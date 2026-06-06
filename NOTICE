@@ -1,0 +1,16 @@
+PixelFlow
+Copyright (c) 2026 joyslxd
+
+This product includes software developed by the DeerFlow project.
+The backend (backend/) is derived from DeerFlow, a LangGraph-based AI agent
+harness, used under the MIT License:
+
+  DeerFlow
+  Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+  Copyright (c) 2025-2026 DeerFlow Authors
+  https://github.com/bytedance/deer-flow
+
+Modifications by PixelFlow include: removal of the IM chat-channel
+integrations, trimming of the gateway to the core infrastructure, and the
+addition of the staged e-commerce video-generation pipeline
+(backend/packages/harness/deerflow/pixelflow/).
