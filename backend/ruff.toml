@@ -4,14 +4,14 @@ target-version = "py312"
 # Vendored verbatim from the borgrise-creative-assistant skill (single source of
 # the Borgrise API contract; executed as-is in the sandbox in P1). Keep it
 # byte-for-byte identical to upstream rather than reformatting it.
-extend-exclude = ["packages/harness/deerflow/pixelflow/skills/borgrise/run_generation.py"]
+extend-exclude = ["pixelflow/skills/borgrise/run_generation.py"]
 
 [lint]
 select = ["E", "F", "I", "UP"]
 ignore = []
 
 [lint.isort]
-known-first-party = ["deerflow", "app"]
+known-first-party = ["pixelflow", "deerflow", "app"]
 
 [format]
 quote-style = "double"

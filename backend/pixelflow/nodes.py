@@ -12,9 +12,9 @@ import logging
 
 from langgraph.types import interrupt
 
-from deerflow.pixelflow.creative import brief_generate, validate_and_fix
-from deerflow.pixelflow.skills import get_video_skill
-from deerflow.pixelflow.state import Phase, TaskState
+from pixelflow.creative import brief_generate, validate_and_fix
+from pixelflow.skills import get_video_skill
+from pixelflow.state import Phase, TaskState
 
 logger = logging.getLogger(__name__)
 

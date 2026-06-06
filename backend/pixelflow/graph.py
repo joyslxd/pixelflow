@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from deerflow.pixelflow.nodes import (
+from pixelflow.nodes import (
     MAX_QC_ATTEMPTS,
     brief_review_node,
     creative_node,
@@ -21,7 +21,7 @@ from deerflow.pixelflow.nodes import (
     intake_node,
     qc_node,
 )
-from deerflow.pixelflow.state import Phase, TaskState
+from pixelflow.state import Phase, TaskState
 
 
 def _route_after_brief(state: TaskState) -> str:

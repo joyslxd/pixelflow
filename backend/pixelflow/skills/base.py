@@ -63,7 +63,7 @@ def get_video_skill() -> VideoGenerationSkill:
     """
     impl = os.environ.get("PIXELFLOW_VIDEO_SKILL", "borgrise")
     if impl == "borgrise":
-        from deerflow.pixelflow.skills.borgrise import BorgriseSkill
+        from pixelflow.skills.borgrise import BorgriseSkill
 
         return BorgriseSkill()
     raise ValueError(f"Unknown video skill implementation: {impl!r}")

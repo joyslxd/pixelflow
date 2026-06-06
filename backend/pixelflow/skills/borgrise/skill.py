@@ -17,8 +17,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from deerflow.pixelflow.skills.base import GenerationResult
-from deerflow.pixelflow.skills.borgrise import run_generation
+from pixelflow.skills.base import GenerationResult
+from pixelflow.skills.borgrise import run_generation
 
 logger = logging.getLogger(__name__)
 

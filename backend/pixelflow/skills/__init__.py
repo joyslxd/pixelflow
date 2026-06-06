@@ -1,6 +1,6 @@
 """PixelFlow skills: capability interfaces and their implementations."""
 
-from deerflow.pixelflow.skills.base import (
+from pixelflow.skills.base import (
     GenerationResult,
     VideoGenerationSkill,
     get_video_skill,
