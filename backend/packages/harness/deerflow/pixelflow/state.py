@@ -47,6 +47,7 @@ class TaskState(TypedDict, total=False):
     brief: dict[str, Any]
     brief_valid: bool
     brief_approved: bool
+    brief_issues: list[dict[str, Any]]  # validator findings (PRD §9.5): fixed/warn
 
     # 生成 — per-shot generated asset URLs (Borgrise task results).
     generated_assets: list[dict[str, Any]]

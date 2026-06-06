@@ -12,6 +12,7 @@ import logging
 
 from langgraph.types import interrupt
 
+from deerflow.pixelflow.creative import brief_generate, validate_and_fix
 from deerflow.pixelflow.skills import get_video_skill
 from deerflow.pixelflow.state import Phase, TaskState
 
@@ -34,11 +35,45 @@ async def intake_node(state: TaskState) -> TaskState:
 async def creative_node(state: TaskState) -> TaskState:
     """策划: produce the Brief and validate its hard constraints.
 
-    TODO: call brief_generate + brief_constraint_validator + creative
-    direction analysis. Brief schema is authoritative per PRD §9.4.
+    brief_generate (纯 Claude) drafts the shot plan, then
+    brief_constraint_validator (纯逻辑, PRD §9.5) auto-fixes hard-constraint
+    violations. ``brief_valid`` is False when any unresolved ``warn`` issue
+    remains, so the BRIEF_REVIEW gate can flag it for the user.
+
+    Failure-safe: if the LLM/config is unavailable (e.g. offline), this logs
+    and emits an empty Brief with ``brief_valid=False`` rather than crashing —
+    the human gate then catches it.
     """
-    logger.info("[pixelflow] creative task_id=%s", state.get("task_id"))
-    return {"phase": Phase.BRIEF_REVIEW.value, "brief": {}, "brief_valid": True}
+    task_id = state.get("task_id")
+    logger.info("[pixelflow] creative task_id=%s", task_id)
+
+    product_info = state.get("product_info") or {}
+    video_params = {
+        "platform": product_info.get("platform", "douyin"),
+        "duration_sec": product_info.get("duration_sec", 30),
+        "ratio": product_info.get("ratio", "9:16"),
+        "size": product_info.get("size", "1080x1920"),
+    }
+
+    try:
+        brief = await brief_generate(
+            product_info=product_info,
+            video_params=video_params,
+            creative_direction=product_info.get("creative_direction", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - boundary: never crash the CREATIVE phase
+        logger.exception("[pixelflow] brief_generate failed task_id=%s", task_id)
+        return {"phase": Phase.BRIEF_REVIEW.value, "brief": {}, "brief_valid": False, "error": str(exc)}
+
+    fixed, issues = validate_and_fix(brief, product_info)
+    brief_valid = not any(i["level"] == "warn" for i in issues)
+    logger.info("[pixelflow] creative task_id=%s shots=%d issues=%d valid=%s", task_id, len(fixed.shots), len(issues), brief_valid)
+    return {
+        "phase": Phase.BRIEF_REVIEW.value,
+        "brief": fixed.model_dump(),
+        "brief_valid": brief_valid,
+        "brief_issues": issues,
+    }
 
 
 async def brief_review_node(state: TaskState) -> TaskState:
