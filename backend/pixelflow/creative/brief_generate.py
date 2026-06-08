@@ -65,14 +65,13 @@ async def brief_generate(
     creative_direction: str = "",
     reference_analysis: dict[str, Any] | None = None,
     creative_mode: CreativeMode = "original",
-    model_name: str | None = None,
 ) -> Brief:
     """Generate a structured :class:`Brief`. Raises on LLM/config failure.
 
     The caller (``creative_node``) is responsible for catching failures and
     degrading gracefully so the pipeline stays runnable offline.
     """
-    model = create_chat_model(name=model_name, thinking_enabled=False)
+    model = create_chat_model(thinking_enabled=False)
     structured = model.with_structured_output(Brief)
     human = _build_human_prompt(
         product_info=product_info,
@@ -81,7 +80,7 @@ async def brief_generate(
         reference_analysis=reference_analysis,
         creative_mode=creative_mode,
     )
-    logger.info("[pixelflow] brief_generate mode=%s model=%s", creative_mode, model_name or "<default>")
+    logger.info("[pixelflow] brief_generate mode=%s", creative_mode)
     brief = await structured.ainvoke([("system", _SYSTEM_PROMPT), ("human", human)])
     # Backfill the output params from video_params so downstream nodes are exact.
     brief.platform = video_params.get("platform", brief.platform)

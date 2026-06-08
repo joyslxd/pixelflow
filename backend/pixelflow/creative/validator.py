@@ -13,6 +13,8 @@ Returns the (possibly mutated) Brief plus a list of issue records::
 
 from __future__ import annotations
 
+import re
+
 from .models import Brief, HardConstraints, Shot, ShotAudio
 
 # Tolerance (seconds) for the total-duration check. PRD §9.5 uses ±2s.
@@ -26,23 +28,29 @@ def _issue(rule: str, level: str, message: str, shot_id: str | None = None) -> d
 
 
 def _check_first_is_hook(brief: Brief, issues: list[dict]) -> None:
-    """Rule 1: 开头是 hook — first shot is a hook and is short (≤3s)."""
+    """Rule 1a: 开头是 hook — first shot must be a hook (reorder, or warn)."""
     shots = brief.shots
-    if not shots:
+    if not shots or shots[0].scene_type == "hook":
         return
-    if shots[0].scene_type != "hook":
-        # Reorder: pull the first hook shot to the front if one exists.
-        hook_idx = next((i for i, s in enumerate(shots) if s.scene_type == "hook"), None)
-        if hook_idx is not None:
-            shot = shots.pop(hook_idx)
-            shots.insert(0, shot)
-            issues.append(_issue("first_shot_must_be_hook", "fixed", "首镜非 hook，已将 hook 镜头前移", shot.shot_id))
-        else:
-            issues.append(_issue("first_shot_must_be_hook", "warn", "无 hook 镜头，需人工补充开场", shots[0].shot_id))
-    if shots[0].scene_type == "hook" and shots[0].duration > MAX_HOOK_DURATION_SEC:
-        old = shots[0].duration
-        shots[0].duration = MAX_HOOK_DURATION_SEC
-        issues.append(_issue("first_shot_must_be_hook", "fixed", f"hook 镜头时长 {old}s 过长，已收紧至 {MAX_HOOK_DURATION_SEC}s", shots[0].shot_id))
+    # Reorder: pull the first hook shot to the front if one exists.
+    hook_idx = next((i for i, s in enumerate(shots) if s.scene_type == "hook"), None)
+    if hook_idx is not None:
+        shot = shots.pop(hook_idx)
+        shots.insert(0, shot)
+        issues.append(_issue("first_shot_must_be_hook", "fixed", "首镜非 hook，已将 hook 镜头前移", shot.shot_id))
+    else:
+        issues.append(_issue("first_shot_must_be_hook", "warn", "无 hook 镜头，需人工补充开场", shots[0].shot_id))
+
+
+def _clamp_hook_duration(brief: Brief, issues: list[dict]) -> None:
+    """Rule 1b: hook ≤3s. Runs AFTER duration scaling so the clamp is final
+    (otherwise proportional scaling could silently push the hook back over 3s)."""
+    shots = brief.shots
+    if not shots or shots[0].scene_type != "hook" or shots[0].duration <= MAX_HOOK_DURATION_SEC:
+        return
+    old = shots[0].duration
+    shots[0].duration = MAX_HOOK_DURATION_SEC
+    issues.append(_issue("first_shot_must_be_hook", "fixed", f"hook 镜头时长 {old}s 过长，已收紧至 {MAX_HOOK_DURATION_SEC}s", shots[0].shot_id))
 
 
 def _check_last_is_cta(brief: Brief, issues: list[dict]) -> None:
@@ -106,13 +114,24 @@ def _check_forbidden_elements(brief: Brief, issues: list[dict]) -> None:
             issues.append(_issue("forbidden_elements", "warn", f"画面描述包含禁止元素「{hit}」，需 AI 改写", s.shot_id))
 
 
+_SUBTITLE_MARKER = "no text, no caption, no watermark"
+# generation_prompt is English (per the brief_generate system prompt); match on
+# word boundaries so "texture"/"context" don't false-positive on "text".
+_SUBTITLE_EN = re.compile(r"\b(text|caption|subtitles?|watermark)\b", re.IGNORECASE)
+_SUBTITLE_ZH = ("画面生成文字", "生成字幕")
+
+
+def _wants_onscreen_text(prompt: str) -> bool:
+    return any(t in prompt for t in _SUBTITLE_ZH) or bool(_SUBTITLE_EN.search(prompt))
+
+
 def _check_subtitle_strategy(brief: Brief, issues: list[dict]) -> None:
     """Rule 7: 字幕策略合规 — generation_prompt must not ask the model to render text."""
-    marker = "no text, no caption, no watermark"
     for s in brief.shots:
-        if ("画面生成文字" in s.generation_prompt) or ("生成字幕" in s.generation_prompt):
-            if marker not in s.generation_prompt:
-                s.generation_prompt = f"{s.generation_prompt.rstrip('. ')}. {marker}"
+        if _SUBTITLE_MARKER in s.generation_prompt:
+            continue  # already negated — idempotent on re-validation
+        if _wants_onscreen_text(s.generation_prompt):
+            s.generation_prompt = f"{s.generation_prompt.rstrip('. ')}. {_SUBTITLE_MARKER}"
             issues.append(_issue("subtitle_strategy", "fixed", "提示词要求画面生成文字，已注入负向约束", s.shot_id))
 
 
@@ -138,6 +157,7 @@ def validate_and_fix(brief: Brief, product_info: dict | None = None) -> tuple[Br
     _check_first_is_hook(fixed, issues)
     _check_last_is_cta(fixed, issues)
     _check_total_duration(fixed, issues)
+    _clamp_hook_duration(fixed, issues)  # after scaling: the clamp is the final word
     _check_text_lengths(fixed, issues)
     _check_forbidden_elements(fixed, issues)
     _check_subtitle_strategy(fixed, issues)
