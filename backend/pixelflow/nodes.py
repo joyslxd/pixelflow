@@ -13,6 +13,7 @@ import logging
 from langgraph.types import interrupt
 
 from pixelflow.creative import brief_generate, validate_and_fix
+from pixelflow.edit import build_timeline
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract
 from pixelflow.skills import get_video_skill
 from pixelflow.state import Phase, TaskState
@@ -205,13 +206,28 @@ async def generate_node(state: TaskState) -> TaskState:
 
 
 async def edit_node(state: TaskState) -> TaskState:
-    """剪辑: assemble generated shots into the final video.
+    """剪辑: assemble generated shots into a Timeline, ready for render.
 
-    TODO: build the Timeline IR and render via FFmpeg / 剪映 draft (multi-shot
-    editing) — distinct from extend-video, which only extends a single shot.
+    ``build_timeline`` (纯逻辑) binds each generated clip to its Brief shot and
+    carries the shot's editing metadata (duration, transitions, narration/花字),
+    skipping shots that produced no usable clip. With no clips the timeline is
+    empty, keeping the pipeline runnable offline.
+
+    TODO: render the Timeline via an FFmpeg / 剪映-draft skill to populate
+    ``final_video_url`` (multi-shot editing) — distinct from extend-video, which
+    only extends a single shot.
     """
-    logger.info("[pixelflow] edit task_id=%s", state.get("task_id"))
-    return {"phase": Phase.QC.value, "timeline": {}, "final_video_url": ""}
+    task_id = state.get("task_id")
+    brief = state.get("brief") or {}
+    assets = state.get("generated_assets") or []
+    timeline, notes = build_timeline(brief, assets)
+    logger.info("[pixelflow] edit task_id=%s clips=%d skipped=%d", task_id, len(timeline.clips), len(notes))
+    return {
+        "phase": Phase.QC.value,
+        "timeline": timeline.model_dump(),
+        "final_video_url": "",
+        "edit_notes": notes,
+    }
 
 
 async def qc_node(state: TaskState) -> TaskState:

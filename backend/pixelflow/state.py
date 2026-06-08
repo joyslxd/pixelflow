@@ -58,8 +58,9 @@ class TaskState(TypedDict, total=False):
     generated_assets: list[dict[str, Any]]
 
     # 剪辑 — assembled timeline / final video.
-    timeline: dict[str, Any]
+    timeline: dict[str, Any]  # §EDIT Timeline IR (ordered clips + output format)
     final_video_url: str
+    edit_notes: list[str]  # shots skipped during assembly (no usable clip)
 
     # 质检 — QC verdict and retry bookkeeping (bounds the GENERATE retry loop).
     qc_passed: bool
