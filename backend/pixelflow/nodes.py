@@ -134,19 +134,44 @@ async def brief_review_node(state: TaskState) -> TaskState:
     return {"phase": next_phase.value, "brief_approved": approved}
 
 
+def _resolve_shot_image(shot: dict, product_info: dict) -> tuple[str | None, str | None]:
+    """Resolve a shot's source image from its ``asset_strategy`` (PRD §9.4).
+
+    The Brief schema (§9.4) carries no per-shot image URL — the asset is bound
+    here at generation time. The product's main image is the anchor for
+    ``use_real_asset``/``mixed``; the strategies that need an unbuilt capability
+    (text-to-image for ``generate_asset``, reference parsing for
+    ``use_reference_structure``) fall back to the product image so the pipeline
+    runs, recording a note so the gap stays visible.
+
+    Returns ``(image_url, note)``; ``image_url`` is None when no source exists.
+    """
+    main = product_info.get("main_image_url")
+    strategy = shot.get("asset_strategy", "use_real_asset")
+    if strategy in ("use_real_asset", "mixed"):
+        return main, None
+    if main:
+        return main, f"asset_strategy '{strategy}' 暂未支持，已回退到商品主图"
+    return None, None
+
+
 async def generate_node(state: TaskState) -> TaskState:
     """生成: shot-by-shot generation via the video-generation skill.
 
     Iterates the Brief's shots and produces one clip per shot through the
-    capability interface (vendor-agnostic). Shots come from the CREATIVE phase
-    (Brief schema: PRD §9.4); until that is implemented the Brief has no shots
-    and this node is a no-op, keeping the pipeline runnable offline.
+    capability interface (vendor-agnostic). Each shot's source image is resolved
+    from ``product_info`` by ``asset_strategy`` (see ``_resolve_shot_image``).
+    With no shots (Brief empty) this is a no-op, keeping the pipeline runnable
+    offline.
 
-    TODO: expand each shot's prompt via PromptEngine and pick image_to_video vs
-    extend_video per the shot's asset_strategy.
+    TODO: expand each shot's prompt via PromptEngine; add a text-to-image skill
+    for ``generate_asset`` and ``extend_video`` for shot continuity.
     """
     task_id = state.get("task_id")
-    shots = (state.get("brief") or {}).get("shots", [])
+    brief = state.get("brief") or {}
+    product_info = state.get("product_info") or {}
+    shots = brief.get("shots", [])
+    ratio = brief.get("ratio", "9:16")
     logger.info("[pixelflow] generate task_id=%s shots=%d", task_id, len(shots))
 
     if not shots:
@@ -155,25 +180,26 @@ async def generate_node(state: TaskState) -> TaskState:
     skill = get_video_skill()
     assets: list[dict] = []
     for i, shot in enumerate(shots):
-        image_url = shot.get("image_url")
+        image_url, note = _resolve_shot_image(shot, product_info)
         if not image_url:
-            assets.append({"shot_index": i, "ok": False, "error": "shot has no image_url"})
+            assets.append({"shot_index": i, "ok": False, "error": "无可用图源：商品缺少 main_image_url"})
             continue
         result = await skill.image_to_video(
             image_url=image_url,
             prompt=shot.get("generation_prompt"),
             duration=shot.get("duration", 10),
-            ratio=shot.get("ratio", "9:16"),
+            ratio=ratio,
         )
-        assets.append(
-            {
-                "shot_index": i,
-                "ok": result.ok,
-                "url": result.url,
-                "task_id": result.task_id,
-                "error": result.error,
-            }
-        )
+        record = {
+            "shot_index": i,
+            "ok": result.ok,
+            "url": result.url,
+            "task_id": result.task_id,
+            "error": result.error,
+        }
+        if note:
+            record["note"] = note
+        assets.append(record)
 
     return {"phase": Phase.EDIT.value, "generated_assets": assets}
 
