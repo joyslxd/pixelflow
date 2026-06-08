@@ -39,9 +39,14 @@ class TaskState(TypedDict, total=False):
     task_id: str
     phase: Phase
 
-    # 采集 — structured product/demand info collected from the user.
-    product_info: dict[str, Any]
+    # 采集 — structured product/demand info collected from the user (PRD §8).
+    product_info: dict[str, Any]  # §8.1 ProductInfo (incl. main_image_url)
+    video_params: dict[str, Any]  # §8.4 platform / duration / resolution
+    creative_direction: dict[str, Any]  # §8.5 style / tone / core_message
+    reference_videos: list[dict[str, Any]]  # §8.6 reference video assets
+    intake_check: dict[str, Any]  # §8.7 demand_integrity_check report
     demand_complete: bool
+    intake_rounds: int  # follow-up rounds spent (bounds the INTAKE loop)
 
     # 策划 — the Brief (authoritative schema: PRD §9.4) and its validation result.
     brief: dict[str, Any]

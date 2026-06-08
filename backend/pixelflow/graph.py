@@ -13,6 +13,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from pixelflow.nodes import (
+    MAX_INTAKE_ROUNDS,
     MAX_QC_ATTEMPTS,
     brief_review_node,
     creative_node,
@@ -22,6 +23,14 @@ from pixelflow.nodes import (
     qc_node,
 )
 from pixelflow.state import Phase, TaskState
+
+
+def _route_after_intake(state: TaskState) -> str:
+    if state.get("demand_complete", False):
+        return "creative"
+    if state.get("intake_rounds", 0) >= MAX_INTAKE_ROUNDS:
+        return END  # demand still incomplete after the follow-up budget: give up
+    return "intake"
 
 
 def _route_after_brief(state: TaskState) -> str:
@@ -48,7 +57,11 @@ def build_graph() -> StateGraph:
     graph.add_node(Phase.QC, qc_node)
 
     graph.add_edge(START, Phase.INTAKE)
-    graph.add_edge(Phase.INTAKE, Phase.CREATIVE)
+    graph.add_conditional_edges(
+        Phase.INTAKE,
+        _route_after_intake,
+        {"creative": Phase.CREATIVE, "intake": Phase.INTAKE, END: END},
+    )
     graph.add_edge(Phase.CREATIVE, Phase.BRIEF_REVIEW)
     graph.add_conditional_edges(
         Phase.BRIEF_REVIEW,

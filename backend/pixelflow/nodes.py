@@ -13,6 +13,7 @@ import logging
 from langgraph.types import interrupt
 
 from pixelflow.creative import brief_generate, validate_and_fix
+from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract
 from pixelflow.skills import get_video_skill
 from pixelflow.state import Phase, TaskState
 
@@ -20,16 +21,58 @@ logger = logging.getLogger(__name__)
 
 # Bounds the QC -> GENERATE retry loop so a persistently failing task terminates.
 MAX_QC_ATTEMPTS = 2
+# Bounds the INTAKE follow-up loop so an unanswerable demand can't spin forever.
+MAX_INTAKE_ROUNDS = 3
 
 
 async def intake_node(state: TaskState) -> TaskState:
-    """采集: collect product info and check demand integrity.
+    """采集: extract product info, normalize params, gate on demand integrity.
 
-    TODO: call product_info_extract + demand_integrity_check skills; when the
-    demand is incomplete, ask follow-up questions instead of advancing.
+    One human-in-the-loop round per invocation: if the demand is incomplete it
+    ``interrupt``s to ask for the missing fields (≤3), merges the answers, and
+    re-checks. While still incomplete the graph loops back here (bounded by
+    ``MAX_INTAKE_ROUNDS``); when complete it advances to CREATIVE.
+
+    Failure-safe: a product-page fetch/extract failure is logged and the run
+    continues — the integrity gate then asks the user for the missing fields.
     """
-    logger.info("[pixelflow] intake task_id=%s", state.get("task_id"))
-    return {"phase": Phase.CREATIVE.value, "demand_complete": True}
+    task_id = state.get("task_id")
+    product_info = dict(state.get("product_info") or {})
+    creative_direction = dict(state.get("creative_direction") or {})
+    rounds = state.get("intake_rounds", 0)
+    logger.info("[pixelflow] intake task_id=%s round=%d", task_id, rounds)
+
+    # Extract from a product URL only once (guard on already-having a name so a
+    # loop re-entry / resume doesn't re-fetch).
+    if product_info.get("product_url") and not product_info.get("product_name"):
+        try:
+            extracted = await product_info_extract(product_info["product_url"], product_info.get("user_note", ""))
+            # User-supplied values win over scraped ones.
+            product_info = {**extracted.model_dump(), **product_info}
+        except Exception:  # noqa: BLE001 - boundary: never crash on a bad link
+            logger.exception("[pixelflow] product_info_extract failed task_id=%s", task_id)
+
+    video_params, _notes = normalize_video_params(state.get("video_params"))
+    result = demand_integrity_check(product_info, video_params, creative_direction, state.get("reference_videos"))
+
+    if not result.is_complete and rounds < MAX_INTAKE_ROUNDS:
+        answers = interrupt({"action": "collect_demand", "questions": result.questions(), "check": result.model_dump()})
+        if isinstance(answers, dict):
+            product_info.update(answers.get("product_info") or {})
+            creative_direction.update(answers.get("creative_direction") or {})
+            video_params, _notes = normalize_video_params({**video_params, **(answers.get("video_params") or {})})
+            result = demand_integrity_check(product_info, video_params, creative_direction, state.get("reference_videos"))
+
+    next_phase = Phase.CREATIVE if result.is_complete else Phase.INTAKE
+    return {
+        "phase": next_phase.value,
+        "product_info": product_info,
+        "video_params": video_params,
+        "creative_direction": creative_direction,
+        "intake_check": result.model_dump(),
+        "demand_complete": result.is_complete,
+        "intake_rounds": rounds + 1,
+    }
 
 
 async def creative_node(state: TaskState) -> TaskState:
@@ -48,18 +91,21 @@ async def creative_node(state: TaskState) -> TaskState:
     logger.info("[pixelflow] creative task_id=%s", task_id)
 
     product_info = state.get("product_info") or {}
+    vp = state.get("video_params") or {}
     video_params = {
-        "platform": product_info.get("platform", "douyin"),
-        "duration_sec": product_info.get("duration_sec", 30),
-        "ratio": product_info.get("ratio", "9:16"),
-        "size": product_info.get("size", "1080x1920"),
+        "platform": vp.get("platform", "douyin"),
+        "duration_sec": vp.get("video_duration_sec", 30),
+        "ratio": vp.get("ratio", "9:16"),
+        "size": vp.get("size", "1080x1920"),
     }
+    cd = state.get("creative_direction") or {}
+    direction = cd if isinstance(cd, str) else "；".join(f"{k}: {v}" for k, v in cd.items() if v)
 
     try:
         brief = await brief_generate(
             product_info=product_info,
             video_params=video_params,
-            creative_direction=product_info.get("creative_direction", ""),
+            creative_direction=direction,
         )
     except Exception as exc:  # noqa: BLE001 - boundary: never crash the CREATIVE phase
         logger.exception("[pixelflow] brief_generate failed task_id=%s", task_id)
