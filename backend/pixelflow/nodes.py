@@ -15,6 +15,7 @@ from langgraph.types import interrupt
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract
+from pixelflow.qc import qc_check
 from pixelflow.skills import get_video_skill
 from pixelflow.state import Phase, TaskState
 
@@ -231,14 +232,19 @@ async def edit_node(state: TaskState) -> TaskState:
 
 
 async def qc_node(state: TaskState) -> TaskState:
-    """质检: quality check; route back to GENERATE on failure (bounded)."""
-    logger.info("[pixelflow] qc task_id=%s", state.get("task_id"))
+    """质检: verdict over the produced output; route back to GENERATE on failure.
+
+    ``qc_check`` (纯逻辑) inspects generation coverage (blocking) and assembled
+    duration (warn). A blocking ``fail`` re-runs GENERATE, bounded by
+    ``MAX_QC_ATTEMPTS`` so a persistently failing task terminates.
+    """
+    task_id = state.get("task_id")
     attempts = state.get("qc_attempts", 0) + 1
-    # TODO: real QC scoring; stub passes so the happy path terminates.
-    passed = True
+    result = qc_check(state.get("brief") or {}, state.get("generated_assets") or [], state.get("timeline") or {})
+    logger.info("[pixelflow] qc task_id=%s attempt=%d passed=%s score=%.2f", task_id, attempts, result.passed, result.score)
     return {
-        "phase": (Phase.DONE if passed else Phase.GENERATE).value,
-        "qc_passed": passed,
+        "phase": (Phase.DONE if result.passed else Phase.GENERATE).value,
+        "qc_passed": result.passed,
         "qc_attempts": attempts,
-        "qc_report": {},
+        "qc_report": result.model_dump(),
     }
