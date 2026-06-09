@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
+from pixelflow.generate import build_seedance_prompt
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract
 from pixelflow.qc import qc_check
 from pixelflow.skills import get_video_edit_skill, get_video_skill
@@ -173,6 +174,7 @@ async def generate_node(state: TaskState) -> TaskState:
     brief = state.get("brief") or {}
     product_info = state.get("product_info") or {}
     shots = brief.get("shots", [])
+    global_visual = brief.get("global_visual") or {}
     ratio = brief.get("ratio", "9:16")
     logger.info("[pixelflow] generate task_id=%s shots=%d", task_id, len(shots))
 
@@ -186,10 +188,11 @@ async def generate_node(state: TaskState) -> TaskState:
         if not image_url:
             assets.append({"shot_index": i, "ok": False, "error": "无可用图源：商品缺少 main_image_url"})
             continue
+        duration = shot.get("duration", 10)
         result = await skill.image_to_video(
             image_url=image_url,
-            prompt=shot.get("generation_prompt"),
-            duration=shot.get("duration", 10),
+            prompt=build_seedance_prompt(shot, global_visual, duration),
+            duration=duration,
             ratio=ratio,
         )
         record = {

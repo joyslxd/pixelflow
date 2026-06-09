@@ -80,7 +80,7 @@ def test_generates_clip_per_shot(monkeypatch):
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call["image_url"] == "https://x/main.jpg"
-    assert call["prompt"] == "p0"
+    assert "p0" in call["prompt"]  # PromptEngine wraps the shot's generation_prompt
     assert call["duration"] == 5
     assert call["ratio"] == "16:9"  # brief-level ratio threaded through
 
