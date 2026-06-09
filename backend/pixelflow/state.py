@@ -57,10 +57,11 @@ class TaskState(TypedDict, total=False):
     # 生成 — per-shot generated asset URLs (Borgrise task results).
     generated_assets: list[dict[str, Any]]
 
-    # 剪辑 — assembled timeline / final video.
+    # 剪辑 — assembled timeline / 剪映 draft / final video.
     timeline: dict[str, Any]  # §EDIT Timeline IR (ordered clips + output format)
+    draft_path: str  # editable 剪映 draft folder produced by the edit skill
     final_video_url: str
-    edit_notes: list[str]  # shots skipped during assembly (no usable clip)
+    edit_notes: list[str]  # shots skipped + render warnings
 
     # 质检 — QC verdict and retry bookkeeping (bounds the GENERATE retry loop).
     qc_passed: bool

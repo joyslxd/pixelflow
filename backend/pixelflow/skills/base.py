@@ -28,6 +28,21 @@ class GenerationResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class EditResult:
+    """Normalized result of an edit/assembly call.
+
+    ``output_path`` points at the produced artifact — for the 剪映 skill this is
+    an editable draft folder, not a finished video (final render needs the
+    JianYing app). A future FFmpeg skill would put a video file path here.
+    """
+
+    ok: bool
+    output_path: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VideoGenerationSkill(Protocol):
     """Capability the GENERATE phase needs: produce/extend video clips.
 
@@ -54,6 +69,17 @@ class VideoGenerationSkill(Protocol):
     ) -> GenerationResult: ...
 
 
+class VideoEditSkill(Protocol):
+    """Capability the EDIT phase needs: assemble clips into a final artifact.
+
+    Implementations own the editor contract (剪映 draft format / FFmpeg cmds)
+    and any media fetching/probing. The plan is passed per call — the graph
+    encodes no editor specifics.
+    """
+
+    async def render(self, timeline: dict, *, draft_name: str, output_root: str | None = None) -> EditResult: ...
+
+
 def get_video_skill() -> VideoGenerationSkill:
     """Return the configured video-generation skill.
 
@@ -67,3 +93,17 @@ def get_video_skill() -> VideoGenerationSkill:
 
         return BorgriseSkill()
     raise ValueError(f"Unknown video skill implementation: {impl!r}")
+
+
+def get_video_edit_skill() -> VideoEditSkill:
+    """Return the configured video-edit skill (the EDIT-phase swap point).
+
+    MVP returns the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL``
+    is reserved for alternatives (e.g. a pure-FFmpeg renderer).
+    """
+    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying")
+    if impl == "jianying":
+        from pixelflow.skills.jianying import JianYingEditSkill
+
+        return JianYingEditSkill()
+    raise ValueError(f"Unknown video edit skill implementation: {impl!r}")

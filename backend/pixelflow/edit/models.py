@@ -32,3 +32,27 @@ class Timeline(BaseModel):
     size: str = "1080x1920"
     platform: str = ""
     total_duration: float = 0.0
+
+
+class DraftSegment(BaseModel):
+    """A clip placed at an absolute timeline offset, ready for a draft builder."""
+
+    source_url: str
+    start: float  # absolute start on the main track, seconds
+    duration: float  # seconds
+    transition_in: str = ""  # transition from the PREVIOUS clip into this one
+    caption: str = ""  # 花字 burned at render time (from the shot's onscreen_text)
+
+
+class DraftPlan(BaseModel):
+    """Flattened, builder-agnostic plan: pixel canvas + absolutely-placed clips.
+
+    Bridges the Timeline IR and a concrete editor (剪映 / FFmpeg). It resolves
+    the pixel canvas and the per-clip start offsets so the render skill is a
+    straight translation with no timing math of its own.
+    """
+
+    width: int
+    height: int
+    fps: int = 30
+    segments: list[DraftSegment]
