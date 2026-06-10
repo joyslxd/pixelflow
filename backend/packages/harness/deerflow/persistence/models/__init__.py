@@ -19,5 +19,7 @@ from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from pixelflow.preferences.model import PixelFlowUserPreferenceRow
+from pixelflow.tasks.model import PixelFlowAssetRow, PixelFlowTaskEventRow, PixelFlowTaskRow
 
-__all__ = ["FeedbackRow", "RunEventRow", "RunRow", "ThreadMetaRow", "UserRow"]
+__all__ = ["FeedbackRow", "PixelFlowAssetRow", "PixelFlowTaskEventRow", "PixelFlowTaskRow", "PixelFlowUserPreferenceRow", "RunEventRow", "RunRow", "ThreadMetaRow", "UserRow"]
