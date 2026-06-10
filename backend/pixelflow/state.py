@@ -70,3 +70,6 @@ class TaskState(TypedDict, total=False):
 
     # Surfaced errors for the gateway/UI.
     error: str
+
+    # P0 structured preference snapshot injected at task start.
+    user_preferences: dict[str, Any]

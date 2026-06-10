@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -18,6 +19,8 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    pixelflow_preferences,
+    pixelflow_tasks,
     runs,
     skills,
     suggestions,
@@ -180,7 +183,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
-        yield
+        from deerflow.persistence.engine import get_session_factory
+        from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
+
+        pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
+        if pixelflow_mysql_url:
+            from pixelflow.preferences.mysql import make_mysql_preference_store
+            from pixelflow.tasks.mysql import make_mysql_task_store
+
+            app.state.pixelflow_task_store, app.state.pixelflow_mysql_engine = await make_mysql_task_store(pixelflow_mysql_url)
+            app.state.pixelflow_preference_store, app.state.pixelflow_preference_mysql_engine = await make_mysql_preference_store(pixelflow_mysql_url)
+            logger.info("PixelFlow task store initialised: mysql")
+        else:
+            sf = get_session_factory()
+            from pixelflow.preferences import MemoryUserPreferenceStore, SQLUserPreferenceStore
+
+            app.state.pixelflow_task_store = SQLPixelFlowTaskStore(sf) if sf is not None else MemoryPixelFlowTaskStore()
+            app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
+            logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
+
+        try:
+            yield
+        finally:
+            pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
+            if pixelflow_mysql_engine is not None:
+                await pixelflow_mysql_engine.dispose()
+                logger.info("PixelFlow MySQL task store closed")
+            pixelflow_preference_mysql_engine = getattr(app.state, "pixelflow_preference_mysql_engine", None)
+            if pixelflow_preference_mysql_engine is not None:
+                await pixelflow_preference_mysql_engine.dispose()
+                logger.info("PixelFlow MySQL preference store closed")
 
     logger.info("Shutting down API Gateway")
 
@@ -268,6 +300,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
+                "name": "pixelflow-tasks",
+                "description": "PixelFlow e-commerce video task API and progress events",
+            },
+            {
+                "name": "pixelflow-preferences",
+                "description": "PixelFlow structured user preferences",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -335,6 +375,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # PixelFlow business task API is mounted at /api/tasks
+    app.include_router(pixelflow_tasks.router)
+
+    # PixelFlow structured preference API is mounted at /api/users/{user_id}/preferences
+    app.include_router(pixelflow_preferences.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
