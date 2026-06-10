@@ -15,9 +15,9 @@ from langgraph.types import interrupt
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
 from pixelflow.generate import build_seedance_prompt
-from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract
+from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract, summarize_storyboards
 from pixelflow.qc import qc_check
-from pixelflow.skills import get_video_edit_skill, get_video_skill
+from pixelflow.skills import get_video_decompose_skill, get_video_edit_skill, get_video_skill
 from pixelflow.state import Phase, TaskState
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,31 @@ logger = logging.getLogger(__name__)
 MAX_QC_ATTEMPTS = 2
 # Bounds the INTAKE follow-up loop so an unanswerable demand can't spin forever.
 MAX_INTAKE_ROUNDS = 3
+
+
+async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
+    """Decompose pending reference videos into storyboards via the decompose skill.
+
+    Each entry is copied; ones already ``done``/``failed`` (or without a URL)
+    pass through untouched, so loop re-entries and resumes never re-parse.
+    Failure-safe: a vendor error marks the entry ``failed`` (the integrity check
+    treats that as a non-blocking warn) instead of crashing INTAKE.
+    """
+    refs = [dict(r or {}) for r in reference_videos or []]
+    pending = [r for r in refs if r.get("url") and r.get("status") not in ("done", "failed")]
+    if not pending:
+        return refs
+    skill = get_video_decompose_skill()
+    for ref in pending:
+        result = await skill.decompose_video_to_storyboard(ref["url"])
+        if result.ok:
+            ref["status"] = "done"
+            ref["storyboard"] = result.shots
+        else:
+            ref["status"] = "failed"
+            ref["error"] = result.error
+            logger.warning("[pixelflow] reference decompose failed task_id=%s url=%s error=%s", task_id, ref["url"], result.error)
+    return refs
 
 
 async def intake_node(state: TaskState) -> TaskState:
@@ -55,8 +80,10 @@ async def intake_node(state: TaskState) -> TaskState:
         except Exception:  # noqa: BLE001 - boundary: never crash on a bad link
             logger.exception("[pixelflow] product_info_extract failed task_id=%s", task_id)
 
+    reference_videos = await _parse_reference_videos(state.get("reference_videos"), task_id)
+
     video_params, _notes = normalize_video_params(state.get("video_params"))
-    result = demand_integrity_check(product_info, video_params, creative_direction, state.get("reference_videos"))
+    result = demand_integrity_check(product_info, video_params, creative_direction, reference_videos)
 
     if not result.is_complete and rounds < MAX_INTAKE_ROUNDS:
         answers = interrupt({"action": "collect_demand", "questions": result.questions(), "check": result.model_dump()})
@@ -64,7 +91,7 @@ async def intake_node(state: TaskState) -> TaskState:
             product_info.update(answers.get("product_info") or {})
             creative_direction.update(answers.get("creative_direction") or {})
             video_params, _notes = normalize_video_params({**video_params, **(answers.get("video_params") or {})})
-            result = demand_integrity_check(product_info, video_params, creative_direction, state.get("reference_videos"))
+            result = demand_integrity_check(product_info, video_params, creative_direction, reference_videos)
 
     next_phase = Phase.CREATIVE if result.is_complete else Phase.INTAKE
     return {
@@ -72,6 +99,7 @@ async def intake_node(state: TaskState) -> TaskState:
         "product_info": product_info,
         "video_params": video_params,
         "creative_direction": creative_direction,
+        "reference_videos": reference_videos,
         "intake_check": result.model_dump(),
         "demand_complete": result.is_complete,
         "intake_rounds": rounds + 1,
@@ -104,11 +132,19 @@ async def creative_node(state: TaskState) -> TaskState:
     cd = state.get("creative_direction") or {}
     direction = cd if isinstance(cd, str) else "；".join(f"{k}: {v}" for k, v in cd.items() if v)
 
+    # 参考视频分析 (纯逻辑摘要) drives the creative mode: 无参考→original,
+    # 单参考→reference (结构复刻), 多参考→attribution (归因融合).
+    reference_analysis = summarize_storyboards(state.get("reference_videos"))
+    video_count = (reference_analysis or {}).get("video_count", 0)
+    creative_mode = "original" if video_count == 0 else ("reference" if video_count == 1 else "attribution")
+
     try:
         brief = await brief_generate(
             product_info=product_info,
             video_params=video_params,
             creative_direction=direction,
+            reference_analysis=reference_analysis,
+            creative_mode=creative_mode,
         )
     except Exception as exc:  # noqa: BLE001 - boundary: never crash the CREATIVE phase
         logger.exception("[pixelflow] brief_generate failed task_id=%s", task_id)

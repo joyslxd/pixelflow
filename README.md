@@ -2,7 +2,7 @@
 
 > ⚠️ **项目状态:开发中(Work in Progress)**
 >
-> 这不是一个完整可交付的项目。核心流水线已经跑通,但仍有关键环节(最终成片导出、参考视频拆解、P1 语义记忆等)未完成,接口与数据结构可能随时调整。请勿用于生产环境。
+> 这不是一个完整可交付的项目。核心流水线已经跑通,但仍有关键环节(成片渲染仅 v1、P1 语义记忆、前端等)未完成,接口与数据结构可能随时调整。请勿用于生产环境。
 
 PixelFlow 是一个电商带货短视频生成 AI Agent:输入商品信息,经过「采集 → 策划 → 人工确认 → 生成 → 剪辑 → 质检」的阶段化流水线,产出可剪辑的短视频草稿。
 
@@ -52,7 +52,7 @@ backend/
 | 质检 QC | ✅ 已完成 | 片段完整性(阻断)+ 时长达标(警告),不通过回 GENERATE |
 | 任务 API | ✅ 已完成 | `/api/tasks`:建任务、查询、结果/资产、Brief 确认/修订、SSE 进度事件;Memory/SQL/MySQL 三种存储 |
 | 用户偏好 P0 | ✅ 已完成 | `/api/users/{id}/preferences`:结构化偏好(正则确定性抽取),建任务时注入初始状态 |
-| 参考视频拆解 | ❌ 未开始 | 当前仅在完整性检查中占位(状态 pending),尚未接入分析流水线 |
+| 参考视频拆解 | ✅ 已完成 | INTAKE 调用博观 decompose_video_to_storyboard 拆分镜,纯逻辑摘要后注入 Brief 提示词;按参考数量切换创意模式(original / reference / attribution),拆解失败仅警告不阻断 |
 | 最终视频渲染 | 🚧 v1 可用 | FFmpeg skill 直出 mp4(裁时长、缩放/填充、可选花字烧录);暂不支持转场与音轨 |
 | P1 语义记忆 | ❌ 未开始 | mem0/Qdrant 预留位,P0 只有结构化偏好 |
 | P1 PPT / 图片生成 | ❌ 未开始 | 规划中 |
@@ -79,6 +79,7 @@ uv run pytest tests/ -k pixelflow  # 跑 PixelFlow 相关测试
 | `PIXELFLOW_MYSQL_URL` | 空 | 业务数据 MySQL 连接串;不设则回退 SQL/内存存储 |
 | `PIXELFLOW_VIDEO_SKILL` | `borgrise` | 视频生成实现 |
 | `PIXELFLOW_EDIT_SKILL` | `jianying` | 剪辑实现:`jianying`(剪映草稿)或 `ffmpeg`(直出 mp4) |
+| `PIXELFLOW_DECOMPOSE_SKILL` | `borgrise` | 参考视频拆解实现 |
 | `PIXELFLOW_DRAFT_ROOT` | 系统临时目录 | 剪映草稿输出根目录 |
 | `PIXELFLOW_RENDER_ROOT` | 系统临时目录 | FFmpeg 成片输出根目录 |
 | `PIXELFLOW_CAPTION_FONT` | 空 | 字体文件路径;设置后 FFmpeg 渲染才烧录花字 |

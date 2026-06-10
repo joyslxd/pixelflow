@@ -5,6 +5,7 @@ from .integrity import demand_integrity_check
 from .models import IntegrityItem, IntegrityResult, ProductInfo, PromotionInfo, VideoParams
 from .params import normalize_video_params
 from .product_info_extract import product_info_extract
+from .reference_summary import summarize_storyboards
 
 __all__ = [
     "IntegrityItem",
@@ -15,4 +16,5 @@ __all__ = [
     "demand_integrity_check",
     "normalize_video_params",
     "product_info_extract",
+    "summarize_storyboards",
 ]

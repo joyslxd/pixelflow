@@ -45,6 +45,21 @@ class EditResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class StoryboardResult:
+    """Normalized result of a reference-video decompose call.
+
+    ``shots`` is the vendor storyboard as a list of dicts; field names are
+    vendor-specific — pure logic (``summarize_storyboards``) normalizes them
+    before the Brief prompt sees anything.
+    """
+
+    ok: bool
+    shots: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VideoGenerationSkill(Protocol):
     """Capability the GENERATE phase needs: produce/extend video clips.
 
@@ -82,6 +97,16 @@ class VideoEditSkill(Protocol):
     async def render(self, timeline: dict, *, draft_name: str, output_root: str | None = None) -> EditResult: ...
 
 
+class VideoDecomposeSkill(Protocol):
+    """Capability the INTAKE phase needs: parse a reference video into a storyboard.
+
+    Implementations own the vendor contract (博观 decompose_video_to_storyboard —
+    the only video-understanding endpoint; there is no separate OCR/ASR).
+    """
+
+    async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult: ...
+
+
 def get_video_skill() -> VideoGenerationSkill:
     """Return the configured video-generation skill.
 
@@ -113,3 +138,13 @@ def get_video_edit_skill() -> VideoEditSkill:
 
         return FFmpegEditSkill()
     raise ValueError(f"Unknown video edit skill implementation: {impl!r}")
+
+
+def get_video_decompose_skill() -> VideoDecomposeSkill:
+    """Return the configured reference-video decompose skill (the INTAKE-phase swap point)."""
+    impl = os.environ.get("PIXELFLOW_DECOMPOSE_SKILL", "borgrise")
+    if impl == "borgrise":
+        from pixelflow.skills.borgrise import BorgriseSkill
+
+        return BorgriseSkill()
+    raise ValueError(f"Unknown video decompose skill implementation: {impl!r}")
