@@ -48,12 +48,12 @@ backend/
 | 策划 CREATIVE | ✅ 已完成 | LLM 生成分镜 Brief + 纯逻辑校验修复(validator) |
 | Brief 人工确认 | ✅ 已完成 | `interrupt()` 门控,支持 approve / revise |
 | 生成 GENERATE | ✅ 已完成 | Brief→Shot 图源映射 + Seedance 结构化 PromptEngine + Borgrise 图生视频 skill |
-| 剪辑 EDIT | 🚧 部分完成 | Timeline IR + DraftPlan 纯逻辑已完成;剪映草稿生成(pyJianYingDraft)可用,但**最终成片导出未实现**(`final_video_url` 恒为空,草稿需在剪映 App 中手动导出) |
+| 剪辑 EDIT | ✅ 已完成 | Timeline IR + DraftPlan 纯逻辑;两条渲染路径:剪映草稿(pyJianYingDraft,精修用)或 FFmpeg 无头渲染直出 mp4(`PIXELFLOW_EDIT_SKILL=ffmpeg`) |
 | 质检 QC | ✅ 已完成 | 片段完整性(阻断)+ 时长达标(警告),不通过回 GENERATE |
 | 任务 API | ✅ 已完成 | `/api/tasks`:建任务、查询、结果/资产、Brief 确认/修订、SSE 进度事件;Memory/SQL/MySQL 三种存储 |
 | 用户偏好 P0 | ✅ 已完成 | `/api/users/{id}/preferences`:结构化偏好(正则确定性抽取),建任务时注入初始状态 |
 | 参考视频拆解 | ❌ 未开始 | 当前仅在完整性检查中占位(状态 pending),尚未接入分析流水线 |
-| 最终视频渲染 | ❌ 未开始 | 仅产出剪映草稿;无头渲染(如 FFmpeg skill)待做 |
+| 最终视频渲染 | 🚧 v1 可用 | FFmpeg skill 直出 mp4(裁时长、缩放/填充、可选花字烧录);暂不支持转场与音轨 |
 | P1 语义记忆 | ❌ 未开始 | mem0/Qdrant 预留位,P0 只有结构化偏好 |
 | P1 PPT / 图片生成 | ❌ 未开始 | 规划中 |
 | 前端 | ❌ 未开始 | 当前仓库仅后端 |
@@ -78,8 +78,10 @@ uv run pytest tests/ -k pixelflow  # 跑 PixelFlow 相关测试
 |---|---|---|
 | `PIXELFLOW_MYSQL_URL` | 空 | 业务数据 MySQL 连接串;不设则回退 SQL/内存存储 |
 | `PIXELFLOW_VIDEO_SKILL` | `borgrise` | 视频生成实现 |
-| `PIXELFLOW_EDIT_SKILL` | `jianying` | 剪辑实现 |
+| `PIXELFLOW_EDIT_SKILL` | `jianying` | 剪辑实现:`jianying`(剪映草稿)或 `ffmpeg`(直出 mp4) |
 | `PIXELFLOW_DRAFT_ROOT` | 系统临时目录 | 剪映草稿输出根目录 |
+| `PIXELFLOW_RENDER_ROOT` | 系统临时目录 | FFmpeg 成片输出根目录 |
+| `PIXELFLOW_CAPTION_FONT` | 空 | 字体文件路径;设置后 FFmpeg 渲染才烧录花字 |
 | `BORGRISE_API_TOKEN` | 空 | Borgrise 生成所需 |
 
 > 剪映草稿生成依赖 `pyJianYingDraft`(及原生 `pymediainfo`),未安装时 EDIT 阶段会优雅降级:草稿生成失败记入 `edit_notes`,流水线继续推进。

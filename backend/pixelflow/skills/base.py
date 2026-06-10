@@ -32,14 +32,16 @@ class GenerationResult:
 class EditResult:
     """Normalized result of an edit/assembly call.
 
-    ``output_path`` points at the produced artifact — for the 剪映 skill this is
-    an editable draft folder, not a finished video (final render needs the
-    JianYing app). A future FFmpeg skill would put a video file path here.
+    ``output_path`` points at the produced artifact; ``kind`` tells the graph
+    what it is — ``"draft"`` for the 剪映 skill (an editable draft folder, final
+    render needs the JianYing app) or ``"video"`` for the FFmpeg skill (a
+    finished mp4).
     """
 
     ok: bool
     output_path: str | None = None
     error: str | None = None
+    kind: str = "draft"
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,12 +100,16 @@ def get_video_skill() -> VideoGenerationSkill:
 def get_video_edit_skill() -> VideoEditSkill:
     """Return the configured video-edit skill (the EDIT-phase swap point).
 
-    MVP returns the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL``
-    is reserved for alternatives (e.g. a pure-FFmpeg renderer).
+    Default is the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL=ffmpeg``
+    selects the headless FFmpeg renderer that produces a finished mp4.
     """
     impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying")
     if impl == "jianying":
         from pixelflow.skills.jianying import JianYingEditSkill
 
         return JianYingEditSkill()
+    if impl == "ffmpeg":
+        from pixelflow.skills.ffmpeg import FFmpegEditSkill
+
+        return FFmpegEditSkill()
     raise ValueError(f"Unknown video edit skill implementation: {impl!r}")

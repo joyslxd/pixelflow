@@ -215,7 +215,8 @@ async def edit_node(state: TaskState) -> TaskState:
     ``build_timeline`` (纯逻辑) binds each generated clip to its Brief shot and
     carries the shot's editing metadata (duration, transitions, narration/花字),
     skipping shots that produced no usable clip. The edit skill then renders the
-    Timeline into an editable 剪映 draft folder (``draft_path``).
+    Timeline — into an editable 剪映 draft folder (``draft_path``) or, with the
+    FFmpeg skill, a finished mp4 (``final_video_url``), routed by ``result.kind``.
 
     Failure-safe: with no clips the skill is skipped; a missing render dep or a
     render error is logged into ``edit_notes`` rather than crashing — so the
@@ -228,22 +229,26 @@ async def edit_node(state: TaskState) -> TaskState:
     logger.info("[pixelflow] edit task_id=%s clips=%d skipped=%d", task_id, len(timeline.clips), len(notes))
 
     draft_path = ""
+    final_video_url = ""
     if timeline.clips:
         try:
             result = await get_video_edit_skill().render(timeline.model_dump(), draft_name=f"pixelflow_{task_id}")
             if result.ok:
-                draft_path = result.output_path or ""
+                if result.kind == "video":
+                    final_video_url = result.output_path or ""
+                else:
+                    draft_path = result.output_path or ""
             else:
-                notes.append(f"剪映草稿生成失败: {result.error}")
+                notes.append(f"剪辑渲染失败: {result.error}")
         except Exception as exc:  # noqa: BLE001 - boundary: never crash the EDIT phase
             logger.exception("[pixelflow] edit render failed task_id=%s", task_id)
-            notes.append(f"剪映草稿生成异常: {exc}")
+            notes.append(f"剪辑渲染异常: {exc}")
 
     return {
         "phase": Phase.QC.value,
         "timeline": timeline.model_dump(),
         "draft_path": draft_path,
-        "final_video_url": "",
+        "final_video_url": final_video_url,
         "edit_notes": notes,
     }
 
