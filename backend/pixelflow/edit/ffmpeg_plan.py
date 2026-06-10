@@ -1,0 +1,72 @@
+"""build_ffmpeg_args — translate a DraftPlan into a deterministic ffmpeg argv (pure logic).
+
+Each segment is trimmed to its planned duration, normalized onto the pixel
+canvas (scale + pad, unified fps), optionally gets its 花字 caption burned in
+via drawtext, then everything is concatenated into one H.264 mp4. The FFmpeg
+render skill executes the argv one-to-one without doing any编排 of its own.
+
+v1 scope (deliberate): no transitions (xfade reshapes the total duration) and
+no audio track (generated clips have inconsistent/absent audio, which breaks
+concat). Captions are only burned when a font file is provided.
+
+Pure and deterministic: no I/O, fully testable offline.
+"""
+
+from __future__ import annotations
+
+from .models import DraftPlan
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape ffmpeg drawtext specials (backslash first, then : ' %)."""
+    out = text.replace("\\", "\\\\")
+    for ch in (":", "'", "%"):
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
+def build_ffmpeg_args(plan: DraftPlan, input_paths: list[str], output_path: str, *, font_file: str | None = None) -> list[str]:
+    """Build the full ffmpeg argv rendering ``plan`` over local ``input_paths``."""
+    if not plan.segments:
+        raise ValueError("empty plan: no segments to render")
+    if len(input_paths) != len(plan.segments):
+        raise ValueError(f"input_paths/segments length mismatch: {len(input_paths)} != {len(plan.segments)}")
+
+    args: list[str] = ["ffmpeg", "-y"]
+    for path in input_paths:
+        args += ["-i", path]
+
+    filters: list[str] = []
+    for i, seg in enumerate(plan.segments):
+        chain = (
+            f"[{i}:v]trim=duration={seg.duration:g},setpts=PTS-STARTPTS,"
+            f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=decrease,"
+            f"pad={plan.width}:{plan.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={plan.fps}"
+        )
+        if seg.caption and font_file:
+            fontsize = max(plan.height // 18, 16)
+            chain += (
+                f",drawtext=fontfile={font_file}:text='{_escape_drawtext(seg.caption)}'"
+                f":x=(w-text_w)/2:y=h*0.82:fontsize={fontsize}:fontcolor=white:borderw=3:bordercolor=black"
+            )
+        filters.append(f"{chain}[v{i}]")
+
+    concat_inputs = "".join(f"[v{i}]" for i in range(len(plan.segments)))
+    filters.append(f"{concat_inputs}concat=n={len(plan.segments)}:v=1:a=0[vout]")
+
+    args += [
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[vout]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        str(plan.fps),
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    return args

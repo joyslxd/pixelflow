@@ -43,6 +43,17 @@ def test_render_success_sets_draft_path(monkeypatch):
     assert len(fake.calls[0]["timeline"]["clips"]) == 1
 
 
+def test_render_video_kind_sets_final_video_url(monkeypatch):
+    fake = _FakeEditSkill(EditResult(ok=True, output_path="/tmp/renders/pixelflow_t1.mp4", kind="video"))
+    monkeypatch.setattr("pixelflow.nodes.get_video_edit_skill", lambda: fake)
+
+    state = {"task_id": "t1", "brief": _BRIEF, "generated_assets": _ASSETS}
+    out = asyncio.run(edit_node(state))
+
+    assert out["final_video_url"] == "/tmp/renders/pixelflow_t1.mp4"
+    assert out["draft_path"] == ""
+
+
 def test_render_failure_recorded_in_notes(monkeypatch):
     fake = _FakeEditSkill(EditResult(ok=False, error="pyJianYingDraft 未安装"))
     monkeypatch.setattr("pixelflow.nodes.get_video_edit_skill", lambda: fake)
@@ -51,7 +62,7 @@ def test_render_failure_recorded_in_notes(monkeypatch):
     out = asyncio.run(edit_node(state))
 
     assert out["draft_path"] == ""
-    assert any("剪映草稿生成失败" in n for n in out["edit_notes"])
+    assert any("剪辑渲染失败" in n for n in out["edit_notes"])
 
 
 def test_no_clips_skips_render(monkeypatch):
