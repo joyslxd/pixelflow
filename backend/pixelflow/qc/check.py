@@ -2,9 +2,9 @@
 
 Two checks over the GENERATE/EDIT results:
 
-- 片段完整性 (blocking): every planned shot produced a usable clip. A miss
+- 片段完整性 (blocking): every attempted segment produced a usable clip. A miss
   ``fail``s so the graph retries GENERATE (the right remediation for a transient
-  generation failure). An empty Brief (no shots) passes vacuously — its
+  generation failure). An empty Brief (no segments) passes vacuously — its
   emptiness is an upstream condition, not a generation defect QC should catch.
 - 时长达标 (warn): the assembled duration is within the Brief's tolerance.
   Regeneration can't change shot durations, so a miss warns rather than retries.
@@ -28,20 +28,21 @@ def _parse_tolerance(spec: str) -> float:
 
 
 def qc_check(brief: dict, generated_assets: list[dict], timeline: dict) -> QCResult:
-    """Evaluate the produced output. ``generated_assets`` is kept for parity with
-    the other phase signatures; coverage is read from the assembled ``timeline``."""
-    total_shots = len(brief.get("shots", []))
+    """Evaluate the produced output. Coverage compares the assembled clips against
+    the segments GENERATE attempted (``generated_assets``), since generation is now
+    per-segment, not per-shot."""
+    total_segments = len(generated_assets)
     n_clips = len(timeline.get("clips", []))
 
     checks: list[QCItem] = []
 
-    coverage_ok = n_clips == total_shots  # both 0 -> vacuous pass
-    score = 1.0 if total_shots == 0 else n_clips / total_shots
+    coverage_ok = n_clips == total_segments  # both 0 -> vacuous pass
+    score = 1.0 if total_segments == 0 else n_clips / total_segments
     checks.append(
         QCItem(
             item="片段完整性",
             status="pass" if coverage_ok else "fail",
-            message=f"{n_clips}/{total_shots} 个分镜生成成功",
+            message=f"{n_clips}/{total_segments} 个片段生成成功",
         )
     )
 

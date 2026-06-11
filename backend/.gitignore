@@ -20,6 +20,7 @@ venv/
 
 # User config file
 config.yaml
+.env
 
 # Langgraph
 .langgraph_api

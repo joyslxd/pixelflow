@@ -8,13 +8,15 @@ loop — is fully wired so the graph runs end-to-end with stub logic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 
 from langgraph.types import interrupt
 
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
-from pixelflow.generate import build_seedance_prompt
+from pixelflow.generate import build_segment_prompt, plan_segments
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract, summarize_storyboards
 from pixelflow.qc import qc_check
 from pixelflow.skills import get_video_decompose_skill, get_video_edit_skill, get_video_skill
@@ -26,6 +28,9 @@ logger = logging.getLogger(__name__)
 MAX_QC_ATTEMPTS = 2
 # Bounds the INTAKE follow-up loop so an unanswerable demand can't spin forever.
 MAX_INTAKE_ROUNDS = 3
+# seedance-2.0 只接受 4–15 秒整数时长；短分镜按下限生成，EDIT 再裁回精确时长。
+SEEDANCE_MIN_DURATION = 4
+SEEDANCE_MAX_DURATION = 15
 
 
 async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
@@ -173,38 +178,43 @@ async def brief_review_node(state: TaskState) -> TaskState:
     return {"phase": next_phase.value, "brief_approved": approved}
 
 
-def _resolve_shot_image(shot: dict, product_info: dict) -> tuple[str | None, str | None]:
-    """Resolve a shot's source image from its ``asset_strategy`` (PRD §9.4).
+async def _generate_segment(skill, segment: dict, *, image_url: str, global_visual: dict, ratio: str) -> dict:
+    """Generate one segment clip (a group of shots, ≤15s) in a single call.
 
-    The Brief schema (§9.4) carries no per-shot image URL — the asset is bound
-    here at generation time. The product's main image is the anchor for
-    ``use_real_asset``/``mixed``; the strategies that need an unbuilt capability
-    (text-to-image for ``generate_asset``, reference parsing for
-    ``use_reference_structure``) fall back to the product image so the pipeline
-    runs, recording a note so the gap stays visible.
-
-    Returns ``(image_url, note)``; ``image_url`` is None when no source exists.
+    seedance takes integer seconds in [4, 15]; ceil then clamp the segment's
+    duration so the clip is valid and long enough for EDIT to trim back to the
+    exact length. Returns a normalized asset record keyed by ``segment_index``.
     """
-    main = product_info.get("main_image_url")
-    strategy = shot.get("asset_strategy", "use_real_asset")
-    if strategy in ("use_real_asset", "mixed"):
-        return main, None
-    if main:
-        return main, f"asset_strategy '{strategy}' 暂未支持，已回退到商品主图"
-    return None, None
+    gen_duration = max(SEEDANCE_MIN_DURATION, min(SEEDANCE_MAX_DURATION, math.ceil(segment["duration"])))
+    result = await skill.image_to_video(
+        image_url=image_url,
+        prompt=build_segment_prompt(segment["shots"], global_visual),
+        duration=gen_duration,
+        ratio=ratio,
+    )
+    return {
+        "segment_index": segment["index"],
+        "shot_indices": segment["shot_indices"],
+        "duration": segment["duration"],
+        "ok": result.ok,
+        "url": result.url,
+        "task_id": result.task_id,
+        "error": result.error,
+    }
 
 
 async def generate_node(state: TaskState) -> TaskState:
-    """生成: shot-by-shot generation via the video-generation skill.
+    """生成: segment-based generation via the video-generation skill.
 
-    Iterates the Brief's shots and produces one clip per shot through the
-    capability interface (vendor-agnostic). Each shot's source image is resolved
-    from ``product_info`` by ``asset_strategy`` (see ``_resolve_shot_image``).
+    seedance-2.0 produces a coherent clip up to 15s per call, so the Brief's
+    shots are grouped into the fewest ≤15s segments (``plan_segments``) and each
+    segment is generated once from a fused multi-scene prompt — a ≤15s video is a
+    single call, longer videos are several segments generated **in parallel** and
+    concatenated in EDIT. The product main image anchors every segment.
+
     With no shots (Brief empty) this is a no-op, keeping the pipeline runnable
-    offline.
-
-    TODO: expand each shot's prompt via PromptEngine; add a text-to-image skill
-    for ``generate_asset`` and ``extend_video`` for shot continuity.
+    offline. Failure-safe: a missing image fails all segments with a note rather
+    than crashing; per-segment vendor errors are normalized by the skill.
     """
     task_id = state.get("task_id")
     brief = state.get("brief") or {}
@@ -212,37 +222,21 @@ async def generate_node(state: TaskState) -> TaskState:
     shots = brief.get("shots", [])
     global_visual = brief.get("global_visual") or {}
     ratio = brief.get("ratio", "9:16")
-    logger.info("[pixelflow] generate task_id=%s shots=%d", task_id, len(shots))
 
     if not shots:
         return {"phase": Phase.EDIT.value, "generated_assets": []}
 
-    skill = get_video_skill()
-    assets: list[dict] = []
-    for i, shot in enumerate(shots):
-        image_url, note = _resolve_shot_image(shot, product_info)
-        if not image_url:
-            assets.append({"shot_index": i, "ok": False, "error": "无可用图源：商品缺少 main_image_url"})
-            continue
-        duration = shot.get("duration", 10)
-        result = await skill.image_to_video(
-            image_url=image_url,
-            prompt=build_seedance_prompt(shot, global_visual, duration),
-            duration=duration,
-            ratio=ratio,
-        )
-        record = {
-            "shot_index": i,
-            "ok": result.ok,
-            "url": result.url,
-            "task_id": result.task_id,
-            "error": result.error,
-        }
-        if note:
-            record["note"] = note
-        assets.append(record)
+    segments = plan_segments(shots, SEEDANCE_MAX_DURATION)
+    logger.info("[pixelflow] generate task_id=%s shots=%d segments=%d", task_id, len(shots), len(segments))
 
-    return {"phase": Phase.EDIT.value, "generated_assets": assets}
+    image_url = product_info.get("main_image_url")
+    if not image_url:
+        assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": "无可用图源：商品缺少 main_image_url"} for s in segments]
+        return {"phase": Phase.EDIT.value, "generated_assets": assets}
+
+    skill = get_video_skill()
+    assets = await asyncio.gather(*(_generate_segment(skill, s, image_url=image_url, global_visual=global_visual, ratio=ratio) for s in segments))
+    return {"phase": Phase.EDIT.value, "generated_assets": list(assets)}
 
 
 async def edit_node(state: TaskState) -> TaskState:

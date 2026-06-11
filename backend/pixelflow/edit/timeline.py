@@ -1,9 +1,10 @@
-"""build_timeline — assemble generated clips into a Timeline IR (pure logic).
+"""build_timeline — assemble generated segment clips into a Timeline IR (pure logic).
 
-Binds each Brief shot to its generated clip (by ``shot_index``), keeps only the
-shots that produced a usable video, and carries the shot's editing metadata
-(duration, transitions, narration/onscreen text) onto the timeline. Shots whose
-generation failed are skipped with a note so the gap stays visible to QC/UI.
+GENERATE produces one clip per *segment* (a group of consecutive shots, ≤15s,
+generated in a single seedance call). build_timeline places each successfully
+generated segment clip on the timeline in order, trimmed to the segment's exact
+duration, and concatenated; segments whose generation failed are skipped with a
+note so the gap stays visible to QC/UI.
 
 Pure and deterministic: no I/O, fully testable offline. The actual render is a
 separate skill that consumes the returned :class:`Timeline`.
@@ -17,28 +18,22 @@ from .models import Clip, Timeline
 def build_timeline(brief: dict, generated_assets: list[dict]) -> tuple[Timeline, list[str]]:
     """Build a :class:`Timeline` from the Brief and the GENERATE phase output.
 
-    Returns ``(timeline, notes)``; ``notes`` records skipped shots.
+    ``generated_assets`` is the per-segment output from ``generate_node``.
+    Returns ``(timeline, notes)``; ``notes`` records skipped segments.
     """
-    shots = brief.get("shots", [])
-    assets_by_index = {a.get("shot_index"): a for a in generated_assets}
-
     clips: list[Clip] = []
     notes: list[str] = []
-    for i, shot in enumerate(shots):
-        asset = assets_by_index.get(i)
-        if not (asset and asset.get("ok") and asset.get("url")):
-            notes.append(f"分镜 {i} 无可用片段，已跳过")
+    for asset in generated_assets:
+        index = asset.get("segment_index", 0)
+        if not (asset.get("ok") and asset.get("url")):
+            notes.append(f"片段 {index} 生成失败，已跳过")
             continue
         clips.append(
             Clip(
-                shot_index=i,
-                shot_id=shot.get("shot_id", f"shot_{i:03d}"),
+                shot_index=index,
+                shot_id=f"seg_{index:03d}",
                 source_url=asset["url"],
-                duration=shot.get("duration", 0.0),
-                transition_in=shot.get("transition_in", ""),
-                transition_out=shot.get("transition_out", ""),
-                narration_text=shot.get("narration_text", ""),
-                onscreen_text=shot.get("onscreen_text", ""),
+                duration=asset.get("duration", 0.0),
             )
         )
 

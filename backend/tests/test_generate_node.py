@@ -1,8 +1,10 @@
-"""Tests for the GENERATE phase: shot image resolution + generation loop."""
+"""Tests for the GENERATE phase: segment-based parallel generation."""
 
 from __future__ import annotations
 
-from pixelflow.nodes import _resolve_shot_image, generate_node
+import asyncio
+
+from pixelflow.nodes import generate_node
 from pixelflow.skills import GenerationResult
 from pixelflow.state import Phase
 
@@ -20,103 +22,86 @@ class _FakeSkill:
         return GenerationResult(ok=True, url="https://x/clip.mp4", task_id="t1")
 
 
-# -- _resolve_shot_image --
-
-
-def test_use_real_asset_uses_main_image():
-    url, note = _resolve_shot_image({"asset_strategy": "use_real_asset"}, _PI)
-    assert url == "https://x/main.jpg"
-    assert note is None
-
-
-def test_mixed_uses_main_image():
-    url, note = _resolve_shot_image({"asset_strategy": "mixed"}, _PI)
-    assert url == "https://x/main.jpg"
-    assert note is None
-
-
-def test_default_strategy_uses_main_image():
-    url, note = _resolve_shot_image({}, _PI)
-    assert url == "https://x/main.jpg"
-    assert note is None
-
-
-def test_generate_asset_falls_back_with_note():
-    url, note = _resolve_shot_image({"asset_strategy": "generate_asset"}, _PI)
-    assert url == "https://x/main.jpg"
-    assert note and "回退" in note
-
-
-def test_no_main_image_returns_none():
-    url, note = _resolve_shot_image({"asset_strategy": "use_real_asset"}, {})
-    assert url is None
-    assert note is None
-
-
-# -- generate_node --
+def _shot(dur, prompt="p", **kw):
+    base = {"generation_prompt": prompt, "duration": dur, "asset_strategy": "use_real_asset"}
+    base.update(kw)
+    return base
 
 
 def test_no_shots_is_noop():
-    import asyncio
-
-    state = {"brief": {"shots": []}, "product_info": _PI}
-    out = asyncio.run(generate_node(state))
+    out = asyncio.run(generate_node({"brief": {"shots": []}, "product_info": _PI}))
     assert out["phase"] == Phase.EDIT.value
     assert out["generated_assets"] == []
 
 
-def test_generates_clip_per_shot(monkeypatch):
+def test_short_video_is_one_segment_one_call(monkeypatch):
     fake = _FakeSkill()
     monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
-    import asyncio
 
+    # 2.5 + 3 + 2 = 7.5s total <= 15 -> single segment, single seedance call.
     state = {
-        "brief": {"ratio": "16:9", "shots": [{"generation_prompt": "p0", "duration": 5, "asset_strategy": "use_real_asset"}]},
+        "brief": {"ratio": "16:9", "shots": [_shot(2.5, "a"), _shot(3, "b"), _shot(2, "c")]},
         "product_info": _PI,
     }
     out = asyncio.run(generate_node(state))
 
     assert out["phase"] == Phase.EDIT.value
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 1  # NOT one call per shot
     call = fake.calls[0]
     assert call["image_url"] == "https://x/main.jpg"
-    assert "p0" in call["prompt"]  # PromptEngine wraps the shot's generation_prompt
-    assert call["duration"] == 5
-    assert call["ratio"] == "16:9"  # brief-level ratio threaded through
+    assert call["ratio"] == "16:9"
+    assert call["duration"] == 8  # ceil(7.5)
+    # the fused prompt carries every shot's action
+    assert "a" in call["prompt"] and "b" in call["prompt"] and "c" in call["prompt"]
 
-    asset = out["generated_assets"][0]
-    assert asset["ok"]
-    assert asset["url"] == "https://x/clip.mp4"
-    assert "note" not in asset
+    assets = out["generated_assets"]
+    assert len(assets) == 1
+    assert assets[0]["segment_index"] == 0
+    assert assets[0]["shot_indices"] == [0, 1, 2]
+    assert assets[0]["duration"] == 7.5
+    assert assets[0]["ok"]
+    assert assets[0]["url"] == "https://x/clip.mp4"
 
 
-def test_fallback_strategy_records_note(monkeypatch):
+def test_long_video_splits_into_segments(monkeypatch):
     fake = _FakeSkill()
     monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
-    import asyncio
 
+    # 10 + 8 + 6 = 24s -> segment0 = [10] (adding 8 would exceed 15... 10+8=18>15),
+    # segment1 = [8,6]=14, so two segments.
     state = {
-        "brief": {"shots": [{"generation_prompt": "p0", "asset_strategy": "generate_asset"}]},
+        "brief": {"shots": [_shot(10, "s0"), _shot(8, "s1"), _shot(6, "s2")]},
         "product_info": _PI,
     }
     out = asyncio.run(generate_node(state))
 
-    assert len(fake.calls) == 1  # still generated, via fallback image
-    assert "note" in out["generated_assets"][0]
+    assert len(fake.calls) == 2
+    assets = out["generated_assets"]
+    assert [a["shot_indices"] for a in assets] == [[0], [1, 2]]
+    assert assets[0]["duration"] == 10
+    assert assets[1]["duration"] == 14
+    assert fake.calls[1]["duration"] == 14  # 14 <= 15, no clamp
 
 
-def test_missing_image_marks_failure_without_calling_skill(monkeypatch):
+def test_duration_clamped_to_vendor_range(monkeypatch):
     fake = _FakeSkill()
     monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
-    import asyncio
 
-    state = {
-        "brief": {"shots": [{"generation_prompt": "p0", "asset_strategy": "use_real_asset"}]},
-        "product_info": {},  # no main_image_url
-    }
+    # single 2.5s shot -> segment duration 2.5 -> generate at the 4s minimum.
+    out = asyncio.run(generate_node({"brief": {"shots": [_shot(2.5)]}, "product_info": _PI}))
+    assert fake.calls[0]["duration"] == 4
+    assert out["generated_assets"][0]["duration"] == 2.5  # edit-side duration unchanged
+
+
+def test_missing_image_fails_all_segments_without_calling_skill(monkeypatch):
+    fake = _FakeSkill()
+    monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
+
+    state = {"brief": {"shots": [_shot(5), _shot(5)]}, "product_info": {}}  # no main_image_url
     out = asyncio.run(generate_node(state))
 
-    assert fake.calls == []  # no image source => never call the skill
-    asset = out["generated_assets"][0]
-    assert asset["ok"] is False
-    assert "无可用图源" in asset["error"]
+    assert fake.calls == []
+    assets = out["generated_assets"]
+    assert len(assets) == 1  # 5+5=10 <= 15 -> one segment
+    assert assets[0]["ok"] is False
+    assert "无可用图源" in assets[0]["error"]

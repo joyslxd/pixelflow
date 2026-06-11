@@ -14,7 +14,7 @@ _BRIEF = {
     "platform": "douyin",
     "shots": [{"shot_id": "shot_000", "duration": 5.0}],
 }
-_ASSETS = [{"shot_index": 0, "ok": True, "url": "https://x/clip.mp4"}]
+_ASSETS = [{"segment_index": 0, "shot_indices": [0], "duration": 5.0, "ok": True, "url": "https://x/clip.mp4"}]
 
 
 class _FakeEditSkill:
@@ -69,10 +69,10 @@ def test_no_clips_skips_render(monkeypatch):
     fake = _FakeEditSkill(EditResult(ok=True, output_path="/should/not/be/used"))
     monkeypatch.setattr("pixelflow.nodes.get_video_edit_skill", lambda: fake)
 
-    # all shots failed generation -> empty timeline -> skill not called
-    state = {"task_id": "t1", "brief": _BRIEF, "generated_assets": [{"shot_index": 0, "ok": False, "url": None}]}
+    # all segments failed generation -> empty timeline -> skill not called
+    state = {"task_id": "t1", "brief": _BRIEF, "generated_assets": [{"segment_index": 0, "ok": False, "url": None}]}
     out = asyncio.run(edit_node(state))
 
     assert fake.calls == []
     assert out["draft_path"] == ""
-    assert len(out["edit_notes"]) == 1  # the skipped-shot note from build_timeline
+    assert len(out["edit_notes"]) == 1  # the skipped-segment note from build_timeline
