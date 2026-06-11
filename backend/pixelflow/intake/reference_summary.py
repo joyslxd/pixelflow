@@ -18,6 +18,7 @@ MAX_SHOTS_PER_VIDEO = 12
 _DURATION_KEYS = ("duration", "duration_sec", "seconds", "time")
 _DESCRIPTION_KEYS = ("visual_description", "description", "desc", "content", "text", "prompt")
 _CAMERA_KEYS = ("camera", "camera_movement", "shot_type")
+_NARRATION_KEYS = ("narration_text", "voice_content", "narration", "voiceover")
 
 
 def _first(raw: dict, keys: tuple[str, ...]) -> Any:
@@ -44,6 +45,9 @@ def _shot(raw: Any, index: int) -> dict[str, Any]:
     camera = _first(raw, _CAMERA_KEYS)
     if camera:
         out["camera"] = str(camera)
+    narration = _first(raw, _NARRATION_KEYS)
+    if narration:
+        out["narration"] = str(narration)
     return out
 
 
