@@ -5,9 +5,10 @@ canvas (scale + pad, unified fps), optionally gets its 花字 caption burned in
 via drawtext, then everything is concatenated into one H.264 mp4. The FFmpeg
 render skill executes the argv one-to-one without doing any编排 of its own.
 
-v1 scope (deliberate): no transitions (xfade reshapes the total duration) and
-no audio track (generated clips have inconsistent/absent audio, which breaks
-concat). Captions are only burned when a font file is provided.
+v1 scope (deliberate): no transitions (xfade reshapes the total duration).
+Each segment's source audio is preserved and concatenated alongside the video
+(seedance clips carry an aac track); captions are only burned when a font file
+is provided.
 
 Pure and deterministic: no I/O, fully testable offline.
 """
@@ -50,21 +51,29 @@ def build_ffmpeg_args(plan: DraftPlan, input_paths: list[str], output_path: str,
                 f":x=(w-text_w)/2:y=h*0.82:fontsize={fontsize}:fontcolor=white:borderw=3:bordercolor=black"
             )
         filters.append(f"{chain}[v{i}]")
+        # Preserve each source's audio, trimmed to the same span as its video.
+        filters.append(f"[{i}:a]atrim=duration={seg.duration:g},asetpts=PTS-STARTPTS[a{i}]")
 
-    concat_inputs = "".join(f"[v{i}]" for i in range(len(plan.segments)))
-    filters.append(f"{concat_inputs}concat=n={len(plan.segments)}:v=1:a=0[vout]")
+    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(plan.segments)))
+    filters.append(f"{concat_inputs}concat=n={len(plan.segments)}:v=1:a=1[vout][aout]")
 
     args += [
         "-filter_complex",
         ";".join(filters),
         "-map",
         "[vout]",
+        "-map",
+        "[aout]",
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
         "-r",
         str(plan.fps),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
         "-movflags",
         "+faststart",
         output_path,

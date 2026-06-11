@@ -26,8 +26,12 @@ def test_single_clip_argv():
     assert "scale=1080:1920:force_original_aspect_ratio=decrease" in fc
     assert "pad=1080:1920:(ow-iw)/2:(oh-ih)/2" in fc
     assert "fps=30" in fc
-    assert "concat=n=1:v=1:a=0[vout]" in fc
+    # source audio preserved and concatenated alongside video
+    assert "[0:a]atrim=duration=5" in fc
+    assert "[v0][a0]concat=n=1:v=1:a=1[vout][aout]" in fc
     assert args[args.index("-map") + 1] == "[vout]"
+    assert "[aout]" in args
+    assert "aac" in args
 
 
 def test_multi_clip_concat_order():
@@ -42,7 +46,7 @@ def test_multi_clip_concat_order():
     fc = args[args.index("-filter_complex") + 1]
     assert "[0:v]trim=duration=3" in fc
     assert "[1:v]trim=duration=4.5" in fc
-    assert "[v0][v1]concat=n=2:v=1:a=0[vout]" in fc
+    assert "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]" in fc
     # every input is registered
     assert args.count("-i") == 2
 
