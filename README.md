@@ -47,18 +47,18 @@ backend/
 | 采集 INTAKE | ✅ 已完成 | LLM 提取商品信息 + 参数归一 + 需求完整性门控(信息不足时中断补充,≤3 轮) |
 | 策划 CREATIVE | ✅ 已完成 | LLM 生成分镜 Brief + 纯逻辑校验修复(validator) |
 | Brief 人工确认 | ✅ 已完成 | `interrupt()` 门控,支持 approve / revise |
-| 生成 GENERATE | ✅ 已完成 | 按总时长分段生成(seedance 单次 ≤15s):≤15s 融合所有分镜提示词**一次出整条**,>15s 拆多段**并行**生成后拼接;商品主图锚定每段 |
-| 剪辑 EDIT | ✅ 已完成 | Timeline IR + DraftPlan 纯逻辑;两条渲染路径:剪映草稿(pyJianYingDraft,精修用)或 FFmpeg 无头渲染直出 mp4(`PIXELFLOW_EDIT_SKILL=ffmpeg`),保留源音轨 |
+| 生成 GENERATE | ✅ 已完成 | 按总时长分段生成(seedance 单次 ≤15s):≤15s 融合所有分镜提示词**一次出整条**,>15s 拆多段**并行**生成后拼接;商品主图锚定每段。**真机已验证**:≤15s 单段、>15s(30s→3 段)多段并行均跑通真出片 |
+| 剪辑 EDIT | ✅ 已完成 | Timeline IR + DraftPlan 纯逻辑;两条渲染路径:剪映草稿(pyJianYingDraft,精修用)或 FFmpeg 无头渲染直出 mp4(`PIXELFLOW_EDIT_SKILL=ffmpeg`),保留源音轨;单段直通、多段 concat 均真机验证 |
 | 质检 QC | ✅ 已完成 | 片段完整性(阻断)+ 时长达标(警告),不通过回 GENERATE |
 | 任务 API | ✅ 已完成 | `/api/tasks`:建任务、查询、结果/资产、Brief 确认/修订、SSE 进度事件;Memory/SQL/MySQL 三种存储 |
 | 用户偏好 P0 | ✅ 已完成 | `/api/users/{id}/preferences`:结构化偏好(正则确定性抽取),建任务时注入初始状态 |
-| 参考视频拆解 | ✅ 已完成 | INTAKE 调用博观 decompose_video_to_storyboard 拆分镜,纯逻辑摘要后注入 Brief 提示词;按参考数量切换创意模式(original / reference / attribution),拆解失败仅警告不阻断 |
-| 最终视频渲染 | 🚧 v1 可用 | FFmpeg 直出 mp4(裁时长、缩放/填充、保留源音轨、可选花字烧录),已端到端验证产出真实成片(1080×1920 / 30fps / H.264 + AAC);暂不支持转场、TTS 旁白与 BGM |
+| 参考视频拆解 | ✅ 已完成 | INTAKE 调用博观 decompose_video_to_storyboard(视觉模型 gemini-3-flash-preview)拆分镜,纯逻辑摘要后注入 Brief 提示词;按参考数量切换创意模式(original / reference / attribution),拆解失败仅警告不阻断。**真机已验证**(小红书链接 → 分镜) |
+| 最终视频渲染 | 🚧 v1 可用 | FFmpeg 直出 mp4(裁时长、缩放/填充、保留源音轨、可选花字烧录),已端到端验证产出真实成片(1080×1920 / 30fps / H.264 + AAC,≤15s 与 30s 多段拼接均验证)。暂不支持转场、TTS 旁白与 BGM;1080p 原生生成待博观接口修复(当前 720p 生成 + 上采样) |
 | P1 语义记忆 | ❌ 未开始 | mem0/Qdrant 预留位,P0 只有结构化偏好 |
 | P1 PPT / 图片生成 | ❌ 未开始 | 规划中 |
 | 前端 | ❌ 未开始 | 当前仓库仅后端 |
 
-测试:各纯逻辑模块与关键节点均有离线单测(`backend/tests/test_pixelflow_*`、`test_intake_*`、`test_creative_*`、`test_generate_*`、`test_edit_*`、`test_qc_*`、`test_prompt_engine.py`),不依赖外部服务。
+测试:各纯逻辑模块与关键节点均有离线单测(`backend/tests/test_pixelflow_*`、`test_intake_*`、`test_creative_*`、`test_generate_*`、`test_edit_*`、`test_qc_*`、`test_borgrise_*`、`test_reference_video_nodes.py`、`test_prompt_engine.py`),不依赖外部服务。
 
 ## 本地开发
 
