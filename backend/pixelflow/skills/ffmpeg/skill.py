@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from pixelflow.edit import build_draft_plan, build_ffmpeg_args
+from pixelflow.edit import build_draft_plan, build_ffmpeg_args, passthrough_eligible
 from pixelflow.skills.base import EditResult
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,23 @@ def _download(url: str, dest_dir: str, index: int) -> str:
     return dest
 
 
+def _probe(ffprobe: str, path: str) -> dict:
+    """Probe a clip's video specs (width/height/fps/duration) via ffprobe."""
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "default=noprint_wrappers=1:nokey=0", path],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    fields: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        key, _, value = line.partition("=")
+        fields[key.strip()] = value.strip()
+    num, _, den = fields.get("r_frame_rate", "0/1").partition("/")
+    fps = float(num) / float(den) if den and float(den) else 0.0
+    return {"width": fields.get("width"), "height": fields.get("height"), "fps": fps, "duration": fields.get("duration")}
+
+
 def _render(timeline: dict, draft_name: str, output_root: str | None) -> EditResult:
     """Download clips and run ffmpeg (blocking; run off-loop)."""
     ffmpeg = shutil.which("ffmpeg")
@@ -67,7 +84,19 @@ def _render(timeline: dict, draft_name: str, output_root: str | None) -> EditRes
 
     inputs = [_download(seg.source_url, assets_dir, i) for i, seg in enumerate(plan.segments)]
     output_path = os.path.join(work_dir, f"{draft_name}.mp4")
-    args = build_ffmpeg_args(plan, inputs, output_path, font_file=os.environ.get("PIXELFLOW_CAPTION_FONT") or None)
+    font_file = os.environ.get("PIXELFLOW_CAPTION_FONT") or None
+
+    # Fast path: a single clip that already matches the target canvas/fps/duration
+    # and needs no caption is used as-is, skipping a lossy re-encode.
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        has_caption = bool(plan.segments[0].caption and font_file)
+        if passthrough_eligible(plan, _probe(ffprobe, inputs[0]), has_caption=has_caption):
+            shutil.copyfile(inputs[0], output_path)
+            logger.info("[pixelflow] ffmpeg passthrough (no re-encode) path=%s", output_path)
+            return EditResult(ok=True, output_path=output_path, kind="video")
+
+    args = build_ffmpeg_args(plan, inputs, output_path, font_file=font_file)
     args[0] = ffmpeg
 
     proc = subprocess.run(args, capture_output=True, text=True, timeout=_RENDER_TIMEOUT_SEC)

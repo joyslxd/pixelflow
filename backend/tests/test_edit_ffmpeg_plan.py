@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pixelflow.edit import build_ffmpeg_args
+from pixelflow.edit import build_ffmpeg_args, passthrough_eligible
 from pixelflow.edit.ffmpeg_plan import _escape_drawtext
 from pixelflow.edit.models import DraftPlan, DraftSegment
 
@@ -65,6 +65,41 @@ def test_caption_burned_only_with_font():
 
 def test_drawtext_escaping():
     assert _escape_drawtext(r"a:b'c%d\e") == r"a\:b\'c\%d\\e"
+
+
+def _probe(width=1080, height=1920, fps=30.0, duration=14.0):
+    return {"width": width, "height": height, "fps": fps, "duration": duration}
+
+
+def test_passthrough_eligible_when_specs_match():
+    plan = _plan([DraftSegment(source_url="x", start=0.0, duration=14.0)])
+    assert passthrough_eligible(plan, _probe(), has_caption=False) is True
+    # tiny duration overage within epsilon still eligible
+    assert passthrough_eligible(plan, _probe(duration=14.07), has_caption=False) is True
+
+
+def test_passthrough_blocked_by_each_condition():
+    plan = _plan([DraftSegment(source_url="x", start=0.0, duration=14.0)])
+    assert passthrough_eligible(plan, _probe(width=720, height=1280), has_caption=False) is False  # wrong size
+    assert passthrough_eligible(plan, _probe(fps=24.0), has_caption=False) is False  # wrong fps
+    assert passthrough_eligible(plan, _probe(duration=12.0), has_caption=False) is False  # needs trim
+    assert passthrough_eligible(plan, _probe(), has_caption=True) is False  # caption to burn
+
+
+def test_passthrough_blocked_for_multi_segment():
+    plan = _plan(
+        [
+            DraftSegment(source_url="a", start=0.0, duration=10.0),
+            DraftSegment(source_url="b", start=10.0, duration=5.0),
+        ]
+    )
+    assert passthrough_eligible(plan, _probe(), has_caption=False) is False
+
+
+def test_passthrough_tolerates_bad_probe():
+    plan = _plan([DraftSegment(source_url="x", start=0.0, duration=14.0)])
+    assert passthrough_eligible(plan, {}, has_caption=False) is False
+    assert passthrough_eligible(plan, {"width": None, "height": None, "fps": None, "duration": None}, has_caption=False) is False
 
 
 def test_length_mismatch_and_empty_plan_raise():

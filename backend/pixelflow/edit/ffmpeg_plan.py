@@ -17,6 +17,32 @@ from __future__ import annotations
 
 from .models import DraftPlan
 
+# A clip whose duration is within this many seconds of its segment target needs
+# no trim, so re-encoding just to shave fractions isn't worth it.
+_PASSTHROUGH_DURATION_EPSILON = 0.5
+
+
+def passthrough_eligible(plan: DraftPlan, probe: dict, *, has_caption: bool) -> bool:
+    """Whether the lone source clip can be used as-is, skipping the ffmpeg re-encode.
+
+    Eligible only when there is exactly one segment, no caption to burn, and the
+    probed source already matches the target canvas/fps and duration — i.e.
+    ffmpeg would do nothing but a lossy re-encode. ``probe`` carries the source's
+    ``width``/``height``/``fps``/``duration``.
+    """
+    if len(plan.segments) != 1 or has_caption:
+        return False
+    seg = plan.segments[0]
+    try:
+        return (
+            int(probe["width"]) == plan.width
+            and int(probe["height"]) == plan.height
+            and abs(float(probe["fps"]) - plan.fps) < 0.01
+            and abs(float(probe["duration"]) - seg.duration) <= _PASSTHROUGH_DURATION_EPSILON
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
 
 def _escape_drawtext(text: str) -> str:
     """Escape ffmpeg drawtext specials (backslash first, then : ' %)."""
