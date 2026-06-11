@@ -118,9 +118,11 @@ def poll_task(task_id: str, timeout: int = POLL_TIMEOUT) -> Dict:
             print(f"Task {task_id}: {status}")
             last_status = status
 
-        if status == "COMPLETED":
+        # The API returns lowercase statuses (e.g. "completed"/"failed"); compare
+        # case-insensitively so polling actually terminates on completion.
+        if status.upper() == "COMPLETED":
             return result
-        elif status == "FAILED":
+        elif status.upper() == "FAILED":
             return {
                 "error": True,
                 "task_id": task_id,
