@@ -34,6 +34,13 @@ def _to_result(raw: dict[str, Any]) -> GenerationResult:
             raw=raw or {},
         )
     url = raw.get("video_url") or raw.get("image_url") or raw.get("url")
+    if not url:
+        return GenerationResult(
+            ok=False,
+            task_id=raw.get("task_id"),
+            error=raw.get("message") or "generation returned no video url",
+            raw=raw,
+        )
     return GenerationResult(ok=True, url=url, task_id=raw.get("task_id"), raw=raw)
 
 

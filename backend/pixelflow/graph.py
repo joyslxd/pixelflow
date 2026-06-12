@@ -34,7 +34,11 @@ def _route_after_intake(state: TaskState) -> str:
 
 
 def _route_after_brief(state: TaskState) -> str:
-    return "generate" if state.get("brief_approved", True) else "creative"
+    return "generate" if state.get("brief_approved") is True else "creative"
+
+
+def _route_after_generate(state: TaskState) -> str:
+    return "edit" if state.get("generation_ready") is True else END
 
 
 def _route_after_qc(state: TaskState) -> str:
@@ -68,7 +72,11 @@ def build_graph() -> StateGraph:
         _route_after_brief,
         {"generate": Phase.GENERATE, "creative": Phase.CREATIVE},
     )
-    graph.add_edge(Phase.GENERATE, Phase.EDIT)
+    graph.add_conditional_edges(
+        Phase.GENERATE,
+        _route_after_generate,
+        {"edit": Phase.EDIT, END: END},
+    )
     graph.add_edge(Phase.EDIT, Phase.QC)
     graph.add_conditional_edges(
         Phase.QC,
@@ -79,6 +87,6 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def make_pixelflow_graph():
+def make_pixelflow_graph(*_args, **_kwargs):
     """LangGraph entrypoint (see ``langgraph.json``)."""
     return build_graph().compile()

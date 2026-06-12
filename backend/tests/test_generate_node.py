@@ -28,10 +28,12 @@ def _shot(dur, prompt="p", **kw):
     return base
 
 
-def test_no_shots_is_noop():
+def test_no_shots_not_ready():
+    # 空分镜:停在 GENERATE,generation_ready=False(不进 EDIT)。
     out = asyncio.run(generate_node({"brief": {"shots": []}, "product_info": _PI}))
-    assert out["phase"] == Phase.EDIT.value
+    assert out["phase"] == Phase.GENERATE.value
     assert out["generated_assets"] == []
+    assert out["generation_ready"] is False
 
 
 def test_short_video_is_one_segment_one_call(monkeypatch):
@@ -67,20 +69,18 @@ def test_long_video_splits_into_segments(monkeypatch):
     fake = _FakeSkill()
     monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
 
-    # 10 + 8 + 6 = 24s -> segment0 = [10] (adding 8 would exceed 15... 10+8=18>15),
-    # segment1 = [8,6]=14, so two segments.
+    # seedance ≤10s/段:10 + 8 + 6 各自成段(任意两段相加 >10),共 3 段。
     state = {
         "brief": {"shots": [_shot(10, "s0"), _shot(8, "s1"), _shot(6, "s2")]},
         "product_info": _PI,
     }
     out = asyncio.run(generate_node(state))
 
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3
     assets = out["generated_assets"]
-    assert [a["shot_indices"] for a in assets] == [[0], [1, 2]]
-    assert assets[0]["duration"] == 10
-    assert assets[1]["duration"] == 14
-    assert fake.calls[1]["duration"] == 14  # 14 <= 15, no clamp
+    assert [a["shot_indices"] for a in assets] == [[0], [1], [2]]
+    assert [a["duration"] for a in assets] == [10, 8, 6]
+    assert [c["duration"] for c in fake.calls] == [10, 8, 6]  # 均 ≤10,无钳制
 
 
 def test_duration_clamped_to_vendor_range(monkeypatch):

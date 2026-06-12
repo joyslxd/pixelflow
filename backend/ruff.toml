@@ -4,7 +4,9 @@ target-version = "py312"
 # Vendored verbatim from the borgrise-creative-assistant skill (single source of
 # the Borgrise API contract; executed as-is in the sandbox in P1). Keep it
 # byte-for-byte identical to upstream rather than reformatting it.
-extend-exclude = ["pixelflow/skills/borgrise/run_generation.py"]
+# ``skills/`` holds installed standard Claude skills (markdown + vendored scripts)
+# loaded by the harness — third-party content, not our code, so don't lint it.
+extend-exclude = ["pixelflow/skills/borgrise/run_generation.py", "skills/"]
 
 [lint]
 select = ["E", "F", "I", "UP"]

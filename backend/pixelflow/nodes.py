@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 MAX_QC_ATTEMPTS = 2
 # Bounds the INTAKE follow-up loop so an unanswerable demand can't spin forever.
 MAX_INTAKE_ROUNDS = 3
-# seedance-2.0 只接受 4–15 秒整数时长；短分镜按下限生成，EDIT 再裁回精确时长。
+# seedance-2.0 单次最长 10s(v2 skill 校验上限)；短分镜按下限生成，>10s 由
+# 多段并行 + concat 承接(plan_segments),EDIT 再裁回精确时长。
 SEEDANCE_MIN_DURATION = 4
-SEEDANCE_MAX_DURATION = 15
+SEEDANCE_MAX_DURATION = 10
 
 
 async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
@@ -170,10 +171,12 @@ async def brief_review_node(state: TaskState) -> TaskState:
     """Human-in-the-loop: pause for the user to approve or revise the Brief.
 
     ``interrupt`` suspends the run; the resume payload decides the next phase.
-    Expected payload: ``{"approved": bool}`` (defaults to approved).
+    Expected payload: ``{"approved": bool}``. Missing/invalid payload is
+    treated as not approved so the pipeline never advances without an explicit
+    user confirmation.
     """
     decision = interrupt({"brief": state.get("brief", {}), "action": "confirm_brief"})
-    approved = bool(decision.get("approved", True)) if isinstance(decision, dict) else True
+    approved = bool(decision.get("approved", False)) if isinstance(decision, dict) else False
     next_phase = Phase.GENERATE if approved else Phase.CREATIVE
     return {"phase": next_phase.value, "brief_approved": approved}
 
@@ -224,7 +227,7 @@ async def generate_node(state: TaskState) -> TaskState:
     ratio = brief.get("ratio", "9:16")
 
     if not shots:
-        return {"phase": Phase.EDIT.value, "generated_assets": []}
+        return {"phase": Phase.GENERATE.value, "generated_assets": [], "generation_ready": False, "error": "Brief 中没有可生成的分镜"}
 
     segments = plan_segments(shots, SEEDANCE_MAX_DURATION)
     logger.info("[pixelflow] generate task_id=%s shots=%d segments=%d", task_id, len(shots), len(segments))
@@ -232,11 +235,18 @@ async def generate_node(state: TaskState) -> TaskState:
     image_url = product_info.get("main_image_url")
     if not image_url:
         assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": "无可用图源：商品缺少 main_image_url"} for s in segments]
-        return {"phase": Phase.EDIT.value, "generated_assets": assets}
+        return {"phase": Phase.GENERATE.value, "generated_assets": assets, "generation_ready": False, "error": "无可用图源：商品缺少 main_image_url"}
 
     skill = get_video_skill()
     assets = await asyncio.gather(*(_generate_segment(skill, s, image_url=image_url, global_visual=global_visual, ratio=ratio) for s in segments))
-    return {"phase": Phase.EDIT.value, "generated_assets": list(assets)}
+    ready = any(asset.get("ok") and asset.get("url") for asset in assets)
+    if not ready:
+        errors = [str(asset.get("error")) for asset in assets if asset.get("error")]
+        error = "视频生成失败，未返回可用片段"
+        if errors:
+            error = f"{error}: {'; '.join(errors[:3])}"
+        return {"phase": Phase.GENERATE.value, "generated_assets": list(assets), "generation_ready": False, "error": error}
+    return {"phase": Phase.EDIT.value, "generated_assets": list(assets), "generation_ready": True, "error": ""}
 
 
 async def edit_node(state: TaskState) -> TaskState:

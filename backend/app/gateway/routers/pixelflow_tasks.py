@@ -239,8 +239,14 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         "final_video_url": state.get("final_video_url") or "",
         "qc_report": state.get("qc_report") or {},
     }
+    error = state.get("error")
+    brief = state.get("brief") or task.brief
     status = "done" if phase == "done" else task.status
-    await store.update(task_id, user_id=user_id, phase=phase, status=status, brief=state.get("brief") or task.brief, result=result, error=state.get("error"))
+    if error and (not brief or phase == "generate"):
+        status = "error"
+    elif phase == "brief_review":
+        status = "pending"
+    await store.update(task_id, user_id=user_id, phase=phase, status=status, brief=brief, result=result, error=error)
     for asset in result["generated_assets"]:
         shot_index = asset.get("shot_index")
         await store.upsert_asset(
@@ -288,8 +294,16 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         )
 
 
-async def _watch_run_to_task(task_id: str, user_id: str | None, run_id: str, request: Request) -> None:
+async def _watch_run_to_task(
+    task_id: str,
+    user_id: str | None,
+    run_id: str,
+    request: Request,
+    *,
+    suppress_pending_replay: bool = False,
+) -> None:
     bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
     store = _task_store(request)
     last_phase = None
     try:
@@ -297,16 +311,26 @@ async def _watch_run_to_task(task_id: str, user_id: str | None, run_id: str, req
             if entry is END_SENTINEL:
                 await _sync_task_from_checkpoint(task_id, user_id, request)
                 task = await store.get(task_id, user_id=user_id)
-                await store.append_event(task_id, "task_done" if task and task.status == "done" else "run_finished", {"run_id": run_id}, user_id=user_id)
+                run = await run_mgr.get(run_id, user_id=user_id)
+                if (run and run.status.value == "error") or (task and task.status == "error"):
+                    error = run.error if run and run.error else (task.error if task else "PixelFlow run failed")
+                    await store.update(task_id, user_id=user_id, status="error", error=error)
+                    await store.append_event(task_id, "task_failed", {"run_id": run_id, "error": error}, user_id=user_id)
+                    return
+                event = "task_done" if task and task.status == "done" else "run_finished"
+                payload = {"run_id": run_id, "status": task.status, "phase": task.phase} if task else {"run_id": run_id}
+                await store.append_event(task_id, event, payload, user_id=user_id)
                 return
             data = getattr(entry, "data", None)
             if isinstance(data, dict):
                 phase = data.get("phase")
+                if suppress_pending_replay and phase == "brief_review":
+                    continue
                 if phase and phase != last_phase:
                     last_phase = phase
                     await store.update(task_id, user_id=user_id, phase=str(phase), status="running")
                     await store.append_event(task_id, "phase_change", {"phase": phase}, user_id=user_id)
-                if data.get("brief"):
+                if data.get("brief") and phase == "brief_review" and not suppress_pending_replay:
                     await store.update(task_id, user_id=user_id, brief=data["brief"])
                     await store.append_event(task_id, "brief_ready", {"brief": data["brief"]}, user_id=user_id)
     except Exception as exc:
@@ -348,7 +372,7 @@ async def create_task(body: TaskCreateRequest, request: Request) -> TaskResponse
             config={"configurable": {"thread_id": thread_id}},
             stream_mode=["values"],
             on_disconnect="continue",
-            multitask_strategy="enqueue",
+            multitask_strategy="reject",
         )
         run = await _start_pixelflow_run(run_body, thread_id, request)
         record = await store.update(task_id, user_id=user_id, run_id=run.run_id, status="running") or record
@@ -405,12 +429,12 @@ async def confirm_brief(task_id: str, body: BriefConfirmRequest, request: Reques
         config={"configurable": {"thread_id": task.thread_id}},
         stream_mode=["values"],
         on_disconnect="continue",
-        multitask_strategy="enqueue",
+        multitask_strategy="reject",
     )
     run = await _start_pixelflow_run(run_body, task.thread_id, request)
     updated = await store.update(task_id, user_id=user_id, run_id=run.run_id, status="running", phase="generate" if body.approved else "creative")
     await store.append_event(task_id, "brief_confirmed" if body.approved else "brief_rejected", {"run_id": run.run_id}, user_id=user_id)
-    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request))
+    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_pending_replay=body.approved))
     return _response(updated or task)
 
 
@@ -422,7 +446,7 @@ async def revise_brief(task_id: str, body: BriefReviseRequest, request: Request)
     if task is None:
         raise HTTPException(status_code=404, detail=f"PixelFlow task {task_id} not found")
     brief = {**task.brief, **body.brief_patch}
-    updated = await store.update(task_id, user_id=user_id, brief=brief, phase="brief_review", status="waiting_for_brief_confirm")
+    updated = await store.update(task_id, user_id=user_id, brief=brief, phase="brief_review", status="pending")
     await store.append_event(task_id, "brief_revised", {"brief": brief, "feedback": body.feedback}, user_id=user_id)
     if user_id and body.feedback.strip():
         pref_patch = extract_structured_preferences(body.feedback, brief_patch=body.brief_patch)

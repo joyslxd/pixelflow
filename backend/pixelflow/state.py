@@ -56,6 +56,7 @@ class TaskState(TypedDict, total=False):
 
     # 生成 — per-shot generated asset URLs (Borgrise task results).
     generated_assets: list[dict[str, Any]]
+    generation_ready: bool
 
     # 剪辑 — assembled timeline / 剪映 draft / final video.
     timeline: dict[str, Any]  # §EDIT Timeline IR (ordered clips + output format)
