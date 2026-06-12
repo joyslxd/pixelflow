@@ -5,6 +5,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom"
 
 import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
+import { AuthGate } from "@/components/auth/AuthGate";
 import { WorkspacePage } from "@/pages/WorkspacePage";
 
 const queryClient = new QueryClient({
@@ -14,7 +15,11 @@ const queryClient = new QueryClient({
 const router = createBrowserRouter([
   {
     path: "/",
-    element: <AppLayout />,
+    element: (
+      <AuthGate>
+        <AppLayout />
+      </AuthGate>
+    ),
     children: [
       { index: true, element: <WorkspacePage /> },
       { path: "c/:taskId", element: <WorkspacePage /> },

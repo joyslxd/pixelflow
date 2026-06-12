@@ -2,14 +2,15 @@ import { useEffect, useRef } from "react";
 import { Composer } from "@/components/composer/Composer";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
-import type { GenParams } from "@/lib/types";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
-  onSubmit: (prompt: string, params: GenParams) => void;
+  onSubmit: (text: string) => void;
+  onOpenArtifact?: (msg: ChatMessage) => void;
+  busy?: boolean;
 }
 
-export function ChatPanel({ messages, onSubmit }: ChatPanelProps) {
+export function ChatPanel({ messages, onSubmit, onOpenArtifact, busy }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -30,13 +31,13 @@ export function ChatPanel({ messages, onSubmit }: ChatPanelProps) {
             </p>
           </div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} msg={m} />)
+          messages.map((m) => <MessageBubble key={m.id} msg={m} onOpenArtifact={onOpenArtifact} />)
         )}
         <div ref={endRef} />
       </div>
 
       <div className="shrink-0 p-4">
-        <Composer onSubmit={onSubmit} />
+        <Composer onSubmit={onSubmit} busy={busy} />
       </div>
     </div>
   );

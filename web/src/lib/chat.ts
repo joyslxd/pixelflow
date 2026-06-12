@@ -5,6 +5,12 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   time: string;
+  artifact?: {
+    type: "brief" | "results";
+    title: string;
+    description: string;
+    actionLabel: string;
+  };
 }
 
 export interface BriefShot {
