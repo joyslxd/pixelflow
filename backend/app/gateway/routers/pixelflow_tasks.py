@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
@@ -50,6 +51,22 @@ class TaskCreateRequest(BaseModel):
 
 class BriefConfirmRequest(BaseModel):
     approved: bool = True
+
+
+class StageConfirmRequest(BaseModel):
+    approved: bool = True
+
+
+class SessionContextRequest(BaseModel):
+    task_id: str
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionContextResponse(BaseModel):
+    task_id: str
+    user_id: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    updated_at: str = ""
 
 
 class BriefReviseRequest(BaseModel):
@@ -244,11 +261,11 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
     status = "done" if phase == "done" else task.status
     if error and (not brief or phase == "generate"):
         status = "error"
-    elif phase == "brief_review":
+    elif phase in {"brief_review", "segment_review", "edit_review", "qc_review"}:
         status = "pending"
     await store.update(task_id, user_id=user_id, phase=phase, status=status, brief=brief, result=result, error=error)
     for asset in result["generated_assets"]:
-        shot_index = asset.get("shot_index")
+        shot_index = asset.get("shot_index") or asset.get("segment_index")
         await store.upsert_asset(
             PixelFlowAssetRecord(
                 asset_id=f"{task_id}:generated:{shot_index}",
@@ -306,6 +323,7 @@ async def _watch_run_to_task(
     run_mgr = get_run_manager(request)
     store = _task_store(request)
     last_phase = None
+    brief_emitted = False
     try:
         async for entry in bridge.subscribe(run_id):
             if entry is END_SENTINEL:
@@ -324,13 +342,14 @@ async def _watch_run_to_task(
             data = getattr(entry, "data", None)
             if isinstance(data, dict):
                 phase = data.get("phase")
-                if suppress_pending_replay and phase == "brief_review":
+                if suppress_pending_replay and phase in {"brief_review", "segment_review", "edit_review", "qc_review"}:
                     continue
                 if phase and phase != last_phase:
                     last_phase = phase
                     await store.update(task_id, user_id=user_id, phase=str(phase), status="running")
                     await store.append_event(task_id, "phase_change", {"phase": phase}, user_id=user_id)
-                if data.get("brief") and phase == "brief_review" and not suppress_pending_replay:
+                if data.get("brief") and phase == "brief_review" and not suppress_pending_replay and not brief_emitted:
+                    brief_emitted = True
                     await store.update(task_id, user_id=user_id, brief=data["brief"])
                     await store.append_event(task_id, "brief_ready", {"brief": data["brief"]}, user_id=user_id)
     except Exception as exc:
@@ -389,6 +408,23 @@ async def list_tasks(request: Request, limit: int = Query(default=50, ge=1, le=2
     return [_response(r) for r in rows]
 
 
+@router.get("/session/context", response_model=SessionContextResponse | None)
+async def get_session_context(request: Request, task_id: str | None = Query(default=None)) -> SessionContextResponse | None:
+    user_id = await get_current_user(request)
+    row = await _task_store(request).get_session_context(task_id, user_id=user_id)
+    return SessionContextResponse(**row) if row else None
+
+
+@router.put("/session/context", response_model=SessionContextResponse)
+async def save_session_context(body: SessionContextRequest, request: Request) -> SessionContextResponse:
+    user_id = await get_current_user(request)
+    store = _task_store(request)
+    if await store.get(body.task_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail=f"PixelFlow task {body.task_id} not found")
+    row = await store.upsert_session_context(body.task_id, body.context, user_id=user_id)
+    return SessionContextResponse(**row)
+
+
 @router.get("/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: str, request: Request) -> TaskResponse:
     user_id = await get_current_user(request)
@@ -413,6 +449,24 @@ async def list_task_assets(task_id: str, request: Request) -> list[AssetResponse
         raise HTTPException(status_code=404, detail=f"PixelFlow task {task_id} not found")
     rows = await store.list_assets(task_id, user_id=user_id)
     return [_asset_response(r) for r in rows]
+
+
+@router.get("/{task_id}/assets/{asset_id}/content")
+async def get_task_asset_content(task_id: str, asset_id: str, request: Request):
+    user_id = await get_current_user(request)
+    store = _task_store(request)
+    if await store.get(task_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail=f"PixelFlow task {task_id} not found")
+    rows = await store.list_assets(task_id, user_id=user_id)
+    asset = next((row for row in rows if row.asset_id == asset_id), None)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"PixelFlow asset {asset_id} not found")
+    if asset.url.startswith(("http://", "https://")):
+        return RedirectResponse(asset.url)
+    path = asset.local_path or asset.url
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Asset file not found")
+    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
 
 
 @router.post("/{task_id}/brief/confirm", response_model=TaskResponse)
@@ -453,6 +507,34 @@ async def revise_brief(task_id: str, body: BriefReviseRequest, request: Request)
         await _preference_store(request).update(user_id, pref_patch)
         await _preference_store(request).append_feedback(user_id, body.feedback, task_id=task_id, metadata={"source": "brief_revise"})
         await store.append_event(task_id, "preferences_updated", {"patch": pref_patch}, user_id=user_id)
+    return _response(updated or task)
+
+
+@router.post("/{task_id}/stages/{stage}/confirm", response_model=TaskResponse)
+async def confirm_stage(task_id: str, stage: Literal["segments", "edit", "qc"], body: StageConfirmRequest, request: Request) -> TaskResponse:
+    store = _task_store(request)
+    user_id = await get_current_user(request)
+    task = await store.get(task_id, user_id=user_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"PixelFlow task {task_id} not found")
+    stage_phase = {"segments": "segment_review", "edit": "edit_review", "qc": "qc_review"}[stage]
+    if task.phase != stage_phase:
+        raise HTTPException(status_code=409, detail=f"Task is in phase {task.phase}, not {stage_phase}")
+    run_body = RunCreateRequest(
+        assistant_id="pixelflow",
+        command={"resume": {"approved": body.approved}},
+        metadata={"pixelflow_task_id": task_id, "action": f"{stage}_confirm"},
+        config={"configurable": {"thread_id": task.thread_id}},
+        stream_mode=["values"],
+        on_disconnect="continue",
+        multitask_strategy="reject",
+    )
+    run = await _start_pixelflow_run(run_body, task.thread_id, request)
+    next_phase = {"segments": "edit", "edit": "qc", "qc": "done"}[stage] if body.approved else {"segments": "generate", "edit": "edit", "qc": "generate"}[stage]
+    updated = await store.update(task_id, user_id=user_id, run_id=run.run_id, status="running", phase=next_phase)
+    event_name = f"{stage}_confirmed" if body.approved else f"{stage}_rejected"
+    await store.append_event(task_id, event_name, {"run_id": run.run_id}, user_id=user_id)
+    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_pending_replay=True))
     return _response(updated or task)
 
 

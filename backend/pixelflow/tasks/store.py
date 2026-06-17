@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from pixelflow.tasks.model import PixelFlowAssetRow, PixelFlowTaskEventRow, PixelFlowTaskRow
+from pixelflow.tasks.model import PixelFlowAssetRow, PixelFlowSessionContextRow, PixelFlowTaskEventRow, PixelFlowTaskRow
 
 
 def _now() -> datetime:
@@ -107,6 +107,8 @@ class PixelFlowTaskStore(Protocol):
     async def list_events(self, task_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]: ...
     async def upsert_asset(self, asset: PixelFlowAssetRecord) -> PixelFlowAssetRecord: ...
     async def list_assets(self, task_id: str, *, user_id: str | None = None) -> list[PixelFlowAssetRecord]: ...
+    async def get_session_context(self, task_id: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None: ...
+    async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
 
 
 def _row_to_record(row: PixelFlowTaskRow) -> PixelFlowTaskRecord:
@@ -275,6 +277,32 @@ class SQLPixelFlowTaskStore:
             rows = (await session.execute(stmt)).scalars().all()
             return [_asset_row_to_record(r) for r in rows]
 
+    async def get_session_context(self, task_id: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None:
+        async with self._sf() as session:
+            stmt = select(PixelFlowSessionContextRow).order_by(PixelFlowSessionContextRow.updated_at.desc()).limit(1)
+            if task_id is not None:
+                stmt = stmt.where(PixelFlowSessionContextRow.task_id == task_id)
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowSessionContextRow.user_id == user_id)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return None
+            return {"task_id": row.task_id, "user_id": row.user_id, "context": row.context_json or {}, "updated_at": _dt(row.updated_at)}
+
+    async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        async with self._sf() as session:
+            row = await session.get(PixelFlowSessionContextRow, task_id)
+            if row is None:
+                row = PixelFlowSessionContextRow(task_id=task_id, user_id=user_id, context_json=context)
+                session.add(row)
+            else:
+                row.user_id = user_id
+                row.context_json = context
+                row.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return {"task_id": row.task_id, "user_id": row.user_id, "context": row.context_json or {}, "updated_at": _dt(row.updated_at)}
+
 
 def _event_to_dict(row: PixelFlowTaskEventRow) -> dict[str, Any]:
     return {"id": row.id, "task_id": row.task_id, "event": row.event, "data": row.data_json or {}, "created_at": _dt(row.created_at)}
@@ -285,6 +313,7 @@ class MemoryPixelFlowTaskStore:
         self._tasks: dict[str, PixelFlowTaskRecord] = {}
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._assets: dict[str, PixelFlowAssetRecord] = {}
+        self._contexts: dict[str, dict[str, Any]] = {}
         self._next_event_id = 1
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
@@ -336,3 +365,20 @@ class MemoryPixelFlowTaskStore:
     async def list_assets(self, task_id: str, *, user_id: str | None = None) -> list[PixelFlowAssetRecord]:
         rows = [r for r in self._assets.values() if r.task_id == task_id and (user_id is None or r.user_id == user_id)]
         return sorted(rows, key=lambda r: r.created_at)
+
+    async def get_session_context(self, task_id: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None:
+        rows = list(self._contexts.values())
+        if task_id is not None:
+            rows = [r for r in rows if r["task_id"] == task_id]
+        if user_id is not None:
+            rows = [r for r in rows if r.get("user_id") == user_id]
+        if not rows:
+            return None
+        return sorted(rows, key=lambda r: r["updated_at"], reverse=True)[0]
+
+    async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        stamp = _dt(_now())
+        row = self._contexts.get(task_id) or {"task_id": task_id, "user_id": user_id, "created_at": stamp}
+        row.update({"user_id": user_id, "context": context, "updated_at": stamp})
+        self._contexts[task_id] = row
+        return row

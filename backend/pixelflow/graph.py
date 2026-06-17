@@ -18,9 +18,12 @@ from pixelflow.nodes import (
     brief_review_node,
     creative_node,
     edit_node,
+    edit_review_node,
     generate_node,
     intake_node,
     qc_node,
+    qc_review_node,
+    segment_review_node,
 )
 from pixelflow.state import Phase, TaskState
 
@@ -38,13 +41,19 @@ def _route_after_brief(state: TaskState) -> str:
 
 
 def _route_after_generate(state: TaskState) -> str:
-    return "edit" if state.get("generation_ready") is True else END
+    return "segment_review" if state.get("generation_ready") is True else END
 
 
-def _route_after_qc(state: TaskState) -> str:
-    if state.get("qc_passed", True):
-        return END
-    if state.get("qc_attempts", 0) >= MAX_QC_ATTEMPTS:
+def _route_after_segment_review(state: TaskState) -> str:
+    return "edit" if state.get("segments_approved") is True else "generate"
+
+
+def _route_after_edit_review(state: TaskState) -> str:
+    return "qc" if state.get("edit_approved") is True else "edit"
+
+
+def _route_after_qc_review(state: TaskState) -> str:
+    if state.get("qc_approved") is True or state.get("qc_attempts", 0) >= MAX_QC_ATTEMPTS:
         return END
     return "generate"
 
@@ -57,8 +66,11 @@ def build_graph() -> StateGraph:
     graph.add_node(Phase.CREATIVE, creative_node)
     graph.add_node(Phase.BRIEF_REVIEW, brief_review_node)
     graph.add_node(Phase.GENERATE, generate_node)
+    graph.add_node(Phase.SEGMENT_REVIEW, segment_review_node)
     graph.add_node(Phase.EDIT, edit_node)
+    graph.add_node(Phase.EDIT_REVIEW, edit_review_node)
     graph.add_node(Phase.QC, qc_node)
+    graph.add_node(Phase.QC_REVIEW, qc_review_node)
 
     graph.add_edge(START, Phase.INTAKE)
     graph.add_conditional_edges(
@@ -75,12 +87,23 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         Phase.GENERATE,
         _route_after_generate,
-        {"edit": Phase.EDIT, END: END},
+        {"segment_review": Phase.SEGMENT_REVIEW, END: END},
     )
-    graph.add_edge(Phase.EDIT, Phase.QC)
     graph.add_conditional_edges(
-        Phase.QC,
-        _route_after_qc,
+        Phase.SEGMENT_REVIEW,
+        _route_after_segment_review,
+        {"edit": Phase.EDIT, "generate": Phase.GENERATE},
+    )
+    graph.add_edge(Phase.EDIT, Phase.EDIT_REVIEW)
+    graph.add_conditional_edges(
+        Phase.EDIT_REVIEW,
+        _route_after_edit_review,
+        {"qc": Phase.QC, "edit": Phase.EDIT},
+    )
+    graph.add_edge(Phase.QC, Phase.QC_REVIEW)
+    graph.add_conditional_edges(
+        Phase.QC_REVIEW,
+        _route_after_qc_review,
         {"generate": Phase.GENERATE, END: END},
     )
 

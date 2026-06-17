@@ -181,6 +181,42 @@ async def brief_review_node(state: TaskState) -> TaskState:
     return {"phase": next_phase.value, "brief_approved": approved}
 
 
+async def segment_review_node(state: TaskState) -> TaskState:
+    """Pause after video segments are generated so the user can approve them."""
+    decision = interrupt({"action": "confirm_segments", "generated_assets": state.get("generated_assets", [])})
+    approved = bool(decision.get("approved", False)) if isinstance(decision, dict) else False
+    next_phase = Phase.EDIT if approved else Phase.GENERATE
+    return {"phase": next_phase.value, "segments_approved": approved}
+
+
+async def edit_review_node(state: TaskState) -> TaskState:
+    """Pause after editing/draft generation so the user can approve the edit."""
+    decision = interrupt(
+        {
+            "action": "confirm_edit",
+            "timeline": state.get("timeline", {}),
+            "draft_path": state.get("draft_path", ""),
+            "final_video_url": state.get("final_video_url", ""),
+        }
+    )
+    approved = bool(decision.get("approved", False)) if isinstance(decision, dict) else False
+    next_phase = Phase.QC if approved else Phase.EDIT
+    return {"phase": next_phase.value, "edit_approved": approved}
+
+
+async def qc_review_node(state: TaskState) -> TaskState:
+    """Pause after QC so the user decides whether to accept or regenerate."""
+    decision = interrupt({"action": "confirm_qc", "qc_report": state.get("qc_report", {})})
+    approved = bool(decision.get("approved", False)) if isinstance(decision, dict) else False
+    if approved:
+        next_phase = Phase.DONE
+    elif state.get("qc_attempts", 0) >= MAX_QC_ATTEMPTS:
+        next_phase = Phase.DONE
+    else:
+        next_phase = Phase.GENERATE
+    return {"phase": next_phase.value, "qc_approved": approved}
+
+
 async def _generate_segment(skill, segment: dict, *, image_url: str, global_visual: dict, ratio: str) -> dict:
     """Generate one segment clip (a group of shots, ≤15s) in a single call.
 
@@ -246,7 +282,7 @@ async def generate_node(state: TaskState) -> TaskState:
         if errors:
             error = f"{error}: {'; '.join(errors[:3])}"
         return {"phase": Phase.GENERATE.value, "generated_assets": list(assets), "generation_ready": False, "error": error}
-    return {"phase": Phase.EDIT.value, "generated_assets": list(assets), "generation_ready": True, "error": ""}
+    return {"phase": Phase.SEGMENT_REVIEW.value, "generated_assets": list(assets), "generation_ready": True, "segments_approved": False, "error": ""}
 
 
 async def edit_node(state: TaskState) -> TaskState:
@@ -285,11 +321,12 @@ async def edit_node(state: TaskState) -> TaskState:
             notes.append(f"剪辑渲染异常: {exc}")
 
     return {
-        "phase": Phase.QC.value,
+        "phase": Phase.EDIT_REVIEW.value,
         "timeline": timeline.model_dump(),
         "draft_path": draft_path,
         "final_video_url": final_video_url,
         "edit_notes": notes,
+        "edit_approved": False,
     }
 
 
@@ -305,8 +342,9 @@ async def qc_node(state: TaskState) -> TaskState:
     result = qc_check(state.get("brief") or {}, state.get("generated_assets") or [], state.get("timeline") or {})
     logger.info("[pixelflow] qc task_id=%s attempt=%d passed=%s score=%.2f", task_id, attempts, result.passed, result.score)
     return {
-        "phase": (Phase.DONE if result.passed else Phase.GENERATE).value,
+        "phase": Phase.QC_REVIEW.value,
         "qc_passed": result.passed,
+        "qc_approved": False,
         "qc_attempts": attempts,
         "qc_report": result.model_dump(),
     }

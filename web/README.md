@@ -1,7 +1,7 @@
 # PixelFlow Web
 
 PixelFlow 前端 —— **对话 + canvas** 工作区(Vite + React + TS + Tailwind v4)。
-风格参考 BORG RISE,左侧对话(chat),右侧 canvas 渲染 Brief / 生成进度 / 成片。
+左侧对话(chat),右侧 canvas 渲染 Brief / 生成进度 / 成片。
 
 ## 开发
 
