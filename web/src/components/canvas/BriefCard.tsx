@@ -5,6 +5,7 @@ interface BriefCardProps {
   brief: Brief;
   onApprove: () => void;
   onRevise: () => void;
+  readonly?: boolean;
 }
 
 const SCENE_LABEL: Record<string, string> = {
@@ -16,7 +17,7 @@ const SCENE_LABEL: Record<string, string> = {
   cta: "转化",
 };
 
-export function BriefCard({ brief, onApprove, onRevise }: BriefCardProps) {
+export function BriefCard({ brief, onApprove, onRevise, readonly = false }: BriefCardProps) {
   return (
     <div className="rounded-card border border-line bg-surface">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
@@ -27,7 +28,7 @@ export function BriefCard({ brief, onApprove, onRevise }: BriefCardProps) {
           </div>
         </div>
         <span className="rounded-full bg-amber/10 px-2.5 py-1 text-[12px] font-medium text-amber">
-          待确认
+          {readonly ? "已确认" : "待确认"}
         </span>
       </div>
 
@@ -54,20 +55,22 @@ export function BriefCard({ brief, onApprove, onRevise }: BriefCardProps) {
         ))}
       </div>
 
-      <div className="flex gap-2 border-t border-line p-3">
-        <button
-          onClick={onApprove}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[14px] font-medium text-white hover:opacity-90"
-        >
-          <Check size={16} /> 确认,开始生成
-        </button>
-        <button
-          onClick={onRevise}
-          className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[14px] font-medium text-ink hover:bg-canvas"
-        >
-          <Pencil size={15} /> 修改
-        </button>
-      </div>
+      {!readonly && (
+        <div className="flex gap-2 border-t border-line p-3">
+          <button
+            onClick={onApprove}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[14px] font-medium text-white hover:opacity-90"
+          >
+            <Check size={16} /> 确认,开始生成
+          </button>
+          <button
+            onClick={onRevise}
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[14px] font-medium text-ink hover:bg-canvas"
+          >
+            <Pencil size={15} /> 修改
+          </button>
+        </div>
+      )}
     </div>
   );
 }

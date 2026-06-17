@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
 import { GenParamsDialog, type GenParamsForm } from "@/components/composer/GenParamsDialog";
@@ -19,7 +19,10 @@ const PHASE_MSG: Record<string, string> = {
   brief_review: "Brief 已就绪,请在右侧确认或修改。",
   generate: "正在生成分镜片段…",
   edit: "正在剪辑合成…",
+  segment_review: "分镜片段已生成,请在画布确认。",
+  edit_review: "剪辑结果已生成,请在画布确认。",
   qc: "正在质检…",
+  qc_review: "质检完成,请在画布确认。",
   done: "全部完成 🎉",
 };
 
@@ -51,6 +54,18 @@ function toBrief(raw: Record<string, unknown>): Brief {
 }
 
 const EMPTY_CANVAS: CanvasState = { phase: "idle", results: [] };
+const SESSION_KEY = "pixelflow.workspace.session.v1";
+
+interface WorkspaceSnapshot {
+  taskId: string;
+  messages: ChatMessage[];
+  canvas: CanvasState;
+  canvasOpen: boolean;
+  briefConfirmed: boolean;
+  lastEventId: number;
+  announcedPhases: string[];
+  briefReadyShown: boolean;
+}
 
 export function WorkspacePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -60,17 +75,101 @@ export function WorkspacePage() {
   const [pendingCore, setPendingCore] = useState("");
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState("");
   const taskIdRef = useRef<string>("");
   const briefConfirmedRef = useRef(false);
   const seenEventIdsRef = useRef(new Set<number>());
   const announcedPhasesRef = useRef(new Set<string>());
+  const briefReadyShownRef = useRef(false);
+  const lastEventIdRef = useRef(0);
+  const restoredRef = useRef(false);
+  const saveTimerRef = useRef<number | undefined>(undefined);
   const unsubRef = useRef<() => void>(() => {});
+
+  const setActiveTaskId = (taskId: string) => {
+    taskIdRef.current = taskId;
+    setCurrentTaskId(taskId);
+  };
 
   const pushAssistant = (content: string) =>
     setMessages((m) => [...m, { id: uid(), role: "assistant", content, time: now() }]);
 
   const pushArtifact = (content: string, artifact: NonNullable<ChatMessage["artifact"]>) =>
     setMessages((m) => [...m, { id: uid(), role: "assistant", content, time: now(), artifact }]);
+
+  const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
+    if (Array.isArray(snapshot.messages)) setMessages(snapshot.messages);
+    if (snapshot.canvas) setCanvas(snapshot.canvas);
+    if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
+    if (typeof snapshot.briefConfirmed === "boolean") {
+      setBriefConfirmed(snapshot.briefConfirmed);
+      briefConfirmedRef.current = snapshot.briefConfirmed;
+    }
+    if (snapshot.taskId) setActiveTaskId(snapshot.taskId);
+    if (typeof snapshot.lastEventId === "number") {
+      lastEventIdRef.current = snapshot.lastEventId;
+      seenEventIdsRef.current = new Set(Array.from({ length: snapshot.lastEventId }, (_, i) => i + 1));
+    }
+    if (Array.isArray(snapshot.announcedPhases)) announcedPhasesRef.current = new Set(snapshot.announcedPhases);
+    if (typeof snapshot.briefReadyShown === "boolean") briefReadyShownRef.current = snapshot.briefReadyShown;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      let snapshot: Partial<WorkspaceSnapshot> | null = null;
+      try {
+        const server = await api.getSessionContext();
+        if (server?.context) snapshot = server.context as Partial<WorkspaceSnapshot>;
+      } catch {
+        /* fall back to local snapshot */
+      }
+      if (!snapshot) {
+        try {
+          const raw = localStorage.getItem(SESSION_KEY);
+          snapshot = raw ? (JSON.parse(raw) as Partial<WorkspaceSnapshot>) : null;
+        } catch {
+          localStorage.removeItem(SESSION_KEY);
+        }
+      }
+      if (cancelled) return;
+      if (snapshot) {
+        applySnapshot(snapshot);
+        if (snapshot.taskId) unsubRef.current = subscribeTaskEvents(snapshot.taskId, onEvent, snapshot.lastEventId || undefined);
+      }
+      restoredRef.current = true;
+    };
+    void restore();
+    return () => {
+      cancelled = true;
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+    if (!restoredRef.current) return;
+    const snapshot: WorkspaceSnapshot = {
+      taskId: currentTaskId,
+      messages,
+      canvas,
+      canvasOpen,
+      briefConfirmed,
+      lastEventId: lastEventIdRef.current,
+      announcedPhases: Array.from(announcedPhasesRef.current),
+      briefReadyShown: briefReadyShownRef.current,
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(snapshot));
+    if (currentTaskId) {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        void api.saveSessionContext(currentTaskId, snapshot as unknown as Record<string, unknown>).catch(() => {});
+      }, 400);
+    }
+    } catch {
+      /* ignore persistence errors in the UI path */
+    }
+  }, [messages, canvas, canvasOpen, briefConfirmed, currentTaskId]);
 
   const handleSend = (text: string) => {
     setMessages((m) => [...m, { id: uid(), role: "user", content: text, time: now() }]);
@@ -87,13 +186,17 @@ export function WorkspacePage() {
 
   async function onEvent(e: TaskEvent) {
     if (e.id && seenEventIdsRef.current.has(e.id)) return;
-    if (e.id) seenEventIdsRef.current.add(e.id);
+    if (e.id) {
+      seenEventIdsRef.current.add(e.id);
+      lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
+    }
     const phase = (e.data.phase as string) || "";
     switch (e.event) {
       case "phase_change":
         if (phase) {
           if (["generate", "edit", "qc", "done"].includes(phase) && !briefConfirmedRef.current) return;
           setCanvas((c) => ({ ...c, phase: phase as TaskPhase }));
+          if (["segment_review", "edit_review", "qc_review", "done"].includes(phase)) void loadResults(phase as TaskPhase);
           if (PHASE_MSG[phase] && !announcedPhasesRef.current.has(phase)) {
             announcedPhasesRef.current.add(phase);
             pushAssistant(PHASE_MSG[phase]);
@@ -101,7 +204,8 @@ export function WorkspacePage() {
         }
         break;
       case "brief_ready":
-        if (briefConfirmedRef.current) return;
+        if (briefConfirmedRef.current || briefReadyShownRef.current) return;
+        briefReadyShownRef.current = true;
         setCanvas((c) => ({ ...c, phase: "brief_review", brief: toBrief((e.data.brief as Record<string, unknown>) || {}) }));
         setBusy(false);
         pushArtifact("Brief 已生成。点击下方素材卡打开画布查看和确认。", {
@@ -128,7 +232,7 @@ export function WorkspacePage() {
     }
   }
 
-  async function loadResults() {
+  async function loadResults(nextPhase: TaskPhase = "done") {
     const id = taskIdRef.current;
     if (!id) return;
     try {
@@ -136,16 +240,19 @@ export function WorkspacePage() {
       const videos = assets.filter((a) => a.asset_type === "final_video" || a.asset_type === "generated_video");
       const results: VideoResult[] = videos.map((a, i) => ({
         id: a.asset_id || `r${i}`,
-        url: a.url,
+        url: a.asset_type === "final_video" ? api.assetContentUrl(id, a.asset_id) : a.url,
+        assetType: a.asset_type,
         status: a.status === "ready" ? "success" : a.status === "error" ? "failed" : "pending",
       }));
-      setCanvas((c) => ({ ...c, phase: "done", results }));
-      pushArtifact("生成完成,素材已就绪。点击下方素材卡打开画布查看。", {
-        type: "results",
-        title: "生成素材",
-        description: `${results.length} 条视频结果`,
-        actionLabel: "打开",
-      });
+      setCanvas((c) => ({ ...c, phase: nextPhase, results }));
+      if (nextPhase === "done") {
+        pushArtifact("生成完成,素材已就绪。点击下方素材卡打开画布查看。", {
+          type: "results",
+          title: "生成素材",
+          description: `${results.length} 条视频结果`,
+          actionLabel: "打开",
+        });
+      }
     } catch {
       pushAssistant("结果拉取失败,请稍后在历史中查看。");
     } finally {
@@ -158,7 +265,7 @@ export function WorkspacePage() {
     if (!id) return;
     try {
       const task = await api.getTask(id);
-      const confirmed = task.phase !== "brief_review" && task.status !== "pending";
+      const confirmed = task.phase !== "brief_review";
       briefConfirmedRef.current = confirmed;
       setBriefConfirmed(confirmed);
       setCanvas((c) => ({
@@ -167,7 +274,7 @@ export function WorkspacePage() {
         brief: task.brief && Object.keys(task.brief).length > 0 ? toBrief(task.brief) : c.brief,
       }));
       if (task.status === "done") {
-        await loadResults();
+        await loadResults("done");
         return;
       }
       if (task.phase === "brief_review") {
@@ -197,11 +304,13 @@ export function WorkspacePage() {
         user_message: form.coreMessage,
         auto_start: true,
       });
-      taskIdRef.current = task.task_id;
+      setActiveTaskId(task.task_id);
       briefConfirmedRef.current = false;
       setBriefConfirmed(false);
       seenEventIdsRef.current = new Set();
+      lastEventIdRef.current = 0;
       announcedPhasesRef.current = new Set();
+      briefReadyShownRef.current = false;
       setCanvas({ phase: (task.phase as TaskPhase) || "intake", results: [] });
       unsubRef.current();
       unsubRef.current = subscribeTaskEvents(task.task_id, onEvent);
@@ -238,6 +347,18 @@ export function WorkspacePage() {
     }
   };
 
+  const handleConfirmStage = async (stage: "segments" | "edit" | "qc", approved: boolean) => {
+    setBusy(true);
+    try {
+      const task = await api.confirmStage(taskIdRef.current, stage, approved);
+      setCanvas((c) => ({ ...c, phase: (task.phase as TaskPhase) || c.phase }));
+      pushAssistant(approved ? "已确认,继续下一步。" : "已退回,重新处理。");
+    } catch (err) {
+      pushAssistant(`确认失败:${err instanceof Error ? err.message : String(err)}`);
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0">
       <ChatPanel
@@ -247,11 +368,20 @@ export function WorkspacePage() {
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
-          if (msg.artifact.type === "brief" && !briefConfirmedRef.current) setCanvas((c) => ({ ...c, phase: "brief_review" }));
+          if (msg.artifact.type === "brief") setCanvas((c) => ({ ...c, phase: "brief_review" }));
           if (msg.artifact.type === "results") setCanvas((c) => ({ ...c, phase: "done" }));
         }}
       />
-      {canvasOpen && <CanvasPanel state={canvas} onApprove={handleApprove} onRevise={handleRevise} onClose={() => setCanvasOpen(false)} briefConfirmed={briefConfirmed} />}
+      {canvasOpen && (
+        <CanvasPanel
+          state={canvas}
+          onApprove={handleApprove}
+          onRevise={handleRevise}
+          onConfirmStage={handleConfirmStage}
+          onClose={() => setCanvasOpen(false)}
+          briefConfirmed={briefConfirmed}
+        />
+      )}
       {dialogOpen && (
         <GenParamsDialog key={pendingCore} open initialCoreMessage={pendingCore} onConfirm={handleConfirmParams} onCancel={() => setDialogOpen(false)} />
       )}

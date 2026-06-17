@@ -5,8 +5,11 @@ export type TaskPhase =
   | "creative"
   | "brief_review"
   | "generate"
+  | "segment_review"
   | "edit"
+  | "edit_review"
   | "qc"
+  | "qc_review"
   | "done";
 
 export interface GenParams {
@@ -23,6 +26,7 @@ export interface GenParams {
 export interface VideoResult {
   id: string;
   url: string;
+  assetType?: "generated_video" | "final_video" | string;
   thumbUrl?: string;
   durationSec?: number;
   status: "success" | "pending" | "failed";

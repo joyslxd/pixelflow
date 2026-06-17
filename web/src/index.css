@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* ── 设计 tokens（取自 BORG RISE 截图：浅底、靛蓝强调、橙/绿计费） ── */
+/* ── 设计 tokens（浅底、靛蓝强调、橙/绿计费） ── */
 @theme {
   --color-canvas: #f6f7f9; /* 应用底色 */
   --color-surface: #ffffff; /* 卡片/侧栏 */

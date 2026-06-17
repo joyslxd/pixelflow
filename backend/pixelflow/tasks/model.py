@@ -50,6 +50,18 @@ class PixelFlowTaskEventRow(Base):
     __table_args__ = (Index("ix_pixelflow_events_task_id_id", "task_id", "id"),)
 
 
+class PixelFlowSessionContextRow(Base):
+    __tablename__ = "pixelflow_session_contexts"
+
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    context_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
+
+    __table_args__ = (Index("ix_pixelflow_session_user_updated", "user_id", "updated_at"),)
+
+
 class PixelFlowAssetRow(Base):
     __tablename__ = "pixelflow_assets"
 

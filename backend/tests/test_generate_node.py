@@ -47,7 +47,7 @@ def test_short_video_is_one_segment_one_call(monkeypatch):
     }
     out = asyncio.run(generate_node(state))
 
-    assert out["phase"] == Phase.EDIT.value
+    assert out["phase"] == Phase.SEGMENT_REVIEW.value  # 片段生成后进人工确认门
     assert len(fake.calls) == 1  # NOT one call per shot
     call = fake.calls[0]
     assert call["image_url"] == "https://x/main.jpg"

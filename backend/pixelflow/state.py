@@ -21,8 +21,11 @@ class Phase(StrEnum):
     CREATIVE = "creative"  # 策划: generate Brief + validate constraints
     BRIEF_REVIEW = "brief_review"  # human-in-the-loop confirmation of the Brief
     GENERATE = "generate"  # 生成: shot-by-shot video generation via Borgrise
+    SEGMENT_REVIEW = "segment_review"  # human review of generated segments
     EDIT = "edit"  # 剪辑: assemble shots into the final video
+    EDIT_REVIEW = "edit_review"  # human review of edit/draft
     QC = "qc"  # 质检: quality check, may loop back to GENERATE
+    QC_REVIEW = "qc_review"  # human review of QC verdict
     DONE = "done"  # terminal
 
 
@@ -57,15 +60,18 @@ class TaskState(TypedDict, total=False):
     # 生成 — per-shot generated asset URLs (Borgrise task results).
     generated_assets: list[dict[str, Any]]
     generation_ready: bool
+    segments_approved: bool
 
     # 剪辑 — assembled timeline / 剪映 draft / final video.
     timeline: dict[str, Any]  # §EDIT Timeline IR (ordered clips + output format)
     draft_path: str  # editable 剪映 draft folder produced by the edit skill
     final_video_url: str
     edit_notes: list[str]  # shots skipped + render warnings
+    edit_approved: bool
 
     # 质检 — QC verdict and retry bookkeeping (bounds the GENERATE retry loop).
     qc_passed: bool
+    qc_approved: bool
     qc_report: dict[str, Any]
     qc_attempts: int
 

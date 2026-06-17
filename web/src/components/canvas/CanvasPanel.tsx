@@ -7,6 +7,7 @@ interface CanvasPanelProps {
   state: CanvasState;
   onApprove: () => void;
   onRevise: () => void;
+  onConfirmStage?: (stage: "segments" | "edit" | "qc", approved: boolean) => void;
   onClose?: () => void;
   briefConfirmed?: boolean;
 }
@@ -19,12 +20,22 @@ const PHASE_LABEL: Record<string, string> = {
   generate: "生成中",
   edit: "剪辑中",
   qc: "质检中",
+  segment_review: "片段待确认",
+  edit_review: "剪辑待确认",
+  qc_review: "质检待确认",
   done: "已完成",
 };
 
-export function CanvasPanel({ state, onApprove, onRevise, onClose, briefConfirmed = false }: CanvasPanelProps) {
+const REVIEW_COPY = {
+  segment_review: { stage: "segments", title: "生成片段已就绪", approve: "确认片段,开始剪辑", reject: "重新生成片段" },
+  edit_review: { stage: "edit", title: "剪辑结果已就绪", approve: "确认剪辑,开始质检", reject: "重新剪辑" },
+  qc_review: { stage: "qc", title: "质检结果已就绪", approve: "确认通过,完成任务", reject: "重新生成" },
+} as const;
+
+export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, briefConfirmed = false }: CanvasPanelProps) {
   const { phase, brief, results, estCost, actualCost } = state;
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
+  const review = phase in REVIEW_COPY ? REVIEW_COPY[phase as keyof typeof REVIEW_COPY] : null;
   return (
     <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
       <div className="flex h-12 shrink-0 items-center justify-between px-5">
@@ -56,6 +67,32 @@ export function CanvasPanel({ state, onApprove, onRevise, onClose, briefConfirme
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6">
         {canReviewBrief ? (
           <BriefCard brief={brief!} onApprove={onApprove} onRevise={onRevise} />
+        ) : brief && phase === "brief_review" ? (
+          <BriefCard brief={brief} onApprove={onApprove} onRevise={onRevise} readonly />
+        ) : review ? (
+          <div className="space-y-3">
+            {results.length > 0 && <VideoResultGrid results={results} />}
+            <div className="rounded-card border border-line bg-surface p-4">
+              <div className="text-[14px] font-semibold text-ink">{review.title}</div>
+              <p className="mt-1 text-[12px] text-ink-soft">请人工确认后再继续下一步。</p>
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => onConfirmStage?.(review.stage, true)}
+                  className="flex-1 rounded-xl bg-brand py-2.5 text-[14px] font-medium text-white hover:opacity-90"
+                >
+                  {review.approve}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onConfirmStage?.(review.stage, false)}
+                  className="rounded-xl border border-line px-4 py-2.5 text-[14px] font-medium text-ink hover:bg-canvas"
+                >
+                  {review.reject}
+                </button>
+              </div>
+            </div>
+          </div>
         ) : results.length > 0 ? (
           <VideoResultGrid results={results} />
         ) : (

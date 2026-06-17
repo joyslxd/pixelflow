@@ -51,6 +51,13 @@ export interface TaskEvent {
   data: Record<string, unknown>;
 }
 
+export interface SessionContextResponse {
+  task_id: string;
+  user_id: string | null;
+  context: Record<string, unknown>;
+  updated_at: string;
+}
+
 function csrfToken(): string {
   const m = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
   return m ? decodeURIComponent(m[1]) : "";
@@ -110,14 +117,25 @@ export const api = {
 
   listAssets: (id: string) => req<AssetResponse[]>(`/tasks/${id}/assets`),
 
+  assetContentUrl: (taskId: string, assetId: string) => `/api/tasks/${taskId}/assets/${encodeURIComponent(assetId)}/content`,
+
   confirmBrief: (id: string, approved: boolean) =>
     req<TaskResponse>(`/tasks/${id}/brief/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
+
+  confirmStage: (id: string, stage: "segments" | "edit" | "qc", approved: boolean) =>
+    req<TaskResponse>(`/tasks/${id}/stages/${stage}/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
 
   reviseBrief: (id: string, briefPatch: Record<string, unknown>, feedback: string) =>
     req<TaskResponse>(`/tasks/${id}/brief/revise`, { method: "POST", body: JSON.stringify({ brief_patch: briefPatch, feedback }) }),
 
   eventsHistory: (id: string, afterId?: number) =>
     req<{ data: TaskEvent[] }>(`/tasks/${id}/events/history${afterId != null ? `?after_id=${afterId}` : ""}`),
+
+  getSessionContext: (taskId?: string) =>
+    req<SessionContextResponse | null>(`/tasks/session/context${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+
+  saveSessionContext: (taskId: string, context: Record<string, unknown>) =>
+    req<SessionContextResponse>("/tasks/session/context", { method: "PUT", body: JSON.stringify({ task_id: taskId, context }) }),
 };
 
 /**
@@ -151,6 +169,12 @@ export function subscribeTaskEvents(
     "brief_ready",
     "brief_confirmed",
     "brief_rejected",
+    "segments_confirmed",
+    "segments_rejected",
+    "edit_confirmed",
+    "edit_rejected",
+    "qc_confirmed",
+    "qc_rejected",
     "brief_revised",
     "preferences_updated",
     "task_done",
