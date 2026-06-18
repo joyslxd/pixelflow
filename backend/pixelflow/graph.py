@@ -65,39 +65,53 @@ def build_graph() -> StateGraph:
     返回未 compile 的 ``StateGraph``，方便测试直接检查图结构；真正给 LangGraph
     服务使用时会在 ``make_pixelflow_graph`` 中 compile。
     """
+    # 创建一个基于 TaskState 的状态图
     graph = StateGraph(TaskState)
 
-    graph.add_node(Phase.INTAKE, intake_node)
-    graph.add_node(Phase.CREATIVE, creative_node)
-    graph.add_node(Phase.BRIEF_REVIEW, brief_review_node)
-    graph.add_node(Phase.GENERATE, generate_node)
-    graph.add_node(Phase.EDIT, edit_node)
-    graph.add_node(Phase.QC, qc_node)
 
-    graph.add_edge(START, Phase.INTAKE)
+
+    # 向图中添加各个处理节点
+    graph.add_node(Phase.INTAKE, intake_node)        # 添加接收节点
+    graph.add_node(Phase.CREATIVE, creative_node)    # 添加创意节点
+    graph.add_node(Phase.BRIEF_REVIEW, brief_review_node)  # 添加人工审核节点
+    graph.add_node(Phase.GENERATE, generate_node)    # 添加生成节点
+    graph.add_node(Phase.EDIT, edit_node)          # 添加编辑节点
+    graph.add_node(Phase.QC, qc_node)              # 添加质量控制节点
+
+
+
+    # 添加节点之间的边连接
+    graph.add_edge(START, Phase.INTAKE)  # 从开始节点连接到接收节点
+    # 添加接收节点后的条件边
     graph.add_conditional_edges(
         Phase.INTAKE,
-        _route_after_intake,
-        {"creative": Phase.CREATIVE, "intake": Phase.INTAKE, END: END},
+        _route_after_intake,  # 根据路由函数决定下一个节点
+        {"creative": Phase.CREATIVE, "intake": Phase.INTAKE, END: END},  # 可能的下一个节点
     )
+    # 从创意节点连接到简报审核节点
     graph.add_edge(Phase.CREATIVE, Phase.BRIEF_REVIEW)
+    # 添加简报审核后的条件边
     graph.add_conditional_edges(
         Phase.BRIEF_REVIEW,
-        _route_after_brief,
-        {"generate": Phase.GENERATE, "creative": Phase.CREATIVE},
+        _route_after_brief,  # 根据路由函数决定下一个节点
+        {"generate": Phase.GENERATE, "creative": Phase.CREATIVE},  # 可能的下一个节点
     )
+    # 添加生成后的条件边
     graph.add_conditional_edges(
         Phase.GENERATE,
-        _route_after_generate,
-        {"edit": Phase.EDIT, END: END},
+        _route_after_generate,  # 根据路由函数决定下一个节点
+        {"edit": Phase.EDIT, END: END},  # 可能的下一个节点
     )
+    # 从编辑节点连接到质量控制节点
     graph.add_edge(Phase.EDIT, Phase.QC)
+    # 添加质量控制后的条件边
     graph.add_conditional_edges(
         Phase.QC,
-        _route_after_qc,
-        {"generate": Phase.GENERATE, END: END},
+        _route_after_qc,  # 根据路由函数决定下一个节点
+        {"generate": Phase.GENERATE, END: END},  # 可能的下一个节点
     )
 
+    # 返回构建完成的状态图
     return graph
 
 
