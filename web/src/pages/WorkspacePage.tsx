@@ -11,6 +11,7 @@ const uid = () => `m${++seq}`;
 const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 
 const VIDEO_HINTS = ["视频", "短视频", "成片", "带货", "种草", "分镜", "广告", "拍", "生成", "seedance"];
+// 前端临时意图识别：只用来判断是否弹出参数表单，不代表后端 Agent 的真实理解。
 const looksLikeVideoIntent = (t: string) => VIDEO_HINTS.some((k) => t.includes(k));
 
 const PHASE_MSG: Record<string, string> = {
@@ -24,6 +25,7 @@ const PHASE_MSG: Record<string, string> = {
 };
 
 function sizeFor(ratio: string, resolution: string): string {
+  // 把弹窗里的比例/清晰度转换成后端 video_params.size，例如 9:16 + 1080p -> 1080x1920。
   const r = resolution === "720p" ? 720 : 1080;
   if (ratio === "16:9") return `${Math.round((r * 16) / 9)}x${r}`;
   if (ratio === "1:1") return `${r}x${r}`;
@@ -31,6 +33,8 @@ function sizeFor(ratio: string, resolution: string): string {
 }
 
 function toBrief(raw: Record<string, unknown>): Brief {
+  // 后端 Brief DTO 使用 snake_case；前端画布组件使用 camelCase 展示模型。
+  // 这个函数就是两者之间的适配器，类似 Java 里 DO/DTO -> VO 的转换。
   const shots = Array.isArray(raw.shots) ? (raw.shots as Record<string, unknown>[]) : [];
   return {
     title: String(raw.brief_id ?? "视频 Brief"),
@@ -53,6 +57,7 @@ function toBrief(raw: Record<string, unknown>): Brief {
 const EMPTY_CANVAS: CanvasState = { phase: "idle", results: [] };
 
 export function WorkspacePage() {
+  // 页面可渲染状态：聊天消息、右侧画布、参数弹窗、流程 busy 态和 Brief 确认态。
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
@@ -60,6 +65,9 @@ export function WorkspacePage() {
   const [pendingCore, setPendingCore] = useState("");
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
+
+  // 运行中上下文：这些值主要给异步 SSE 回调读取，不需要每次变化都触发 React 重渲染。
+  // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
   const taskIdRef = useRef<string>("");
   const briefConfirmedRef = useRef(false);
   const seenEventIdsRef = useRef(new Set<number>());
@@ -86,12 +94,15 @@ export function WorkspacePage() {
   };
 
   async function onEvent(e: TaskEvent) {
+    // SSE 事件分发器：后端事件表可能因为断线重连/afterId 被重复消费，这里先按 id 去重。
     if (e.id && seenEventIdsRef.current.has(e.id)) return;
     if (e.id) seenEventIdsRef.current.add(e.id);
     const phase = (e.data.phase as string) || "";
     switch (e.event) {
       case "phase_change":
         if (phase) {
+          // Brief 未人工确认前，忽略 generate/edit/qc/done 阶段回放，避免旧 run 的 pending
+          // 事件把画布提前推进到生成结果态。
           if (["generate", "edit", "qc", "done"].includes(phase) && !briefConfirmedRef.current) return;
           setCanvas((c) => ({ ...c, phase: phase as TaskPhase }));
           if (PHASE_MSG[phase] && !announcedPhasesRef.current.has(phase)) {
@@ -101,6 +112,7 @@ export function WorkspacePage() {
         }
         break;
       case "brief_ready":
+        // brief_ready 表示后端在 LangGraph interrupt 前已经准备好 Brief，前端需要展示确认卡。
         if (briefConfirmedRef.current) return;
         setCanvas((c) => ({ ...c, phase: "brief_review", brief: toBrief((e.data.brief as Record<string, unknown>) || {}) }));
         setBusy(false);
@@ -112,13 +124,17 @@ export function WorkspacePage() {
         });
         break;
       case "task_done":
+        // task_done 代表业务任务已完成，可以从 /assets 拉取最终视频或生成片段。
         await loadResults();
         break;
       case "brief_confirmed":
+        // brief_confirmed 是业务事件，表示用户确认动作已被后端接收。
         briefConfirmedRef.current = true;
         setBriefConfirmed(true);
         break;
       case "run_finished":
+        // run_finished 只表示某个 LangGraph run 结束，不一定等于业务任务 done；
+        // 需要再查任务详情，同步 checkpoint 后的 phase/status/brief。
         await refreshTaskAfterRun();
         break;
       case "task_failed":
@@ -129,6 +145,8 @@ export function WorkspacePage() {
   }
 
   async function loadResults() {
+    // 从 /assets 拉取画布可展示的视频资产。当前只展示 final_video 和 generated_video；
+    // jianying_draft 是本地草稿路径，浏览器通常不能直接播放。
     const id = taskIdRef.current;
     if (!id) return;
     try {
@@ -154,6 +172,8 @@ export function WorkspacePage() {
   }
 
   async function refreshTaskAfterRun() {
+    // LangGraph run 结束后重新查询业务任务。后端 getTask 会先同步 checkpoint，
+    // 因此前端能拿到最新 phase、brief、error 和 result。
     const id = taskIdRef.current;
     if (!id) return;
     try {
@@ -184,7 +204,8 @@ export function WorkspacePage() {
     }
   }
 
-  // 弹窗确认 → 真实建任务 + 订阅 SSE。
+  // 参数弹窗确认后的主链路：创建业务任务 -> 记录 taskId -> 重置事件缓存 -> 订阅 SSE。
+  // 注意：GenParamsForm 里的 count/sound/reference_videos 当前还没有透传到后端主链路。
   const handleConfirmParams = async (form: GenParamsForm) => {
     setDialogOpen(false);
     setBusy(true);
@@ -212,6 +233,7 @@ export function WorkspacePage() {
   };
 
   const handleApprove = async () => {
+    // 对应后端 /brief/confirm：恢复 LangGraph 的 Brief interrupt，批准后进入 GENERATE。
     pushAssistant("Brief 已确认,开始生成…");
     setBusy(true);
     briefConfirmedRef.current = true;
@@ -226,6 +248,7 @@ export function WorkspacePage() {
   };
 
   const handleRevise = async () => {
+    // 对应后端 /brief/revise：当前只写业务 brief/反馈/偏好，不会直接恢复 LangGraph run。
     const fb = "请优化分镜节奏与卖点表达";
     pushAssistant("已请求修改 Brief。");
     try {

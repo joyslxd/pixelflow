@@ -1,4 +1,10 @@
-"""Persistence abstraction for PixelFlow business tasks."""
+"""PixelFlow 业务任务持久化抽象。
+
+LangGraph checkpoint 保存的是运行时状态；这里的 Store 保存的是前端和业务 API
+更容易消费的任务视图、事件流和资产列表。可以把它理解成业务侧 Repository：
+``pixelflow_tasks`` 是任务主表，``pixelflow_task_events`` 是进度事件表，
+``pixelflow_assets`` 是生成/剪辑产物表。
+"""
 
 from __future__ import annotations
 
@@ -99,6 +105,12 @@ class PixelFlowAssetRecord:
 
 
 class PixelFlowTaskStore(Protocol):
+    """业务任务 Store 接口。
+
+    SQL 实现用于真实持久化；Memory 实现适合本地开发和测试。所有方法都带可选
+    ``user_id`` 过滤，避免不同用户读取彼此任务。
+    """
+
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord: ...
     async def get(self, task_id: str, *, user_id: str | None = None) -> PixelFlowTaskRecord | None: ...
     async def list(self, *, user_id: str | None = None, limit: int = 50) -> list[PixelFlowTaskRecord]: ...

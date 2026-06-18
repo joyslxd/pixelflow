@@ -1,15 +1,15 @@
-"""qc_check — verdict over the produced output (pure logic).
+"""产物质检，纯逻辑实现。
 
-Two checks over the GENERATE/EDIT results:
+QC 检查的是 GENERATE/EDIT 已经产出的结果，而不是 Brief 计划本身。当前包含两类
+检查：
 
-- 片段完整性 (blocking): every attempted segment produced a usable clip. A miss
-  ``fail``s so the graph retries GENERATE (the right remediation for a transient
-  generation failure). An empty Brief (no segments) passes vacuously — its
-  emptiness is an upstream condition, not a generation defect QC should catch.
-- 时长达标 (warn): the assembled duration is within the Brief's tolerance.
-  Regeneration can't change shot durations, so a miss warns rather than retries.
+- 片段完整性（阻塞）：每个尝试生成的 segment 都应该有可用 clip。缺失会产生
+  ``fail``，让图回到 GENERATE 重试，适合处理第三方偶发失败。
+- 时长达标（非阻塞）：剪辑后的总时长应落在 Brief 容忍区间内。重新生成通常不能
+  改变 shot 时长，所以不触发重试，只记录 ``warn``。
 
-Pure and deterministic: no I/O, fully testable offline.
+空 Brief 或没有生成尝试时，完整性检查会自然通过；这种问题属于上游策划/采集，
+不是 QC 应该修复的生成缺陷。本模块不做 I/O，方便离线单测。
 """
 
 from __future__ import annotations
@@ -22,21 +22,23 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
 def _parse_tolerance(spec: str) -> float:
-    """Extract seconds from a tolerance spec like ``'+2s'`` -> ``2.0``."""
+    """从 ``'+2s'`` 这类容忍度字符串中提取秒数。"""
     m = _NUM.search(spec or "")
     return float(m.group()) if m else 0.0
 
 
 def qc_check(brief: dict, generated_assets: list[dict], timeline: dict) -> QCResult:
-    """Evaluate the produced output. Coverage compares the assembled clips against
-    the segments GENERATE attempted (``generated_assets``), since generation is now
-    per-segment, not per-shot."""
+    """评估产物是否通过质检。
+
+    覆盖率比较的是 Timeline 中已经装配的 clips 和 GENERATE 实际尝试过的
+    ``generated_assets``。当前生成粒度是 segment，不再是单 shot。
+    """
     total_segments = len(generated_assets)
     n_clips = len(timeline.get("clips", []))
 
     checks: list[QCItem] = []
 
-    coverage_ok = n_clips == total_segments  # both 0 -> vacuous pass
+    coverage_ok = n_clips == total_segments  # 两者同为 0 时视为自然通过。
     score = 1.0 if total_segments == 0 else n_clips / total_segments
     checks.append(
         QCItem(

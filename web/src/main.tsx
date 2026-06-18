@@ -22,6 +22,7 @@ const router = createBrowserRouter([
     ),
     children: [
       { index: true, element: <WorkspacePage /> },
+      // 当前路由骨架已预留 /c/:taskId，但 WorkspacePage 还没有用 taskId 恢复历史任务。
       { path: "c/:taskId", element: <WorkspacePage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],

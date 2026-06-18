@@ -1,4 +1,8 @@
-"""ORM rows for PixelFlow business tasks and progress events."""
+"""PixelFlow 业务任务、进度事件和资产表的 ORM 行模型。
+
+这些 SQLAlchemy model 对应数据库表结构，字段名需要稳定，因为 Store、API 返回
+和前端展示都会间接依赖这些列。
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-/** PixelFlow 后端 client(对齐 /api/tasks 契约)。dev 下 /api 由 vite 代理到后端。 */
+/** PixelFlow 后端 API Client，对齐 /api/tasks 契约。开发环境下 /api 由 Vite 代理到后端。 */
 
 export interface TaskResponse {
   task_id: string;
@@ -19,7 +19,7 @@ export interface TaskResponse {
 export interface AssetResponse {
   asset_id: string;
   task_id: string;
-  asset_type: string; // generated_video | jianying_draft | final_video
+  asset_type: string; // 资产类型枚举：generated_video | jianying_draft | final_video。
   status: string;
   phase: string;
   shot_id: string | null;
@@ -31,7 +31,7 @@ export interface AssetResponse {
 
 export interface CreateTaskBody {
   product_url?: string;
-  product_info?: Record<string, unknown>; // product_name, main_image_url, ...
+  product_info?: Record<string, unknown>; // 商品信息，如 product_name、main_image_url。
   video_params?: {
     platform?: string;
     duration_sec?: number;
@@ -40,14 +40,14 @@ export interface CreateTaskBody {
     business_goal?: string;
   };
   reference_videos?: string[];
-  creative_direction?: Record<string, unknown>; // core_message, creative_style, ...
+  creative_direction?: Record<string, unknown>; // 创意方向，如 core_message、creative_style。
   user_message?: string;
   auto_start?: boolean;
 }
 
 export interface TaskEvent {
   id: number;
-  event: string; // task_created | phase_change | brief_ready | task_done | ...
+  event: string; // 事件名，如 task_created、phase_change、brief_ready、task_done。
   data: Record<string, unknown>;
 }
 
@@ -63,9 +63,11 @@ export class ApiError extends Error {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // 统一请求模板：自动带 cookie、为写操作补 CSRF header，并把非 2xx 响应转换成 ApiError。
+  // 可以把它类比成前端侧的后端 Client 拦截器。
   const method = (init?.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(init?.headers as Record<string, string>) };
-  // 双提交 CSRF:写操作回传 csrf_token cookie。
+  // 双提交 CSRF：写操作需要把 csrf_token cookie 回传到 X-CSRF-Token header。
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers["X-CSRF-Token"] = csrfToken();
   const res = await fetch(`/api${path}`, { credentials: "include", ...init, headers });
   if (!res.ok) {
@@ -78,6 +80,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 /** 认证:本地 session(cookie) + CSRF。 */
 export const auth = {
   async me(): Promise<{ authenticated: boolean }> {
+    // 当前没有单独调用 /api/v1/auth/me，而是用一个轻量业务接口探测 cookie 是否有效。
     try {
       await req("/tasks?limit=1");
       return { authenticated: true };
@@ -123,6 +126,7 @@ export const api = {
 /**
  * 订阅任务 SSE 事件流。返回取消函数。
  * 后端事件格式:`event: <name>` + `data: <json>` + `id: <num>`。
+ * afterId 用于断点续订；EventSource 的 lastEventId 会进入 onEvent 做前端去重。
  */
 export function subscribeTaskEvents(
   taskId: string,
@@ -142,7 +146,7 @@ export function subscribeTaskEvents(
       /* 忽略非 JSON 心跳 */
     }
   };
-  // 后端用具名事件(event: phase_change 等),需对已知类型分别监听;
+  // 后端用具名事件（event: phase_change 等），需对已知类型分别监听；
   // 同时监听默认 message 兜底。
   const NAMES = [
     "task_created",

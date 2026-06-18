@@ -1,4 +1,4 @@
-"""Authentication for trusted Gateway internal callers."""
+"""Gateway 内部可信调用的认证工具。"""
 
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ _INTERNAL_AUTH_TOKEN = _load_internal_auth_token()
 
 
 def create_internal_auth_headers() -> dict[str, str]:
-    """Return headers that authenticate trusted Gateway internal calls."""
+    """返回用于认证 Gateway 内部可信调用的请求头。"""
     return {INTERNAL_AUTH_HEADER_NAME: _INTERNAL_AUTH_TOKEN}
 
 
 def is_valid_internal_auth_token(token: str | None) -> bool:
-    """Return True when *token* matches this Gateway worker's internal token."""
+    """判断传入 token 是否匹配当前 Gateway worker 的内部 token。"""
     return bool(token) and secrets.compare_digest(token, _INTERNAL_AUTH_TOKEN)
 
 
 def get_internal_user():
-    """Return the synthetic user used for trusted internal channel calls."""
+    """返回内部可信通道使用的合成用户。"""
     return SimpleNamespace(id=DEFAULT_USER_ID, system_role=INTERNAL_SYSTEM_ROLE)

@@ -34,6 +34,8 @@ const inputCls =
   "w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-soft/60 focus:border-accent/40";
 
 export function GenParamsDialog({ open, initialCoreMessage, onConfirm, onCancel }: GenParamsDialogProps) {
+  // 弹窗本地表单状态：这里只负责收集创建任务所需参数，真正建任务由
+  // WorkspacePage.handleConfirmParams 统一调用后端 API。
   const [f, setF] = useState<GenParamsForm>({
     productName: "",
     imageUrl: "",
@@ -50,6 +52,7 @@ export function GenParamsDialog({ open, initialCoreMessage, onConfirm, onCancel 
     setF((p) => ({ ...p, [k]: v }));
 
   if (!open) return null;
+  // 最小必填校验：商品名、商品图 URL、核心诉求三项齐全才允许提交。
   const canConfirm = f.productName.trim() && f.imageUrl.trim() && f.coreMessage.trim();
 
   return (

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Borgrise AI Content Creation Platform - Execution Script
+Borgrise AI 内容创作平台执行脚本。
 
-Usage:
+命令示例：
     python run_generation.py image-to-video --image-url URL --prompt "..." [--duration 5] [--ratio "9:16"]
     python run_generation.py text-to-video --prompt "..." [--duration 10] [--ratio "9:16"]
     python run_generation.py reference-mode-video --image-urls '["URL"]' --prompt "..." [--duration 10] [--ratio "9:16"]
@@ -17,12 +17,12 @@ Usage:
     python run_generation.py create-virtual-human-asset --image-url URL --asset-name NAME
     python run_generation.py poll --task-id TASK_ID
 
-Environment Variables:
-    BORGRISE_API_TOKEN: Your API bearer token
-    BORGRISE_USERNAME: Borgrise username for automatic token refresh
-    BORGRISE_PASSWORD: Borgrise password for automatic token refresh
-    BORGRISE_BASE_URL: API base URL (default: https://test-video.borgrise.com/api)
-    BORGRISE_PROJECT_ID: Project ID for generation APIs (default: 1)
+环境变量：
+    BORGRISE_API_TOKEN: API bearer token
+    BORGRISE_USERNAME: 自动刷新 token 时使用的 Borgrise 用户名
+    BORGRISE_PASSWORD: 自动刷新 token 时使用的 Borgrise 密码
+    BORGRISE_BASE_URL: API base URL，默认 https://test-video.borgrise.com/api
+    BORGRISE_PROJECT_ID: 生成接口使用的项目 ID，默认 1
 """
 
 import os
@@ -41,7 +41,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(line_buffering=True)
 
-# Configuration
+# 基础配置
 BASE_URL = os.environ.get("BORGRISE_BASE_URL", "https://test-video.borgrise.com/api")
 API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
 BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
@@ -50,7 +50,7 @@ PROJECT_ID = os.environ.get("BORGRISE_PROJECT_ID", "1")
 SKIP_SSL_VERIFY = os.environ.get("BORGRISE_SKIP_SSL_VERIFY", "").lower() in {"1", "true", "yes", "on"}
 SSL_CONTEXT = ssl._create_unverified_context() if SKIP_SSL_VERIFY else None
 
-# Default models
+# 默认模型
 DEFAULT_IMAGE_MODEL = "seeddream-5.0"
 DEFAULT_VIDEO_MODEL = "seedance-2.0"
 SUPPORTED_RATIOS = {"1:1", "9:16", "16:9"}
@@ -58,23 +58,23 @@ SUPPORTED_IMAGE_QUALITIES = {"all", "480p", "720p", "1080p", "2K", "3K", "4K", "
 SEEDANCE_MAX_SEGMENT_DURATION = 10
 SAFE_MAX_LONG_VIDEO_DURATION = 30
 
-# Polling settings
-POLL_INTERVAL = 5  # seconds
-POLL_TIMEOUT = int(os.environ.get("BORGRISE_POLL_TIMEOUT", "600"))  # seconds (10 min default)
-_cli_poll_timeout: Optional[int] = None  # overridden by --poll-timeout CLI flag
+# 轮询配置
+POLL_INTERVAL = 5  # 秒
+POLL_TIMEOUT = int(os.environ.get("BORGRISE_POLL_TIMEOUT", "600"))  # 秒，默认 10 分钟。
+_cli_poll_timeout: Optional[int] = None  # 由 --poll-timeout 命令行参数覆盖。
 
-# Retry settings
+# 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
 def _effective_poll_timeout() -> int:
-    """Return the CLI-overridden poll timeout if set, else the env/default."""
+    """返回最终轮询超时时间：命令行参数优先，否则使用环境变量/默认值。"""
     return _cli_poll_timeout if _cli_poll_timeout is not None else POLL_TIMEOUT
 
 
 def validate_ratio(ratio: str) -> Optional[Dict]:
-    """Reject ratios that the current Borgrise GPT/video workflows do not support."""
+    """拒绝当前 Borgrise GPT/视频工作流不支持的画面比例。"""
     if ratio not in SUPPORTED_RATIOS:
         return {
             "error": True,
@@ -85,7 +85,7 @@ def validate_ratio(ratio: str) -> Optional[Dict]:
 
 
 def normalize_image_quality(size: str) -> str:
-    """Normalize legacy image size values to the quality labels used by Borgrise pricing config."""
+    """把旧版图片尺寸值归一到 Borgrise 计费配置使用的质量档位。"""
     normalized = str(size).strip()
     legacy_map = {
         "1024x1024": "1080p",
@@ -115,7 +115,7 @@ def validate_image_quality(size: str) -> Optional[Dict]:
 
 
 def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
-    """Keep single video calls within known model limits."""
+    """校验单次视频生成时长不能超过已知模型限制。"""
     if duration <= 0:
         return {"error": True, "message": "Duration must be a positive integer"}
     if model == "seedance-2.0" and duration > SEEDANCE_MAX_SEGMENT_DURATION:
@@ -132,14 +132,14 @@ def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
 
 
 def validate_positive_count(count: int, field_name: str) -> Optional[Dict]:
-    """Validate requested output counts so user-requested N images is not collapsed."""
+    """校验输出数量，避免用户请求的 N 张图片被静默压成 1 张。"""
     if count <= 0:
         return {"error": True, "message": f"{field_name} must be a positive integer"}
     return None
 
 
 def extract_result_urls(data: Any) -> List[str]:
-    """Best-effort extraction for single or multi-image/video task result URLs."""
+    """尽力从单图、多图或视频任务结果中提取 URL。"""
     urls: List[str] = []
 
     def visit(value: Any) -> None:
@@ -167,14 +167,14 @@ def extract_result_urls(data: Any) -> List[str]:
 def get_headers(model: str = "", bill_type: int = 0,
                  duration: int = 1, size: str = "720p",
                  model_header: str = "ModelType") -> Dict[str, str]:
-    """Get request headers with auth token and required custom headers.
+    """生成带鉴权 token 和 Borgrise 必需自定义头的请求头。
 
-    Custom headers required by Borgrise API:
-      - ModelType/modelType: the model name. content-app_ec uses ModelType
-        for image endpoints and modelType for video endpoints.
-      - billType: 2 = image (per-image billing), 3 = video (per-second billing)
-      - apiModelParamObj: JSON string with model params (e.g. {"size":"720p"})
-      - duration: generation duration (seconds for video, 1 for image)
+    Borgrise API 需要的关键自定义头：
+      - ModelType/modelType：模型名。content-app_ec 图片端点用 ModelType，
+        视频端点用 modelType。
+      - billType：2 = 图片按张计费，3 = 视频按秒计费。
+      - apiModelParamObj：模型参数 JSON 字符串，例如 {"size":"720p"}。
+      - duration：生成时长，视频按秒，图片为 1。
     """
     ensure_api_token()
     headers = {
@@ -187,14 +187,14 @@ def get_headers(model: str = "", bill_type: int = 0,
         headers["billType"] = str(bill_type)
     if duration:
         headers["duration"] = str(duration)
-    # apiModelParamObj - model parameter configuration
+    # apiModelParamObj 保存模型参数配置。
     api_param = {"size": size}
     headers["apiModelParamObj"] = json.dumps(api_param)
     return headers
 
 
 def with_project(endpoint: str, project_id: str = PROJECT_ID) -> str:
-    """Append projectId like the Borgrise test frontend does for generation APIs."""
+    """按 Borgrise 测试前端的做法，为生成接口追加 projectId。"""
     if not project_id or "projectId=" in endpoint:
         return endpoint
     separator = "&" if "?" in endpoint else "?"
@@ -202,7 +202,7 @@ def with_project(endpoint: str, project_id: str = PROJECT_ID) -> str:
 
 
 def _extract_token(payload: Dict[str, Any]) -> Optional[str]:
-    """Extract a login token from known Borgrise response shapes."""
+    """从已知 Borgrise 登录响应结构中提取 token。"""
     data = payload.get("data", payload)
     if not isinstance(data, dict):
         return None
@@ -218,7 +218,7 @@ def _extract_token(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def _looks_token_expired(payload: Dict[str, Any]) -> bool:
-    """Detect Borgrise token-expiry responses across HTTP and JSON shapes."""
+    """从 HTTP/JSON 响应形态中判断 Borgrise token 是否过期。"""
     haystack = " ".join(
         str(payload.get(key, ""))
         for key in ("code", "error", "message", "msg", "detail", "status")
@@ -233,7 +233,7 @@ def _looks_token_expired(payload: Dict[str, Any]) -> bool:
 
 
 def login_and_refresh_token() -> str:
-    """Login with BORGRISE_USERNAME/PASSWORD and refresh the process token."""
+    """使用 BORGRISE_USERNAME/PASSWORD 登录，并刷新当前进程内 token。"""
     global API_TOKEN
 
     if not BORGRISE_USERNAME or not BORGRISE_PASSWORD:
@@ -272,7 +272,7 @@ def login_and_refresh_token() -> str:
 
 
 def ensure_api_token() -> str:
-    """Return a usable token, logging in first when only credentials exist."""
+    """返回可用 token；如果只配置了账号密码，则先登录换取 token。"""
     if API_TOKEN:
         return API_TOKEN
     return login_and_refresh_token()
@@ -301,17 +301,17 @@ def _send_request(url: str, body: Optional[bytes], headers: Dict[str, str], meth
 def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST",
                   custom_headers: Optional[Dict[str, str]] = None,
                   _retry_on_token_expired: bool = True) -> Dict:
-    """Make HTTP request to the API with retry on transient errors.
+    """向 Borgrise API 发起 HTTP 请求，并对临时错误重试。
 
-    Retries on:
-      - HTTP 429 (rate limit) and 5xx (server errors)
-      - Network-level errors (URLError, TimeoutError, OSError)
+    会重试：
+      - HTTP 429（限流）和 5xx（服务端错误）。
+      - 网络层错误，如 URLError、TimeoutError、OSError。
 
-    Uses exponential backoff: 2s, 4s, 8s... between retries.
-    Set BORGRISE_MAX_RETRIES env var to override the default (3).
+    重试间隔使用指数退避：2s、4s、8s……。可通过 BORGRISE_MAX_RETRIES 环境变量
+    覆盖默认重试次数。
     """
     url = f"{BASE_URL}{endpoint}"
-    # Use custom_headers if provided, otherwise get default (polling) headers
+    # 优先使用调用方传入的自定义头；否则使用轮询等简单请求的默认 JSON 头。
     if custom_headers:
         headers = _apply_auth_header(custom_headers)
     else:
@@ -363,13 +363,13 @@ def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST
         except Exception as e:
             return {"error": True, "message": str(e)}
 
-    # All retries exhausted
+    # 所有重试都耗尽后，返回最后一次错误，避免抛异常中断调用方。
     return last_error or {"error": True, "message": "All retries exhausted"}
 
 
 def make_multipart_request(endpoint: str, file_field: str, file_path: str,
                            fields: Optional[Dict[str, str]] = None) -> Dict:
-    """Upload a local file using multipart/form-data."""
+    """使用 multipart/form-data 上传本地文件。"""
     if not os.path.exists(file_path):
         return {"error": True, "message": f"File does not exist: {file_path}"}
 
@@ -436,12 +436,12 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
 
 
 def poll_task(task_id: str, timeout: Optional[int] = None) -> Dict:
-    """Poll task status until completion or timeout.
+    """轮询任务状态，直到完成、失败或超时。
 
-    Args:
-        task_id: The Borgrise task ID to poll.
-        timeout: Max seconds to wait. Falls back to --poll-timeout CLI flag,
-                 then BORGRISE_POLL_TIMEOUT env var, then 600s default.
+    参数：
+        task_id: 要轮询的 Borgrise task ID。
+        timeout: 最大等待秒数。未传时依次使用 --poll-timeout、BORGRISE_POLL_TIMEOUT、
+                 最后回退到默认 600 秒。
     """
     effective_timeout = timeout if timeout is not None else _effective_poll_timeout()
     start_time = time.time()
@@ -482,7 +482,7 @@ def poll_task(task_id: str, timeout: Optional[int] = None) -> Dict:
 
 
 def craft_video_prompt(product_description: str, style: str = "cinematic") -> str:
-    """Craft a detailed video prompt from product description."""
+    """根据商品描述拼出更详细的视频生成 prompt。"""
     base_prompt = product_description
 
     if style == "cinematic":
@@ -499,7 +499,7 @@ def craft_video_prompt(product_description: str, style: str = "cinematic") -> st
 
 
 def craft_image_prompt(product_description: str, scene: str = "studio") -> str:
-    """Craft a detailed image prompt from product description."""
+    """根据商品描述和场景拼出图片生成 prompt。"""
     scene_styles = {
         "studio": "on a clean white surface, soft studio lighting from above, professional product photography",
         "lifestyle": "in an elegant lifestyle setting, natural window light, aspirational aesthetic",
@@ -512,13 +512,13 @@ def craft_image_prompt(product_description: str, scene: str = "studio") -> str:
 
 
 def extract_task_id(result: Dict) -> Optional[str]:
-    """Extract task ID from API response supporting multiple key styles."""
+    """从多种响应字段风格中提取 task ID。"""
     data = result.get("data", result)
     return data.get("taskId") or data.get("task_id") or result.get("task_id") or result.get("taskId")
 
 
 def extract_video_url(result: Dict) -> Optional[str]:
-    """Extract video URL from polling/API response supporting multiple layouts."""
+    """从轮询/API 响应的多种结构中提取视频 URL。"""
     final_data = result.get("data", result)
     return (
         final_data.get("result", {}).get("video_url")
@@ -530,18 +530,17 @@ def extract_video_url(result: Dict) -> Optional[str]:
 
 def verify_video_duration(video_url: str, expected_duration: int,
                           tolerance: int = 2) -> Dict:
-    """Verify actual video duration using ffprobe (best-effort).
+    """使用 ffprobe 尽力校验视频实际时长。
 
-    Returns a dict with:
-      - verified: bool — whether ffprobe was available and ran
-      - actual_duration: float — the measured duration in seconds
-      - within_tolerance: bool — whether the actual duration is within tolerance
-      - verdict: "PASS" | "FAIL" | "SKIP"
-      - warning: str — present when ffprobe is unavailable or failed
+    返回 dict 包含：
+      - verified: 是否成功运行 ffprobe。
+      - actual_duration: 实测视频时长，单位秒。
+      - within_tolerance: 实测时长是否落在容忍区间内。
+      - verdict: "PASS" | "FAIL" | "SKIP"。
+      - warning: ffprobe 不可用或失败时的说明。
 
-    This is best-effort: if ffprobe is not installed or the URL is
-    unreachable, it returns a warning rather than an error. Callers
-    should treat a FAIL verdict as a generation defect.
+    这是 best-effort 校验：ffprobe 未安装或 URL 不可访问时返回 warning，而不是
+    error。调用方应把 FAIL 判定视为生成缺陷。
     """
     import subprocess
     import shutil
@@ -594,7 +593,7 @@ def verify_video_duration(video_url: str, expected_duration: int,
 
 
 def extract_uploaded_url(result: Dict) -> Optional[str]:
-    """Extract an uploaded file URL from Borgrise upload response variants."""
+    """从 Borgrise 上传接口的多种响应结构中提取文件 URL。"""
     data = result.get("data", result)
     if isinstance(data, str):
         return data
@@ -610,7 +609,7 @@ def extract_uploaded_url(result: Dict) -> Optional[str]:
 
 
 def extract_asset_id(result: Dict) -> Optional[str]:
-    """Extract a third-party digital-human asset id from response variants."""
+    """从多种响应结构中提取第三方数字人资产 ID。"""
     data = result.get("data", result)
     return (
         data.get("assetId")
@@ -623,7 +622,7 @@ def extract_asset_id(result: Dict) -> Optional[str]:
 
 
 def upload_file(file_path: str) -> Dict:
-    """Upload a local file to Borgrise and return its public URL."""
+    """上传本地文件到 Borgrise，并返回可被后续接口引用的公开 URL。"""
     print(f"\n{'='*60}")
     print("POST /api/upload")
     print(f"{'='*60}")
@@ -655,7 +654,7 @@ def create_virtual_human_asset(asset_name: str,
                                price: float = 0.5,
                                visibility: int = 0,
                                project_id: str = PROJECT_ID) -> Dict:
-    """Create a virtual human asset and return an asset:// reference."""
+    """创建虚拟人资产，并返回 ``asset://`` 引用。"""
     if not image_url and not image_file:
         return {"error": True, "message": "Provide either image_url or image_file"}
 
@@ -739,7 +738,7 @@ def create_virtual_human_asset(asset_name: str,
 
 
 def resolve_asset_urls(asset_ids: List[str]) -> Dict:
-    """Resolve Borgrise asset IDs to reference URLs via the frontend endpoint."""
+    """通过 Borgrise 前端端点把资产 ID 解析成参考 URL。"""
     if not asset_ids:
         return {"error": True, "message": "At least one asset id is required"}
 
@@ -761,7 +760,7 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
                    model: str = DEFAULT_VIDEO_MODEL,
                    product_description: Optional[str] = None,
                    auto_poll: bool = True) -> Dict:
-    """Generate video from image."""
+    """根据单张图片生成视频。"""
 
     validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
     if validation_error:
@@ -839,7 +838,7 @@ def text_to_video(prompt: str,
                   sound: str = "on",
                   video_count: int = 1,
                   auto_poll: bool = True) -> Dict:
-    """Generate video from a text-only prompt."""
+    """根据纯文本 prompt 生成视频。"""
 
     validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
     if validation_error:
@@ -916,11 +915,10 @@ def reference_mode_video(prompt: str,
                          sound: str = "on",
                          video_count: int = 1,
                          auto_poll: bool = True) -> Dict:
-    """Generate video from multimodal reference materials.
+    """根据多模态参考素材生成视频。
 
-    This mirrors the Borgrise test frontend's "reference mode" call. Use it
-    when uploaded images/audio/videos are references rather than a single first
-    frame.
+    这对应 Borgrise 测试前端的“reference mode”调用。适用于上传图片、音频、视频
+    作为参考素材的场景，而不是单纯把一张图当作首帧。
     """
 
     validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
@@ -1009,11 +1007,10 @@ def _extract_primary_dialogue(prompt: str) -> Optional[str]:
 
 
 def build_native_audio_prompt(prompt: str) -> str:
-    """Wrap a user video prompt with a speech-first contract.
+    """把用户视频 prompt 包装成“口播优先”的提示合同。
 
-    Root-cause testing showed that front-loading long technical instructions,
-    timecodes, and shot grammar can pollute the first few seconds of generated
-    speech. Keep the spoken line first and keep the non-spoken constraints short.
+    排查发现，如果一开始塞入大量技术说明、时间码和镜头语法，生成音频的前几秒
+    容易被污染。因此这里把真正要朗读的台词放在第一行，非朗读约束尽量短。
     """
     cleaned = _strip_prompt_timecode(prompt)
     dialogue = _extract_primary_dialogue(prompt)
@@ -1046,7 +1043,7 @@ def native_audio_reference_video(prompt: str,
                                  sound: str = "on",
                                  video_count: int = 1,
                                  reference_video_fn=reference_mode_video) -> Dict:
-    """Generate reference-mode video with model-native Chinese audio."""
+    """生成带模型原生中文音频的 reference-mode 视频。"""
     return reference_video_fn(
         prompt=build_native_audio_prompt(prompt),
         image_urls=image_urls,
@@ -1071,25 +1068,23 @@ def extend_video(video_url: str, duration: int = 10,
                  max_total_duration: Optional[int] = None,
                  current_cumulative_duration: int = 0,
                  project_id: str = PROJECT_ID) -> Dict:
-    """Extend an existing video using the correct API format.
+    """按正确 API 格式延展已有视频。
 
-    The extend-video API requires:
-    - refVideoList: array of video URLs
-    - prompt: must include "@filename" to reference the video
-    - projectId: optional query parameter
+    extend-video API 要求：
+    - refVideoList：视频 URL 数组。
+    - prompt：必须包含 "@filename" 来引用被延展的视频。
+    - projectId：可选 query 参数。
 
-    Duration safety (Critical):
-    - max_total_duration: when set, the function will refuse to extend
-      if current_cumulative_duration + duration would exceed it.
-    - current_cumulative_duration: the total duration already generated
-      across previous segments. Pass 0 for the first extend after a
-      10s first segment, 10 for the second extend, etc.
-    - Example: for a 30s target, call extend 1 with (cum=10, max=30),
-      extend 2 with (cum=20, max=30). A third extend (cum=30, max=30)
-      would be rejected because 30+10 > 30.
+    时长安全保护（关键）：
+    - max_total_duration: 设置后，如果 current_cumulative_duration + duration
+      会超过总时长上限，本函数会拒绝继续 extend。
+    - current_cumulative_duration: 之前片段已经累计生成的总时长。比如首段 10 秒后
+      第一次 extend 传 10，第二次 extend 传 20。
+    - 示例：目标 30 秒时，第一次 extend 为 (cum=10, max=30)，第二次为
+      (cum=20, max=30)。第三次 (cum=30, max=30) 会被拒绝，因为 30+10 > 30。
     """
 
-    # ---- cumulative-duration guard ------------------------------------
+    # ---- 累计时长保护 ---------------------------------------------------
     if max_total_duration is not None:
         would_reach = current_cumulative_duration + duration
         if would_reach > max_total_duration:
@@ -1112,12 +1107,12 @@ def extend_video(video_url: str, duration: int = 10,
     if validation_error:
         return validation_error
 
-    # Extract filename from URL for @filename reference
+    # 从 URL 中取文件名，供 @filename 引用使用。
     filename = video_url.split("/")[-1]
     if not prompt:
         prompt = f"将@{filename}向后延伸，延长内容为延续之前的视频内容"
 
-    # Ensure prompt contains @filename reference
+    # extend-video prompt 必须包含 @filename 引用，否则供应商可能无法定位参考视频。
     if f"@{filename}" not in prompt:
         prompt = f"将@{filename}向后延伸，延长内容为" + prompt
 
@@ -1194,10 +1189,10 @@ def merge_videos(video_urls: List[str],
                  model: str = DEFAULT_VIDEO_MODEL,
                  duration: int = 30,
                  size: str = "1080p") -> Dict:
-    """Merge video pieces into a single deliverable.
+    """把多个视频片段合并成一个交付视频。
 
-    Swagger defines VideoMergeRequest as projectId + videoUrls. The older
-    snake_case video_urls field is rejected by the backend.
+    Swagger 中 VideoMergeRequest 使用 projectId + videoUrls。旧的 snake_case
+    ``video_urls`` 字段会被后端拒绝。
     """
 
     if len(video_urls) < 2:
@@ -1236,13 +1231,11 @@ def merge_videos(video_urls: List[str],
 
 
 def select_long_video_delivery(segments: List[Dict]) -> Dict:
-    """Select the final deliverable for extend-based long video workflows.
+    """为基于 extend 的长视频流程选择最终交付物。
 
-    Borgrise extend-video returns cumulative videos: each extend result already
-    includes the previous content plus the new continuation. Therefore the last
-    segment URL is the complete deliverable. Re-merging the first segment with
-    the last cumulative result duplicates the opening segment and makes 60s
-    videos become roughly 70s.
+    Borgrise extend-video 返回的是累计视频：每次 extend 的结果已经包含之前内容和
+    新延展内容。因此最后一个 segment URL 就是完整交付物。如果再把首段和最后
+    的累计结果 merge，会重复开头片段，让 60 秒视频变成约 70 秒。
     """
     if not segments:
         return {
@@ -1266,11 +1259,10 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
                         sound: str = "on",
                         force_long: bool = False,
                         progress_file: Optional[str] = None) -> Dict:
-    """Generate a long video by creating an initial segment then extending it repeatedly.
+    """先生成首段，再反复 extend，得到长视频。
 
-    Note: seedance-2.0 supports max 10s per segment, so we use extend-video for longer
-    videos. Cumulative duration tracking prevents over-generation. The final
-    cumulative extend result is verified with ffprobe.
+    注意：seedance-2.0 单段最长 10 秒，因此更长视频需要使用 extend-video。
+    累计时长追踪用于避免过度生成，最终累计结果会用 ffprobe 做 best-effort 时长校验。
     """
 
     validation_error = validate_ratio(ratio)
@@ -1312,8 +1304,8 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
             product_description=product_description
         )
 
-    # Calculate segments: first segment = segment_duration, remaining via extend
-    total_segments = -(-total_duration // segment_duration)  # ceiling division
+    # 计算段数：首段由 image-to-video 生成，剩余时长通过 extend-video 延展。
+    total_segments = -(-total_duration // segment_duration)  # 向上取整。
     actual_total = total_segments * segment_duration
     if actual_total != total_duration:
         last_segment = total_duration - (total_segments - 1) * segment_duration
@@ -1333,7 +1325,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
 
     segments = []
 
-    # Generate first segment
+    # 生成首段。
     first_result = image_to_video(
         image_url=image_url,
         prompt=prompt,
@@ -1355,7 +1347,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
         "cumulative_duration": segment_duration,
     })
 
-    # ---- save progress after first segment --------------------------
+    # ---- 首段完成后保存进度 -------------------------------------------
     if progress_file:
         try:
             _progress = {
@@ -1376,7 +1368,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
 
     elapsed = segment_duration
 
-    # Extend for remaining segments
+    # 逐段延展剩余时长。
     for idx in range(2, total_segments + 1):
         print(f"\nExtending segment {idx}/{total_segments}...")
 
@@ -1418,7 +1410,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
             "cumulative_duration": elapsed,
         })
 
-        # ---- save progress after each segment --------------------------
+        # ---- 每段完成后保存进度 ----------------------------------------
         if progress_file:
             try:
                 _progress = {
@@ -1444,7 +1436,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
     final_video_url = delivery.get("video_url")
     merge_result = None
 
-    # ---- final duration verification ------------------------------------
+    # ---- 最终时长校验 ---------------------------------------------------
     duration_check = None
     if final_video_url:
         print(f"\nVerifying final video duration (ffprobe)...")
@@ -1487,20 +1479,17 @@ def long_reference_mode_video(prompts: List[str],
                               sound: str = "on",
                               force_long: bool = False,
                               progress_file: Optional[str] = None) -> Dict:
-    """Generate a long reference-material video by reference-mode-video + extend-video.
+    """通过 reference-mode-video + extend-video 生成长参考素材视频。
 
-    Use this for story videos that need uploaded product/person/style images as
-    references. The first segment sends images through imageUrls; continuation
-    segments use extend-video with the previous video URL.
+    适用于需要上传商品图、人物图、风格图作为参考的剧情视频。首段通过 imageUrls
+    传参考素材，后续段使用上一段视频 URL 调 extend-video。
 
-    Duration safety:
-    - Default safe max is 30s. For 40s+ videos, pass force_long=True after the
-      user has explicitly confirmed the segment plan and merge strategy.
-    - Cumulative duration tracking is enforced on every extend-video call so an
-      accidental extra extend cannot produce a 70s+ video for a 60s request.
-    - The final cumulative extend result is verified with ffprobe when available.
-    - If progress_file is set, segment URLs are saved after each step so a
-      crashed run can be resumed.
+    时长安全：
+    - 默认安全上限是 30 秒。40 秒以上视频必须在用户明确确认分段计划和交付策略后，
+      才通过 force_long=True 放行。
+    - 每次 extend-video 都会检查累计时长，避免 60 秒请求因为多延展一次变成 70 秒以上。
+    - 最终累计结果会在可用时用 ffprobe 校验。
+    - 如果设置 progress_file，每步都会保存 segment URL，方便崩溃后恢复。
     """
 
     if not prompts:
@@ -1593,7 +1582,7 @@ def long_reference_mode_video(prompts: List[str],
         "cumulative_duration": first_duration,
     })
 
-    # ---- save progress after first segment --------------------------
+    # ---- 首段完成后保存进度 -------------------------------------------
     if progress_file:
         try:
             _progress = {
@@ -1656,7 +1645,7 @@ def long_reference_mode_video(prompts: List[str],
             "cumulative_duration": elapsed,
         })
 
-        # ---- save progress after each segment --------------------------
+        # ---- 每段完成后保存进度 ----------------------------------------
         if progress_file:
             try:
                 _progress = {
@@ -1673,7 +1662,7 @@ def long_reference_mode_video(prompts: List[str],
                     json.dump(_progress, pf, indent=2, ensure_ascii=False)
                 print(f"Progress saved: {len(segments)}/{total_segments} segments → {progress_file}")
             except Exception:
-                pass  # progress file is best-effort, never fatal
+                pass  # 进度文件是 best-effort，保存失败不能中断生成流程。
 
     delivery = select_long_video_delivery(segments)
     if delivery.get("error"):
@@ -1682,7 +1671,7 @@ def long_reference_mode_video(prompts: List[str],
     final_video_url = delivery.get("video_url")
     merge_result = None
 
-    # ---- final duration verification ------------------------------------
+    # ---- 最终时长校验 ---------------------------------------------------
     duration_check = None
     if final_video_url:
         print(f"\nVerifying final video duration (ffprobe)...")
@@ -1734,7 +1723,7 @@ def long_native_audio_reference_video(prompts: List[str],
                                       force_long: bool = False,
                                       progress_file: Optional[str] = None,
                                       long_reference_video_fn=long_reference_mode_video) -> Dict:
-    """Generate a long reference video with model-native Chinese audio."""
+    """生成带模型原生中文音频的长参考视频。"""
     native_prompts = [build_native_audio_prompt(prompt) for prompt in prompts]
     return long_reference_video_fn(
         prompts=native_prompts,
@@ -1761,12 +1750,10 @@ def resume_long_reference_mode_video(progress_file: str,
                                      extend_fn=None,
                                      merge_fn=None,
                                      verify_fn=None) -> Dict:
-    """Resume an interrupted long-reference-mode-video workflow.
+    """恢复中断的 long-reference-mode-video 工作流。
 
-    This is the official crash-recovery path for progress files produced by
-    long_reference_mode_video. It preserves segment-count validation,
-    cumulative-duration guards, progress-file updates, final delivery, and
-    duration verification instead of relying on ad hoc resume scripts.
+    这是 ``long_reference_mode_video`` 进度文件的正式崩溃恢复路径。它会保留段数
+    校验、累计时长保护、进度文件更新、最终交付和时长校验，而不是依赖临时脚本。
     """
     extend_fn = extend_fn or extend_video
     verify_fn = verify_fn or verify_video_duration
@@ -1969,7 +1956,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
                   size: str = "1080p", model: str = DEFAULT_IMAGE_MODEL,
                   product_description: Optional[str] = None,
                   scene: str = "studio", num_images: int = 1) -> Dict:
-    """Generate image from text."""
+    """根据文本 prompt 生成图片。"""
 
     validation_error = validate_ratio(ratio)
     if validation_error:
@@ -2031,14 +2018,14 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
     raw_image_url = (final_data.get("result", {}).get("url")
                      or final_data.get("result", {}).get("image_url")
                      or final_data.get("url"))
-    # If the API returned an array for image_url, take the first element
+    # 如果 API 的 image_url 返回数组，主图字段取第一张。
     if isinstance(raw_image_url, list) and raw_image_url:
         image_url = raw_image_url[0]
     else:
         image_url = raw_image_url
     image_urls = extract_result_urls(final_data)
 
-    # ---- image-count verification ------------------------------------
+    # ---- 图片数量校验 ---------------------------------------------------
     count_warning = None
     if len(image_urls) < num_images:
         count_warning = (
@@ -2065,7 +2052,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
 
 
 def ratio_to_dimensions(ratio: str) -> tuple[int, int]:
-    """Convert ratio strings accepted by the assistant to Borgrise width/height fields."""
+    """把助手接受的比例字符串转换为 Borgrise width/height 字段。"""
     ratio_map = {
         "1:1": (1, 1),
         "16:9": (16, 9),
@@ -2079,7 +2066,7 @@ def ratio_to_dimensions(ratio: str) -> tuple[int, int]:
 def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1",
                     size: str = "4K", model: str = DEFAULT_IMAGE_MODEL,
                     strength: Optional[float] = None, max_images: int = 1) -> Dict:
-    """Generate an image from one or more reference images."""
+    """根据一张或多张参考图生成图片。"""
 
     if not reference_images:
         return {"error": True, "message": "At least one reference image URL is required"}
@@ -2142,14 +2129,14 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
     raw_image_url = (final_data.get("result", {}).get("url")
                      or final_data.get("result", {}).get("image_url")
                      or final_data.get("url"))
-    # If the API returned an array for image_url, take the first element
+    # 如果 API 的 image_url 返回数组，主图字段取第一张。
     if isinstance(raw_image_url, list) and raw_image_url:
         image_url = raw_image_url[0]
     else:
         image_url = raw_image_url
     image_urls = extract_result_urls(final_data)
 
-    # ---- image-count verification ------------------------------------
+    # ---- 图片数量校验 ---------------------------------------------------
     count_warning = None
     if len(image_urls) < max_images:
         count_warning = (
@@ -2174,7 +2161,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
 
 
 def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) -> Dict:
-    """Edit an existing image."""
+    """编辑一张已有图片。"""
 
     request_data = {
         "image_url": image_url,
@@ -2225,7 +2212,7 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
 def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
                         size: str = "1080p",
                         model: str = DEFAULT_IMAGE_MODEL) -> Dict:
-    """Batch generate images from multiple prompts."""
+    """根据多条 prompt 批量生成图片。"""
 
     validation_error = validate_ratio(ratio)
     if validation_error:
@@ -2264,10 +2251,10 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
     if result.get("error"):
         return result
 
-    # Batch endpoint may return multiple task IDs
+    # 批量端点可能返回多个 task ID。
     task_ids = result.get("data", result).get("taskIds", [])
     if not task_ids:
-        # Single task ID case
+        # 兼容只返回单个 task ID 的响应。
         single_id = result.get("data", result).get("taskId")
         if single_id:
             task_ids = [single_id]
@@ -2277,7 +2264,7 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
     print(f"Tasks created: {task_ids}")
     print(f"Polling for results...\n")
 
-    # Poll all tasks
+    # 逐个轮询所有任务。
     results = []
     for task_id in task_ids:
         print(f"Polling task {task_id}...")
@@ -2315,7 +2302,7 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
-    # image-to-video
+    # 图片生成视频命令。
     p_i2v = subparsers.add_parser("image-to-video", help="Generate video from image")
     p_i2v.add_argument("--image-url", required=True, help="Product image URL")
     p_i2v.add_argument("--prompt", help="Video generation prompt")
@@ -2325,7 +2312,7 @@ def main():
     p_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # text-to-video
+    # 文本生成视频命令。
     p_t2v = subparsers.add_parser("text-to-video", help="Generate video from a text-only prompt")
     p_t2v.add_argument("--prompt", required=True, help="Video generation prompt")
     p_t2v.add_argument("--duration", type=int, default=10, help="Video duration in seconds")
@@ -2336,7 +2323,7 @@ def main():
     p_t2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_t2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # reference-mode-video
+    # 参考素材生成视频命令。
     p_ref_video = subparsers.add_parser("reference-mode-video", help="Generate video from reference images/audio/videos")
     p_ref_video.add_argument("--prompt", required=True, help="Video generation prompt")
     p_ref_video.add_argument("--image-urls", default="[]", help="JSON array of reference image URLs")
@@ -2350,7 +2337,7 @@ def main():
     p_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # native-audio-reference-video
+    # 带模型原生音频的参考素材生成视频命令。
     p_native_ref_video = subparsers.add_parser(
         "native-audio-reference-video",
         help="Generate reference-mode video with model-native Chinese speech/music"
@@ -2367,7 +2354,7 @@ def main():
     p_native_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_native_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # extend-video
+    # 视频延展命令。
     p_extend = subparsers.add_parser("extend-video", help="Extend an existing video")
     p_extend.add_argument("--video-url", required=True, help="Existing video URL")
     p_extend.add_argument("--prompt", help="Extension prompt (must contain @filename reference)")
@@ -2380,7 +2367,7 @@ def main():
     p_extend.add_argument("--current-cumulative", type=int, default=0, help="Total duration already generated so far")
     p_extend.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # long-image-to-video
+    # 图片生成长视频命令。
     p_long_i2v = subparsers.add_parser("long-image-to-video", help="Generate a long video by image-to-video + repeated extend-video")
     p_long_i2v.add_argument("--image-url", required=True, help="Product image URL")
     p_long_i2v.add_argument("--prompt", help="Video generation prompt")
@@ -2395,7 +2382,7 @@ def main():
     p_long_i2v.add_argument("--progress-file", help="Save segment progress to this JSON file")
     p_long_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # long-reference-mode-video
+    # 参考素材生成长视频命令。
     p_long_ref = subparsers.add_parser("long-reference-mode-video", help="Generate a long video by reference-mode-video + extend-video with final duration verification")
     p_long_ref.add_argument("--prompts", required=True, help="JSON array of segment prompts. First prompt creates the video; later prompts extend it.")
     p_long_ref.add_argument("--image-urls", default="[]", help="JSON array of reference image URLs")
@@ -2411,7 +2398,7 @@ def main():
     p_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # long-native-audio-reference-video
+    # 带模型原生音频的参考素材长视频命令。
     p_long_native_ref = subparsers.add_parser(
         "long-native-audio-reference-video",
         help="Generate a long reference video with model-native Chinese speech/music"
@@ -2430,7 +2417,7 @@ def main():
     p_long_native_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_long_native_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # resume-long-reference-mode-video
+    # 长参考视频恢复命令。
     p_resume_long_ref = subparsers.add_parser(
         "resume-long-reference-mode-video",
         help="Resume an interrupted long-reference-mode-video workflow from a progress file"
@@ -2443,7 +2430,7 @@ def main():
     p_resume_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_resume_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
 
-    # text-to-image
+    # 文本生成图片命令。
     p_t2i = subparsers.add_parser("text-to-image", help="Generate image from text")
     p_t2i.add_argument("--prompt", help="Image generation prompt")
     p_t2i.add_argument("--product-description", help="Product description (will craft prompt)")
@@ -2453,7 +2440,7 @@ def main():
     p_t2i.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
     p_t2i.add_argument("--num-images", type=int, default=1, help="Number of images to generate")
 
-    # reference-image
+    # 参考图生成图片命令。
     p_ref = subparsers.add_parser("reference-image", help="Generate image from one or more reference images")
     p_ref.add_argument("--reference-images", required=True, help="JSON array of reference image URLs")
     p_ref.add_argument("--prompt", required=True, help="Image generation prompt")
@@ -2463,20 +2450,20 @@ def main():
     p_ref.add_argument("--strength", type=float, help="Reference strength, if supported by the model")
     p_ref.add_argument("--max-images", type=int, default=1, help="Number of images to generate")
 
-    # image-edit
+    # 图片编辑命令。
     p_edit = subparsers.add_parser("image-edit", help="Edit an existing image")
     p_edit.add_argument("--image-url", required=True, help="Original image URL")
     p_edit.add_argument("--prompt", required=True, help="Edit instruction")
     p_edit.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
 
-    # batch-text-to-image
+    # 批量文本生成图片命令。
     p_batch = subparsers.add_parser("batch-text-to-image", help="Batch generate images")
     p_batch.add_argument("--prompts", required=True, help="JSON array of prompts")
     p_batch.add_argument("--ratio", default="1:1", help="Aspect ratio")
     p_batch.add_argument("--size", default="1080p", help="Image quality (1080p, 2K, 4K, etc.)")
     p_batch.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
 
-    # poll
+    # 任务轮询命令。
     p_poll = subparsers.add_parser("poll", help="Poll task status")
     p_poll.add_argument("--task-id", required=True, help="Task ID to poll")
     p_poll.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")

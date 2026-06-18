@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { SquarePen } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// 占位对话列表(待接 /api/tasks)
+// 侧边栏当前仍是静态占位数据；后续应接 /api/tasks，并用真实 task_id 跳转 /c/:taskId。
 const THREADS = [
   { id: "t1", title: "45度俯拍水果刀切果肉", count: 5 },
   { id: "t2", title: "保温杯冬季通勤种草", count: 3 },

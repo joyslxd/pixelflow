@@ -1,7 +1,7 @@
-"""PixelFlow MySQL engine bootstrap.
+"""PixelFlow 业务任务 MySQL 初始化。
 
-PixelFlow business data can live in MySQL independently from the DeerFlow
-runtime/checkpointer database. Configure with:
+PixelFlow 业务数据可以独立放在 MySQL 中，不必和 DeerFlow runtime/checkpointer
+数据库共用同一套连接。通过以下环境变量配置：
 
     PIXELFLOW_MYSQL_URL=mysql+asyncmy://user:password@host:3306/database?charset=utf8mb4
 """

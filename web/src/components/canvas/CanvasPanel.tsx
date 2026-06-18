@@ -24,6 +24,8 @@ const PHASE_LABEL: Record<string, string> = {
 
 export function CanvasPanel({ state, onApprove, onRevise, onClose, briefConfirmed = false }: CanvasPanelProps) {
   const { phase, brief, results, estCost, actualCost } = state;
+  // 只有 Brief 阶段、后端已返回 Brief、且用户尚未确认时，才展示审核卡。
+  // 其他阶段优先展示生成结果；没有内容时展示空画布。
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
   return (
     <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">

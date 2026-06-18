@@ -1,4 +1,4 @@
-"""PixelFlow structured user preference API."""
+"""PixelFlow 结构化用户偏好 API。"""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _store(request: Request) -> UserPreferenceStore:
 async def _require_self(path_user_id: str, request: Request) -> str:
     current = await get_current_user(request)
     if current is None:
-        # Auth may be disabled in local dev; allow the explicit path id.
+        # 本地开发可能关闭鉴权；此时允许使用路径里的显式 user_id。
         return path_user_id
     if path_user_id != current:
         raise HTTPException(status_code=403, detail="Cannot access another user's PixelFlow preferences")

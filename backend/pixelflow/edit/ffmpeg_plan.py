@@ -1,34 +1,29 @@
-"""build_ffmpeg_args — translate a DraftPlan into a deterministic ffmpeg argv (pure logic).
+"""把 DraftPlan 翻译成确定性的 ffmpeg 命令参数，纯逻辑实现。
 
-Each segment is trimmed to its planned duration, normalized onto the pixel
-canvas (scale + pad, unified fps), optionally gets its 花字 caption burned in
-via drawtext, then everything is concatenated into one H.264 mp4. The FFmpeg
-render skill executes the argv one-to-one without doing any编排 of its own.
+每个 segment 都会按规划时长裁剪，缩放/补边到目标画布，统一 fps，并在提供字体
+文件时通过 drawtext 烧录花字。最后所有片段会 concat 成一个 H.264 mp4。FFmpeg
+render skill 只负责执行这里生成的 argv，不再自行做编排。
 
-v1 scope (deliberate): no transitions (xfade reshapes the total duration).
-Each segment's source audio is preserved and concatenated alongside the video
-(seedance clips carry an aac track); captions are only burned when a font file
-is provided.
+v1 有意不处理转场：FFmpeg xfade 会改变总时长，容易和 Brief/QC 的时长合同冲突。
+每段源音频会按相同时长裁剪并随视频拼接；只有配置字体文件时才烧录花字。
 
-Pure and deterministic: no I/O, fully testable offline.
+这是纯逻辑，不做 I/O，输出完全由入参决定，方便离线单测。
 """
 
 from __future__ import annotations
 
 from .models import DraftPlan
 
-# A clip whose duration is within this many seconds of its segment target needs
-# no trim, so re-encoding just to shave fractions isn't worth it.
+# 单片段源视频和目标时长差异在该阈值内时，不值得为了几帧差异重新编码。
 _PASSTHROUGH_DURATION_EPSILON = 0.5
 
 
 def passthrough_eligible(plan: DraftPlan, probe: dict, *, has_caption: bool) -> bool:
-    """Whether the lone source clip can be used as-is, skipping the ffmpeg re-encode.
+    """判断唯一源片段是否可以直接复用，跳过 ffmpeg 重编码。
 
-    Eligible only when there is exactly one segment, no caption to burn, and the
-    probed source already matches the target canvas/fps and duration — i.e.
-    ffmpeg would do nothing but a lossy re-encode. ``probe`` carries the source's
-    ``width``/``height``/``fps``/``duration``.
+    只有在“恰好一个 segment、没有花字要烧录、源视频画布/fps/时长已经匹配目标”
+    时才允许直通。否则 ffmpeg 至少需要裁剪、缩放、补边、烧录文字或拼接。``probe``
+    来自 ffprobe，包含源视频的 ``width``、``height``、``fps``、``duration``。
     """
     if len(plan.segments) != 1 or has_caption:
         return False
@@ -45,7 +40,10 @@ def passthrough_eligible(plan: DraftPlan, probe: dict, *, has_caption: bool) -> 
 
 
 def _escape_drawtext(text: str) -> str:
-    """Escape ffmpeg drawtext specials (backslash first, then : ' %)."""
+    """转义 ffmpeg drawtext 的特殊字符。
+
+    必须先转义反斜杠，再处理冒号、单引号和百分号。
+    """
     out = text.replace("\\", "\\\\")
     for ch in (":", "'", "%"):
         out = out.replace(ch, "\\" + ch)
@@ -53,7 +51,7 @@ def _escape_drawtext(text: str) -> str:
 
 
 def build_ffmpeg_args(plan: DraftPlan, input_paths: list[str], output_path: str, *, font_file: str | None = None) -> list[str]:
-    """Build the full ffmpeg argv rendering ``plan`` over local ``input_paths``."""
+    """根据本地输入文件和 ``DraftPlan`` 构建完整 ffmpeg argv。"""
     if not plan.segments:
         raise ValueError("empty plan: no segments to render")
     if len(input_paths) != len(plan.segments):
@@ -77,7 +75,7 @@ def build_ffmpeg_args(plan: DraftPlan, input_paths: list[str], output_path: str,
                 f":x=(w-text_w)/2:y=h*0.82:fontsize={fontsize}:fontcolor=white:borderw=3:bordercolor=black"
             )
         filters.append(f"{chain}[v{i}]")
-        # Preserve each source's audio, trimmed to the same span as its video.
+        # 保留每个源片段的音频，并裁剪到和视频相同的时长。
         filters.append(f"[{i}:a]atrim=duration={seg.duration:g},asetpts=PTS-STARTPTS[a{i}]")
 
     concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(plan.segments)))

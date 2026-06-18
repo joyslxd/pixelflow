@@ -1,4 +1,4 @@
-"""ORM row for PixelFlow P0 structured user preferences."""
+"""PixelFlow P0 结构化用户偏好的 ORM 行模型。"""
 
 from __future__ import annotations
 

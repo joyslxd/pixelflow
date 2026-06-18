@@ -1,13 +1,13 @@
-"""Borgrise video-generation skill (Shape B: in-process).
+"""Borgrise 视频生成 skill（Shape B：进程内执行）。
 
-Thin async adapter over the vendored ``run_generation`` script, which is the
-single source of the Borgrise API contract (auth, custom headers, endpoints,
-polling) and is reused verbatim. The sync, blocking functions are offloaded to
-a worker thread so they don't block the async event loop (the harness gates
-blocking IO on the loop).
+这是对 ``run_generation`` 脚本的异步薄封装。``run_generation`` 是 Borgrise API
+合同的单一来源，包含鉴权、自定义请求头、端点、轮询等细节。这里不复制供应商
+协议，只负责把同步阻塞函数丢到线程里执行，并把返回值映射成 PixelFlow 统一
+Result DTO。
 
-Config is environment-driven via ``run_generation`` (``BORGRISE_API_TOKEN``,
-``BORGRISE_BASE_URL``); per-call generation params are passed through.
+配置由 ``run_generation`` 读取环境变量，例如 ``BORGRISE_API_TOKEN``、
+``BORGRISE_BASE_URL``；每次生成所需的 image_url、prompt、duration、ratio 等
+参数由调用方传入。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def _to_result(raw: dict[str, Any]) -> GenerationResult:
-    """Map a ``run_generation`` response dict onto ``GenerationResult``."""
+    """把 ``run_generation`` 的原始 dict 映射成统一 ``GenerationResult``。"""
     if not raw or raw.get("error"):
         return GenerationResult(
             ok=False,
@@ -45,10 +45,10 @@ def _to_result(raw: dict[str, Any]) -> GenerationResult:
 
 
 def _extract_shots(raw: Any) -> list[dict[str, Any]]:
-    """Pull the storyboard shot list out of a vendor response, tolerantly.
+    """从供应商响应中宽松提取 storyboard shots。
 
-    博观's decompose nests the list at ``data.result.video_url.segments``; we also
-    accept the simpler ``shots``/``scenes`` shapes other endpoints might use.
+    博观拆解接口常把列表嵌在 ``data.result.video_url.segments``；这里也兼容
+    ``shots``、``storyboard``、``scenes`` 等更简单形态，降低供应商响应变化的影响。
     """
     if not isinstance(raw, dict):
         return []
@@ -68,7 +68,7 @@ def _extract_shots(raw: Any) -> list[dict[str, Any]]:
 
 
 def _parse_time_range(time_range: Any) -> float:
-    """Seconds spanned by a ``"4-22s"``-style range; 0 when unparseable."""
+    """解析 ``"4-22s"`` 这类时间范围对应的秒数，无法解析时返回 0。"""
     nums = re.findall(r"\d+(?:\.\d+)?", str(time_range or ""))
     if len(nums) >= 2:
         return max(0.0, round(float(nums[1]) - float(nums[0]), 2))
@@ -76,10 +76,10 @@ def _parse_time_range(time_range: Any) -> float:
 
 
 def _normalize_segment(seg: Any) -> dict[str, Any]:
-    """Map a 博观 segment (camelCase, Chinese fields) onto PixelFlow's shot shape.
+    """把博观 segment 映射成 PixelFlow 更稳定的 shot 形态。
 
-    Keeps the vendor specifics behind the skill boundary so downstream pure logic
-    (``summarize_storyboards``) reads stable, underscore-cased keys.
+    博观字段可能是 camelCase 或中文语义字段。这里把供应商差异挡在 skill 边界，
+    让下游纯逻辑 ``summarize_storyboards`` 只读取稳定的下划线字段。
     """
     if not isinstance(seg, dict):
         return {"visual_description": str(seg)}
@@ -95,10 +95,10 @@ def _normalize_segment(seg: Any) -> dict[str, Any]:
 
 
 def _decompose_blocking(video_url: str) -> dict[str, Any]:
-    """Call the decompose endpoint; poll when the response is an async task.
+    """调用参考视频拆解端点；如果返回异步任务，则继续轮询。
 
-    Decompose runs on the vision model ``gemini-3-flash-preview`` (billType=1,
-    size=all) and needs the same custom headers as the generation endpoints.
+    拆解使用视觉模型 ``gemini-3-flash-preview``，并需要和生成接口相同的自定义
+    请求头。这个函数是阻塞调用，外层必须用 ``asyncio.to_thread`` offload。
     """
     headers = run_generation.get_headers(model="gemini-3-flash-preview", bill_type=1, duration=1, size="all")
     result = run_generation.make_request("/creative/decompose_video_to_storyboard?projectId=1", {"video_url": video_url}, custom_headers=headers)
@@ -109,11 +109,10 @@ def _decompose_blocking(video_url: str) -> dict[str, Any]:
 
 
 async def _run(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> GenerationResult:
-    """Run a blocking ``run_generation`` call off-loop, normalizing failures.
+    """在线程中运行阻塞的 ``run_generation`` 调用，并归一化失败。
 
-    ``run_generation`` raises on config errors (e.g. missing token) and may
-    raise on transport errors; normalize everything to a ``GenerationResult``
-    so one failing shot never crashes the GENERATE phase.
+    ``run_generation`` 可能因为缺 token、网络错误、供应商异常而抛出。这里统一转成
+    ``GenerationResult(ok=False)``，避免某个片段失败时直接冲垮整个 GENERATE 阶段。
     """
     try:
         raw = await asyncio.to_thread(fn, **kwargs)
@@ -124,7 +123,7 @@ async def _run(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> GenerationRe
 
 
 class BorgriseSkill:
-    """In-process Borgrise implementation of ``VideoGenerationSkill``."""
+    """进程内 Borgrise 实现，同时实现视频生成和参考视频拆解能力。"""
 
     async def image_to_video(
         self,
@@ -163,7 +162,7 @@ class BorgriseSkill:
         return await _run(run_generation.extend_video, **kwargs)
 
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult:
-        """Parse a reference video into a vendor storyboard (博观拆解)."""
+        """把参考视频拆解成供应商 storyboard（博观拆解）。"""
         try:
             raw = await asyncio.to_thread(_decompose_blocking, video_url)
         except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors

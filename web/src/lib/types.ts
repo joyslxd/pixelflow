@@ -1,4 +1,4 @@
-/** 与后端 /api/tasks 对齐的最小类型(按需扩展)。 */
+/** 与后端 /api/tasks 对齐的最小前端类型，后续按页面需要扩展。 */
 
 export type TaskPhase =
   | "intake"
@@ -10,14 +10,14 @@ export type TaskPhase =
   | "done";
 
 export interface GenParams {
-  mode: string; // 视频生成 / 图片生成
-  model: string; // seedance-2.0
-  reference: string; // 全能参考
-  ratio: string; // 9:16
-  resolution: string; // 1080p
-  durationSec: number; // 5
-  count: number; // 1
-  sound: boolean; // 输出声音
+  mode: string; // 生成模式，例如视频生成 / 图片生成。
+  model: string; // 前端展示的模型名，例如 seedance-2.0。
+  reference: string; // 参考素材模式，例如全能参考。
+  ratio: string; // 画面比例，例如 9:16。
+  resolution: string; // 清晰度，例如 1080p；提交时会转成后端 size。
+  durationSec: number; // 目标时长，单位秒。
+  count: number; // 期望生成数量；当前 WorkspacePage 尚未透传到后端。
+  sound: boolean; // 是否输出声音；当前 WorkspacePage 尚未透传到后端。
 }
 
 export interface VideoResult {

@@ -1,9 +1,10 @@
-"""Skill capability interfaces.
+"""Skill 能力接口定义。
 
-The pipeline graph depends on these abstractions, never on a concrete vendor
-(Borgrise) or its HTTP endpoints. This keeps the generation interface swappable:
-MVP runs the skill in-process (Shape B); P1 can move the same implementation
-into the sandbox (Shape A) without touching graph code.
+这里的 ``Protocol`` 可以类比成 Java 的 interface。PixelFlow 图节点只依赖这些抽象，
+不直接依赖 Borgrise、FFmpeg、剪映或它们的 HTTP/命令行细节。这样后续替换供应商、
+把能力搬到 sandbox、或增加新的实现，都不需要改 ``nodes.py`` 的流程编排。
+
+当前 MVP 以进程内实现为主；P1 可以把同一能力迁移到 sandbox 执行。
 """
 
 from __future__ import annotations
@@ -15,10 +16,10 @@ from typing import Any, Protocol
 
 @dataclass
 class GenerationResult:
-    """Normalized result of a single generation call.
+    """单次生成调用的统一返回 DTO。
 
-    Vendor-specific response shapes are mapped onto this so the graph reads a
-    stable contract: ``ok`` + ``url`` on success, ``error`` on failure.
+    不同供应商返回结构不一致，skill 实现负责把它们映射到这里。图节点只看稳定
+    合同：成功时 ``ok=True`` 并有 ``url``；失败时 ``ok=False`` 并有 ``error``。
     """
 
     ok: bool
@@ -30,12 +31,11 @@ class GenerationResult:
 
 @dataclass
 class EditResult:
-    """Normalized result of an edit/assembly call.
+    """剪辑/装配调用的统一返回 DTO。
 
-    ``output_path`` points at the produced artifact; ``kind`` tells the graph
-    what it is — ``"draft"`` for the 剪映 skill (an editable draft folder, final
-    render needs the JianYing app) or ``"video"`` for the FFmpeg skill (a
-    finished mp4).
+    ``output_path`` 指向产物路径；``kind`` 告诉图节点这是什么类型：``"draft"``
+    表示剪映 skill 产出的可编辑草稿目录，最终渲染还依赖剪映；``"video"`` 表示
+    FFmpeg skill 已经产出 mp4 成片。
     """
 
     ok: bool
@@ -47,11 +47,10 @@ class EditResult:
 
 @dataclass
 class StoryboardResult:
-    """Normalized result of a reference-video decompose call.
+    """参考视频拆解调用的统一返回 DTO。
 
-    ``shots`` is the vendor storyboard as a list of dicts; field names are
-    vendor-specific — pure logic (``summarize_storyboards``) normalizes them
-    before the Brief prompt sees anything.
+    ``shots`` 是供应商 storyboard 列表。字段名仍可能是供应商风格；进入 Brief
+    prompt 前会由纯逻辑 ``summarize_storyboards`` 再做一次归一化。
     """
 
     ok: bool
@@ -61,10 +60,10 @@ class StoryboardResult:
 
 
 class VideoGenerationSkill(Protocol):
-    """Capability the GENERATE phase needs: produce/extend video clips.
+    """GENERATE 阶段依赖的视频生成能力接口。
 
-    Implementations own the vendor contract (auth, headers, endpoints, polling).
-    Generation parameters are passed per call — nothing is hardcoded here.
+    实现类负责供应商合同：鉴权、请求头、端点、轮询、错误归一化。生成参数按调用
+    传入，这里不硬编码具体模型或供应商行为。
     """
 
     async def image_to_video(
@@ -87,32 +86,30 @@ class VideoGenerationSkill(Protocol):
 
 
 class VideoEditSkill(Protocol):
-    """Capability the EDIT phase needs: assemble clips into a final artifact.
+    """EDIT 阶段依赖的视频剪辑/渲染能力接口。
 
-    Implementations own the editor contract (剪映 draft format / FFmpeg cmds)
-    and any media fetching/probing. The plan is passed per call — the graph
-    encodes no editor specifics.
+    实现类负责具体编辑器合同，如剪映草稿格式、FFmpeg 命令、媒体下载和探测。
+    图节点只传 Timeline 计划，不写任何具体编辑器细节。
     """
 
     async def render(self, timeline: dict, *, draft_name: str, output_root: str | None = None) -> EditResult: ...
 
 
 class VideoDecomposeSkill(Protocol):
-    """Capability the INTAKE phase needs: parse a reference video into a storyboard.
+    """INTAKE 阶段依赖的参考视频拆解能力接口。
 
-    Implementations own the vendor contract (博观 decompose_video_to_storyboard —
-    the only video-understanding endpoint; there is no separate OCR/ASR).
+    实现类负责供应商合同。当前 Borgrise 只用博观的
+    ``decompose_video_to_storyboard`` 视频理解端点，没有单独接 OCR/ASR。
     """
 
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult: ...
 
 
 def get_video_skill() -> VideoGenerationSkill:
-    """Return the configured video-generation skill.
+    """返回当前配置的视频生成 skill。
 
-    This is the single swap point for the implementation. MVP returns the
-    in-process Borgrise skill; ``PIXELFLOW_VIDEO_SKILL`` is reserved for
-    selecting alternative implementations (e.g. a sandbox-executed skill in P1).
+    这是视频生成实现的唯一替换点。MVP 默认返回进程内 Borgrise 实现；
+    ``PIXELFLOW_VIDEO_SKILL`` 预留给后续切换其它实现，例如 sandbox 执行版。
     """
     impl = os.environ.get("PIXELFLOW_VIDEO_SKILL", "borgrise")
     if impl == "borgrise":
@@ -123,10 +120,10 @@ def get_video_skill() -> VideoGenerationSkill:
 
 
 def get_video_edit_skill() -> VideoEditSkill:
-    """Return the configured video-edit skill (the EDIT-phase swap point).
+    """返回当前配置的视频剪辑 skill，也就是 EDIT 阶段替换点。
 
-    Default is the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL=ffmpeg``
-    selects the headless FFmpeg renderer that produces a finished mp4.
+    默认是剪映草稿 skill（pyJianYingDraft）。设置 ``PIXELFLOW_EDIT_SKILL=ffmpeg``
+    时会切到无界面的 FFmpeg 渲染器，直接产出 mp4。
     """
     impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying")
     if impl == "jianying":
@@ -141,7 +138,7 @@ def get_video_edit_skill() -> VideoEditSkill:
 
 
 def get_video_decompose_skill() -> VideoDecomposeSkill:
-    """Return the configured reference-video decompose skill (the INTAKE-phase swap point)."""
+    """返回当前配置的参考视频拆解 skill，也就是 INTAKE 阶段替换点。"""
     impl = os.environ.get("PIXELFLOW_DECOMPOSE_SKILL", "borgrise")
     if impl == "borgrise":
         from pixelflow.skills.borgrise import BorgriseSkill

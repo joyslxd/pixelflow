@@ -1,4 +1,8 @@
-"""Structured preference storage for PixelFlow P0."""
+"""PixelFlow P0 结构化偏好存储。
+
+Store 负责保存用户风格偏好、负向规则、默认视频参数和最近反馈。它不是语义记忆
+系统；``semantic_memory`` 字段当前只作为 P1 mem0/Qdrant 的预留标记返回。
+"""
 
 from __future__ import annotations
 
@@ -43,10 +47,12 @@ class UserPreferenceRecord:
 
 
 class PreferencePatch(dict):
-    """Plain dict marker for preference update payloads."""
+    """偏好更新 payload 的轻量标记类型，实际结构仍是普通 dict。"""
 
 
 class UserPreferenceStore(Protocol):
+    """用户偏好 Store 接口，SQL 和内存实现都遵循这个合同。"""
+
     async def get(self, user_id: str) -> UserPreferenceRecord: ...
     async def update(self, user_id: str, patch: dict[str, Any]) -> UserPreferenceRecord: ...
     async def append_feedback(self, user_id: str, feedback: str, *, task_id: str | None = None, metadata: dict[str, Any] | None = None) -> UserPreferenceRecord: ...

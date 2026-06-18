@@ -1,8 +1,11 @@
-"""PixelFlow P0 business task API.
+"""PixelFlow P0 业务任务 API。
 
-This wraps the lower-level LangGraph run API in e-commerce-video terminology:
-task creation, task status/result lookup, Brief confirmation/revision, and a
-PixelFlow progress event stream.
+这里把底层 LangGraph run/thread API 包装成电商短视频业务语义：创建任务、查询任务
+状态/结果、Brief 人工确认/修改、资产查询和 PixelFlow 进度事件流。
+
+按 Java/Spring 视角看，本文件相当于 PixelFlow 的 Controller：负责 HTTP 入参/出参、
+状态码和鉴权用户透传；真正阶段编排在 ``pixelflow.nodes``，持久化在
+``pixelflow.tasks`` Store。
 """
 
 from __future__ import annotations
@@ -121,6 +124,12 @@ def _apply_preference_defaults(
     creative_direction: dict[str, Any],
     preference_snapshot: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """把用户偏好默认值合并到本次任务参数中。
+
+    合并规则是“用户本次显式入参优先，历史偏好只补空值”。这样不会因为用户过去的
+    默认平台/比例覆盖本次前端弹窗里刚选择的值。风格偏好会作为创意方向的默认项，
+    但本次 creative_direction 仍然可以覆盖它。
+    """
     defaults = preference_snapshot.get("defaults") or {}
     style = preference_snapshot.get("style_preferences") or {}
     out_video = dict(video_params)
@@ -138,6 +147,12 @@ def _apply_preference_defaults(
 
 
 def _initial_state(task_id: str, user_id: str | None, body: TaskCreateRequest, preference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把 HTTP 创建任务 DTO 转成 LangGraph ``TaskState`` 初始上下文。
+
+    这是 Controller 和工作流之间的适配器。前端/HTTP 使用 ``duration_sec``，而
+    INTAKE 旧逻辑读取 ``video_duration_sec``，因此这里做一次字段名转换。参考视频
+    URL 也会转成带 ``status=pending`` 的对象，供 INTAKE 阶段拆解。
+    """
     product_info = dict(body.product_info)
     if body.product_url:
         product_info.setdefault("product_url", body.product_url)
@@ -146,7 +161,7 @@ def _initial_state(task_id: str, user_id: str | None, body: TaskCreateRequest, p
         dict(body.creative_direction),
         preference_snapshot or {},
     )
-    # Existing intake code expects video_duration_sec.
+    # INTAKE 既有代码读取 video_duration_sec，这里保留兼容转换。
     video_params["video_duration_sec"] = video_params.pop("duration_sec")
     refs = [{"url": url, "status": "pending"} for url in body.reference_videos]
     return {
@@ -163,6 +178,13 @@ def _initial_state(task_id: str, user_id: str | None, body: TaskCreateRequest, p
 
 
 async def _start_pixelflow_run(body: RunCreateRequest, thread_id: str, request: Request):
+    """启动或恢复一个 PixelFlow 专用 LangGraph run。
+
+    这和通用 ``services.start_run`` 的核心区别是指定
+    ``agent_factory=make_pixelflow_graph``，保证运行的是 PixelFlow 状态机。创建
+    新任务时传普通 graph input；Brief 确认时传 ``Command(resume=...)`` 恢复
+    interrupt。
+    """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
@@ -217,6 +239,12 @@ async def _start_pixelflow_run(body: RunCreateRequest, thread_id: str, request: 
 
 
 async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request: Request) -> None:
+    """从 LangGraph checkpoint 同步业务任务视图和资产表。
+
+    LangGraph checkpoint 是真实运行时状态；业务 API 需要的是任务主表、结果字段和
+    资产列表。本函数就是 ``TaskState -> PixelFlowTaskRecord/AssetRecord`` 的同步桥。
+    查询任务详情、run 结束 watcher 都会调用它。
+    """
     store = _task_store(request)
     task = await store.get(task_id, user_id=user_id)
     if task is None:
@@ -248,6 +276,9 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         status = "pending"
     await store.update(task_id, user_id=user_id, phase=phase, status=status, brief=brief, result=result, error=error)
     for asset in result["generated_assets"]:
+        # 注意：generate_node 当前写的是 segment_index。这里保留既有 shot_index 读取
+        # 逻辑，意味着多段资产可能落到 generated:None；这是已知风险，后续应单独修复，
+        # 本次只补注释不改变业务行为。
         shot_index = asset.get("shot_index")
         await store.upsert_asset(
             PixelFlowAssetRecord(
@@ -302,6 +333,13 @@ async def _watch_run_to_task(
     *,
     suppress_pending_replay: bool = False,
 ) -> None:
+    """把 LangGraph stream 事件转换成 PixelFlow 业务事件。
+
+    前端订阅的是任务事件表，而不是直接订阅 LangGraph 原始 stream。watcher 会消费
+    ``StreamBridge``，在阶段变化时写 ``phase_change``，Brief 准备好时写
+    ``brief_ready``，run 结束后先同步 checkpoint，再写 ``task_done`` 或
+    ``run_finished``。
+    """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     store = _task_store(request)
@@ -341,6 +379,11 @@ async def _watch_run_to_task(
 
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(body: TaskCreateRequest, request: Request) -> TaskResponse:
+    """创建 PixelFlow 业务任务，并按需立即启动工作流。
+
+    调用链：创建业务 task -> 构造初始 TaskState -> 启动 PixelFlow graph run ->
+    后台启动 watcher，把 run 进度持续同步回业务事件表。
+    """
     store = _task_store(request)
     user_id = await get_current_user(request)
     task_id = str(uuid.uuid4())
@@ -417,6 +460,10 @@ async def list_task_assets(task_id: str, request: Request) -> list[AssetResponse
 
 @router.post("/{task_id}/brief/confirm", response_model=TaskResponse)
 async def confirm_brief(task_id: str, body: BriefConfirmRequest, request: Request) -> TaskResponse:
+    """确认或驳回 Brief，并恢复 LangGraph 的人工审批 interrupt。
+
+    ``approved=True`` 会让图进入 GENERATE；``approved=False`` 会回到 CREATIVE 重新策划。
+    """
     store = _task_store(request)
     user_id = await get_current_user(request)
     task = await store.get(task_id, user_id=user_id)
@@ -440,6 +487,11 @@ async def confirm_brief(task_id: str, body: BriefConfirmRequest, request: Reques
 
 @router.post("/{task_id}/brief/revise", response_model=TaskResponse)
 async def revise_brief(task_id: str, body: BriefReviseRequest, request: Request) -> TaskResponse:
+    """修改当前业务 Brief，并抽取用户偏好。
+
+    当前实现只更新业务任务表中的 brief、记录反馈并更新偏好，不直接恢复 LangGraph run。
+    如果产品希望“修改后立刻继续生成”，需要另开逻辑变更，不应只靠注释表达。
+    """
     store = _task_store(request)
     user_id = await get_current_user(request)
     task = await store.get(task_id, user_id=user_id)
@@ -458,6 +510,11 @@ async def revise_brief(task_id: str, body: BriefReviseRequest, request: Request)
 
 @router.get("/{task_id}/events")
 async def stream_task_events(task_id: str, request: Request, after_id: int | None = Query(default=None)) -> StreamingResponse:
+    """业务侧 SSE 事件流。
+
+    这里每秒轮询 ``pixelflow_task_events`` 表，把新增事件转为 SSE 返回给前端。
+    ``after_id`` 用于断点续订；这不是直接透传 LangGraph stream。
+    """
     store = _task_store(request)
     user_id = await get_current_user(request)
     if await store.get(task_id, user_id=user_id) is None:

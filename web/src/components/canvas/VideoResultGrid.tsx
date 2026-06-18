@@ -14,6 +14,8 @@ function StatusLine({ results }: { results: VideoResult[] }) {
 }
 
 export function VideoResultGrid({ results }: { results: VideoResult[] }) {
+  // 这里的 url 必须是浏览器可访问地址。若后端返回本地文件路径（如 FFmpeg 本地输出），
+  // <video> 无法直接播放，需要后续 artifact/static 服务转换成 HTTP URL。
   return (
     <div className="space-y-3">
       <StatusLine results={results} />

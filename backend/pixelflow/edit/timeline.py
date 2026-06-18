@@ -1,13 +1,12 @@
-"""build_timeline — assemble generated segment clips into a Timeline IR (pure logic).
+"""把生成片段装配成 Timeline IR，纯逻辑实现。
 
-GENERATE produces one clip per *segment* (a group of consecutive shots, ≤15s,
-generated in a single seedance call). build_timeline places each successfully
-generated segment clip on the timeline in order, trimmed to the segment's exact
-duration, and concatenated; segments whose generation failed are skipped with a
-note so the gap stays visible to QC/UI.
+GENERATE 当前按 segment 生成视频：一个 segment 是一组连续 shots，并由一次
+Seedance 调用生成。``build_timeline`` 会把每个成功生成的 segment clip 按顺序放入
+Timeline，时长使用 segment 的精确规划时长；失败的 segment 会跳过并写入 notes，
+让 QC 和前端都能看到缺口。
 
-Pure and deterministic: no I/O, fully testable offline. The actual render is a
-separate skill that consumes the returned :class:`Timeline`.
+这里不做下载、不调剪辑工具，是可离线测试的纯函数。真正渲染由后续 edit skill
+消费返回的 ``Timeline``。
 """
 
 from __future__ import annotations
@@ -16,10 +15,10 @@ from .models import Clip, Timeline
 
 
 def build_timeline(brief: dict, generated_assets: list[dict]) -> tuple[Timeline, list[str]]:
-    """Build a :class:`Timeline` from the Brief and the GENERATE phase output.
+    """根据 Brief 和 GENERATE 输出构建 ``Timeline``。
 
-    ``generated_assets`` is the per-segment output from ``generate_node``.
-    Returns ``(timeline, notes)``; ``notes`` records skipped segments.
+    ``generated_assets`` 是 ``generate_node`` 的 per-segment 结果。返回
+    ``(timeline, notes)``，其中 ``notes`` 记录被跳过的失败片段。
     """
     clips: list[Clip] = []
     notes: list[str] = []

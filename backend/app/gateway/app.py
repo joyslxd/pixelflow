@@ -34,7 +34,7 @@ from deerflow.config.app_config import apply_logging_level
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
 
-# Default logging; lifespan overrides from config.yaml log_level.
+# 默认日志配置；lifespan 会根据 config.yaml 的 log_level 覆盖。
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -45,25 +45,21 @@ logger = logging.getLogger(__name__)
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
-    """Startup hook: handle first boot and migrate orphan threads otherwise.
+    """启动钩子：处理首次启动和历史无主线程迁移。
 
-    After admin creation, migrate orphan threads from the LangGraph
-    store (metadata.user_id unset) to the admin account. This is the
-    "no-auth → with-auth" upgrade path: users who ran DeerFlow without
-    authentication have existing LangGraph thread data that needs an
-    owner assigned.
-        First boot (no admin exists):
-            - Does NOT create any user accounts automatically.
-            - The operator must visit ``/setup`` to create the first admin.
+    管理员创建后，会把 LangGraph store 中没有 ``metadata.user_id`` 的历史线程迁移
+    到管理员账号下。这是 “无认证 → 有认证” 升级路径：以前未启用鉴权时创建的
+    LangGraph thread 数据需要补一个 owner。
 
-    Subsequent boots (admin already exists):
-      - Runs the one-time "no-auth → with-auth" orphan thread migration for
-        existing LangGraph thread metadata that has no user_id.
+    首次启动（没有管理员）：
+      - 不自动创建账号。
+      - 运维/用户需要访问 ``/setup`` 创建第一个管理员。
 
-    No SQL persistence migration is needed: the four user_id columns
-    (threads_meta, runs, run_events, feedback) only come into existence
-    alongside the auth module via create_all, so freshly created tables
-    never contain NULL-owner rows.
+    后续启动（管理员已存在）：
+      - 执行一次历史无主 LangGraph thread 元数据迁移。
+
+    SQL 持久化不需要额外迁移：threads_meta、runs、run_events、feedback 四个
+    user_id 列会随 auth 模块 create_all 一起出现，新建表不会有 NULL owner 历史行。
     """
     from sqlalchemy import select
 
@@ -74,8 +70,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     try:
         provider = get_local_provider()
     except RuntimeError:
-        # Auth persistence may not be initialized in some test/boot paths.
-        # Skip admin migration work rather than failing gateway startup.
+        # 某些测试或启动路径下鉴权持久化尚未初始化；跳过管理员迁移，避免网关启动失败。
         logger.warning("Auth persistence not ready; skipping admin bootstrap check")
         return
 
@@ -92,8 +87,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         logger.info("=" * 60)
         return
 
-    # Admin already exists — run orphan thread migration for any
-    # LangGraph thread metadata that pre-dates the auth module.
+    # 管理员已存在：迁移 auth 模块引入前留下的无主 LangGraph thread 元数据。
     async with sf() as session:
         stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
         row = (await session.execute(stmt)).scalar_one_or_none()
@@ -103,9 +97,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
     admin_id = str(row.id)
 
-    # LangGraph store orphan migration — non-fatal.
-    # This covers the "no-auth → with-auth" upgrade path for users
-    # whose existing LangGraph thread metadata has no user_id set.
+    # LangGraph store 无主数据迁移是非致命步骤，失败时只记录日志。
     store = getattr(app.state, "store", None)
     if store is not None:
         try:
@@ -117,12 +109,10 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
 
 async def _iter_store_items(store, namespace, *, page_size: int = 500):
-    """Paginated async iterator over a LangGraph store namespace.
+    """分页遍历 LangGraph store 的某个 namespace。
 
-    Replaces the old hardcoded ``limit=1000`` call with a cursor-style
-    loop so that environments with more than one page of orphans do
-    not silently lose data. Terminates when a page is empty OR when a
-    short page arrives (indicating the last page).
+    这里用 offset 分页替代旧的 ``limit=1000`` 固定读取，避免无主数据超过一页时
+    静默漏迁。空页或短页都表示已经到达最后一页。
     """
     offset = 0
     while True:
@@ -137,10 +127,9 @@ async def _iter_store_items(store, namespace, *, page_size: int = 500):
 
 
 async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
-    """Migrate LangGraph store threads with no user_id to the given admin.
+    """把没有 user_id 的 LangGraph store threads 迁移给指定管理员。
 
-    Uses cursor pagination so all orphans are migrated regardless of
-    count. Returns the number of rows migrated.
+    使用分页遍历，保证无论数量多少都能迁移。返回迁移条数。
     """
     migrated = 0
     async for item in _iter_store_items(store, ("threads",)):
@@ -155,15 +144,13 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan handler."""
+    """FastAPI 应用生命周期处理器。"""
 
-    # Load config and check necessary environment variables at startup.
-    # `startup_config` is a local snapshot used only for one-shot bootstrap
-    # work (logging level, langgraph_runtime engines, channels). Request-time
-    # config resolution always routes through `get_app_config()` in
-    # `app/gateway/deps.py::get_config()` so `config.yaml` edits become
-    # visible without a process restart. We deliberately do NOT cache this
-    # snapshot on `app.state` to keep that contract enforceable.
+    # 启动时加载配置并检查必要环境变量。startup_config 是一次性启动快照，只用于
+    # 日志级别、LangGraph runtime 引擎和 channels 等必须重启才生效的基础设施。
+    # 请求期配置读取始终走 deps.get_config() -> get_app_config()，让 config.yaml 修改
+    # 可以在无需重启的情况下对请求生效。因此这里刻意不把 startup_config 缓存在
+    # app.state 上，避免破坏热加载边界。
     try:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
@@ -175,12 +162,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
-    # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
+    # 初始化 LangGraph runtime 组件：StreamBridge、RunManager、checkpointer、store。
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
-        # Check admin bootstrap state and migrate orphan threads after admin exists.
-        # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
+        # 检查管理员初始化状态，并在管理员存在后迁移无主线程。必须在
+        # langgraph_runtime 之后执行，因为迁移需要 app.state.store。
         await _ensure_admin_user(app)
 
         from deerflow.persistence.engine import get_session_factory
@@ -218,10 +205,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application.
+    """创建并配置 FastAPI 应用。
 
-    Returns:
-        Configured FastAPI application instance.
+    返回已挂载中间件、router 和生命周期处理器的 FastAPI 实例。
     """
     config = get_gateway_config()
     docs_url = "/docs" if config.enable_docs else None
@@ -314,15 +300,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ],
     )
 
-    # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
+    # Auth 中间件：非公开路径必须鉴权，作为 fail-closed 安全兜底。
     app.add_middleware(AuthMiddleware)
 
-    # CSRF: Double Submit Cookie pattern for state-changing requests
+    # CSRF 中间件：对会改变状态的请求使用 Double Submit Cookie 模式。
     app.add_middleware(CSRFMiddleware)
 
-    # CORS: the unified nginx endpoint is same-origin by default. Split-origin
-    # browser clients must opt in with this explicit Gateway allowlist so CORS
-    # and CSRF origin checks share the same source of truth.
+    # CORS：统一 nginx 入口默认同源。前后端分离部署时，浏览器来源必须显式写入
+    # Gateway allowlist，让 CORS 和 CSRF origin 校验共享同一份来源配置。
     cors_origins = sorted(get_configured_cors_origins())
     if cors_origins:
         app.add_middleware(
@@ -333,66 +318,65 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_headers=["*"],
         )
 
-    # Include routers
-    # Models API is mounted at /api/models
+    # 挂载各业务 router。
+    # 模型 API：/api/models。
     app.include_router(models.router)
 
-    # MCP API is mounted at /api/mcp
+    # MCP API：/api/mcp。
     app.include_router(mcp.router)
 
-    # Memory API is mounted at /api/memory
+    # Memory API：/api/memory。
     app.include_router(memory.router)
 
-    # Skills API is mounted at /api/skills
+    # Skills API：/api/skills。
     app.include_router(skills.router)
 
-    # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
+    # Artifacts API：/api/threads/{thread_id}/artifacts。
     app.include_router(artifacts.router)
 
-    # Uploads API is mounted at /api/threads/{thread_id}/uploads
+    # Uploads API：/api/threads/{thread_id}/uploads。
     app.include_router(uploads.router)
 
-    # Thread cleanup API is mounted at /api/threads/{thread_id}
+    # Thread 管理 API：/api/threads/{thread_id}。
     app.include_router(threads.router)
 
-    # Agents API is mounted at /api/agents
+    # 自定义 Agents API：/api/agents。
     app.include_router(agents.router)
 
-    # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
+    # Suggestions API：/api/threads/{thread_id}/suggestions。
     app.include_router(suggestions.router)
 
-    # Assistants compatibility API (LangGraph Platform stub)
+    # Assistants 兼容 API：LangGraph Platform stub。
     app.include_router(assistants_compat.router)
 
-    # Auth API is mounted at /api/v1/auth
+    # Auth API：/api/v1/auth。
     app.include_router(auth.router)
 
-    # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
+    # Feedback API：/api/threads/{thread_id}/runs/{run_id}/feedback。
     app.include_router(feedback.router)
 
-    # Thread Runs API (LangGraph Platform-compatible runs lifecycle)
+    # Thread Runs API：兼容 LangGraph Platform 的 runs 生命周期。
     app.include_router(thread_runs.router)
 
-    # Stateless Runs API (stream/wait without a pre-existing thread)
+    # Stateless Runs API：无需预先存在 thread 的 stream/wait。
     app.include_router(runs.router)
 
-    # PixelFlow business task API is mounted at /api/tasks
+    # PixelFlow 业务任务 API：/api/tasks。
     app.include_router(pixelflow_tasks.router)
 
-    # PixelFlow structured preference API is mounted at /api/users/{user_id}/preferences
+    # PixelFlow 结构化偏好 API：/api/users/{user_id}/preferences。
     app.include_router(pixelflow_preferences.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
-        """Health check endpoint.
+        """健康检查端点。
 
-        Returns:
-            Service health status information.
+        返回服务健康状态。
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
 
     return app
 
 
-# Create app instance for uvicorn
+# 供 uvicorn 导入的应用实例。
 app = create_app()

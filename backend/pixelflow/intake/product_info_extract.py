@@ -1,12 +1,16 @@
-"""product_info_extract — fetch a product page and LLM-extract structured info (PRD §8.1).
+"""商品页信息抽取（PRD §8.1）。
 
-Fetches the product URL (blocking httpx, offloaded to a thread so the event loop
-stays free), reduces the HTML to plain text, and asks the config-driven chat
-model to extract a :class:`ProductInfo` via structured output. The model is
-instructed to drop coupons/nav/reviews and keep only core promo info (§8.1).
+这个模块负责把商品详情页转换成结构化 ``ProductInfo``。流程是：
 
-Best-effort: transport failures raise so the caller (``intake_node``) can fall
-back to asking the user; the demand-integrity gate then enforces required fields.
+1. 用 httpx 拉取商品页 HTML。
+2. 清理 script/style/tag，把 HTML 压缩成适合给 LLM 的纯文本。
+3. 调用配置驱动的 chat model，并要求它按 ``ProductInfo`` 结构化输出。
+
+``httpx.get`` 是阻塞 I/O，所以调用方会通过 ``asyncio.to_thread`` 把它放到线程
+里执行，避免卡住 FastAPI/LangGraph 的 async event loop。
+
+这是 best-effort 能力：网络失败会抛给 ``intake_node``，由 node 记录日志并回退
+到人工补充；真正的必填字段仍由需求完整性检查统一兜底。
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from .models import ProductInfo
 logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SEC = 15.0
-_MAX_PAGE_CHARS = 8000  # cap the text we hand the LLM
+_MAX_PAGE_CHARS = 8000  # 限制交给 LLM 的页面文本长度，避免 prompt 过大。
 _UA = "Mozilla/5.0 (compatible; PixelFlowBot/1.0)"
 
 _SCRIPT_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
@@ -55,7 +59,10 @@ def _html_to_text(raw: str) -> str:
 
 
 async def product_info_extract(product_url: str, user_note: str = "") -> ProductInfo:
-    """Fetch ``product_url`` and extract a :class:`ProductInfo`. Raises on fetch error."""
+    """抓取 ``product_url`` 并抽取 ``ProductInfo``。
+
+    抓取异常会继续抛出，由上层 ``intake_node`` 决定如何降级。
+    """
     raw = await asyncio.to_thread(_fetch, product_url)
     page_text = _html_to_text(raw)
     model = create_chat_model(thinking_enabled=False)
