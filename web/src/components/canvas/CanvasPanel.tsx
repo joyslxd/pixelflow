@@ -33,7 +33,7 @@ const REVIEW_COPY = {
 } as const;
 
 export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, briefConfirmed = false }: CanvasPanelProps) {
-  const { phase, brief, results, estCost, actualCost } = state;
+  const { phase, brief, results, qcReport, estCost, actualCost } = state;
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
   const review = phase in REVIEW_COPY ? REVIEW_COPY[phase as keyof typeof REVIEW_COPY] : null;
   return (
@@ -72,6 +72,32 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
         ) : review ? (
           <div className="space-y-3">
             {results.length > 0 && <VideoResultGrid results={results} />}
+            {phase === "qc_review" && qcReport && (
+              <div className="rounded-card border border-line bg-surface p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-[14px] font-semibold text-ink">质检报告</div>
+                  <span className={qcReport.passed ? "text-[12px] font-medium text-emerald" : "text-[12px] font-medium text-rose-500"}>
+                    {qcReport.passed ? "通过" : "未通过"}
+                  </span>
+                </div>
+                {qcReport.score != null && (
+                  <div className="mt-1 text-[12px] text-ink-soft">评分: {Math.round(qcReport.score * 100)} / 100</div>
+                )}
+                <div className="mt-3 divide-y divide-line">
+                  {(qcReport.check_results || []).map((item, index) => (
+                    <div key={`${item.item || "check"}-${index}`} className="py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-[13px] font-medium text-ink">{item.item || `检查项 ${index + 1}`}</span>
+                        <span className={item.status === "pass" ? "text-[12px] text-emerald" : "text-[12px] text-rose-500"}>
+                          {item.status === "pass" ? "通过" : "需处理"}
+                        </span>
+                      </div>
+                      {item.message && <div className="mt-0.5 text-[12px] text-ink-soft">{item.message}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="rounded-card border border-line bg-surface p-4">
               <div className="text-[14px] font-semibold text-ink">{review.title}</div>
               <p className="mt-1 text-[12px] text-ink-soft">请人工确认后再继续下一步。</p>

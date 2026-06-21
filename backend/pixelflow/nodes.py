@@ -339,7 +339,12 @@ async def qc_node(state: TaskState) -> TaskState:
     """
     task_id = state.get("task_id")
     attempts = state.get("qc_attempts", 0) + 1
-    result = qc_check(state.get("brief") or {}, state.get("generated_assets") or [], state.get("timeline") or {})
+    result = qc_check(
+        state.get("brief") or {},
+        state.get("generated_assets") or [],
+        state.get("timeline") or {},
+        state.get("final_video_url") or "",
+    )
     logger.info("[pixelflow] qc task_id=%s attempt=%d passed=%s score=%.2f", task_id, attempts, result.passed, result.score)
     return {
         "phase": Phase.QC_REVIEW.value,
