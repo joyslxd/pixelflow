@@ -26,6 +26,27 @@ const PHASE_MSG: Record<string, string> = {
   done: "全部完成 🎉",
 };
 
+const REVIEW_ARTIFACT: Partial<Record<TaskPhase, NonNullable<ChatMessage["artifact"]>>> = {
+  segment_review: {
+    type: "segments",
+    title: "分镜片段",
+    description: "查看生成片段并确认是否进入剪辑",
+    actionLabel: "查看",
+  },
+  edit_review: {
+    type: "edit",
+    title: "剪辑结果",
+    description: "查看剪辑成片并确认是否质检",
+    actionLabel: "查看",
+  },
+  qc_review: {
+    type: "qc",
+    title: "质检结果",
+    description: "查看质检结果并确认是否完成",
+    actionLabel: "查看",
+  },
+};
+
 function sizeFor(ratio: string, resolution: string): string {
   const r = resolution === "720p" ? 720 : 1080;
   if (ratio === "16:9") return `${Math.round((r * 16) / 9)}x${r}`;
@@ -97,6 +118,62 @@ export function WorkspacePage() {
   const pushArtifact = (content: string, artifact: NonNullable<ChatMessage["artifact"]>) =>
     setMessages((m) => [...m, { id: uid(), role: "assistant", content, time: now(), artifact }]);
 
+  const pushReviewArtifact = (phase: TaskPhase) => {
+    const artifact = REVIEW_ARTIFACT[phase];
+    if (!artifact) return;
+    const key = `${phase}:artifact`;
+    if (announcedPhasesRef.current.has(key)) return;
+    announcedPhasesRef.current.add(key);
+    pushArtifact(PHASE_MSG[phase] || "请在画布确认。", artifact);
+  };
+
+  async function reconcileTaskFromServer(taskId: string) {
+    try {
+      const task = await api.getTask(taskId);
+      setActiveTaskId(task.task_id);
+      const phase = task.phase as TaskPhase;
+      const confirmed = task.phase !== "brief_review";
+      briefConfirmedRef.current = confirmed;
+      setBriefConfirmed(confirmed);
+      setCanvas((c) => ({
+        ...c,
+        phase: phase || c.phase,
+        brief: task.brief && Object.keys(task.brief).length > 0 ? toBrief(task.brief) : c.brief,
+      }));
+
+      if (["segment_review", "edit_review", "qc_review"].includes(task.phase)) {
+        setCanvasOpen(true);
+        await loadResults(phase);
+        pushReviewArtifact(phase);
+        if (PHASE_MSG[task.phase] && !announcedPhasesRef.current.has(task.phase)) {
+          announcedPhasesRef.current.add(task.phase);
+        }
+        return;
+      }
+
+      if (task.phase === "brief_review") {
+        setCanvasOpen(true);
+        if (!announcedPhasesRef.current.has("brief_review")) {
+          announcedPhasesRef.current.add("brief_review");
+          pushAssistant(PHASE_MSG.brief_review);
+        }
+        return;
+      }
+
+      if (task.status === "done") {
+        await loadResults("done");
+        return;
+      }
+
+      if (task.status === "error") {
+        pushAssistant(`生成失败:${task.error || "未知错误"}`);
+        setBusy(false);
+      }
+    } catch {
+      /* keep restored snapshot if server reconciliation fails */
+    }
+  }
+
   const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
     if (Array.isArray(snapshot.messages)) setMessages(snapshot.messages);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
@@ -135,7 +212,10 @@ export function WorkspacePage() {
       if (cancelled) return;
       if (snapshot) {
         applySnapshot(snapshot);
-        if (snapshot.taskId) unsubRef.current = subscribeTaskEvents(snapshot.taskId, onEvent, snapshot.lastEventId || undefined);
+        if (snapshot.taskId) {
+          unsubRef.current = subscribeTaskEvents(snapshot.taskId, onEvent, snapshot.lastEventId || undefined);
+          await reconcileTaskFromServer(snapshot.taskId);
+        }
       }
       restoredRef.current = true;
     };
@@ -196,10 +276,13 @@ export function WorkspacePage() {
         if (phase) {
           if (["generate", "edit", "qc", "done"].includes(phase) && !briefConfirmedRef.current) return;
           setCanvas((c) => ({ ...c, phase: phase as TaskPhase }));
-          if (["segment_review", "edit_review", "qc_review", "done"].includes(phase)) void loadResults(phase as TaskPhase);
+          if (["segment_review", "edit_review", "qc_review", "done"].includes(phase)) {
+            void loadResults(phase as TaskPhase);
+            pushReviewArtifact(phase as TaskPhase);
+          }
           if (PHASE_MSG[phase] && !announcedPhasesRef.current.has(phase)) {
             announcedPhasesRef.current.add(phase);
-            pushAssistant(PHASE_MSG[phase]);
+            if (!(phase in REVIEW_ARTIFACT)) pushAssistant(PHASE_MSG[phase]);
           }
         }
         break;
@@ -236,7 +319,7 @@ export function WorkspacePage() {
     const id = taskIdRef.current;
     if (!id) return;
     try {
-      const assets = await api.listAssets(id);
+      const [assets, taskResult] = await Promise.all([api.listAssets(id), api.getResult(id).catch(() => null)]);
       const videos = assets.filter((a) => a.asset_type === "final_video" || a.asset_type === "generated_video");
       const results: VideoResult[] = videos.map((a, i) => ({
         id: a.asset_id || `r${i}`,
@@ -244,7 +327,13 @@ export function WorkspacePage() {
         assetType: a.asset_type,
         status: a.status === "ready" ? "success" : a.status === "error" ? "failed" : "pending",
       }));
-      setCanvas((c) => ({ ...c, phase: nextPhase, results }));
+      const qcReport = taskResult?.result?.qc_report;
+      setCanvas((c) => ({
+        ...c,
+        phase: nextPhase,
+        results,
+        qcReport: qcReport && typeof qcReport === "object" ? c.qcReport || (qcReport as CanvasState["qcReport"]) : c.qcReport,
+      }));
       if (nextPhase === "done") {
         pushArtifact("生成完成,素材已就绪。点击下方素材卡打开画布查看。", {
           type: "results",
@@ -275,6 +364,14 @@ export function WorkspacePage() {
       }));
       if (task.status === "done") {
         await loadResults("done");
+        return;
+      }
+      if (["segment_review", "edit_review", "qc_review"].includes(task.phase)) {
+        await loadResults(task.phase as TaskPhase);
+        if (PHASE_MSG[task.phase] && !announcedPhasesRef.current.has(task.phase)) {
+          announcedPhasesRef.current.add(task.phase);
+          pushAssistant(PHASE_MSG[task.phase]);
+        }
         return;
       }
       if (task.phase === "brief_review") {
@@ -370,6 +467,13 @@ export function WorkspacePage() {
           setCanvasOpen(true);
           if (msg.artifact.type === "brief") setCanvas((c) => ({ ...c, phase: "brief_review" }));
           if (msg.artifact.type === "results") setCanvas((c) => ({ ...c, phase: "done" }));
+          if (msg.artifact.type === "segments") setCanvas((c) => ({ ...c, phase: "segment_review" }));
+          if (msg.artifact.type === "edit") setCanvas((c) => ({ ...c, phase: "edit_review" }));
+          if (msg.artifact.type === "qc") setCanvas((c) => ({ ...c, phase: "qc_review" }));
+          if (["segments", "edit", "qc"].includes(msg.artifact.type)) {
+            const phaseByType = { segments: "segment_review", edit: "edit_review", qc: "qc_review" } as const;
+            void loadResults(phaseByType[msg.artifact.type as "segments" | "edit" | "qc"]);
+          }
         }}
       />
       {canvasOpen && (

@@ -317,13 +317,14 @@ async def _watch_run_to_task(
     run_id: str,
     request: Request,
     *,
-    suppress_pending_replay: bool = False,
+    suppress_replay_phases: set[str] | None = None,
 ) -> None:
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     store = _task_store(request)
     last_phase = None
     brief_emitted = False
+    suppressed_phases = suppress_replay_phases or set()
     try:
         async for entry in bridge.subscribe(run_id):
             if entry is END_SENTINEL:
@@ -342,13 +343,14 @@ async def _watch_run_to_task(
             data = getattr(entry, "data", None)
             if isinstance(data, dict):
                 phase = data.get("phase")
-                if suppress_pending_replay and phase in {"brief_review", "segment_review", "edit_review", "qc_review"}:
+                if phase in suppressed_phases:
+                    suppressed_phases.remove(str(phase))
                     continue
                 if phase and phase != last_phase:
                     last_phase = phase
                     await store.update(task_id, user_id=user_id, phase=str(phase), status="running")
                     await store.append_event(task_id, "phase_change", {"phase": phase}, user_id=user_id)
-                if data.get("brief") and phase == "brief_review" and not suppress_pending_replay and not brief_emitted:
+                if data.get("brief") and phase == "brief_review" and "brief_review" not in suppressed_phases and not brief_emitted:
                     brief_emitted = True
                     await store.update(task_id, user_id=user_id, brief=data["brief"])
                     await store.append_event(task_id, "brief_ready", {"brief": data["brief"]}, user_id=user_id)
@@ -488,7 +490,8 @@ async def confirm_brief(task_id: str, body: BriefConfirmRequest, request: Reques
     run = await _start_pixelflow_run(run_body, task.thread_id, request)
     updated = await store.update(task_id, user_id=user_id, run_id=run.run_id, status="running", phase="generate" if body.approved else "creative")
     await store.append_event(task_id, "brief_confirmed" if body.approved else "brief_rejected", {"run_id": run.run_id}, user_id=user_id)
-    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_pending_replay=body.approved))
+    suppress_phases = {"brief_review"} if body.approved else set()
+    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_replay_phases=suppress_phases))
     return _response(updated or task)
 
 
@@ -534,7 +537,8 @@ async def confirm_stage(task_id: str, stage: Literal["segments", "edit", "qc"], 
     updated = await store.update(task_id, user_id=user_id, run_id=run.run_id, status="running", phase=next_phase)
     event_name = f"{stage}_confirmed" if body.approved else f"{stage}_rejected"
     await store.append_event(task_id, event_name, {"run_id": run.run_id}, user_id=user_id)
-    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_pending_replay=True))
+    suppress_phases = {"segments": "segment_review", "edit": "edit_review", "qc": "qc_review"}
+    asyncio.create_task(_watch_run_to_task(task_id, user_id, run.run_id, request, suppress_replay_phases={suppress_phases[stage]}))
     return _response(updated or task)
 
 
