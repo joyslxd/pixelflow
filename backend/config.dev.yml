@@ -86,24 +86,16 @@ deerflow:
 
 # LLM 模型配置；DeerFlow Agent 使用。这里直接写明文值，不再依赖 .env。
 models:
-  # 默认聊天模型；如果要真实调用大模型，请填好 api_key/base_url/model。
-  - name: "default"
-    # 管理端展示名称；只影响展示，不影响调用。
-    display_name: "默认开发模型"
-    # 模型用途说明；方便以后多人维护时识别。
-    description: "开发环境默认模型，请按实际供应商修改 api_key 和 base_url。"
-    # LangChain 模型 Provider 类路径；OpenAI 兼容接口通常使用这个。
+  # 默认聊天模型；代码未显式指定 model_name 时会使用列表中的第一个模型。
+  - name: "deepseek-v4-pro"
+    # LangChain 模型 Provider 类路径；DeepSeek 兼容 OpenAI 协议，所以使用 ChatOpenAI 适配器。
     use: "langchain_openai:ChatOpenAI"
-    # 实际模型名称；例如 gpt-4o-mini、deepseek-chat 或兼容服务的模型名。
-    model: "gpt-4o-mini"
+    # 实际请求给模型供应商的模型名称；需要和供应商控制台支持的名称一致。
+    model: "deepseek-v4-pro"
     # 模型 API Key；开发环境可直接写明文。
-    api_key: ""
-    # 模型 API Base；OpenAI 官方可留空，兼容服务填写自己的 base_url。
-    base_url: ""
-    # 是否支持图片输入；按模型能力填写。
-    supports_vision: true
-    # 是否支持 reasoning/thinking 配置；普通 chat 模型保持 false。
-    supports_thinking: false
+    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT"
+    # 模型 API Base；这里使用 yunwu.site 的 OpenAI 兼容接口地址。
+    base_url: "https://yunwu.site/v1"
 
 # sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
 sandbox:
