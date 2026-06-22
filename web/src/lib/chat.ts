@@ -6,7 +6,7 @@ export interface ChatMessage {
   content: string;
   time: string;
   artifact?: {
-    type: "brief" | "results";
+    type: "brief" | "results" | "segments" | "edit" | "qc";
     title: string;
     description: string;
     actionLabel: string;
@@ -35,6 +35,11 @@ export interface CanvasState {
   phase: TaskPhase | "idle";
   brief?: Brief;
   results: VideoResult[];
+  qcReport?: {
+    passed?: boolean;
+    score?: number;
+    check_results?: Array<{ item?: string; status?: string; message?: string }>;
+  };
   estCost?: number;
   actualCost?: number;
 }

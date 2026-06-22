@@ -15,7 +15,7 @@ export function Sidebar() {
     <aside className="flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="flex items-center px-5 pb-3 pt-5">
         <span className="text-[18px] font-extrabold tracking-tight text-brand">
-          BORG RISE
+          Pixel Flow
         </span>
       </div>
 

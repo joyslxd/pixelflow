@@ -24,9 +24,12 @@ from pixelflow.nodes import (
     brief_review_node,
     creative_node,
     edit_node,
+    edit_review_node,
     generate_node,
     intake_node,
     qc_node,
+    qc_review_node,
+    segment_review_node,
 )
 from pixelflow.state import Phase, TaskState
 
@@ -46,15 +49,23 @@ def _route_after_brief(state: TaskState) -> str:
 
 
 def _route_after_generate(state: TaskState) -> str:
-    """GENERATE 后的路由：至少有一个可用片段才进入剪辑。"""
-    return "edit" if state.get("generation_ready") is True else END
+    """GENERATE 后的路由：至少有一个可用片段才进入片段人工确认。"""
+    return "segment_review" if state.get("generation_ready") is True else END
 
 
-def _route_after_qc(state: TaskState) -> str:
-    """QC 后的路由：通过即结束，失败则在重试预算内回到生成阶段。"""
-    if state.get("qc_passed", True):
-        return END
-    if state.get("qc_attempts", 0) >= MAX_QC_ATTEMPTS:
+def _route_after_segment_review(state: TaskState) -> str:
+    """片段确认后的路由：批准进入剪辑，拒绝则重新生成。"""
+    return "edit" if state.get("segments_approved") is True else "generate"
+
+
+def _route_after_edit_review(state: TaskState) -> str:
+    """剪辑确认后的路由：批准进入质检，拒绝则重新剪辑。"""
+    return "qc" if state.get("edit_approved") is True else "edit"
+
+
+def _route_after_qc_review(state: TaskState) -> str:
+    """QC 确认后的路由：批准或重试耗尽则结束，否则回到生成。"""
+    if state.get("qc_approved") is True or state.get("qc_attempts", 0) >= MAX_QC_ATTEMPTS:
         return END
     return "generate"
 
@@ -68,17 +79,16 @@ def build_graph() -> StateGraph:
     # 创建一个基于 TaskState 的状态图
     graph = StateGraph(TaskState)
 
-
-
     # 向图中添加各个处理节点
     graph.add_node(Phase.INTAKE, intake_node)        # 添加接收节点
     graph.add_node(Phase.CREATIVE, creative_node)    # 添加创意节点
     graph.add_node(Phase.BRIEF_REVIEW, brief_review_node)  # 添加人工审核节点
     graph.add_node(Phase.GENERATE, generate_node)    # 添加生成节点
+    graph.add_node(Phase.SEGMENT_REVIEW, segment_review_node)  # 添加片段审核节点
     graph.add_node(Phase.EDIT, edit_node)          # 添加编辑节点
+    graph.add_node(Phase.EDIT_REVIEW, edit_review_node)  # 添加剪辑审核节点
     graph.add_node(Phase.QC, qc_node)              # 添加质量控制节点
-
-
+    graph.add_node(Phase.QC_REVIEW, qc_review_node)  # 添加质检审核节点
 
     # 添加节点之间的边连接
     graph.add_edge(START, Phase.INTAKE)  # 从开始节点连接到接收节点
@@ -99,16 +109,25 @@ def build_graph() -> StateGraph:
     # 添加生成后的条件边
     graph.add_conditional_edges(
         Phase.GENERATE,
-        _route_after_generate,  # 根据路由函数决定下一个节点
-        {"edit": Phase.EDIT, END: END},  # 可能的下一个节点
+        _route_after_generate,
+        {"segment_review": Phase.SEGMENT_REVIEW, END: END},
     )
-    # 从编辑节点连接到质量控制节点
-    graph.add_edge(Phase.EDIT, Phase.QC)
-    # 添加质量控制后的条件边
     graph.add_conditional_edges(
-        Phase.QC,
-        _route_after_qc,  # 根据路由函数决定下一个节点
-        {"generate": Phase.GENERATE, END: END},  # 可能的下一个节点
+        Phase.SEGMENT_REVIEW,
+        _route_after_segment_review,
+        {"edit": Phase.EDIT, "generate": Phase.GENERATE},
+    )
+    graph.add_edge(Phase.EDIT, Phase.EDIT_REVIEW)
+    graph.add_conditional_edges(
+        Phase.EDIT_REVIEW,
+        _route_after_edit_review,
+        {"qc": Phase.QC, "edit": Phase.EDIT},
+    )
+    graph.add_edge(Phase.QC, Phase.QC_REVIEW)
+    graph.add_conditional_edges(
+        Phase.QC_REVIEW,
+        _route_after_qc_review,
+        {"generate": Phase.GENERATE, END: END},
     )
 
     # 返回构建完成的状态图

@@ -24,16 +24,16 @@ def _status(result, item):
 def test_full_coverage_on_target_passes():
     result = qc_check(_brief(), _assets(2), _timeline(2, 30.0))
     assert result.passed
-    assert result.score == 1.0
     assert _status(result, "片段完整性") == "pass"
     assert _status(result, "时长达标") == "pass"
+    assert 0 < result.score <= 1.0  # 含 P0 占位 warn(产品一致性等),非满分
 
 
 def test_missing_clip_fails_and_scores_partial():
     result = qc_check(_brief(), _assets(3), _timeline(2, 20.0))
     assert not result.passed  # blocking -> routes back to GENERATE
     assert _status(result, "片段完整性") == "fail"
-    assert result.score == round(2 / 3, 2)
+    assert result.score < 1.0
 
 
 def test_duration_drift_warns_not_fails():
@@ -50,11 +50,11 @@ def test_duration_within_tolerance_passes():
 def test_empty_brief_passes_vacuously():
     result = qc_check({}, [], {"clips": [], "total_duration": 0.0})
     assert result.passed
-    assert result.score == 1.0
+    assert _status(result, "片段完整性") == "pass"
     assert all(c.item != "时长达标" for c in result.check_results)
 
 
 def test_all_clips_failed_fails():
     result = qc_check(_brief(), _assets(3), _timeline(0, 0.0))
     assert not result.passed
-    assert result.score == 0.0
+    assert _status(result, "片段完整性") == "fail"

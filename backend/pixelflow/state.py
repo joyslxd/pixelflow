@@ -26,8 +26,11 @@ class Phase(StrEnum):
     CREATIVE = "creative"  # 策划：生成 Brief，并执行硬约束校验。
     BRIEF_REVIEW = "brief_review"  # 人工确认：用户审核 Brief，批准后才生成视频。
     GENERATE = "generate"  # 生成：调用 Borgrise 等视频能力生成片段。
+    SEGMENT_REVIEW = "segment_review"  # 人工确认：用户审核生成片段，批准后进入剪辑。
     EDIT = "edit"  # 剪辑：把生成片段组装为剪映草稿或最终成片。
+    EDIT_REVIEW = "edit_review"  # 人工确认：用户审核剪辑结果，批准后进入质检。
     QC = "qc"  # 质检：检查覆盖率/时长等，失败时可回到 GENERATE 重试。
+    QC_REVIEW = "qc_review"  # 人工确认：用户审核质检结论，批准后完成任务。
     DONE = "done"  # 终态：任务完成或已终止。
 
 
@@ -62,15 +65,18 @@ class TaskState(TypedDict, total=False):
     # 生成：按 segment/shot 记录第三方返回的视频片段资产。
     generated_assets: list[dict[str, Any]]
     generation_ready: bool
+    segments_approved: bool
 
     # 剪辑：把生成资产组装成 Timeline，再交给剪映或 FFmpeg skill 渲染。
     timeline: dict[str, Any]  # EDIT 阶段中间表示，包含有序 clips 和输出格式。
     draft_path: str  # 剪辑 skill 产出的可编辑剪映草稿目录。
     final_video_url: str
     edit_notes: list[str]  # 剪辑阶段的跳过片段、渲染失败、依赖缺失等说明。
+    edit_approved: bool
 
     # 质检：保存 QC 结果和重试计数，用于限制 GENERATE 重试循环。
     qc_passed: bool
+    qc_approved: bool
     qc_report: dict[str, Any]
     qc_attempts: int
 

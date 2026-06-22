@@ -34,7 +34,7 @@ def test_render_success_sets_draft_path(monkeypatch):
     state = {"task_id": "t1", "brief": _BRIEF, "generated_assets": _ASSETS}
     out = asyncio.run(edit_node(state))
 
-    assert out["phase"] == Phase.QC.value
+    assert out["phase"] == Phase.EDIT_REVIEW.value
     assert out["draft_path"] == "/tmp/drafts/pixelflow_t1"
     assert out["edit_notes"] == []
     assert len(fake.calls) == 1
