@@ -13,6 +13,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+MEDIA_SKILL_ENV = "PIXELFLOW_MEDIA_SKILL"
+DEFAULT_MEDIA_SKILL = "borgrise"
+
 
 @dataclass
 class GenerationResult:
@@ -105,18 +108,33 @@ class VideoDecomposeSkill(Protocol):
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult: ...
 
 
+def _get_media_skill_impl() -> str:
+    """读取当前媒体生成/理解供应商配置。
+
+    当前图片生成、视频生成、参考视频拆解都共用同一个供应商能力，配置名统一为
+    ``PIXELFLOW_MEDIA_SKILL``。目前只支持 ``borgrise``；后续如果图片、视频、
+    拆解需要独立切供应商，再拆成更细的配置项。
+    """
+    return (os.environ.get(MEDIA_SKILL_ENV, DEFAULT_MEDIA_SKILL).strip() or DEFAULT_MEDIA_SKILL).lower()
+
+
+def _get_borgrise_media_skill():
+    """延迟导入 Borgrise skill，避免未使用时提前加载供应商相关模块。"""
+    from pixelflow.skills.borgrise import BorgriseSkill
+
+    return BorgriseSkill()
+
+
 def get_video_skill() -> VideoGenerationSkill:
     """返回当前配置的视频生成 skill。
 
-    这是视频生成实现的唯一替换点。MVP 默认返回进程内 Borgrise 实现；
-    ``PIXELFLOW_VIDEO_SKILL`` 预留给后续切换其它实现，例如 sandbox 执行版。
+    视频生成属于媒体生成能力，读取统一的 ``PIXELFLOW_MEDIA_SKILL``。当前仅支持
+    ``borgrise``，它会调用 content-app/Borgrise 的图片转视频、续写视频等接口。
     """
-    impl = os.environ.get("PIXELFLOW_VIDEO_SKILL", "borgrise")
+    impl = _get_media_skill_impl()
     if impl == "borgrise":
-        from pixelflow.skills.borgrise import BorgriseSkill
-
-        return BorgriseSkill()
-    raise ValueError(f"Unknown video skill implementation: {impl!r}")
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
 
 
 def get_video_edit_skill() -> VideoEditSkill:
@@ -138,10 +156,12 @@ def get_video_edit_skill() -> VideoEditSkill:
 
 
 def get_video_decompose_skill() -> VideoDecomposeSkill:
-    """返回当前配置的参考视频拆解 skill，也就是 INTAKE 阶段替换点。"""
-    impl = os.environ.get("PIXELFLOW_DECOMPOSE_SKILL", "borgrise")
-    if impl == "borgrise":
-        from pixelflow.skills.borgrise import BorgriseSkill
+    """返回当前配置的参考视频拆解 skill，也就是 INTAKE 阶段替换点。
 
-        return BorgriseSkill()
-    raise ValueError(f"Unknown video decompose skill implementation: {impl!r}")
+    参考视频拆解也属于媒体理解/生成供应商能力，和视频生成共用
+    ``PIXELFLOW_MEDIA_SKILL``。当前仅支持 ``borgrise``。
+    """
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")

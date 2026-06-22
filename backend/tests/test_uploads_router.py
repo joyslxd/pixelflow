@@ -695,7 +695,7 @@ def test_upload_limits_endpoint_requires_thread_access():
     app.include_router(uploads.router)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-local/uploads/limits")
+        response = client.get("/agent/threads/thread-local/uploads/limits")
 
     assert response.status_code == 404
 

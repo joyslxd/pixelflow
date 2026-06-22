@@ -80,7 +80,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     app.include_router(artifacts_router.router)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt?download=false")
+        response = client.get("/agent/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt?download=false")
 
     assert response.status_code == 200
     assert response.text == "hello"
@@ -98,7 +98,7 @@ def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path
     app.include_router(artifacts_router.router)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/notes.txt?download=true")
+        response = client.get("/agent/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/notes.txt?download=true")
 
     assert response.status_code == 200
     assert response.text == "hello"

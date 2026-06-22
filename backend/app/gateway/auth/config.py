@@ -72,8 +72,8 @@ def get_auth_config() -> AuthConfig:
             logger.warning(
                 "⚠ AUTH_JWT_SECRET is not set — using an auto-generated secret "
                 "persisted to .jwt_secret. Sessions will survive restarts. "
-                "For production, add AUTH_JWT_SECRET to your .env file: "
-                'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+                "For production, set auth.jwt_secret in config.prod.yml. "
+                'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
         _auth_config = AuthConfig(jwt_secret=jwt_secret)
     return _auth_config

@@ -18,11 +18,13 @@ Borgrise AI 内容创作平台执行脚本。
     python run_generation.py poll --task-id TASK_ID
 
 环境变量：
-    BORGRISE_API_TOKEN: API bearer token
-    BORGRISE_USERNAME: 自动刷新 token 时使用的 Borgrise 用户名
-    BORGRISE_PASSWORD: 自动刷新 token 时使用的 Borgrise 密码
     BORGRISE_BASE_URL: API base URL，默认 https://test-video.borgrise.com/api
     BORGRISE_PROJECT_ID: 生成接口使用的项目 ID，默认 1
+
+鉴权说明：
+    生成/查询接口使用 content-app 登录用户的 Authorization 透传。网关收到前端请求后，
+    会把原始 Authorization 写入 ContextVar；本脚本从 ContextVar 读取，不再支持
+    BORGRISE_API_TOKEN、账号密码自动登录等静态扣费身份。
 """
 
 import os
@@ -43,9 +45,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 # 基础配置
 BASE_URL = os.environ.get("BORGRISE_BASE_URL", "https://test-video.borgrise.com/api")
-API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
-BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
-BORGRISE_PASSWORD = os.environ.get("BORGRISE_PASSWORD", "")
 PROJECT_ID = os.environ.get("BORGRISE_PROJECT_ID", "1")
 SKIP_SSL_VERIFY = os.environ.get("BORGRISE_SKIP_SSL_VERIFY", "").lower() in {"1", "true", "yes", "on"}
 SSL_CONTEXT = ssl._create_unverified_context() if SKIP_SSL_VERIFY else None
@@ -60,17 +59,19 @@ SAFE_MAX_LONG_VIDEO_DURATION = 30
 
 # 轮询配置
 POLL_INTERVAL = 5  # 秒
-POLL_TIMEOUT = int(os.environ.get("BORGRISE_POLL_TIMEOUT", "600"))  # 秒，默认 10 分钟。
-_cli_poll_timeout: Optional[int] = None  # 由 --poll-timeout 命令行参数覆盖。
+VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # 视频生成默认最多等 1 小时。
+IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # 图片生成默认最多等 10 分钟。
+VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "1200"))  # 视频分析/拆解默认最多等 20 分钟。
+_cli_poll_timeout: Optional[int] = None  # 由 --poll-timeout 命令行参数临时覆盖当前命令的业务默认值。
 
 # 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
-def _effective_poll_timeout() -> int:
-    """返回最终轮询超时时间：命令行参数优先，否则使用环境变量/默认值。"""
-    return _cli_poll_timeout if _cli_poll_timeout is not None else POLL_TIMEOUT
+def _effective_poll_timeout(default_timeout: int) -> int:
+    """返回最终轮询超时时间：命令行参数优先，否则使用调用方传入的业务默认值。"""
+    return _cli_poll_timeout if _cli_poll_timeout is not None else default_timeout
 
 
 def validate_ratio(ratio: str) -> Optional[Dict]:
@@ -167,7 +168,7 @@ def extract_result_urls(data: Any) -> List[str]:
 def get_headers(model: str = "", bill_type: int = 0,
                  duration: int = 1, size: str = "720p",
                  model_header: str = "ModelType") -> Dict[str, str]:
-    """生成带鉴权 token 和 Borgrise 必需自定义头的请求头。
+    """生成带当前用户 Authorization 和 Borgrise 必需自定义头的请求头。
 
     Borgrise API 需要的关键自定义头：
       - ModelType/modelType：模型名。content-app_ec 图片端点用 ModelType，
@@ -175,10 +176,12 @@ def get_headers(model: str = "", bill_type: int = 0,
       - billType：2 = 图片按张计费，3 = 视频按秒计费。
       - apiModelParamObj：模型参数 JSON 字符串，例如 {"size":"720p"}。
       - duration：生成时长，视频按秒，图片为 1。
+
+    鉴权头不再来自配置文件里的固定 token，而是来自当前请求的 content-app
+    Authorization。这样后续 content-app 才能按真实登录用户扣费、查资产和写历史。
     """
-    ensure_api_token()
     headers = {
-        "Authorization": f"Bearer {API_TOKEN}",
+        "Authorization": _current_authorization(),
         "Content-Type": "application/json"
     }
     if model:
@@ -201,22 +204,6 @@ def with_project(endpoint: str, project_id: str = PROJECT_ID) -> str:
     return f"{endpoint}{separator}projectId={project_id}"
 
 
-def _extract_token(payload: Dict[str, Any]) -> Optional[str]:
-    """从已知 Borgrise 登录响应结构中提取 token。"""
-    data = payload.get("data", payload)
-    if not isinstance(data, dict):
-        return None
-    return (
-        data.get("token")
-        or data.get("accessToken")
-        or data.get("access_token")
-        or data.get("jwt")
-        or payload.get("token")
-        or payload.get("accessToken")
-        or payload.get("access_token")
-    )
-
-
 def _looks_token_expired(payload: Dict[str, Any]) -> bool:
     """从 HTTP/JSON 响应形态中判断 Borgrise token 是否过期。"""
     haystack = " ".join(
@@ -232,55 +219,21 @@ def _looks_token_expired(payload: Dict[str, Any]) -> bool:
     return False
 
 
-def login_and_refresh_token() -> str:
-    """使用 BORGRISE_USERNAME/PASSWORD 登录，并刷新当前进程内 token。"""
-    global API_TOKEN
+def _current_authorization() -> str:
+    """读取当前请求的 content-app Authorization。
 
-    if not BORGRISE_USERNAME or not BORGRISE_PASSWORD:
-        raise ValueError(
-            "BORGRISE_API_TOKEN is expired and BORGRISE_USERNAME/BORGRISE_PASSWORD "
-            "are not configured for automatic refresh."
-        )
+    这里故意使用延迟 import，保证这个脚本作为命令行文件被导入时不会因为应用层
+    模块初始化顺序报错。真正发起计费接口前如果没有请求上下文，会抛出清晰错误。
+    """
+    from app.gateway.content_app_auth_context import require_current_authorization
 
-    login_url = f"{BASE_URL}/auth/login"
-    body = json.dumps({
-        "username": BORGRISE_USERNAME,
-        "password": BORGRISE_PASSWORD,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        login_url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else ""
-        raise RuntimeError(f"Borgrise login failed: HTTP {e.code} {error_body}") from e
-
-    token = _extract_token(payload)
-    if not token:
-        raise RuntimeError(f"Borgrise login succeeded but no token was found: {payload}")
-
-    API_TOKEN = token
-    os.environ["BORGRISE_API_TOKEN"] = token
-    print("Borgrise API token refreshed automatically.")
-    return token
-
-
-def ensure_api_token() -> str:
-    """返回可用 token；如果只配置了账号密码，则先登录换取 token。"""
-    if API_TOKEN:
-        return API_TOKEN
-    return login_and_refresh_token()
+    return require_current_authorization()
 
 
 def _apply_auth_header(headers: Dict[str, str]) -> Dict[str, str]:
+    """把当前用户 Authorization 写入请求头，覆盖调用方误传的固定 token。"""
     updated = dict(headers)
-    updated["Authorization"] = f"Bearer {ensure_api_token()}"
+    updated["Authorization"] = _current_authorization()
     return updated
 
 
@@ -312,12 +265,15 @@ def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST
     """
     url = f"{BASE_URL}{endpoint}"
     # 优先使用调用方传入的自定义头；否则使用轮询等简单请求的默认 JSON 头。
-    if custom_headers:
-        headers = _apply_auth_header(custom_headers)
-    else:
-        headers = _apply_auth_header({
-            "Content-Type": "application/json"
-        })
+    try:
+        if custom_headers:
+            headers = _apply_auth_header(custom_headers)
+        else:
+            headers = _apply_auth_header({
+                "Content-Type": "application/json"
+            })
+    except Exception as exc:
+        return {"error": True, "message": str(exc)}
 
     if data:
         body = json.dumps(data).encode("utf-8")
@@ -329,15 +285,7 @@ def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST
         try:
             result = _send_request(url, body, headers, method)
             if _retry_on_token_expired and _looks_token_expired(result):
-                login_and_refresh_token()
-                headers = _apply_auth_header(headers)
-                return make_request(
-                    endpoint,
-                    data=data,
-                    method=method,
-                    custom_headers=headers,
-                    _retry_on_token_expired=False,
-                )
+                return {"error": True, "status_code": 401, "message": "content-app Authorization 已过期，请重新登录后重试", "details": result}
             if not result.get("error"):
                 return result
 
@@ -396,7 +344,10 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     }
-    headers = _apply_auth_header(headers)
+    try:
+        headers = _apply_auth_header(headers)
+    except Exception as exc:
+        return {"error": True, "message": str(exc)}
 
     last_error: Optional[Dict] = None
     for attempt in range(MAX_REQUEST_RETRIES):
@@ -435,15 +386,17 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     return last_error or {"error": True, "message": "All upload retries exhausted"}
 
 
-def poll_task(task_id: str, timeout: Optional[int] = None) -> Dict:
+def poll_task(task_id: str, timeout: Optional[int] = None, *, default_timeout: Optional[int] = None) -> Dict:
     """轮询任务状态，直到完成、失败或超时。
 
     参数：
         task_id: 要轮询的 Borgrise task ID。
-        timeout: 最大等待秒数。未传时依次使用 --poll-timeout、BORGRISE_POLL_TIMEOUT、
-                 最后回退到默认 600 秒。
+        timeout: 本次调用显式指定的最大等待秒数，优先级最高。
+        default_timeout: 业务类型默认等待秒数；视频、图片、视频分析分别传入不同值。
+                 未传时按视频任务处理，默认最多等待 1 小时。
     """
-    effective_timeout = timeout if timeout is not None else _effective_poll_timeout()
+    business_default = default_timeout if default_timeout is not None else VIDEO_POLL_TIMEOUT
+    effective_timeout = timeout if timeout is not None else _effective_poll_timeout(business_default)
     start_time = time.time()
     last_status = None
 
@@ -782,7 +735,7 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     }
 
     print(f"\n{'='*60}")
-    print(f"POST /api/video/image-to-video")
+    print("POST /api/video/image-to-video")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"Duration: {duration}s")
@@ -810,9 +763,9 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
         }
 
     print(f"Task created: {task_id}")
-    print(f"Polling for result...\n")
+    print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -886,7 +839,7 @@ def text_to_video(prompt: str,
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -974,7 +927,7 @@ def reference_mode_video(prompt: str,
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -1159,9 +1112,9 @@ def extend_video(video_url: str, duration: int = 10,
         }
 
     print(f"Task created: {task_id}")
-    print(f"Polling for result...\n")
+    print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -1316,7 +1269,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
         last_segment = segment_duration
 
     print(f"\n{'='*60}")
-    print(f"LONG IMAGE TO VIDEO WORKFLOW")
+    print("LONG IMAGE TO VIDEO WORKFLOW")
     print(f"{'='*60}")
     print(f"Target Duration: {total_duration}s")
     print(f"Segment Duration: {segment_duration}s")
@@ -1324,6 +1277,8 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
     print(f"{'='*60}\n")
 
     segments = []
+    # 长图生视频只有一个用户 prompt；进度文件需要列表形态，便于恢复工具复用统一结构。
+    progress_prompts = [prompt or product_description or ""] * total_segments
 
     # 生成首段。
     first_result = image_to_video(
@@ -1355,7 +1310,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
                 "segment_duration": segment_duration,
                 "segments_completed": 1,
                 "total_segments": total_segments,
-                "prompts": prompts,
+                "prompts": progress_prompts,
                 "segments": segments,
                 "last_updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
@@ -1418,7 +1373,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
                     "segment_duration": segment_duration,
                     "segments_completed": len(segments),
                     "total_segments": total_segments,
-                    "prompts": prompts,
+                    "prompts": progress_prompts,
                     "segments": segments,
                     "last_updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }
@@ -1439,7 +1394,7 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
     # ---- 最终时长校验 ---------------------------------------------------
     duration_check = None
     if final_video_url:
-        print(f"\nVerifying final video duration (ffprobe)...")
+        print("\nVerifying final video duration (ffprobe)...")
         duration_check = verify_video_duration(final_video_url, total_duration, tolerance=2)
         if duration_check.get("verdict") == "PASS":
             print(f"  ✅ Duration OK: {duration_check['actual_duration']}s "
@@ -1674,7 +1629,7 @@ def long_reference_mode_video(prompts: List[str],
     # ---- 最终时长校验 ---------------------------------------------------
     duration_check = None
     if final_video_url:
-        print(f"\nVerifying final video duration (ffprobe)...")
+        print("\nVerifying final video duration (ffprobe)...")
         duration_check = verify_video_duration(
             final_video_url, total_duration, tolerance=2
         )
@@ -1988,7 +1943,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
     }
 
     print(f"\n{'='*60}")
-    print(f"POST /api/picture/text_to_image")
+    print("POST /api/picture/text_to_image")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"Ratio: {ratio}")
@@ -2007,9 +1962,9 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
         return {"error": True, "message": "No taskId in response", "response": result}
 
     print(f"Task created: {task_id}")
-    print(f"Polling for result...\n")
+    print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2120,7 +2075,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2172,7 +2127,7 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     }
 
     print(f"\n{'='*60}")
-    print(f"POST /api/picture/image_edit")
+    print("POST /api/picture/image_edit")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"{'='*60}\n")
@@ -2188,9 +2143,9 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
         return {"error": True, "message": "No taskId in response", "response": result}
 
     print(f"Task created: {task_id}")
-    print(f"Polling for result...\n")
+    print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2237,7 +2192,7 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
         })
 
     print(f"\n{'='*60}")
-    print(f"POST /api/picture/batch_text_to_image")
+    print("POST /api/picture/batch_text_to_image")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"Count: {len(prompts)} images")
@@ -2262,13 +2217,13 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
             return {"error": True, "message": "No taskIds in response", "response": result}
 
     print(f"Tasks created: {task_ids}")
-    print(f"Polling for results...\n")
+    print("Polling for results...\n")
 
     # 逐个轮询所有任务。
     results = []
     for task_id in task_ids:
         print(f"Polling task {task_id}...")
-        poll_result = poll_task(task_id)
+        poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
         if not poll_result.get("error"):
             final_data = poll_result.get("data", poll_result)
             img_url = final_data.get("result", {}).get("url") or final_data.get("url")
@@ -2310,7 +2265,7 @@ def main():
     p_i2v.add_argument("--duration", type=int, default=10, help="Video duration in seconds")
     p_i2v.add_argument("--ratio", default="9:16", help="Aspect ratio")
     p_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_i2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 文本生成视频命令。
     p_t2v = subparsers.add_parser("text-to-video", help="Generate video from a text-only prompt")
@@ -2321,7 +2276,7 @@ def main():
     p_t2v.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_t2v.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_t2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_t2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_t2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 参考素材生成视频命令。
     p_ref_video = subparsers.add_parser("reference-mode-video", help="Generate video from reference images/audio/videos")
@@ -2335,7 +2290,7 @@ def main():
     p_ref_video.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_ref_video.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_ref_video.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 带模型原生音频的参考素材生成视频命令。
     p_native_ref_video = subparsers.add_parser(
@@ -2352,7 +2307,7 @@ def main():
     p_native_ref_video.add_argument("--sound", default="on", help="Sound setting, keep on for native audio")
     p_native_ref_video.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_native_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_native_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_native_ref_video.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 视频延展命令。
     p_extend = subparsers.add_parser("extend-video", help="Extend an existing video")
@@ -2365,7 +2320,7 @@ def main():
     p_extend.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_extend.add_argument("--max-total-duration", type=int, help="Refuse extend if cumulative duration would exceed this")
     p_extend.add_argument("--current-cumulative", type=int, default=0, help="Total duration already generated so far")
-    p_extend.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_extend.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 图片生成长视频命令。
     p_long_i2v = subparsers.add_parser("long-image-to-video", help="Generate a long video by image-to-video + repeated extend-video")
@@ -2380,7 +2335,7 @@ def main():
     p_long_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_long_i2v.add_argument("--allow-long", action="store_true", help="Bypass 30s safe-max limit after user confirmation")
     p_long_i2v.add_argument("--progress-file", help="Save segment progress to this JSON file")
-    p_long_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_i2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 参考素材生成长视频命令。
     p_long_ref = subparsers.add_parser("long-reference-mode-video", help="Generate a long video by reference-mode-video + extend-video with final duration verification")
@@ -2396,7 +2351,7 @@ def main():
     p_long_ref.add_argument("--progress-file", help="Save segment progress to this JSON file")
     p_long_ref.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 带模型原生音频的参考素材长视频命令。
     p_long_native_ref = subparsers.add_parser(
@@ -2415,7 +2370,7 @@ def main():
     p_long_native_ref.add_argument("--progress-file", help="Save segment progress to this JSON file")
     p_long_native_ref.add_argument("--sound", default="on", help="Sound setting, keep on for native audio")
     p_long_native_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_long_native_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_native_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 长参考视频恢复命令。
     p_resume_long_ref = subparsers.add_parser(
@@ -2428,7 +2383,7 @@ def main():
     p_resume_long_ref.add_argument("--size", default="720p", help="Video size (720p, 1080p, 4K)")
     p_resume_long_ref.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_resume_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_resume_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_resume_long_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # 文本生成图片命令。
     p_t2i = subparsers.add_parser("text-to-image", help="Generate image from text")
@@ -2466,7 +2421,7 @@ def main():
     # 任务轮询命令。
     p_poll = subparsers.add_parser("poll", help="Poll task status")
     p_poll.add_argument("--task-id", required=True, help="Task ID to poll")
-    p_poll.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_poll.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # upload-file
     p_upload = subparsers.add_parser("upload-file", help="Upload a local file and return its Borgrise URL")
@@ -2497,15 +2452,8 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Check token or login credentials
-    if not API_TOKEN and not (BORGRISE_USERNAME and BORGRISE_PASSWORD):
-        print("ERROR: BORGRISE_API_TOKEN is not set and automatic login credentials are missing.")
-        print("\nSet either:")
-        print("  export BORGRISE_API_TOKEN='your-token-here'")
-        print("\nOr:")
-        print("  export BORGRISE_USERNAME='your-username'")
-        print("  export BORGRISE_PASSWORD='your-password'")
-        sys.exit(1)
+    # 命令行模式不再支持配置静态 token/账号密码。真实扣费调用必须从 FastAPI
+    # 请求进入，由网关把 content-app Authorization 写入 ContextVar 后再执行。
 
     # Apply --poll-timeout override if provided
     poll_timeout_override = getattr(args, "poll_timeout", None)

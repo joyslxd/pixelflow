@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/assistants", tags=["assistants-compat"])
+router = APIRouter(prefix="/agent/assistants", tags=["assistants-compat"])
 
 
 class AssistantResponse(BaseModel):

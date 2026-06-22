@@ -99,7 +99,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"})
+        response = client.post("/agent/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"})
 
     assert response.status_code == 200
     assert response.json()["skill_name"] == "archive-skill"
@@ -152,7 +152,7 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
 
     with TestClient(app) as client:
         upload_response = client.post(
-            f"/api/threads/{thread_id}/uploads",
+            f"/agent/threads/{thread_id}/uploads",
             files=[("files", ("uploaded-skill.skill", archive_bytes, "application/octet-stream"))],
         )
         assert upload_response.status_code == 200
@@ -160,7 +160,7 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
         uploaded_path = Path(uploaded_file["path"])
         assert uploaded_path.is_file()
 
-        install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
+        install_response = client.post("/agent/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
 
     assert install_response.status_code == 200
     assert install_response.json()["skill_name"] == "uploaded-skill"
@@ -204,7 +204,7 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})
+        response = client.post("/agent/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})
 
     assert response.status_code == 400
     assert "Security scan blocked skill 'blocked-skill': prompt injection" in response.json()["detail"]
@@ -233,27 +233,27 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        response = client.get("/api/skills/custom")
+        response = client.get("/agent/skills/custom")
         assert response.status_code == 200
         assert response.json()["skills"][0]["name"] == "demo-skill"
 
-        get_response = client.get("/api/skills/custom/demo-skill")
+        get_response = client.get("/agent/skills/custom/demo-skill")
         assert get_response.status_code == 200
         assert "# demo-skill" in get_response.json()["content"]
 
         update_response = client.put(
-            "/api/skills/custom/demo-skill",
+            "/agent/skills/custom/demo-skill",
             json={"content": _skill_content("demo-skill", "Edited skill")},
         )
         assert update_response.status_code == 200
         assert update_response.json()["description"] == "Edited skill"
         assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
 
-        history_response = client.get("/api/skills/custom/demo-skill/history")
+        history_response = client.get("/agent/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
         assert history_response.json()["history"][-1]["action"] == "human_edit"
 
-        rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+        rollback_response = client.post("/agent/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 200
         assert rollback_response.json()["description"] == "Demo skill"
         assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
@@ -294,11 +294,11 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+        rollback_response = client.post("/agent/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 400
         assert "unsafe rollback" in rollback_response.json()["detail"]
 
-        history_response = client.get("/api/skills/custom/demo-skill/history")
+        history_response = client.get("/agent/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
         assert history_response.json()["history"][-1]["scanner"]["decision"] == "block"
 
@@ -325,15 +325,15 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        delete_response = client.delete("/api/skills/custom/demo-skill")
+        delete_response = client.delete("/agent/skills/custom/demo-skill")
         assert delete_response.status_code == 200
         assert not (custom_dir / "SKILL.md").exists()
 
-        history_response = client.get("/api/skills/custom/demo-skill/history")
+        history_response = client.get("/agent/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
         assert history_response.json()["history"][-1]["action"] == "human_delete"
 
-        rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+        rollback_response = client.post("/agent/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 200
         assert rollback_response.json()["description"] == "Demo skill"
         assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
@@ -364,7 +364,7 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        delete_response = client.delete("/api/skills/custom/demo-skill")
+        delete_response = client.delete("/agent/skills/custom/demo-skill")
 
     assert delete_response.status_code == 200
     assert delete_response.json() == {"success": True}
@@ -396,7 +396,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     app = _make_test_app(config)
 
     with TestClient(app) as client:
-        delete_response = client.delete("/api/skills/custom/demo-skill")
+        delete_response = client.delete("/agent/skills/custom/demo-skill")
 
     assert delete_response.status_code == 500
     assert "Failed to delete custom skill" in delete_response.json()["detail"]
@@ -429,7 +429,7 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     app = _make_test_app(SimpleNamespace())
 
     with TestClient(app) as client:
-        response = client.put("/api/skills/demo-skill", json={"enabled": False})
+        response = client.put("/agent/skills/demo-skill", json={"enabled": False})
 
     assert response.status_code == 200
     assert response.json()["enabled"] is False

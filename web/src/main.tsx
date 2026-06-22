@@ -5,7 +5,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom"
 
 import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
-import { AuthGate } from "@/components/auth/AuthGate";
+import { AuthTokenPage } from "@/pages/AuthTokenPage";
 import { WorkspacePage } from "@/pages/WorkspacePage";
 
 const queryClient = new QueryClient({
@@ -15,13 +15,10 @@ const queryClient = new QueryClient({
 const router = createBrowserRouter([
   {
     path: "/",
-    element: (
-      <AuthGate>
-        <AppLayout />
-      </AuthGate>
-    ),
+    element: <AppLayout />,
     children: [
       { index: true, element: <WorkspacePage /> },
+      { path: "auth-token", element: <AuthTokenPage /> },
       // 当前路由骨架已预留 /c/:taskId，但 WorkspacePage 还没有用 taskId 恢复历史任务。
       { path: "c/:taskId", element: <WorkspacePage /> },
       { path: "*", element: <Navigate to="/" replace /> },

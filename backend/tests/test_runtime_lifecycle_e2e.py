@@ -267,7 +267,7 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
 
 def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
     response = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": email, "password": "very-strong-password-123"},
     )
     assert response.status_code == 201, response.text
@@ -279,7 +279,7 @@ def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
 def _create_thread(client, csrf_token: str) -> str:
     thread_id = str(uuid.uuid4())
     response = client.post(
-        "/api/threads",
+        "/agent/threads",
         json={"thread_id": thread_id, "metadata": {"purpose": "runtime-lifecycle-e2e"}},
         headers={"X-CSRF-Token": csrf_token},
     )
@@ -370,7 +370,7 @@ def _wait_for_status(client, thread_id: str, run_id: str, status: str, *, timeou
     deadline = time.monotonic() + timeout
     last: dict | None = None
     while time.monotonic() < deadline:
-        response = client.get(f"/api/threads/{thread_id}/runs/{run_id}")
+        response = client.get(f"/agent/threads/{thread_id}/runs/{run_id}")
         assert response.status_code == 200, response.text
         last = response.json()
         if last["status"] == status:
@@ -445,7 +445,7 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
 
         with client.stream(
             "POST",
-            f"/api/threads/{thread_id}/runs/stream",
+            f"/agent/threads/{thread_id}/runs/stream",
             json=_run_body(),
             headers={"X-CSRF-Token": csrf_token},
         ) as response:
@@ -459,16 +459,16 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         assert events[1]["data"]["title"] == "Lifecycle E2E"
         assert events[1]["data"]["messages"][-1]["content"] == "Lifecycle complete."
 
-        run = client.get(f"/api/threads/{thread_id}/runs/{run_id}")
+        run = client.get(f"/agent/threads/{thread_id}/runs/{run_id}")
         assert run.status_code == 200, run.text
         assert run.json()["status"] == "success"
 
-        thread = client.get(f"/api/threads/{thread_id}")
+        thread = client.get(f"/agent/threads/{thread_id}")
         assert thread.status_code == 200, thread.text
         assert thread.json()["status"] == "idle"
         assert thread.json()["values"]["title"] == "Lifecycle E2E"
 
-        messages = client.get(f"/api/threads/{thread_id}/runs/{run_id}/messages")
+        messages = client.get(f"/agent/threads/{thread_id}/runs/{run_id}/messages")
         assert messages.status_code == 200, messages.text
         message_events = messages.json()["data"]
         event_types = [row["event_type"] for row in message_events]
@@ -492,7 +492,7 @@ def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_
         TestClient(isolated_app) as client,
     ):
         csrf_token = _register_user(client, email="business-e2e@example.com")
-        auth_user_id = client.get("/api/v1/auth/me").json()["id"]
+        auth_user_id = client.get("/agent/auth/me").json()["id"]
         thread_id = _create_thread(client, csrf_token)
 
         body = _run_body(
@@ -515,7 +515,7 @@ def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_
 
         with client.stream(
             "POST",
-            f"/api/threads/{thread_id}/runs/stream",
+            f"/agent/threads/{thread_id}/runs/stream",
             json=body,
             headers={"X-CSRF-Token": csrf_token},
         ) as response:
@@ -558,7 +558,7 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         thread_id = _create_thread(client, csrf_token)
 
         created = client.post(
-            f"/api/threads/{thread_id}/runs",
+            f"/agent/threads/{thread_id}/runs",
             json=_run_body(),
             headers={"X-CSRF-Token": csrf_token},
         )
@@ -567,7 +567,7 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         assert controller.started.wait(5), "fake agent never started"
 
         cancelled = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
+            f"/agent/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
             headers={"X-CSRF-Token": csrf_token},
         )
         assert cancelled.status_code == 204, cancelled.text
@@ -576,7 +576,7 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         run = _wait_for_status(client, thread_id, run_id, "interrupted")
         assert run["status"] == "interrupted"
 
-        thread = client.get(f"/api/threads/{thread_id}")
+        thread = client.get(f"/agent/threads/{thread_id}")
         assert thread.status_code == 200, thread.text
         assert thread.json()["status"] == "idle"
 
@@ -649,7 +649,7 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         thread_id = _create_thread(client, csrf_token)
 
         before = client.post(
-            f"/api/threads/{thread_id}/state",
+            f"/agent/threads/{thread_id}/state",
             json={
                 "values": {
                     "title": "Before rollback",
@@ -663,7 +663,7 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         assert before.json()["values"]["title"] == "Before rollback"
 
         created = client.post(
-            f"/api/threads/{thread_id}/runs",
+            f"/agent/threads/{thread_id}/runs",
             json=_run_body(),
             headers={"X-CSRF-Token": csrf_token},
         )
@@ -671,12 +671,12 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         run_id = created.json()["run_id"]
         assert controller.checkpoint_written.wait(5), "fake agent did not write in-run checkpoint"
 
-        during = client.get(f"/api/threads/{thread_id}/state")
+        during = client.get(f"/agent/threads/{thread_id}/state")
         assert during.status_code == 200, during.text
         assert during.json()["values"]["title"] == "During rollback run"
 
         rolled_back = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=rollback",
+            f"/agent/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=rollback",
             headers={"X-CSRF-Token": csrf_token},
         )
         assert rolled_back.status_code == 204, rolled_back.text
@@ -685,7 +685,7 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         run = _wait_for_status(client, thread_id, run_id, "error")
         assert run["status"] == "error"
 
-        after = client.get(f"/api/threads/{thread_id}/state")
+        after = client.get(f"/agent/threads/{thread_id}/state")
         assert after.status_code == 200, after.text
         assert after.json()["values"]["title"] == "Before rollback"
         assert after.json()["values"]["messages"] == [{"type": "human", "content": "before"}]

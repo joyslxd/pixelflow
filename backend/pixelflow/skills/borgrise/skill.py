@@ -5,9 +5,10 @@
 协议，只负责把同步阻塞函数丢到线程里执行，并把返回值映射成 PixelFlow 统一
 Result DTO。
 
-配置由 ``run_generation`` 读取环境变量，例如 ``BORGRISE_API_TOKEN``、
-``BORGRISE_BASE_URL``；每次生成所需的 image_url、prompt、duration、ratio 等
-参数由调用方传入。
+``run_generation`` 只读取供应商 base URL、projectId、轮询超时等非用户身份配置。
+真正的用户身份来自入口请求的 content-app ``Authorization``，由网关写入
+ContextVar 后在这里透传给生成接口。也就是说，这个 skill 不允许再使用配置文件里的
+固定 token 或账号密码去替用户扣费。
 """
 
 from __future__ import annotations
@@ -104,7 +105,8 @@ def _decompose_blocking(video_url: str) -> dict[str, Any]:
     result = run_generation.make_request("/creative/decompose_video_to_storyboard?projectId=1", {"video_url": video_url}, custom_headers=headers)
     task_id = run_generation.extract_task_id(result)
     if task_id and not _extract_shots(result):
-        result = run_generation.poll_task(task_id)
+        # 参考视频拆解属于“视频分析”任务，通常比图片生成久、但不应套用视频生成 1 小时上限。
+        result = run_generation.poll_task(task_id, default_timeout=run_generation.VIDEO_ANALYSIS_POLL_TIMEOUT)
     return result
 
 

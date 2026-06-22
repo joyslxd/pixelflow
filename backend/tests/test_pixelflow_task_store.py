@@ -60,6 +60,67 @@ def test_pixelflow_router_imports():
     from app.gateway.routers import pixelflow_tasks
 
     paths = {route.path for route in pixelflow_tasks.router.routes}
-    assert "/api/tasks" in paths
-    assert "/api/tasks/{task_id}/events" in paths
-    assert "/api/tasks/{task_id}/assets" in paths
+    assert pixelflow_tasks.router.prefix == "/agent/flows"
+    assert "/agent/flows" in paths
+    assert "/agent/flows/{task_id}/events" in paths
+    assert "/agent/flows/{task_id}/assets" in paths
+
+
+def test_explainable_event_contract_for_generate_phase():
+    """生成阶段必须返回可解释事件，而不是返回大模型原始思维链。"""
+    from app.gateway.routers import pixelflow_tasks
+
+    events = pixelflow_tasks._build_phase_transition_events(
+        previous_phase="brief_review",
+        phase="generate",
+        state={
+            "task_id": "t1",
+            "brief": {"brief_id": "brief-1", "shots": [{"shot_id": "s1"}, {"shot_id": "s2"}]},
+            "generated_assets": [{"ok": True, "url": "https://cdn.example/1.mp4"}],
+        },
+        run_id="run-1",
+    )
+
+    event_names = [name for name, _payload in events]
+    assert event_names == ["step_finished", "step_started", "vendor_call_started", "vendor_call_finished"]
+    assert events[1][1]["phase"] == "generate"
+    assert events[1][1]["summary"]
+    assert "chain_of_thought" not in events[1][1]
+    assert "raw_thought" not in events[1][1]
+
+
+def test_asset_ready_events_only_expose_safe_asset_fields():
+    from app.gateway.routers import pixelflow_tasks
+
+    events = pixelflow_tasks._build_asset_ready_events(
+        [
+            PixelFlowAssetRecord(
+                asset_id="a1",
+                task_id="t1",
+                user_id="u1",
+                asset_type="final_video",
+                status="ready",
+                phase="done",
+                url="https://cdn.example/final.mp4",
+                local_path="/tmp/private/final.mp4",
+                metadata={"secret": "hidden", "duration_sec": 12},
+            )
+        ],
+        run_id="run-1",
+    )
+
+    assert events == [
+        (
+            "asset_ready",
+            {
+                "asset_id": "a1",
+                "asset_type": "final_video",
+                "phase": "done",
+                "status": "ready",
+                "url": "https://cdn.example/final.mp4",
+                "vendor": "",
+                "summary": "最终成片已准备好，可以在前端预览或下载。",
+                "run_id": "run-1",
+            },
+        )
+    ]

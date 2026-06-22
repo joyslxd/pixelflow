@@ -1,2 +1,8 @@
 # Internal design docs — not published to GitHub.
 docs/
+
+# IntelliJ IDEA / PyCharm local project metadata.
+.idea/
+
+# Local agent handoff notes for this workspace.
+AGENTS.md

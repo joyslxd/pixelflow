@@ -143,64 +143,41 @@ For Feishu card updates, DeerFlow stores the running card's `message_id` per inb
 ### Installation
 
 ```bash
-cd deer-flow
-
-# Copy configuration files
-cp config.example.yaml config.yaml
-
-# Install backend dependencies
 cd backend
 make install
 ```
 
 ### Configuration
 
-Edit `config.yaml` in the project root:
+PixelFlow 后端现在使用 profile YAML，类似 Spring Boot 的 `application-dev.yml` / `application-prod.yml`：
 
-```yaml
-models:
-  - name: gpt-4o
-    display_name: GPT-4o
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    supports_thinking: false
-    supports_vision: true
+| File | Purpose |
+| --- | --- |
+| `config.dev.yml` | Development/test profile. Swagger is enabled, sqlite is used by default. |
+| `config.prod.yml` | Production profile. Swagger is disabled by default and output paths are production-oriented. |
 
-  - name: gpt-5-responses
-    display_name: GPT-5 (Responses API)
-    use: langchain_openai:ChatOpenAI
-    model: gpt-5
-    api_key: $OPENAI_API_KEY
-    use_responses_api: true
-    output_version: responses/v1
-    supports_vision: true
-```
+Edit the chosen file directly. Model keys, content-app auth settings, MySQL URL, tracing keys, and output paths are all documented with Chinese comments in the YAML itself. The loader maps these YAML values into the environment variables that existing gateway/skill code reads.
 
-Set your API keys:
-
-```bash
-export OPENAI_API_KEY="your-api-key-here"
-```
+PixelFlow does **not** issue its own login token anymore. Every protected `/agent/**` request must carry `Authorization: Bearer <content-app-jwt>`. The gateway only reads the JWT subject as the username, calls content-app `/api/auth/verify` to let content-app validate the token and disabled-user state, and passes the same `Authorization` through to content-app/Borgrise generation APIs for billing.
 
 ### Running
-
-**Full Application** (from project root):
-
-```bash
-make dev  # Starts Gateway + Frontend + Nginx
-```
-
-Access at: http://localhost:2026
 
 **Backend Only** (from backend directory):
 
 ```bash
-# Gateway API + embedded agent runtime
-make dev
+make dev                                  # Loads config.dev.yml and enables reload
+PIXELFLOW_CONFIG_ENV=dev make gateway     # Loads config.dev.yml without reload
+PIXELFLOW_CONFIG_ENV=prod make gateway    # Loads config.prod.yml without reload
+PIXELFLOW_CONFIG_FILE=/abs/path/custom.yml make gateway
 ```
 
-Direct access: Gateway at http://localhost:8001
+Direct access: Gateway at http://localhost:8001, unless `gateway.port` is changed in the selected YAML.
+
+Command-line environment variables still have the highest priority for temporary overrides:
+
+```bash
+GATEWAY_PORT=8123 PIXELFLOW_CONFIG_ENV=dev make gateway
+```
 
 ---
 
@@ -250,20 +227,30 @@ tooling, Studio, or direct LangGraph Server compatibility.
 
 ## Configuration
 
-### Main Configuration (`config.yaml`)
+### Main Configuration (`config.dev.yml` / `config.prod.yml`)
 
-Place in project root. Config values starting with `$` resolve as environment variables.
+Gateway startup first loads a PixelFlow profile file, then points DeerFlow's
+`DEER_FLOW_CONFIG_PATH` at the same YAML. This means the profile file is both:
+
+- the PixelFlow business configuration entry (`gateway`, `auth`, `pixelflow`, `borgrise`);
+- the DeerFlow harness configuration entry (`models`, `sandbox`, `database`, `skills`, tracing).
+
+Profile selection:
+
+- `PIXELFLOW_CONFIG_ENV=dev` loads `config.dev.yml`.
+- `PIXELFLOW_CONFIG_ENV=prod` loads `config.prod.yml`.
+- `PIXELFLOW_CONFIG_FILE=/abs/path/custom.yml` loads an explicit file and wins over `PIXELFLOW_CONFIG_ENV`.
 
 Key sections:
-- `models` - LLM configurations with class paths, API keys, thinking/vision flags
-- `tools` - Tool definitions with module paths and groups
-- `tool_groups` - Logical tool groupings
-- `sandbox` - Execution environment provider
-- `skills` - Skills directory paths
-- `title` - Auto-title generation settings
-- `summarization` - Context summarization settings
-- `subagents` - Subagent system (enabled/disabled)
-- `memory` - Memory system settings (enabled, storage, debounce, facts limits)
+- `gateway` - FastAPI host/port, OpenAPI docs, CORS.
+- `pixelflow` - MySQL URL, media provider (`media_skill`), edit/render skill (`edit_skill`), draft/render/font paths.
+- `borgrise` - content-app/Borgrise Client configuration used when `media_skill` is `borgrise`: base URL, `/api/auth/verify` remote validation switch, 10-second login-check timeout, project ID, retry policy, and separate polling limits for video generation (1 hour), image generation (10 minutes), and video analysis/decompose (20 minutes). User tokens must come from the incoming `Authorization` header, not from YAML.
+- `models` - LLM configurations with class paths, API keys, thinking/vision flags.
+- `sandbox` - Execution environment provider.
+- `database` - DeerFlow persistence/checkpointer backend.
+- `skills` - Skills directory paths.
+- `tracing` - LangSmith/Langfuse settings.
+- `environment.variables` - Escape hatch for uncommon env vars.
 
 Provider note:
 - `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).
@@ -302,12 +289,20 @@ MCP servers and skill states in a single file:
 }
 ```
 
-### Environment Variables
+### Environment Variable Overrides
 
-- `DEER_FLOW_CONFIG_PATH` - Override config.yaml location
-- `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Override extensions_config.json location
-- Model API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, etc.
-- Tool API keys: `TAVILY_API_KEY`, `GITHUB_TOKEN`, etc.
+Profile YAML is the primary configuration source. A shell environment variable
+still wins for temporary one-off overrides, for example:
+
+```bash
+GATEWAY_PORT=8123 PIXELFLOW_CONFIG_ENV=dev make gateway
+```
+
+Common selectors:
+
+- `PIXELFLOW_CONFIG_ENV` - Selects `config.dev.yml` or `config.prod.yml`.
+- `PIXELFLOW_CONFIG_FILE` - Uses an explicit YAML file path.
+- `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Overrides `extensions_config.json` / `mcp_config.json`.
 
 ### LangSmith Tracing
 
@@ -316,13 +311,15 @@ DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for o
 **Setup:**
 
 1. Sign up at [smith.langchain.com](https://smith.langchain.com) and create a project.
-2. Add the following to your `.env` file in the project root:
+2. Edit the selected profile YAML:
 
-```bash
-LANGSMITH_TRACING=true
-LANGSMITH_ENDPOINT=https://api.smith.langchain.com
-LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
-LANGSMITH_PROJECT=xxx
+```yaml
+tracing:
+  langsmith:
+    enabled: true
+    endpoint: "https://api.smith.langchain.com"
+    api_key: "lsv2_pt_xxxxxxxxxxxxxxxx"
+    project: "pixelflow-prod"
 ```
 
 **Legacy variables:** The `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, and `LANGCHAIN_ENDPOINT` variables are also supported for backward compatibility. `LANGSMITH_*` variables take precedence when both are set.
@@ -331,13 +328,15 @@ LANGSMITH_PROJECT=xxx
 
 DeerFlow also supports [Langfuse](https://langfuse.com) observability for LangChain-compatible runs.
 
-Add the following to your `.env` file:
+Edit the selected profile YAML:
 
-```bash
-LANGFUSE_TRACING=true
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```yaml
+tracing:
+  langfuse:
+    enabled: true
+    public_key: "pk-lf-xxxxxxxxxxxxxxxx"
+    secret_key: "sk-lf-xxxxxxxxxxxxxxxx"
+    base_url: "https://cloud.langfuse.com"
 ```
 
 If you are using a self-hosted Langfuse deployment, set `LANGFUSE_BASE_URL` to your Langfuse host.
@@ -348,7 +347,7 @@ If both LangSmith and Langfuse are enabled, DeerFlow initializes and attaches bo
 
 If a provider is explicitly enabled but required credentials are missing, or the provider callback cannot be initialized, DeerFlow raises an error when tracing is initialized during model creation instead of silently disabling tracing.
 
-**Docker:** In `docker-compose.yaml`, tracing is disabled by default (`LANGSMITH_TRACING=false`). Set `LANGSMITH_TRACING=true` and/or `LANGFUSE_TRACING=true` in your `.env`, together with the required credentials, to enable tracing in containerized deployments.
+**Docker:** Prefer setting `PIXELFLOW_CONFIG_ENV=prod` or `PIXELFLOW_CONFIG_FILE=/app/backend/config.prod.yml` for containerized deployments. Tracing should be configured in the selected YAML profile.
 
 ---
 
@@ -358,8 +357,9 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run Gateway API + embedded agent runtime (port 8001)
-make gateway    # Run Gateway API without reload (port 8001)
+make dev        # Run Gateway API + embedded agent runtime with config.dev.yml and reload
+make gateway    # Run Gateway API without reload; uses PIXELFLOW_CONFIG_ENV, default dev
+make gateway-prod  # Run Gateway API without reload with config.prod.yml
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 make detect-blocking-io  # Inventory blocking IO that may block the backend event loop

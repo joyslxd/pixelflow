@@ -1,4 +1,9 @@
-/** PixelFlow 后端 API Client，对齐 /api/tasks 契约。开发环境下 /api 由 Vite 代理到后端。 */
+/** PixelFlow 后端 API Client，对齐 /agent/flows 契约。开发环境下 /agent 由 Vite 代理到后端。 */
+
+import { getBrowserAuthorization } from "@/lib/authStorage";
+
+const AGENT_API_PREFIX = "/agent";
+const FLOW_BASE = "/flows";
 
 export interface TaskResponse {
   task_id: string;
@@ -47,8 +52,9 @@ export interface CreateTaskBody {
 
 export interface TaskEvent {
   id: number;
-  event: string; // 事件名，如 task_created、phase_change、brief_ready、task_done。
+  event: string; // 事件名，如 phase_change、llm_summary、vendor_call_started、asset_ready。
   data: Record<string, unknown>;
+  created_at?: string;
 }
 
 export interface SessionContextResponse {
@@ -58,25 +64,31 @@ export interface SessionContextResponse {
   updated_at: string;
 }
 
-function csrfToken(): string {
-  const m = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : "";
-}
-
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
   }
 }
 
+export function getAuthorizationHeader(): string {
+  // content-app 登录后进入 pixelflow 时，最理想是由宿主页面直接写入 Authorization。
+  // 本地联调页面会把 token 存到 localStorage.Authorization，普通 API 调用统一从这里读取。
+  return getBrowserAuthorization();
+}
+
+function authHeaders(): Record<string, string> {
+  const authorization = getAuthorizationHeader();
+  if (!authorization) {
+    throw new ApiError(401, "缺少 content-app Authorization，请先从 content-app 登录入口进入 PixelFlow");
+  }
+  return { Authorization: authorization };
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  // 统一请求模板：自动带 cookie、为写操作补 CSRF header，并把非 2xx 响应转换成 ApiError。
+  // 统一请求模板：自动带 content-app Authorization，并把非 2xx 响应转换成 ApiError。
   // 可以把它类比成前端侧的后端 Client 拦截器。
-  const method = (init?.method ?? "GET").toUpperCase();
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...(init?.headers as Record<string, string>) };
-  // 双提交 CSRF：写操作需要把 csrf_token cookie 回传到 X-CSRF-Token header。
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers["X-CSRF-Token"] = csrfToken();
-  const res = await fetch(`/api${path}`, { credentials: "include", ...init, headers });
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers as Record<string, string>) };
+  const res = await fetch(`${AGENT_API_PREFIX}${path}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
@@ -84,108 +96,111 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
-/** 认证:本地 session(cookie) + CSRF。 */
-export const auth = {
-  async me(): Promise<{ authenticated: boolean }> {
-    // 当前没有单独调用 /api/v1/auth/me，而是用一个轻量业务接口探测 cookie 是否有效。
-    try {
-      await req("/tasks?limit=1");
-      return { authenticated: true };
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) return { authenticated: false };
-      throw e;
-    }
-  },
-  async login(email: string, password: string): Promise<void> {
-    const body = new URLSearchParams({ username: email, password });
-    const res = await fetch("/api/v1/auth/login/local", { method: "POST", credentials: "include", body });
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      throw new ApiError(res.status, t.slice(0, 200) || "登录失败");
-    }
-  },
-  async logout(): Promise<void> {
-    await req("/v1/auth/logout", { method: "POST" }).catch(() => {});
-  },
-};
-
 export const api = {
-  createTask: (body: CreateTaskBody) =>
-    req<TaskResponse>("/tasks", { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),
+  getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
-  getTask: (id: string) => req<TaskResponse>(`/tasks/${id}`),
+  createTask: (body: CreateTaskBody) =>
+    req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),
+
+  getTask: (id: string) => req<TaskResponse>(`${FLOW_BASE}/${id}`),
 
   getResult: (id: string) =>
-    req<{ task_id: string; status: string; phase: string; result: Record<string, unknown>; error: string | null }>(`/tasks/${id}/result`),
+    req<{ task_id: string; status: string; phase: string; result: Record<string, unknown>; error: string | null }>(`${FLOW_BASE}/${id}/result`),
 
-  listAssets: (id: string) => req<AssetResponse[]>(`/tasks/${id}/assets`),
+  listAssets: (id: string) => req<AssetResponse[]>(`${FLOW_BASE}/${id}/assets`),
 
-  assetContentUrl: (taskId: string, assetId: string) => `/api/tasks/${taskId}/assets/${encodeURIComponent(assetId)}/content`,
+  assetContentUrl: (taskId: string, assetId: string) => `${AGENT_API_PREFIX}${FLOW_BASE}/${taskId}/assets/${encodeURIComponent(assetId)}/content`,
+
+  async assetContentBlobUrl(taskId: string, assetId: string): Promise<string> {
+    // <video src> 不能自定义 Authorization header，所以受保护的本地成片需要先
+    // 用 fetch 带 header 拉成 Blob，再转成本页可播放的 object URL。
+    const path = `${FLOW_BASE}/${taskId}/assets/${encodeURIComponent(assetId)}/content`;
+    const res = await fetch(`${AGENT_API_PREFIX}${path}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
+    }
+    return URL.createObjectURL(await res.blob());
+  },
 
   confirmBrief: (id: string, approved: boolean) =>
-    req<TaskResponse>(`/tasks/${id}/brief/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
+    req<TaskResponse>(`${FLOW_BASE}/${id}/brief/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
 
   confirmStage: (id: string, stage: "segments" | "edit" | "qc", approved: boolean) =>
-    req<TaskResponse>(`/tasks/${id}/stages/${stage}/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
+    req<TaskResponse>(`${FLOW_BASE}/${id}/stages/${stage}/confirm`, { method: "POST", body: JSON.stringify({ approved }) }),
 
   reviseBrief: (id: string, briefPatch: Record<string, unknown>, feedback: string) =>
-    req<TaskResponse>(`/tasks/${id}/brief/revise`, { method: "POST", body: JSON.stringify({ brief_patch: briefPatch, feedback }) }),
+    req<TaskResponse>(`${FLOW_BASE}/${id}/brief/revise`, { method: "POST", body: JSON.stringify({ brief_patch: briefPatch, feedback }) }),
 
   eventsHistory: (id: string, afterId?: number) =>
-    req<{ data: TaskEvent[] }>(`/tasks/${id}/events/history${afterId != null ? `?after_id=${afterId}` : ""}`),
+    req<{ data: TaskEvent[] }>(`${FLOW_BASE}/${id}/events/history${afterId != null ? `?after_id=${afterId}` : ""}`),
 
   getSessionContext: (taskId?: string) =>
-    req<SessionContextResponse | null>(`/tasks/session/context${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+    req<SessionContextResponse | null>(`${FLOW_BASE}/session/context${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
 
   saveSessionContext: (taskId: string, context: Record<string, unknown>) =>
-    req<SessionContextResponse>("/tasks/session/context", { method: "PUT", body: JSON.stringify({ task_id: taskId, context }) }),
+    req<SessionContextResponse>(`${FLOW_BASE}/session/context`, { method: "PUT", body: JSON.stringify({ task_id: taskId, context }) }),
 };
 
 /**
  * 订阅任务 SSE 事件流。返回取消函数。
  * 后端事件格式:`event: <name>` + `data: <json>` + `id: <num>`。
- * afterId 用于断点续订；EventSource 的 lastEventId 会进入 onEvent 做前端去重。
+ * 原生 EventSource 不能自定义 Authorization header，因此这里用 fetch 读取
+ * text/event-stream。afterId 用于断点续订，事件 id 进入 onEvent 做前端去重。
  */
 export function subscribeTaskEvents(
   taskId: string,
   onEvent: (e: TaskEvent) => void,
   afterId?: number,
 ): () => void {
-  const url = `/api/tasks/${taskId}/events${afterId != null ? `?after_id=${afterId}` : ""}`;
-  const es = new EventSource(url);
-  const handler = (ev: MessageEvent) => {
+  const url = `${AGENT_API_PREFIX}${FLOW_BASE}/${taskId}/events${afterId != null ? `?after_id=${afterId}` : ""}`;
+  const controller = new AbortController();
+
+  const dispatchBlock = (block: string) => {
+    let event = "message";
+    let id = 0;
+    const dataLines: string[] = [];
+    for (const line of block.split(/\r?\n/)) {
+      if (!line || line.startsWith(":")) continue;
+      const sep = line.indexOf(":");
+      const field = sep >= 0 ? line.slice(0, sep) : line;
+      const value = sep >= 0 ? line.slice(sep + 1).trimStart() : "";
+      if (field === "event") event = value || "message";
+      if (field === "id") id = Number(value || 0);
+      if (field === "data") dataLines.push(value);
+    }
+    if (dataLines.length === 0) return;
     try {
-      onEvent({
-        id: Number(ev.lastEventId || 0),
-        event: (ev as MessageEvent).type,
-        data: JSON.parse(ev.data),
-      });
+      onEvent({ id, event, data: JSON.parse(dataLines.join("\n")) });
     } catch {
       /* 忽略非 JSON 心跳 */
     }
   };
-  // 后端用具名事件（event: phase_change 等），需对已知类型分别监听；
-  // 同时监听默认 message 兜底。
-  const NAMES = [
-    "task_created",
-    "run_started",
-    "phase_change",
-    "brief_ready",
-    "brief_confirmed",
-    "brief_rejected",
-    "segments_confirmed",
-    "segments_rejected",
-    "edit_confirmed",
-    "edit_rejected",
-    "qc_confirmed",
-    "qc_rejected",
-    "brief_revised",
-    "preferences_updated",
-    "task_done",
-    "run_finished",
-    "task_failed",
-  ];
-  NAMES.forEach((n) => es.addEventListener(n, handler as EventListener));
-  es.addEventListener("message", handler as EventListener);
-  return () => es.close();
+
+  void (async () => {
+    try {
+      const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
+      if (!res.ok || !res.body) {
+        throw new ApiError(res.status, `SSE 连接失败: ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        blocks.forEach(dispatchBlock);
+      }
+      if (buffer.trim()) dispatchBlock(buffer);
+    } catch {
+      if (!controller.signal.aborted) {
+        onEvent({ id: 0, event: "task_failed", data: { error: "任务事件流连接失败" } });
+      }
+    }
+  })();
+
+  return () => controller.abort();
 }

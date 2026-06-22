@@ -26,7 +26,7 @@ from app.gateway.services import sse_consumer, start_run, wait_for_run_completio
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/threads", tags=["runs"])
+router = APIRouter(prefix="/agent/threads", tags=["runs"])
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
             # LangGraph Platform includes run metadata in this header.
             # The SDK uses a greedy regex to extract the run id from this path,
             # so it must point at the canonical run resource without extra suffixes.
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
+            "Content-Location": f"/agent/threads/{thread_id}/runs/{record.run_id}",
         },
     )
 

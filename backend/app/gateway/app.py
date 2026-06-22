@@ -8,8 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
-from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
+from app.gateway.csrf_middleware import get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
+from app.gateway.profile_config import load_profile_config
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -34,7 +35,11 @@ from deerflow.config.app_config import apply_logging_level
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
 
-# 默认日志配置；lifespan 会根据 config.yaml 的 log_level 覆盖。
+# 在创建 FastAPI app 实例前加载 profile YAML，确保 GatewayConfig、AuthConfig 和
+# PixelFlow skill 工厂后续都能从环境变量拿到 YAML 中的值。
+load_profile_config()
+
+# 默认日志配置；lifespan 会根据当前 profile YAML 的 log_level 覆盖。
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -44,112 +49,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def _ensure_admin_user(app: FastAPI) -> None:
-    """启动钩子：处理首次启动和历史无主线程迁移。
-
-    管理员创建后，会把 LangGraph store 中没有 ``metadata.user_id`` 的历史线程迁移
-    到管理员账号下。这是 “无认证 → 有认证” 升级路径：以前未启用鉴权时创建的
-    LangGraph thread 数据需要补一个 owner。
-
-    首次启动（没有管理员）：
-      - 不自动创建账号。
-      - 运维/用户需要访问 ``/setup`` 创建第一个管理员。
-
-    后续启动（管理员已存在）：
-      - 执行一次历史无主 LangGraph thread 元数据迁移。
-
-    SQL 持久化不需要额外迁移：threads_meta、runs、run_events、feedback 四个
-    user_id 列会随 auth 模块 create_all 一起出现，新建表不会有 NULL owner 历史行。
-    """
-    from sqlalchemy import select
-
-    from app.gateway.deps import get_local_provider
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.user.model import UserRow
-
-    try:
-        provider = get_local_provider()
-    except RuntimeError:
-        # 某些测试或启动路径下鉴权持久化尚未初始化；跳过管理员迁移，避免网关启动失败。
-        logger.warning("Auth persistence not ready; skipping admin bootstrap check")
-        return
-
-    sf = get_session_factory()
-    if sf is None:
-        return
-
-    admin_count = await provider.count_admin_users()
-
-    if admin_count == 0:
-        logger.info("=" * 60)
-        logger.info("  First boot detected — no admin account exists.")
-        logger.info("  Visit /setup to complete admin account creation.")
-        logger.info("=" * 60)
-        return
-
-    # 管理员已存在：迁移 auth 模块引入前留下的无主 LangGraph thread 元数据。
-    async with sf() as session:
-        stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
-        row = (await session.execute(stmt)).scalar_one_or_none()
-
-    if row is None:
-        return  # Should not happen (admin_count > 0 above), but be safe.
-
-    admin_id = str(row.id)
-
-    # LangGraph store 无主数据迁移是非致命步骤，失败时只记录日志。
-    store = getattr(app.state, "store", None)
-    if store is not None:
-        try:
-            migrated = await _migrate_orphaned_threads(store, admin_id)
-            if migrated:
-                logger.info("Migrated %d orphan LangGraph thread(s) to admin", migrated)
-        except Exception:
-            logger.exception("LangGraph thread migration failed (non-fatal)")
-
-
-async def _iter_store_items(store, namespace, *, page_size: int = 500):
-    """分页遍历 LangGraph store 的某个 namespace。
-
-    这里用 offset 分页替代旧的 ``limit=1000`` 固定读取，避免无主数据超过一页时
-    静默漏迁。空页或短页都表示已经到达最后一页。
-    """
-    offset = 0
-    while True:
-        batch = await store.asearch(namespace, limit=page_size, offset=offset)
-        if not batch:
-            return
-        for item in batch:
-            yield item
-        if len(batch) < page_size:
-            return
-        offset += page_size
-
-
-async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
-    """把没有 user_id 的 LangGraph store threads 迁移给指定管理员。
-
-    使用分页遍历，保证无论数量多少都能迁移。返回迁移条数。
-    """
-    migrated = 0
-    async for item in _iter_store_items(store, ("threads",)):
-        metadata = item.value.get("metadata", {})
-        if not metadata.get("user_id"):
-            metadata["user_id"] = admin_user_id
-            item.value["metadata"] = metadata
-            await store.aput(("threads",), item.key, item.value)
-            migrated += 1
-    return migrated
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI 应用生命周期处理器。"""
 
+    # lifespan 入口再调用一次，保证测试或特殊 ASGI 加载路径也已经完成 profile 初始化。
+    load_profile_config()
+
     # 启动时加载配置并检查必要环境变量。startup_config 是一次性启动快照，只用于
     # 日志级别、LangGraph runtime 引擎和 channels 等必须重启才生效的基础设施。
-    # 请求期配置读取始终走 deps.get_config() -> get_app_config()，让 config.yaml 修改
-    # 可以在无需重启的情况下对请求生效。因此这里刻意不把 startup_config 缓存在
+    # 请求期配置读取始终走 deps.get_config() -> get_app_config()，让当前 profile YAML
+    # 的可热加载字段可以在无需重启的情况下对请求生效。因此这里刻意不把 startup_config 缓存在
     # app.state 上，避免破坏热加载边界。
     try:
         startup_config = get_app_config()
@@ -165,10 +75,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 初始化 LangGraph runtime 组件：StreamBridge、RunManager、checkpointer、store。
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
-
-        # 检查管理员初始化状态，并在管理员存在后迁移无主线程。必须在
-        # langgraph_runtime 之后执行，因为迁移需要 app.state.store。
-        await _ensure_admin_user(app)
 
         from deerflow.persistence.engine import get_session_factory
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
@@ -209,31 +115,33 @@ def create_app() -> FastAPI:
 
     返回已挂载中间件、router 和生命周期处理器的 FastAPI 实例。
     """
+    # create_app 可能被测试直接调用；这里保持幂等加载，确保 GatewayConfig 从 YAML 取值。
+    load_profile_config()
+
     config = get_gateway_config()
-    docs_url = "/docs" if config.enable_docs else None
-    redoc_url = "/redoc" if config.enable_docs else None
-    openapi_url = "/openapi.json" if config.enable_docs else None
+    docs_url = "/agent/docs" if config.enable_docs else None
+    redoc_url = "/agent/redoc" if config.enable_docs else None
+    openapi_url = "/agent/openapi.json" if config.enable_docs else None
 
     app = FastAPI(
-        title="DeerFlow API Gateway",
+        title="PixelFlow Agent API Gateway",
         description="""
-## DeerFlow API Gateway
+## PixelFlow Agent API Gateway
 
-API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execution capabilities.
+PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由 FastAPI
+自动生成，底层是 OpenAPI 3，功能上类似 Java 项目里的 Knife4j / Swagger 页面。
 
-### Features
+### 主要入口
 
-- **Models Management**: Query and retrieve available AI models
-- **MCP Configuration**: Manage Model Context Protocol (MCP) server configurations
-- **Memory Management**: Access and manage global memory data for personalized conversations
-- **Skills Management**: Query and manage skills and their enabled status
-- **Artifacts**: Access thread artifacts and generated files
-- **Health Monitoring**: System health check endpoints
+- **PixelFlow Agent Flow**: `/agent/flows`，创建生成流程、查询状态、订阅 SSE、确认 Brief/片段/剪辑/QC
+- **Auth**: 所有非公开接口使用 content-app 的 `Authorization: Bearer <token>`
+- **Agent Runtime**: `/agent/threads`、`/agent/runs`，DeerFlow/LangGraph 兼容运行时接口
+- **Tools**: `/agent/models`、`/agent/mcp`、`/agent/skills`、`/agent/memory`
 
-### Architecture
+### 访问说明
 
-LangGraph-compatible requests are routed through nginx to this gateway.
-This gateway provides runtime endpoints for agent runs plus custom endpoints for models, MCP configuration, skills, and artifacts.
+开发环境默认端口是 `8001`。启动后访问 `/agent/docs` 查看 Swagger UI，
+访问 `/agent/redoc` 查看 ReDoc，访问 `/agent/openapi.json` 获取原始 OpenAPI JSON。
         """,
         version="0.1.0",
         lifespan=lifespan,
@@ -286,8 +194,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
-                "name": "pixelflow-tasks",
-                "description": "PixelFlow e-commerce video task API and progress events",
+                "name": "pixelflow-flows",
+                "description": "PixelFlow e-commerce video Agent flow API, progress events, and explainable timeline",
             },
             {
                 "name": "pixelflow-preferences",
@@ -303,11 +211,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Auth 中间件：非公开路径必须鉴权，作为 fail-closed 安全兜底。
     app.add_middleware(AuthMiddleware)
 
-    # CSRF 中间件：对会改变状态的请求使用 Double Submit Cookie 模式。
-    app.add_middleware(CSRFMiddleware)
+    # 已废弃 pixelflow 自有 cookie 登录体系，因此不再挂 CSRF 中间件。
+    # 浏览器请求必须显式携带 Authorization header，和 content-app 保持一致。
 
     # CORS：统一 nginx 入口默认同源。前后端分离部署时，浏览器来源必须显式写入
-    # Gateway allowlist，让 CORS 和 CSRF origin 校验共享同一份来源配置。
+    # Gateway allowlist，浏览器才允许把 Authorization header 发给 pixelflow。
     cors_origins = sorted(get_configured_cors_origins())
     if cors_origins:
         app.add_middleware(
@@ -319,40 +227,40 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         )
 
     # 挂载各业务 router。
-    # 模型 API：/api/models。
+    # 模型 API：/agent/models。
     app.include_router(models.router)
 
-    # MCP API：/api/mcp。
+    # MCP API：/agent/mcp。
     app.include_router(mcp.router)
 
-    # Memory API：/api/memory。
+    # Memory API：/agent/memory。
     app.include_router(memory.router)
 
-    # Skills API：/api/skills。
+    # Skills API：/agent/skills。
     app.include_router(skills.router)
 
-    # Artifacts API：/api/threads/{thread_id}/artifacts。
+    # Artifacts API：/agent/threads/{thread_id}/artifacts。
     app.include_router(artifacts.router)
 
-    # Uploads API：/api/threads/{thread_id}/uploads。
+    # Uploads API：/agent/threads/{thread_id}/uploads。
     app.include_router(uploads.router)
 
-    # Thread 管理 API：/api/threads/{thread_id}。
+    # Thread 管理 API：/agent/threads/{thread_id}。
     app.include_router(threads.router)
 
-    # 自定义 Agents API：/api/agents。
+    # 自定义 Agents API：/agent/agents。
     app.include_router(agents.router)
 
-    # Suggestions API：/api/threads/{thread_id}/suggestions。
+    # Suggestions API：/agent/threads/{thread_id}/suggestions。
     app.include_router(suggestions.router)
 
     # Assistants 兼容 API：LangGraph Platform stub。
     app.include_router(assistants_compat.router)
 
-    # Auth API：/api/v1/auth。
+    # Auth API：只保留 /agent/auth/me，用于查看 content-app 当前用户。
     app.include_router(auth.router)
 
-    # Feedback API：/api/threads/{thread_id}/runs/{run_id}/feedback。
+    # Feedback API：/agent/threads/{thread_id}/runs/{run_id}/feedback。
     app.include_router(feedback.router)
 
     # Thread Runs API：兼容 LangGraph Platform 的 runs 生命周期。
@@ -361,10 +269,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Stateless Runs API：无需预先存在 thread 的 stream/wait。
     app.include_router(runs.router)
 
-    # PixelFlow 业务任务 API：/api/tasks。
+    # PixelFlow Agent 工作流 API：/agent/flows。
     app.include_router(pixelflow_tasks.router)
 
-    # PixelFlow 结构化偏好 API：/api/users/{user_id}/preferences。
+    # PixelFlow 结构化偏好 API：/agent/users/{user_id}/preferences。
     app.include_router(pixelflow_preferences.router)
 
     @app.get("/health", tags=["health"])

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:auth-storage": "rm -rf /tmp/pixelflow-auth-storage-test && tsc src/lib/authStorage.ts --target ES2022 --module ES2022 --moduleResolution bundler --outDir /tmp/pixelflow-auth-storage-test --skipLibCheck --strict && AUTH_STORAGE_TEST_MODULE=file:///tmp/pixelflow-auth-storage-test/authStorage.js node --test tests/authStorage.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.7",

@@ -1,4 +1,4 @@
-import type { TaskPhase, VideoResult } from "./types";
+import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
 
 export interface ChatMessage {
   id: string;
@@ -40,6 +40,7 @@ export interface CanvasState {
     score?: number;
     check_results?: Array<{ item?: string; status?: string; message?: string }>;
   };
+  timeline?: FlowTimelineEntry[];
   estCost?: number;
   actualCost?: number;
 }

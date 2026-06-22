@@ -1,0 +1,195 @@
+# PixelFlow 开发/测试环境配置。
+# 启动示例：cd backend && make dev
+# 也可以显式指定：PIXELFLOW_CONFIG_ENV=dev make dev
+
+# 配置文件版本；用于后续升级配置结构时做兼容提示。
+config_version: 1
+
+# 日志级别；开发环境建议 info，需要排查问题时可改成 debug。
+log_level: info
+
+# FastAPI 网关配置；可以类比 Spring Boot 的 server.* 配置。
+gateway:
+  # 网关监听地址；0.0.0.0 表示本机所有网卡都能访问。
+  host: "0.0.0.0"
+  # 网关监听端口；前端 Vite 代理默认转发到这个端口。
+  port: 8001
+  # 是否开启 OpenAPI/Swagger 接口文档；开发环境建议开启。
+  enable_docs: true
+  # 允许跨域访问的前端地址；多个地址用英文逗号分隔，空字符串表示不额外放行。
+  cors_origins: "http://localhost:5273,http://127.0.0.1:5273"
+
+# PixelFlow 业务配置；对应短视频生成 Agent 自己的 Service/Client 参数。
+pixelflow:
+  # PixelFlow 独立业务库 MySQL 连接串；留空时复用 DeerFlow 的 sqlite/内存存储。
+  mysql_url: ""
+  # 是否启用 mem0 记忆能力；当前默认关闭，避免本地缺少外部依赖时报错。
+  mem0_enabled: false
+  # 媒体生成/理解供应商；当前仅支持 borgrise。
+  # 目前图片生成、视频生成、参考视频拆解都走 Borgrise/content-app 接口。
+  # 后续如果图片、视频、拆解需要拆成不同供应商，再新增 image_skill/video_skill/decompose_skill 等细分配置。
+  media_skill: "borgrise"
+  # 剪辑能力实现；开发环境用 ffmpeg 更容易直出 mp4，jianying 则生成剪映草稿。
+  edit_skill: "ffmpeg"
+  # 剪映草稿输出目录；留空时使用系统临时目录下的 pixelflow_drafts。
+  draft_root: ""
+  # FFmpeg 成片输出目录；留空时使用系统临时目录下的 pixelflow_renders。
+  render_root: ""
+  # FFmpeg 字幕/花字字体文件路径；留空时不强制烧录字体。
+  caption_font: ""
+
+# Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
+# 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。
+borgrise:
+  # Borgrise/content-app API 基础地址；代码会用它调用生成接口，也会自动拼接 /auth/verify 做登录态校验。
+  base_url: "https://test-video.borgrise.com/api"
+  # 是否调用 Borgrise/content-app 的 /api/auth/verify 校验 Authorization。
+  # 开启后由 content-app 校验 token 签名、过期和用户启用状态；只有本地离线调试才建议临时设为 false。
+  remote_verify_enabled: true
+  # 登录态校验接口超时时间，单位秒；只影响 /api/auth/verify。
+  # 它只是一次短 HTTP 校验，不是生成任务轮询，所以开发环境默认 10 秒。
+  verify_timeout_seconds: 10
+  # 不配置用户 token：生成/查询接口会透传前端请求里的 content-app Authorization。
+  # Borgrise 项目 ID；默认 1，按实际账号项目修改。
+  project_id: "1"
+  # 是否跳过 SSL 证书校验；开发环境遇到测试证书问题时可设 true。
+  skip_ssl_verify: false
+  # 视频生成轮询超时时间，单位秒；视频生成可能较慢，默认最多等 1 小时。
+  video_poll_timeout: 3600
+  # 图片生成轮询超时时间，单位秒；图片通常比视频快，默认最多等 10 分钟。
+  image_poll_timeout: 600
+  # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 20 分钟。
+  video_analysis_poll_timeout: 1200
+  # 第三方请求失败后的最大重试次数。
+  max_retries: 3
+
+# DeerFlow harness 运行路径配置；可以类比平台框架的基础设施配置。
+deerflow:
+  # 当前运行环境名称；会写入 DEER_FLOW_ENV，便于日志/追踪区分环境。
+  environment: "dev"
+  # DeerFlow 可写数据目录；留空时默认使用 backend/.deer-flow。
+  home: ""
+  # DeerFlow 项目根目录；留空时加载器默认设为当前配置文件所在的 backend 目录。
+  project_root: ""
+  # Docker/宿主机场景下的可见数据目录；本地开发通常留空。
+  host_base_dir: ""
+  # 宿主机上的 skills 目录；本地开发通常留空。
+  host_skills_path: ""
+  # skills 目录；相对路径会按项目根目录解析。
+  skills_path: "skills"
+  # MCP/skills 扩展配置 JSON 路径；留空时自动查找 extensions_config.json/mcp_config.json。
+  extensions_config_path: ""
+  # sandbox 服务绑定地址；只在 AioSandbox/Docker sandbox 场景需要。
+  sandbox_bind_host: ""
+  # sandbox 对外访问主机名；只在 AioSandbox/Docker sandbox 场景需要。
+  sandbox_host: ""
+
+# LLM 模型配置；DeerFlow Agent 使用。这里直接写明文值，不再依赖 .env。
+models:
+  # 默认聊天模型；如果要真实调用大模型，请填好 api_key/base_url/model。
+  - name: "default"
+    # 管理端展示名称；只影响展示，不影响调用。
+    display_name: "默认开发模型"
+    # 模型用途说明；方便以后多人维护时识别。
+    description: "开发环境默认模型，请按实际供应商修改 api_key 和 base_url。"
+    # LangChain 模型 Provider 类路径；OpenAI 兼容接口通常使用这个。
+    use: "langchain_openai:ChatOpenAI"
+    # 实际模型名称；例如 gpt-4o-mini、deepseek-chat 或兼容服务的模型名。
+    model: "gpt-4o-mini"
+    # 模型 API Key；开发环境可直接写明文。
+    api_key: ""
+    # 模型 API Base；OpenAI 官方可留空，兼容服务填写自己的 base_url。
+    base_url: ""
+    # 是否支持图片输入；按模型能力填写。
+    supports_vision: true
+    # 是否支持 reasoning/thinking 配置；普通 chat 模型保持 false。
+    supports_thinking: false
+
+# sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
+sandbox:
+  # sandbox Provider；本地开发用 LocalSandboxProvider，不依赖 Docker。
+  use: "deerflow.sandbox.local:LocalSandboxProvider"
+  # 是否允许工具直接执行宿主机 bash；仅个人可信本地开发可设 true。
+  allow_host_bash: false
+  # bash 工具输出最大字符数；防止一次命令输出过大拖慢页面。
+  bash_output_max_chars: 20000
+  # 读文件工具输出最大字符数；防止超大文件把上下文撑爆。
+  read_file_output_max_chars: 50000
+  # ls 工具输出最大字符数；防止目录太大时输出失控。
+  ls_output_max_chars: 20000
+
+# DeerFlow 持久化配置；保存线程、运行记录、checkpointer 等平台数据。
+database:
+  # 持久化后端；开发环境使用 sqlite，简单且无需单独启动数据库。
+  backend: "sqlite"
+  # sqlite 数据目录；最终文件是 .deer-flow/dev-data/deerflow.db。
+  sqlite_dir: ".deer-flow/dev-data"
+  # PostgreSQL 连接串；当 backend=postgres 时才需要填写。
+  postgres_url: ""
+  # 是否打印 SQL；排查数据库问题时可设 true。
+  echo_sql: false
+  # PostgreSQL 连接池大小；sqlite 模式不使用。
+  pool_size: 5
+
+# 自定义 Agent 管理 API 配置；保持开启，方便前端/接口文档调试。
+agents_api:
+  # 是否启用自定义 Agent 管理 API。
+  enabled: true
+
+# 技能存储配置；DeerFlow skills 会从这里读取。
+skills:
+  # SkillStorage 实现类；默认本地文件存储。
+  use: "deerflow.skills.storage.local_skill_storage:LocalSkillStorage"
+  # skills 目录；相对项目根目录解析。
+  path: "skills"
+  # sandbox 内挂载 skills 的路径；本地开发通常无需修改。
+  container_path: "/mnt/skills"
+
+# 链路追踪配置；用于接入 LangSmith/Langfuse 观察 LLM 和工具调用。
+tracing:
+  # LangSmith 追踪配置。
+  langsmith:
+    # 是否启用 LangSmith；开发环境默认关闭。
+    enabled: false
+    # LangSmith API Key；启用时填写。
+    api_key: ""
+    # LangSmith 项目名；用于在平台上区分项目。
+    project: "pixelflow-dev"
+    # LangSmith 服务地址；通常保持默认。
+    endpoint: "https://api.smith.langchain.com"
+  # Langfuse 追踪配置。
+  langfuse:
+    # 是否启用 Langfuse；开发环境默认关闭。
+    enabled: false
+    # Langfuse Public Key；启用时填写。
+    public_key: ""
+    # Langfuse Secret Key；启用时填写。
+    secret_key: ""
+    # Langfuse 服务地址；自建时改成自己的地址。
+    base_url: "https://cloud.langfuse.com"
+
+# 常见第三方能力 Key；没有独立业务分组的先集中放这里。
+third_party:
+  # Serper 搜索 API Key；使用 Google 搜索工具时填写。
+  serper_api_key: ""
+  # Jina API Key；使用 Jina 读取网页/搜索能力时填写。
+  jina_api_key: ""
+  # InfoQuest API Key；使用 InfoQuest 检索能力时填写。
+  infoquest_api_key: ""
+  # Anthropic API Key；使用 Claude 模型时填写。
+  anthropic_api_key: ""
+  # Anthropic 计费/路由 header；特殊 Anthropic 接入场景才需要。
+  anthropic_billing_header: ""
+  # OpenAI API Key；使用 OpenAI 或 OpenAI 兼容模型时填写。
+  openai_api_key: ""
+  # OpenAI API Base；兼容服务可填写自定义地址。
+  openai_api_base: ""
+  # Claude Code 凭据文件路径；使用本地 Claude OAuth 凭据时填写。
+  claude_code_credentials_path: ""
+  # Claude Code OAuth token；使用 token 直连时填写。
+  claude_code_oauth_token: ""
+
+# 环境变量直通区；少量非常规 key 可以放这里，加载器会原样写入 os.environ。
+environment:
+  # 自定义环境变量字典；key 必须是环境变量名，value 会转成字符串。
+  variables: {}

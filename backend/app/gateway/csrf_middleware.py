@@ -38,18 +38,18 @@ def should_check_csrf(request: Request) -> bool:
         return False
 
     path = request.url.path.rstrip("/")
-    # /api/v1/auth/me 不改变状态，豁免。
-    if path == "/api/v1/auth/me":
+    # /agent/auth/me 不改变状态，豁免。
+    if path == "/agent/auth/me":
         return False
     return True
 
 
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
     {
-        "/api/v1/auth/login/local",
-        "/api/v1/auth/logout",
-        "/api/v1/auth/register",
-        "/api/v1/auth/initialize",
+        "/agent/auth/login/local",
+        "/agent/auth/logout",
+        "/agent/auth/register",
+        "/agent/auth/initialize",
     }
 )
 

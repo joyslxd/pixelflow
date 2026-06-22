@@ -38,5 +38,6 @@ def test_pixelflow_preferences_router_imports():
     from app.gateway.routers import pixelflow_preferences
 
     paths = {route.path for route in pixelflow_preferences.router.routes}
-    assert "/api/users/{user_id}/preferences" in paths
-    assert "/api/users/{user_id}/preferences/feedback" in paths
+    assert pixelflow_preferences.router.prefix == "/agent/users"
+    assert "/agent/users/{user_id}/preferences" in paths
+    assert "/agent/users/{user_id}/preferences/feedback" in paths

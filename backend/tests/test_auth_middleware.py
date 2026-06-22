@@ -13,14 +13,10 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
     [
         "/health",
         "/health/",
-        "/docs",
-        "/docs/",
-        "/redoc",
-        "/openapi.json",
-        "/api/v1/auth/login/local",
-        "/api/v1/auth/register",
-        "/api/v1/auth/logout",
-        "/api/v1/auth/setup-status",
+        "/agent/docs",
+        "/agent/docs/",
+        "/agent/redoc",
+        "/agent/openapi.json",
     ],
 )
 def test_public_paths(path: str):
@@ -30,18 +26,21 @@ def test_public_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/models",
-        "/api/mcp/config",
-        "/api/memory",
-        "/api/skills",
-        "/api/threads/123",
-        "/api/threads/123/uploads",
-        "/api/agents",
-        "/api/channels",
-        "/api/runs/stream",
-        "/api/threads/123/runs",
-        "/api/v1/auth/me",
-        "/api/v1/auth/change-password",
+        "/agent/models",
+        "/agent/mcp/config",
+        "/agent/memory",
+        "/agent/skills",
+        "/agent/threads/123",
+        "/agent/threads/123/uploads",
+        "/agent/agents",
+        "/agent/channels",
+        "/agent/runs/stream",
+        "/agent/threads/123/runs",
+        "/agent/auth/me",
+        "/agent/auth/login/local",
+        "/agent/auth/register",
+        "/agent/auth/logout",
+        "/agent/auth/setup-status",
     ],
 )
 def test_protected_paths(path: str):
@@ -54,22 +53,22 @@ def test_protected_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/v1/auth/login/local/",
-        "/api/v1/auth/register/",
-        "/api/v1/auth/logout/",
-        "/api/v1/auth/setup-status/",
+        "/agent/auth/login/local/",
+        "/agent/auth/register/",
+        "/agent/auth/logout/",
+        "/agent/auth/setup-status/",
     ],
 )
-def test_public_auth_paths_with_trailing_slash(path: str):
-    assert _is_public(path) is True
+def test_auth_paths_with_trailing_slash_are_protected(path: str):
+    assert _is_public(path) is False
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/models/",
-        "/api/v1/auth/me/",
-        "/api/v1/auth/change-password/",
+        "/agent/models/",
+        "/agent/auth/me/",
+        "/agent/auth/change-password/",
     ],
 )
 def test_protected_paths_with_trailing_slash(path: str):
@@ -77,10 +76,10 @@ def test_protected_paths_with_trailing_slash(path: str):
 
 
 def test_unknown_api_path_is_protected():
-    """Fail-closed: any new /api/* path is protected by default."""
-    assert _is_public("/api/new-feature") is False
-    assert _is_public("/api/v2/something") is False
-    assert _is_public("/api/v1/auth/new-endpoint") is False
+    """Fail-closed: any new /agent/* path is protected by default."""
+    assert _is_public("/agent/new-feature") is False
+    assert _is_public("/agent/v2/something") is False
+    assert _is_public("/agent/auth/new-endpoint") is False
 
 
 # ── Middleware integration tests ──────────────────────────────────────────
@@ -97,35 +96,35 @@ def _make_app():
     async def health():
         return {"status": "ok"}
 
-    @app.get("/api/v1/auth/me")
+    @app.get("/agent/auth/me")
     async def auth_me():
         return {"id": "1", "email": "test@test.com"}
 
-    @app.get("/api/v1/auth/setup-status")
+    @app.get("/agent/auth/setup-status")
     async def setup_status():
         return {"needs_setup": False}
 
-    @app.get("/api/models")
+    @app.get("/agent/models")
     async def models_get():
         return {"models": []}
 
-    @app.put("/api/mcp/config")
+    @app.put("/agent/mcp/config")
     async def mcp_put():
         return {"ok": True}
 
-    @app.delete("/api/threads/abc")
+    @app.delete("/agent/threads/abc")
     async def thread_delete():
         return {"ok": True}
 
-    @app.patch("/api/threads/abc")
+    @app.patch("/agent/threads/abc")
     async def thread_patch():
         return {"ok": True}
 
-    @app.post("/api/threads/abc/runs/stream")
+    @app.post("/agent/threads/abc/runs/stream")
     async def stream():
         return {"ok": True}
 
-    @app.get("/api/future-endpoint")
+    @app.get("/agent/future-endpoint")
     async def future():
         return {"ok": True}
 
@@ -142,20 +141,20 @@ def test_public_path_no_cookie(client):
     assert res.status_code == 200
 
 
-def test_public_auth_path_no_cookie(client):
-    """Public auth endpoints (login/register) pass without cookie."""
-    res = client.get("/api/v1/auth/setup-status")
-    assert res.status_code == 200
+def test_removed_setup_status_path_no_authorization(client):
+    """旧本地初始化接口不再公开，必须按普通 /agent 路径鉴权。"""
+    res = client.get("/agent/auth/setup-status")
+    assert res.status_code == 401
 
 
 def test_protected_auth_path_no_cookie(client):
-    """/auth/me requires cookie even though it's under /api/v1/auth/."""
-    res = client.get("/api/v1/auth/me")
+    """/auth/me requires Authorization even though it's under /agent/auth/."""
+    res = client.get("/agent/auth/me")
     assert res.status_code == 401
 
 
 def test_protected_path_no_cookie_returns_401(client):
-    res = client.get("/api/models")
+    res = client.get("/agent/models")
     assert res.status_code == 401
     body = res.json()
     assert body["detail"]["code"] == "not_authenticated"
@@ -165,58 +164,44 @@ def test_protected_path_with_junk_cookie_rejected(client):
     """Junk cookie → 401. Middleware strictly validates the JWT now
     (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad
     tokens through to the route handler."""
-    res = client.get("/api/models", cookies={"access_token": "some-token"})
+    res = client.get("/agent/models", cookies={"access_token": "some-token"})
     assert res.status_code == 401
 
 
 def test_protected_post_no_cookie_returns_401(client):
-    res = client.post("/api/threads/abc/runs/stream")
+    res = client.post("/agent/threads/abc/runs/stream")
     assert res.status_code == 401
-
-
-def test_protected_post_with_internal_auth_header_passes():
-    from app.gateway.internal_auth import create_internal_auth_headers
-
-    app = _make_app()
-    client = TestClient(app)
-
-    res = client.post(
-        "/api/threads/abc/runs/stream",
-        headers=create_internal_auth_headers(),
-    )
-
-    assert res.status_code == 200
 
 
 # ── Method matrix: PUT/DELETE/PATCH also protected ────────────────────────
 
 
 def test_protected_put_no_cookie(client):
-    res = client.put("/api/mcp/config")
+    res = client.put("/agent/mcp/config")
     assert res.status_code == 401
 
 
 def test_protected_delete_no_cookie(client):
-    res = client.delete("/api/threads/abc")
+    res = client.delete("/agent/threads/abc")
     assert res.status_code == 401
 
 
 def test_protected_patch_no_cookie(client):
-    res = client.patch("/api/threads/abc")
+    res = client.patch("/agent/threads/abc")
     assert res.status_code == 401
 
 
 def test_put_with_junk_cookie_rejected(client):
     """Junk cookie on PUT → 401 (strict JWT validation in middleware)."""
     client.cookies.set("access_token", "tok")
-    res = client.put("/api/mcp/config")
+    res = client.put("/agent/mcp/config")
     assert res.status_code == 401
 
 
 def test_delete_with_junk_cookie_rejected(client):
     """Junk cookie on DELETE → 401 (strict JWT validation in middleware)."""
     client.cookies.set("access_token", "tok")
-    res = client.delete("/api/threads/abc")
+    res = client.delete("/agent/threads/abc")
     assert res.status_code == 401
 
 
@@ -224,13 +209,13 @@ def test_delete_with_junk_cookie_rejected(client):
 
 
 def test_unknown_endpoint_no_cookie_returns_401(client):
-    """Any new /api/* endpoint is blocked by default without cookie."""
-    res = client.get("/api/future-endpoint")
+    """Any new /agent/* endpoint is blocked by default without cookie."""
+    res = client.get("/agent/future-endpoint")
     assert res.status_code == 401
 
 
 def test_unknown_endpoint_with_junk_cookie_rejected(client):
     """New endpoints are also protected by strict JWT validation."""
     client.cookies.set("access_token", "tok")
-    res = client.get("/api/future-endpoint")
+    res = client.get("/agent/future-endpoint")
     assert res.status_code == 401

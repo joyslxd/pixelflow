@@ -19,7 +19,6 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
-from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -166,9 +165,6 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
-        return
-
-    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
         return
 
     runtime_context = config.setdefault("context", {})

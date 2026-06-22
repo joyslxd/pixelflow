@@ -5,7 +5,7 @@
 
 ``AppConfig`` 刻意不缓存到 ``app.state``。Router 和 run 路径会通过
 ``deerflow.config.app_config.get_app_config`` 获取配置，该函数基于文件 mtime 做热
-加载，所以 ``config.yaml`` 修改后下一次请求即可生效。``langgraph_runtime`` 创建的
+加载，所以当前 profile YAML 修改后下一次请求即可生效。``langgraph_runtime`` 创建的
 引擎（stream bridge、persistence、checkpointer、store、run-event store）绑定启动
 快照，这些属于必须重启才安全切换的基础设施。
 
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from app.gateway.content_app_auth import ContentAppAuthError, authenticate_authorization_header
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
@@ -31,8 +32,6 @@ from deerflow.runtime.runs.store.base import RunStore
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from app.gateway.auth.local_provider import LocalAuthProvider
-    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -68,7 +67,7 @@ def get_config() -> AppConfig:
     """返回当前请求可见的最新 ``AppConfig``。
 
     这里会走 ``get_app_config``，它尊重运行时 ``ContextVar`` 覆盖，并在
-    ``config.yaml`` mtime 变化时从磁盘重载。``AppConfig`` 完全不缓存在
+    当前 profile YAML mtime 变化时从磁盘重载。``AppConfig`` 完全不缓存在
     ``app.state``；唯一启动快照只存在于 ``lifespan()`` 的局部变量
     ``startup_config``，并显式传给必须重启才切换的基础设施。
 
@@ -202,7 +201,7 @@ def get_run_context(request: Request) -> RunContext:
 
     返回基础上下文，包含 checkpointer、store、event_store、thread_store 等基础设施。
     ``app_config`` 每次请求实时解析，因此模型 max_tokens 等 per-run 配置能跟随
-    ``config.yaml`` 热更新；``event_store`` / ``run_events_config`` 保持启动快照，
+    当前 profile YAML 热更新；``event_store`` / ``run_events_config`` 保持启动快照，
     避免 store 后端和配置后端错配。
     """
     return RunContext(
@@ -219,71 +218,27 @@ def get_run_context(request: Request) -> RunContext:
 # Auth 辅助函数：供 authz.py 和 auth middleware 使用。
 # ---------------------------------------------------------------------------
 
-# 缓存单例，避免每个请求重复构造 provider/repository。
-_cached_local_provider: LocalAuthProvider | None = None
-_cached_repo: SQLiteUserRepository | None = None
-
-
-def get_local_provider() -> LocalAuthProvider:
-    """获取或创建缓存的 ``LocalAuthProvider`` 单例。
-
-    必须在 ``init_engine_from_config()`` 之后调用，因为用户仓储需要共享
-    session_factory。
-    """
-    global _cached_local_provider, _cached_repo
-    if _cached_repo is None:
-        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-        from deerflow.persistence.engine import get_session_factory
-
-        sf = get_session_factory()
-        if sf is None:
-            raise RuntimeError("get_local_provider() called before init_engine_from_config(); cannot access users table")
-        _cached_repo = SQLiteUserRepository(sf)
-    if _cached_local_provider is None:
-        from app.gateway.auth.local_provider import LocalAuthProvider
-
-        _cached_local_provider = LocalAuthProvider(repository=_cached_repo)
-    return _cached_local_provider
-
-
 async def get_current_user_from_request(request: Request):
-    """从请求 cookie 中获取当前已认证用户。
+    """从 ``Authorization`` 请求头解析 content-app 用户。
 
-    未认证时抛 HTTPException 401。
+    Java 类比：这里相当于 Controller/Filter 共用的 ``CurrentUserResolver``。
+    pixelflow 不再读取自己的 ``access_token`` cookie，也不再查本地 users 表；用户
+    身份完全来自 content-app JWT，并通过远程 ``/api/auth/verify`` 确认实时可用。
     """
-    from app.gateway.auth import decode_token
-    from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
+    from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 
-    access_token = request.cookies.get("access_token")
-    if not access_token:
+    cached_user = getattr(request.state, "user", None)
+    if cached_user is not None:
+        return cached_user
+
+    try:
+        return await authenticate_authorization_header(request.headers.get("Authorization"))
+    except ContentAppAuthError as exc:
+        code = AuthErrorCode(exc.code) if exc.code in AuthErrorCode._value2member_map_ else AuthErrorCode.TOKEN_INVALID
         raise HTTPException(
-            status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.NOT_AUTHENTICATED, message="Not authenticated").model_dump(),
-        )
-
-    payload = decode_token(access_token)
-    if isinstance(payload, TokenError):
-        raise HTTPException(
-            status_code=401,
-            detail=AuthErrorResponse(code=token_error_to_code(payload), message=f"Token error: {payload.value}").model_dump(),
-        )
-
-    provider = get_local_provider()
-    user = await provider.get_user(payload.sub)
-    if user is None:
-        raise HTTPException(
-            status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
-        )
-
-    # token_version 不一致表示用户改过密码，当前 token 已失效。
-    if user.token_version != payload.ver:
-        raise HTTPException(
-            status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
-        )
-
-    return user
+            status_code=exc.status_code,
+            detail=AuthErrorResponse(code=code, message=exc.message).model_dump(),
+        ) from exc
 
 
 async def get_optional_user_from_request(request: Request):
@@ -298,7 +253,7 @@ async def get_optional_user_from_request(request: Request):
 
 
 async def get_current_user(request: Request) -> str | None:
-    """从请求 cookie 中提取 user_id；未认证时返回 None。
+    """从 content-app Authorization 中提取当前用户名；未认证时返回 None。
 
     这是一个轻量适配器，适合只需要用户 ID 的调用方（如 ``feedback.py``）。需要完整
     用户对象时应使用 ``get_current_user_from_request`` 或

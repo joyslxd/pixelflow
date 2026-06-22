@@ -1,8 +1,8 @@
 import { NavLink, useNavigate } from "react-router-dom";
-import { SquarePen } from "lucide-react";
+import { KeyRound, SquarePen } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// 侧边栏当前仍是静态占位数据；后续应接 /api/tasks，并用真实 task_id 跳转 /c/:taskId。
+// 侧边栏当前仍是静态占位数据；后续应接 /agent/flows，并用真实 task_id 跳转 /c/:taskId。
 const THREADS = [
   { id: "t1", title: "45度俯拍水果刀切果肉", count: 5 },
   { id: "t2", title: "保温杯冬季通勤种草", count: 3 },
@@ -27,6 +27,20 @@ export function Sidebar() {
           <SquarePen size={16} />
           新建对话
         </button>
+        <NavLink
+          to="/auth-token"
+          className={({ isActive }) =>
+            cn(
+              "mt-2 flex w-full items-center gap-2 rounded-xl border px-3 py-2.5 text-[14px] font-medium transition-colors",
+              isActive
+                ? "border-accent/30 bg-accent-soft text-accent"
+                : "border-line bg-surface text-ink-soft hover:border-accent/30 hover:text-accent",
+            )
+          }
+        >
+          <KeyRound size={16} />
+          认证设置
+        </NavLink>
       </div>
 
       <div className="mt-5 px-5 text-[12px] font-medium text-ink-soft/70">

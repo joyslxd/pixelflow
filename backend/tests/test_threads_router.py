@@ -49,7 +49,7 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     """Build a stub-authed FastAPI app wired with an in-memory ThreadMetaStore.
 
     The thread_store on ``app.state`` is a permissive subclass of
-    ``MemoryThreadMetaStore`` so tests can drive ``/api/threads``
+    ``MemoryThreadMetaStore`` so tests can drive ``/agent/threads``
     end-to-end and pre-seed legacy records via the underlying BaseStore.
 
     Returns ``(app, store, checkpointer)`` for direct seeding/inspection.
@@ -118,7 +118,7 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
         with TestClient(app) as client:
-            response = client.delete("/api/threads/thread-route")
+            response = client.delete("/agent/threads/thread-route")
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
@@ -133,7 +133,7 @@ def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
         with TestClient(app) as client:
-            response = client.delete("/api/threads/../escape")
+            response = client.delete("/agent/threads/../escape")
 
     assert response.status_code == 404
 
@@ -146,7 +146,7 @@ def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
         with TestClient(app) as client:
-            response = client.delete("/api/threads/thread.with.dot")
+            response = client.delete("/agent/threads/thread.with.dot")
 
     assert response.status_code == 422
     assert "Invalid thread_id" in response.json()["detail"]
@@ -209,7 +209,7 @@ def test_create_thread_returns_iso_timestamps() -> None:
     app, _store, _checkpointer = _build_thread_app()
 
     with TestClient(app) as client:
-        response = client.post("/api/threads", json={"metadata": {}})
+        response = client.post("/agent/threads", json={"metadata": {}})
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -254,7 +254,7 @@ def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.get(f"/api/threads/{legacy_thread_id}")
+        response = client.get(f"/agent/threads/{legacy_thread_id}")
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -287,7 +287,7 @@ def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+        response = client.patch(f"/agent/threads/{thread_id}", json={"metadata": {"k": "v1"}})
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -339,7 +339,7 @@ def test_search_threads_normalizes_legacy_unix_seconds_to_iso() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.post("/api/threads/search", json={"limit": 10})
+        response = client.post("/agent/threads/search", json={"limit": 10})
 
     assert response.status_code == 200, response.text
     items = response.json()
@@ -394,7 +394,7 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.get(f"/api/threads/{thread_id}/state")
+        response = client.get(f"/agent/threads/{thread_id}/state")
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -425,7 +425,7 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+        response = client.post(f"/agent/threads/{thread_id}/history", json={"limit": 10})
 
     assert response.status_code == 200, response.text
     entries = response.json()
@@ -444,7 +444,7 @@ def test_search_threads_rejects_invalid_key_at_api_boundary() -> None:
     app, _store, _checkpointer = _build_thread_app()
 
     with TestClient(app) as client:
-        response = client.post("/api/threads/search", json={"metadata": {"bad;key": "x"}})
+        response = client.post("/agent/threads/search", json={"metadata": {"bad;key": "x"}})
 
     assert response.status_code == 422
 
@@ -454,7 +454,7 @@ def test_search_threads_rejects_unsupported_value_type_at_api_boundary() -> None
     app, _store, _checkpointer = _build_thread_app()
 
     with TestClient(app) as client:
-        response = client.post("/api/threads/search", json={"metadata": {"env": ["a", "b"]}})
+        response = client.post("/agent/threads/search", json={"metadata": {"env": ["a", "b"]}})
 
     assert response.status_code == 422
 
@@ -471,7 +471,7 @@ def test_search_threads_returns_400_for_backend_invalid_metadata_filter() -> Non
 
     with TestClient(app) as client:
         with patch.object(thread_store, "search", side_effect=_raise):
-            response = client.post("/api/threads/search", json={"metadata": {"valid_key": "x"}})
+            response = client.post("/agent/threads/search", json={"metadata": {"valid_key": "x"}})
 
     assert response.status_code == 400
     assert "rejected" in response.json()["detail"]
@@ -482,6 +482,6 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
     app, _store, _checkpointer = _build_thread_app()
 
     with TestClient(app) as client:
-        response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
+        response = client.post("/agent/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200

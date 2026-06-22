@@ -97,13 +97,13 @@ class TestCancelRunEndpointIdempotency:
         run_id = _create_interrupted_run(mgr)
         client = _make_app(mgr)
 
-        resp = client.post(f"/api/threads/{THREAD_ID}/runs/{run_id}/cancel")
+        resp = client.post(f"/agent/threads/{THREAD_ID}/runs/{run_id}/cancel")
         assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.text}"
 
     def test_cancel_unknown_run_returns_404(self):
         mgr = RunManager()
         client = _make_app(mgr)
-        resp = client.post(f"/api/threads/{THREAD_ID}/runs/no-such-run/cancel")
+        resp = client.post(f"/agent/threads/{THREAD_ID}/runs/no-such-run/cancel")
         assert resp.status_code == 404
 
     def test_cancel_successful_run_returns_409(self):
@@ -118,7 +118,7 @@ class TestCancelRunEndpointIdempotency:
 
         mgr, run_id = asyncio.run(_setup())
         client = _make_app(mgr)
-        resp = client.post(f"/api/threads/{THREAD_ID}/runs/{run_id}/cancel")
+        resp = client.post(f"/agent/threads/{THREAD_ID}/runs/{run_id}/cancel")
         assert resp.status_code == 409
 
 
@@ -136,7 +136,7 @@ class TestStreamExistingRunIdempotentCancel:
         client = _make_app(mgr)
 
         resp = client.post(
-            f"/api/threads/{THREAD_ID}/runs/{run_id}/join",
+            f"/agent/threads/{THREAD_ID}/runs/{run_id}/join",
             params={"action": "interrupt"},
         )
         assert resp.status_code != 409, f"Should not 409 on idempotent cancel, got {resp.status_code}"

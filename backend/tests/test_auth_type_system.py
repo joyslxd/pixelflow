@@ -82,39 +82,39 @@ class _FakeRequest:
 
 def test_csrf_exempts_login_local():
     """login/local (actual route) should be exempt from CSRF."""
-    req = _FakeRequest("/api/v1/auth/login/local")
+    req = _FakeRequest("/agent/auth/login/local")
     assert is_auth_endpoint(req) is True
 
 
 def test_csrf_exempts_login_local_trailing_slash():
     """Trailing slash should also be exempt."""
-    req = _FakeRequest("/api/v1/auth/login/local/")
+    req = _FakeRequest("/agent/auth/login/local/")
     assert is_auth_endpoint(req) is True
 
 
 def test_csrf_exempts_logout():
-    req = _FakeRequest("/api/v1/auth/logout")
+    req = _FakeRequest("/agent/auth/logout")
     assert is_auth_endpoint(req) is True
 
 
 def test_csrf_exempts_register():
-    req = _FakeRequest("/api/v1/auth/register")
+    req = _FakeRequest("/agent/auth/register")
     assert is_auth_endpoint(req) is True
 
 
 def test_csrf_does_not_exempt_old_login_path():
-    """Old /api/v1/auth/login (without /local) should NOT be exempt."""
-    req = _FakeRequest("/api/v1/auth/login")
+    """Old /agent/auth/login (without /local) should NOT be exempt."""
+    req = _FakeRequest("/agent/auth/login")
     assert is_auth_endpoint(req) is False
 
 
 def test_csrf_does_not_exempt_me():
-    req = _FakeRequest("/api/v1/auth/me")
+    req = _FakeRequest("/agent/auth/me")
     assert is_auth_endpoint(req) is False
 
 
 def test_csrf_skips_get_requests():
-    req = _FakeRequest("/api/v1/auth/me", method="GET")
+    req = _FakeRequest("/agent/auth/me", method="GET")
     assert should_check_csrf(req) is False
 
 
@@ -415,7 +415,7 @@ def _make_csrf_app():
     async def protected():
         return {"ok": True}
 
-    @app.post("/api/v1/auth/login/local")
+    @app.post("/agent/auth/login/local")
     async def login():
         return {"ok": True}
 
@@ -469,14 +469,14 @@ def test_csrf_middleware_allows_get_without_token():
 def test_csrf_middleware_exempts_login_local():
     """POST to login/local is exempt from CSRF (no token yet)."""
     client = TestClient(_make_csrf_app())
-    resp = client.post("/api/v1/auth/login/local")
+    resp = client.post("/agent/auth/login/local")
     assert resp.status_code == 200
 
 
 def test_csrf_middleware_sets_cookie_on_auth_endpoint():
     """Auth endpoints should receive a CSRF cookie in response."""
     client = TestClient(_make_csrf_app())
-    resp = client.post("/api/v1/auth/login/local")
+    resp = client.post("/agent/auth/login/local")
     assert CSRF_COOKIE_NAME in resp.cookies
 
 
@@ -520,10 +520,10 @@ def _get_auth_client():
 
 
 def test_api_auth_me_no_cookie_returns_structured_401():
-    """/api/v1/auth/me without cookie → 401 with {code: 'not_authenticated'}."""
+    """/agent/auth/me without cookie → 401 with {code: 'not_authenticated'}."""
     _setup_config()
     client = _get_auth_client()
-    resp = client.get("/api/v1/auth/me")
+    resp = client.get("/agent/auth/me")
     assert resp.status_code == 401
     body = resp.json()
     assert body["detail"]["code"] == "not_authenticated"
@@ -531,28 +531,28 @@ def test_api_auth_me_no_cookie_returns_structured_401():
 
 
 def test_api_auth_me_expired_token_returns_structured_401():
-    """/api/v1/auth/me with expired token → 401 with {code: 'token_expired'}."""
+    """/agent/auth/me with expired token → 401 with {code: 'token_expired'}."""
     _setup_config()
     expired = {"sub": "u1", "exp": datetime.now(UTC) - timedelta(hours=1), "iat": datetime.now(UTC)}
     token = pyjwt.encode(expired, _TEST_SECRET, algorithm="HS256")
 
     client = _get_auth_client()
     client.cookies.set("access_token", token)
-    resp = client.get("/api/v1/auth/me")
+    resp = client.get("/agent/auth/me")
     assert resp.status_code == 401
     body = resp.json()
     assert body["detail"]["code"] == "token_expired"
 
 
 def test_api_auth_me_invalid_sig_returns_structured_401():
-    """/api/v1/auth/me with bad signature → 401 with {code: 'token_invalid'}."""
+    """/agent/auth/me with bad signature → 401 with {code: 'token_invalid'}."""
     _setup_config()
     payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
     token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
 
     client = _get_auth_client()
     client.cookies.set("access_token", token)
-    resp = client.get("/api/v1/auth/me")
+    resp = client.get("/agent/auth/me")
     assert resp.status_code == 401
     body = resp.json()
     assert body["detail"]["code"] == "token_invalid"
@@ -563,7 +563,7 @@ def test_api_login_bad_credentials_returns_structured_401():
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         data={"username": "nonexistent@test.com", "password": "wrongpassword"},
     )
     assert resp.status_code == 401
@@ -577,12 +577,12 @@ def test_api_login_success_no_token_in_body():
     client = _get_auth_client()
     # Register first
     client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": "contract-test@test.com", "password": "securepassword123"},
     )
     # Login
     resp = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         data={"username": "contract-test@test.com", "password": "securepassword123"},
     )
     assert resp.status_code == 200
@@ -599,9 +599,9 @@ def test_api_register_duplicate_returns_structured_400():
     client = _get_auth_client()
     email = "dup-contract-test@test.com"
     # First register
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
+    client.post("/agent/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
     # Duplicate
-    resp = client.post("/api/v1/auth/register", json={"email": email, "password": "AnotherStr0ngPwd!"})
+    resp = client.post("/agent/auth/register", json={"email": email, "password": "AnotherStr0ngPwd!"})
     assert resp.status_code == 400
     body = resp.json()
     assert body["detail"]["code"] == "email_already_exists"
@@ -624,7 +624,7 @@ def test_register_http_cookie_httponly_true_secure_false():
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": _unique_email("http-cookie"), "password": "Tr0ub4dor3a"},
     )
     assert resp.status_code == 201
@@ -639,7 +639,7 @@ def test_register_https_cookie_httponly_true_secure_true():
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": _unique_email("https-cookie"), "password": "Tr0ub4dor3a"},
         headers={"x-forwarded-proto": "https"},
     )
@@ -656,9 +656,9 @@ def test_login_https_sets_secure_cookie():
     _setup_config()
     client = _get_auth_client()
     email = _unique_email("https-login")
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
+    client.post("/agent/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
     resp = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         data={"username": email, "password": "Tr0ub4dor3a"},
         headers={"x-forwarded-proto": "https"},
     )
@@ -674,7 +674,7 @@ def test_csrf_cookie_secure_on_https():
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": _unique_email("csrf-https"), "password": "Tr0ub4dor3a"},
         headers={"x-forwarded-proto": "https"},
     )
@@ -691,7 +691,7 @@ def test_csrf_cookie_not_secure_on_http():
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         json={"email": _unique_email("csrf-http"), "password": "Tr0ub4dor3a"},
     )
     assert resp.status_code == 201

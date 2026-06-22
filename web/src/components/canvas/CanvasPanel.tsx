@@ -1,5 +1,6 @@
 import { LayoutPanelLeft, X } from "lucide-react";
 import { BriefCard } from "./BriefCard";
+import { FlowTimeline } from "./FlowTimeline";
 import { VideoResultGrid } from "./VideoResultGrid";
 import type { CanvasState } from "@/lib/chat";
 
@@ -33,7 +34,7 @@ const REVIEW_COPY = {
 } as const;
 
 export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, briefConfirmed = false }: CanvasPanelProps) {
-  const { phase, brief, results, qcReport, estCost, actualCost } = state;
+  const { phase, brief, results, qcReport, timeline, estCost, actualCost } = state;
   // 只有 Brief 阶段、后端已返回 Brief、且用户尚未确认时，才展示审核卡。
   // 其他 review 阶段展示对应确认卡；没有内容时展示空画布。
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
@@ -67,6 +68,7 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6">
+        <FlowTimeline entries={timeline} />
         {canReviewBrief ? (
           <BriefCard brief={brief!} onApprove={onApprove} onRevise={onRevise} />
         ) : brief && phase === "brief_review" ? (

@@ -1,110 +1,33 @@
-"""LangGraph compatibility auth handler — shares JWT logic with Gateway.
+"""LangGraph 兼容认证入口：复用 content-app Authorization。
 
-The default DeerFlow runtime is embedded in the FastAPI Gateway; scripts and
-Docker deployments do not load this module.  It is retained for LangGraph
-tooling, Studio, or direct LangGraph Server compatibility through
-``langgraph.json``'s ``auth.path``.
-
-When that compatibility path is used, this module reuses the same JWT and CSRF
-rules as Gateway so both modes validate sessions consistently.
-
-Two layers:
-  1. @auth.authenticate — validates JWT cookie, extracts user_id,
-     and enforces CSRF on state-changing methods (POST/PUT/DELETE/PATCH)
-  2. @auth.on — returns metadata filter so each user only sees own threads
+FastAPI 网关是 pixelflow 的主入口；本模块只给 ``langgraph.json`` 的
+``auth.path`` 使用。为了避免两套认证行为不一致，这里不再读取 pixelflow 旧
+``access_token`` cookie，而是和 ``AuthMiddleware`` 一样校验
+``Authorization: Bearer <content-app-jwt>``。
 """
 
-import secrets
+from __future__ import annotations
 
 from langgraph_sdk import Auth
 
-from app.gateway.auth.errors import TokenError
-from app.gateway.auth.jwt import decode_token
-from app.gateway.deps import get_local_provider
+from app.gateway.content_app_auth import ContentAppAuthError, authenticate_authorization_header
 
 auth = Auth()
-
-# Methods that require CSRF validation (state-changing per RFC 7231).
-_CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
-
-
-def _check_csrf(request) -> None:
-    """Enforce Double Submit Cookie CSRF check for state-changing requests.
-
-    Mirrors Gateway's CSRFMiddleware logic so that LangGraph routes
-    proxied directly by nginx have the same CSRF protection.
-    """
-    method = getattr(request, "method", "") or ""
-    if method.upper() not in _CSRF_METHODS:
-        return
-
-    cookie_token = request.cookies.get("csrf_token")
-    header_token = request.headers.get("x-csrf-token")
-
-    if not cookie_token or not header_token:
-        raise Auth.exceptions.HTTPException(
-            status_code=403,
-            detail="CSRF token missing. Include X-CSRF-Token header.",
-        )
-
-    if not secrets.compare_digest(cookie_token, header_token):
-        raise Auth.exceptions.HTTPException(
-            status_code=403,
-            detail="CSRF token mismatch.",
-        )
 
 
 @auth.authenticate
 async def authenticate(request):
-    """Validate the session cookie, decode JWT, and check token_version.
-
-    Same validation chain as Gateway's get_current_user_from_request:
-      cookie → decode JWT → DB lookup → token_version match
-    Also enforces CSRF on state-changing methods.
-    """
-    # CSRF check before authentication so forged cross-site requests
-    # are rejected early, even if the cookie carries a valid JWT.
-    _check_csrf(request)
-
-    token = request.cookies.get("access_token")
-    if not token:
-        raise Auth.exceptions.HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-        )
-
-    payload = decode_token(token)
-    if isinstance(payload, TokenError):
-        raise Auth.exceptions.HTTPException(
-            status_code=401,
-            detail="Invalid token",
-        )
-
-    user = await get_local_provider().get_user(payload.sub)
-    if user is None:
-        raise Auth.exceptions.HTTPException(
-            status_code=401,
-            detail="User not found",
-        )
-    if user.token_version != payload.ver:
-        raise Auth.exceptions.HTTPException(
-            status_code=401,
-            detail="Token revoked (password changed)",
-        )
-
-    return payload.sub
+    """校验 content-app token，并把用户名作为 LangGraph identity。"""
+    try:
+        user = await authenticate_authorization_header(request.headers.get("Authorization"))
+    except ContentAppAuthError as exc:
+        raise Auth.exceptions.HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return user.id
 
 
 @auth.on
 async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
-    """Inject user_id metadata on writes; filter by user_id on reads.
-
-    Gateway stores thread ownership as ``metadata.user_id``.
-    This handler ensures LangGraph Server enforces the same isolation.
-    """
-    # On create/update: stamp user_id into metadata
+    """写入/过滤 ``metadata.user_id``，保证 LangGraph 资源按 content-app 用户隔离。"""
     metadata = value.setdefault("metadata", {})
     metadata["user_id"] = ctx.user.identity
-
-    # Return filter dict — LangGraph applies it to search/read/delete
     return {"user_id": ctx.user.identity}

@@ -1,11 +1,17 @@
+PIXELFLOW_CONFIG_ENV ?= dev
+PYTHON ?= uv run python
+
 install:
 	uv sync
 
 dev:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	PIXELFLOW_CONFIG_ENV=$(PIXELFLOW_CONFIG_ENV) PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(PYTHON) -m app.gateway.run --reload
 
 gateway:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PIXELFLOW_CONFIG_ENV=$(PIXELFLOW_CONFIG_ENV) PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(PYTHON) -m app.gateway.run
+
+gateway-prod:
+	PIXELFLOW_CONFIG_ENV=prod PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(PYTHON) -m app.gateway.run
 
 test:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/ -v

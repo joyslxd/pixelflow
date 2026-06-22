@@ -18,7 +18,7 @@ from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["skills"])
+router = APIRouter(prefix="/agent", tags=["skills"])
 
 
 class SkillResponse(BaseModel):

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from app.gateway.deps import get_current_user
 from pixelflow.preferences import UserPreferenceStore
 
-router = APIRouter(prefix="/api/users", tags=["pixelflow-preferences"])
+router = APIRouter(prefix="/agent/users", tags=["pixelflow-preferences"])
 
 
 class PreferenceResponse(BaseModel):

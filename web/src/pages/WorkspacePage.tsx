@@ -4,7 +4,7 @@ import { CanvasPanel } from "@/components/canvas/CanvasPanel";
 import { GenParamsDialog, type GenParamsForm } from "@/components/composer/GenParamsDialog";
 import { api, subscribeTaskEvents, type TaskEvent } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
-import type { TaskPhase, VideoResult } from "@/lib/types";
+import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 
 let seq = 0;
 const uid = () => `m${++seq}`;
@@ -48,6 +48,24 @@ const REVIEW_ARTIFACT: Partial<Record<TaskPhase, NonNullable<ChatMessage["artifa
   },
 };
 
+const EXPLAINABLE_EVENT_NAMES = new Set<FlowTimelineEntry["event"]>([
+  "step_started",
+  "step_finished",
+  "llm_summary",
+  "vendor_call_started",
+  "vendor_call_finished",
+  "asset_ready",
+]);
+
+const EVENT_FALLBACK_TITLE: Record<FlowTimelineEntry["event"], string> = {
+  step_started: "步骤开始",
+  step_finished: "步骤完成",
+  llm_summary: "思考摘要",
+  vendor_call_started: "外部能力调用开始",
+  vendor_call_finished: "外部能力调用完成",
+  asset_ready: "资产已就绪",
+};
+
 function sizeFor(ratio: string, resolution: string): string {
   // 把弹窗里的比例/清晰度转换成后端 video_params.size，例如 9:16 + 1080p -> 1080x1920。
   const r = resolution === "720p" ? 720 : 1080;
@@ -78,8 +96,27 @@ function toBrief(raw: Record<string, unknown>): Brief {
   };
 }
 
-const EMPTY_CANVAS: CanvasState = { phase: "idle", results: [] };
+const EMPTY_CANVAS: CanvasState = { phase: "idle", results: [], timeline: [] };
 const SESSION_KEY = "pixelflow.workspace.session.v1";
+
+function toTimelineEntry(event: TaskEvent): FlowTimelineEntry | null {
+  // 后端的可解释事件 payload 是面向前端展示的 VO；这里只做轻量字段适配。
+  // 普通业务事件仍走 onEvent switch，不进入时间线，避免画布噪声过多。
+  if (!EXPLAINABLE_EVENT_NAMES.has(event.event as FlowTimelineEntry["event"])) return null;
+  const type = event.event as FlowTimelineEntry["event"];
+  const data = event.data || {};
+  return {
+    id: event.id ? `event-${event.id}` : `${type}-${Date.now()}`,
+    event: type,
+    title: String(data.title || EVENT_FALLBACK_TITLE[type]),
+    summary: String(data.summary || ""),
+    phase: data.phase ? String(data.phase) : undefined,
+    status: data.status ? String(data.status) : undefined,
+    time: event.created_at
+      ? new Date(event.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+      : now(),
+  };
+}
 
 interface WorkspaceSnapshot {
   taskId: string;
@@ -133,6 +170,16 @@ export function WorkspacePage() {
     if (announcedPhasesRef.current.has(key)) return;
     announcedPhasesRef.current.add(key);
     pushArtifact(PHASE_MSG[phase] || "请在画布确认。", artifact);
+  };
+
+  const appendTimelineEvent = (event: TaskEvent) => {
+    const entry = toTimelineEntry(event);
+    if (!entry) return;
+    setCanvas((c) => {
+      const timeline = c.timeline || [];
+      if (timeline.some((item) => item.id === entry.id)) return c;
+      return { ...c, timeline: [...timeline, entry].slice(-80) };
+    });
   };
 
   async function reconcileTaskFromServer(taskId: string) {
@@ -280,6 +327,7 @@ export function WorkspacePage() {
       lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
     }
     const phase = (e.data.phase as string) || "";
+    appendTimelineEvent(e);
     switch (e.event) {
       case "phase_change":
         if (phase) {
@@ -328,6 +376,12 @@ export function WorkspacePage() {
         pushAssistant(`生成失败:${String(e.data.error ?? "未知错误")}`);
         setBusy(false);
         break;
+      case "auth_revoked":
+        // 后端 SSE 会在长连接期间持续复查 content-app 登录态；被禁用或 token 失效时会主动断开。
+        pushAssistant(`登录态已失效:${String(e.data.message ?? "请重新从 content-app 进入")}`);
+        setBusy(false);
+        unsubRef.current();
+        break;
     }
   }
 
@@ -339,12 +393,24 @@ export function WorkspacePage() {
     try {
       const [assets, taskResult] = await Promise.all([api.listAssets(id), api.getResult(id).catch(() => null)]);
       const videos = assets.filter((a) => a.asset_type === "final_video" || a.asset_type === "generated_video");
-      const results: VideoResult[] = videos.map((a, i) => ({
-        id: a.asset_id || `r${i}`,
-        url: a.asset_type === "final_video" ? api.assetContentUrl(id, a.asset_id) : a.url,
-        assetType: a.asset_type,
-        status: a.status === "ready" ? "success" : a.status === "error" ? "failed" : "pending",
-      }));
+      const results: VideoResult[] = await Promise.all(
+        videos.map(async (a, i) => {
+          let url = a.url;
+          if (a.asset_type === "final_video") {
+            try {
+              url = await api.assetContentBlobUrl(id, a.asset_id);
+            } catch {
+              url = "";
+            }
+          }
+          return {
+            id: a.asset_id || `r${i}`,
+            url,
+            assetType: a.asset_type,
+            status: a.status === "ready" && url ? "success" : a.status === "error" ? "failed" : "pending",
+          };
+        }),
+      );
       const qcReport = taskResult?.result?.qc_report;
       setCanvas((c) => ({
         ...c,
@@ -429,7 +495,7 @@ export function WorkspacePage() {
       lastEventIdRef.current = 0;
       announcedPhasesRef.current = new Set();
       briefReadyShownRef.current = false;
-      setCanvas({ phase: (task.phase as TaskPhase) || "intake", results: [] });
+      setCanvas({ phase: (task.phase as TaskPhase) || "intake", results: [], timeline: [] });
       unsubRef.current();
       unsubRef.current = subscribeTaskEvents(task.task_id, onEvent);
     } catch (err) {

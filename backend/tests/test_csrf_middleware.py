@@ -10,15 +10,15 @@ def _make_app() -> FastAPI:
     app = FastAPI()
     app.add_middleware(CSRFMiddleware)
 
-    @app.post("/api/v1/auth/login/local")
+    @app.post("/agent/auth/login/local")
     async def login_local():
         return {"ok": True}
 
-    @app.post("/api/v1/auth/register")
+    @app.post("/agent/auth/register")
     async def register():
         return {"ok": True}
 
-    @app.post("/api/threads/abc/runs/stream")
+    @app.post("/agent/threads/abc/runs/stream")
     async def protected_mutation():
         return {"ok": True}
 
@@ -36,7 +36,7 @@ def test_auth_post_rejects_cross_origin_browser_request():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://evil.example"},
     )
 
@@ -48,7 +48,7 @@ def test_auth_post_allows_same_origin_browser_request():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://deerflow.example"},
     )
 
@@ -60,7 +60,7 @@ def test_auth_post_rejects_malformed_origin_with_path():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://deerflow.example/path"},
     )
 
@@ -73,7 +73,7 @@ def test_auth_post_rejects_malformed_origin_with_invalid_port():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://deerflow.example:bad"},
     )
 
@@ -86,7 +86,7 @@ def test_auth_post_allows_same_origin_default_port_equivalence():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://deerflow.example:443"},
     )
 
@@ -98,7 +98,7 @@ def test_auth_post_allows_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={
             "Origin": "https://deerflow.example",
             "X-Forwarded-Proto": "https",
@@ -114,7 +114,7 @@ def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={
             "Origin": "http://localhost:2026",
             "X-Forwarded-Proto": "http",
@@ -130,7 +130,7 @@ def test_auth_post_allows_rfc_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={
             "Origin": "https://deerflow.example",
             "Forwarded": "proto=https;host=deerflow.example",
@@ -147,7 +147,7 @@ def test_auth_post_allows_explicit_configured_origin(monkeypatch):
     client = TestClient(_make_app(), base_url="https://api.example")
 
     response = client.post(
-        "/api/v1/auth/register",
+        "/agent/auth/register",
         headers={"Origin": "https://app.example"},
     )
 
@@ -160,7 +160,7 @@ def test_auth_post_does_not_treat_wildcard_cors_as_allowed_origin(monkeypatch):
     client = TestClient(_make_app(), base_url="https://api.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://evil.example"},
     )
 
@@ -172,7 +172,7 @@ def test_auth_post_sets_strict_samesite_csrf_cookie():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/v1/auth/login/local",
+        "/agent/auth/login/local",
         headers={"Origin": "https://deerflow.example"},
     )
 
@@ -186,7 +186,7 @@ def test_auth_post_sets_strict_samesite_csrf_cookie():
 def test_auth_post_without_origin_still_allows_non_browser_clients():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
-    response = client.post("/api/v1/auth/login/local")
+    response = client.post("/agent/auth/login/local")
 
     assert response.status_code == 200
     assert response.cookies.get("csrf_token")
@@ -196,7 +196,7 @@ def test_non_auth_mutation_still_requires_double_submit_token():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/threads/abc/runs/stream",
+        "/agent/threads/abc/runs/stream",
         headers={"Origin": "https://deerflow.example"},
     )
 
@@ -209,7 +209,7 @@ def test_non_auth_mutation_allows_valid_double_submit_token():
     client.cookies.set("csrf_token", "known-token")
 
     response = client.post(
-        "/api/threads/abc/runs/stream",
+        "/agent/threads/abc/runs/stream",
         headers={
             "Origin": "https://deerflow.example",
             "X-CSRF-Token": "known-token",
@@ -224,7 +224,7 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
     client.cookies.set("csrf_token", "cookie-token")
 
     response = client.post(
-        "/api/threads/abc/runs/stream",
+        "/agent/threads/abc/runs/stream",
         headers={
             "Origin": "https://deerflow.example",
             "X-CSRF-Token": "header-token",

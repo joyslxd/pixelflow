@@ -4,8 +4,8 @@ This test drives the **entire** FastAPI gateway through ``starlette.testclient.T
 
   starlette.testclient.TestClient (real ASGI stack)
     -> AuthMiddleware (real cookie parsing, real JWT decode)
-    -> /api/v1/auth/register endpoint (real password hash + sqlite write)
-    -> /api/threads/{id}/runs/stream endpoint (real start_run config-assembly)
+    -> /agent/auth/register endpoint (real password hash + sqlite write)
+    -> /agent/threads/{id}/runs/stream endpoint (real start_run config-assembly)
     -> background asyncio.create_task(run_agent) (real worker, real Runtime)
     -> langchain.agents.create_agent graph (real, with fake LLM)
     -> ToolNode dispatch (real)
@@ -215,8 +215,8 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
 ):
     """The full real-server contract test.
 
-    1. Register a real user via POST /api/v1/auth/register (also auto-logs in)
-    2. POST to /api/threads/{tid}/runs/stream with the **exact** body shape the
+    1. Register a real user via POST /agent/auth/register (also auto-logs in)
+    2. POST to /agent/threads/{tid}/runs/stream with the **exact** body shape the
        frontend (LangGraph SDK) sends during the bootstrap flow.
     3. Wait for the background run to finish.
     4. Assert SOUL.md exists under users/<authenticated_uid>/agents/<name>/.
@@ -240,7 +240,7 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
     ):
         # --- 1. Register & auto-login ---
         register = client.post(
-            "/api/v1/auth/register",
+            "/agent/auth/register",
             json={"email": "e2e-user@example.com", "password": "very-strong-password-123"},
         )
         assert register.status_code == 201, register.text
@@ -253,13 +253,13 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         assert csrf_token, "register endpoint must set csrf_token cookie"
 
         # --- 2. Create a thread (require_existing=True on /runs/stream means
-        # we must call POST /api/threads first; the React frontend does the
+        # we must call POST /agent/threads first; the React frontend does the
         # same via the LangGraph SDK's threads.create) ---
         import uuid as _uuid
 
         thread_id = str(_uuid.uuid4())
         created = client.post(
-            "/api/threads",
+            "/agent/threads",
             json={"thread_id": thread_id, "metadata": {}},
             headers={"X-CSRF-Token": csrf_token},
         )
@@ -268,7 +268,7 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         # --- 3. POST /runs/stream with the bootstrap wire format ---
         # This is the EXACT shape the React frontend sends after PR #2784:
         #   thread.submit(input, {config, context}) ->
-        #   POST /api/threads/{id}/runs/stream body =
+        #   POST /agent/threads/{id}/runs/stream body =
         #     {assistant_id, input, config, context}
         body = {
             "assistant_id": "lead_agent",
@@ -295,7 +295,7 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         # background task (run_agent) gets to completion before we look at disk.
         with client.stream(
             "POST",
-            f"/api/threads/{thread_id}/runs/stream",
+            f"/agent/threads/{thread_id}/runs/stream",
             json=body,
             headers={"X-CSRF-Token": csrf_token},
         ) as resp:
