@@ -168,7 +168,7 @@ tracing:
     # Langfuse 服务地址；自建时改成自己的地址。
     base_url: "https://cloud.langfuse.com"
 
-# 常见第三方能力 Key；没有独立业务分组的先集中放这里。
+# 常见第三方工具 Key；大模型 key 请直接写到 models.* 的 api_key/base_url。
 third_party:
   # Serper 搜索 API Key；使用 Google 搜索工具时填写。
   serper_api_key: ""
@@ -176,18 +176,6 @@ third_party:
   jina_api_key: ""
   # InfoQuest API Key；使用 InfoQuest 检索能力时填写。
   infoquest_api_key: ""
-  # Anthropic API Key；使用 Claude 模型时填写。
-  anthropic_api_key: ""
-  # Anthropic 计费/路由 header；特殊 Anthropic 接入场景才需要。
-  anthropic_billing_header: ""
-  # OpenAI API Key；使用 OpenAI 或 OpenAI 兼容模型时填写。
-  openai_api_key: ""
-  # OpenAI API Base；兼容服务可填写自定义地址。
-  openai_api_base: ""
-  # Claude Code 凭据文件路径；使用本地 Claude OAuth 凭据时填写。
-  claude_code_credentials_path: ""
-  # Claude Code OAuth token；使用 token 直连时填写。
-  claude_code_oauth_token: ""
 
 # 环境变量直通区；少量非常规 key 可以放这里，加载器会原样写入 os.environ。
 environment:

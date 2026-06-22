@@ -36,10 +36,19 @@ _MAPPED_ENV_KEYS = {
     "PIXELFLOW_RENDER_ROOT",
 }
 
+_REMOVED_MODEL_THIRD_PARTY_ENV_KEYS = {
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BILLING_HEADER",
+    "OPENAI_API_KEY",
+    "OPENAI_API_BASE",
+    "CLAUDE_CODE_CREDENTIALS_PATH",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+}
+
 
 @pytest.fixture(autouse=True)
 def _clean_profile_env(monkeypatch: pytest.MonkeyPatch):
-    for key in _MAPPED_ENV_KEYS | {"PIXELFLOW_CONFIG_ENV", "PIXELFLOW_CONFIG_FILE", "CUSTOM_PROFILE_KEY"}:
+    for key in _MAPPED_ENV_KEYS | _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS | {"PIXELFLOW_CONFIG_ENV", "PIXELFLOW_CONFIG_FILE", "CUSTOM_PROFILE_KEY"}:
         monkeypatch.delenv(key, raising=False)
 
     from app.gateway.profile_config import reset_profile_config_for_tests
@@ -125,6 +134,36 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert "BORGRISE_POLL_TIMEOUT" not in os.environ
     assert os.environ["CUSTOM_PROFILE_KEY"] == "custom-value"
     assert os.environ["DEER_FLOW_CONFIG_PATH"] == str(config_file)
+
+
+def test_model_related_third_party_keys_are_no_longer_profile_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """大模型 key 统一放在 models.*，不再从 third_party 映射成环境变量。"""
+    config_file = tmp_path / "config.dev.yml"
+    _write_minimal_profile(config_file)
+    content = config_file.read_text(encoding="utf-8")
+    config_file.write_text(
+        content.replace(
+            "environment:\n",
+            """third_party:
+  anthropic_api_key: sk-anthropic
+  anthropic_billing_header: billing-header
+  openai_api_key: sk-openai
+  openai_api_base: https://llm.example/v1
+  claude_code_credentials_path: /tmp/claude.json
+  claude_code_oauth_token: sk-claude-oauth
+environment:
+""",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
+
+    from app.gateway.profile_config import load_profile_config
+
+    load_profile_config()
+
+    for key in _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS:
+        assert key not in os.environ
 
 
 def test_shell_environment_keeps_highest_priority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

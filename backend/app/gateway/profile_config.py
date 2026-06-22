@@ -91,12 +91,6 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("third_party", "serper_api_key"): "SERPER_API_KEY",
     ("third_party", "jina_api_key"): "JINA_API_KEY",
     ("third_party", "infoquest_api_key"): "INFOQUEST_API_KEY",
-    ("third_party", "anthropic_api_key"): "ANTHROPIC_API_KEY",
-    ("third_party", "anthropic_billing_header"): "ANTHROPIC_BILLING_HEADER",
-    ("third_party", "openai_api_key"): "OPENAI_API_KEY",
-    ("third_party", "openai_api_base"): "OPENAI_API_BASE",
-    ("third_party", "claude_code_credentials_path"): "CLAUDE_CODE_CREDENTIALS_PATH",
-    ("third_party", "claude_code_oauth_token"): "CLAUDE_CODE_OAUTH_TOKEN",
 }
 
 
