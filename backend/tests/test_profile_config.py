@@ -16,7 +16,6 @@ _MAPPED_ENV_KEYS = {
     "BORGRISE_BASE_URL",
     "BORGRISE_IMAGE_POLL_TIMEOUT",
     "BORGRISE_MAX_RETRIES",
-    "BORGRISE_PROJECT_ID",
     "BORGRISE_REMOTE_VERIFY_ENABLED",
     "BORGRISE_SKIP_SSL_VERIFY",
     "BORGRISE_VERIFY_TIMEOUT_SECONDS",
@@ -45,10 +44,14 @@ _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS = {
     "CLAUDE_CODE_OAUTH_TOKEN",
 }
 
+_REMOVED_BORGRISE_ENV_KEYS = {
+    "BORGRISE_PROJECT_ID",
+}
+
 
 @pytest.fixture(autouse=True)
 def _clean_profile_env(monkeypatch: pytest.MonkeyPatch):
-    for key in _MAPPED_ENV_KEYS | _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS | {"PIXELFLOW_CONFIG_ENV", "PIXELFLOW_CONFIG_FILE", "CUSTOM_PROFILE_KEY"}:
+    for key in _MAPPED_ENV_KEYS | _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS | _REMOVED_BORGRISE_ENV_KEYS | {"PIXELFLOW_CONFIG_ENV", "PIXELFLOW_CONFIG_FILE", "CUSTOM_PROFILE_KEY"}:
         monkeypatch.delenv(key, raising=False)
 
     from app.gateway.profile_config import reset_profile_config_for_tests
@@ -126,7 +129,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert "CONTENT_APP_API_BASE_URL" not in os.environ
     assert "CONTENT_APP_REMOTE_VERIFY_ENABLED" not in os.environ
     assert "CONTENT_APP_VERIFY_TIMEOUT_SECONDS" not in os.environ
-    assert os.environ["BORGRISE_PROJECT_ID"] == "42"
+    assert "BORGRISE_PROJECT_ID" not in os.environ
     assert os.environ["BORGRISE_SKIP_SSL_VERIFY"] == "true"
     assert os.environ["BORGRISE_VIDEO_POLL_TIMEOUT"] == "3600"
     assert os.environ["BORGRISE_IMAGE_POLL_TIMEOUT"] == "600"
@@ -134,6 +137,20 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert "BORGRISE_POLL_TIMEOUT" not in os.environ
     assert os.environ["CUSTOM_PROFILE_KEY"] == "custom-value"
     assert os.environ["DEER_FLOW_CONFIG_PATH"] == str(config_file)
+
+
+def test_borgrise_project_id_is_no_longer_profile_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """content-app/Borgrise 接口不再接收 projectId，配置里的旧字段也不能再导出。"""
+    config_file = tmp_path / "config.dev.yml"
+    _write_minimal_profile(config_file)
+    monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
+
+    from app.gateway.profile_config import load_profile_config
+
+    load_profile_config()
+
+    for key in _REMOVED_BORGRISE_ENV_KEYS:
+        assert key not in os.environ
 
 
 def test_model_related_third_party_keys_are_no_longer_profile_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

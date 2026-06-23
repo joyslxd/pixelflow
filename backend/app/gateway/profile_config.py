@@ -65,7 +65,6 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("borgrise", "base_url"): "BORGRISE_BASE_URL",
     ("borgrise", "remote_verify_enabled"): "BORGRISE_REMOTE_VERIFY_ENABLED",
     ("borgrise", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",
-    ("borgrise", "project_id"): "BORGRISE_PROJECT_ID",
     ("borgrise", "skip_ssl_verify"): "BORGRISE_SKIP_SSL_VERIFY",
     ("borgrise", "video_poll_timeout"): "BORGRISE_VIDEO_POLL_TIMEOUT",
     ("borgrise", "image_poll_timeout"): "BORGRISE_IMAGE_POLL_TIMEOUT",

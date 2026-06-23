@@ -50,8 +50,6 @@ borgrise:
   # 它只是一次短 HTTP 校验，不是生成任务轮询，所以开发环境默认 10 秒。
   verify_timeout_seconds: 10
   # 不配置用户 token：生成/查询接口会透传前端请求里的 content-app Authorization。
-  # Borgrise 项目 ID；默认 1，按实际账号项目修改。
-  project_id: "1"
   # 是否跳过 SSL 证书校验；开发环境遇到测试证书问题时可设 true。
   skip_ssl_verify: false
   # 视频生成轮询超时时间，单位秒；视频生成可能较慢，默认最多等 1 小时。

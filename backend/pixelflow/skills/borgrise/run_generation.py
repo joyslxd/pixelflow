@@ -19,7 +19,6 @@ Borgrise AI 内容创作平台执行脚本。
 
 环境变量：
     BORGRISE_BASE_URL: API base URL，默认 https://test-video.borgrise.com/api
-    BORGRISE_PROJECT_ID: 生成接口使用的项目 ID，默认 1
 
 鉴权说明：
     生成/查询接口使用 content-app 登录用户的 Authorization 透传。网关收到前端请求后，
@@ -45,7 +44,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 # 基础配置
 BASE_URL = os.environ.get("BORGRISE_BASE_URL", "https://test-video.borgrise.com/api")
-PROJECT_ID = os.environ.get("BORGRISE_PROJECT_ID", "1")
 SKIP_SSL_VERIFY = os.environ.get("BORGRISE_SKIP_SSL_VERIFY", "").lower() in {"1", "true", "yes", "on"}
 SSL_CONTEXT = ssl._create_unverified_context() if SKIP_SSL_VERIFY else None
 
@@ -194,14 +192,6 @@ def get_headers(model: str = "", bill_type: int = 0,
     api_param = {"size": size}
     headers["apiModelParamObj"] = json.dumps(api_param)
     return headers
-
-
-def with_project(endpoint: str, project_id: str = PROJECT_ID) -> str:
-    """按 Borgrise 测试前端的做法，为生成接口追加 projectId。"""
-    if not project_id or "projectId=" in endpoint:
-        return endpoint
-    separator = "&" if "?" in endpoint else "?"
-    return f"{endpoint}{separator}projectId={project_id}"
 
 
 def _looks_token_expired(payload: Dict[str, Any]) -> bool:
@@ -605,8 +595,7 @@ def create_virtual_human_asset(asset_name: str,
                                sex: str = "female",
                                age: str = "20",
                                price: float = 0.5,
-                               visibility: int = 0,
-                               project_id: str = PROJECT_ID) -> Dict:
+                               visibility: int = 0) -> Dict:
     """创建虚拟人资产，并返回 ``asset://`` 引用。"""
     if not image_url and not image_file:
         return {"error": True, "message": "Provide either image_url or image_file"}
@@ -647,7 +636,6 @@ def create_virtual_human_asset(asset_name: str,
     asset_record_data = {
         "assetType": "xnszr",
         "assetSource": "upload",
-        "projectId": int(project_id),
         "name": asset_name,
         "sex": sex,
         "age": age,
@@ -743,7 +731,7 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size="720p", model_header="modelType")
-    result = make_request(with_project("/video/image-to-video"), request_data, custom_headers=headers)
+    result = make_request("/video/image-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -817,7 +805,7 @@ def text_to_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/text-to-video"), request_data, custom_headers=headers)
+    result = make_request("/video/text-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -905,7 +893,7 @@ def reference_mode_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/reference-mode-video"), request_data, custom_headers=headers)
+    result = make_request("/video/reference-mode-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -1019,14 +1007,12 @@ def extend_video(video_url: str, duration: int = 10,
                  sound: str = "on",
                  auto_poll: bool = True,
                  max_total_duration: Optional[int] = None,
-                 current_cumulative_duration: int = 0,
-                 project_id: str = PROJECT_ID) -> Dict:
+                 current_cumulative_duration: int = 0) -> Dict:
     """按正确 API 格式延展已有视频。
 
     extend-video API 要求：
     - refVideoList：视频 URL 数组。
     - prompt：必须包含 "@filename" 来引用被延展的视频。
-    - projectId：可选 query 参数。
 
     时长安全保护（关键）：
     - max_total_duration: 设置后，如果 current_cumulative_duration + duration
@@ -1081,7 +1067,7 @@ def extend_video(video_url: str, duration: int = 10,
     }
 
     print(f"\n{'='*60}")
-    print(f"POST /api/video/extend-video?projectId={project_id}")
+    print("POST /api/video/extend-video")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"Duration: {duration}s")
@@ -1092,7 +1078,7 @@ def extend_video(video_url: str, duration: int = 10,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/extend-video", project_id=project_id), request_data, custom_headers=headers)
+    result = make_request("/video/extend-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -1138,21 +1124,19 @@ def extend_video(video_url: str, duration: int = 10,
 
 
 def merge_videos(video_urls: List[str],
-                 project_id: str = "108",
                  model: str = DEFAULT_VIDEO_MODEL,
                  duration: int = 30,
                  size: str = "1080p") -> Dict:
     """把多个视频片段合并成一个交付视频。
 
-    Swagger 中 VideoMergeRequest 使用 projectId + videoUrls。旧的 snake_case
-    ``video_urls`` 字段会被后端拒绝。
+    Swagger 中 VideoMergeRequest 使用 ``videoUrls``。旧的 snake_case
+    ``video_urls`` 字段会被后端拒绝；项目归属已由 content-app 后端按登录态处理。
     """
 
     if len(video_urls) < 2:
         return {"error": True, "message": "At least two video URLs are required for merge"}
 
     request_data = {
-        "projectId": int(project_id),
         "videoUrls": video_urls
     }
 
@@ -1160,7 +1144,6 @@ def merge_videos(video_urls: List[str],
     print("POST /api/video/merge")
     print(f"{'='*60}")
     print(f"Videos: {len(video_urls)}")
-    print(f"Project ID: {project_id}")
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
@@ -1579,7 +1562,6 @@ def long_reference_mode_video(prompts: List[str],
             auto_poll=True,
             max_total_duration=total_duration,
             current_cumulative_duration=elapsed,
-            project_id=PROJECT_ID,
         )
         if extend_result.get("error"):
             return {
@@ -1837,7 +1819,6 @@ def resume_long_reference_mode_video(progress_file: str,
             auto_poll=True,
             max_total_duration=total_duration,
             current_cumulative_duration=elapsed,
-            project_id=PROJECT_ID,
         )
         if extend_result.get("error"):
             return {
@@ -1952,7 +1933,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request(with_project("/picture/text_to_image"), request_data, custom_headers=headers)
+    result = make_request("/picture/text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2063,7 +2044,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
 
     header_duration = 1 if model in {"gpt-image-2", "nanobanana-pro"} else max_images
     headers = get_headers(model=model, bill_type=2, duration=header_duration, size=quality)
-    result = make_request(with_project("/picture/multi_reference_image_generation"), request_data, custom_headers=headers)
+    result = make_request("/picture/multi_reference_image_generation", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2133,7 +2114,7 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size="1080p")
-    result = make_request(with_project("/picture/image_edit"), request_data, custom_headers=headers)
+    result = make_request("/picture/image_edit", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2201,7 +2182,7 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request(with_project("/picture/batch_text_to_image"), request_data, custom_headers=headers)
+    result = make_request("/picture/batch_text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2440,7 +2421,6 @@ def main():
     p_virtual_asset.add_argument("--age", default="20", help="Asset age metadata")
     p_virtual_asset.add_argument("--price", type=float, default=0.5, help="Asset price metadata")
     p_virtual_asset.add_argument("--visibility", type=int, default=0, help="0 private, 1 public")
-    p_virtual_asset.add_argument("--project-id", default=PROJECT_ID, help="Borgrise project id")
 
     # resolve-assets
     p_resolve_assets = subparsers.add_parser("resolve-assets", help="Resolve Borgrise asset ids to URLs")
@@ -2622,8 +2602,7 @@ def main():
                 sex=args.sex,
                 age=args.age,
                 price=args.price,
-                visibility=args.visibility,
-                project_id=args.project_id
+                visibility=args.visibility
             )
         elif args.command == "resolve-assets":
             result = resolve_asset_urls(json.loads(args.asset_ids))
