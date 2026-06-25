@@ -1,3 +1,39 @@
-from . import artifacts, assistants_compat, auth, mcp, models, pixelflow_preferences, pixelflow_tasks, skills, suggestions, thread_runs, threads, uploads
+from . import (
+    artifacts,
+    assistants_compat,
+    auth,
+    mcp,
+    models,
+    pixelflow_conversations,
+    pixelflow_image,
+    pixelflow_intake,
+    pixelflow_planning,
+    pixelflow_preferences,
+    pixelflow_tasks,
+    pixelflow_video,
+    skills,
+    suggestions,
+    thread_runs,
+    threads,
+    uploads,
+)
 
-__all__ = ["artifacts", "assistants_compat", "auth", "mcp", "models", "pixelflow_preferences", "pixelflow_tasks", "skills", "suggestions", "threads", "thread_runs", "uploads"]
+__all__ = [
+    "artifacts",
+    "assistants_compat",
+    "auth",
+    "mcp",
+    "models",
+    "pixelflow_conversations",
+    "pixelflow_image",
+    "pixelflow_intake",
+    "pixelflow_planning",
+    "pixelflow_preferences",
+    "pixelflow_tasks",
+    "pixelflow_video",
+    "skills",
+    "suggestions",
+    "threads",
+    "thread_runs",
+    "uploads",
+]

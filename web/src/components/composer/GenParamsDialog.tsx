@@ -1,154 +1,237 @@
-import { useState } from "react";
-import { ImagePlus, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { Check, ChevronUp, FilePenLine, X } from "lucide-react";
 
-export interface GenParamsForm {
-  productName: string;
-  imageUrl: string;
-  coreMessage: string;
-  creativeStyle: string;
-  platform: string;
-  ratio: string;
-  resolution: string;
-  durationSec: number;
-  count: number;
-  sound: boolean;
+export type CreationIntent = "video" | "image";
+
+export interface VideoRequirementForm {
+  intent: "video";
+  product_info: string;
+  product_category: string;
+  target_audience: string;
+  conversion_goal: string;
 }
+
+export interface ImageRequirementForm {
+  intent: "image";
+  image_goal: string;
+  image_type: string;
+  image_usage: string;
+  image_style: string;
+  image_size: string;
+}
+
+export type GenParamsForm = VideoRequirementForm | ImageRequirementForm;
 
 interface GenParamsDialogProps {
   open: boolean;
+  intent: CreationIntent;
   /** 来自用户消息的初始创意诉求 */
   initialCoreMessage?: string;
+  /** LLM 从用户提示词中自动抽取的表单初值 */
+  initialValues?: Record<string, unknown>;
   onConfirm: (form: GenParamsForm) => void;
   onCancel: () => void;
 }
 
-const PLATFORMS = ["douyin", "kuaishou", "taobao", "xiaohongshu"];
-const RATIOS = ["9:16", "16:9", "1:1"];
-const RESOLUTIONS = ["720p", "1080p"];
+const VIDEO_CATEGORIES = ["美妆护肤", "食品饮料", "数码3C", "服饰鞋包", "家居日用", "保健养生", "其他品类"];
+const VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"];
 
-function Label({ children }: { children: React.ReactNode }) {
-  return <div className="mb-1 text-[12px] font-medium text-ink-soft">{children}</div>;
-}
+const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"];
+const IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"];
+const IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"];
+const IMAGE_SIZES = ["1:1 正方形", "3:4 竖图", "4:5 信息流图", "9:16 竖版海报", "16:9 横版图", "自定义"];
 
 const inputCls =
-  "w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-soft/60 focus:border-accent/40";
+  "h-12 w-full rounded-xl border border-line bg-surface px-4 text-[14px] text-ink outline-none placeholder:text-ink-soft/55 focus:border-accent/40";
 
-export function GenParamsDialog({ open, initialCoreMessage, onConfirm, onCancel }: GenParamsDialogProps) {
-  // 弹窗本地表单状态：这里只负责收集创建任务所需参数，真正建任务由
-  // WorkspacePage.handleConfirmParams 统一调用后端 API。
-  const [f, setF] = useState<GenParamsForm>({
-    productName: "",
-    imageUrl: "",
-    coreMessage: initialCoreMessage ?? "",
-    creativeStyle: "情绪种草",
-    platform: "douyin",
-    ratio: "9:16",
-    resolution: "1080p",
-    durationSec: 15,
-    count: 1,
-    sound: true,
-  });
-  const set = <K extends keyof GenParamsForm>(k: K, v: GenParamsForm[K]) =>
-    setF((p) => ({ ...p, [k]: v }));
+const textValue = (values: Record<string, unknown>, key: string, fallback = "") => {
+  const value = values[key];
+  return typeof value === "string" && value.trim() ? value : fallback;
+};
+
+const optionValue = (values: Record<string, unknown>, key: string, options: string[], fallback: string) => {
+  const value = values[key];
+  return typeof value === "string" && options.includes(value) ? value : fallback;
+};
+
+function videoInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): VideoRequirementForm {
+  return {
+    intent: "video",
+    product_info: textValue(values, "product_info", initialCoreMessage ?? ""),
+    product_category: optionValue(values, "product_category", VIDEO_CATEGORIES, "数码3C"),
+    target_audience: textValue(values, "target_audience"),
+    conversion_goal: optionValue(values, "conversion_goal", VIDEO_GOALS, "引流直播间"),
+  };
+}
+
+function imageInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): ImageRequirementForm {
+  return {
+    intent: "image",
+    image_goal: textValue(values, "image_goal", initialCoreMessage ?? ""),
+    image_type: optionValue(values, "image_type", IMAGE_TYPES, "海报/封面图"),
+    image_usage: optionValue(values, "image_usage", IMAGE_USAGES, "社媒发布"),
+    image_style: optionValue(values, "image_style", IMAGE_STYLES, "真实摄影"),
+    image_size: optionValue(values, "image_size", IMAGE_SIZES, "9:16 竖版海报"),
+  };
+}
+
+function PillGroup({ options, value, onChange }: { options: string[]; value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-3">
+      {options.map((option) => {
+        const selected = value === option;
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onChange(option)}
+            className={`flex h-12 items-center gap-2 rounded-xl border px-4 text-[14px] transition-colors ${
+              selected
+                ? "border-[#ded6fb] bg-[#ebe6ff] text-ink"
+                : "border-line bg-surface text-ink-soft hover:border-accent/30 hover:text-ink"
+            }`}
+          >
+            <span className={`flex h-5 w-5 items-center justify-center rounded-full border ${selected ? "border-accent" : "border-line"}`}>
+              {selected && <span className="h-2.5 w-2.5 rounded-full bg-accent" />}
+            </span>
+            {option}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FieldBlock({ index, label, children }: { index: number; label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-3">
+      <div className="text-[18px] font-semibold leading-6 text-ink">
+        {index}. {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export function GenParamsDialog({ open, intent, initialCoreMessage, initialValues = {}, onConfirm, onCancel }: GenParamsDialogProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [video, setVideo] = useState<VideoRequirementForm>(() => videoInitialValues(initialCoreMessage, initialValues));
+  const [image, setImage] = useState<ImageRequirementForm>(() => imageInitialValues(initialCoreMessage, initialValues));
+
+  useEffect(() => {
+    if (!open) return;
+    setSubmitted(false);
+    setCollapsed(false);
+    setVideo(videoInitialValues(initialCoreMessage, initialValues));
+    setImage(imageInitialValues(initialCoreMessage, initialValues));
+  }, [open, intent, initialCoreMessage, initialValues]);
 
   if (!open) return null;
-  // 最小必填校验：商品名、商品图 URL、核心诉求三项齐全才允许提交。
-  const canConfirm = f.productName.trim() && f.imageUrl.trim() && f.coreMessage.trim();
+
+  const isVideo = intent === "video";
+  const canConfirm = isVideo
+    ? Boolean(video.product_info.trim() && video.product_category && video.target_audience.trim() && video.conversion_goal)
+    : Boolean(image.image_goal.trim() && image.image_type && image.image_usage && image.image_style && image.image_size);
+
+  const submit = () => {
+    if (!canConfirm) return;
+    setSubmitted(true);
+    onConfirm(isVideo ? video : image);
+  };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-line bg-surface shadow-xl">
-        <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
-          <div>
-            <div className="text-[15px] font-semibold text-ink">视频生成参数</div>
-            <div className="mt-0.5 text-[12px] text-ink-soft">补充商品与参数,Agent 据此生成 Brief</div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 p-5">
+      <div className="max-h-[88vh] w-full max-w-[980px] overflow-y-auto rounded-[22px] border border-line bg-[#fbfbfc] p-8 shadow-xl">
+        <div className="mb-8 flex items-center justify-between">
+          <div className="flex items-center gap-3 text-[22px] font-semibold text-ink">
+            <FilePenLine size={26} />
+            {isVideo ? "AD投放短视频需求收集" : "图片生成需求收集"}
           </div>
-          <button onClick={onCancel} className="text-ink-soft hover:text-ink" aria-label="关闭">
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCollapsed((v) => !v)}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-canvas text-ink-soft hover:text-ink"
+              aria-label="折叠表单"
+            >
+              <ChevronUp size={18} className={collapsed ? "rotate-180 transition-transform" : "transition-transform"} />
+            </button>
+            <button
+              type="button"
+              onClick={onCancel}
+              className="flex h-9 w-9 items-center justify-center rounded-full text-ink-soft hover:bg-canvas hover:text-ink"
+              aria-label="关闭"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <div className="space-y-3.5 px-5 py-4">
-          <div className="flex gap-3">
-            <div className="shrink-0">
-              <Label>商品图</Label>
-              {f.imageUrl.trim() ? (
-                <img src={f.imageUrl} alt="商品图" className="h-[58px] w-[58px] rounded-lg border border-line object-cover" />
-              ) : (
-                <div className="flex h-[58px] w-[58px] items-center justify-center rounded-lg border border-dashed border-line text-ink-soft">
-                  <ImagePlus size={18} />
-                </div>
-              )}
-            </div>
-            <div className="min-w-0 flex-1">
-              <Label>商品名 *</Label>
-              <input className={inputCls} value={f.productName} onChange={(e) => set("productName", e.target.value)} placeholder="如：极简不锈钢保温杯 500ml" />
-              <div className="mt-2.5">
-                <Label>商品图公网 URL *（供生成调用)</Label>
-                <input className={inputCls} value={f.imageUrl} onChange={(e) => set("imageUrl", e.target.value)} placeholder="https://…/product.jpg" />
-              </div>
-            </div>
+        {!collapsed && (
+          <div className="space-y-9">
+            {isVideo ? (
+              <>
+                <FieldBlock index={1} label="请提供你要投放的产品信息">
+                  <input
+                    className={inputCls}
+                    value={video.product_info}
+                    onChange={(e) => setVideo((p) => ({ ...p, product_info: e.target.value }))}
+                    placeholder="苹果什么什么PRO"
+                  />
+                </FieldBlock>
+                <FieldBlock index={2} label="产品品类">
+                  <PillGroup options={VIDEO_CATEGORIES} value={video.product_category} onChange={(v) => setVideo((p) => ({ ...p, product_category: v }))} />
+                </FieldBlock>
+                <FieldBlock index={3} label="目标人群">
+                  <input
+                    className={inputCls}
+                    value={video.target_audience}
+                    onChange={(e) => setVideo((p) => ({ ...p, target_audience: e.target.value }))}
+                    placeholder="25-35"
+                  />
+                </FieldBlock>
+                <FieldBlock index={4} label="转化目标">
+                  <PillGroup options={VIDEO_GOALS} value={video.conversion_goal} onChange={(v) => setVideo((p) => ({ ...p, conversion_goal: v }))} />
+                </FieldBlock>
+              </>
+            ) : (
+              <>
+                <FieldBlock index={1} label="你想生成什么图片？">
+                  <input
+                    className={inputCls}
+                    value={image.image_goal}
+                    onChange={(e) => setImage((p) => ({ ...p, image_goal: e.target.value }))}
+                    placeholder="例如：科技感海报、办公室场景图、小红书封面、人物插画"
+                  />
+                </FieldBlock>
+                <FieldBlock index={2} label="图片类型">
+                  <PillGroup options={IMAGE_TYPES} value={image.image_type} onChange={(v) => setImage((p) => ({ ...p, image_type: v }))} />
+                </FieldBlock>
+                <FieldBlock index={3} label="图片用途">
+                  <PillGroup options={IMAGE_USAGES} value={image.image_usage} onChange={(v) => setImage((p) => ({ ...p, image_usage: v }))} />
+                </FieldBlock>
+                <FieldBlock index={4} label="图片风格">
+                  <PillGroup options={IMAGE_STYLES} value={image.image_style} onChange={(v) => setImage((p) => ({ ...p, image_style: v }))} />
+                </FieldBlock>
+                <FieldBlock index={5} label="图片尺寸">
+                  <PillGroup options={IMAGE_SIZES} value={image.image_size} onChange={(v) => setImage((p) => ({ ...p, image_size: v }))} />
+                </FieldBlock>
+              </>
+            )}
           </div>
+        )}
 
-          <div>
-            <Label>核心诉求 *</Label>
-            <textarea
-              className={`${inputCls} h-16 resize-none`}
-              value={f.coreMessage}
-              onChange={(e) => set("coreMessage", e.target.value)}
-              placeholder="冬天通勤路上随时喝到热水,主打 12 小时保温"
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <Label>创意风格</Label>
-              <input className={inputCls} value={f.creativeStyle} onChange={(e) => set("creativeStyle", e.target.value)} />
-            </div>
-            <div>
-              <Label>平台</Label>
-              <select className={inputCls} value={f.platform} onChange={(e) => set("platform", e.target.value)}>
-                {PLATFORMS.map((p) => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-            <div>
-              <Label>比例</Label>
-              <select className={inputCls} value={f.ratio} onChange={(e) => set("ratio", e.target.value)}>
-                {RATIOS.map((r) => <option key={r}>{r}</option>)}
-              </select>
-            </div>
-            <div>
-              <Label>分辨率</Label>
-              <select className={inputCls} value={f.resolution} onChange={(e) => set("resolution", e.target.value)}>
-                {RESOLUTIONS.map((r) => <option key={r}>{r}</option>)}
-              </select>
-            </div>
-            <div>
-              <Label>时长(秒)</Label>
-              <input type="number" min={4} max={60} className={inputCls} value={f.durationSec} onChange={(e) => set("durationSec", Number(e.target.value))} />
-            </div>
-            <div>
-              <Label>数量</Label>
-              <input type="number" min={1} max={4} className={inputCls} value={f.count} onChange={(e) => set("count", Number(e.target.value))} />
-            </div>
-          </div>
-
-          <label className="flex items-center gap-2 text-[13px] text-ink">
-            <input type="checkbox" checked={f.sound} onChange={(e) => set("sound", e.target.checked)} className="accent-[var(--color-accent)]" />
-            输出声音
-          </label>
-        </div>
-
-        <div className="flex justify-end gap-2 border-t border-line px-5 py-3">
-          <button onClick={onCancel} className="rounded-xl border border-line px-4 py-2 text-[14px] text-ink hover:bg-canvas">
-            取消
-          </button>
+        <div className="mt-8 flex justify-end">
           <button
-            onClick={() => canConfirm && onConfirm(f)}
-            disabled={!canConfirm}
-            className="rounded-xl bg-brand px-5 py-2 text-[14px] font-medium text-white transition-opacity disabled:opacity-30"
+            type="button"
+            onClick={submit}
+            disabled={!canConfirm || submitted}
+            className="flex h-14 min-w-[150px] items-center justify-center gap-2 rounded-xl bg-brand px-5 text-[16px] font-medium text-white transition-opacity disabled:bg-line disabled:text-ink-soft disabled:opacity-70"
           >
-            开始生成
+            <Check size={20} />
+            {submitted ? "已提交" : "提交"}
           </button>
         </div>
       </div>

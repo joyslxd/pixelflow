@@ -33,6 +33,17 @@ class GenerationResult:
 
 
 @dataclass
+class ImageGenerationResult:
+    """图片生成调用的统一返回 DTO。"""
+
+    ok: bool
+    images: list[dict[str, Any]] = field(default_factory=list)
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class EditResult:
     """剪辑/装配调用的统一返回 DTO。
 
@@ -62,6 +73,41 @@ class StoryboardResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class BatchStoryboardResult:
+    """批量参考视频拆解调用的统一返回 DTO。"""
+
+    ok: bool
+    storyboards: list[dict[str, Any]] = field(default_factory=list)
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MediaLinkExtractionResult:
+    """媒体链接识别调用的统一返回 DTO。"""
+
+    ok: bool
+    links: list[str] = field(default_factory=list)
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class VideoFlawAnalysisResult:
+    """视频穿帮分析调用的统一返回 DTO。"""
+
+    ok: bool
+    flaw_analysis_markdown: str = ""
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    affected_scene_ids: list[str] = field(default_factory=list)
+    revision_prompt: str = ""
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VideoGenerationSkill(Protocol):
     """GENERATE 阶段依赖的视频生成能力接口。
 
@@ -87,6 +133,61 @@ class VideoGenerationSkill(Protocol):
         model: str | None = None,
     ) -> GenerationResult: ...
 
+    async def reference_mode_video(
+        self,
+        prompt: str,
+        image_urls: list[str] | None = None,
+        video_urls: list[str] | None = None,
+        audio_urls: list[str] | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult: ...
+
+    async def merge_videos(
+        self,
+        video_urls: list[str],
+        duration: int = 30,
+        size: str = "1080p",
+        model: str | None = None,
+    ) -> GenerationResult: ...
+
+
+class ImageGenerationSkill(Protocol):
+    """图片生成能力接口。
+
+    实现类负责调用文生图、参考图生图、图片编辑等供应商接口，并把异步轮询后的
+    图片 URL 归一成 ``ImageGenerationResult``。
+    """
+
+    async def text_to_image(
+        self,
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        num_images: int = 1,
+    ) -> ImageGenerationResult: ...
+
+    async def reference_image(
+        self,
+        reference_images: list[str],
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        max_images: int = 1,
+    ) -> ImageGenerationResult: ...
+
+    async def image_edit(
+        self,
+        image_url: str,
+        prompt: str,
+        model: str | None = None,
+    ) -> ImageGenerationResult: ...
+
 
 class VideoEditSkill(Protocol):
     """EDIT 阶段依赖的视频剪辑/渲染能力接口。
@@ -106,6 +207,26 @@ class VideoDecomposeSkill(Protocol):
     """
 
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult: ...
+
+    async def batch_decompose_video_to_storyboard(self, video_urls: list[str]) -> BatchStoryboardResult: ...
+
+
+class MediaLinkExtractionSkill(Protocol):
+    """媒体链接识别能力接口。"""
+
+    async def extract_media_links(self, text: str, materials: list[dict[str, Any]] | None = None) -> MediaLinkExtractionResult: ...
+
+
+class VideoFlawAnalysisSkill(Protocol):
+    """视频穿帮分析能力接口。"""
+
+    async def analyze_video_flaws(
+        self,
+        merged_video_url: str,
+        scene_videos: list[dict[str, Any]],
+        scene_packages: list[dict[str, Any]] | None = None,
+        user_feedback: str | None = None,
+    ) -> VideoFlawAnalysisResult: ...
 
 
 def _get_media_skill_impl() -> str:
@@ -137,6 +258,14 @@ def get_video_skill() -> VideoGenerationSkill:
     raise ValueError(f"Unknown media skill implementation: {impl!r}")
 
 
+def get_image_skill() -> ImageGenerationSkill:
+    """返回当前配置的图片生成 skill。"""
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
 def get_video_edit_skill() -> VideoEditSkill:
     """返回当前配置的视频剪辑 skill，也就是 EDIT 阶段替换点。
 
@@ -161,6 +290,22 @@ def get_video_decompose_skill() -> VideoDecomposeSkill:
     参考视频拆解也属于媒体理解/生成供应商能力，和视频生成共用
     ``PIXELFLOW_MEDIA_SKILL``。当前仅支持 ``borgrise``。
     """
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
+def get_media_link_extraction_skill() -> MediaLinkExtractionSkill:
+    """返回当前配置的媒体链接识别 skill。"""
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
+def get_video_flaw_analysis_skill() -> VideoFlawAnalysisSkill:
+    """返回当前配置的视频穿帮分析 skill。"""
     impl = _get_media_skill_impl()
     if impl == "borgrise":
         return _get_borgrise_media_skill()

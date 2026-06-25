@@ -19,7 +19,14 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from pixelflow.skills.base import GenerationResult, StoryboardResult
+from pixelflow.skills.base import (
+    BatchStoryboardResult,
+    GenerationResult,
+    ImageGenerationResult,
+    MediaLinkExtractionResult,
+    StoryboardResult,
+    VideoFlawAnalysisResult,
+)
 from pixelflow.skills.borgrise import run_generation
 
 logger = logging.getLogger(__name__)
@@ -43,6 +50,101 @@ def _to_result(raw: dict[str, Any]) -> GenerationResult:
             raw=raw,
         )
     return GenerationResult(ok=True, url=url, task_id=raw.get("task_id"), raw=raw)
+
+
+def _to_image_result(raw: dict[str, Any]) -> ImageGenerationResult:
+    """把 ``run_generation`` 的图片原始 dict 映射成统一图片结果。"""
+    if not raw or raw.get("error"):
+        return ImageGenerationResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "image generation failed",
+            raw=raw or {},
+        )
+    task_id = raw.get("task_id")
+    urls: list[str] = []
+    for value in (raw.get("image_urls"), raw.get("image_url"), raw.get("edited_image_url"), raw.get("url")):
+        if isinstance(value, list):
+            urls.extend(str(item) for item in value if item)
+        elif value:
+            urls.append(str(value))
+    for url in run_generation.extract_result_urls(raw):
+        urls.append(url)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    if not deduped:
+        return ImageGenerationResult(
+            ok=False,
+            task_id=task_id,
+            error=raw.get("message") or "image generation returned no image url",
+            raw=raw,
+        )
+    asset_prefix = task_id or "image"
+    images = [{"asset_id": f"{asset_prefix}-{index}", "url": url, "download_url": url} for index, url in enumerate(deduped)]
+    return ImageGenerationResult(ok=True, images=images, task_id=task_id, raw=raw)
+
+
+def _to_flaw_analysis_result(raw: dict[str, Any]) -> VideoFlawAnalysisResult:
+    """把 ``run_generation`` 的穿帮分析原始 dict 映射成统一结果。"""
+    if not raw or raw.get("error"):
+        return VideoFlawAnalysisResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "video flaw analysis failed",
+            raw=raw or {},
+        )
+    return VideoFlawAnalysisResult(
+        ok=True,
+        task_id=raw.get("task_id"),
+        flaw_analysis_markdown=str(raw.get("flaw_analysis_markdown") or ""),
+        issues=[issue for issue in raw.get("issues", []) if isinstance(issue, dict)],
+        affected_scene_ids=[str(scene_id) for scene_id in raw.get("affected_scene_ids", []) if scene_id],
+        revision_prompt=str(raw.get("revision_prompt") or ""),
+        raw=raw,
+    )
+
+
+def _to_media_link_result(raw: dict[str, Any]) -> MediaLinkExtractionResult:
+    """把媒体链接识别原始 dict 映射成统一结果。"""
+    if not raw or raw.get("error"):
+        return MediaLinkExtractionResult(
+            ok=False,
+            error=(raw.get("message") if raw else "empty response") or "media link extraction failed",
+            raw=raw or {},
+        )
+    links = [str(link) for link in raw.get("links", []) if link] if isinstance(raw.get("links"), list) else []
+    return MediaLinkExtractionResult(ok=True, links=links, raw=raw)
+
+
+def _to_batch_storyboard_result(raw: dict[str, Any]) -> BatchStoryboardResult:
+    """把批量视频拆解原始 dict 映射成统一结果。"""
+    if not raw or raw.get("error"):
+        return BatchStoryboardResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "batch decompose failed",
+            raw=raw or {},
+        )
+    storyboards = [item for item in raw.get("storyboards", []) if isinstance(item, dict)] if isinstance(raw.get("storyboards"), list) else []
+    if not storyboards and (raw.get("batch_video_analysis_markdown") or raw.get("batch_video_generation_prompt")):
+        storyboards = [
+            {
+                "video_urls": raw.get("video_urls", []),
+                "analysis_markdown": raw.get("batch_video_analysis_markdown", ""),
+                "generation_prompt": raw.get("batch_video_generation_prompt", ""),
+            }
+        ]
+    return BatchStoryboardResult(
+        ok=True,
+        task_id=raw.get("task_id"),
+        storyboards=storyboards,
+        raw=raw,
+    )
 
 
 def _extract_shots(raw: Any) -> list[dict[str, Any]]:
@@ -95,6 +197,23 @@ def _normalize_segment(seg: Any) -> dict[str, Any]:
     }
 
 
+def _collect_material_strings(value: Any) -> list[str]:
+    """从素材 dict/list 中递归收集字符串，供 content-app 媒体链接识别接口处理。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        collected: list[str] = []
+        for item in value:
+            collected.extend(_collect_material_strings(item))
+        return collected
+    if isinstance(value, dict):
+        collected: list[str] = []
+        for item in value.values():
+            collected.extend(_collect_material_strings(item))
+        return collected
+    return []
+
+
 def _decompose_blocking(video_url: str) -> dict[str, Any]:
     """调用参考视频拆解端点；如果返回异步任务，则继续轮询。
 
@@ -122,6 +241,46 @@ async def _run(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> GenerationRe
         logger.exception("borgrise %s failed", getattr(fn, "__name__", "call"))
         return GenerationResult(ok=False, error=str(exc))
     return _to_result(raw)
+
+
+async def _run_image(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> ImageGenerationResult:
+    """在线程中运行阻塞图片调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise image %s failed", getattr(fn, "__name__", "call"))
+        return ImageGenerationResult(ok=False, error=str(exc))
+    return _to_image_result(raw)
+
+
+async def _run_flaw_analysis(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> VideoFlawAnalysisResult:
+    """在线程中运行阻塞穿帮分析调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise video flaw analysis %s failed", getattr(fn, "__name__", "call"))
+        return VideoFlawAnalysisResult(ok=False, error=str(exc))
+    return _to_flaw_analysis_result(raw)
+
+
+async def _run_media_links(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> MediaLinkExtractionResult:
+    """在线程中运行阻塞媒体链接识别调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise media link extraction %s failed", getattr(fn, "__name__", "call"))
+        return MediaLinkExtractionResult(ok=False, error=str(exc))
+    return _to_media_link_result(raw)
+
+
+async def _run_batch_storyboard(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> BatchStoryboardResult:
+    """在线程中运行阻塞批量拆解调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise batch decompose %s failed", getattr(fn, "__name__", "call"))
+        return BatchStoryboardResult(ok=False, error=str(exc))
+    return _to_batch_storyboard_result(raw)
 
 
 class BorgriseSkill:
@@ -163,6 +322,100 @@ class BorgriseSkill:
             kwargs["model"] = model
         return await _run(run_generation.extend_video, **kwargs)
 
+    async def reference_mode_video(
+        self,
+        prompt: str,
+        image_urls: list[str] | None = None,
+        video_urls: list[str] | None = None,
+        audio_urls: list[str] | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "image_urls": image_urls or [],
+            "video_urls": video_urls or [],
+            "audio_urls": audio_urls or [],
+            "duration": duration,
+            "ratio": ratio,
+            "size": size,
+            "sound": sound,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run(run_generation.reference_mode_video, **kwargs)
+
+    async def merge_videos(
+        self,
+        video_urls: list[str],
+        duration: int = 30,
+        size: str = "1080p",
+        model: str | None = None,
+    ) -> GenerationResult:
+        kwargs: dict[str, Any] = {
+            "video_urls": video_urls,
+            "duration": duration,
+            "size": size,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run(run_generation.merge_videos, **kwargs)
+
+    async def text_to_image(
+        self,
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        num_images: int = 1,
+    ) -> ImageGenerationResult:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "ratio": ratio,
+            "size": size,
+            "num_images": num_images,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run_image(run_generation.text_to_image, **kwargs)
+
+    async def reference_image(
+        self,
+        reference_images: list[str],
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        max_images: int = 1,
+    ) -> ImageGenerationResult:
+        kwargs: dict[str, Any] = {
+            "reference_images": reference_images,
+            "prompt": prompt,
+            "ratio": ratio,
+            "size": size,
+            "max_images": max_images,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run_image(run_generation.reference_image, **kwargs)
+
+    async def image_edit(
+        self,
+        image_url: str,
+        prompt: str,
+        model: str | None = None,
+    ) -> ImageGenerationResult:
+        kwargs: dict[str, Any] = {
+            "image_url": image_url,
+            "prompt": prompt,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run_image(run_generation.image_edit, **kwargs)
+
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult:
         """把参考视频拆解成供应商 storyboard（博观拆解）。"""
         try:
@@ -176,3 +429,30 @@ class BorgriseSkill:
         if not shots:
             return StoryboardResult(ok=False, error="no shots in decompose response", raw=raw)
         return StoryboardResult(ok=True, shots=shots, raw=raw)
+
+    async def batch_decompose_video_to_storyboard(self, video_urls: list[str]) -> BatchStoryboardResult:
+        """把多个参考视频拆解成批量分析 storyboard。"""
+        return await _run_batch_storyboard(run_generation.batch_decompose_video_to_storyboard, video_urls=video_urls)
+
+    async def extract_media_links(self, text: str, materials: list[dict[str, Any]] | None = None) -> MediaLinkExtractionResult:
+        """从提示词和素材文本中识别媒体链接。"""
+        pieces = [text]
+        for material in materials or []:
+            pieces.extend(_collect_material_strings(material))
+        return await _run_media_links(run_generation.extract_media_links, text="\n".join(piece for piece in pieces if piece))
+
+    async def analyze_video_flaws(
+        self,
+        merged_video_url: str,
+        scene_videos: list[dict[str, Any]],
+        scene_packages: list[dict[str, Any]] | None = None,
+        user_feedback: str | None = None,
+    ) -> VideoFlawAnalysisResult:
+        """分析合并视频和场景视频中的穿帮问题。"""
+        return await _run_flaw_analysis(
+            run_generation.analyze_video_flaws,
+            merged_video_url=merged_video_url,
+            scene_videos=scene_videos,
+            scene_packages=scene_packages or [],
+            user_feedback=user_feedback,
+        )

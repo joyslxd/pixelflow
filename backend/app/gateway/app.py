@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -6,11 +8,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.gateway.profile_config import load_profile_config
+
+# 在导入会触发 DeerFlow/Skill 初始化副作用的 router 之前加载 profile YAML，
+# 确保 DeerFlow 使用 DEER_FLOW_CONFIG_PATH，不再回退查找旧 config.yaml。
+load_profile_config()
+
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
-from app.gateway.profile_config import load_profile_config
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -20,8 +27,13 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    pixelflow_conversations,
+    pixelflow_image,
+    pixelflow_intake,
+    pixelflow_planning,
     pixelflow_preferences,
     pixelflow_tasks,
+    pixelflow_video,
     runs,
     skills,
     suggestions,
@@ -34,10 +46,6 @@ from deerflow.config.app_config import apply_logging_level
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
-
-# 在创建 FastAPI app 实例前加载 profile YAML，确保 GatewayConfig、AuthConfig 和
-# PixelFlow skill 工厂后续都能从环境变量拿到 YAML 中的值。
-load_profile_config()
 
 # 默认日志配置；lifespan 会根据当前 profile YAML 的 log_level 覆盖。
 logging.basicConfig(
@@ -198,6 +206,10 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
                 "description": "PixelFlow e-commerce video Agent flow API, progress events, and explainable timeline",
             },
             {
+                "name": "pixelflow-conversations",
+                "description": "PixelFlow conversation history, pagination, and workflow resume API",
+            },
+            {
                 "name": "pixelflow-preferences",
                 "description": "PixelFlow structured user preferences",
             },
@@ -271,6 +283,21 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
 
     # PixelFlow Agent 工作流 API：/agent/flows。
     app.include_router(pixelflow_tasks.router)
+
+    # PixelFlow 采集表单和创意方向 API：/agent/flows/intake。
+    app.include_router(pixelflow_intake.router)
+
+    # PixelFlow 策划 plan.md API：/agent/flows/planning。
+    app.include_router(pixelflow_planning.router)
+
+    # PixelFlow 图片生成准备 API：/agent/flows/image。
+    app.include_router(pixelflow_image.router)
+
+    # PixelFlow 视频生成和分析 API：/agent/flows/video。
+    app.include_router(pixelflow_video.router)
+
+    # PixelFlow 对话历史 API：/agent/conversations。
+    app.include_router(pixelflow_conversations.router)
 
     # PixelFlow 结构化偏好 API：/agent/users/{user_id}/preferences。
     app.include_router(pixelflow_preferences.router)

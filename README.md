@@ -171,7 +171,7 @@ GATEWAY_PORT=8123 PIXELFLOW_CONFIG_ENV=dev make gateway
 |---|---|
 | `gateway.*` | 后端监听 host/port、接口文档开关、CORS |
 | `pixelflow.*` | 业务 MySQL、媒体生成供应商 `media_skill`、剪辑/渲染 `edit_skill`、产物输出目录 |
-| `borgrise.*` | `media_skill: "borgrise"` 时使用的 Borgrise/content-app Client 配置；也配置 `/api/auth/verify` 登录态校验开关和 10 秒超时，以及视频 1 小时、图片 10 分钟、视频分析 20 分钟三类轮询超时 |
+| `borgrise.*` | `media_skill: "borgrise"` 时使用的 Borgrise/content-app Client 配置；也配置 `/api/auth/verify` 登录态校验开关和 10 秒超时，以及视频 1 小时、图片 10 分钟、视频分析 15 分钟三类轮询超时 |
 | `models` | DeerFlow/Agent 使用的大模型配置 |
 | `database` | DeerFlow 平台数据持久化，开发默认 sqlite |
 | `tracing.*` | LangSmith/Langfuse 链路追踪 |

@@ -1,16 +1,40 @@
+import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { KeyRound, SquarePen } from "lucide-react";
+import { api, type ConversationSummaryResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-// 侧边栏当前仍是静态占位数据；后续应接 /agent/flows，并用真实 task_id 跳转 /c/:taskId。
-const THREADS = [
-  { id: "t1", title: "45度俯拍水果刀切果肉", count: 5 },
-  { id: "t2", title: "保温杯冬季通勤种草", count: 3 },
-  { id: "t3", title: "口红草莓釉质特写", count: 6 },
-];
+const PAGE_SIZE = 5;
 
 export function Sidebar() {
   const navigate = useNavigate();
+  const [items, setItems] = useState<ConversationSummaryResponse[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadConversations = async (cursor?: string | null, append = false) => {
+    if (loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const page = await api.listConversations({ pageSize: PAGE_SIZE, cursor });
+      setItems((prev) => (append ? [...prev, ...page.items] : page.items));
+      setNextCursor(page.next_cursor);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "历史对话加载失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadConversations();
+    const refresh = () => void loadConversations();
+    window.addEventListener("pixelflow-conversations-updated", refresh);
+    return () => window.removeEventListener("pixelflow-conversations-updated", refresh);
+  }, []);
+
   return (
     <aside className="flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="flex items-center px-5 pb-3 pt-5">
@@ -47,10 +71,10 @@ export function Sidebar() {
         最近对话
       </div>
       <nav className="mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
-        {THREADS.map((t) => (
+        {items.map((t) => (
           <NavLink
-            key={t.id}
-            to={`/c/${t.id}`}
+            key={t.conversation_id}
+            to={`/c/${t.conversation_id}`}
             className={({ isActive }) =>
               cn(
                 "flex items-center justify-between rounded-lg px-3 py-2 text-[13px] transition-colors",
@@ -60,12 +84,32 @@ export function Sidebar() {
               )
             }
           >
-            <span className="truncate">{t.title}</span>
+            <span className="truncate">{t.title || "新的对话"}</span>
             <span className="ml-2 shrink-0 text-[12px] text-ink-soft/70">
-              {t.count}
+              {t.last_phase === "idle" ? "新" : t.last_phase}
             </span>
           </NavLink>
         ))}
+        {!loading && items.length === 0 && (
+          <div className="px-3 py-2 text-[12px] text-ink-soft/70">
+            {error || "暂无历史对话"}
+          </div>
+        )}
+        {error && items.length > 0 && (
+          <div className="px-3 py-2 text-[12px] text-red-500">
+            历史加载失败
+          </div>
+        )}
+        {nextCursor && (
+          <button
+            type="button"
+            onClick={() => void loadConversations(nextCursor, true)}
+            disabled={loading}
+            className="mt-2 w-full rounded-lg px-3 py-2 text-left text-[12px] text-ink-soft hover:bg-canvas disabled:opacity-40"
+          >
+            {loading ? "加载中..." : "加载更多"}
+          </button>
+        )}
       </nav>
     </aside>
   );

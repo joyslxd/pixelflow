@@ -1,3 +1,15 @@
+import type {
+  AnalyzeStoryboardsResponse,
+  CreationIntent,
+  CreativeDirectionResponse,
+  GenerateSceneVideosResponse,
+  ImageGenerateResponse,
+  ImagePrepareResponse,
+  MergeSceneVideosResponse,
+  PlanMarkdownResponse,
+  PrepareScenePackagesResponse,
+  VideoFlawAnalysisResponse,
+} from "./api";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
 
 export interface ChatMessage {
@@ -6,10 +18,39 @@ export interface ChatMessage {
   content: string;
   time: string;
   artifact?: {
-    type: "brief" | "results" | "segments" | "edit" | "qc";
+    type:
+      | "brief"
+      | "results"
+      | "segments"
+      | "edit"
+      | "qc"
+      | "directions"
+      | "plan"
+      | "image_prepare"
+      | "image_result"
+      | "video_scene_packages"
+      | "video_flaw_analysis"
+      | "video_analysis_result"
+      | "video_result";
     title: string;
     description: string;
     actionLabel: string;
+    directions?: CreativeDirectionResponse[];
+    intent?: CreationIntent | "video_analysis";
+    formValues?: Record<string, unknown>;
+    coreMessage?: string;
+    selectedDirection?: CreativeDirectionResponse;
+    plan?: PlanMarkdownResponse;
+    imagePrepare?: ImagePrepareResponse;
+    imageResult?: ImageGenerateResponse;
+    imageRevisionFeedback?: string;
+    videoScenePackages?: PrepareScenePackagesResponse;
+    sceneAssetFailures?: Array<Record<string, unknown>>;
+    generatedSceneVideos?: GenerateSceneVideosResponse;
+    mergedVideo?: MergeSceneVideosResponse;
+    videoFlawAnalysis?: VideoFlawAnalysisResponse;
+    videoAnalysis?: AnalyzeStoryboardsResponse;
+    videoRevisionFeedback?: string;
   };
 }
 

@@ -56,8 +56,8 @@ borgrise:
   video_poll_timeout: 3600
   # 图片生成轮询超时时间，单位秒；图片通常比视频快，默认最多等 10 分钟。
   image_poll_timeout: 600
-  # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 20 分钟。
-  video_analysis_poll_timeout: 1200
+  # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 15 分钟。
+  video_analysis_poll_timeout: 900
   # 第三方请求失败后的最大重试次数。
   max_retries: 3
 

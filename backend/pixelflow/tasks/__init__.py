@@ -4,6 +4,22 @@
 资产记录的读写。
 """
 
-from pixelflow.tasks.store import MemoryPixelFlowTaskStore, PixelFlowAssetRecord, PixelFlowTaskRecord, PixelFlowTaskStore, SQLPixelFlowTaskStore
+from pixelflow.tasks.store import (
+    MemoryPixelFlowTaskStore,
+    PixelFlowAssetRecord,
+    PixelFlowConversationMessageRecord,
+    PixelFlowConversationRecord,
+    PixelFlowTaskRecord,
+    PixelFlowTaskStore,
+    SQLPixelFlowTaskStore,
+)
 
-__all__ = ["MemoryPixelFlowTaskStore", "PixelFlowAssetRecord", "PixelFlowTaskRecord", "PixelFlowTaskStore", "SQLPixelFlowTaskStore"]
+__all__ = [
+    "MemoryPixelFlowTaskStore",
+    "PixelFlowAssetRecord",
+    "PixelFlowConversationMessageRecord",
+    "PixelFlowConversationRecord",
+    "PixelFlowTaskRecord",
+    "PixelFlowTaskStore",
+    "SQLPixelFlowTaskStore",
+]

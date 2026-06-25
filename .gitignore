@@ -6,3 +6,6 @@ docs/
 
 # Local agent handoff notes for this workspace.
 AGENTS.md
+
+# Local DeerFlow/Pixelflow runtime data.
+.deer-flow/

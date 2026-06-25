@@ -2,15 +2,53 @@ import { useEffect, useRef } from "react";
 import { Composer } from "@/components/composer/Composer";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
+import type { CreativeDirectionResponse } from "@/lib/api";
+import type { SceneAssetCollection, ScenePackagePatch } from "@/lib/scenePackages";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSubmit: (text: string) => void;
   onOpenArtifact?: (msg: ChatMessage) => void;
+  onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
+  onApprovePlan?: (msg: ChatMessage) => void;
+  onRevisePlan?: (msg: ChatMessage) => void;
+  onGenerateImage?: (msg: ChatMessage) => void;
+  onAcceptImageResult?: (msg: ChatMessage) => void;
+  onReviseImageResult?: (msg: ChatMessage) => void;
+  onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
+  onAcceptVideoResult?: (msg: ChatMessage) => void;
+  onReviseVideoResult?: (msg: ChatMessage) => void;
+  onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
+  onUpdateVideoScenePackage?: (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => void;
+  onUpdateVideoSceneAssetField?: (
+    msg: ChatMessage,
+    sceneId: string,
+    collection: SceneAssetCollection,
+    index: number,
+    field: string,
+    value: string,
+  ) => void;
   busy?: boolean;
 }
 
-export function ChatPanel({ messages, onSubmit, onOpenArtifact, busy }: ChatPanelProps) {
+export function ChatPanel({
+  messages,
+  onSubmit,
+  onOpenArtifact,
+  onSelectDirection,
+  onApprovePlan,
+  onRevisePlan,
+  onGenerateImage,
+  onAcceptImageResult,
+  onReviseImageResult,
+  onGenerateVideoFromScenePackages,
+  onAcceptVideoResult,
+  onReviseVideoResult,
+  onRegenerateVideoWithRevision,
+  onUpdateVideoScenePackage,
+  onUpdateVideoSceneAssetField,
+  busy,
+}: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -31,7 +69,25 @@ export function ChatPanel({ messages, onSubmit, onOpenArtifact, busy }: ChatPane
             </p>
           </div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} msg={m} onOpenArtifact={onOpenArtifact} />)
+          messages.map((m) => (
+            <MessageBubble
+              key={m.id}
+              msg={m}
+              onOpenArtifact={onOpenArtifact}
+              onSelectDirection={onSelectDirection}
+              onApprovePlan={onApprovePlan}
+              onRevisePlan={onRevisePlan}
+              onGenerateImage={onGenerateImage}
+              onAcceptImageResult={onAcceptImageResult}
+              onReviseImageResult={onReviseImageResult}
+              onGenerateVideoFromScenePackages={onGenerateVideoFromScenePackages}
+              onAcceptVideoResult={onAcceptVideoResult}
+              onReviseVideoResult={onReviseVideoResult}
+              onRegenerateVideoWithRevision={onRegenerateVideoWithRevision}
+              onUpdateVideoScenePackage={onUpdateVideoScenePackage}
+              onUpdateVideoSceneAssetField={onUpdateVideoSceneAssetField}
+            />
+          ))
         )}
         <div ref={endRef} />
       </div>

@@ -15,7 +15,7 @@ export default defineConfig({
   server: {
     port: 5273,
     proxy: {
-      "/agent": { target: API_TARGET, changeOrigin: false },
+      "^/agent(/|$)": { target: API_TARGET, changeOrigin: false },
     },
   },
 });

@@ -12,10 +12,24 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from pixelflow.tasks.model import PixelFlowAssetRow, PixelFlowTaskEventRow, PixelFlowTaskRow
+from pixelflow.tasks.model import (
+    PixelFlowAssetRow,
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
+    PixelFlowTaskEventRow,
+    PixelFlowTaskRow,
+)
 from pixelflow.tasks.store import SQLPixelFlowTaskStore
 
 logger = logging.getLogger(__name__)
+
+PIXELFLOW_TASK_TABLES = [
+    PixelFlowTaskRow.__table__,
+    PixelFlowTaskEventRow.__table__,
+    PixelFlowAssetRow.__table__,
+    PixelFlowConversationRow.__table__,
+    PixelFlowConversationMessageRow.__table__,
+]
 
 
 async def make_mysql_task_store(url: str, *, echo: bool = False, pool_size: int = 5) -> tuple[SQLPixelFlowTaskStore, AsyncEngine]:
@@ -32,7 +46,7 @@ async def make_mysql_task_store(url: str, *, echo: bool = False, pool_size: int 
         await conn.run_sync(
             lambda sync_conn: PixelFlowTaskRow.metadata.create_all(
                 sync_conn,
-                tables=[PixelFlowTaskRow.__table__, PixelFlowTaskEventRow.__table__, PixelFlowAssetRow.__table__],
+                tables=PIXELFLOW_TASK_TABLES,
             )
         )
     logger.info("PixelFlow MySQL task tables are ready")

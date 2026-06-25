@@ -26,16 +26,16 @@ Borgrise AI 内容创作平台执行脚本。
     BORGRISE_API_TOKEN、账号密码自动登录等静态扣费身份。
 """
 
-import os
-import sys
-import json
-import time
 import argparse
-import ssl
-import urllib.request
-import urllib.error
+import json
+import os
 import re
-from typing import Optional, Dict, Any, List
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -52,6 +52,16 @@ DEFAULT_IMAGE_MODEL = "seeddream-5.0"
 DEFAULT_VIDEO_MODEL = "seedance-2.0"
 SUPPORTED_RATIOS = {"1:1", "9:16", "16:9"}
 SUPPORTED_IMAGE_QUALITIES = {"all", "480p", "720p", "1080p", "2K", "3K", "4K", "5K", "6K", "7K", "8K"}
+IMAGE_PRICE_CONFIGURED_QUALITIES = {
+    "nano-banana": {"1080p", "2K", "4K"},
+    "nanobanana-pro": {"1080p", "2K", "4K"},
+    "seeddream-4.5": {"1080p", "2K", "4K"},
+    "seeddream-5.0": {"1080p", "2K", "4K"},
+    "gpt-image-2": {"4K"},
+}
+DEFAULT_IMAGE_QUALITY_BY_MODEL = {
+    "gpt-image-2": "4K",
+}
 SEEDANCE_MAX_SEGMENT_DURATION = 10
 SAFE_MAX_LONG_VIDEO_DURATION = 30
 
@@ -59,8 +69,8 @@ SAFE_MAX_LONG_VIDEO_DURATION = 30
 POLL_INTERVAL = 5  # 秒
 VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # 视频生成默认最多等 1 小时。
 IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # 图片生成默认最多等 10 分钟。
-VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "1200"))  # 视频分析/拆解默认最多等 20 分钟。
-_cli_poll_timeout: Optional[int] = None  # 由 --poll-timeout 命令行参数临时覆盖当前命令的业务默认值。
+VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "900"))  # 视频分析/拆解默认最多等 15 分钟。
+_cli_poll_timeout: int | None = None  # 由 --poll-timeout 命令行参数临时覆盖当前命令的业务默认值。
 
 # 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
@@ -72,7 +82,7 @@ def _effective_poll_timeout(default_timeout: int) -> int:
     return _cli_poll_timeout if _cli_poll_timeout is not None else default_timeout
 
 
-def validate_ratio(ratio: str) -> Optional[Dict]:
+def validate_ratio(ratio: str) -> dict | None:
     """拒绝当前 Borgrise GPT/视频工作流不支持的画面比例。"""
     if ratio not in SUPPORTED_RATIOS:
         return {
@@ -99,7 +109,7 @@ def normalize_image_quality(size: str) -> str:
     return normalized
 
 
-def validate_image_quality(size: str) -> Optional[Dict]:
+def validate_image_quality(size: str) -> dict | None:
     normalized = normalize_image_quality(size)
     if normalized not in SUPPORTED_IMAGE_QUALITIES:
         return {
@@ -113,7 +123,29 @@ def validate_image_quality(size: str) -> Optional[Dict]:
     return None
 
 
-def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
+def default_image_quality_for_model(model: str, fallback: str = "1080p") -> str:
+    return DEFAULT_IMAGE_QUALITY_BY_MODEL.get(model, fallback)
+
+
+def validate_image_model_quality(model: str, size: str) -> dict | None:
+    quality_error = validate_image_quality(size)
+    if quality_error:
+        return quality_error
+    quality = normalize_image_quality(size)
+    allowed = IMAGE_PRICE_CONFIGURED_QUALITIES.get(model)
+    if allowed and quality not in allowed:
+        return {
+            "error": True,
+            "message": (
+                f"Unsupported image quality '{quality}' for model '{model}'. "
+                f"Use one of: {', '.join(sorted(allowed))}."
+            ),
+            "supported_image_qualities": sorted(allowed),
+        }
+    return None
+
+
+def validate_video_duration(duration: int, model: str) -> dict | None:
     """校验单次视频生成时长不能超过已知模型限制。"""
     if duration <= 0:
         return {"error": True, "message": "Duration must be a positive integer"}
@@ -130,16 +162,16 @@ def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
     return None
 
 
-def validate_positive_count(count: int, field_name: str) -> Optional[Dict]:
+def validate_positive_count(count: int, field_name: str) -> dict | None:
     """校验输出数量，避免用户请求的 N 张图片被静默压成 1 张。"""
     if count <= 0:
         return {"error": True, "message": f"{field_name} must be a positive integer"}
     return None
 
 
-def extract_result_urls(data: Any) -> List[str]:
+def extract_result_urls(data: Any) -> list[str]:
     """尽力从单图、多图或视频任务结果中提取 URL。"""
-    urls: List[str] = []
+    urls: list[str] = []
 
     def visit(value: Any) -> None:
         if isinstance(value, str):
@@ -165,7 +197,7 @@ def extract_result_urls(data: Any) -> List[str]:
 
 def get_headers(model: str = "", bill_type: int = 0,
                  duration: int = 1, size: str = "720p",
-                 model_header: str = "ModelType") -> Dict[str, str]:
+                 model_header: str = "ModelType") -> dict[str, str]:
     """生成带当前用户 Authorization 和 Borgrise 必需自定义头的请求头。
 
     Borgrise API 需要的关键自定义头：
@@ -194,7 +226,7 @@ def get_headers(model: str = "", bill_type: int = 0,
     return headers
 
 
-def _looks_token_expired(payload: Dict[str, Any]) -> bool:
+def _looks_token_expired(payload: dict[str, Any]) -> bool:
     """从 HTTP/JSON 响应形态中判断 Borgrise token 是否过期。"""
     haystack = " ".join(
         str(payload.get(key, ""))
@@ -220,14 +252,14 @@ def _current_authorization() -> str:
     return require_current_authorization()
 
 
-def _apply_auth_header(headers: Dict[str, str]) -> Dict[str, str]:
+def _apply_auth_header(headers: dict[str, str]) -> dict[str, str]:
     """把当前用户 Authorization 写入请求头，覆盖调用方误传的固定 token。"""
     updated = dict(headers)
     updated["Authorization"] = _current_authorization()
     return updated
 
 
-def _send_request(url: str, body: Optional[bytes], headers: Dict[str, str], method: str) -> Dict:
+def _send_request(url: str, body: bytes | None, headers: dict[str, str], method: str) -> dict:
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
@@ -241,9 +273,9 @@ def _send_request(url: str, body: Optional[bytes], headers: Dict[str, str], meth
         }
 
 
-def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST",
-                  custom_headers: Optional[Dict[str, str]] = None,
-                  _retry_on_token_expired: bool = True) -> Dict:
+def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
+                  custom_headers: dict[str, str] | None = None,
+                  _retry_on_token_expired: bool = True) -> dict:
     """向 Borgrise API 发起 HTTP 请求，并对临时错误重试。
 
     会重试：
@@ -270,7 +302,7 @@ def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST
     else:
         body = None
 
-    last_error: Optional[Dict] = None
+    last_error: dict | None = None
     for attempt in range(MAX_REQUEST_RETRIES):
         try:
             result = _send_request(url, body, headers, method)
@@ -306,7 +338,7 @@ def make_request(endpoint: str, data: Optional[Dict] = None, method: str = "POST
 
 
 def make_multipart_request(endpoint: str, file_field: str, file_path: str,
-                           fields: Optional[Dict[str, str]] = None) -> Dict:
+                           fields: dict[str, str] | None = None) -> dict:
     """使用 multipart/form-data 上传本地文件。"""
     if not os.path.exists(file_path):
         return {"error": True, "message": f"File does not exist: {file_path}"}
@@ -315,21 +347,21 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     body = bytearray()
 
     for key, value in (fields or {}).items():
-        body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"))
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
         body.extend(str(value).encode("utf-8"))
         body.extend(b"\r\n")
 
     filename = os.path.basename(file_path)
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f"--{boundary}\r\n".encode())
     body.extend(
-        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode("utf-8")
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode()
     )
     body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
     with open(file_path, "rb") as file_obj:
         body.extend(file_obj.read())
     body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    body.extend(f"--{boundary}--\r\n".encode())
 
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
@@ -339,7 +371,7 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     except Exception as exc:
         return {"error": True, "message": str(exc)}
 
-    last_error: Optional[Dict] = None
+    last_error: dict | None = None
     for attempt in range(MAX_REQUEST_RETRIES):
         try:
             req = urllib.request.Request(
@@ -376,7 +408,7 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     return last_error or {"error": True, "message": "All upload retries exhausted"}
 
 
-def poll_task(task_id: str, timeout: Optional[int] = None, *, default_timeout: Optional[int] = None) -> Dict:
+def poll_task(task_id: str, timeout: int | None = None, *, default_timeout: int | None = None) -> dict:
     """轮询任务状态，直到完成、失败或超时。
 
     参数：
@@ -454,13 +486,13 @@ def craft_image_prompt(product_description: str, scene: str = "studio") -> str:
     return f"{product_description}, {scene_desc}, high resolution, no watermark"
 
 
-def extract_task_id(result: Dict) -> Optional[str]:
+def extract_task_id(result: dict) -> str | None:
     """从多种响应字段风格中提取 task ID。"""
     data = result.get("data", result)
     return data.get("taskId") or data.get("task_id") or result.get("task_id") or result.get("taskId")
 
 
-def extract_video_url(result: Dict) -> Optional[str]:
+def extract_video_url(result: dict) -> str | None:
     """从轮询/API 响应的多种结构中提取视频 URL。"""
     final_data = result.get("data", result)
     return (
@@ -472,7 +504,7 @@ def extract_video_url(result: Dict) -> Optional[str]:
 
 
 def verify_video_duration(video_url: str, expected_duration: int,
-                          tolerance: int = 2) -> Dict:
+                          tolerance: int = 2) -> dict:
     """使用 ffprobe 尽力校验视频实际时长。
 
     返回 dict 包含：
@@ -485,8 +517,8 @@ def verify_video_duration(video_url: str, expected_duration: int,
     这是 best-effort 校验：ffprobe 未安装或 URL 不可访问时返回 warning，而不是
     error。调用方应把 FAIL 判定视为生成缺陷。
     """
-    import subprocess
     import shutil
+    import subprocess
 
     if not shutil.which("ffprobe"):
         return {
@@ -535,7 +567,7 @@ def verify_video_duration(video_url: str, expected_duration: int,
         }
 
 
-def extract_uploaded_url(result: Dict) -> Optional[str]:
+def extract_uploaded_url(result: dict) -> str | None:
     """从 Borgrise 上传接口的多种响应结构中提取文件 URL。"""
     data = result.get("data", result)
     if isinstance(data, str):
@@ -551,7 +583,7 @@ def extract_uploaded_url(result: Dict) -> Optional[str]:
     )
 
 
-def extract_asset_id(result: Dict) -> Optional[str]:
+def extract_asset_id(result: dict) -> str | None:
     """从多种响应结构中提取第三方数字人资产 ID。"""
     data = result.get("data", result)
     return (
@@ -564,7 +596,7 @@ def extract_asset_id(result: Dict) -> Optional[str]:
     )
 
 
-def upload_file(file_path: str) -> Dict:
+def upload_file(file_path: str) -> dict:
     """上传本地文件到 Borgrise，并返回可被后续接口引用的公开 URL。"""
     print(f"\n{'='*60}")
     print("POST /api/upload")
@@ -589,13 +621,13 @@ def upload_file(file_path: str) -> Dict:
 
 
 def create_virtual_human_asset(asset_name: str,
-                               image_url: Optional[str] = None,
-                               image_file: Optional[str] = None,
+                               image_url: str | None = None,
+                               image_file: str | None = None,
                                description: str = "",
                                sex: str = "female",
                                age: str = "20",
                                price: float = 0.5,
-                               visibility: int = 0) -> Dict:
+                               visibility: int = 0) -> dict:
     """创建虚拟人资产，并返回 ``asset://`` 引用。"""
     if not image_url and not image_file:
         return {"error": True, "message": "Provide either image_url or image_file"}
@@ -678,7 +710,7 @@ def create_virtual_human_asset(asset_name: str,
     }
 
 
-def resolve_asset_urls(asset_ids: List[str]) -> Dict:
+def resolve_asset_urls(asset_ids: list[str]) -> dict:
     """通过 Borgrise 前端端点把资产 ID 解析成参考 URL。"""
     if not asset_ids:
         return {"error": True, "message": "At least one asset id is required"}
@@ -696,11 +728,11 @@ def resolve_asset_urls(asset_ids: List[str]) -> Dict:
     }
 
 
-def image_to_video(image_url: str, prompt: Optional[str] = None,
+def image_to_video(image_url: str, prompt: str | None = None,
                    duration: int = 10, ratio: str = "9:16",
                    model: str = DEFAULT_VIDEO_MODEL,
-                   product_description: Optional[str] = None,
-                   auto_poll: bool = True) -> Dict:
+                   product_description: str | None = None,
+                   auto_poll: bool = True) -> dict:
     """根据单张图片生成视频。"""
 
     validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
@@ -778,7 +810,7 @@ def text_to_video(prompt: str,
                   model: str = DEFAULT_VIDEO_MODEL,
                   sound: str = "on",
                   video_count: int = 1,
-                  auto_poll: bool = True) -> Dict:
+                  auto_poll: bool = True) -> dict:
     """根据纯文本 prompt 生成视频。"""
 
     validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
@@ -846,16 +878,16 @@ def text_to_video(prompt: str,
 
 
 def reference_mode_video(prompt: str,
-                         image_urls: Optional[List[str]] = None,
-                         video_urls: Optional[List[str]] = None,
-                         audio_urls: Optional[List[str]] = None,
+                         image_urls: list[str] | None = None,
+                         video_urls: list[str] | None = None,
+                         audio_urls: list[str] | None = None,
                          duration: int = 10,
                          ratio: str = "9:16",
                          size: str = "720p",
                          model: str = DEFAULT_VIDEO_MODEL,
                          sound: str = "on",
                          video_count: int = 1,
-                         auto_poll: bool = True) -> Dict:
+                         auto_poll: bool = True) -> dict:
     """根据多模态参考素材生成视频。
 
     这对应 Borgrise 测试前端的“reference mode”调用。适用于上传图片、音频、视频
@@ -937,7 +969,7 @@ def _strip_prompt_timecode(prompt: str) -> str:
     return re.sub(r"^\s*\d+\s*-\s*\d+\s*s[:：]\s*", "", prompt).strip()
 
 
-def _extract_primary_dialogue(prompt: str) -> Optional[str]:
+def _extract_primary_dialogue(prompt: str) -> str | None:
     cleaned = _strip_prompt_timecode(prompt)
     markers = ["女播主说：", "女播主说:", "旁白说：", "旁白说:", "女1说：", "女1说:"]
     for marker in markers:
@@ -974,16 +1006,16 @@ def build_native_audio_prompt(prompt: str) -> str:
 
 
 def native_audio_reference_video(prompt: str,
-                                 image_urls: Optional[List[str]] = None,
-                                 video_urls: Optional[List[str]] = None,
-                                 audio_urls: Optional[List[str]] = None,
+                                 image_urls: list[str] | None = None,
+                                 video_urls: list[str] | None = None,
+                                 audio_urls: list[str] | None = None,
                                  duration: int = 10,
                                  ratio: str = "9:16",
                                  size: str = "720p",
                                  model: str = DEFAULT_VIDEO_MODEL,
                                  sound: str = "on",
                                  video_count: int = 1,
-                                 reference_video_fn=reference_mode_video) -> Dict:
+                                 reference_video_fn=reference_mode_video) -> dict:
     """生成带模型原生中文音频的 reference-mode 视频。"""
     return reference_video_fn(
         prompt=build_native_audio_prompt(prompt),
@@ -1001,13 +1033,13 @@ def native_audio_reference_video(prompt: str,
 
 def extend_video(video_url: str, duration: int = 10,
                  model: str = DEFAULT_VIDEO_MODEL,
-                 prompt: Optional[str] = None,
+                 prompt: str | None = None,
                  ratio: str = "9:16",
                  size: str = "720p",
                  sound: str = "on",
                  auto_poll: bool = True,
-                 max_total_duration: Optional[int] = None,
-                 current_cumulative_duration: int = 0) -> Dict:
+                 max_total_duration: int | None = None,
+                 current_cumulative_duration: int = 0) -> dict:
     """按正确 API 格式延展已有视频。
 
     extend-video API 要求：
@@ -1123,10 +1155,10 @@ def extend_video(video_url: str, duration: int = 10,
     }
 
 
-def merge_videos(video_urls: List[str],
+def merge_videos(video_urls: list[str],
                  model: str = DEFAULT_VIDEO_MODEL,
                  duration: int = 30,
-                 size: str = "1080p") -> Dict:
+                 size: str = "1080p") -> dict:
     """把多个视频片段合并成一个交付视频。
 
     Swagger 中 VideoMergeRequest 使用 ``videoUrls``。旧的 snake_case
@@ -1166,7 +1198,179 @@ def merge_videos(video_urls: List[str],
     }
 
 
-def select_long_video_delivery(segments: List[Dict]) -> Dict:
+def extract_media_links(text: str) -> dict:
+    """调用 content-app 从文本中识别媒体链接。
+
+    content-app 的 ``/api/creative/extractMediaLinks`` 是同步轻量接口，不创建任务、
+    不扣配额。这里仍然透传当前用户 Authorization，保证网关合同一致。
+    """
+    normalized_text = text.strip()
+    if not normalized_text:
+        return {"error": True, "message": "text is required"}
+
+    result = make_request("/creative/extractMediaLinks", {"text": normalized_text})
+    if result.get("error"):
+        return result
+
+    data = result.get("data", [])
+    links = [str(item) for item in data if item] if isinstance(data, list) else []
+    return {
+        "success": bool(result.get("success", True)),
+        "endpoint": "/api/creative/extractMediaLinks",
+        "links": links,
+        "raw_response": result,
+    }
+
+
+def batch_decompose_video_to_storyboard(
+        video_urls: list[str],
+        generation_dialog_id: int | None = None,
+        parent_generation_dialog_id: int | None = None,
+) -> dict:
+    """调用 content-app 批量视频拆解接口并轮询任务结果。"""
+    clean_urls = [url.strip() for url in video_urls if url and url.strip()]
+    if len(clean_urls) < 2:
+        return {"error": True, "message": "At least two video URLs are required for batch decompose"}
+
+    request_data: dict[str, Any] = {"videoUrls": clean_urls}
+    if generation_dialog_id is not None:
+        request_data["generationDialogId"] = generation_dialog_id
+    if parent_generation_dialog_id is not None:
+        request_data["parentGenerationDialogId"] = parent_generation_dialog_id
+
+    headers = get_headers(model="gemini-3-flash-preview", bill_type=1, duration=1, size="all")
+    result = make_request("/creative/batch_decompose_video_to_storyboard", request_data, custom_headers=headers)
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    poll_result = result
+    if task_id:
+        poll_result = poll_task(task_id, default_timeout=VIDEO_ANALYSIS_POLL_TIMEOUT)
+        if poll_result.get("error"):
+            return poll_result
+
+    final_data = poll_result.get("data", poll_result)
+    result_data = final_data.get("result", final_data) if isinstance(final_data, dict) else {}
+    if not isinstance(result_data, dict):
+        result_data = {}
+    final_dict = final_data if isinstance(final_data, dict) else {}
+    nested_video_payload = result_data.get("video_url") or result_data.get("videoUrl")
+    payload_sources = [result_data]
+    if isinstance(nested_video_payload, dict):
+        payload_sources.append(nested_video_payload)
+    payload_sources.append(final_dict)
+
+    def first_payload_value(*keys: str) -> Any:
+        for payload in payload_sources:
+            for key in keys:
+                value = payload.get(key)
+                if value:
+                    return value
+        return None
+
+    analysis_markdown = (
+        first_payload_value("batch_video_analysis_markdown", "batchVideoAnalysisMarkdown")
+        or ""
+    )
+    generation_prompt = (
+        first_payload_value("batch_video_generation_prompt", "batchVideoGenerationPrompt")
+        or ""
+    )
+    storyboards = first_payload_value("storyboards", "segments") or []
+    if not isinstance(storyboards, list):
+        storyboards = []
+    if not storyboards and (analysis_markdown or generation_prompt):
+        storyboards = [
+            {
+                "video_urls": clean_urls,
+                "analysis_markdown": analysis_markdown,
+                "generation_prompt": generation_prompt,
+            }
+        ]
+
+    return {
+        "success": bool(poll_result.get("success", result.get("success", True))),
+        "task_id": task_id,
+        "status": final_dict.get("status", poll_result.get("status", "COMPLETED")),
+        "endpoint": "/api/creative/batch_decompose_video_to_storyboard",
+        "video_urls": clean_urls,
+        "storyboards": storyboards,
+        "batch_video_analysis_markdown": analysis_markdown,
+        "batch_video_generation_prompt": generation_prompt,
+        "raw_response": poll_result,
+    }
+
+
+def analyze_video_flaws(
+        merged_video_url: str,
+        scene_videos: list[dict],
+        scene_packages: list[dict] | None = None,
+        user_feedback: str | None = None,
+        generation_dialog_id: int | None = None,
+        parent_generation_dialog_id: int | None = None,
+) -> dict:
+    """调用 content-app 视频穿帮分析接口并轮询任务结果。"""
+    if not merged_video_url:
+        return {"error": True, "message": "merged_video_url is required"}
+    if not scene_videos:
+        return {"error": True, "message": "scene_videos is required"}
+
+    request_data: dict[str, Any] = {
+        "merged_video_url": merged_video_url,
+        "scene_videos": scene_videos,
+        "scene_packages": scene_packages or [],
+        "user_feedback": user_feedback or "",
+    }
+    if generation_dialog_id is not None:
+        request_data["generationDialogId"] = generation_dialog_id
+    if parent_generation_dialog_id is not None:
+        request_data["parentGenerationDialogId"] = parent_generation_dialog_id
+
+    headers = get_headers(model="gemini-3-flash-preview", bill_type=1, duration=1, size="all")
+    result = make_request("/creative/analyze_video_flaws", request_data, custom_headers=headers)
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    poll_result = result
+    if task_id:
+        poll_result = poll_task(task_id, default_timeout=VIDEO_ANALYSIS_POLL_TIMEOUT)
+        if poll_result.get("error"):
+            return poll_result
+
+    final_data = poll_result.get("data", poll_result)
+    result_data = final_data.get("result", final_data) if isinstance(final_data, dict) else {}
+    if not isinstance(result_data, dict):
+        result_data = {}
+    final_dict = final_data if isinstance(final_data, dict) else {}
+
+    return {
+        "success": bool(poll_result.get("success", result.get("success", True))),
+        "task_id": task_id,
+        "status": final_dict.get("status", poll_result.get("status", "COMPLETED")),
+        "endpoint": "/api/creative/analyze_video_flaws",
+        "flaw_analysis_markdown": (
+            result_data.get("flaw_analysis_markdown")
+            or result_data.get("flawAnalysisMarkdown")
+            or final_dict.get("flaw_analysis_markdown", "")
+        ),
+        "issues": result_data.get("issues") or final_dict.get("issues", []),
+        "affected_scene_ids": (
+            result_data.get("affected_scene_ids")
+            or result_data.get("affectedSceneIds")
+            or final_dict.get("affected_scene_ids", [])
+        ),
+        "revision_prompt": (
+            result_data.get("revision_prompt")
+            or result_data.get("revisionPrompt")
+            or final_dict.get("revision_prompt", "")
+        ),
+        "raw_response": poll_result,
+    }
+
+
+def select_long_video_delivery(segments: list[dict]) -> dict:
     """为基于 extend 的长视频流程选择最终交付物。
 
     Borgrise extend-video 返回的是累计视频：每次 extend 的结果已经包含之前内容和
@@ -1187,14 +1391,14 @@ def select_long_video_delivery(segments: List[Dict]) -> Dict:
     }
 
 
-def long_image_to_video(image_url: str, prompt: Optional[str] = None,
+def long_image_to_video(image_url: str, prompt: str | None = None,
                         total_duration: int = 20, segment_duration: int = 10,
                         ratio: str = "9:16", model: str = DEFAULT_VIDEO_MODEL,
-                        product_description: Optional[str] = None,
+                        product_description: str | None = None,
                         size: str = "720p",
                         sound: str = "on",
                         force_long: bool = False,
-                        progress_file: Optional[str] = None) -> Dict:
+                        progress_file: str | None = None) -> dict:
     """先生成首段，再反复 extend，得到长视频。
 
     注意：seedance-2.0 单段最长 10 秒，因此更长视频需要使用 extend-video。
@@ -1405,10 +1609,10 @@ def long_image_to_video(image_url: str, prompt: Optional[str] = None,
     }
 
 
-def long_reference_mode_video(prompts: List[str],
-                              image_urls: Optional[List[str]] = None,
-                              video_urls: Optional[List[str]] = None,
-                              audio_urls: Optional[List[str]] = None,
+def long_reference_mode_video(prompts: list[str],
+                              image_urls: list[str] | None = None,
+                              video_urls: list[str] | None = None,
+                              audio_urls: list[str] | None = None,
                               total_duration: int = 30,
                               segment_duration: int = 10,
                               ratio: str = "9:16",
@@ -1416,7 +1620,7 @@ def long_reference_mode_video(prompts: List[str],
                               model: str = DEFAULT_VIDEO_MODEL,
                               sound: str = "on",
                               force_long: bool = False,
-                              progress_file: Optional[str] = None) -> Dict:
+                              progress_file: str | None = None) -> dict:
     """通过 reference-mode-video + extend-video 生成长参考素材视频。
 
     适用于需要上传商品图、人物图、风格图作为参考的剧情视频。首段通过 imageUrls
@@ -1647,10 +1851,10 @@ def long_reference_mode_video(prompts: List[str],
     }
 
 
-def long_native_audio_reference_video(prompts: List[str],
-                                      image_urls: Optional[List[str]] = None,
-                                      video_urls: Optional[List[str]] = None,
-                                      audio_urls: Optional[List[str]] = None,
+def long_native_audio_reference_video(prompts: list[str],
+                                      image_urls: list[str] | None = None,
+                                      video_urls: list[str] | None = None,
+                                      audio_urls: list[str] | None = None,
                                       total_duration: int = 30,
                                       segment_duration: int = 10,
                                       ratio: str = "9:16",
@@ -1658,8 +1862,8 @@ def long_native_audio_reference_video(prompts: List[str],
                                       model: str = DEFAULT_VIDEO_MODEL,
                                       sound: str = "on",
                                       force_long: bool = False,
-                                      progress_file: Optional[str] = None,
-                                      long_reference_video_fn=long_reference_mode_video) -> Dict:
+                                      progress_file: str | None = None,
+                                      long_reference_video_fn=long_reference_mode_video) -> dict:
     """生成带模型原生中文音频的长参考视频。"""
     native_prompts = [build_native_audio_prompt(prompt) for prompt in prompts]
     return long_reference_video_fn(
@@ -1679,14 +1883,14 @@ def long_native_audio_reference_video(prompts: List[str],
 
 
 def resume_long_reference_mode_video(progress_file: str,
-                                     prompts_file: Optional[str] = None,
+                                     prompts_file: str | None = None,
                                      ratio: str = "9:16",
                                      size: str = "720p",
                                      model: str = DEFAULT_VIDEO_MODEL,
                                      sound: str = "on",
                                      extend_fn=None,
                                      merge_fn=None,
-                                     verify_fn=None) -> Dict:
+                                     verify_fn=None) -> dict:
     """恢复中断的 long-reference-mode-video 工作流。
 
     这是 ``long_reference_mode_video`` 进度文件的正式崩溃恢复路径。它会保留段数
@@ -1888,16 +2092,16 @@ def resume_long_reference_mode_video(progress_file: str,
     }
 
 
-def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
+def text_to_image(prompt: str | None = None, ratio: str = "1:1",
                   size: str = "1080p", model: str = DEFAULT_IMAGE_MODEL,
-                  product_description: Optional[str] = None,
-                  scene: str = "studio", num_images: int = 1) -> Dict:
+                  product_description: str | None = None,
+                  scene: str = "studio", num_images: int = 1) -> dict:
     """根据文本 prompt 生成图片。"""
 
     validation_error = validate_ratio(ratio)
     if validation_error:
         return validation_error
-    quality_error = validate_image_quality(size)
+    quality_error = validate_image_model_quality(model, size)
     if quality_error:
         return quality_error
     count_error = validate_positive_count(num_images, "num_images")
@@ -1999,9 +2203,9 @@ def ratio_to_dimensions(ratio: str) -> tuple[int, int]:
     return ratio_map[ratio]
 
 
-def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1",
+def reference_image(reference_images: list[str], prompt: str, ratio: str = "1:1",
                     size: str = "4K", model: str = DEFAULT_IMAGE_MODEL,
-                    strength: Optional[float] = None, max_images: int = 1) -> Dict:
+                    strength: float | None = None, max_images: int = 1) -> dict:
     """根据一张或多张参考图生成图片。"""
 
     if not reference_images:
@@ -2009,7 +2213,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
     count_error = validate_positive_count(max_images, "max_images")
     if count_error:
         return count_error
-    quality_error = validate_image_quality(size)
+    quality_error = validate_image_model_quality(model, size)
     if quality_error:
         return quality_error
 
@@ -2019,7 +2223,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
         return {"error": True, "message": str(exc)}
     quality = normalize_image_quality(size)
 
-    request_data: Dict[str, Any] = {
+    request_data: dict[str, Any] = {
         "prompt": prompt,
         "reference_image_urls": reference_images,
         "model": model,
@@ -2096,8 +2300,9 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
     }
 
 
-def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) -> Dict:
+def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) -> dict:
     """编辑一张已有图片。"""
+    quality = default_image_quality_for_model(model)
 
     request_data = {
         "image_url": image_url,
@@ -2111,9 +2316,10 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     print("POST /api/picture/image_edit")
     print(f"{'='*60}")
     print(f"Model: {model}")
+    print(f"Quality: {quality}")
     print(f"{'='*60}\n")
 
-    headers = get_headers(model=model, bill_type=2, duration=1, size="1080p")
+    headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
     result = make_request("/picture/image_edit", request_data, custom_headers=headers)
 
     if result.get("error"):
@@ -2145,15 +2351,15 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     }
 
 
-def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
+def batch_text_to_image(prompts: list[str], ratio: str = "1:1",
                         size: str = "1080p",
-                        model: str = DEFAULT_IMAGE_MODEL) -> Dict:
+                        model: str = DEFAULT_IMAGE_MODEL) -> dict:
     """根据多条 prompt 批量生成图片。"""
 
     validation_error = validate_ratio(ratio)
     if validation_error:
         return validation_error
-    quality_error = validate_image_quality(size)
+    quality_error = validate_image_model_quality(model, size)
     if quality_error:
         return quality_error
     width, height = ratio_to_dimensions(ratio)

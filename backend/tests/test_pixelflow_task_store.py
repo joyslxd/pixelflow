@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowAssetRecord, PixelFlowTaskRecord
+from pixelflow.tasks import (
+    MemoryPixelFlowTaskStore,
+    PixelFlowAssetRecord,
+    PixelFlowConversationMessageRecord,
+    PixelFlowConversationRecord,
+    PixelFlowTaskRecord,
+)
 
 
 @pytest.mark.asyncio
@@ -56,6 +62,60 @@ async def test_memory_task_store_create_update_and_events():
     assert assets[0].asset_type == "generated_video"
 
 
+@pytest.mark.asyncio
+async def test_memory_conversation_store_paginates_and_restores_context():
+    store = MemoryPixelFlowTaskStore()
+    for i in range(7):
+        await store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=f"c{i}",
+                user_id="u1",
+                title=f"对话 {i}",
+                current_task_id=f"t{i}",
+                last_phase="intake",
+                context={"index": i},
+            )
+        )
+
+    first_page, next_cursor = await store.list_conversations(user_id="u1", limit=5)
+    assert [r.conversation_id for r in first_page] == ["c6", "c5", "c4", "c3", "c2"]
+    assert next_cursor
+
+    second_page, final_cursor = await store.list_conversations(user_id="u1", limit=5, cursor=next_cursor)
+    assert [r.conversation_id for r in second_page] == ["c1", "c0"]
+    assert final_cursor is None
+
+    other = await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="other",
+            user_id="u2",
+            title="其他用户对话",
+            current_task_id="t-other",
+            last_phase="done",
+        )
+    )
+    assert other.conversation_id == "other"
+    assert await store.get_conversation("other", user_id="u1") is None
+
+    message = await store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id="m1",
+            conversation_id="c6",
+            user_id="u1",
+            role="user",
+            content="生成一条口红短视频",
+            payload={"time": "10:00"},
+        )
+    )
+    assert message.message_id == "m1"
+
+    restored = await store.get_conversation("c6", user_id="u1")
+    assert restored is not None
+    assert restored.current_task_id == "t6"
+    assert restored.context["index"] == 6
+    assert [m.content for m in await store.list_conversation_messages("c6", user_id="u1")] == ["生成一条口红短视频"]
+
+
 def test_pixelflow_router_imports():
     from app.gateway.routers import pixelflow_tasks
 
@@ -64,6 +124,14 @@ def test_pixelflow_router_imports():
     assert "/agent/flows" in paths
     assert "/agent/flows/{task_id}/events" in paths
     assert "/agent/flows/{task_id}/assets" in paths
+
+
+def test_mysql_task_store_initializes_conversation_tables():
+    from pixelflow.tasks.model import PixelFlowConversationMessageRow, PixelFlowConversationRow
+    from pixelflow.tasks.mysql import PIXELFLOW_TASK_TABLES
+
+    assert PixelFlowConversationRow.__table__ in PIXELFLOW_TASK_TABLES
+    assert PixelFlowConversationMessageRow.__table__ in PIXELFLOW_TASK_TABLES
 
 
 def test_explainable_event_contract_for_generate_phase():

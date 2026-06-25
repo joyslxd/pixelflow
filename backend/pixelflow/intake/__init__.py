@@ -5,6 +5,7 @@
 ``nodes.intake_node`` 只负责流程编排，具体规则都从这里引用。
 """
 
+from .forms import CreativeDirection, FormField, FormSchema, FormValidationResult, draft_creative_directions, get_form_schema, validate_form
 from .integrity import demand_integrity_check
 from .models import IntegrityItem, IntegrityResult, ProductInfo, PromotionInfo, VideoParams
 from .params import normalize_video_params
@@ -17,8 +18,15 @@ __all__ = [
     "ProductInfo",
     "PromotionInfo",
     "VideoParams",
+    "CreativeDirection",
+    "FormField",
+    "FormSchema",
+    "FormValidationResult",
+    "draft_creative_directions",
     "demand_integrity_check",
+    "get_form_schema",
     "normalize_video_params",
     "product_info_extract",
     "summarize_storyboards",
+    "validate_form",
 ]

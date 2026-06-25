@@ -66,6 +66,35 @@ class PixelFlowSessionContextRow(Base):
     __table_args__ = (Index("ix_pixelflow_session_user_updated", "user_id", "updated_at"),)
 
 
+class PixelFlowConversationRow(Base):
+    __tablename__ = "pixelflow_conversations"
+
+    conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    current_task_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    last_phase: Mapped[str] = mapped_column(String(32), default="idle", index=True)
+    context_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
+
+    __table_args__ = (Index("ix_pixelflow_conversations_user_updated", "user_id", "updated_at", "conversation_id"),)
+
+
+class PixelFlowConversationMessageRow(Base):
+    __tablename__ = "pixelflow_conversation_messages"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(24), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+    __table_args__ = (Index("ix_pixelflow_conversation_messages_conversation_created", "conversation_id", "created_at"),)
+
+
 class PixelFlowAssetRow(Base):
     __tablename__ = "pixelflow_assets"
 
