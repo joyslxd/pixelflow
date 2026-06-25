@@ -198,6 +198,23 @@ export function WorkspacePage() {
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
 
+  // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
+  useEffect(() => {
+    // 先检查是否已有等待消费的消息
+    if (window.__CONTENT_APP_USER_MESSAGE__) {
+      const msg = window.__CONTENT_APP_USER_MESSAGE__;
+      window.__CONTENT_APP_USER_MESSAGE__ = undefined;
+      handleSend(msg);
+      return;
+    }
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail) handleSend(detail);
+    };
+    window.addEventListener("contentAppUserMessage", handler);
+    return () => window.removeEventListener("contentAppUserMessage", handler);
+  }, []);
+
   // 运行中上下文：这些值主要给异步 SSE 回调读取，不需要每次变化都触发 React 重渲染。
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
   const [currentTaskId, setCurrentTaskId] = useState("");

@@ -7,6 +7,9 @@ import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { AuthTokenPage } from "@/pages/AuthTokenPage";
 import { WorkspacePage } from "@/pages/WorkspacePage";
+import { setupContentAppAuthorizationListener } from "@/lib/authStorage";
+
+setupContentAppAuthorizationListener();
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
