@@ -32,11 +32,11 @@ pixelflow:
   # 剪辑能力实现；生产默认用 jianying 生成剪映草稿，需要直出 mp4 可改成 ffmpeg。
   edit_skill: "jianying"
   # 剪映草稿输出目录；生产建议改成有容量保障的持久化目录。
-  draft_root: "drafts"
+  draft_root: "../drafts"
   # FFmpeg 成片输出目录；生产建议改成有容量保障的持久化目录。
-  render_root: "renders"
+  render_root: "../renders"
   # FFmpeg 字幕/花字字体文件路径；需要字幕渲染时填写服务器上的字体路径。
-  caption_font: "caption"
+  caption_font: "../aption"
 
 # Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
 # 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。
@@ -66,7 +66,7 @@ deerflow:
   # 当前运行环境名称；会写入 DEER_FLOW_ENV，便于日志/追踪区分环境。
   environment: "prod"
   # DeerFlow 可写数据目录；生产建议放到持久化磁盘。
-  home: ".deer-flow"
+  home: "../.deer-flow"
   # DeerFlow 项目根目录；留空时加载器默认设为当前配置文件所在的 backend 目录。
   project_root: ""
   # Docker/宿主机场景下的可见数据目录；本地裸进程部署可留空。
@@ -113,7 +113,7 @@ database:
   # 持久化后端；生产单机可用 sqlite，多实例建议改 postgres。
   backend: "sqlite"
   # sqlite 数据目录；最终文件是 /data/pixelflow/.deer-flow/prod-data/deerflow.db。
-  sqlite_dir: ".deer-flow/prod-data"
+  sqlite_dir: "../.deer-flow/prod-data"
   # PostgreSQL 连接串；当 backend=postgres 时填写真实生产连接串。
   postgres_url: ""
   # 是否打印 SQL；生产建议 false，避免日志过大。
