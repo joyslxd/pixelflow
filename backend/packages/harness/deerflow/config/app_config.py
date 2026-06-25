@@ -68,15 +68,19 @@ def apply_logging_level(name: str | None) -> None:
     """Resolve *name* to a logging level and apply it to the ``deerflow``/``app`` logger hierarchies.
 
     Only the ``deerflow`` and ``app`` logger levels are changed so that
-    third-party library verbosity (e.g. uvicorn, sqlalchemy) is not
-    affected. Root handler levels are lowered (never raised) so that
-    messages from the configured loggers can propagate through without
-    being filtered, while preserving handler thresholds that may be
+    most third-party library verbosity (e.g. uvicorn, sqlalchemy) is not
+    affected. Chatty HTTP client request logs are kept at WARNING because
+    content-app token verification and polling paths can otherwise emit one
+    INFO log line for every request. Root handler levels are lowered (never
+    raised) so that messages from the configured loggers can propagate through
+    without being filtered, while preserving handler thresholds that may be
     intentionally restrictive for third-party log output.
     """
     level = logging_level_from_config(name)
     for logger_name in ("deerflow", "app"):
         logging.getLogger(logger_name).setLevel(level)
+    for logger_name in ("httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
     for handler in logging.root.handlers:
         if level < handler.level:
             handler.setLevel(level)
@@ -85,7 +89,10 @@ def apply_logging_level(name: str | None) -> None:
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
-    log_level: str = Field(default="info", description="Logging level for deerflow and app modules (debug/info/warning/error); third-party libraries are not affected")
+    log_level: str = Field(
+        default="info",
+        description="Logging level for deerflow and app modules (debug/info/warning/error); noisy HTTP client logs stay at warning",
+    )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
