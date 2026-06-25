@@ -7,6 +7,7 @@ import path from "node:path";
 const API_TARGET = process.env.VITE_API_TARGET ?? "http://localhost:8001";
 
 export default defineConfig({
+  base: "/agentfrontend/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },

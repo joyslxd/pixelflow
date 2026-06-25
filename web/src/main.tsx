@@ -24,7 +24,9 @@ const router = createBrowserRouter([
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
-]);
+], {
+  basename: "/agentfrontend",
+});
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
