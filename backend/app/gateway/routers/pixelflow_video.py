@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import uuid
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,6 +21,9 @@ from pixelflow.skills import (
 )
 
 router = APIRouter(prefix="/agent/flows/video", tags=["pixelflow-flows"])
+
+_SCENE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_SCENE_VIDEO_JOBS = 100
 
 
 class SceneVideo(BaseModel):
@@ -94,6 +98,22 @@ class GenerateSceneVideosResponse(BaseModel):
     message: str = ""
 
 
+class GenerateSceneVideosJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class GenerateSceneVideosJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: GenerateSceneVideosResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
 class MergeSceneVideosRequest(BaseModel):
     scene_videos: list[SceneVideo]
     duration: int = 30
@@ -116,6 +136,7 @@ class VideoFlawAnalysisRequest(BaseModel):
     merged_video_url: str
     scene_videos: list[SceneVideo]
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    materials: list[dict[str, Any]] = Field(default_factory=list)
     user_feedback: str | None = None
 
 
@@ -276,8 +297,7 @@ async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSce
     )
 
 
-@router.post("/generate-scenes", response_model=GenerateSceneVideosResponse)
-async def generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
+async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
     if not body.scenes:
         raise HTTPException(status_code=400, detail="scenes不能为空")
 
@@ -322,6 +342,61 @@ async def generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSce
     )
 
 
+@router.post("/generate-scenes", response_model=GenerateSceneVideosResponse)
+async def generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
+    return await _generate_scene_videos_response(body)
+
+
+@router.post("/generate-scenes/start", response_model=GenerateSceneVideosJobStartResponse)
+async def start_generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSceneVideosJobStartResponse:
+    if not body.scenes:
+        raise HTTPException(status_code=400, detail="scenes不能为空")
+    _trim_scene_video_jobs()
+    job_id = uuid.uuid4().hex
+    _SCENE_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_scene_video_job(job_id, body))
+    return GenerateSceneVideosJobStartResponse(ok=True, job_id=job_id, status="running", message="场景视频生成任务已启动。")
+
+
+@router.get("/generate-scenes/jobs/{job_id}", response_model=GenerateSceneVideosJobStatusResponse)
+async def get_generate_scene_video_job(job_id: str) -> GenerateSceneVideosJobStatusResponse:
+    job = _SCENE_VIDEO_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="场景视频生成任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, GenerateSceneVideosResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = GenerateSceneVideosResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return GenerateSceneVideosJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message="场景视频生成完成。" if status == "completed" else ("场景视频生成失败。" if status == "failed" else "场景视频生成中。"),
+    )
+
+
+async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest) -> None:
+    try:
+        result = await _generate_scene_videos_response(body)
+        _SCENE_VIDEO_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _SCENE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
+def _trim_scene_video_jobs() -> None:
+    if len(_SCENE_VIDEO_JOBS) < _MAX_SCENE_VIDEO_JOBS:
+        return
+    for job_id in list(_SCENE_VIDEO_JOBS.keys())[: len(_SCENE_VIDEO_JOBS) - _MAX_SCENE_VIDEO_JOBS + 1]:
+        _SCENE_VIDEO_JOBS.pop(job_id, None)
+
+
 @router.post("/merge", response_model=MergeSceneVideosResponse)
 async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosResponse:
     ordered_scenes = sorted(body.scene_videos, key=lambda scene: scene.scene_index if scene.scene_index is not None else 0)
@@ -355,6 +430,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
         merged_video_url=body.merged_video_url,
         scene_videos=[scene.model_dump() for scene in body.scene_videos],
         scene_packages=body.scene_packages,
+        materials=body.materials,
         user_feedback=body.user_feedback,
     )
     endpoint = result.raw.get("endpoint")

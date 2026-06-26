@@ -186,6 +186,19 @@ class ImageGenerationSkill(Protocol):
         image_url: str,
         prompt: str,
         model: str | None = None,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        max_images: int = 1,
+    ) -> ImageGenerationResult: ...
+
+    async def multi_image_fusion(
+        self,
+        image_urls: list[str],
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        num_images: int = 1,
     ) -> ImageGenerationResult: ...
 
 
@@ -225,6 +238,7 @@ class VideoFlawAnalysisSkill(Protocol):
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
     ) -> VideoFlawAnalysisResult: ...
 

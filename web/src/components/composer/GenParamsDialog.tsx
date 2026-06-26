@@ -40,7 +40,7 @@ const VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直�
 const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"];
 const IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"];
 const IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"];
-const IMAGE_SIZES = ["1:1 正方形", "3:4 竖图", "4:5 信息流图", "9:16 竖版海报", "16:9 横版图", "自定义"];
+const IMAGE_SIZES = ["1:1 正方形", "3:4 竖图", "4:5 信息流图", "9:16 竖版海报", "16:9 横版图", "自动适配"];
 
 const inputCls =
   "h-12 w-full rounded-xl border border-line bg-surface px-4 text-[14px] text-ink outline-none placeholder:text-ink-soft/55 focus:border-accent/40";
@@ -66,13 +66,14 @@ function videoInitialValues(initialCoreMessage: string | undefined, values: Reco
 }
 
 function imageInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): ImageRequirementForm {
+  const imageSize = textValue(values, "image_size");
   return {
     intent: "image",
     image_goal: textValue(values, "image_goal", initialCoreMessage ?? ""),
     image_type: optionValue(values, "image_type", IMAGE_TYPES, "海报/封面图"),
     image_usage: optionValue(values, "image_usage", IMAGE_USAGES, "社媒发布"),
     image_style: optionValue(values, "image_style", IMAGE_STYLES, "真实摄影"),
-    image_size: optionValue(values, "image_size", IMAGE_SIZES, "9:16 竖版海报"),
+    image_size: imageSize === "自定义" ? "自动适配" : optionValue(values, "image_size", IMAGE_SIZES, "9:16 竖版海报"),
   };
 }
 

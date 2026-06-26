@@ -270,7 +270,7 @@ def _build_image_plan(
     image_type = _text(form_values.get("image_type"), "图片")
     usage = _text(form_values.get("image_usage"), "内容使用")
     style = _text(form_values.get("image_style"), "自由发挥")
-    size = _text(form_values.get("image_size"), "自定义")
+    size = _text(form_values.get("image_size"), "自动适配")
     direction_title = _text(selected_direction.get("title"), "推荐创意方向")
     direction_description = _text(selected_direction.get("description"), "围绕图片目标组织完整创作方案。")
     visual_anchor = _visual_anchor(selected_direction, product_creative_profile)

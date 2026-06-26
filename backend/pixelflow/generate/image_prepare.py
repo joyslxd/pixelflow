@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -29,6 +30,7 @@ REFERENCE_IMAGE_MODEL = "gpt-image-2"
 REFERENCE_IMAGE_QUALITY = "4K"
 IMAGE_EDIT_MODEL = "gpt-image-2"
 IMAGE_EDIT_QUALITY = "4K"
+RATIO_PATTERN = re.compile(r"(\d{1,2})\s*:\s*(\d{1,2})")
 
 
 @dataclass(frozen=True)
@@ -69,21 +71,51 @@ def prepare_image_generation(
     endpoint = ENDPOINT_BY_METHOD[method]
     prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
-    ratio = _ratio_from_size_label(_text(form_values.get("image_size")))
+    ratio = _resolve_ratio(form_values, plan_markdown, selected_direction)
     reference_urls = [image["url"] for image in image_materials if _text(image.get("url"))]
 
     if method == "multi_image_fusion":
+        width, height = _ratio_pair(ratio)
+        if len(reference_urls) < 2:
+            return ImageGenerationPrepareResult(
+                ok=False,
+                method=method,
+                endpoint=endpoint,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                params={
+                    "image_urls": reference_urls,
+                    "ratio": ratio,
+                    "width": width,
+                    "height": height,
+                    "model": TEXT_TO_IMAGE_MODEL,
+                    "size": TEXT_TO_IMAGE_QUALITY,
+                    "num_images": 1,
+                },
+                images=[],
+                message="多图融合至少需要上传 2 张图片素材。",
+            )
         return ImageGenerationPrepareResult(
-            ok=False,
+            ok=True,
             method=method,
             endpoint=endpoint,
             prompt=prompt,
             negative_prompt=negative_prompt,
-            params={"reference_image_urls": reference_urls, "ratio": ratio, "imageSize": REFERENCE_IMAGE_QUALITY},
+            params={
+                "image_urls": reference_urls,
+                "prompt": prompt,
+                "ratio": ratio,
+                "width": width,
+                "height": height,
+                "model": TEXT_TO_IMAGE_MODEL,
+                "size": TEXT_TO_IMAGE_QUALITY,
+                "num_images": 1,
+            },
             images=[],
-            message="当前图片融合接口未接入，请改用参考图生图或图像编辑。",
+            message="已准备多图融合参数，下一步可调用博观多图融合接口。",
         )
     if method == "image_edit":
+        width, height = _ratio_pair(ratio)
         return ImageGenerationPrepareResult(
             ok=True,
             method=method,
@@ -95,6 +127,9 @@ def prepare_image_generation(
                 "prompt": prompt,
                 "model": IMAGE_EDIT_MODEL,
                 "imageSize": IMAGE_EDIT_QUALITY,
+                "width": width,
+                "height": height,
+                "max_images": 1,
             },
             message="已准备图片编辑参数，下一步可调用博观图片编辑接口。",
         )
@@ -173,7 +208,7 @@ def _build_prompt(
         f"图片类型：{_text(form_values.get('image_type'), '未指定')}",
         f"图片用途：{_text(form_values.get('image_usage'), '未指定')}",
         f"图片风格：{_text(form_values.get('image_style'), '自由发挥')}",
-        f"图片尺寸：{_text(form_values.get('image_size'), '自定义')}",
+        f"图片尺寸：{_text(form_values.get('image_size'), '自动适配')}",
         f"创意方向：{_text(selected_direction.get('title'), '推荐方向')}。{_text(selected_direction.get('description'))}",
         f"plan.md 摘要：{_compact_markdown(plan_markdown)}",
     ]
@@ -186,28 +221,69 @@ def _build_prompt(
 def _image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
     images: list[dict[str, Any]] = []
     for material in materials:
-        url = _text(material.get("url") or material.get("image_url"))
-        kind = _text(material.get("type") or material.get("kind") or material.get("media_type")).lower()
-        if url and (kind in {"", "image", "picture", "reference_image"} or url.lower().split("?")[0].endswith((".png", ".jpg", ".jpeg", ".webp"))):
+        url = _first_text(material, "url", "image_url", "imageUrl", "download_url", "downloadUrl", "src")
+        kind = _first_text(material, "type", "kind", "media_type", "mediaType", "mime_type", "mimeType").lower()
+        if url and (
+            kind in {"", "image", "picture", "reference_image"}
+            or kind.startswith("image")
+            or url.lower().split("?")[0].endswith((".png", ".jpg", ".jpeg", ".webp"))
+        ):
             normalized = dict(material)
             normalized["url"] = url
             images.append(normalized)
     return images
 
 
-def _ratio_from_size_label(label: str) -> str:
-    if "9:16" in label:
-        return "9:16"
-    if "16:9" in label:
-        return "16:9"
+def _resolve_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
+    label = _text(form_values.get("image_size")).strip()
+    explicit = _explicit_ratio(label)
+    if explicit:
+        return explicit
+    if not label or _is_auto_size(label):
+        return _auto_ratio(form_values, plan_markdown, selected_direction)
     return "1:1"
 
 
+def _explicit_ratio(label: str) -> str:
+    match = RATIO_PATTERN.search(label)
+    if match:
+        return f"{int(match.group(1))}:{int(match.group(2))}"
+    if "正方" in label or "方图" in label:
+        return "1:1"
+    return ""
+
+
+def _is_auto_size(label: str) -> bool:
+    normalized = label.lower()
+    return any(keyword in normalized for keyword in ["auto", "自动", "自适应", "适配"])
+
+
+def _auto_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
+    context = _context_text(form_values, plan_markdown, selected_direction)
+    if _has_any(context, ["横版", "横幅", "banner", "大屏", "电脑端", "官网", "头图", "网页", "16:9"]):
+        return "16:9"
+    if _has_any(context, ["商品主图", "主图", "头像", "logo", "图标", "电商主图", "正方形", "1:1"]):
+        return "1:1"
+    if _has_any(context, ["信息流", "4:5", "feed"]):
+        return "4:5"
+    if _has_any(context, ["竖版", "竖图", "海报", "封面", "小红书", "社媒", "短视频", "种草", "抖音", "快手", "投放", "9:16"]):
+        return "9:16"
+    if _has_any(context, ["人物", "场景图", "3:4"]):
+        return "3:4"
+    return "1:1"
+
+
+def _context_text(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
+    parts = [plan_markdown]
+    parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style"])
+    parts.extend(_text(value) for value in selected_direction.values())
+    return " ".join(part for part in parts if part).lower()
+
+
 def _ratio_pair(ratio: str) -> tuple[int, int]:
-    if ratio == "9:16":
-        return 9, 16
-    if ratio == "16:9":
-        return 16, 9
+    match = RATIO_PATTERN.fullmatch(ratio.strip())
+    if match:
+        return int(match.group(1)), int(match.group(2))
     return 1, 1
 
 
@@ -227,3 +303,11 @@ def _text(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value.strip() or default
     return str(value)
+
+
+def _first_text(values: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = _text(values.get(key))
+        if text:
+            return text
+    return ""

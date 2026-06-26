@@ -2,12 +2,13 @@ import { useEffect, useRef } from "react";
 import { Composer } from "@/components/composer/Composer";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
+import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse } from "@/lib/api";
 import type { SceneAssetCollection, ScenePackagePatch } from "@/lib/scenePackages";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
-  onSubmit: (text: string) => void;
+  onSubmit: (payload: AgentUserMessagePayload) => void;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;

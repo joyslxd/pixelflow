@@ -6,6 +6,8 @@ const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
 const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
+const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
+const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 
 export type CreationIntent = "video" | "image";
 export type IntakeIntent = CreationIntent | "video_analysis" | "unknown";
@@ -167,6 +169,17 @@ export interface ImageGenerateResponse {
   raw: Record<string, unknown>;
 }
 
+export interface UploadedAttachment extends Record<string, unknown> {
+  name: string;
+  filename: string;
+  size: number;
+  type: string;
+  mimeType: string;
+  url: string;
+  path: string;
+  raw?: Record<string, unknown>;
+}
+
 export interface SceneVideoPayload {
   scene_id: string;
   scene_index?: number | null;
@@ -219,6 +232,22 @@ export interface GenerateSceneVideosResponse {
     raw?: Record<string, unknown>;
   }>;
   failed_scenes: Array<Record<string, unknown>>;
+  message: string;
+}
+
+export interface GenerateSceneVideosJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface GenerateSceneVideosJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  result: GenerateSceneVideosResponse | null;
+  error: string | null;
   message: string;
 }
 
@@ -312,14 +341,102 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   };
   const res = await fetch(`${AGENT_API_PREFIX}${path}`, { ...init, headers });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
+    throw new ApiError(res.status, await responseErrorMessage(res, path));
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
+async function responseErrorMessage(res: Response, path: string): Promise<string> {
+  const text = await res.text().catch(() => "");
+  const title = text.match(/<title>(.*?)<\/title>/is)?.[1] || text.match(/<h1>(.*?)<\/h1>/is)?.[1];
+  const message = (title || text).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return `${res.status} ${path}: ${(message || res.statusText).slice(0, 200)}`;
+}
+
+async function uploadFileToContentApp(file: File): Promise<UploadedAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const path = "/api/upload";
+  const res = await fetch(path, {
+    method: "POST",
+    headers: authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    body: formData,
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res, path));
+  }
+  const raw = (await res.json()) as Record<string, unknown>;
+  if (raw.success === false) {
+    throw new ApiError(400, String(raw.error || raw.message || "上传失败"));
+  }
+  const url = stringField(raw.url) || stringField(raw.path);
+  if (!url) {
+    throw new ApiError(500, "上传成功但没有返回文件 URL");
+  }
+  const filename = stringField(raw.filename) || file.name;
+  const mimeType = file.type || stringField(raw.contentType);
+  return {
+    name: filename,
+    filename,
+    size: numberField(raw.size) || file.size,
+    type: attachmentType(mimeType, filename),
+    mimeType,
+    url,
+    path: stringField(raw.path) || url,
+  };
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function numberField(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function attachmentType(mimeType: string, filename: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.startsWith("image/")) return "image";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized.startsWith("audio/")) return "audio";
+  const name = filename.toLowerCase();
+  if (/\\.(png|jpe?g|gif|webp|bmp)$/.test(name)) return "image";
+  if (/\\.(mp4|mov|mkv|webm)$/.test(name)) return "video";
+  if (/\\.(mp3|wav|aac|m4a)$/.test(name)) return "audio";
+  return "file";
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResponse> {
+  const deadline = Date.now() + SCENE_VIDEO_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`);
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        endpoint: "/api/video/reference-mode-video",
+        scene_videos: [],
+        failed_scenes: [{ error: status.error || status.message || "场景视频生成失败" }],
+        message: status.error || status.message || "场景视频生成失败",
+      };
+    }
+    await delay(SCENE_VIDEO_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    endpoint: "/api/video/reference-mode-video",
+    scene_videos: [],
+    failed_scenes: [{ error: "场景视频生成轮询超时" }],
+    message: "场景视频生成轮询超时",
+  };
+}
+
 export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
+
+  uploadAttachment: (file: File) => uploadFileToContentApp(file),
 
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),
@@ -396,6 +513,7 @@ export const api = {
     values: Record<string, unknown>;
     intake_rounds?: number;
     product_creative_profile?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
   }) => req<CreativeDirectionsResponse>(`${FLOW_BASE}/intake/directions`, { method: "POST", body: JSON.stringify(body) }),
 
   createPlanMarkdown: (body: {
@@ -435,13 +553,19 @@ export const api = {
     model?: string | null;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
 
-  generateSceneVideos: (body: {
+  generateSceneVideos: async (body: {
     scenes: SceneGenerationPayload[];
     ratio?: string;
     size?: string;
     model?: string | null;
     sound?: string;
-  }) => req<GenerateSceneVideosResponse>(`${FLOW_BASE}/video/generate-scenes`, { method: "POST", body: JSON.stringify(body) }),
+  }) => {
+    const started = await req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollSceneVideoJob(started.job_id);
+  },
 
   mergeSceneVideos: (body: {
     scene_videos: SceneVideoPayload[];
@@ -454,6 +578,7 @@ export const api = {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
+    materials?: Array<Record<string, unknown>>;
     user_feedback?: string | null;
   }) => req<VideoFlawAnalysisResponse>(`${FLOW_BASE}/video/analyze-flaws`, { method: "POST", body: JSON.stringify(body) }),
 

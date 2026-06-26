@@ -1306,6 +1306,7 @@ def analyze_video_flaws(
         merged_video_url: str,
         scene_videos: list[dict],
         scene_packages: list[dict] | None = None,
+        materials: list[dict] | None = None,
         user_feedback: str | None = None,
         generation_dialog_id: int | None = None,
         parent_generation_dialog_id: int | None = None,
@@ -1320,6 +1321,7 @@ def analyze_video_flaws(
         "merged_video_url": merged_video_url,
         "scene_videos": scene_videos,
         "scene_packages": scene_packages or [],
+        "materials": materials or [],
         "user_feedback": user_feedback or "",
     }
     if generation_dialog_id is not None:
@@ -2300,16 +2302,39 @@ def reference_image(reference_images: list[str], prompt: str, ratio: str = "1:1"
     }
 
 
-def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) -> dict:
+def image_edit(
+    image_url: str,
+    prompt: str,
+    model: str = DEFAULT_IMAGE_MODEL,
+    ratio: str | None = None,
+    size: str | None = None,
+    max_images: int = 1,
+) -> dict:
     """编辑一张已有图片。"""
-    quality = default_image_quality_for_model(model)
+    if not image_url:
+        return {"error": True, "message": "Image URL is required"}
+    count_error = validate_positive_count(max_images, "max_images")
+    if count_error:
+        return count_error
+    quality = normalize_image_quality(size or default_image_quality_for_model(model))
+    quality_error = validate_image_model_quality(model, quality)
+    if quality_error:
+        return quality_error
+    if ratio and ratio != "1:1":
+        try:
+            width, height = ratio_to_dimensions(ratio)
+        except ValueError as exc:
+            return {"error": True, "message": str(exc)}
+    else:
+        width, height = 512, 512
 
     request_data = {
         "image_url": image_url,
         "prompt": prompt,
-        "negative_prompt": "blurry, low quality, distorted product",
         "model": model,
-        "mask": None
+        "width": width,
+        "height": height,
+        "max_images": max_images,
     }
 
     print(f"\n{'='*60}")
@@ -2338,7 +2363,14 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
         return poll_result
 
     final_data = poll_result.get("data", poll_result)
-    edited_url = final_data.get("result", {}).get("url") or final_data.get("url")
+    raw_edited_url = (
+        final_data.get("result", {}).get("url")
+        or final_data.get("result", {}).get("image_url")
+        or final_data.get("url")
+        or final_data.get("image_url")
+    )
+    edited_url = raw_edited_url[0] if isinstance(raw_edited_url, list) and raw_edited_url else raw_edited_url
+    image_urls = extract_result_urls(final_data)
 
     return {
         "success": True,
@@ -2347,7 +2379,93 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
         "endpoint": "/api/picture/image_edit",
         "model": model,
         "edited_image_url": edited_url,
+        "image_url": edited_url,
+        "image_urls": image_urls,
         "raw_response": poll_result
+    }
+
+
+def multi_image_fusion(
+    image_urls: list[str],
+    prompt: str = "",
+    ratio: str = "1:1",
+    size: str = "1080p",
+    model: str = DEFAULT_IMAGE_MODEL,
+    num_images: int = 1,
+) -> dict:
+    """把多张图片融合成一张或多张新图。"""
+    image_urls = [url for url in image_urls if url]
+    if len(image_urls) < 2:
+        return {"error": True, "message": "At least two image URLs are required for multi-image fusion"}
+    count_error = validate_positive_count(num_images, "num_images")
+    if count_error:
+        return count_error
+    quality_error = validate_image_model_quality(model, size)
+    if quality_error:
+        return quality_error
+    try:
+        width, height = ratio_to_dimensions(ratio)
+    except ValueError as exc:
+        return {"error": True, "message": str(exc)}
+    quality = normalize_image_quality(size)
+
+    request_data = {
+        "image_urls": image_urls,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "model": model,
+        "num": num_images,
+    }
+
+    print(f"\n{'='*60}")
+    print("POST /api/picture/multi_image_fusion")
+    print(f"{'='*60}")
+    print(f"Model: {model}")
+    print(f"Images: {len(image_urls)}")
+    print(f"Ratio: {ratio}")
+    print(f"Quality: {quality}")
+    print(f"Outputs: {num_images}")
+    print(f"{'='*60}\n")
+
+    headers = get_headers(model=model, bill_type=2, duration=num_images, size=quality)
+    result = make_request("/picture/multi_image_fusion", request_data, custom_headers=headers)
+
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    if not task_id:
+        return {"error": True, "message": "No taskId in response", "response": result}
+
+    print(f"Task created: {task_id}")
+    print("Polling for result...\n")
+
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
+
+    if poll_result.get("error"):
+        return poll_result
+
+    final_data = poll_result.get("data", poll_result)
+    raw_image_url = (
+        final_data.get("result", {}).get("url")
+        or final_data.get("result", {}).get("image_url")
+        or final_data.get("url")
+    )
+    image_url = raw_image_url[0] if isinstance(raw_image_url, list) and raw_image_url else raw_image_url
+    image_urls_result = extract_result_urls(final_data)
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "COMPLETED",
+        "endpoint": "/api/picture/multi_image_fusion",
+        "model": model,
+        "requested_images": num_images,
+        "returned_images": len(image_urls_result),
+        "image_url": image_url,
+        "image_urls": image_urls_result,
+        "raw_response": poll_result,
     }
 
 

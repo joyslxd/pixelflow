@@ -10,7 +10,7 @@ export const TRUSTED_CONTENT_APP_ORIGINS = [
 declare global {
   interface Window {
     __CONTENT_APP_AUTHORIZATION__?: string;
-    __CONTENT_APP_USER_MESSAGE__?: string;
+    __CONTENT_APP_USER_MESSAGE__?: AgentUserMessagePayload;
   }
 }
 
@@ -27,6 +27,11 @@ export interface BrowserStorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
+}
+
+export interface AgentUserMessagePayload {
+  content: string;
+  materials?: Array<Record<string, unknown>>;
 }
 
 export interface AuthorizationSources {
@@ -104,8 +109,12 @@ export function setupContentAppAuthorizationListener(): () => void {
     }
 
     if (data.type === AGENT_USER_MESSAGE_TYPE && typeof data.content === "string") {
-      window.__CONTENT_APP_USER_MESSAGE__ = data.content;
-      window.dispatchEvent(new CustomEvent("contentAppUserMessage", { detail: data.content }));
+      const payload: AgentUserMessagePayload = {
+        content: data.content,
+        materials: Array.isArray(data.materials) ? data.materials : [],
+      };
+      window.__CONTENT_APP_USER_MESSAGE__ = payload;
+      window.dispatchEvent(new CustomEvent("contentAppUserMessage", { detail: payload }));
       return;
     }
   };

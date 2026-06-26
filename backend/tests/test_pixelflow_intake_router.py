@@ -167,3 +167,45 @@ def test_intake_router_directions_use_llm_when_form_complete(monkeypatch):
     data = response.json()
     assert data["creative_directions"][0]["title"] == "LLM 主视觉"
     assert data["creative_directions"][0]["recommended"] is True
+
+
+def test_intake_router_passes_materials_to_creative_direction_llm(monkeypatch):
+    from app.gateway.routers import pixelflow_intake
+    from pixelflow.intake.forms import CreativeDirection
+
+    materials = [{"type": "image", "url": "https://x/product.png", "filename": "product.png"}]
+
+    async def fake_draft_creative_directions_with_llm(intent, values, product_creative_profile=None):
+        assert intent == "image"
+        assert values["image_goal"] == "参考上传素材生成商品海报"
+        assert product_creative_profile == {"materials": materials}
+        return [
+            CreativeDirection(direction_id="direction_1", title="素材主视觉", description="参考上传素材组织画面。", recommended=True),
+            CreativeDirection(direction_id="direction_2", title="素材场景图", description="延展产品使用场景。"),
+            CreativeDirection(direction_id="direction_3", title="素材封面图", description="提炼素材卖点做封面。"),
+        ]
+
+    monkeypatch.setattr(pixelflow_intake, "draft_creative_directions_with_llm", fake_draft_creative_directions_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_intake.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/intake/directions",
+            json={
+                "intent": "image",
+                "values": {
+                    "image_goal": "参考上传素材生成商品海报",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "自动适配",
+                },
+                "materials": materials,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["creative_directions"][0]["title"] == "素材主视觉"

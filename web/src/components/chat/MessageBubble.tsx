@@ -61,6 +61,14 @@ function records(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
 }
 
+function materialUrl(record: Record<string, unknown>): string {
+  return stringValue(record.url) || stringValue(record.path) || stringValue(record.image_url) || stringValue(record.imageUrl);
+}
+
+function materialName(record: Record<string, unknown>, index: number): string {
+  return stringValue(record.name) || stringValue(record.filename) || `附件 ${index + 1}`;
+}
+
 export function MessageBubble({
   msg,
   onOpenArtifact,
@@ -82,6 +90,7 @@ export function MessageBubble({
   const imagePrepareParams = msg.artifact?.imagePrepare?.params ? JSON.stringify(msg.artifact.imagePrepare.params, null, 2) : "";
   const scenePackages = msg.artifact?.videoScenePackages?.scene_packages || [];
   const videoAnalysisStoryboards = records(msg.artifact?.videoAnalysis?.storyboards);
+  const messageMaterials = records(msg.materials);
   const inputClass = "min-w-0 rounded-lg border border-line bg-white px-2 py-1.5 text-[12px] text-ink outline-none focus:border-accent";
   const textareaClass = "min-h-16 rounded-lg border border-line bg-white px-2 py-1.5 text-[12px] leading-relaxed text-ink outline-none focus:border-accent";
   return (
@@ -105,6 +114,31 @@ export function MessageBubble({
         >
           {msg.content}
         </div>
+        {messageMaterials.length > 0 && (
+          <div className={cn("mt-2 flex max-w-[520px] flex-wrap gap-2", isUser ? "justify-end" : "justify-start")}>
+            {messageMaterials.map((material, index) => {
+              const url = materialUrl(material);
+              const name = materialName(material, index);
+              const type = stringValue(material.type).toLowerCase();
+              return (
+                <a
+                  key={`${url}-${index}`}
+                  href={url || undefined}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex max-w-[220px] items-center gap-2 rounded-xl border border-line bg-white px-2.5 py-1.5 text-[12px] text-ink hover:bg-canvas"
+                >
+                  {type === "image" && url ? (
+                    <img src={url} alt="" className="h-8 w-8 shrink-0 rounded-md object-cover" />
+                  ) : (
+                    <FileText size={15} className="shrink-0 text-ink-soft" />
+                  )}
+                  <span className="truncate">{name}</span>
+                </a>
+              );
+            })}
+          </div>
+        )}
         {msg.artifact?.type === "directions" && msg.artifact.directions ? (
           <div className="mt-2 w-full max-w-[520px] space-y-2 rounded-2xl border border-accent/20 bg-accent-soft/50 p-3">
             <div className="text-[13px] font-semibold text-ink">{msg.artifact.title}</div>

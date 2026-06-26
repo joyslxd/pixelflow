@@ -25,6 +25,8 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/prepare-scene-packages" in paths
     assert "/agent/flows/video/generate-scene-assets" in paths
     assert "/agent/flows/video/generate-scenes" in paths
+    assert "/agent/flows/video/generate-scenes/start" in paths
+    assert "/agent/flows/video/generate-scenes/jobs/{job_id}" in paths
     assert "/agent/flows/video/merge" in paths
     assert "/agent/flows/video/analyze-flaws" in paths
     assert "/agent/flows/video/analyze-storyboards" in paths
@@ -163,6 +165,65 @@ def test_video_router_generates_scene_videos(monkeypatch):
     assert data["endpoint"] == "/api/video/reference-mode-video"
     assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-1", "scene-2"]
     assert data["scene_videos"][0]["video_url"] == "https://x/第一幕展示白色耳机.mp4"
+
+
+def test_video_router_starts_scene_video_job_and_polls_result(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            return GenerationResult(
+                ok=True,
+                task_id=f"{kwargs['prompt']}-task",
+                url=f"https://x/{kwargs['prompt']}.mp4",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/generate-scenes/start",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕展示白色耳机",
+                        "image_urls": ["https://x/role.png"],
+                    }
+                ],
+                "ratio": "9:16",
+                "size": "720p",
+                "sound": "on",
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["status"] in {"queued", "running"}
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/generate-scenes/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["scene_videos"][0]["video_url"] == "https://x/第一幕展示白色耳机.mp4"
 
 
 def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):

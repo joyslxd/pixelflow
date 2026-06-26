@@ -69,6 +69,7 @@ class IntakeValidationResponse(BaseModel):
 
 class CreativeDirectionsRequest(IntakeValidateRequest):
     product_creative_profile: dict[str, Any] = Field(default_factory=dict)
+    materials: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreativeDirectionsResponse(BaseModel):
@@ -103,12 +104,15 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
     validation_response = IntakeValidationResponse(**data, creative_directions=[])
     if not validation.is_complete or validation.terminated:
         return CreativeDirectionsResponse(validation=validation_response, creative_directions=[])
+    product_creative_profile = dict(body.product_creative_profile)
+    if body.materials:
+        product_creative_profile["materials"] = body.materials
     directions = [
         direction.to_dict()
         for direction in await draft_creative_directions_with_llm(
             body.intent,
             validation.values,
-            body.product_creative_profile,
+            product_creative_profile,
         )
     ]
     return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions)

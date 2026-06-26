@@ -407,14 +407,40 @@ class BorgriseSkill:
         image_url: str,
         prompt: str,
         model: str | None = None,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        max_images: int = 1,
     ) -> ImageGenerationResult:
         kwargs: dict[str, Any] = {
             "image_url": image_url,
             "prompt": prompt,
+            "ratio": ratio,
+            "size": size,
+            "max_images": max_images,
         }
         if model:
             kwargs["model"] = model
         return await _run_image(run_generation.image_edit, **kwargs)
+
+    async def multi_image_fusion(
+        self,
+        image_urls: list[str],
+        prompt: str,
+        ratio: str = "1:1",
+        size: str = "1080p",
+        model: str | None = None,
+        num_images: int = 1,
+    ) -> ImageGenerationResult:
+        kwargs: dict[str, Any] = {
+            "image_urls": image_urls,
+            "prompt": prompt,
+            "ratio": ratio,
+            "size": size,
+            "num_images": num_images,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run_image(run_generation.multi_image_fusion, **kwargs)
 
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult:
         """把参考视频拆解成供应商 storyboard（博观拆解）。"""
@@ -446,6 +472,7 @@ class BorgriseSkill:
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
     ) -> VideoFlawAnalysisResult:
         """分析合并视频和场景视频中的穿帮问题。"""
@@ -454,5 +481,6 @@ class BorgriseSkill:
             merged_video_url=merged_video_url,
             scene_videos=scene_videos,
             scene_packages=scene_packages or [],
+            materials=materials or [],
             user_feedback=user_feedback,
         )

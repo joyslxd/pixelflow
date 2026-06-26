@@ -59,8 +59,10 @@ def test_borgrise_image_edit_maps_edited_url(monkeypatch):
 
 def test_gpt_image_edit_uses_price_configured_quality(monkeypatch):
     captured_headers = {}
+    captured_payload = {}
 
     def fake_make_request(_path, _payload, custom_headers=None):
+        captured_payload.update(_payload)
         captured_headers.update(custom_headers or {})
         return {"error": True, "message": "stop before polling"}
 
@@ -71,3 +73,73 @@ def test_gpt_image_edit_uses_price_configured_quality(monkeypatch):
 
     assert result["error"] is True
     assert captured_headers["apiModelParamObj"] == '{"size": "4K"}'
+    assert captured_payload == {
+        "image_url": "https://x/source.png",
+        "prompt": "换背景",
+        "model": "gpt-image-2",
+        "width": 512,
+        "height": 512,
+        "max_images": 1,
+    }
+
+
+def test_multi_image_fusion_sends_content_app_contract(monkeypatch):
+    captured = {}
+
+    def fake_make_request(path, payload, custom_headers=None):
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["headers"] = custom_headers or {}
+        return {"error": True, "message": "stop before polling"}
+
+    monkeypatch.setattr(run_generation, "_current_authorization", lambda: "Bearer test-token")
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+
+    result = run_generation.multi_image_fusion(
+        ["https://x/a.png", "https://x/b.png"],
+        "把两张图融合成商品海报",
+        ratio="9:16",
+        size="1080p",
+        model="seeddream-5.0",
+        num_images=1,
+    )
+
+    assert result["error"] is True
+    assert captured["path"] == "/picture/multi_image_fusion"
+    assert captured["payload"] == {
+        "image_urls": ["https://x/a.png", "https://x/b.png"],
+        "prompt": "把两张图融合成商品海报",
+        "width": 9,
+        "height": 16,
+        "model": "seeddream-5.0",
+        "num": 1,
+    }
+    assert captured["headers"]["apiModelParamObj"] == '{"size": "1080p"}'
+
+
+def test_image_edit_extracts_image_url_list_from_poll_result(monkeypatch):
+    def fake_make_request(_path, _payload, custom_headers=None):
+        return {"success": True, "data": {"taskId": "edit-task-2"}}
+
+    def fake_poll_task(task_id, default_timeout=None):
+        assert task_id == "edit-task-2"
+        return {
+            "success": True,
+            "data": {
+                "status": "completed",
+                "result": {
+                    "message": "图片生成成功",
+                    "image_url": ["https://x/edited-from-image-url.png"],
+                },
+            },
+        }
+
+    monkeypatch.setattr(run_generation, "_current_authorization", lambda: "Bearer test-token")
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+    monkeypatch.setattr(run_generation, "poll_task", fake_poll_task)
+
+    result = run_generation.image_edit("https://x/source.png", "换背景", model="gpt-image-2")
+
+    assert result["success"] is True
+    assert result["edited_image_url"] == "https://x/edited-from-image-url.png"
+    assert result["image_urls"] == ["https://x/edited-from-image-url.png"]

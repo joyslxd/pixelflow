@@ -65,30 +65,36 @@ async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
 
 @router.post("/generate", response_model=ImageGenerateResponse)
 async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
-    if body.method == "multi_image_fusion":
-        return ImageGenerateResponse(
-            ok=False,
-            method=body.method,
-            endpoint="/api/picture/multi_image_fusion",
-            error="当前图片融合接口未接入，请改用参考图生图或图像编辑。",
-            message="当前图片融合接口未接入，请改用参考图生图或图像编辑。",
-        )
     skill = get_image_skill()
     if body.method == "image_edit":
+        model = _optional_str(body.params.get("model"))
         result = await skill.image_edit(
-            image_url=str(body.params.get("image_url") or ""),
+            image_url=_first_image_url(body.params),
             prompt=body.prompt or str(body.params.get("prompt") or ""),
-            model=_optional_str(body.params.get("model")),
+            model=model,
+            ratio=_ratio_from_params(body.params),
+            size=_image_size_from_params(body.params, model),
+            max_images=int(body.params.get("max_images") or body.params.get("num_images") or body.params.get("num") or 1),
         )
     elif body.method == "multi_reference_image_generation":
         model = _optional_str(body.params.get("model"))
         result = await skill.reference_image(
-            reference_images=[str(url) for url in body.params.get("reference_image_urls", []) if url],
+            reference_images=_image_urls_from_params(body.params, primary_keys=("reference_image_urls", "referenceImageUrls")),
             prompt=body.prompt or str(body.params.get("prompt") or ""),
             ratio=_ratio_from_params(body.params),
             size=_image_size_from_params(body.params, model),
             model=model,
             max_images=int(body.params.get("max_images") or body.params.get("num_images") or 1),
+        )
+    elif body.method == "multi_image_fusion":
+        model = _optional_str(body.params.get("model"))
+        result = await skill.multi_image_fusion(
+            image_urls=_image_urls_from_params(body.params, primary_keys=("image_urls", "imageUrls")),
+            prompt=body.prompt or str(body.params.get("prompt") or ""),
+            ratio=_ratio_from_params(body.params),
+            size=_image_size_from_params(body.params, model),
+            model=model,
+            num_images=int(body.params.get("num_images") or body.params.get("num") or 1),
         )
     else:
         model = _optional_str(body.params.get("model"))
@@ -148,3 +154,45 @@ def _image_size_from_params(params: dict[str, Any], model: str | None) -> str:
     if model == "gpt-image-2":
         return "4K"
     return "1080p"
+
+
+def _first_image_url(params: dict[str, Any]) -> str:
+    explicit = _optional_str(params.get("image_url") or params.get("imageUrl") or params.get("url"))
+    if explicit:
+        return explicit
+    urls = _image_urls_from_params(
+        params,
+        primary_keys=("reference_image_urls", "referenceImageUrls", "image_urls", "imageUrls", "images", "materials"),
+    )
+    return urls[0] if urls else ""
+
+
+def _image_urls_from_params(params: dict[str, Any], *, primary_keys: tuple[str, ...]) -> list[str]:
+    urls: list[str] = []
+    for key in primary_keys:
+        urls.extend(_urls_from_value(params.get(key)))
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        url = _optional_str(
+            value.get("url")
+            or value.get("image_url")
+            or value.get("imageUrl")
+            or value.get("download_url")
+            or value.get("downloadUrl")
+            or value.get("src")
+        )
+        return [url] if url else []
+    if isinstance(value, list):
+        urls: list[str] = []
+        for item in value:
+            urls.extend(_urls_from_value(item))
+        return urls
+    return []

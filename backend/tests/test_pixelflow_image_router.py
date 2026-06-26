@@ -55,6 +55,37 @@ def test_image_router_prepares_text_to_image_contract():
     assert "科技感耳机海报" in data["prompt"]
 
 
+def test_image_router_prepares_image_edit_from_camel_case_material():
+    from app.gateway.routers import pixelflow_image
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/prepare",
+            json={
+                "form_values": {
+                    "image_goal": "修改图片，换成科技蓝背景",
+                    "image_size": "9:16 竖版海报",
+                },
+                "plan_markdown": "## 图片编辑",
+                "selected_direction": {"title": "改图", "description": "基于上传素材编辑"},
+                "materials": [{"imageUrl": "https://x/source.png", "mediaType": "image"}],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["method"] == "image_edit"
+    assert data["endpoint"] == "/api/picture/image_edit"
+    assert data["params"]["image_url"] == "https://x/source.png"
+    assert data["params"]["width"] == 9
+    assert data["params"]["height"] == 16
+    assert data["params"]["max_images"] == 1
+
+
 def test_image_router_generates_text_to_image(monkeypatch):
     from app.gateway.routers import pixelflow_image
     from pixelflow.skills import ImageGenerationResult
@@ -120,13 +151,71 @@ def test_image_router_defaults_gpt_image_to_price_configured_quality(monkeypatch
     assert response.json()["ok"] is True
 
 
-def test_image_router_rejects_unavailable_multi_image_fusion(monkeypatch):
+def test_image_router_generates_image_edit_from_image_url_alias(monkeypatch):
     from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
 
-    def fail_if_called():
-        raise AssertionError("multi_image_fusion must not call the current image skill")
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            assert kwargs == {
+                "image_url": "https://x/source.png",
+                "prompt": "换背景",
+                "model": "gpt-image-2",
+                "ratio": "9:16",
+                "size": "4K",
+                "max_images": 1,
+            }
+            return ImageGenerationResult(
+                ok=True,
+                task_id="edit-task-1",
+                images=[{"asset_id": "edit-task-1-0", "url": "https://x/edited.png", "download_url": "https://x/edited.png"}],
+                raw={"endpoint": "/api/picture/image_edit"},
+            )
 
-    monkeypatch.setattr(pixelflow_image, "get_image_skill", fail_if_called)
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/generate",
+            json={
+                "method": "image_edit",
+                "prompt": "换背景",
+                "params": {"imageUrl": "https://x/source.png", "model": "gpt-image-2", "width": 9, "height": 16},
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["endpoint"] == "/api/picture/image_edit"
+    assert data["images"][0]["url"] == "https://x/edited.png"
+
+
+def test_image_router_generates_multi_image_fusion(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def multi_image_fusion(self, **kwargs):
+            assert kwargs == {
+                "image_urls": ["https://x/a.png", "https://x/b.png"],
+                "prompt": "融合两张图",
+                "ratio": "9:16",
+                "size": "1080p",
+                "model": "seeddream-5.0",
+                "num_images": 1,
+            }
+            return ImageGenerationResult(
+                ok=True,
+                task_id="fusion-task-1",
+                images=[{"asset_id": "fusion-task-1-0", "url": "https://x/fusion.png", "download_url": "https://x/fusion.png"}],
+                raw={"endpoint": "/api/picture/multi_image_fusion"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
 
     app = make_authed_test_app(user_factory=_stable_user)
     app.include_router(pixelflow_image.router)
@@ -137,12 +226,12 @@ def test_image_router_rejects_unavailable_multi_image_fusion(monkeypatch):
             json={
                 "method": "multi_image_fusion",
                 "prompt": "融合两张图",
-                "params": {"reference_image_urls": ["https://x/a.png", "https://x/b.png"]},
+                "params": {"image_urls": ["https://x/a.png", "https://x/b.png"], "ratio": "9:16", "model": "seeddream-5.0"},
             },
         )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["ok"] is False
+    assert data["ok"] is True
     assert data["endpoint"] == "/api/picture/multi_image_fusion"
-    assert "未接入" in data["error"]
+    assert data["images"][0]["url"] == "https://x/fusion.png"

@@ -21,6 +21,51 @@ def test_prepare_image_generation_uses_text_to_image_without_reference_materials
     assert "核心卖点海报" in result.prompt
 
 
+def test_prepare_image_generation_auto_size_uses_context_for_vertical_poster():
+    result = prepare_image_generation(
+        {
+            "image_goal": "小红书新品封面图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+        },
+        "## 一、选题方向\n适合竖版内容流的封面",
+        {"title": "竖版种草海报", "description": "突出产品质感和点击欲望"},
+    )
+
+    assert result.ok is True
+    assert result.params["ratio"] == "9:16"
+
+
+def test_prepare_image_generation_auto_size_uses_context_for_horizontal_banner():
+    result = prepare_image_generation(
+        {
+            "image_goal": "官网横版 banner 头图",
+            "image_type": "背景/素材图",
+            "image_usage": "内部展示",
+            "image_style": "科技感",
+            "image_size": "auto",
+        },
+        "## 一、选题方向\n电脑端首屏横幅",
+        {"title": "横版品牌视觉", "description": "用于网页头图和大屏展示"},
+    )
+
+    assert result.ok is True
+    assert result.params["ratio"] == "16:9"
+
+
+def test_prepare_image_generation_keeps_explicit_non_default_ratio():
+    result = prepare_image_generation(
+        {"image_goal": "信息流广告图", "image_style": "真实摄影", "image_size": "4:5 信息流图"},
+        "plan",
+        {"title": "信息流广告", "description": "突出商品"},
+    )
+
+    assert result.ok is True
+    assert result.params["ratio"] == "4:5"
+
+
 def test_prepare_image_generation_uses_multi_reference_with_image_materials():
     result = prepare_image_generation(
         {"image_goal": "商品场景图", "image_style": "真实摄影", "image_size": "1:1 正方形"},
@@ -56,7 +101,7 @@ def test_prepare_image_generation_uses_image_edit_for_edit_operation():
     assert "换背景" in result.prompt
 
 
-def test_prepare_image_generation_reports_unavailable_multi_image_fusion():
+def test_prepare_image_generation_prepares_multi_image_fusion():
     result = prepare_image_generation(
         {"image_goal": "把两张图融合成一张", "image_style": "真实摄影", "image_size": "4:5 信息流图"},
         "plan",
@@ -67,8 +112,9 @@ def test_prepare_image_generation_reports_unavailable_multi_image_fusion():
         ],
     )
 
-    assert result.ok is False
+    assert result.ok is True
     assert result.endpoint == "/api/picture/multi_image_fusion"
     assert result.method == "multi_image_fusion"
-    assert "未接入" in result.message
-    assert result.params["reference_image_urls"] == ["https://x/a.png", "https://x/b.png"]
+    assert result.params["image_urls"] == ["https://x/a.png", "https://x/b.png"]
+    assert result.params["width"] == 4
+    assert result.params["height"] == 5

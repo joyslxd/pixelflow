@@ -83,3 +83,59 @@ test("API requests wait briefly for content-app authorization injected after ifr
     }
   }
 });
+
+test("uploadAttachment posts multipart file to content-app upload API with authorization", async () => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const testWindow = makeWindow();
+  testWindow.__CONTENT_APP_AUTHORIZATION__ = "Bearer upload-token";
+  globalThis.window = testWindow;
+
+  let capturedUrl = "";
+  let capturedAuthorization = "";
+  let capturedBody;
+  let hasJsonContentType = false;
+  globalThis.fetch = async (url, init) => {
+    capturedUrl = String(url);
+    capturedAuthorization = init?.headers?.Authorization || "";
+    hasJsonContentType = Boolean(init?.headers?.["Content-Type"]);
+    capturedBody = init?.body;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        filename: "product.png",
+        size: 1234,
+        url: "https://x/product.png",
+        path: "https://x/product.png",
+      }),
+    };
+  };
+
+  try {
+    const file = new File(["fake"], "product.png", { type: "image/png" });
+    const uploaded = await api.uploadAttachment(file);
+
+    assert.equal(capturedUrl, "/api/upload");
+    assert.equal(capturedAuthorization, "Bearer upload-token");
+    assert.equal(hasJsonContentType, false);
+    assert.ok(capturedBody instanceof FormData);
+    assert.deepEqual(uploaded, {
+      name: "product.png",
+      filename: "product.png",
+      size: 1234,
+      type: "image",
+      mimeType: "image/png",
+      url: "https://x/product.png",
+      path: "https://x/product.png",
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = previousWindow;
+    }
+  }
+});

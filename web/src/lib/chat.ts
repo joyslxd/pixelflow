@@ -14,9 +14,11 @@ import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
 
 export interface ChatMessage {
   id: string;
+  conversationId?: string;
   role: "user" | "assistant";
   content: string;
   time: string;
+  materials?: Array<Record<string, unknown>>;
   artifact?: {
     type:
       | "brief"
@@ -38,6 +40,7 @@ export interface ChatMessage {
     directions?: CreativeDirectionResponse[];
     intent?: CreationIntent | "video_analysis";
     formValues?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
     coreMessage?: string;
     selectedDirection?: CreativeDirectionResponse;
     plan?: PlanMarkdownResponse;
