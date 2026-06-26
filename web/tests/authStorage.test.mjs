@@ -10,6 +10,7 @@ const {
   getAuthorizationFromSources,
   normalizeAuthorization,
   saveAuthorization,
+  isTrustedContentAppOrigin,
 } = await import(moduleUrl);
 
 function makeStorage(initial = {}) {
@@ -76,4 +77,11 @@ test("clearSavedAuthorization removes all supported local testing keys", () => {
   clearSavedAuthorization(localStorage);
 
   assert.deepEqual(localStorage.dump(), {});
+});
+
+test("isTrustedContentAppOrigin accepts local, test, and production content-app origins", () => {
+  assert.equal(isTrustedContentAppOrigin("http://localhost:5174"), true);
+  assert.equal(isTrustedContentAppOrigin("https://test-video.borgrise.com"), true);
+  assert.equal(isTrustedContentAppOrigin("https://video.borgrise.com"), true);
+  assert.equal(isTrustedContentAppOrigin("https://example.com"), false);
 });

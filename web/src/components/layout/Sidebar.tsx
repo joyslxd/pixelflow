@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { KeyRound, SquarePen } from "lucide-react";
+import { SquarePen } from "lucide-react";
 import { api, type ConversationSummaryResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -37,13 +37,7 @@ export function Sidebar() {
 
   return (
     <aside className="flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
-      <div className="flex items-center px-5 pb-3 pt-5">
-        <span className="text-[18px] font-extrabold tracking-tight text-brand">
-          Pixel Flow
-        </span>
-      </div>
-
-      <div className="px-3">
+      <div className="px-3 pt-5">
         <button
           onClick={() => navigate("/")}
           className="flex w-full items-center gap-2 rounded-xl border border-line bg-canvas px-3 py-2.5 text-[14px] font-medium text-ink transition-colors hover:border-accent/30 hover:text-accent"
@@ -51,20 +45,6 @@ export function Sidebar() {
           <SquarePen size={16} />
           新建对话
         </button>
-        <NavLink
-          to="/auth-token"
-          className={({ isActive }) =>
-            cn(
-              "mt-2 flex w-full items-center gap-2 rounded-xl border px-3 py-2.5 text-[14px] font-medium transition-colors",
-              isActive
-                ? "border-accent/30 bg-accent-soft text-accent"
-                : "border-line bg-surface text-ink-soft hover:border-accent/30 hover:text-accent",
-            )
-          }
-        >
-          <KeyRound size={16} />
-          认证设置
-        </NavLink>
       </div>
 
       <div className="mt-5 px-5 text-[12px] font-medium text-ink-soft/70">

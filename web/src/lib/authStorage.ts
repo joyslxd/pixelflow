@@ -1,7 +1,11 @@
 export const AUTHORIZATION_STORAGE_KEY = "Authorization";
 export const CONTENT_APP_AUTH_MESSAGE_TYPE = "CONTENT_APP_AUTHORIZATION";
 export const AGENT_USER_MESSAGE_TYPE = "AGENT_USER_MESSAGE";
-export const TRUSTED_CONTENT_APP_ORIGINS = ["https://test-video.borgrise.com", "http://localhost:5174"];
+export const TRUSTED_CONTENT_APP_ORIGINS = [
+  "https://test-video.borgrise.com",
+  "https://video.borgrise.com",
+  "http://localhost:5174",
+];
 
 declare global {
   interface Window {
@@ -95,6 +99,7 @@ export function setupContentAppAuthorizationListener(): () => void {
     if (data.type === CONTENT_APP_AUTH_MESSAGE_TYPE && typeof data.authorization === "string") {
       saveAuthorization(data.authorization);
       window.__CONTENT_APP_AUTHORIZATION__ = normalizeAuthorization(data.authorization);
+      window.dispatchEvent(new CustomEvent("contentAppAuthorizationReady"));
       return;
     }
 

@@ -4,6 +4,8 @@ import { getBrowserAuthorization } from "@/lib/authStorage";
 
 const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
+const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
+const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 
 export type CreationIntent = "video" | "image";
 export type IntakeIntent = CreationIntent | "video_analysis" | "unknown";
@@ -269,18 +271,45 @@ export function getAuthorizationHeader(): string {
   return getBrowserAuthorization();
 }
 
-function authHeaders(): Record<string, string> {
-  const authorization = getAuthorizationHeader();
+function authHeadersFromAuthorization(authorization: string): Record<string, string> {
   if (!authorization) {
     throw new ApiError(401, "缺少 content-app Authorization，请先从 content-app 登录入口进入 PixelFlow");
   }
   return { Authorization: authorization };
 }
 
+export async function waitForAuthorizationHeader(timeoutMs = AUTHORIZATION_WAIT_TIMEOUT_MS): Promise<string> {
+  const current = getAuthorizationHeader();
+  if (current) return current;
+  if (typeof window === "undefined") return "";
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: number | undefined;
+
+    const finish = (authorization: string) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      window.removeEventListener(AUTHORIZATION_READY_EVENT, onReady);
+      resolve(authorization);
+    };
+
+    const onReady = () => finish(getAuthorizationHeader());
+
+    window.addEventListener(AUTHORIZATION_READY_EVENT, onReady, { once: true });
+    timer = window.setTimeout(() => finish(getAuthorizationHeader()), timeoutMs);
+  });
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   // 统一请求模板：自动带 content-app Authorization，并把非 2xx 响应转换成 ApiError。
   // 可以把它类比成前端侧的后端 Client 拦截器。
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers as Record<string, string>) };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    ...(init?.headers as Record<string, string>),
+  };
   const res = await fetch(`${AGENT_API_PREFIX}${path}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -308,7 +337,9 @@ export const api = {
     // <video src> 不能自定义 Authorization header，所以受保护的本地成片需要先
     // 用 fetch 带 header 拉成 Blob，再转成本页可播放的 object URL。
     const path = `${FLOW_BASE}/${taskId}/assets/${encodeURIComponent(assetId)}/content`;
-    const res = await fetch(`${AGENT_API_PREFIX}${path}`, { headers: authHeaders() });
+    const res = await fetch(`${AGENT_API_PREFIX}${path}`, {
+      headers: authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
@@ -470,7 +501,10 @@ export function subscribeTaskEvents(
 
   void (async () => {
     try {
-      const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
+      const res = await fetch(url, {
+        headers: authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+        signal: controller.signal,
+      });
       if (!res.ok || !res.body) {
         throw new ApiError(res.status, `SSE 连接失败: ${res.status}`);
       }
