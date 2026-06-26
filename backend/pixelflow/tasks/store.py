@@ -36,15 +36,15 @@ def _dt(value: datetime | str | None) -> str:
 def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
     if not cursor or "|" not in cursor:
         return None
-    raw_updated_at, conversation_id = cursor.rsplit("|", 1)
+    raw_created_at, conversation_id = cursor.rsplit("|", 1)
     try:
-        return datetime.fromisoformat(raw_updated_at), conversation_id
+        return datetime.fromisoformat(raw_created_at), conversation_id
     except ValueError:
         return None
 
 
 def _conversation_cursor(record: PixelFlowConversationRecord) -> str:
-    return f"{record.updated_at}|{record.conversation_id}"
+    return f"{record.created_at}|{record.conversation_id}"
 
 
 @dataclass
@@ -448,19 +448,19 @@ class SQLPixelFlowTaskStore:
         async with self._sf() as session:
             stmt = (
                 select(PixelFlowConversationRow)
-                .order_by(PixelFlowConversationRow.updated_at.desc(), PixelFlowConversationRow.conversation_id.desc())
+                .order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc())
                 .limit(limit + 1)
             )
             if user_id is not None:
                 stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
             parsed = _parse_cursor(cursor)
             if parsed is not None:
-                updated_at, conversation_id = parsed
+                created_at, conversation_id = parsed
                 stmt = stmt.where(
                     or_(
-                        PixelFlowConversationRow.updated_at < updated_at,
+                        PixelFlowConversationRow.created_at < created_at,
                         and_(
-                            PixelFlowConversationRow.updated_at == updated_at,
+                            PixelFlowConversationRow.created_at == created_at,
                             PixelFlowConversationRow.conversation_id < conversation_id,
                         ),
                     )
@@ -627,12 +627,12 @@ class MemoryPixelFlowTaskStore:
         self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
     ) -> tuple[list[PixelFlowConversationRecord], str | None]:
         rows = [r for r in self._conversations.values() if user_id is None or r.user_id == user_id]
-        rows = sorted(rows, key=lambda r: (r.updated_at, r.conversation_id), reverse=True)
+        rows = sorted(rows, key=lambda r: (r.created_at, r.conversation_id), reverse=True)
         parsed = _parse_cursor(cursor)
         if parsed is not None:
-            updated_at, conversation_id = parsed
-            cursor_key = (_dt(updated_at), conversation_id)
-            rows = [r for r in rows if (r.updated_at, r.conversation_id) < cursor_key]
+            created_at, conversation_id = parsed
+            cursor_key = (_dt(created_at), conversation_id)
+            rows = [r for r in rows if (r.created_at, r.conversation_id) < cursor_key]
         page = rows[:limit]
         next_cursor = _conversation_cursor(page[-1]) if len(rows) > limit and page else None
         return page, next_cursor

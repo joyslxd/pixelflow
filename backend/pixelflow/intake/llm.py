@@ -281,13 +281,56 @@ def _fallback_intent(text: str) -> IntakeIntent:
         "analyze video",
     )
     video_analysis_words = ("分析", "拆解", "解析", "对比", "复盘", "看看", "看下", "研究")
-    image_hints = ("图片", "海报", "封面", "主图", "配图", "素材图", "image")
-    video_hints = ("视频", "短视频", "带货", "广告视频", "分镜", "video")
+    video_generation_words = ("生成", "制作", "做", "编辑", "修改", "延伸", "延长", "合并")
+    image_hints = (
+        "图片",
+        "图像",
+        "生图",
+        "文生图",
+        "图生图",
+        "改图",
+        "修图",
+        "海报",
+        "封面",
+        "主图",
+        "配图",
+        "素材图",
+        "参考图",
+        "融合成一张图",
+        "多图融合",
+        "换背景",
+        "篮球图",
+        "篮球图片",
+        "image",
+    )
+    video_hints = (
+        "生成视频",
+        "宣传视频",
+        "短视频",
+        "带货视频",
+        "广告视频",
+        "文生视频",
+        "图生视频",
+        "图片生成视频",
+        "首帧",
+        "首尾帧",
+        "尾帧",
+        "参考生成视频",
+        "全能参考",
+        "编辑视频",
+        "视频编辑",
+        "延伸视频",
+        "延长视频",
+        "分镜",
+        "video",
+    )
     if any(hint in lowered for hint in analysis_hints) or ("视频" in lowered and any(word in lowered for word in video_analysis_words)):
         return "video_analysis"
     if any(hint in lowered for hint in image_hints):
         return "image"
     if any(hint in lowered for hint in video_hints):
+        return "video"
+    if "视频" in lowered and any(word in lowered for word in video_generation_words):
         return "video"
     return "unknown"
 

@@ -115,13 +115,37 @@ class VideoGenerationSkill(Protocol):
     传入，这里不硬编码具体模型或供应商行为。
     """
 
+    async def text_to_video(
+        self,
+        prompt: str,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult: ...
+
     async def image_to_video(
         self,
         image_url: str,
         prompt: str | None = None,
         duration: int = 10,
         ratio: str = "9:16",
+        size: str = "720p",
         model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult: ...
+
+    async def two_image_to_video(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        prompt: str | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
     ) -> GenerationResult: ...
 
     async def extend_video(
@@ -130,7 +154,9 @@ class VideoGenerationSkill(Protocol):
         prompt: str | None = None,
         duration: int = 10,
         ratio: str = "9:16",
+        size: str = "720p",
         model: str | None = None,
+        sound: str = "on",
     ) -> GenerationResult: ...
 
     async def reference_mode_video(
@@ -139,6 +165,18 @@ class VideoGenerationSkill(Protocol):
         image_urls: list[str] | None = None,
         video_urls: list[str] | None = None,
         audio_urls: list[str] | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult: ...
+
+    async def edit_video(
+        self,
+        ref_video: str,
+        prompt: str | None = None,
+        ref_image: str | None = None,
         duration: int = 10,
         ratio: str = "9:16",
         size: str = "720p",

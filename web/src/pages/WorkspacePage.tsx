@@ -15,7 +15,12 @@ import {
 } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
-import { appendVisibleConversationMessage, messageConversationId } from "@/lib/conversationRouting";
+import {
+  appendVisibleConversationMessage,
+  messageConversationId,
+  restoredConversationMessages,
+  shouldApplyVisibleConversationSideEffect,
+} from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
   collectSceneImageUrls,
@@ -278,6 +283,25 @@ export function WorkspacePage() {
     setCurrentConversationId(id);
   };
 
+  const isVisibleConversation = (targetConversationId: string) =>
+    shouldApplyVisibleConversationSideEffect(conversationIdRef.current, targetConversationId);
+
+  const setBusyForConversation = (targetConversationId: string, value: boolean) => {
+    if (isVisibleConversation(targetConversationId)) setBusy(value);
+  };
+
+  const setCanvasOpenForConversation = (targetConversationId: string, value: boolean) => {
+    if (isVisibleConversation(targetConversationId)) setCanvasOpen(value);
+  };
+
+  const setCanvasForConversation = (
+    targetConversationId: string,
+    updater: CanvasState | ((current: CanvasState) => CanvasState),
+  ) => {
+    if (!isVisibleConversation(targetConversationId)) return;
+    setCanvas(updater);
+  };
+
   const persistChatMessage = (conversation: string, message: ChatMessage) => {
     void api
       .appendConversationMessage(conversation, {
@@ -525,7 +549,7 @@ export function WorkspacePage() {
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
-    applySnapshot({ ...snapshot, messages: snapshot.messages?.length ? snapshot.messages : restoredMessages });
+    applySnapshot({ ...snapshot, messages: restoredConversationMessages(snapshot.messages, restoredMessages) });
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -665,7 +689,7 @@ export function WorkspacePage() {
       const flowMaterials = mergeMaterials(revisionArtifact.materials, materials);
       if (!isCreationIntent(revisionIntent) || !revisionFormValues) return;
       planRevisionArtifactRef.current = null;
-      setBusy(true);
+      setBusyForConversation(activeConversation, true);
       pushAssistant("已收到修改意见，正在回到采集 Agent 重新生成 3 个创意方向…", activeConversation);
       try {
         const directionResult = await api.generateCreativeDirections({
@@ -676,7 +700,7 @@ export function WorkspacePage() {
         });
         if (!directionResult.validation.is_complete) {
           pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", activeConversation);
-          setBusy(false);
+          setBusyForConversation(activeConversation, false);
           return;
         }
         pushDirectionsArtifact(directionResult.creative_directions, {
@@ -701,7 +725,7 @@ export function WorkspacePage() {
       } catch (err) {
         pushAssistant(`重新生成创意方向失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
-        setBusy(false);
+        setBusyForConversation(activeConversation, false);
       }
       return;
     }
@@ -710,7 +734,7 @@ export function WorkspacePage() {
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {
       const flowMaterials = mergeMaterials(pendingImageRevisionArtifact.materials, materials);
       imageRevisionArtifactRef.current = null;
-      setBusy(true);
+      setBusyForConversation(activeConversation, true);
       pushAssistant("已收到图片修改意见，正在重新准备参数并生成图片…", activeConversation);
       try {
         const imagePrepare = await api.prepareImageGeneration(
@@ -738,7 +762,7 @@ export function WorkspacePage() {
             selectedDirection: pendingImageRevisionArtifact.selectedDirection,
             plan: pendingImageRevisionArtifact.plan,
           }, activeConversation);
-          setBusy(false);
+          setBusyForConversation(activeConversation, false);
           return;
         }
         const imageResult = await api.generateImage({
@@ -783,7 +807,7 @@ export function WorkspacePage() {
       } catch (err) {
         pushAssistant(`图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
-        setBusy(false);
+        setBusyForConversation(activeConversation, false);
       }
       return;
     }
@@ -804,7 +828,7 @@ export function WorkspacePage() {
         pushAssistant("当前没有可分析的合并视频链接，无法进入视频修改流程。", activeConversation);
         return;
       }
-      setBusy(true);
+      setBusyForConversation(activeConversation, true);
       pushAssistant("已收到视频修改意见，正在调用视频穿帮分析 Skill…", activeConversation);
       try {
         const flawAnalysis = await api.analyzeVideoFlaws({
@@ -852,11 +876,11 @@ export function WorkspacePage() {
       } catch (err) {
         pushAssistant(`视频穿帮分析失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
-        setBusy(false);
+        setBusyForConversation(activeConversation, false);
       }
       return;
     }
-    setBusy(true);
+    setBusyForConversation(activeConversation, true);
     pushAssistant("正在调用采集 Agent 识别意图，并抽取可自动填充的表单字段…", activeConversation);
     try {
       const intake = await api.analyzeIntakeIntent({ prompt: text, materials });
@@ -892,11 +916,13 @@ export function WorkspacePage() {
         return;
       }
       if (isCreationIntent(intake.intent)) {
-        setPendingCore(text);
-        setPendingIntent(intake.intent);
-        setPendingFormValues(intake.values || {});
-        setPendingMaterials(materials);
-        pendingDialogContextRef.current = { conversationId: activeConversation, coreMessage: text, materials };
+        if (isVisibleConversation(activeConversation)) {
+          setPendingCore(text);
+          setPendingIntent(intake.intent);
+          setPendingFormValues(intake.values || {});
+          setPendingMaterials(materials);
+          pendingDialogContextRef.current = { conversationId: activeConversation, coreMessage: text, materials };
+        }
         pushAssistant(`采集 Agent 判断这是${intake.intent === "video" ? "视频生成" : "图片生成"}需求，已把能识别的信息自动填进表单。请补充确认。`, activeConversation);
         if (activeConversation) {
           void api
@@ -911,7 +937,7 @@ export function WorkspacePage() {
             })
             .catch(() => {});
         }
-        setDialogOpen(true);
+        if (isVisibleConversation(activeConversation)) setDialogOpen(true);
         return;
       }
       pushAssistant(intake.reason || "我可以帮你生成图片、生成电商带货短视频，或分析已有视频。请再描述一下需求。", activeConversation);
@@ -929,7 +955,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`采集 Agent 意图识别失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
     } finally {
-      setBusy(false);
+      setBusyForConversation(activeConversation, false);
     }
   };
 
@@ -1096,13 +1122,13 @@ export function WorkspacePage() {
     const flowCoreMessage = dialogContext?.coreMessage || pendingCore;
     setDialogOpen(false);
     setPendingFormValues({});
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     const values = valuesFromForm(form);
     try {
       const directionResult = await api.generateCreativeDirections({ intent: form.intent, values, materials: flowMaterials });
       if (!directionResult.validation.is_complete) {
         pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", targetConversationId);
-        setBusy(false);
+        setBusyForConversation(targetConversationId, false);
         return;
       }
       pushDirectionsArtifact(directionResult.creative_directions, {
@@ -1127,10 +1153,10 @@ export function WorkspacePage() {
           })
           .catch(() => {});
       }
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     } catch (err) {
       pushAssistant(`采集处理失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -1139,7 +1165,7 @@ export function WorkspacePage() {
     if (processedArtifactIdsRef.current.has(msg.id)) return;
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     pushAssistant(auto ? `30 秒未选择，已默认采用推荐方向「${direction.title}」。` : `已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
     try {
       const plan = await api.createPlanMarkdown({
@@ -1173,7 +1199,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`plan.md 生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -1184,7 +1210,7 @@ export function WorkspacePage() {
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     if (artifact.intent === "image") {
-      setBusy(true);
+      setBusyForConversation(targetConversationId, true);
       pushAssistant(auto ? "30 秒未操作，已默认同意图片 plan.md，正在准备图片生成参数…" : "图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
       try {
         const imagePrepare = await api.prepareImageGeneration({
@@ -1193,11 +1219,48 @@ export function WorkspacePage() {
           selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
           materials: artifact.materials || [],
         });
-        pushArtifact(imagePrepare.ok ? "图片生成参数已准备好，下一步可接入博观异步生成和轮询。" : "图片生成准备发现当前能力暂不可用，请按提示调整。", {
-          type: "image_prepare",
-          title: "图片生成准备",
-          description: imagePrepare.ok ? `将调用 ${imagePrepare.endpoint}` : imagePrepare.message,
+        if (!imagePrepare.ok) {
+          pushArtifact("图片生成准备发现当前能力暂不可用，请按提示调整。", {
+            type: "image_prepare",
+            title: "图片生成准备",
+            description: imagePrepare.message,
+            actionLabel: "查看",
+            imagePrepare,
+            intent: "image",
+            formValues: artifact.formValues,
+            materials: artifact.materials || [],
+            selectedDirection: artifact.selectedDirection,
+            plan: artifact.plan,
+          }, targetConversationId);
+          if (targetConversationId) {
+            void api
+              .updateConversation(targetConversationId, {
+                last_phase: "image_generation_blocked",
+                context: {
+                  ...makeSnapshot(),
+                  plan_approved: true,
+                  plan_markdown: artifact.plan.plan_markdown,
+                  materials: artifact.materials || [],
+                  image_prepare: imagePrepare,
+                } as unknown as Record<string, unknown>,
+              })
+              .catch(() => {});
+          }
+          return;
+        }
+        pushAssistant(`正在调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
+        const imageResult = await api.generateImage({
+          method: imagePrepare.method,
+          prompt: imagePrepare.prompt,
+          negative_prompt: imagePrepare.negative_prompt,
+          params: imagePrepare.params,
+        });
+        const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
+          type: "image_result",
+          title: "图片生成结果",
+          description: imageResultSummary(imageResult),
           actionLabel: "查看",
+          imageResult,
           imagePrepare,
           intent: "image",
           formValues: artifact.formValues,
@@ -1205,16 +1268,22 @@ export function WorkspacePage() {
           selectedDirection: artifact.selectedDirection,
           plan: artifact.plan,
         }, targetConversationId);
+        if (canAcceptImageResult(imageResult)) {
+          window.setTimeout(() => {
+            void handleAcceptImageResult(imageResultMessage, true);
+          }, 30_000);
+        }
         if (targetConversationId) {
           void api
             .updateConversation(targetConversationId, {
-              last_phase: imagePrepare.ok ? "image_generation_prepared" : "image_generation_blocked",
+              last_phase: imageResult.ok ? "image_generated" : "image_generation_failed",
               context: {
                 ...makeSnapshot(),
                 plan_approved: true,
                 plan_markdown: artifact.plan.plan_markdown,
                 materials: artifact.materials || [],
                 image_prepare: imagePrepare,
+                image_result: imageResult,
               } as unknown as Record<string, unknown>,
             })
             .catch(() => {});
@@ -1222,11 +1291,11 @@ export function WorkspacePage() {
       } catch (err) {
         pushAssistant(`图片生成参数准备失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
       } finally {
-        setBusy(false);
+        setBusyForConversation(targetConversationId, false);
       }
       return;
     }
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     const formValues = artifact.formValues;
     const selectedDirection = artifact.selectedDirection;
     const targetDurationMs = inferTargetDurationMs([
@@ -1294,7 +1363,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`视频场景包准备失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -1320,7 +1389,7 @@ export function WorkspacePage() {
     if (processedArtifactIdsRef.current.has(msg.id)) return;
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
     try {
       const imageResult = await api.generateImage({
@@ -1362,7 +1431,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`图片生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -1405,7 +1474,7 @@ export function WorkspacePage() {
     if (processedArtifactIdsRef.current.has(msg.id)) return;
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     pushAssistant("场景包已确认，正在并行生成场景视频…", targetConversationId);
     try {
       const generatedSceneVideos = await api.generateSceneVideos({
@@ -1462,8 +1531,8 @@ export function WorkspacePage() {
           assetType: "final_video",
           status: mergedVideo.ok ? "success" : "failed",
         };
-        setCanvas((c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results: [result] }));
-        setCanvasOpen(true);
+        setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results: [result] }));
+        setCanvasOpenForConversation(targetConversationId, true);
       }
       if (targetConversationId) {
         void api
@@ -1481,7 +1550,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`视频生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -1524,7 +1593,7 @@ export function WorkspacePage() {
     if (processedArtifactIdsRef.current.has(msg.id)) return;
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    setBusy(true);
+    setBusyForConversation(targetConversationId, true);
     const affectedSceneIds = sceneIdsForRevision(
       artifact.videoScenePackages.scene_packages,
       artifact.videoRevisionFeedback,
@@ -1592,7 +1661,7 @@ export function WorkspacePage() {
         }, 30_000);
       }
       if (mergedVideo.merged_video_url) {
-        setCanvas((c) => ({
+        setCanvasForConversation(targetConversationId, (c) => ({
           ...c,
           phase: mergedVideo.ok ? "done" : c.phase,
           results: [
@@ -1604,7 +1673,7 @@ export function WorkspacePage() {
             },
           ],
         }));
-        setCanvasOpen(true);
+        setCanvasOpenForConversation(targetConversationId, true);
       }
       if (targetConversationId) {
         void api
@@ -1624,7 +1693,7 @@ export function WorkspacePage() {
     } catch (err) {
       pushAssistant(`视频修改重生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
-      setBusy(false);
+      setBusyForConversation(targetConversationId, false);
     }
   }
 

@@ -101,6 +101,20 @@ def test_prepare_image_generation_uses_image_edit_for_edit_operation():
     assert "换背景" in result.prompt
 
 
+def test_prepare_image_generation_uses_image_edit_when_plan_mentions_image_edit():
+    result = prepare_image_generation(
+        {"image_goal": "篮球主题社媒海报", "image_style": "真实摄影", "image_size": "9:16 竖版海报"},
+        "## 创作方案\n对用户上传图片进行图片编辑，修改背景为蓝色篮球馆灯光氛围。",
+        {"title": "参考图延展", "description": "保留主体质感"},
+        materials=[{"type": "image", "url": "https://x/source.png"}],
+    )
+
+    assert result.ok is True
+    assert result.endpoint == "/api/picture/image_edit"
+    assert result.method == "image_edit"
+    assert result.params["image_url"] == "https://x/source.png"
+
+
 def test_prepare_image_generation_prepares_multi_image_fusion():
     result = prepare_image_generation(
         {"image_goal": "把两张图融合成一张", "image_style": "真实摄影", "image_size": "4:5 信息流图"},

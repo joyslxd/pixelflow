@@ -87,6 +87,36 @@ def test_recognize_intent_fallback_covers_natural_video_analysis_phrases() -> No
         assert result.intent == "video_analysis", phrase
 
 
+def test_recognize_intent_fallback_routes_image_and_video_operation_phrases() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    image_phrases = [
+        "帮我生成2张篮球图片",
+        "把这张图片改成蓝色背景",
+        "参考这张图生成商品海报",
+        "把两张图融合成一张图",
+        "做一张小红书封面",
+    ]
+    video_phrases = [
+        "帮我生成一个宣传视频",
+        "文生视频：一只耳机在桌面旋转",
+        "用这张首帧图生成视频",
+        "用首尾帧生成一段视频",
+        "编辑这个视频，节奏更快",
+        "参考这些素材生成视频",
+    ]
+
+    for phrase in image_phrases:
+        result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
+        assert result.intent == "image", phrase
+
+    for phrase in video_phrases:
+        result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
+        assert result.intent == "video", phrase
+
+
 def test_draft_creative_directions_with_llm_returns_three_normalized_directions() -> None:
     fake_model = FakeModel(
         """

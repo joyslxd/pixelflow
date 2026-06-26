@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import uuid
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
@@ -24,6 +24,8 @@ router = APIRouter(prefix="/agent/flows/video", tags=["pixelflow-flows"])
 
 _SCENE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_VIDEO_JOBS = 100
+_DIRECT_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_DIRECT_VIDEO_JOBS = 100
 
 
 class SceneVideo(BaseModel):
@@ -172,6 +174,62 @@ class AnalyzeStoryboardsResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+DirectVideoMode = Literal[
+    "text_to_video",
+    "image_to_video",
+    "two_image_to_video",
+    "reference_mode_video",
+    "edit_video",
+    "extend_video",
+]
+
+
+class GenerateDirectVideoRequest(BaseModel):
+    mode: DirectVideoMode
+    prompt: str = ""
+    image_url: str = ""
+    first_frame_image_url: str = ""
+    last_frame_image_url: str = ""
+    image_urls: list[str] = Field(default_factory=list)
+    video_urls: list[str] = Field(default_factory=list)
+    audio_urls: list[str] = Field(default_factory=list)
+    video_url: str = ""
+    ref_video: str = ""
+    ref_image: str = ""
+    duration: int = Field(default=5, gt=0, le=15)
+    ratio: str = "9:16"
+    size: str = "720p"
+    model: str | None = None
+    sound: str = "on"
+
+
+class GenerateDirectVideoResponse(BaseModel):
+    ok: bool
+    mode: str
+    endpoint: str
+    video_url: str | None = None
+    task_id: str | None = None
+    error: str | None = None
+    message: str = ""
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenerateDirectVideoJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class GenerateDirectVideoJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: GenerateDirectVideoResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
 @router.post("/prepare-scene-packages", response_model=PrepareScenePackagesResponse)
 async def prepare_scene_packages(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
     result = await prepare_video_scene_packages_with_llm(
@@ -297,6 +355,132 @@ async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSce
     )
 
 
+async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> GenerateDirectVideoResponse:
+    skill = get_video_skill()
+
+    if body.mode == "text_to_video":
+        result = await skill.text_to_video(
+            prompt=body.prompt,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+    elif body.mode == "image_to_video":
+        if not body.image_url:
+            raise HTTPException(status_code=400, detail="image_url不能为空")
+        result = await skill.image_to_video(
+            image_url=body.image_url,
+            prompt=body.prompt,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+    elif body.mode == "two_image_to_video":
+        if not body.first_frame_image_url or not body.last_frame_image_url:
+            raise HTTPException(status_code=400, detail="first_frame_image_url和last_frame_image_url不能为空")
+        result = await skill.two_image_to_video(
+            first_frame_image_url=body.first_frame_image_url,
+            last_frame_image_url=body.last_frame_image_url,
+            prompt=body.prompt,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+    elif body.mode == "reference_mode_video":
+        result = await skill.reference_mode_video(
+            prompt=body.prompt,
+            image_urls=body.image_urls,
+            video_urls=body.video_urls,
+            audio_urls=body.audio_urls,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+    elif body.mode == "edit_video":
+        if not body.ref_video:
+            raise HTTPException(status_code=400, detail="ref_video不能为空")
+        result = await skill.edit_video(
+            ref_video=body.ref_video,
+            prompt=body.prompt,
+            ref_image=body.ref_image or None,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+    else:
+        if not body.video_url:
+            raise HTTPException(status_code=400, detail="video_url不能为空")
+        result = await skill.extend_video(
+            video_url=body.video_url,
+            prompt=body.prompt,
+            duration=body.duration,
+            ratio=body.ratio,
+            size=body.size,
+            model=body.model,
+            sound=body.sound,
+        )
+
+    endpoint = _direct_video_endpoint(body.mode, result.raw)
+    return GenerateDirectVideoResponse(
+        ok=result.ok,
+        mode=body.mode,
+        endpoint=endpoint,
+        video_url=result.url,
+        task_id=result.task_id,
+        error=result.error,
+        message="视频生成完成。" if result.ok else (result.error or "视频生成失败。"),
+        raw=result.raw,
+    )
+
+
+@router.post("/generate-direct", response_model=GenerateDirectVideoResponse)
+async def generate_direct_video(body: GenerateDirectVideoRequest) -> GenerateDirectVideoResponse:
+    return await _generate_direct_video_response(body)
+
+
+@router.post("/generate-direct/start", response_model=GenerateDirectVideoJobStartResponse)
+async def start_generate_direct_video(body: GenerateDirectVideoRequest) -> GenerateDirectVideoJobStartResponse:
+    _trim_direct_video_jobs()
+    job_id = uuid.uuid4().hex
+    _DIRECT_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_direct_video_job(job_id, body))
+    return GenerateDirectVideoJobStartResponse(ok=True, job_id=job_id, status="running", message="直接视频生成任务已启动。")
+
+
+@router.get("/generate-direct/jobs/{job_id}", response_model=GenerateDirectVideoJobStatusResponse)
+async def get_generate_direct_video_job(job_id: str) -> GenerateDirectVideoJobStatusResponse:
+    job = _DIRECT_VIDEO_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="直接视频生成任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, GenerateDirectVideoResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = GenerateDirectVideoResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return GenerateDirectVideoJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message="直接视频生成完成。" if status == "completed" else ("直接视频生成失败。" if status == "failed" else "直接视频生成中。"),
+    )
+
+
 async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
     if not body.scenes:
         raise HTTPException(status_code=400, detail="scenes不能为空")
@@ -390,11 +574,40 @@ async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest) ->
         _SCENE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
 
 
+async def _run_direct_video_job(job_id: str, body: GenerateDirectVideoRequest) -> None:
+    try:
+        result = await _generate_direct_video_response(body)
+        _DIRECT_VIDEO_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _DIRECT_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
 def _trim_scene_video_jobs() -> None:
     if len(_SCENE_VIDEO_JOBS) < _MAX_SCENE_VIDEO_JOBS:
         return
     for job_id in list(_SCENE_VIDEO_JOBS.keys())[: len(_SCENE_VIDEO_JOBS) - _MAX_SCENE_VIDEO_JOBS + 1]:
         _SCENE_VIDEO_JOBS.pop(job_id, None)
+
+
+def _trim_direct_video_jobs() -> None:
+    if len(_DIRECT_VIDEO_JOBS) < _MAX_DIRECT_VIDEO_JOBS:
+        return
+    for job_id in list(_DIRECT_VIDEO_JOBS.keys())[: len(_DIRECT_VIDEO_JOBS) - _MAX_DIRECT_VIDEO_JOBS + 1]:
+        _DIRECT_VIDEO_JOBS.pop(job_id, None)
+
+
+def _direct_video_endpoint(mode: str, raw: dict[str, Any]) -> str:
+    endpoint = raw.get("endpoint") if isinstance(raw, dict) else None
+    if isinstance(endpoint, str) and endpoint:
+        return endpoint
+    return {
+        "text_to_video": "/api/video/text-to-video",
+        "image_to_video": "/api/video/image-to-video",
+        "two_image_to_video": "/api/video/two-image-to-video",
+        "reference_mode_video": "/api/video/reference-mode-video",
+        "edit_video": "/api/video/edit-video",
+        "extend_video": "/api/video/extend-video",
+    }.get(mode, "/api/video/reference-mode-video")
 
 
 @router.post("/merge", response_model=MergeSceneVideosResponse)

@@ -8,6 +8,8 @@ const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
+const DIRECT_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 
 export type CreationIntent = "video" | "image";
 export type IntakeIntent = CreationIntent | "video_analysis" | "unknown";
@@ -262,6 +264,41 @@ export interface MergeSceneVideosResponse {
   raw: Record<string, unknown>;
 }
 
+export type DirectVideoMode =
+  | "text_to_video"
+  | "image_to_video"
+  | "two_image_to_video"
+  | "reference_mode_video"
+  | "edit_video"
+  | "extend_video";
+
+export interface GenerateDirectVideoResponse {
+  ok: boolean;
+  mode: DirectVideoMode;
+  endpoint: string;
+  video_url: string | null;
+  task_id: string | null;
+  error: string | null;
+  message: string;
+  raw: Record<string, unknown>;
+}
+
+export interface GenerateDirectVideoJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface GenerateDirectVideoJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  result: GenerateDirectVideoResponse | null;
+  error: string | null;
+  message: string;
+}
+
 export interface VideoFlawAnalysisResponse {
   ok: boolean;
   endpoint: string;
@@ -433,6 +470,37 @@ async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResp
   };
 }
 
+async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoResponse> {
+  const deadline = Date.now() + DIRECT_VIDEO_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await req<GenerateDirectVideoJobStatusResponse>(`${FLOW_BASE}/video/generate-direct/jobs/${encodeURIComponent(jobId)}`);
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        mode: "reference_mode_video",
+        endpoint: "/api/video/reference-mode-video",
+        video_url: null,
+        task_id: null,
+        error: status.error || status.message || "直接视频生成失败",
+        message: status.error || status.message || "直接视频生成失败",
+        raw: {},
+      };
+    }
+    await delay(DIRECT_VIDEO_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    mode: "reference_mode_video",
+    endpoint: "/api/video/reference-mode-video",
+    video_url: null,
+    task_id: null,
+    error: "直接视频生成轮询超时",
+    message: "直接视频生成轮询超时",
+    raw: {},
+  };
+}
+
 export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
@@ -565,6 +633,31 @@ export const api = {
       body: JSON.stringify(body),
     });
     return pollSceneVideoJob(started.job_id);
+  },
+
+  generateDirectVideo: async (body: {
+    mode: DirectVideoMode;
+    prompt?: string;
+    image_url?: string;
+    first_frame_image_url?: string;
+    last_frame_image_url?: string;
+    image_urls?: string[];
+    video_urls?: string[];
+    audio_urls?: string[];
+    video_url?: string;
+    ref_video?: string;
+    ref_image?: string;
+    duration?: number;
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+    sound?: string;
+  }) => {
+    const started = await req<GenerateDirectVideoJobStartResponse>(`${FLOW_BASE}/video/generate-direct/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollDirectVideoJob(started.job_id);
   },
 
   mergeSceneVideos: (body: {

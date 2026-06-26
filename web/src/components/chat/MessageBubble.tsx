@@ -635,7 +635,10 @@ export function MessageBubble({
                 <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
                 <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
               </span>
-              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", msg.artifact.mergedVideo.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
+              <span className={cn(
+                "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                msg.artifact.mergedVideo.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber",
+              )}>
                 {msg.artifact.mergedVideo.ok ? "已合并" : "失败"}
               </span>
             </div>
@@ -644,7 +647,7 @@ export function MessageBubble({
                 {msg.artifact.mergedVideo.error}
               </div>
             )}
-            {msg.artifact.mergedVideo.merged_video_url && (
+            {msg.artifact.mergedVideo?.merged_video_url && (
               <a
                 href={msg.artifact.mergedVideo.merged_video_url}
                 target="_blank"

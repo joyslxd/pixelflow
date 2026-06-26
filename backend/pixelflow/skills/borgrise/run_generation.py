@@ -149,6 +149,13 @@ def validate_video_duration(duration: int, model: str) -> dict | None:
     """校验单次视频生成时长不能超过已知模型限制。"""
     if duration <= 0:
         return {"error": True, "message": "Duration must be a positive integer"}
+    if model == "seedance-2.0" and duration < 5:
+        return {
+            "error": True,
+            "message": "seedance-2.0 supports video durations from 5s to 10s per single call.",
+            "requested_duration": duration,
+            "min_single_call_duration": 5,
+        }
     if model == "seedance-2.0" and duration > SEEDANCE_MAX_SEGMENT_DURATION:
         return {
             "error": True,
@@ -731,6 +738,9 @@ def resolve_asset_urls(asset_ids: list[str]) -> dict:
 def image_to_video(image_url: str, prompt: str | None = None,
                    duration: int = 10, ratio: str = "9:16",
                    model: str = DEFAULT_VIDEO_MODEL,
+                   size: str = "720p",
+                   sound: str = "on",
+                   video_count: int = 1,
                    product_description: str | None = None,
                    auto_poll: bool = True) -> dict:
     """根据单张图片生成视频。"""
@@ -751,6 +761,9 @@ def image_to_video(image_url: str, prompt: str | None = None,
         "model": model,
         "duration": duration,
         "ratio": ratio,
+        "size": size,
+        "sound": sound,
+        "videoCount": video_count,
         "seed": None
     }
 
@@ -760,9 +773,10 @@ def image_to_video(image_url: str, prompt: str | None = None,
     print(f"Model: {model}")
     print(f"Duration: {duration}s")
     print(f"Ratio: {ratio}")
+    print(f"Size: {size}")
     print(f"{'='*60}\n")
 
-    headers = get_headers(model=model, bill_type=3, duration=duration, size="720p", model_header="modelType")
+    headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
     result = make_request("/video/image-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
@@ -797,6 +811,84 @@ def image_to_video(image_url: str, prompt: str | None = None,
         "task_id": task_id,
         "status": "COMPLETED",
         "endpoint": "/api/video/image-to-video",
+        "model": model,
+        "video_url": video_url,
+        "raw_response": poll_result
+    }
+
+
+def two_image_to_video(first_frame_image_url: str,
+                       last_frame_image_url: str,
+                       prompt: str | None = None,
+                       duration: int = 10,
+                       ratio: str = "9:16",
+                       size: str = "720p",
+                       model: str = DEFAULT_VIDEO_MODEL,
+                       sound: str = "on",
+                       video_count: int = 1,
+                       auto_poll: bool = True) -> dict:
+    """根据首帧图和尾帧图生成视频。"""
+
+    validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
+    if validation_error:
+        return validation_error
+
+    request_data = {
+        "first_frame_image_url": first_frame_image_url,
+        "last_frame_image_url": last_frame_image_url,
+        "prompt": prompt or "",
+        "model": model,
+        "duration": duration,
+        "ratio": ratio,
+        "size": size,
+        "sound": sound,
+        "videoCount": video_count
+    }
+
+    print(f"\n{'='*60}")
+    print("POST /api/video/two-image-to-video")
+    print(f"{'='*60}")
+    print(f"Model: {model}")
+    print(f"Duration: {duration}s")
+    print(f"Ratio: {ratio}")
+    print(f"Size: {size}")
+    print(f"{'='*60}\n")
+
+    headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
+    result = make_request("/video/two-image-to-video", request_data, custom_headers=headers)
+
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    if not task_id:
+        return {"error": True, "message": "No taskId in response", "response": result}
+
+    if not auto_poll:
+        return {
+            "success": True,
+            "task_id": task_id,
+            "status": result.get("status", "PENDING"),
+            "endpoint": "/api/video/two-image-to-video",
+            "model": model,
+            "raw_response": result
+        }
+
+    print(f"Task created: {task_id}")
+    print("Polling for result...\n")
+
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
+
+    if poll_result.get("error"):
+        return poll_result
+
+    video_url = extract_video_url(poll_result)
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "COMPLETED",
+        "endpoint": "/api/video/two-image-to-video",
         "model": model,
         "video_url": video_url,
         "raw_response": poll_result
@@ -959,6 +1051,84 @@ def reference_mode_video(prompt: str,
         "task_id": task_id,
         "status": "COMPLETED",
         "endpoint": "/api/video/reference-mode-video",
+        "model": model,
+        "video_url": video_url,
+        "raw_response": poll_result
+    }
+
+
+def edit_video(ref_video: str,
+               prompt: str | None = None,
+               ref_image: str | None = None,
+               duration: int = 10,
+               ratio: str = "9:16",
+               size: str = "720p",
+               model: str = DEFAULT_VIDEO_MODEL,
+               sound: str = "on",
+               video_count: int = 1,
+               auto_poll: bool = True) -> dict:
+    """根据参考视频和可选参考图编辑生成新视频。"""
+
+    validation_error = validate_ratio(ratio) or validate_video_duration(duration, model)
+    if validation_error:
+        return validation_error
+
+    request_data = {
+        "refVideo": ref_video,
+        "refImage": ref_image or "",
+        "prompt": prompt or "",
+        "model": model,
+        "duration": duration,
+        "ratio": ratio,
+        "size": size,
+        "sound": sound,
+        "videoCount": video_count
+    }
+
+    print(f"\n{'='*60}")
+    print("POST /api/video/edit-video")
+    print(f"{'='*60}")
+    print(f"Model: {model}")
+    print(f"Duration: {duration}s")
+    print(f"Ratio: {ratio}")
+    print(f"Size: {size}")
+    print(f"{'='*60}\n")
+
+    headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
+    result = make_request("/video/edit-video", request_data, custom_headers=headers)
+
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    if not task_id:
+        return {"error": True, "message": "No taskId in response", "response": result}
+
+    if not auto_poll:
+        return {
+            "success": True,
+            "task_id": task_id,
+            "status": result.get("status", "PENDING"),
+            "endpoint": "/api/video/edit-video",
+            "model": model,
+            "raw_response": result
+        }
+
+    print(f"Task created: {task_id}")
+    print("Polling for result...\n")
+
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
+
+    if poll_result.get("error"):
+        return poll_result
+
+    video_url = extract_video_url(poll_result)
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "COMPLETED",
+        "endpoint": "/api/video/edit-video",
         "model": model,
         "video_url": video_url,
         "raw_response": poll_result

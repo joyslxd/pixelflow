@@ -7,6 +7,8 @@ assert.ok(moduleUrl, "CONVERSATION_ROUTING_TEST_MODULE must point to the compile
 const {
   appendVisibleConversationMessage,
   messageConversationId,
+  restoredConversationMessages,
+  shouldApplyVisibleConversationSideEffect,
   shouldRenderConversationMessage,
 } = await import(moduleUrl);
 
@@ -38,4 +40,17 @@ test("appendVisibleConversationMessage keeps async results out of another active
 test("messageConversationId prefers the message owner over current visible conversation", () => {
   assert.equal(messageConversationId({ conversationId: "conversation-a" }, "conversation-b"), "conversation-a");
   assert.equal(messageConversationId({}, "conversation-b"), "conversation-b");
+});
+
+test("restoredConversationMessages ignores stale snapshot messages and uses persisted messages", () => {
+  const snapshotMessages = [{ id: "wrong", conversationId: "other", content: "其他会话消息" }];
+  const persistedMessages = [{ id: "right", conversationId: "current", content: "当前会话消息" }];
+
+  assert.deepEqual(restoredConversationMessages(snapshotMessages, persistedMessages), persistedMessages);
+});
+
+test("shouldApplyVisibleConversationSideEffect only allows visible conversation UI updates", () => {
+  assert.equal(shouldApplyVisibleConversationSideEffect("active", "active"), true);
+  assert.equal(shouldApplyVisibleConversationSideEffect("active", "other"), false);
+  assert.equal(shouldApplyVisibleConversationSideEffect("", "other"), false);
 });

@@ -17,3 +17,11 @@ export function appendVisibleConversationMessage<T>(
 export function messageConversationId(message: ConversationScopedMessage, fallbackConversationId: string): string {
   return message.conversationId || fallbackConversationId;
 }
+
+export function restoredConversationMessages<T>(_snapshotMessages: T[] | undefined, persistedMessages: T[]): T[] {
+  return persistedMessages;
+}
+
+export function shouldApplyVisibleConversationSideEffect(activeConversationId: string, targetConversationId: string): boolean {
+  return shouldRenderConversationMessage(activeConversationId, targetConversationId);
+}

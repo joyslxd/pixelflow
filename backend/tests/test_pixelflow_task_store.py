@@ -116,6 +116,48 @@ async def test_memory_conversation_store_paginates_and_restores_context():
     assert [m.content for m in await store.list_conversation_messages("c6", user_id="u1")] == ["生成一条口红短视频"]
 
 
+@pytest.mark.asyncio
+async def test_memory_conversation_store_sorts_by_created_at_not_updated_at():
+    from datetime import UTC, datetime, timedelta
+
+    store = MemoryPixelFlowTaskStore()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    older = await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="older",
+            user_id="u1",
+            title="更早创建",
+            created_at=base.isoformat(),
+            updated_at=(base + timedelta(hours=2)).isoformat(),
+        )
+    )
+    newer = await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="newer",
+            user_id="u1",
+            title="更晚创建",
+            created_at=(base + timedelta(hours=1)).isoformat(),
+            updated_at=(base + timedelta(hours=1)).isoformat(),
+        )
+    )
+
+    await store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id="m1",
+            conversation_id=older.conversation_id,
+            user_id="u1",
+            role="assistant",
+            content="后续更新不应改变最近对话的创建时间排序",
+        )
+    )
+    first_page, next_cursor = await store.list_conversations(user_id="u1", limit=1)
+    second_page, final_cursor = await store.list_conversations(user_id="u1", limit=1, cursor=next_cursor)
+
+    assert [record.conversation_id for record in first_page] == [newer.conversation_id]
+    assert [record.conversation_id for record in second_page] == [older.conversation_id]
+    assert final_cursor is None
+
+
 def test_pixelflow_router_imports():
     from app.gateway.routers import pixelflow_tasks
 

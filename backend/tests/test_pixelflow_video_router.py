@@ -27,6 +27,9 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/generate-scenes" in paths
     assert "/agent/flows/video/generate-scenes/start" in paths
     assert "/agent/flows/video/generate-scenes/jobs/{job_id}" in paths
+    assert "/agent/flows/video/generate-direct" in paths
+    assert "/agent/flows/video/generate-direct/start" in paths
+    assert "/agent/flows/video/generate-direct/jobs/{job_id}" in paths
     assert "/agent/flows/video/merge" in paths
     assert "/agent/flows/video/analyze-flaws" in paths
     assert "/agent/flows/video/analyze-storyboards" in paths
@@ -263,6 +266,114 @@ def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):
     assert data["ok"] is True
     assert data["endpoint"] == "/api/video/merge"
     assert data["merged_video_url"] == "https://x/merged.mp4"
+
+
+def test_video_router_generates_direct_video_modes(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(("text_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="text-task", url="https://x/text.mp4", raw={"endpoint": "/api/video/text-to-video"})
+
+        async def image_to_video(self, **kwargs):
+            calls.append(("image_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="image-task", url="https://x/image.mp4", raw={"endpoint": "/api/video/image-to-video"})
+
+        async def two_image_to_video(self, **kwargs):
+            calls.append(("two_image_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="two-image-task", url="https://x/two-image.mp4", raw={"endpoint": "/api/video/two-image-to-video"})
+
+        async def reference_mode_video(self, **kwargs):
+            calls.append(("reference_mode_video", kwargs))
+            return GenerationResult(ok=True, task_id="ref-task", url="https://x/ref.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
+
+        async def edit_video(self, **kwargs):
+            calls.append(("edit_video", kwargs))
+            return GenerationResult(ok=True, task_id="edit-task", url="https://x/edit.mp4", raw={"endpoint": "/api/video/edit-video"})
+
+        async def extend_video(self, **kwargs):
+            calls.append(("extend_video", kwargs))
+            return GenerationResult(ok=True, task_id="extend-task", url="https://x/extend.mp4", raw={"endpoint": "/api/video/extend-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    requests = [
+        ("text_to_video", {"prompt": "文生视频", "duration": 5}, "/api/video/text-to-video", "https://x/text.mp4"),
+        ("image_to_video", {"prompt": "首帧动起来", "image_url": "https://x/first.png", "duration": 5}, "/api/video/image-to-video", "https://x/image.mp4"),
+        (
+            "two_image_to_video",
+            {"prompt": "首尾帧过渡", "first_frame_image_url": "https://x/first.png", "last_frame_image_url": "https://x/last.png", "duration": 5},
+            "/api/video/two-image-to-video",
+            "https://x/two-image.mp4",
+        ),
+        (
+            "reference_mode_video",
+            {"prompt": "参考素材生成", "image_urls": ["https://x/a.png"], "video_urls": ["https://x/a.mp4"], "duration": 5},
+            "/api/video/reference-mode-video",
+            "https://x/ref.mp4",
+        ),
+        ("edit_video", {"prompt": "改成快节奏", "ref_video": "https://x/source.mp4", "ref_image": "https://x/ref.png", "duration": 5}, "/api/video/edit-video", "https://x/edit.mp4"),
+        ("extend_video", {"prompt": "继续延伸产品展示", "video_url": "https://x/source.mp4", "duration": 5}, "/api/video/extend-video", "https://x/extend.mp4"),
+    ]
+
+    with TestClient(app) as client:
+        for mode, payload, endpoint, expected_url in requests:
+            response = client.post("/agent/flows/video/generate-direct", json={"mode": mode, **payload})
+            assert response.status_code == 200
+            data = response.json()
+            assert data["ok"] is True
+            assert data["endpoint"] == endpoint
+            assert data["video_url"] == expected_url
+
+    assert [name for name, _kwargs in calls] == [request[0] for request in requests]
+    assert calls[0][1]["prompt"] == "文生视频"
+    assert calls[2][1]["first_frame_image_url"] == "https://x/first.png"
+    assert calls[4][1]["ref_video"] == "https://x/source.mp4"
+
+
+def test_video_router_starts_direct_video_job_and_polls_result(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            return GenerationResult(ok=True, task_id="text-task", url="https://x/text.mp4", raw={"endpoint": "/api/video/text-to-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post("/agent/flows/video/generate-direct/start", json={"mode": "text_to_video", "prompt": "文生视频", "duration": 5})
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["status"] in {"queued", "running"}
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/generate-direct/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["video_url"] == "https://x/text.mp4"
 
 
 def test_video_router_analyzes_flaws(monkeypatch):

@@ -286,23 +286,71 @@ async def _run_batch_storyboard(fn: Callable[..., dict[str, Any]], **kwargs: Any
 class BorgriseSkill:
     """进程内 Borgrise 实现，同时实现视频生成和参考视频拆解能力。"""
 
+    async def text_to_video(
+        self,
+        prompt: str,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "duration": duration,
+            "ratio": ratio,
+            "size": size,
+            "sound": sound,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run(run_generation.text_to_video, **kwargs)
+
     async def image_to_video(
         self,
         image_url: str,
         prompt: str | None = None,
         duration: int = 10,
         ratio: str = "9:16",
+        size: str = "720p",
         model: str | None = None,
+        sound: str = "on",
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "image_url": image_url,
             "prompt": prompt,
             "duration": duration,
             "ratio": ratio,
+            "size": size,
+            "sound": sound,
         }
         if model:
             kwargs["model"] = model
         return await _run(run_generation.image_to_video, **kwargs)
+
+    async def two_image_to_video(
+        self,
+        first_frame_image_url: str,
+        last_frame_image_url: str,
+        prompt: str | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult:
+        kwargs: dict[str, Any] = {
+            "first_frame_image_url": first_frame_image_url,
+            "last_frame_image_url": last_frame_image_url,
+            "prompt": prompt,
+            "duration": duration,
+            "ratio": ratio,
+            "size": size,
+            "sound": sound,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run(run_generation.two_image_to_video, **kwargs)
 
     async def extend_video(
         self,
@@ -310,13 +358,17 @@ class BorgriseSkill:
         prompt: str | None = None,
         duration: int = 10,
         ratio: str = "9:16",
+        size: str = "720p",
         model: str | None = None,
+        sound: str = "on",
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "video_url": video_url,
             "prompt": prompt,
             "duration": duration,
             "ratio": ratio,
+            "size": size,
+            "sound": sound,
         }
         if model:
             kwargs["model"] = model
@@ -347,6 +399,30 @@ class BorgriseSkill:
         if model:
             kwargs["model"] = model
         return await _run(run_generation.reference_mode_video, **kwargs)
+
+    async def edit_video(
+        self,
+        ref_video: str,
+        prompt: str | None = None,
+        ref_image: str | None = None,
+        duration: int = 10,
+        ratio: str = "9:16",
+        size: str = "720p",
+        model: str | None = None,
+        sound: str = "on",
+    ) -> GenerationResult:
+        kwargs: dict[str, Any] = {
+            "ref_video": ref_video,
+            "prompt": prompt,
+            "ref_image": ref_image,
+            "duration": duration,
+            "ratio": ratio,
+            "size": size,
+            "sound": sound,
+        }
+        if model:
+            kwargs["model"] = model
+        return await _run(run_generation.edit_video, **kwargs)
 
     async def merge_videos(
         self,

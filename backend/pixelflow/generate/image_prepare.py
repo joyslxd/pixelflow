@@ -67,7 +67,7 @@ def prepare_image_generation(
     revision_feedback: str | None = None,
 ) -> ImageGenerationPrepareResult:
     image_materials = _image_materials(materials or [])
-    method = _decide_method(form_values, selected_direction, image_materials, revision_feedback)
+    method = _decide_method(form_values, plan_markdown, selected_direction, image_materials, revision_feedback)
     endpoint = ENDPOINT_BY_METHOD[method]
     prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
@@ -172,10 +172,12 @@ def prepare_image_generation(
 
 def _decide_method(
     form_values: dict[str, Any],
+    plan_markdown: str,
     selected_direction: dict[str, Any],
     image_materials: list[dict[str, Any]],
     revision_feedback: str | None,
 ) -> ImageMethod:
+    plan_text = _text(plan_markdown)
     operation_text = " ".join(
         _text(value)
         for value in [
@@ -188,9 +190,15 @@ def _decide_method(
             *(material.get("operation") for material in image_materials),
         ]
     )
-    if _has_any(operation_text, ["融合", "合成一张", "fusion", "multi_image_fusion"]):
+    if _has_any(operation_text, ["融合", "合成一张", "fusion", "multi_image_fusion"]) or _has_any(
+        plan_text,
+        ["多图融合", "融合成一张", "合成一张", "multi_image_fusion"],
+    ):
         return "multi_image_fusion"
-    if _has_any(operation_text, ["编辑", "修改", "换背景", "修图", "image_edit", "edit"]):
+    if _has_any(operation_text, ["编辑", "修改", "换背景", "修图", "image_edit", "edit"]) or _has_any(
+        plan_text,
+        ["图片编辑", "图像编辑", "编辑图片", "修改图片", "改图", "换背景", "修图", "替换背景", "调整背景"],
+    ):
         return "image_edit"
     if image_materials:
         return "multi_reference_image_generation"
