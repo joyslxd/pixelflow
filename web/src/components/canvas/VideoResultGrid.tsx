@@ -1,4 +1,4 @@
-import { Download, Play } from "lucide-react";
+import { Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { VideoResult } from "@/lib/types";
 
@@ -16,7 +16,6 @@ function StatusLine({ results }: { results: VideoResult[] }) {
 export function VideoResultGrid({ results }: { results: VideoResult[] }) {
   // 这里的 url 必须是浏览器可访问地址。若后端返回本地文件路径（如 FFmpeg 本地输出），
   // <video> 无法直接播放，需要后续 artifact/static 服务转换成 HTTP URL。
-  const openVideo = (url: string) => window.open(url, "_blank", "noopener,noreferrer");
   const finalVideos = results.filter((r) => r.assetType === "final_video");
   const segmentVideos = results.filter((r) => r.assetType !== "final_video");
   const renderCard = (r: VideoResult) => (
@@ -32,7 +31,6 @@ export function VideoResultGrid({ results }: { results: VideoResult[] }) {
           controls
           muted
           playsInline
-          onClick={() => openVideo(r.url)}
         />
       ) : (
         <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-700 to-slate-900">
@@ -54,29 +52,6 @@ export function VideoResultGrid({ results }: { results: VideoResult[] }) {
           0:{String(r.durationSec).padStart(2, "0")}
         </span>
       )}
-      <div className="absolute bottom-1.5 right-1.5 flex gap-1">
-        {r.url && (
-          <button
-            type="button"
-            onClick={() => openVideo(r.url)}
-            className="rounded bg-black/45 p-1 text-white/85 hover:bg-black/65"
-            aria-label="播放"
-          >
-            <Play size={13} />
-          </button>
-        )}
-        <a
-          className={cn("rounded bg-black/45 p-1 text-white/85 hover:bg-black/65", !r.url && "pointer-events-none opacity-40")}
-          href={r.url || undefined}
-          download
-          target="_blank"
-          rel="noreferrer"
-          aria-label="下载"
-        >
-          <Download size={13} />
-        </a>
-      </div>
-
       <span
         className={cn(
           "absolute left-1.5 top-1.5 h-2 w-2 rounded-full",

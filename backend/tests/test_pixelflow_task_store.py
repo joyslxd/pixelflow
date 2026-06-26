@@ -8,6 +8,7 @@ from pixelflow.tasks import (
     PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
     PixelFlowTaskRecord,
+    SQLPixelFlowTaskStore,
 )
 
 
@@ -156,6 +157,124 @@ async def test_memory_conversation_store_sorts_by_created_at_not_updated_at():
     assert [record.conversation_id for record in first_page] == [newer.conversation_id]
     assert [record.conversation_id for record in second_page] == [older.conversation_id]
     assert final_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_sql_conversation_store_emits_timezone_aware_timestamps(tmp_path):
+    import re
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    tz_suffix = re.compile(r"(?:Z|[+-]\d{2}:\d{2})$")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False))
+
+        created = await store.create_conversation(PixelFlowConversationRecord(conversation_id="c-tz", user_id="u1", title="时区"))
+        assert tz_suffix.search(created.created_at)
+        assert tz_suffix.search(created.updated_at)
+
+        message = await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id="m-tz",
+                conversation_id="c-tz",
+                user_id="u1",
+                role="user",
+                content="你好",
+            )
+        )
+        assert tz_suffix.search(message.created_at)
+
+        restored = await store.get_conversation("c-tz", user_id="u1")
+        assert restored is not None
+        assert tz_suffix.search(restored.created_at)
+        assert tz_suffix.search(restored.updated_at)
+        listed_messages = await store.list_conversation_messages("c-tz", user_id="u1")
+        assert tz_suffix.search(listed_messages[0].created_at)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_conversation_store_drops_legacy_snapshot_messages_from_context():
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="c-legacy",
+            user_id="u1",
+            title="旧快照",
+            context={
+                "taskId": "t1",
+                "messages": [{"id": "old", "time": "10:06", "content": "旧的前端时间"}],
+                "canvasOpen": True,
+            },
+        )
+    )
+
+    restored = await store.get_conversation("c-legacy", user_id="u1")
+    assert restored is not None
+    assert restored.context == {"taskId": "t1", "canvasOpen": True}
+
+    updated = await store.update_conversation(
+        "c-legacy",
+        user_id="u1",
+        context={
+            "taskId": "t2",
+            "messages": [{"id": "old-2", "time": "10:07", "content": "旧的前端时间 2"}],
+            "briefConfirmed": False,
+        },
+    )
+    assert updated is not None
+    assert updated.context == {"taskId": "t2", "briefConfirmed": False}
+
+
+@pytest.mark.asyncio
+async def test_sql_conversation_store_drops_legacy_snapshot_messages_from_context(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False))
+
+        created = await store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="c-legacy-sql",
+                user_id="u1",
+                title="旧快照",
+                context={
+                    "taskId": "t1",
+                    "messages": [{"id": "old", "time": "10:06", "content": "旧的前端时间"}],
+                    "canvasOpen": True,
+                },
+            )
+        )
+        assert created.context == {"taskId": "t1", "canvasOpen": True}
+
+        restored = await store.get_conversation("c-legacy-sql", user_id="u1")
+        assert restored is not None
+        assert restored.context == {"taskId": "t1", "canvasOpen": True}
+
+        updated = await store.update_conversation(
+            "c-legacy-sql",
+            user_id="u1",
+            context={
+                "taskId": "t2",
+                "messages": [{"id": "old-2", "time": "10:07", "content": "旧的前端时间 2"}],
+                "briefConfirmed": False,
+            },
+        )
+        assert updated is not None
+        assert updated.context == {"taskId": "t2", "briefConfirmed": False}
+    finally:
+        await engine.dispose()
 
 
 def test_pixelflow_router_imports():

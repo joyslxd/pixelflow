@@ -18,6 +18,16 @@ export function messageConversationId(message: ConversationScopedMessage, fallba
   return message.conversationId || fallbackConversationId;
 }
 
+export function replaceMessageById<T extends { id: string }>(messages: T[], messageId: string, replacement: T): T[] {
+  let replaced = false;
+  const next = messages.map((message) => {
+    if (message.id !== messageId) return message;
+    replaced = true;
+    return replacement;
+  });
+  return replaced ? next : messages;
+}
+
 export function restoredConversationMessages<T>(_snapshotMessages: T[] | undefined, persistedMessages: T[]): T[] {
   return persistedMessages;
 }

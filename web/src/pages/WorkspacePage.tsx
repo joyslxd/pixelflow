@@ -18,12 +18,14 @@ import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import {
   appendVisibleConversationMessage,
   messageConversationId,
+  replaceMessageById,
   restoredConversationMessages,
   shouldApplyVisibleConversationSideEffect,
 } from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
   collectSceneImageUrls,
+  durationMsForSubmit,
   inferTargetDurationMs,
   sceneIdsForRevision,
   updateScenePackageAssetField,
@@ -32,11 +34,12 @@ import {
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
+import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 
 let seq = 0;
 const uid = () => `m${++seq}`;
-const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image";
 
@@ -129,15 +132,13 @@ function toTimelineEntry(event: TaskEvent): FlowTimelineEntry | null {
     summary: String(data.summary || ""),
     phase: data.phase ? String(data.phase) : undefined,
     status: data.status ? String(data.status) : undefined,
-    time: event.created_at
-      ? new Date(event.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
-      : now(),
+    time: formatClockTime(event.created_at, "zh-CN", undefined, now()),
   };
 }
 
 interface WorkspaceSnapshot {
   taskId: string;
-  messages: ChatMessage[];
+  messages?: ChatMessage[];
   pendingMaterials: Array<Record<string, unknown>>;
   canvas: CanvasState;
   canvasOpen: boolean;
@@ -214,9 +215,7 @@ function messageFromResponse(message: ConversationMessageResponse, conversationI
     role: message.role,
     content: message.content,
     materials,
-    time: message.created_at
-      ? new Date(message.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
-      : String(message.payload.time || now()),
+    time: formatClockTime(message.created_at),
     artifact,
   };
 }
@@ -302,38 +301,44 @@ export function WorkspacePage() {
     setCanvas(updater);
   };
 
-  const persistChatMessage = (conversation: string, message: ChatMessage) => {
-    void api
-      .appendConversationMessage(conversation, {
-        role: message.role,
-        content: message.content,
-        payload: { time: message.time, artifact: message.artifact, materials: message.materials || [] },
-      })
-      .catch(() => {});
+  const persistChatMessage = async (conversation: string, message: ChatMessage): Promise<ChatMessage> => {
+    const saved = await api.appendConversationMessage(conversation, {
+      role: message.role,
+      content: message.content,
+      payload: { artifact: message.artifact, materials: message.materials || [] },
+    });
+    return {
+      ...message,
+      conversationId: conversation,
+      time: formatClockTime(saved.created_at),
+    };
   };
 
   const appendMessageForConversation = (message: ChatMessage, targetConversationId: string) => {
     if (targetConversationId) {
+      const optimisticMessage = { ...message, conversationId: targetConversationId, time: message.time || now() };
       setMessages((items) =>
         appendVisibleConversationMessage(items, {
           activeConversationId: conversationIdRef.current,
           targetConversationId,
-          message,
+          message: optimisticMessage,
         }),
       );
-      persistChatMessage(targetConversationId, message);
+      void persistChatMessage(targetConversationId, optimisticMessage)
+        .then((savedMessage) => setMessages((items) => replaceMessageById(items, optimisticMessage.id, savedMessage)))
+        .catch(() => {});
       return;
     }
-    setMessages((items) => [...items, message]);
+    setMessages((items) => [...items, { ...message, time: message.time || now() }]);
   };
 
   const pushAssistant = (content: string, targetConversationId = conversationIdRef.current) => {
-    const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: now() };
+    const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: "" };
     appendMessageForConversation(message, targetConversationId);
   };
 
   const pushArtifact = (content: string, artifact: ChatArtifact, targetConversationId = conversationIdRef.current) => {
-    const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: now(), artifact };
+    const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
     appendMessageForConversation(message, targetConversationId);
     return message;
   };
@@ -509,7 +514,6 @@ export function WorkspacePage() {
 
   const makeSnapshot = (): WorkspaceSnapshot => ({
     taskId: currentTaskId,
-    messages,
     pendingMaterials,
     canvas,
     canvasOpen,
@@ -549,7 +553,7 @@ export function WorkspacePage() {
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
-    applySnapshot({ ...snapshot, messages: restoredConversationMessages(snapshot.messages, restoredMessages) });
+    applySnapshot({ ...snapshot, messages: restoredConversationMessages(undefined, restoredMessages) });
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -602,7 +606,6 @@ export function WorkspacePage() {
     if (restoringRef.current || !currentConversationId) return;
     const snapshot: WorkspaceSnapshot = {
       taskId: currentTaskId,
-      messages,
       pendingMaterials,
       canvas,
       canvasOpen,
@@ -621,14 +624,7 @@ export function WorkspacePage() {
         })
         .catch(() => {});
     }, 400);
-  }, [messages, pendingMaterials, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
-
-  const saveChatMessage = (conversation: string, message: ChatMessage) =>
-    api.appendConversationMessage(conversation, {
-      role: message.role,
-      content: message.content,
-      payload: { time: message.time, artifact: message.artifact, materials: message.materials || [] },
-    });
+  }, [pendingMaterials, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
 
   const titleFromPrompt = (text: string) => {
     const normalized = text.trim() || "带附件对话";
@@ -655,27 +651,11 @@ export function WorkspacePage() {
 
   const handleSend = async (input: string | AgentUserMessagePayload) => {
     const { content: text, materials = [] } = normalizeSendInput(input);
-    const initialConversation = conversationIdRef.current;
-    const message: ChatMessage = { id: uid(), conversationId: initialConversation || undefined, role: "user", content: text, materials, time: now() };
-    if (initialConversation) {
-      setMessages((items) =>
-        appendVisibleConversationMessage(items, {
-          activeConversationId: conversationIdRef.current,
-          targetConversationId: initialConversation,
-          message,
-        }),
-      );
-    } else {
-      setMessages((items) => [...items, message]);
-    }
     let activeConversation = conversationIdRef.current;
+    const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
       activeConversation = await ensureConversation(text);
-      const savedMessage = { ...message, conversationId: activeConversation };
-      if (!initialConversation) {
-        setMessages((items) => items.map((item) => (item.id === message.id ? savedMessage : item)));
-      }
-      await saveChatMessage(activeConversation, savedMessage);
+      appendMessageForConversation(message, activeConversation);
       if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
     } catch (err) {
       pushAssistant(`对话保存失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
@@ -1481,7 +1461,7 @@ export function WorkspacePage() {
         scenes: videoScenePackages.scene_packages.map((scene) => ({
           scene_id: scene.scene_id,
           scene_index: scene.scene_index,
-          duration_ms: scene.duration_ms,
+          duration_ms: durationMsForSubmit(scene.duration_ms),
           prompt: scene.prompt,
           image_urls: collectSceneImageUrls(scene),
           video_urls: scene.video_urls || [],
@@ -1607,7 +1587,7 @@ export function WorkspacePage() {
         scenes: scenesToRegenerate.map((scene) => ({
           scene_id: scene.scene_id,
           scene_index: scene.scene_index,
-          duration_ms: scene.duration_ms,
+          duration_ms: durationMsForSubmit(scene.duration_ms),
           prompt: revisedScenePrompt(scene, artifact.videoRevisionFeedback || "", artifact.videoFlawAnalysis, useFlawAnalysis),
           image_urls: collectSceneImageUrls(scene),
           video_urls: scene.video_urls || [],

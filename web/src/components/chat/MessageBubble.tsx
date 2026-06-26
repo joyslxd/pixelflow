@@ -284,7 +284,7 @@ export function MessageBubble({
                     <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold text-ink">
                       <span>{scene.scene_index}. {scene.title || scene.scene_id}</span>
                       <span className="rounded-full bg-white px-2 py-0.5 text-[11px] text-ink-soft">
-                        {(scene.duration_ms / 1000).toFixed(1)}s
+                        {(scene.duration_ms as number | "") === "" ? "待填写" : `${(Number(scene.duration_ms) / 1000).toFixed(1)}s`}
                       </span>
                     </div>
                     {scene.storyline && <p className="mt-1 text-[12px] leading-relaxed text-ink-soft">{scene.storyline}</p>}

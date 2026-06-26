@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "CONVERSATION_ROUTING_TEST_MODULE must point to the compile
 const {
   appendVisibleConversationMessage,
   messageConversationId,
+  replaceMessageById,
   restoredConversationMessages,
   shouldApplyVisibleConversationSideEffect,
   shouldRenderConversationMessage,
@@ -40,6 +41,19 @@ test("appendVisibleConversationMessage keeps async results out of another active
 test("messageConversationId prefers the message owner over current visible conversation", () => {
   assert.equal(messageConversationId({ conversationId: "conversation-a" }, "conversation-b"), "conversation-a");
   assert.equal(messageConversationId({}, "conversation-b"), "conversation-b");
+});
+
+test("replaceMessageById patches an optimistic message without reordering or appending missing messages", () => {
+  const currentMessages = [
+    { id: "m1", content: "first", time: "10:00" },
+    { id: "m2", content: "second", time: "10:01" },
+  ];
+
+  assert.deepEqual(replaceMessageById(currentMessages, "m1", { id: "server-1", content: "first", time: "10:02" }), [
+    { id: "server-1", content: "first", time: "10:02" },
+    { id: "m2", content: "second", time: "10:01" },
+  ]);
+  assert.equal(replaceMessageById(currentMessages, "missing", { id: "server-2" }), currentMessages);
 });
 
 test("restoredConversationMessages ignores stale snapshot messages and uses persisted messages", () => {

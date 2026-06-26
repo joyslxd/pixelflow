@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.utils.time import coerce_iso
 from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
@@ -30,7 +31,14 @@ def _now() -> datetime:
 
 
 def _dt(value: datetime | str | None) -> str:
-    return value.isoformat() if isinstance(value, datetime) else (value or "")
+    return coerce_iso(value)
+
+
+def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop legacy chat snapshots; persisted messages are the source of truth."""
+    if not value:
+        return {}
+    return {key: item for key, item in value.items() if key != "messages"}
 
 
 def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
@@ -250,7 +258,7 @@ def _conversation_row_to_record(row: PixelFlowConversationRow) -> PixelFlowConve
         title=row.title or "",
         current_task_id=row.current_task_id,
         last_phase=row.last_phase or "idle",
-        context=row.context_json or {},
+        context=_conversation_context(row.context_json),
         created_at=_dt(row.created_at),
         updated_at=_dt(row.updated_at),
     )
@@ -427,7 +435,7 @@ class SQLPixelFlowTaskStore:
                 title=record.title,
                 current_task_id=record.current_task_id,
                 last_phase=record.last_phase,
-                context_json=record.context,
+                context_json=_conversation_context(record.context),
             )
             session.add(row)
             await session.commit()
@@ -489,6 +497,8 @@ class SQLPixelFlowTaskStore:
             for key, value in fields.items():
                 attr = mapping.get(key)
                 if attr:
+                    if key == "context":
+                        value = _conversation_context(value)
                     setattr(row, attr, value)
             row.updated_at = _now()
             await session.commit()
@@ -614,6 +624,7 @@ class MemoryPixelFlowTaskStore:
         stamp = _dt(_now())
         record.created_at = record.created_at or stamp
         record.updated_at = record.updated_at or stamp
+        record.context = _conversation_context(record.context)
         self._conversations[record.conversation_id] = record
         return record
 
@@ -645,7 +656,8 @@ class MemoryPixelFlowTaskStore:
             return None
         for key in ("title", "current_task_id", "last_phase", "context"):
             if key in fields:
-                setattr(record, key, fields[key])
+                value = _conversation_context(fields[key]) if key == "context" else fields[key]
+                setattr(record, key, value)
         record.updated_at = _dt(_now())
         return record
 

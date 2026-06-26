@@ -6,6 +6,7 @@ assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scen
 
 const {
   collectSceneImageUrls,
+  durationMsForSubmit,
   inferTargetDurationMs,
   sceneIdsForRevision,
   updateScenePackageAssetField,
@@ -77,6 +78,16 @@ test("updateScenePackageField edits top-level fields immutably and clamps durati
   assert.equal(updated[1], original[1]);
 });
 
+test("updateScenePackageField lets users temporarily clear duration before retyping", () => {
+  const original = sampleScenes();
+
+  const updated = updateScenePackageField(original, "scene-1", {
+    duration_ms: "",
+  });
+
+  assert.equal(updated[0].duration_ms, "");
+});
+
 test("updateScenePackageAssetField edits nested character scene and prop fields immutably", () => {
   const original = sampleScenes();
 
@@ -114,4 +125,10 @@ test("inferTargetDurationMs reads seconds and minutes from user-facing flow text
   assert.equal(inferTargetDurationMs(["帮我生成90秒左右的视频"]), 90_000);
   assert.equal(inferTargetDurationMs(["做一个1.5分钟的复杂种草视频"]), 90_000);
   assert.equal(inferTargetDurationMs(["没有明确时长"]), 30_000);
+});
+
+test("durationMsForSubmit converts empty edit values to a valid minimum duration", () => {
+  assert.equal(durationMsForSubmit(""), 1000);
+  assert.equal(durationMsForSubmit(1), 1000);
+  assert.equal(durationMsForSubmit(22000), 10000);
 });

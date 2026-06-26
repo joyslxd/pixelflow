@@ -6,7 +6,7 @@ export type SceneAssetCollection = "characters" | "scene_images" | "prop_images"
 export interface ScenePackageRecord {
   scene_id: string;
   scene_index: number;
-  duration_ms: number;
+  duration_ms: number | "";
   title?: string;
   storyline?: string;
   prompt: string;
@@ -111,6 +111,12 @@ export function inferTargetDurationMs(texts: Array<string | undefined | null>): 
   return DEFAULT_TARGET_DURATION_MS;
 }
 
+export function durationMsForSubmit(value: number | string | ""): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1000;
+  return Math.max(1000, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
+}
+
 function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch {
   const normalized: ScenePackagePatch = {};
   if (patch.title !== undefined) normalized.title = patch.title;
@@ -121,7 +127,8 @@ function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch
   return normalized;
 }
 
-function normalizeDurationMs(value: number | string): number {
+function normalizeDurationMs(value: number | string): number | "" {
+  if (value === "") return "";
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 1;
   return Math.max(1, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
