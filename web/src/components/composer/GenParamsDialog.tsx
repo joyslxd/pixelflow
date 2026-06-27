@@ -19,6 +19,7 @@ export interface ImageRequirementForm {
   image_usage: string;
   image_style: string;
   image_size: string;
+  image_count?: number;
 }
 
 export type GenParamsForm = VideoRequirementForm | ImageRequirementForm;
@@ -55,6 +56,11 @@ const optionValue = (values: Record<string, unknown>, key: string, options: stri
   return typeof value === "string" && options.includes(value) ? value : fallback;
 };
 
+const numberValue = (values: Record<string, unknown>, key: string, fallback: number) => {
+  const parsed = Number(values[key]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(10, Math.round(parsed))) : fallback;
+};
+
 function videoInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): VideoRequirementForm {
   return {
     intent: "video",
@@ -74,6 +80,7 @@ function imageInitialValues(initialCoreMessage: string | undefined, values: Reco
     image_usage: optionValue(values, "image_usage", IMAGE_USAGES, "社媒发布"),
     image_style: optionValue(values, "image_style", IMAGE_STYLES, "真实摄影"),
     image_size: imageSize === "自定义" ? "自动适配" : optionValue(values, "image_size", IMAGE_SIZES, "9:16 竖版海报"),
+    image_count: numberValue(values, "image_count", 1),
   };
 }
 

@@ -4,7 +4,6 @@ import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse } from "@/lib/api";
-import type { SceneAssetCollection, ScenePackagePatch } from "@/lib/scenePackages";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -20,15 +19,9 @@ interface ChatPanelProps {
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
   onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
-  onUpdateVideoScenePackage?: (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => void;
-  onUpdateVideoSceneAssetField?: (
-    msg: ChatMessage,
-    sceneId: string,
-    collection: SceneAssetCollection,
-    index: number,
-    field: string,
-    value: string,
-  ) => void;
+  onRetryImageResult?: (msg: ChatMessage) => void;
+  onRetrySceneAssets?: (msg: ChatMessage) => void;
+  onRetryVideoMerge?: (msg: ChatMessage) => void;
   busy?: boolean;
 }
 
@@ -46,8 +39,9 @@ export function ChatPanel({
   onAcceptVideoResult,
   onReviseVideoResult,
   onRegenerateVideoWithRevision,
-  onUpdateVideoScenePackage,
-  onUpdateVideoSceneAssetField,
+  onRetryImageResult,
+  onRetrySceneAssets,
+  onRetryVideoMerge,
   busy,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -85,8 +79,9 @@ export function ChatPanel({
               onAcceptVideoResult={onAcceptVideoResult}
               onReviseVideoResult={onReviseVideoResult}
               onRegenerateVideoWithRevision={onRegenerateVideoWithRevision}
-              onUpdateVideoScenePackage={onUpdateVideoScenePackage}
-              onUpdateVideoSceneAssetField={onUpdateVideoSceneAssetField}
+              onRetryImageResult={onRetryImageResult}
+              onRetrySceneAssets={onRetrySceneAssets}
+              onRetryVideoMerge={onRetryVideoMerge}
             />
           ))
         )}

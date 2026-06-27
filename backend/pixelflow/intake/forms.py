@@ -224,7 +224,17 @@ def _normalize_values(schema: FormSchema, values: dict[str, Any]) -> dict[str, A
     for form_field in schema.fields:
         raw = values.get(form_field.id, form_field.default_value)
         normalized[form_field.id] = raw.strip() if isinstance(raw, str) else raw
+    if schema.output_type == "image" and _has(values.get("image_count")):
+        normalized["image_count"] = _normalize_image_count(values.get("image_count"))
     return normalized
+
+
+def _normalize_image_count(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 1
+    return max(1, min(10, number))
 
 
 def _has(value: Any) -> bool:

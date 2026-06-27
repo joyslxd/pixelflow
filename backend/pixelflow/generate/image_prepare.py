@@ -72,6 +72,7 @@ def prepare_image_generation(
     prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
     ratio = _resolve_ratio(form_values, plan_markdown, selected_direction)
+    image_count = _requested_image_count(form_values, plan_markdown, selected_direction)
     reference_urls = [image["url"] for image in image_materials if _text(image.get("url"))]
 
     if method == "multi_image_fusion":
@@ -129,7 +130,7 @@ def prepare_image_generation(
                 "imageSize": IMAGE_EDIT_QUALITY,
                 "width": width,
                 "height": height,
-                "max_images": 1,
+                "max_images": image_count,
             },
             message="已准备图片编辑参数，下一步可调用博观图片编辑接口。",
         )
@@ -148,7 +149,7 @@ def prepare_image_generation(
                 "width": width,
                 "height": height,
                 "imageSize": REFERENCE_IMAGE_QUALITY,
-                "max_images": 1,
+                "max_images": image_count,
             },
             message="已准备参考图生图参数，下一步可调用博观参考生成组图接口。",
         )
@@ -164,7 +165,7 @@ def prepare_image_generation(
             "model": TEXT_TO_IMAGE_MODEL,
             "ratio": ratio,
             "size": TEXT_TO_IMAGE_QUALITY,
-            "num_images": 1,
+            "num_images": image_count,
         },
         message="已准备文生图参数，下一步可调用博观文生图接口。",
     )
@@ -286,6 +287,34 @@ def _context_text(form_values: dict[str, Any], plan_markdown: str, selected_dire
     parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style"])
     parts.extend(_text(value) for value in selected_direction.values())
     return " ".join(part for part in parts if part).lower()
+
+
+def _requested_image_count(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> int:
+    explicit = _normalize_image_count(form_values.get("image_count"))
+    if explicit > 1:
+        return explicit
+    inferred = _extract_image_count(_context_text(form_values, plan_markdown, selected_direction))
+    return inferred or explicit
+
+
+def _extract_image_count(text: str) -> int | None:
+    patterns = [
+        r"(\d{1,2})\s*(?:张|幅|个)\s*(?:图片|图|海报|封面|主图|素材图)",
+        r"(?:图片|图|海报|封面|主图|素材图)\s*(\d{1,2})\s*(?:张|幅|个)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _normalize_image_count(match.group(1))
+    return None
+
+
+def _normalize_image_count(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(10, number))
 
 
 def _ratio_pair(ratio: str) -> tuple[int, int]:

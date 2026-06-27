@@ -61,6 +61,23 @@ def test_validate_form_accepts_complete_image_values():
     assert result.values["image_style"] == "科技感"
 
 
+def test_validate_image_form_preserves_hidden_image_count_metadata():
+    result = validate_form(
+        "image",
+        {
+            "image_goal": "篮球主题宣传图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+            "image_count": 4,
+        },
+    )
+
+    assert result.is_complete is True
+    assert result.values["image_count"] == 4
+
+
 def test_draft_creative_directions_returns_three_with_recommended_first():
     directions = draft_creative_directions(
         "video",

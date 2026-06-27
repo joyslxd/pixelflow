@@ -15,6 +15,53 @@ from typing import Any, Protocol
 
 MEDIA_SKILL_ENV = "PIXELFLOW_MEDIA_SKILL"
 DEFAULT_MEDIA_SKILL = "borgrise"
+QUOTA_INSUFFICIENT_STATUS_CODE = 402
+QUOTA_INSUFFICIENT_KEYWORDS = (
+    "额度不足",
+    "余额不足",
+    "没有有效的额度",
+    "有效的额度",
+    "扣费失败",
+    "剩余额度",
+    "充值",
+    "quota insufficient",
+    "insufficient quota",
+    "insufficient balance",
+    "payment required",
+    "not enough quota",
+)
+
+
+def is_quota_insufficient(value: Any) -> bool:
+    """判断供应商或 content-app 返回是否表示额度不足。
+
+    content-app 通用拦截器会返回 HTTP 402 和 ``{"success":false,"message":"..."}``；
+    一些业务接口也可能在 200 包装中返回类似文案。这里做宽松识别，供 router 和
+    skill 统一把流程暂停在可恢复状态。
+    """
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        if value.get("quota_insufficient") is True:
+            return True
+        if value.get("status_code") == QUOTA_INSUFFICIENT_STATUS_CODE:
+            return True
+        haystack = " ".join(
+            str(value.get(key, ""))
+            for key in ("message", "msg", "error", "detail", "code", "status")
+        ).lower()
+        if any(keyword.lower() in haystack for keyword in QUOTA_INSUFFICIENT_KEYWORDS):
+            return True
+        return any(is_quota_insufficient(child) for child in value.values())
+    if isinstance(value, list):
+        return any(is_quota_insufficient(item) for item in value)
+    text = str(value).lower()
+    return any(keyword.lower() in text for keyword in QUOTA_INSUFFICIENT_KEYWORDS)
+
+
+def quota_resume_message(message: str | None = None) -> str:
+    detail = (message or "额度不足").strip()
+    return f"{detail}。当前生成已暂停，请充值后回到本对话继续执行。"
 
 
 @dataclass

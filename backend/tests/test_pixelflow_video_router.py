@@ -62,8 +62,12 @@ def test_video_router_prepares_scene_packages():
     assert data["ok"] is True
     assert data["requires_confirmation"] is True
     assert data["review_timeout_sec"] is None
+    assert data["global_assets"]["characters"][0]["asset_id"] == "character-host"
+    assert data["global_assets"]["visual_style"]["name"]
     assert data["scene_packages"][0]["scene_id"] == "scene-1"
-    assert data["scene_packages"][0]["duration_ms"] <= 10_000
+    assert 4_000 <= data["scene_packages"][0]["duration_ms"] <= 15_000
+    assert data["scene_packages"][0]["reference_asset_ids"]
+    assert set(data["scene_packages"][0]["shot_description"]) >= {"time_range", "location", "characters", "shot_size", "description"}
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
 
 
@@ -95,13 +99,17 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
         response = client.post(
             "/agent/flows/video/generate-scene-assets",
             json={
+                "global_assets": {
+                    "characters": [{"asset_id": "character-host", "name": "讲解者", "three_view_prompt": "角色三视图"}],
+                    "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
+                    "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
+                    "visual_style": {"asset_id": "style-main", "name": "真实摄影"},
+                },
                 "scene_packages": [
                     {
                         "scene_id": "scene-1",
                         "scene_index": 1,
-                        "characters": [{"name": "讲解者", "three_view_prompt": "角色三视图"}],
-                        "scene_images": [{"description": "桌面场景", "image_prompt": "桌面场景图"}],
-                        "prop_images": [{"name": "耳机", "image_prompt": "耳机道具图"}],
+                        "reference_asset_ids": ["character-host", "scene-desk", "prop-product"],
                     }
                 ]
             },
@@ -109,12 +117,51 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    scene = data["scene_packages"][0]
     assert data["ok"] is True
     assert data["endpoint"] == "/api/picture/text_to_image"
-    assert scene["characters"][0]["three_view_images"] == ["https://x/three-view.png"]
-    assert scene["scene_images"][0]["images"] == ["https://x/scene.png"]
-    assert scene["prop_images"][0]["images"] == ["https://x/prop.png"]
+    assert data["global_assets"]["characters"][0]["three_view_images"] == ["https://x/three-view.png"]
+    assert data["global_assets"]["scenes"][0]["images"] == ["https://x/scene.png"]
+    assert data["global_assets"]["props"][0]["images"] == ["https://x/prop.png"]
+
+
+def test_video_router_stops_scene_asset_generation_on_quota_failure(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度: 0，需要: 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度: 0，需要: 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scene-assets",
+            json={
+                "global_assets": {
+                    "characters": [{"asset_id": "character-host", "name": "讲解者", "three_view_prompt": "角色三视图"}],
+                    "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
+                },
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["quota_insufficient"] is True
+    assert "充值后" in data["message"]
+    assert len(calls) == 1
 
 
 def test_video_router_generates_scene_videos(monkeypatch):
@@ -168,6 +215,174 @@ def test_video_router_generates_scene_videos(monkeypatch):
     assert data["endpoint"] == "/api/video/reference-mode-video"
     assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-1", "scene-2"]
     assert data["scene_videos"][0]["video_url"] == "https://x/第一幕展示白色耳机.mp4"
+
+
+def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[str] = []
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            if kwargs["prompt"].startswith("第一幕"):
+                return GenerationResult(
+                    ok=False,
+                    error="用户没有有效的额度",
+                    raw={"quota_insufficient": True, "message": "用户没有有效的额度"},
+                )
+            return GenerationResult(ok=True, task_id="should-not-run", url="https://x/should-not-run.mp4")
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕展示白色耳机",
+                        "image_urls": ["https://x/role.png"],
+                    },
+                    {
+                        "scene_id": "scene-2",
+                        "scene_index": 2,
+                        "duration_ms": 8000,
+                        "prompt": "第二幕展示降噪场景",
+                        "image_urls": ["https://x/scene.png"],
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["quota_insufficient"] is True
+    assert data["scene_videos"] == []
+    assert len(calls) == 1
+
+
+def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(("text_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="text-task", url="https://x/text.mp4", raw={"endpoint": "/api/video/text-to-video"})
+
+        async def image_to_video(self, **kwargs):
+            calls.append(("image_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="image-task", url="https://x/image.mp4", raw={"endpoint": "/api/video/image-to-video"})
+
+        async def two_image_to_video(self, **kwargs):
+            calls.append(("two_image_to_video", kwargs))
+            return GenerationResult(ok=True, task_id="two-image-task", url="https://x/two-image.mp4", raw={"endpoint": "/api/video/two-image-to-video"})
+
+        async def reference_mode_video(self, **kwargs):
+            calls.append(("reference_mode_video", kwargs))
+            return GenerationResult(ok=True, task_id="ref-task", url="https://x/ref.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
+
+        async def edit_video(self, **kwargs):
+            calls.append(("edit_video", kwargs))
+            return GenerationResult(ok=True, task_id="edit-task", url="https://x/edit.mp4", raw={"endpoint": "/api/video/edit-video"})
+
+        async def extend_video(self, **kwargs):
+            calls.append(("extend_video", kwargs))
+            return GenerationResult(ok=True, task_id="extend-task", url="https://x/extend.mp4", raw={"endpoint": "/api/video/extend-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {"scene_id": "scene-1", "scene_index": 1, "duration_ms": 5000, "prompt": "纯文本镜头", "generation_mode": "text_to_video"},
+                    {"scene_id": "scene-2", "scene_index": 2, "duration_ms": 5000, "prompt": "首帧动起来", "image_urls": ["https://x/first.png"], "generation_mode": "image_to_video"},
+                    {
+                        "scene_id": "scene-3",
+                        "scene_index": 3,
+                        "duration_ms": 5000,
+                        "prompt": "首尾帧过渡",
+                        "image_urls": ["https://x/first.png", "https://x/last.png"],
+                        "generation_mode": "two_image_to_video",
+                    },
+                    {
+                        "scene_id": "scene-4",
+                        "scene_index": 4,
+                        "duration_ms": 5000,
+                        "prompt": "多参考生成",
+                        "image_urls": ["https://x/a.png", "https://x/b.png"],
+                        "generation_mode": "reference_mode_video",
+                    },
+                    {
+                        "scene_id": "scene-5",
+                        "scene_index": 5,
+                        "duration_ms": 5000,
+                        "prompt": "编辑视频节奏",
+                        "video_urls": ["https://x/source.mp4"],
+                        "image_urls": ["https://x/ref.png"],
+                        "generation_mode": "edit_video",
+                    },
+                    {
+                        "scene_id": "scene-6",
+                        "scene_index": 6,
+                        "duration_ms": 5000,
+                        "prompt": "延伸视频结尾",
+                        "video_urls": ["https://x/source.mp4"],
+                        "generation_mode": "extend_video",
+                    },
+                    {
+                        "scene_id": "scene-7",
+                        "scene_index": 7,
+                        "duration_ms": 5000,
+                        "prompt": "参考图太多",
+                        "image_urls": [f"https://x/ref-{index}.png" for index in range(10)],
+                        "generation_mode": "reference_mode_video",
+                    },
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert [scene["mode"] for scene in data["scene_videos"]] == [
+        "text_to_video",
+        "image_to_video",
+        "two_image_to_video",
+        "reference_mode_video",
+        "edit_video",
+        "extend_video",
+    ]
+    assert [name for name, _kwargs in calls] == [
+        "text_to_video",
+        "image_to_video",
+        "two_image_to_video",
+        "reference_mode_video",
+        "edit_video",
+        "extend_video",
+    ]
+    assert calls[2][1]["first_frame_image_url"] == "https://x/first.png"
+    assert calls[2][1]["last_frame_image_url"] == "https://x/last.png"
+    assert calls[4][1]["ref_video"] == "https://x/source.mp4"
+    assert calls[5][1]["video_url"] == "https://x/source.mp4"
+    assert data["failed_scenes"][0]["scene_id"] == "scene-7"
+    assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
 def test_video_router_starts_scene_video_job_and_polls_result(monkeypatch):

@@ -8,6 +8,9 @@ const {
   collectSceneImageUrls,
   durationMsForSubmit,
   inferTargetDurationMs,
+  MAX_REFERENCE_IMAGE_COUNT,
+  MAX_SCENE_DURATION_MS,
+  MIN_SCENE_DURATION_MS,
   sceneIdsForRevision,
   updateScenePackageAssetField,
   updateScenePackageField,
@@ -24,6 +27,15 @@ function sampleScenes() {
       prompt: "旧提示词",
       narration: "旧旁白",
       image_urls: ["https://x/material.png"],
+      shot_description: {
+        time_range: "00:00-00:08",
+        location: "@scene-desk",
+        characters: ["@character-host"],
+        props: ["@prop-product"],
+        shot_size: "中景",
+        description: "讲解者拿起产品",
+      },
+      reference_asset_ids: ["character-host", "scene-desk", "prop-product"],
       characters: [
         {
           name: "讲解者",
@@ -57,7 +69,42 @@ function sampleScenes() {
   ];
 }
 
-test("updateScenePackageField edits top-level fields immutably and clamps duration to 10 seconds", () => {
+function sampleGlobalAssets() {
+  return {
+    characters: [
+      {
+        asset_id: "character-host",
+        name: "讲解者",
+        three_view_images: ["https://x/global-role.png"],
+      },
+    ],
+    scenes: [
+      {
+        asset_id: "scene-desk",
+        name: "桌面场景",
+        images: ["https://x/global-scene.png"],
+      },
+    ],
+    props: [
+      {
+        asset_id: "prop-product",
+        name: "耳机",
+        images: ["https://x/global-prop.png"],
+      },
+    ],
+    visual_style: {
+      asset_id: "style-main",
+      name: "真实摄影",
+    },
+  };
+}
+
+test("scene duration constants match backend-only 4 to 15 second contract", () => {
+  assert.equal(MIN_SCENE_DURATION_MS, 4000);
+  assert.equal(MAX_SCENE_DURATION_MS, 15000);
+});
+
+test("updateScenePackageField edits top-level fields immutably and clamps backend duration to 15 seconds", () => {
   const original = sampleScenes();
 
   const updated = updateScenePackageField(original, "scene-1", {
@@ -71,7 +118,7 @@ test("updateScenePackageField edits top-level fields immutably and clamps durati
   assert.notEqual(updated, original);
   assert.equal(original[0].title, "开场钩子");
   assert.equal(updated[0].title, "新版开场");
-  assert.equal(updated[0].duration_ms, 10000);
+  assert.equal(updated[0].duration_ms, 15000);
   assert.equal(updated[0].storyline, "新版故事线");
   assert.equal(updated[0].prompt, "新版提示词");
   assert.equal(updated[0].narration, "新版旁白");
@@ -102,15 +149,30 @@ test("updateScenePackageAssetField edits nested character scene and prop fields 
   assert.equal(updatedProp[1], original[1]);
 });
 
-test("collectSceneImageUrls includes material, character, scene and prop image urls without duplicates", () => {
+test("collectSceneImageUrls prefers selected global @ references and limits all-power references to 9 images", () => {
   const [scene] = sampleScenes();
 
-  assert.deepEqual(collectSceneImageUrls(scene), [
+  assert.equal(MAX_REFERENCE_IMAGE_COUNT, 9);
+  assert.deepEqual(collectSceneImageUrls(scene, sampleGlobalAssets()), [
     "https://x/material.png",
-    "https://x/role.png",
-    "https://x/scene.png",
-    "https://x/prop.png",
+    "https://x/global-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
   ]);
+
+  const manyGlobalAssets = {
+    characters: Array.from({ length: 11 }, (_item, index) => ({
+      asset_id: `character-${index}`,
+      three_view_images: [`https://x/role-${index}.png`],
+    })),
+  };
+  const manyScene = {
+    ...scene,
+    image_urls: [],
+    reference_asset_ids: Array.from({ length: 11 }, (_item, index) => `character-${index}`),
+  };
+
+  assert.equal(collectSceneImageUrls(manyScene, manyGlobalAssets).length, 9);
 });
 
 test("sceneIdsForRevision maps explicit scene mentions and falls back to all scenes", () => {
@@ -128,7 +190,7 @@ test("inferTargetDurationMs reads seconds and minutes from user-facing flow text
 });
 
 test("durationMsForSubmit converts empty edit values to a valid minimum duration", () => {
-  assert.equal(durationMsForSubmit(""), 1000);
-  assert.equal(durationMsForSubmit(1), 1000);
-  assert.equal(durationMsForSubmit(22000), 10000);
+  assert.equal(durationMsForSubmit(""), 4000);
+  assert.equal(durationMsForSubmit(1), 4000);
+  assert.equal(durationMsForSubmit(22000), 15000);
 });

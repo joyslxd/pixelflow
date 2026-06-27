@@ -64,7 +64,7 @@ async def recognize_intent_with_llm(
         if not isinstance(payload, dict):
             raise ValueError("intent response must be a JSON object")
         intent = _normalize_intent(payload.get("intent"))
-        values = _filter_form_values(intent, payload.get("values"))
+        values = _augment_intent_values(intent, _filter_form_values(intent, payload.get("values")), text)
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
@@ -79,7 +79,7 @@ async def recognize_intent_with_llm(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
             reason="LLM 调用失败，已使用本地兜底规则。",
-            values={},
+            values=_augment_intent_values(fallback, {}, text),
             llm_used=False,
             model_name=model_name,
             error=str(exc),
@@ -157,7 +157,8 @@ def _intent_prompt(text: str) -> str:
 product_info, product_category, target_audience, conversion_goal。
 
 如果是 image_generation，可抽取 values 字段：
-image_goal, image_type, image_usage, image_style, image_size。
+image_goal, image_type, image_usage, image_style, image_size, image_count。
+image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
 
 只返回 JSON，不要解释，不要 Markdown：
 {{"intent":"video_generation|image_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","values":{{}}}}
@@ -230,7 +231,12 @@ def _filter_form_values(intent: IntakeIntent, values: Any) -> dict[str, Any]:
         return {}
     schema = get_form_schema(intent)
     allowed = {field.id for field in schema.fields}
-    return {key: value for key, value in values.items() if key in allowed and _has(value)}
+    filtered = {key: value for key, value in values.items() if key in allowed and _has(value)}
+    if intent == "image":
+        image_count = _normalize_image_count(values.get("image_count"))
+        if image_count:
+            filtered["image_count"] = image_count
+    return filtered
 
 
 def _confidence(value: Any) -> float:
@@ -333,6 +339,66 @@ def _fallback_intent(text: str) -> IntakeIntent:
     if "视频" in lowered and any(word in lowered for word in video_generation_words):
         return "video"
     return "unknown"
+
+
+def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: str) -> dict[str, Any]:
+    if intent != "image":
+        return values
+    if _normalize_image_count(values.get("image_count")):
+        return values
+    image_count = _extract_image_count(text)
+    if not image_count:
+        return values
+    return {**values, "image_count": image_count}
+
+
+def _extract_image_count(text: str) -> int | None:
+    normalized = text.lower()
+    patterns = [
+        r"(?:生成|做|出|制作|来|要|给我)?\s*(\d{1,2})\s*(?:张|幅|个)\s*[^，。,.；;]{0,12}(?:图片|图|海报|封面|主图|素材图)",
+        r"(?:图片|图|海报|封面|主图|素材图)\s*(\d{1,2})\s*(?:张|幅|个)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return _normalize_image_count(match.group(1))
+    cn_match = re.search(r"(?:生成|做|出|制作|来|要|给我)?\s*([一二两三四五六七八九十]{1,3})\s*(?:张|幅|个)\s*[^，。,.；;]{0,12}(?:图片|图|海报|封面|主图|素材图)", normalized)
+    if cn_match:
+        return _normalize_image_count(cn_match.group(1))
+    return None
+
+
+def _normalize_image_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            number = int(text)
+        else:
+            number = _chinese_number(text)
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+    if number <= 0:
+        return None
+    return max(1, min(10, number))
+
+
+def _chinese_number(text: str) -> int:
+    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if text == "十":
+        return 10
+    if text.startswith("十"):
+        return 10 + digits.get(text[-1], 0)
+    if "十" in text:
+        left, right = text.split("十", 1)
+        return digits.get(left, 0) * 10 + (digits.get(right, 0) if right else 0)
+    return digits.get(text, 0)
 
 
 def _has(value: Any) -> bool:

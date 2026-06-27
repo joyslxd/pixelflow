@@ -119,6 +119,7 @@ Authorization: Bearer <content-app 登录 token>
 3. 再调用 content-app `/api/auth/verify` 做实时校验，由 content-app 判断 token 真伪、过期状态和用户是否被禁用；禁用用户会立即无法访问任务列表和 SSE。
 4. 业务层把 content-app 用户名作为 `user_id` 做任务、资产、偏好隔离。
 5. `borgrise` skill 调用 content-app/Borgrise 图片视频生成接口时，透传同一个 `Authorization`，不再使用配置文件里的固定 token、账号或密码。
+6. content-app/Borgrise 返回 HTTP 402 或“额度不足 / 没有有效的额度”等业务失败时，PixelFlow 不继续重试或发起后续生成调用；当前对话会停在可恢复状态，用户充值后回到同一对话可继续原来的图片、参考图、场景视频或合并步骤。
 
 前端普通请求和 SSE 都会携带 `Authorization`。由于原生 `EventSource` 不能加 header，事件流使用 `fetch` 读取 `text/event-stream`。
 

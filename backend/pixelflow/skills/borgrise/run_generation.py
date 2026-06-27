@@ -75,6 +75,21 @@ _cli_poll_timeout: int | None = None  # 由 --poll-timeout 命令行参数临时
 # 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+QUOTA_INSUFFICIENT_STATUS_CODE = 402
+QUOTA_INSUFFICIENT_KEYWORDS = (
+    "额度不足",
+    "余额不足",
+    "没有有效的额度",
+    "有效的额度",
+    "扣费失败",
+    "剩余额度",
+    "充值",
+    "quota insufficient",
+    "insufficient quota",
+    "insufficient balance",
+    "payment required",
+    "not enough quota",
+)
 
 
 def _effective_poll_timeout(default_timeout: int) -> int:
@@ -259,6 +274,68 @@ def _current_authorization() -> str:
     return require_current_authorization()
 
 
+def is_quota_insufficient(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        if value.get("quota_insufficient") is True:
+            return True
+        if value.get("status_code") == QUOTA_INSUFFICIENT_STATUS_CODE:
+            return True
+        haystack = " ".join(
+            str(value.get(key, ""))
+            for key in ("message", "msg", "error", "detail", "code", "status")
+        ).lower()
+        if any(keyword.lower() in haystack for keyword in QUOTA_INSUFFICIENT_KEYWORDS):
+            return True
+        return any(is_quota_insufficient(child) for child in value.values())
+    if isinstance(value, list):
+        return any(is_quota_insufficient(item) for item in value)
+    text = str(value).lower()
+    return any(keyword.lower() in text for keyword in QUOTA_INSUFFICIENT_KEYWORDS)
+
+
+def _safe_json_loads(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_error_message(value: Any, fallback: str = "") -> str:
+    if isinstance(value, dict):
+        for key in ("message", "msg", "error", "detail"):
+            message = value.get(key)
+            if message:
+                return str(message)
+        data = value.get("data")
+        if data is not None:
+            nested = _extract_error_message(data, "")
+            if nested:
+                return nested
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return fallback.strip() or "额度不足，请充值后重试"
+
+
+def _quota_error_response(payload: Any, *, status_code: int | None = None, fallback_message: str = "") -> dict:
+    message = _extract_error_message(payload, fallback_message)
+    return {
+        "error": True,
+        "quota_insufficient": True,
+        "non_retryable": True,
+        "status_code": status_code or QUOTA_INSUFFICIENT_STATUS_CODE,
+        "message": message,
+        "details": payload,
+    }
+
+
+def _normalize_quota_error(result: dict) -> dict:
+    if is_quota_insufficient(result):
+        return _quota_error_response(result, status_code=result.get("status_code"), fallback_message=str(result.get("message") or ""))
+    return result
+
+
 def _apply_auth_header(headers: dict[str, str]) -> dict[str, str]:
     """把当前用户 Authorization 写入请求头，覆盖调用方误传的固定 token。"""
     updated = dict(headers)
@@ -270,9 +347,15 @@ def _send_request(url: str, body: bytes | None, headers: dict[str, str], method:
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
-            return json.loads(response.read().decode("utf-8"))
+            result = json.loads(response.read().decode("utf-8"))
+            if is_quota_insufficient(result):
+                return _quota_error_response(result, status_code=getattr(response, "status", None))
+            return result
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else ""
+        parsed = _safe_json_loads(error_body)
+        if e.code == QUOTA_INSUFFICIENT_STATUS_CODE or is_quota_insufficient(parsed) or is_quota_insufficient(error_body):
+            return _quota_error_response(parsed or error_body, status_code=e.code, fallback_message=error_body)
         return {
             "error": True,
             "status_code": e.code,
@@ -315,10 +398,15 @@ def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
             result = _send_request(url, body, headers, method)
             if _retry_on_token_expired and _looks_token_expired(result):
                 return {"error": True, "status_code": 401, "message": "content-app Authorization 已过期，请重新登录后重试", "details": result}
+            result = _normalize_quota_error(result)
+            if result.get("quota_insufficient"):
+                return result
             if not result.get("error"):
                 return result
 
             status_code = result.get("status_code")
+            if result.get("non_retryable"):
+                return result
             retryable = status_code in RETRYABLE_HTTP_CODES
             if retryable and attempt < MAX_REQUEST_RETRIES - 1:
                 wait = (2 ** attempt) * 2
@@ -388,9 +476,15 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as response:
-                return json.loads(response.read().decode("utf-8"))
+                result = json.loads(response.read().decode("utf-8"))
+                if is_quota_insufficient(result):
+                    return _quota_error_response(result, status_code=getattr(response, "status", None))
+                return result
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
+            parsed = _safe_json_loads(error_body)
+            if e.code == QUOTA_INSUFFICIENT_STATUS_CODE or is_quota_insufficient(parsed) or is_quota_insufficient(error_body):
+                return _quota_error_response(parsed or error_body, status_code=e.code, fallback_message=error_body)
             retryable = e.code in RETRYABLE_HTTP_CODES
             if retryable and attempt < MAX_REQUEST_RETRIES - 1:
                 wait = (2 ** attempt) * 2

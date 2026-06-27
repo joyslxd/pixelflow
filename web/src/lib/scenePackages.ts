@@ -1,7 +1,16 @@
-export const MAX_SCENE_DURATION_MS = 10_000;
+export const MIN_SCENE_DURATION_MS = 4_000;
+export const MAX_SCENE_DURATION_MS = 15_000;
+export const MAX_REFERENCE_IMAGE_COUNT = 9;
 export const DEFAULT_TARGET_DURATION_MS = 30_000;
 
 export type SceneAssetCollection = "characters" | "scene_images" | "prop_images";
+
+export interface GlobalSceneAssets {
+  characters?: Array<Record<string, unknown>>;
+  scenes?: Array<Record<string, unknown>>;
+  props?: Array<Record<string, unknown>>;
+  visual_style?: Record<string, unknown>;
+}
 
 export interface ScenePackageRecord {
   scene_id: string;
@@ -11,6 +20,9 @@ export interface ScenePackageRecord {
   storyline?: string;
   prompt: string;
   narration?: string;
+  shot_description?: Record<string, unknown>;
+  reference_asset_ids?: string[];
+  generation_mode?: string | null;
   image_urls?: string[];
   video_urls?: string[];
   audio_urls?: string[];
@@ -25,6 +37,9 @@ export interface ScenePackagePatch {
   prompt?: string;
   narration?: string;
   duration_ms?: number | string;
+  shot_description?: Record<string, unknown>;
+  reference_asset_ids?: string[];
+  generation_mode?: string | null;
 }
 
 export interface SceneFlawLike {
@@ -61,8 +76,17 @@ export function updateScenePackageAssetField<T extends ScenePackageRecord>(
   });
 }
 
-export function collectSceneImageUrls(scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images">): string[] {
+export function collectSceneImageUrls(
+  scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images" | "reference_asset_ids">,
+  globalAssets?: GlobalSceneAssets,
+): string[] {
   const urls = new Set(stringArray(scene.image_urls));
+  if (globalAssets && stringArray(scene.reference_asset_ids).length > 0) {
+    stringArray(scene.reference_asset_ids).forEach((assetId) => {
+      collectGlobalAssetUrls(globalAssets, assetId).forEach((url) => urls.add(url));
+    });
+    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+  }
   const collectFromRecords = (items: unknown, keys: string[]) => {
     if (!Array.isArray(items)) return;
     items.forEach((item) => {
@@ -73,7 +97,7 @@ export function collectSceneImageUrls(scene: Pick<ScenePackageRecord, "image_url
   collectFromRecords(scene.characters, ["three_view_images", "images"]);
   collectFromRecords(scene.scene_images, ["images"]);
   collectFromRecords(scene.prop_images, ["images"]);
-  return Array.from(urls);
+  return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
 }
 
 export function sceneIdsForRevision(
@@ -113,8 +137,8 @@ export function inferTargetDurationMs(texts: Array<string | undefined | null>): 
 
 export function durationMsForSubmit(value: number | string | ""): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 1000;
-  return Math.max(1000, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
+  if (!Number.isFinite(parsed)) return MIN_SCENE_DURATION_MS;
+  return Math.max(MIN_SCENE_DURATION_MS, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
 }
 
 function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch {
@@ -123,6 +147,9 @@ function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch
   if (patch.storyline !== undefined) normalized.storyline = patch.storyline;
   if (patch.prompt !== undefined) normalized.prompt = patch.prompt;
   if (patch.narration !== undefined) normalized.narration = patch.narration;
+  if (patch.shot_description !== undefined) normalized.shot_description = patch.shot_description;
+  if (patch.reference_asset_ids !== undefined) normalized.reference_asset_ids = patch.reference_asset_ids;
+  if (patch.generation_mode !== undefined) normalized.generation_mode = patch.generation_mode;
   if (patch.duration_ms !== undefined) normalized.duration_ms = normalizeDurationMs(patch.duration_ms);
   return normalized;
 }
@@ -130,11 +157,33 @@ function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch
 function normalizeDurationMs(value: number | string): number | "" {
   if (value === "") return "";
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 1;
-  return Math.max(1, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
+  if (!Number.isFinite(parsed)) return MIN_SCENE_DURATION_MS;
+  return Math.max(MIN_SCENE_DURATION_MS, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
 }
 
 function normalizeTargetDurationMs(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_TARGET_DURATION_MS;
   return Math.max(1_000, Math.min(180_000, Math.round(value)));
+}
+
+function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string): string[] {
+  const asset = findGlobalAsset(globalAssets, assetId);
+  if (!asset) return [];
+  return [
+    ...stringArray(asset.three_view_images),
+    ...stringArray(asset.images),
+    ...stringArray(asset.image_urls),
+  ];
+}
+
+function findGlobalAsset(globalAssets: GlobalSceneAssets, assetId: string): Record<string, unknown> | undefined {
+  for (const collection of [globalAssets.characters, globalAssets.scenes, globalAssets.props]) {
+    const match = collection?.find((item) => stringValue(item.asset_id) === assetId || stringValue(item.id) === assetId);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }

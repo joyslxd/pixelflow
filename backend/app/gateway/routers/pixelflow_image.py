@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from pixelflow.generate.image_prepare import ImageMethod, prepare_image_generation
 from pixelflow.skills import get_image_skill
+from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
 
 router = APIRouter(prefix="/agent/flows/image", tags=["pixelflow-flows"])
 
@@ -48,6 +49,7 @@ class ImageGenerateResponse(BaseModel):
     images: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     message: str = ""
+    quota_insufficient: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -105,6 +107,10 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
             model=model,
             num_images=int(body.params.get("num_images") or body.params.get("num") or 1),
         )
+    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+    message = "图片生成完成。" if result.ok else (result.error or "图片生成失败。")
+    if quota_insufficient:
+        message = quota_resume_message(result.error)
     return ImageGenerateResponse(
         ok=result.ok,
         method=body.method,
@@ -112,7 +118,8 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         task_id=result.task_id,
         images=result.images,
         error=result.error,
-        message="图片生成完成。" if result.ok else (result.error or "图片生成失败。"),
+        message=message,
+        quota_insufficient=quota_insufficient,
         raw=result.raw,
     )
 

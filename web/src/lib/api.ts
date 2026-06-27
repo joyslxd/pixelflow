@@ -168,6 +168,7 @@ export interface ImageGenerateResponse {
   images: Array<{ asset_id?: string; url?: string; download_url?: string }>;
   error: string | null;
   message: string;
+  quota_insufficient?: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -193,6 +194,10 @@ export interface SceneGenerationPayload {
   scene_index: number;
   duration_ms: number;
   prompt: string;
+  storyline?: string;
+  shot_description?: Record<string, unknown>;
+  narration?: string;
+  generation_mode?: DirectVideoMode | null;
   image_urls?: string[];
   video_urls?: string[];
   audio_urls?: string[];
@@ -204,10 +209,14 @@ export interface PrepareScenePackagesResponse {
   requires_confirmation: boolean;
   review_timeout_sec: number | null;
   target_duration_ms: number;
+  global_assets: Record<string, unknown>;
   scene_packages: Array<SceneGenerationPayload & {
     title?: string;
     storyline?: string;
     narration?: string;
+    shot_description?: Record<string, unknown>;
+    reference_asset_ids?: string[];
+    generation_mode?: DirectVideoMode | null;
     characters?: Array<Record<string, unknown>>;
     scene_images?: Array<Record<string, unknown>>;
     prop_images?: Array<Record<string, unknown>>;
@@ -217,9 +226,11 @@ export interface PrepareScenePackagesResponse {
 export interface GenerateSceneAssetsResponse {
   ok: boolean;
   endpoint: string;
+  global_assets: Record<string, unknown>;
   scene_packages: PrepareScenePackagesResponse["scene_packages"];
   failed_assets: Array<Record<string, unknown>>;
   message: string;
+  quota_insufficient?: boolean;
 }
 
 export interface GenerateSceneVideosResponse {
@@ -229,12 +240,15 @@ export interface GenerateSceneVideosResponse {
     scene_id: string;
     scene_index: number;
     duration_ms: number;
+    mode?: string;
+    endpoint?: string;
     video_url: string;
     task_id?: string | null;
     raw?: Record<string, unknown>;
   }>;
   failed_scenes: Array<Record<string, unknown>>;
   message: string;
+  quota_insufficient?: boolean;
 }
 
 export interface GenerateSceneVideosJobStartResponse {
@@ -261,6 +275,7 @@ export interface MergeSceneVideosResponse {
   scene_videos: SceneVideoPayload[];
   error: string | null;
   message: string;
+  quota_insufficient?: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -280,6 +295,7 @@ export interface GenerateDirectVideoResponse {
   task_id: string | null;
   error: string | null;
   message: string;
+  quota_insufficient?: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -309,6 +325,7 @@ export interface VideoFlawAnalysisResponse {
   revision_prompt: string;
   error: string | null;
   message: string;
+  quota_insufficient?: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -322,6 +339,7 @@ export interface AnalyzeStoryboardsResponse {
   task_id: string | null;
   error: string | null;
   message: string;
+  quota_insufficient?: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -616,6 +634,7 @@ export const api = {
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
   generateSceneAssets: (body: {
+    global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     image_size?: string;
     model?: string | null;

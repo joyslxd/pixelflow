@@ -21,6 +21,43 @@ def test_prepare_image_generation_uses_text_to_image_without_reference_materials
     assert "核心卖点海报" in result.prompt
 
 
+def test_prepare_image_generation_uses_requested_image_count_for_text_to_image():
+    result = prepare_image_generation(
+        {
+            "image_goal": "篮球主题宣传图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+            "image_count": 3,
+        },
+        "## 一、选题方向\n生成 3 张不同构图的篮球图片",
+        {"title": "篮球海报", "description": "三张不同角度"},
+    )
+
+    assert result.ok is True
+    assert result.method == "text_to_image"
+    assert result.params["num_images"] == 3
+
+
+def test_prepare_image_generation_uses_requested_image_count_for_reference_generation():
+    result = prepare_image_generation(
+        {
+            "image_goal": "参考商品图生成3张卖点海报",
+            "image_style": "真实摄影",
+            "image_size": "1:1 正方形",
+            "image_count": "3",
+        },
+        "plan",
+        {"title": "参考图海报", "description": "基于素材出三张"},
+        materials=[{"type": "image", "url": "https://x/product.png"}],
+    )
+
+    assert result.ok is True
+    assert result.method == "multi_reference_image_generation"
+    assert result.params["max_images"] == 3
+
+
 def test_prepare_image_generation_auto_size_uses_context_for_vertical_poster():
     result = prepare_image_generation(
         {

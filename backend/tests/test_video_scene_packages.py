@@ -19,11 +19,21 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert result["ok"] is True
     assert result["requires_confirmation"] is True
     assert result["review_timeout_sec"] is None
+    assert result["global_assets"]["visual_style"]["name"]
+    assert result["global_assets"]["characters"][0]["asset_id"] == "character-host"
+    assert result["global_assets"]["scenes"][0]["asset_id"].startswith("scene-")
+    assert result["global_assets"]["props"][0]["asset_id"] == "prop-product"
     assert [scene["scene_id"] for scene in result["scene_packages"]] == ["scene-1", "scene-2", "scene-3"]
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 30_000
-    assert all(scene["duration_ms"] <= 10_000 for scene in result["scene_packages"])
+    assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
     assert "苹果降噪耳机 Pro" in result["scene_packages"][0]["prompt"]
     assert "引流直播间" in result["scene_packages"][-1]["narration"]
+    first_scene = result["scene_packages"][0]
+    assert "characters" not in first_scene
+    assert "scene_images" not in first_scene
+    assert "prop_images" not in first_scene
+    assert first_scene["reference_asset_ids"] == ["character-host", "scene-opening", "prop-product"]
+    assert set(first_scene["shot_description"]) >= {"time_range", "location", "characters", "shot_size", "description"}
 
 
 def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video():
@@ -33,19 +43,31 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
 
     class FakeModel:
         def invoke(self, _prompt):
+            global_assets = {
+                "characters": [{"asset_id": "character-host", "name": "主讲人", "description": "稳定的讲解者", "three_view_prompt": "统一角色三视图"}],
+                "scenes": [{"asset_id": "scene-home", "name": "居家场景", "description": "真实居家场景", "image_prompt": "真实场景图"}],
+                "props": [{"asset_id": "prop-product", "name": "产品", "description": "产品道具", "image_prompt": "产品道具图"}],
+                "visual_style": {"asset_id": "style-main", "name": "真实摄影", "description": "真实电商广告风格"},
+            }
             scenes = [
                 {
                     "title": f"LLM 场景 {index}",
                     "storyline": f"LLM 故事线 {index}",
                     "prompt": f"LLM 分镜提示词 {index}",
                     "narration": f"LLM 旁白 {index}",
-                    "characters": [{"name": "主讲人", "description": "稳定的讲解者", "three_view_prompt": "统一角色三视图"}],
-                    "scene_images": [{"description": "真实场景", "image_prompt": "真实场景图"}],
-                    "prop_images": [{"name": "产品", "description": "产品道具", "image_prompt": "产品道具图"}],
+                    "shot_description": {
+                        "time_range": "00:00-00:10",
+                        "location": "@scene-home",
+                        "characters": ["@character-host"],
+                        "props": ["@prop-product"],
+                        "shot_size": "中景",
+                        "description": f"LLM 镜头描述 {index}",
+                    },
+                    "reference_asset_ids": ["character-host", "scene-home", "prop-product"],
                 }
                 for index in range(1, 10)
             ]
-            return FakeMessage('{"scene_packages": ' + __import__("json").dumps(scenes, ensure_ascii=False) + "}")
+            return FakeMessage(__import__("json").dumps({"global_assets": global_assets, "scene_packages": scenes}, ensure_ascii=False))
 
     result = __import__("asyncio").run(
         prepare_video_scene_packages_with_llm(
@@ -63,9 +85,11 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
     )
 
     assert result["ok"] is True
+    assert result["global_assets"]["characters"][0]["asset_id"] == "character-host"
     assert len(result["scene_packages"]) == 9
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 90_000
-    assert all(scene["duration_ms"] <= 10_000 for scene in result["scene_packages"])
+    assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
     assert result["scene_packages"][0]["storyline"] == "LLM 故事线 1"
     assert result["scene_packages"][0]["prompt"] == "LLM 分镜提示词 1"
     assert result["scene_packages"][0]["narration"] == "LLM 旁白 1"
+    assert result["scene_packages"][0]["shot_description"]["description"] == "LLM 镜头描述 1"

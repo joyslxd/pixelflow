@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
+import { StoryboardPanel } from "@/components/canvas/StoryboardPanel";
 import { GenParamsDialog, type CreationIntent, type GenParamsForm } from "@/components/composer/GenParamsDialog";
 import {
   api,
@@ -28,9 +29,7 @@ import {
   durationMsForSubmit,
   inferTargetDurationMs,
   sceneIdsForRevision,
-  updateScenePackageAssetField,
   updateScenePackageField,
-  type SceneAssetCollection,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -175,6 +174,7 @@ function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
         image_usage: form.image_usage,
         image_style: form.image_style,
         image_size: form.image_size,
+        image_count: form.image_count,
       };
 }
 
@@ -205,6 +205,24 @@ function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefi
   return merged;
 }
 
+function isQuotaInsufficientPayload(value: unknown): boolean {
+  if (!value) return false;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record.quota_insufficient === true) return true;
+    if (record.status_code === 402) return true;
+    return Object.values(record).some((item) => isQuotaInsufficientPayload(item));
+  }
+  const text = String(value).toLowerCase();
+  return ["额度不足", "余额不足", "没有有效的额度", "有效的额度", "剩余额度", "充值", "quota insufficient", "insufficient quota", "payment required"].some((keyword) =>
+    text.includes(keyword.toLowerCase()),
+  );
+}
+
+function quotaMessage(fallback: string) {
+  return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
+}
+
 function messageFromResponse(message: ConversationMessageResponse, conversationId: string): ChatMessage | null {
   if (message.role === "system") return null;
   const artifact = message.payload.artifact as ChatMessage["artifact"] | undefined;
@@ -227,6 +245,7 @@ export function WorkspacePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
+  const [selectedStoryboardMessageId, setSelectedStoryboardMessageId] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
@@ -290,7 +309,10 @@ export function WorkspacePage() {
   };
 
   const setCanvasOpenForConversation = (targetConversationId: string, value: boolean) => {
-    if (isVisibleConversation(targetConversationId)) setCanvasOpen(value);
+    if (isVisibleConversation(targetConversationId)) {
+      setCanvasOpen(value);
+      if (!value) setSelectedStoryboardMessageId("");
+    }
   };
 
   const setCanvasForConversation = (
@@ -314,7 +336,7 @@ export function WorkspacePage() {
     };
   };
 
-  const appendMessageForConversation = (message: ChatMessage, targetConversationId: string) => {
+  const appendMessageForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
     if (targetConversationId) {
       const optimisticMessage = { ...message, conversationId: targetConversationId, time: message.time || now() };
       setMessages((items) =>
@@ -324,22 +346,27 @@ export function WorkspacePage() {
           message: optimisticMessage,
         }),
       );
-      void persistChatMessage(targetConversationId, optimisticMessage)
-        .then((savedMessage) => setMessages((items) => replaceMessageById(items, optimisticMessage.id, savedMessage)))
-        .catch(() => {});
-      return;
+      try {
+        const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
+        setMessages((items) => replaceMessageById(items, optimisticMessage.id, savedMessage));
+        return savedMessage;
+      } catch {
+        return optimisticMessage;
+      }
     }
-    setMessages((items) => [...items, { ...message, time: message.time || now() }]);
+    const localMessage = { ...message, time: message.time || now() };
+    setMessages((items) => [...items, localMessage]);
+    return localMessage;
   };
 
   const pushAssistant = (content: string, targetConversationId = conversationIdRef.current) => {
     const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: "" };
-    appendMessageForConversation(message, targetConversationId);
+    void appendMessageForConversation(message, targetConversationId);
   };
 
   const pushArtifact = (content: string, artifact: ChatArtifact, targetConversationId = conversationIdRef.current) => {
     const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
-    appendMessageForConversation(message, targetConversationId);
+    void appendMessageForConversation(message, targetConversationId);
     return message;
   };
 
@@ -368,17 +395,6 @@ export function WorkspacePage() {
 
   const handleUpdateVideoScenePackage = (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => {
     updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageField(scenePackages, sceneId, patch));
-  };
-
-  const handleUpdateVideoSceneAssetField = (
-    msg: ChatMessage,
-    sceneId: string,
-    collection: SceneAssetCollection,
-    index: number,
-    field: string,
-    value: string,
-  ) => {
-    updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageAssetField(scenePackages, sceneId, collection, index, field, value));
   };
 
   const pushDirectionsArtifact = (
@@ -530,6 +546,7 @@ export function WorkspacePage() {
     setMessages([]);
     setCanvas(EMPTY_CANVAS);
     setCanvasOpen(false);
+    setSelectedStoryboardMessageId("");
     setDialogOpen(false);
     setPendingCore("");
     setPendingIntent("video");
@@ -655,7 +672,7 @@ export function WorkspacePage() {
     const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
       activeConversation = await ensureConversation(text);
-      appendMessageForConversation(message, activeConversation);
+      await appendMessageForConversation(message, activeConversation);
       if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
     } catch (err) {
       pushAssistant(`对话保存失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
@@ -751,10 +768,11 @@ export function WorkspacePage() {
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
         });
+        const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
         const imageResultMessage = pushArtifact(imageResult.ok ? "图片已按修改意见重新生成，请查看结果。" : "图片重新生成失败，请查看错误信息。", {
           type: "image_result",
           title: "图片重新生成结果",
-          description: imageResultSummary(imageResult),
+          description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片重新生成额度不足。") : imageResultSummary(imageResult),
           actionLabel: "查看",
           imageResult,
           imagePrepare,
@@ -1235,10 +1253,12 @@ export function WorkspacePage() {
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
         });
+        const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
+        if (imageQuotaInsufficient) processedArtifactIdsRef.current.delete(msg.id);
         const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
           type: "image_result",
           title: "图片生成结果",
-          description: imageResultSummary(imageResult),
+          description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
           actionLabel: "查看",
           imageResult,
           imagePrepare,
@@ -1256,7 +1276,7 @@ export function WorkspacePage() {
         if (targetConversationId) {
           void api
             .updateConversation(targetConversationId, {
-              last_phase: imageResult.ok ? "image_generated" : "image_generation_failed",
+              last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
               context: {
                 ...makeSnapshot(),
                 plan_approved: true,
@@ -1298,15 +1318,52 @@ export function WorkspacePage() {
       if (videoScenePackages.ok) {
         pushAssistant("视频场景包已准备好，正在生成角色三视图、场景图和道具图…", targetConversationId);
         const sceneAssets = await api.generateSceneAssets({
+          global_assets: videoScenePackages.global_assets,
           scene_packages: videoScenePackages.scene_packages,
           image_size: "1080p",
         });
         scenePackagesForReview = {
           ...videoScenePackages,
+          global_assets: sceneAssets.global_assets || videoScenePackages.global_assets,
           scene_packages: sceneAssets.scene_packages,
           message: sceneAssets.ok ? videoScenePackages.message : sceneAssets.message,
         };
         sceneAssetFailures = sceneAssets.failed_assets;
+        if (sceneAssets.quota_insufficient) {
+          processedArtifactIdsRef.current.delete(msg.id);
+          pushArtifact("场景参考图生成因额度不足暂停，充值后可从本卡片继续。", {
+            type: "video_scene_packages",
+            title: "视频场景包",
+            description: quotaMessage(sceneAssets.message || "场景参考图生成额度不足。"),
+            actionLabel: "继续",
+            videoScenePackages: scenePackagesForReview,
+            sceneAssetFailures,
+            intent: "video",
+            formValues,
+            materials: artifact.materials || [],
+            selectedDirection,
+            plan: artifact.plan,
+          }, targetConversationId);
+          if (targetConversationId) {
+            void api
+              .updateConversation(targetConversationId, {
+                last_phase: "scene_asset_quota_paused",
+                context: {
+                  ...makeSnapshot(),
+                  form_values: formValues,
+                  materials: artifact.materials || [],
+                  selected_direction: selectedDirection,
+                  plan_markdown: artifact.plan.plan_markdown,
+                  plan_approved: true,
+                  global_assets: scenePackagesForReview.global_assets,
+                  scene_packages: scenePackagesForReview.scene_packages,
+                  scene_asset_failures: sceneAssetFailures,
+                } as unknown as Record<string, unknown>,
+              })
+              .catch(() => {});
+          }
+          return;
+        }
       }
       pushArtifact(scenePackagesForReview.ok ? "视频场景包和参考图已准备好，请确认后生成视频。" : "视频场景包准备失败，请检查提示。", {
         type: "video_scene_packages",
@@ -1334,6 +1391,7 @@ export function WorkspacePage() {
               selected_direction: selectedDirection,
               plan_markdown: artifact.plan.plan_markdown,
               plan_approved: true,
+              global_assets: scenePackagesForReview.global_assets,
               scene_packages: scenePackagesForReview.scene_packages,
               scene_asset_failures: sceneAssetFailures,
             } as unknown as Record<string, unknown>,
@@ -1342,6 +1400,65 @@ export function WorkspacePage() {
       }
     } catch (err) {
       pushAssistant(`视频场景包准备失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleRetrySceneAssets = async (msg: ChatMessage) => {
+    const videoScenePackages = msg.artifact?.videoScenePackages;
+    if (!videoScenePackages?.scene_packages.length || !isQuotaInsufficientPayload(msg.artifact?.sceneAssetFailures)) return;
+    if (processedArtifactIdsRef.current.has(msg.id)) return;
+    processedArtifactIdsRef.current.add(msg.id);
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("正在继续生成场景参考图…", targetConversationId);
+    try {
+      const sceneAssets = await api.generateSceneAssets({
+        global_assets: videoScenePackages.global_assets,
+        scene_packages: videoScenePackages.scene_packages,
+        image_size: "1080p",
+      });
+      const nextPackages = {
+        ...videoScenePackages,
+        global_assets: sceneAssets.global_assets || videoScenePackages.global_assets,
+        scene_packages: sceneAssets.scene_packages,
+        message: sceneAssets.ok ? videoScenePackages.message : sceneAssets.message,
+      };
+      if (sceneAssets.quota_insufficient) {
+        processedArtifactIdsRef.current.delete(msg.id);
+      }
+      pushArtifact(sceneAssets.ok ? "场景参考图已继续生成完成，请确认后生成视频。" : "场景参考图继续生成失败，请查看失败项。", {
+        type: "video_scene_packages",
+        title: "视频场景包",
+        description: sceneAssets.quota_insufficient
+          ? quotaMessage(sceneAssets.message || "场景参考图生成额度不足。")
+          : `${nextPackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
+        actionLabel: "确认",
+        videoScenePackages: nextPackages,
+        sceneAssetFailures: sceneAssets.failed_assets,
+        intent: "video",
+        formValues: msg.artifact?.formValues,
+        materials: msg.artifact?.materials || [],
+        selectedDirection: msg.artifact?.selectedDirection,
+        plan: msg.artifact?.plan,
+      }, targetConversationId);
+      if (targetConversationId) {
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: sceneAssets.ok ? "scene_package_ready" : sceneAssets.quota_insufficient ? "scene_asset_quota_paused" : "scene_asset_failed",
+            context: {
+              ...makeSnapshot(),
+              global_assets: nextPackages.global_assets,
+              scene_packages: nextPackages.scene_packages,
+              scene_asset_failures: sceneAssets.failed_assets,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+    } catch (err) {
+      processedArtifactIdsRef.current.delete(msg.id);
+      pushAssistant(`场景参考图继续生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
@@ -1378,10 +1495,12 @@ export function WorkspacePage() {
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
       });
+      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
+      if (imageQuotaInsufficient) processedArtifactIdsRef.current.delete(msg.id);
       const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
         type: "image_result",
         title: "图片生成结果",
-        description: imageResultSummary(imageResult),
+        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
         actionLabel: "查看",
         imageResult,
         imagePrepare,
@@ -1399,7 +1518,7 @@ export function WorkspacePage() {
       if (targetConversationId) {
         void api
           .updateConversation(targetConversationId, {
-            last_phase: imageResult.ok ? "image_generated" : "image_generation_failed",
+            last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
             context: {
               ...makeSnapshot(),
               image_prepare: imagePrepare,
@@ -1410,6 +1529,57 @@ export function WorkspacePage() {
       }
     } catch (err) {
       pushAssistant(`图片生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleRetryImageResult = async (msg: ChatMessage) => {
+    const imagePrepare = msg.artifact?.imagePrepare;
+    if (!imagePrepare || !isQuotaInsufficientPayload(msg.artifact?.imageResult)) return;
+    if (processedArtifactIdsRef.current.has(msg.id)) return;
+    processedArtifactIdsRef.current.add(msg.id);
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant(`已继续调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
+    try {
+      const imageResult = await api.generateImage({
+        method: imagePrepare.method,
+        prompt: imagePrepare.prompt,
+        negative_prompt: imagePrepare.negative_prompt,
+        params: imagePrepare.params,
+      });
+      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
+      if (imageQuotaInsufficient) processedArtifactIdsRef.current.delete(msg.id);
+      const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
+        type: "image_result",
+        title: "图片生成结果",
+        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
+        actionLabel: "查看",
+        imageResult,
+        imagePrepare,
+        intent: "image",
+        formValues: msg.artifact?.formValues,
+        materials: msg.artifact?.materials || [],
+        selectedDirection: msg.artifact?.selectedDirection,
+        plan: msg.artifact?.plan,
+      }, targetConversationId);
+      if (canAcceptImageResult(imageResult)) {
+        window.setTimeout(() => {
+          void handleAcceptImageResult(imageResultMessage, true);
+        }, 30_000);
+      }
+      if (targetConversationId) {
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
+            context: { ...makeSnapshot(), image_prepare: imagePrepare, image_result: imageResult } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+    } catch (err) {
+      processedArtifactIdsRef.current.delete(msg.id);
+      pushAssistant(`图片继续生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
@@ -1455,7 +1625,7 @@ export function WorkspacePage() {
     processedArtifactIdsRef.current.add(msg.id);
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     setBusyForConversation(targetConversationId, true);
-    pushAssistant("场景包已确认，正在并行生成场景视频…", targetConversationId);
+    pushAssistant("场景包已确认，正在生成场景视频…", targetConversationId);
     try {
       const generatedSceneVideos = await api.generateSceneVideos({
         scenes: videoScenePackages.scene_packages.map((scene) => ({
@@ -1463,7 +1633,11 @@ export function WorkspacePage() {
           scene_index: scene.scene_index,
           duration_ms: durationMsForSubmit(scene.duration_ms),
           prompt: scene.prompt,
-          image_urls: collectSceneImageUrls(scene),
+          storyline: scene.storyline,
+          shot_description: scene.shot_description,
+          narration: scene.narration,
+          generation_mode: scene.generation_mode,
+          image_urls: collectSceneImageUrls(scene, videoScenePackages.global_assets),
           video_urls: scene.video_urls || [],
           audio_urls: scene.audio_urls || [],
         })),
@@ -1472,7 +1646,37 @@ export function WorkspacePage() {
         sound: "on",
       });
       if (!generatedSceneVideos.ok) {
-        throw new Error(generatedSceneVideos.message || "部分场景视频生成失败");
+        const videoQuotaInsufficient = isQuotaInsufficientPayload(generatedSceneVideos);
+        if (videoQuotaInsufficient) processedArtifactIdsRef.current.delete(msg.id);
+        pushArtifact("视频生成失败：部分场景视频生成失败，请展开失败场景查看原因。", {
+          type: "video_result",
+          title: "视频生成结果",
+          description: videoQuotaInsufficient ? quotaMessage(generatedSceneVideos.message || "场景视频生成额度不足。") : (generatedSceneVideos.message || "部分场景视频生成失败，请查看失败场景。"),
+          actionLabel: "查看",
+          videoScenePackages,
+          generatedSceneVideos,
+          intent: "video",
+          formValues: msg.artifact?.formValues,
+          materials: msg.artifact?.materials || [],
+          selectedDirection: msg.artifact?.selectedDirection,
+          plan: msg.artifact?.plan,
+        }, targetConversationId);
+        if (targetConversationId) {
+          void api
+            .updateConversation(targetConversationId, {
+              last_phase: "video_generation_failed",
+              context: {
+                ...makeSnapshot(),
+                global_assets: videoScenePackages.global_assets,
+                scene_packages: videoScenePackages.scene_packages,
+                generated_scene_videos: generatedSceneVideos.scene_videos,
+                failed_scenes: generatedSceneVideos.failed_scenes,
+                video_quota_insufficient: videoQuotaInsufficient,
+              } as unknown as Record<string, unknown>,
+            })
+            .catch(() => {});
+        }
+        return;
       }
       pushAssistant("场景视频已生成，正在按场景顺序合并完整视频…", targetConversationId);
       const duration = Math.max(1, Math.ceil(videoScenePackages.target_duration_ms / 1000));
@@ -1485,10 +1689,11 @@ export function WorkspacePage() {
         duration,
         size: "1080p",
       });
+      const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
       const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频生成完成，请查看合并视频和场景视频。" : "视频合并失败，请查看错误信息。", {
         type: "video_result",
         title: "视频生成结果",
-        description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergedVideo.message,
+        description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
         actionLabel: "查看",
         videoScenePackages,
         generatedSceneVideos,
@@ -1517,9 +1722,10 @@ export function WorkspacePage() {
       if (targetConversationId) {
         void api
           .updateConversation(targetConversationId, {
-            last_phase: mergedVideo.ok ? "video_generated" : "video_merge_failed",
+              last_phase: mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed",
             context: {
               ...makeSnapshot(),
+              global_assets: videoScenePackages.global_assets,
               scene_packages: videoScenePackages.scene_packages,
               generated_scene_videos: generatedSceneVideos.scene_videos,
               merged_video: mergedVideo,
@@ -1529,6 +1735,71 @@ export function WorkspacePage() {
       }
     } catch (err) {
       pushAssistant(`视频生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleRetryVideoMerge = async (msg: ChatMessage) => {
+    const generatedSceneVideos = msg.artifact?.generatedSceneVideos;
+    const videoScenePackages = msg.artifact?.videoScenePackages;
+    if (!generatedSceneVideos?.scene_videos.length || !videoScenePackages || !isQuotaInsufficientPayload(msg.artifact?.mergedVideo)) return;
+    if (processedArtifactIdsRef.current.has(msg.id)) return;
+    processedArtifactIdsRef.current.add(msg.id);
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("正在继续合并已生成的场景视频…", targetConversationId);
+    try {
+      const duration = Math.max(1, Math.ceil(videoScenePackages.target_duration_ms / 1000));
+      const mergedVideo = await api.mergeSceneVideos({
+        scene_videos: generatedSceneVideos.scene_videos.map((scene) => ({
+          scene_id: scene.scene_id,
+          scene_index: scene.scene_index,
+          video_url: scene.video_url,
+        })),
+        duration,
+        size: "1080p",
+      });
+      const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
+      if (mergeQuotaInsufficient) processedArtifactIdsRef.current.delete(msg.id);
+      const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频合并完成，请查看完整视频。" : "视频合并失败，请查看错误信息。", {
+        type: "video_result",
+        title: "视频生成结果",
+        description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
+        actionLabel: "查看",
+        videoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+        intent: "video",
+        formValues: msg.artifact?.formValues,
+        materials: msg.artifact?.materials || [],
+        selectedDirection: msg.artifact?.selectedDirection,
+        plan: msg.artifact?.plan,
+      }, targetConversationId);
+      if (mergedVideo.ok) {
+        window.setTimeout(() => {
+          void handleAcceptVideoResult(videoResultMessage, true);
+        }, 30_000);
+      }
+      if (mergedVideo.merged_video_url) {
+        setCanvasForConversation(targetConversationId, (c) => ({
+          ...c,
+          phase: mergedVideo.ok ? "done" : c.phase,
+          results: [{ id: mergedVideo.task_id || "merged-video", url: mergedVideo.merged_video_url || "", assetType: "final_video", status: mergedVideo.ok ? "success" : "failed" }],
+        }));
+        setCanvasOpenForConversation(targetConversationId, true);
+      }
+      if (targetConversationId) {
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed",
+            context: { ...makeSnapshot(), generated_scene_videos: generatedSceneVideos.scene_videos, merged_video: mergedVideo } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+    } catch (err) {
+      processedArtifactIdsRef.current.delete(msg.id);
+      pushAssistant(`视频继续合并失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
@@ -1589,7 +1860,11 @@ export function WorkspacePage() {
           scene_index: scene.scene_index,
           duration_ms: durationMsForSubmit(scene.duration_ms),
           prompt: revisedScenePrompt(scene, artifact.videoRevisionFeedback || "", artifact.videoFlawAnalysis, useFlawAnalysis),
-          image_urls: collectSceneImageUrls(scene),
+          storyline: scene.storyline,
+          shot_description: scene.shot_description,
+          narration: scene.narration,
+          generation_mode: scene.generation_mode,
+          image_urls: collectSceneImageUrls(scene, artifact.videoScenePackages?.global_assets),
           video_urls: scene.video_urls || [],
           audio_urls: scene.audio_urls || [],
         })),
@@ -1598,7 +1873,21 @@ export function WorkspacePage() {
         sound: "on",
       });
       if (!regenerated.ok) {
-        throw new Error(regenerated.message || "受影响场景重生成失败");
+        pushArtifact("视频修改重生成失败：部分受影响场景生成失败，请展开失败场景查看原因。", {
+          type: "video_result",
+          title: "视频修改结果",
+          description: regenerated.message || "受影响场景重生成失败，请查看失败场景。",
+          actionLabel: "查看",
+          videoScenePackages: artifact.videoScenePackages,
+          generatedSceneVideos: regenerated,
+          mergedVideo: artifact.mergedVideo,
+          intent: "video",
+          formValues: artifact.formValues,
+          materials: artifact.materials || [],
+          selectedDirection: artifact.selectedDirection,
+          plan: artifact.plan,
+        }, targetConversationId);
+        return;
       }
       const previousByScene = new Map(artifact.generatedSceneVideos.scene_videos.map((scene) => [scene.scene_id, scene]));
       const regeneratedByScene = new Map(regenerated.scene_videos.map((scene) => [scene.scene_id, scene]));
@@ -1718,6 +2007,10 @@ export function WorkspacePage() {
     }
   };
 
+  const selectedStoryboardMessage = selectedStoryboardMessageId
+    ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.type === "video_scene_packages")
+    : undefined;
+
   return (
     <div className="flex h-full min-h-0">
       <ChatPanel
@@ -1734,11 +2027,17 @@ export function WorkspacePage() {
         onAcceptVideoResult={handleAcceptVideoResult}
         onReviseVideoResult={handleReviseVideoResult}
         onRegenerateVideoWithRevision={handleRegenerateVideoWithRevision}
-        onUpdateVideoScenePackage={handleUpdateVideoScenePackage}
-        onUpdateVideoSceneAssetField={handleUpdateVideoSceneAssetField}
+        onRetryImageResult={handleRetryImageResult}
+        onRetrySceneAssets={handleRetrySceneAssets}
+        onRetryVideoMerge={handleRetryVideoMerge}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
+          if (msg.artifact.type === "video_scene_packages") {
+            setSelectedStoryboardMessageId(msg.id);
+            return;
+          }
+          setSelectedStoryboardMessageId("");
           if (msg.artifact.type === "brief") setCanvas((c) => ({ ...c, phase: "brief_review" }));
           if (msg.artifact.type === "results") setCanvas((c) => ({ ...c, phase: "done" }));
           if (msg.artifact.type === "segments") setCanvas((c) => ({ ...c, phase: "segment_review" }));
@@ -1751,13 +2050,27 @@ export function WorkspacePage() {
           }
         }}
       />
-      {canvasOpen && (
+      {canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
+        <StoryboardPanel
+          msg={selectedStoryboardMessage}
+          onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
+          onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
+          onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
+          onClose={() => {
+            setCanvasOpen(false);
+            setSelectedStoryboardMessageId("");
+          }}
+        />
+      ) : canvasOpen && (
         <CanvasPanel
           state={canvas}
           onApprove={handleApprove}
           onRevise={handleRevise}
           onConfirmStage={handleConfirmStage}
-          onClose={() => setCanvasOpen(false)}
+          onClose={() => {
+            setCanvasOpen(false);
+            setSelectedStoryboardMessageId("");
+          }}
           briefConfirmed={briefConfirmed}
         />
       )}

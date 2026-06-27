@@ -46,6 +46,31 @@ def test_recognize_intent_uses_llm_json_and_normalizes_video_generation() -> Non
     assert result.values["conversion_goal"] == "引流直播间"
 
 
+def test_recognize_intent_preserves_requested_image_count_from_llm_json() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "image_generation",
+          "confidence": 0.95,
+          "reason": "用户明确要生成多张图片",
+          "values": {
+            "image_goal": "篮球主题宣传图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+            "image_count": 3
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("帮我生成3张篮球图片", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "image"
+    assert result.values["image_count"] == 3
+
+
 def test_recognize_intent_accepts_video_analysis() -> None:
     fake_model = FakeModel('{"intent":"video_analysis","confidence":0.88,"reason":"用户要求分析参考视频","values":{}}')
 
@@ -115,6 +140,23 @@ def test_recognize_intent_fallback_routes_image_and_video_operation_phrases() ->
     for phrase in video_phrases:
         result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
         assert result.intent == "video", phrase
+
+
+def test_recognize_intent_fallback_extracts_requested_image_count() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    cases = [
+        ("帮我生成3张篮球图片", 3),
+        ("做四张小红书封面", 4),
+        ("生成十张商品主图", 10),
+    ]
+
+    for phrase, expected in cases:
+        result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
+        assert result.intent == "image", phrase
+        assert result.values["image_count"] == expected
 
 
 def test_draft_creative_directions_with_llm_returns_three_normalized_directions() -> None:

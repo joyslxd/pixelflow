@@ -126,6 +126,40 @@ def test_image_router_generates_text_to_image(monkeypatch):
     assert data["images"][0]["url"] == "https://x/image.png"
 
 
+def test_image_router_marks_quota_insufficient_generation(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度: 0，需要: 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度: 0，需要: 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/generate",
+            json={
+                "method": "text_to_image",
+                "prompt": "生成商品主图",
+                "params": {"ratio": "9:16", "size": "1080p", "num_images": 1},
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["quota_insufficient"] is True
+    assert "充值后" in data["message"]
+
+
 def test_image_router_defaults_gpt_image_to_price_configured_quality(monkeypatch):
     from app.gateway.routers import pixelflow_image
     from pixelflow.skills import ImageGenerationResult
