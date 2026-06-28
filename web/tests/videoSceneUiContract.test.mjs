@@ -55,6 +55,12 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
   assert.match(sceneMentionEditorSource, /最多只能选择\s*9\s*张/);
   assert.match(sceneMentionEditorSource, /选择素材进行关联/);
   assert.match(sceneMentionEditorSource, /@/);
+  assert.match(sceneMentionEditorSource, /contentEditable/);
+  assert.match(sceneMentionEditorSource, /suppressContentEditableWarning/);
+  assert.match(sceneMentionEditorSource, /data-mention-id/);
+  assert.match(sceneMentionEditorSource, /data-mention-image-url/);
+  assert.match(sceneMentionEditorSource, /group-hover:block/);
+  assert.doesNotMatch(sceneMentionEditorSource, /<textarea/);
   assert.match(messageBubbleSource, /failed_scenes|失败场景/);
   assert.match(workspaceSource, /generatedSceneVideos\.failed_scenes|failed_scenes/);
 });
