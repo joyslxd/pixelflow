@@ -17,6 +17,7 @@ class PlanMarkdownRequest(BaseModel):
     form_values: dict[str, Any] = Field(default_factory=dict)
     selected_direction: dict[str, Any] = Field(default_factory=dict)
     product_creative_profile: dict[str, Any] = Field(default_factory=dict)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     collection: dict[str, Any] = Field(default_factory=dict)
 
@@ -41,6 +42,8 @@ class PlanMarkdownRequest(BaseModel):
             self.form_values = collection["form_values"]
         if not self.product_creative_profile and isinstance(collection.get("product_creative_profile"), dict):
             self.product_creative_profile = collection["product_creative_profile"]
+        if not self.intake_context and isinstance(collection.get("intake_context"), dict):
+            self.intake_context = collection["intake_context"]
         if not self.materials and isinstance(collection.get("materials"), list):
             self.materials = collection["materials"]
         return self
@@ -62,5 +65,6 @@ async def create_plan_markdown(body: PlanMarkdownRequest) -> PlanMarkdownRespons
         body.selected_direction,
         body.product_creative_profile,
         body.materials,
+        body.intake_context,
     )
     return PlanMarkdownResponse(**result.to_dict())

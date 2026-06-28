@@ -61,6 +61,44 @@ def test_planning_router_creates_reviewable_plan_markdown():
     assert "痛点开场 + 产品解决" in data["plan_markdown"]
 
 
+def test_planning_router_preserves_complete_intake_context_for_image_plan():
+    from app.gateway.routers import pixelflow_planning
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan",
+            json={
+                "intent": "image",
+                "form_values": {
+                    "image_goal": "宣传图",
+                    "image_type": "海报/封面图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "自动适配",
+                },
+                "selected_direction": {
+                    "direction_id": "direction_1",
+                    "title": "通学收纳主视觉",
+                    "description": "突出书包容量、护脊和耐磨卖点。",
+                },
+                "intake_context": {
+                    "source_prompt": "帮我生成书包的宣传图",
+                    "product_subject": "书包",
+                    "creation_goal": "书包宣传图",
+                    "industry_type": "服饰鞋包",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "# 书包宣传图｜通学收纳主视觉" in data["plan_markdown"]
+    assert "原始需求：帮我生成书包的宣传图" in data["plan_markdown"]
+
+
 def test_planning_router_accepts_generation_intent_aliases():
     from app.gateway.routers import pixelflow_planning
 

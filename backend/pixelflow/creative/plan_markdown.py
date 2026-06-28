@@ -48,13 +48,16 @@ def build_plan_markdown(
     selected_direction: dict[str, Any],
     product_creative_profile: dict[str, Any] | None = None,
     materials: list[dict[str, Any]] | None = None,
+    intake_context: dict[str, Any] | None = None,
 ) -> PlanMarkdownResult:
     _ensure_template_available()
     issues = _consistency_issues(intent, form_values, selected_direction)
+    context = intake_context or {}
+    profile = _merged_profile(product_creative_profile or {}, context)
     if intent == "image":
-        markdown = _build_image_plan(form_values, selected_direction, product_creative_profile or {}, materials or [])
+        markdown = _build_image_plan(form_values, selected_direction, profile, materials or [], context)
     else:
-        markdown = _build_video_plan(form_values, selected_direction, product_creative_profile or {}, materials or [])
+        markdown = _build_video_plan(form_values, selected_direction, profile, materials or [], context)
     return PlanMarkdownResult(output_type=intent, plan_markdown=markdown, consistency_issues=issues)
 
 
@@ -88,8 +91,12 @@ def _build_video_plan(
     selected_direction: dict[str, Any],
     product_creative_profile: dict[str, Any],
     materials: list[dict[str, Any]],
+    intake_context: dict[str, Any],
 ) -> str:
-    product = _text(form_values.get("product_info"), "未命名产品")
+    product = _context_text_value(intake_context, "product_subject") or _text(form_values.get("product_info"), "未命名产品")
+    original_prompt = _context_text_value(intake_context, "source_prompt")
+    industry_type = _context_text_value(intake_context, "industry_type")
+    creation_goal = _context_text_value(intake_context, "creation_goal")
     category = _text(form_values.get("product_category"), "未分类")
     audience = _text(form_values.get("target_audience"), "目标用户")
     goal = _text(form_values.get("conversion_goal"), "完成转化")
@@ -103,6 +110,10 @@ def _build_video_plan(
 
 ## 一、选题方向
 
+原始需求：{original_prompt or "未提供"}  
+产品主体：{product}  
+创作目标：{creation_goal or product}  
+行业类型：{industry_type or category}  
 内容类型：AD 投放短视频。  
 人物/场景冲突：{audience} 在高频使用场景中遇到明确痛点，需要一个可信解决方案。  
 产品/商品能力：{product} 作为 {category} 产品，用 {visual_anchor} 建立记忆点。  
@@ -265,8 +276,13 @@ def _build_image_plan(
     selected_direction: dict[str, Any],
     product_creative_profile: dict[str, Any],
     materials: list[dict[str, Any]],
+    intake_context: dict[str, Any],
 ) -> str:
-    image_goal = _text(form_values.get("image_goal"), "图片创作目标")
+    image_goal = _context_text_value(intake_context, "creation_goal") or _text(form_values.get("image_goal"), "图片创作目标")
+    product_subject = _context_text_value(intake_context, "product_subject") or image_goal
+    original_prompt = _context_text_value(intake_context, "source_prompt")
+    industry_type = _context_text_value(intake_context, "industry_type")
+    requested_count = _context_int_value(intake_context, "requested_output_count") or 1
     image_type = _text(form_values.get("image_type"), "图片")
     usage = _text(form_values.get("image_usage"), "内容使用")
     style = _text(form_values.get("image_style"), "自由发挥")
@@ -279,12 +295,17 @@ def _build_image_plan(
 
 ## 一、选题方向
 
+原始需求：{original_prompt or "未提供"}  
+产品主体：{product_subject}  
+创作目标：{image_goal}  
+行业类型：{industry_type or "general"}  
+生成数量：{requested_count} 张  
 内容类型：图片生成。  
 人物/场景冲突：围绕 {usage} 的第一眼注意力建立画面焦点。  
 产品/商品能力：通过 {visual_anchor} 让主题更容易被识别和记住。  
 结果反转：从普通图片需求升级为可直接用于 {usage} 的成品视觉。
 
-产品定位：{image_goal} = 面向 {usage} 的 {image_type}。  
+产品定位：{product_subject} = 面向 {usage} 的 {image_type} 主体，创作目标为 {image_goal}。  
 产品剧情角色：视频生成不适用；图片中承担主视觉主体和信息焦点。  
 系列记忆句：一眼看到重点，一张图完成表达。
 
@@ -319,7 +340,7 @@ def _build_image_plan(
 - 主视觉主体：{image_goal}，承担第一视觉焦点
 - 场景环境：围绕 {visual_anchor} 组织背景和道具关系
 - 信息元素：标题、辅助文案或视觉标签，承担快速理解作用
-- 产品/商品名称：按 {image_goal} 呈现，视觉锚点为 {visual_anchor}
+- 产品/商品名称：按 {product_subject} 呈现，视觉锚点为 {visual_anchor}
 
 ---
 
@@ -349,7 +370,7 @@ def _build_image_plan(
 
 - 首次露出时间：静态画面首屏即露出
 - 露出方式：主体视觉直接呈现
-- 露出画面：{image_goal}、关键风格元素和 {visual_anchor}
+- 露出画面：{product_subject}、关键风格元素和 {visual_anchor}
 - 露出目的：让用户快速理解主题，并服务 {usage}
 
 ---
@@ -375,6 +396,26 @@ def _text(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value.strip() or default
     return str(value)
+
+
+def _context_text_value(intake_context: dict[str, Any], key: str) -> str:
+    value = intake_context.get(key)
+    return _text(value)
+
+
+def _context_int_value(intake_context: dict[str, Any], key: str) -> int | None:
+    try:
+        value = int(intake_context.get(key))
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(10, value))
+
+
+def _merged_profile(product_creative_profile: dict[str, Any], intake_context: dict[str, Any]) -> dict[str, Any]:
+    context_profile = intake_context.get("product_creative_profile")
+    if not isinstance(context_profile, dict):
+        return product_creative_profile
+    return {**context_profile, **product_creative_profile}
 
 
 def _visual_anchor(selected_direction: dict[str, Any], product_creative_profile: dict[str, Any]) -> str:

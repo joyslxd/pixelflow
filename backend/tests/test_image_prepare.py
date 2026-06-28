@@ -40,6 +40,40 @@ def test_prepare_image_generation_uses_requested_image_count_for_text_to_image()
     assert result.params["num_images"] == 3
 
 
+def test_prepare_image_generation_prompt_uses_intake_context_subject_and_profile():
+    result = prepare_image_generation(
+        {
+            "image_goal": "宣传图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+        },
+        "## 一、选题方向\n图片生成方案",
+        {"title": "通学收纳主视觉", "description": "突出容量和护脊"},
+        intake_context={
+            "source_prompt": "帮我生成书包的宣传图",
+            "product_subject": "书包",
+            "creation_goal": "书包宣传图",
+            "industry_type": "服饰鞋包",
+            "requested_output_count": 3,
+            "product_creative_profile": {
+                "core_message": "儿童通学场景里的轻量护脊书包",
+                "visual_anchor_keywords": ["通学路", "收纳分区", "护脊背负"],
+            },
+        },
+    )
+
+    assert result.ok is True
+    assert result.params["num_images"] == 3
+    assert "图片目标：书包宣传图" in result.prompt
+    assert "产品主体：书包" in result.prompt
+    assert "原始需求：帮我生成书包的宣传图" in result.prompt
+    assert "行业类型：服饰鞋包" in result.prompt
+    assert "儿童通学场景里的轻量护脊书包" in result.prompt
+    assert "通学路、收纳分区、护脊背负" in result.prompt
+
+
 def test_prepare_image_generation_uses_requested_image_count_for_reference_generation():
     result = prepare_image_generation(
         {

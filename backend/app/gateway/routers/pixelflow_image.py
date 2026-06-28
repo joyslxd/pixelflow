@@ -20,6 +20,7 @@ class ImagePrepareRequest(BaseModel):
     selected_direction: dict[str, Any] = Field(default_factory=dict)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     revision_feedback: str | None = None
+    intake_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ImagePrepareResponse(BaseModel):
@@ -61,6 +62,7 @@ async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
         body.selected_direction,
         body.materials,
         body.revision_feedback,
+        body.intake_context,
     )
     return ImagePrepareResponse(**result.to_dict())
 

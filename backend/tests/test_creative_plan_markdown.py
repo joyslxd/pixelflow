@@ -56,6 +56,41 @@ def test_build_image_plan_markdown_marks_video_only_sections_not_applicable():
     assert result.review_timeout_sec == 30
 
 
+def test_build_image_plan_markdown_uses_intake_context_complete_goal():
+    result = build_plan_markdown(
+        "image",
+        {
+            "image_goal": "宣传图",
+            "image_type": "海报/封面图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+        },
+        {
+            "direction_id": "direction_1",
+            "title": "通学收纳主视觉",
+            "description": "突出书包容量、护脊和耐磨卖点。",
+        },
+        {
+            "core_message": "儿童通学场景里的轻量护脊书包",
+            "visual_anchor_keywords": ["通学路", "收纳分区", "护脊背负"],
+        },
+        intake_context={
+            "source_prompt": "帮我生成书包的宣传图",
+            "product_subject": "书包",
+            "creation_goal": "书包宣传图",
+            "industry_type": "服饰鞋包",
+            "requested_output_count": 1,
+        },
+    )
+
+    assert "# 书包宣传图｜通学收纳主视觉" in result.plan_markdown
+    assert "原始需求：帮我生成书包的宣传图" in result.plan_markdown
+    assert "产品主体：书包" in result.plan_markdown
+    assert "行业类型：服饰鞋包" in result.plan_markdown
+    assert "宣传图 = 面向" not in result.plan_markdown
+
+
 def test_build_video_plan_markdown_infers_requested_duration_from_context():
     result = build_plan_markdown(
         "video",

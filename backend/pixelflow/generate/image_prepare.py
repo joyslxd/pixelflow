@@ -66,14 +66,16 @@ def prepare_image_generation(
     selected_direction: dict[str, Any],
     materials: list[dict[str, Any]] | None = None,
     revision_feedback: str | None = None,
+    intake_context: dict[str, Any] | None = None,
 ) -> ImageGenerationPrepareResult:
+    context = intake_context or {}
     image_materials = _image_materials(materials or [])
     method = _decide_method(form_values, plan_markdown, selected_direction, image_materials, revision_feedback)
     endpoint = ENDPOINT_BY_METHOD[method]
-    prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback)
+    prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback, context)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
-    ratio = _resolve_ratio(form_values, plan_markdown, selected_direction)
-    image_count = _requested_image_count(form_values, plan_markdown, selected_direction)
+    ratio = _resolve_ratio(form_values, plan_markdown, selected_direction, context)
+    image_count = _requested_image_count(form_values, plan_markdown, selected_direction, context)
     reference_urls = [image["url"] for image in image_materials if _text(image.get("url"))]
 
     if method == "multi_image_fusion":
@@ -212,9 +214,21 @@ def _build_prompt(
     plan_markdown: str,
     selected_direction: dict[str, Any],
     revision_feedback: str | None,
+    intake_context: dict[str, Any],
 ) -> str:
+    product_subject = _context_text_value(intake_context, "product_subject")
+    image_goal = _context_text_value(intake_context, "creation_goal") or _text(form_values.get("image_goal"), "图片生成")
+    source_prompt = _context_text_value(intake_context, "source_prompt")
+    industry_type = _context_text_value(intake_context, "industry_type")
+    profile = _context_profile(intake_context)
+    visual_anchors = _profile_anchor_text(profile)
     parts = [
-        f"图片目标：{_text(form_values.get('image_goal'), '图片生成')}",
+        f"图片目标：{image_goal}",
+        f"产品主体：{product_subject}" if product_subject else "",
+        f"原始需求：{source_prompt}" if source_prompt else "",
+        f"行业类型：{industry_type}" if industry_type else "",
+        f"垂类核心表达：{_text(profile.get('core_message'))}" if _text(profile.get("core_message")) else "",
+        f"视觉锚点：{visual_anchors}" if visual_anchors else "",
         f"图片类型：{_text(form_values.get('image_type'), '未指定')}",
         f"图片用途：{_text(form_values.get('image_usage'), '未指定')}",
         f"图片风格：{_text(form_values.get('image_style'), '自由发挥')}",
@@ -244,13 +258,18 @@ def _image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return images
 
 
-def _resolve_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
+def _resolve_ratio(
+    form_values: dict[str, Any],
+    plan_markdown: str,
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any] | None = None,
+) -> str:
     label = _text(form_values.get("image_size")).strip()
     explicit = _explicit_ratio(label)
     if explicit:
         return explicit
     if not label or _is_auto_size(label) or RATIO_PATTERN.search(label):
-        return _auto_ratio(form_values, plan_markdown, selected_direction)
+        return _auto_ratio(form_values, plan_markdown, selected_direction, intake_context or {})
     return "1:1"
 
 
@@ -269,8 +288,13 @@ def _is_auto_size(label: str) -> bool:
     return any(keyword in normalized for keyword in ["auto", "自动", "自适应", "适配"])
 
 
-def _auto_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
-    context = _context_text(form_values, plan_markdown, selected_direction)
+def _auto_ratio(
+    form_values: dict[str, Any],
+    plan_markdown: str,
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any] | None = None,
+) -> str:
+    context = _context_text(form_values, plan_markdown, selected_direction, intake_context or {})
     if _has_any(context, ["横版", "横幅", "banner", "大屏", "电脑端", "官网", "头图", "网页", "16:9"]):
         return "16:9"
     if _has_any(context, ["商品主图", "主图", "头像", "logo", "图标", "电商主图", "正方形", "1:1"]):
@@ -284,18 +308,39 @@ def _auto_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direct
     return "1:1"
 
 
-def _context_text(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
+def _context_text(
+    form_values: dict[str, Any],
+    plan_markdown: str,
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any] | None = None,
+) -> str:
     parts = [plan_markdown]
     parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style", "image_size"])
     parts.extend(_text(value) for value in selected_direction.values())
+    context = intake_context or {}
+    parts.extend(
+        _text(context.get(key))
+        for key in ["source_prompt", "product_subject", "creation_goal", "industry_type", "requested_output_count"]
+    )
+    profile = _context_profile(context)
+    parts.append(_text(profile.get("core_message")))
+    parts.append(_profile_anchor_text(profile))
     return " ".join(part for part in parts if part).lower()
 
 
-def _requested_image_count(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> int:
+def _requested_image_count(
+    form_values: dict[str, Any],
+    plan_markdown: str,
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any] | None = None,
+) -> int:
+    context_count = _normalize_image_count((intake_context or {}).get("requested_output_count"))
+    if context_count > 1:
+        return context_count
     explicit = _normalize_image_count(form_values.get("image_count"))
     if explicit > 1:
         return explicit
-    inferred = _extract_image_count(_context_text(form_values, plan_markdown, selected_direction))
+    inferred = _extract_image_count(_context_text(form_values, plan_markdown, selected_direction, intake_context or {}))
     return inferred or explicit
 
 
@@ -342,6 +387,22 @@ def _text(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value.strip() or default
     return str(value)
+
+
+def _context_text_value(intake_context: dict[str, Any], key: str) -> str:
+    return _text(intake_context.get(key))
+
+
+def _context_profile(intake_context: dict[str, Any]) -> dict[str, Any]:
+    profile = intake_context.get("product_creative_profile")
+    return profile if isinstance(profile, dict) else {}
+
+
+def _profile_anchor_text(profile: dict[str, Any]) -> str:
+    anchors = profile.get("visual_anchor_keywords")
+    if isinstance(anchors, list):
+        return "、".join(_text(anchor) for anchor in anchors if _text(anchor))
+    return _text(anchors)
 
 
 def _first_text(values: dict[str, Any], *keys: str) -> str:
