@@ -121,6 +121,7 @@ export interface IntakeIntentResponse {
   confidence: number;
   reason: string;
   values: Record<string, unknown>;
+  intake_context: Record<string, unknown>;
   llm_used: boolean;
   model_name: string;
   error: string | null;
@@ -138,6 +139,7 @@ export interface CreativeDirectionResponse {
 export interface CreativeDirectionsResponse {
   validation: IntakeValidationResponse;
   creative_directions: CreativeDirectionResponse[];
+  intake_context: Record<string, unknown>;
 }
 
 export interface PlanMarkdownResponse {
@@ -599,6 +601,7 @@ export const api = {
     values: Record<string, unknown>;
     intake_rounds?: number;
     product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<CreativeDirectionsResponse>(`${FLOW_BASE}/intake/directions`, { method: "POST", body: JSON.stringify(body) }),
 
@@ -607,6 +610,7 @@ export const api = {
     form_values: Record<string, unknown>;
     selected_direction: Record<string, unknown>;
     product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan`, { method: "POST", body: JSON.stringify(body) }),
 
@@ -616,6 +620,7 @@ export const api = {
     selected_direction: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     revision_feedback?: string | null;
+    intake_context?: Record<string, unknown>;
   }) => req<ImagePrepareResponse>(`${FLOW_BASE}/image/prepare`, { method: "POST", body: JSON.stringify(body) }),
 
   generateImage: (body: {

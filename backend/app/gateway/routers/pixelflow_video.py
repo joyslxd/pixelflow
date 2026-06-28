@@ -28,6 +28,8 @@ _MAX_SCENE_VIDEO_JOBS = 100
 _DIRECT_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_DIRECT_VIDEO_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
+_SEEDANCE_MIN_SINGLE_CALL_DURATION = 5
+_SEEDANCE_MAX_SINGLE_CALL_DURATION = 10
 
 DirectVideoMode = Literal[
     "text_to_video",
@@ -408,11 +410,12 @@ async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSce
 
 async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> GenerateDirectVideoResponse:
     skill = get_video_skill()
+    duration = _provider_video_duration_seconds(body.duration * 1000, body.model)
 
     if body.mode == "text_to_video":
         result = await skill.text_to_video(
             prompt=body.prompt,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -424,7 +427,7 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
         result = await skill.image_to_video(
             image_url=body.image_url,
             prompt=body.prompt,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -437,7 +440,7 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
             first_frame_image_url=body.first_frame_image_url,
             last_frame_image_url=body.last_frame_image_url,
             prompt=body.prompt,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -449,7 +452,7 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
             image_urls=body.image_urls,
             video_urls=body.video_urls,
             audio_urls=body.audio_urls,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -462,7 +465,7 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
             ref_video=body.ref_video,
             prompt=body.prompt,
             ref_image=body.ref_image or None,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -474,7 +477,7 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
         result = await skill.extend_video(
             video_url=body.video_url,
             prompt=body.prompt,
-            duration=body.duration,
+            duration=duration,
             ratio=body.ratio,
             size=body.size,
             model=body.model,
@@ -554,7 +557,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
             }
         mode = _select_scene_video_mode(scene, image_urls)
         prompt = _build_scene_video_prompt(scene)
-        duration = max(4, min(15, math.ceil(scene.duration_ms / 1000)))
+        duration = _provider_video_duration_seconds(scene.duration_ms, body.model)
         result = await _run_scene_video_generation(
             skill=skill,
             mode=mode,
@@ -701,6 +704,13 @@ def _select_scene_video_mode(scene: SceneGenerationItem, image_urls: list[str]) 
     if video_urls or image_urls or scene.audio_urls:
         return "reference_mode_video"
     return "text_to_video"
+
+
+def _provider_video_duration_seconds(duration_ms: int, model: str | None) -> int:
+    seconds = max(1, math.ceil(duration_ms / 1000))
+    if model is None or model == "seedance-2.0":
+        return max(_SEEDANCE_MIN_SINGLE_CALL_DURATION, min(_SEEDANCE_MAX_SINGLE_CALL_DURATION, seconds))
+    return max(1, min(15, seconds))
 
 
 def _build_scene_video_prompt(scene: SceneGenerationItem) -> str:

@@ -13,6 +13,8 @@ const workspaceSource = readFileSync(
 );
 const storyboardPanelPath = fileURLToPath(new URL("../src/components/canvas/StoryboardPanel.tsx", import.meta.url));
 const storyboardPanelSource = existsSync(storyboardPanelPath) ? readFileSync(storyboardPanelPath, "utf8") : "";
+const sceneMentionEditorPath = fileURLToPath(new URL("../src/components/canvas/SceneMentionEditor.tsx", import.meta.url));
+const sceneMentionEditorSource = existsSync(sceneMentionEditorPath) ? readFileSync(sceneMentionEditorPath, "utf8") : "";
 
 test("video scene package card hides duration editing from users", () => {
   assert.doesNotMatch(messageBubbleSource, /时长\(ms\)/);
@@ -42,13 +44,17 @@ test("storyboard detail panel edits global assets and scene-varying fields", () 
   assert.doesNotMatch(storyboardPanelSource, />\s*角色标注\s*</);
   assert.doesNotMatch(storyboardPanelSource, />\s*景别\s*</);
   assert.match(storyboardPanelSource, /shotDescriptionText/);
+  assert.match(storyboardPanelSource, /SceneMentionEditor/);
+  assert.doesNotMatch(storyboardPanelSource, />\s*参考素材\s*</);
 });
 
 test("storyboard detail panel enforces at-reference image limit and failure details", () => {
   assert.ok(existsSync(storyboardPanelPath), "StoryboardPanel must exist");
-  assert.match(storyboardPanelSource, /MAX_REFERENCE_IMAGE_COUNT/);
-  assert.match(storyboardPanelSource, /最多\s*9\s*张/);
-  assert.match(storyboardPanelSource, /@/);
+  assert.ok(existsSync(sceneMentionEditorPath), "SceneMentionEditor must own inline @ references");
+  assert.match(sceneMentionEditorSource, /MAX_REFERENCE_IMAGE_COUNT/);
+  assert.match(sceneMentionEditorSource, /最多只能选择\s*9\s*张/);
+  assert.match(sceneMentionEditorSource, /选择素材进行关联/);
+  assert.match(sceneMentionEditorSource, /@/);
   assert.match(messageBubbleSource, /failed_scenes|失败场景/);
   assert.match(workspaceSource, /generatedSceneVideos\.failed_scenes|failed_scenes/);
 });

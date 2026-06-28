@@ -40,6 +40,7 @@ export interface ChatMessage {
     directions?: CreativeDirectionResponse[];
     intent?: CreationIntent | "video_analysis";
     formValues?: Record<string, unknown>;
+    intakeContext?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     coreMessage?: string;
     selectedDirection?: CreativeDirectionResponse;

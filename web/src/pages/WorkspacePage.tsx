@@ -158,6 +158,7 @@ interface PendingDialogContext {
   conversationId: string;
   coreMessage: string;
   materials: Array<Record<string, unknown>>;
+  intakeContext?: Record<string, unknown>;
 }
 
 function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
@@ -399,7 +400,13 @@ export function WorkspacePage() {
 
   const pushDirectionsArtifact = (
     directions: CreativeDirectionResponse[],
-    context: { intent: CreationIntent; formValues: Record<string, unknown>; coreMessage: string; materials?: Array<Record<string, unknown>> },
+    context: {
+      intent: CreationIntent;
+      formValues: Record<string, unknown>;
+      coreMessage: string;
+      materials?: Array<Record<string, unknown>>;
+      intakeContext?: Record<string, unknown>;
+    },
     targetConversationId = conversationIdRef.current,
   ) => {
     const message = pushArtifact("已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。30 秒未选择将采用推荐方向。", {
@@ -410,6 +417,7 @@ export function WorkspacePage() {
       directions,
       intent: context.intent,
       formValues: context.formValues,
+      intakeContext: context.intakeContext,
       materials: context.materials || [],
       coreMessage: context.coreMessage,
     }, targetConversationId);
@@ -424,7 +432,13 @@ export function WorkspacePage() {
   const pushPlanArtifact = (
     plan: PlanMarkdownResponse,
     selectedDirection: CreativeDirectionResponse,
-    context: { intent: CreationIntent; formValues: Record<string, unknown>; coreMessage: string; materials?: Array<Record<string, unknown>> },
+    context: {
+      intent: CreationIntent;
+      formValues: Record<string, unknown>;
+      coreMessage: string;
+      materials?: Array<Record<string, unknown>>;
+      intakeContext?: Record<string, unknown>;
+    },
     targetConversationId = conversationIdRef.current,
   ) => {
     const message = pushArtifact("plan.md 创作方案已生成，请审核后继续。30 秒未操作将默认同意。", {
@@ -436,6 +450,7 @@ export function WorkspacePage() {
       selectedDirection,
       intent: context.intent,
       formValues: context.formValues,
+      intakeContext: context.intakeContext,
       materials: context.materials || [],
       coreMessage: context.coreMessage,
     }, targetConversationId);
@@ -694,6 +709,7 @@ export function WorkspacePage() {
           values: revisionFormValues,
           materials: flowMaterials,
           product_creative_profile: { revision_feedback: text },
+          intake_context: revisionArtifact.intakeContext,
         });
         if (!directionResult.validation.is_complete) {
           pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", activeConversation);
@@ -705,6 +721,7 @@ export function WorkspacePage() {
           formValues: revisionFormValues,
           materials: flowMaterials,
           coreMessage: `${revisionArtifact.coreMessage || pendingCore}\n修改意见：${text}`,
+          intakeContext: directionResult.intake_context || revisionArtifact.intakeContext,
         }, activeConversation);
         if (activeConversation) {
           void api
@@ -714,6 +731,7 @@ export function WorkspacePage() {
                 ...makeSnapshot(),
                 revision_feedback: text,
                 materials: flowMaterials,
+                intake_context: directionResult.intake_context || revisionArtifact.intakeContext,
                 creative_directions: directionResult.creative_directions,
               } as unknown as Record<string, unknown>,
             })
@@ -743,6 +761,7 @@ export function WorkspacePage() {
               feedback: text,
             }),
             materials: flowMaterials,
+            intake_context: pendingImageRevisionArtifact.intakeContext,
           },
         );
         if (!imagePrepare.ok) {
@@ -755,6 +774,7 @@ export function WorkspacePage() {
             imageRevisionFeedback: text,
             intent: "image",
             formValues: pendingImageRevisionArtifact.formValues,
+            intakeContext: pendingImageRevisionArtifact.intakeContext,
             materials: flowMaterials,
             selectedDirection: pendingImageRevisionArtifact.selectedDirection,
             plan: pendingImageRevisionArtifact.plan,
@@ -779,6 +799,7 @@ export function WorkspacePage() {
           imageRevisionFeedback: text,
           intent: "image",
           formValues: pendingImageRevisionArtifact.formValues,
+          intakeContext: pendingImageRevisionArtifact.intakeContext,
           materials: flowMaterials,
           selectedDirection: pendingImageRevisionArtifact.selectedDirection,
           plan: pendingImageRevisionArtifact.plan,
@@ -795,6 +816,7 @@ export function WorkspacePage() {
               context: {
                 ...makeSnapshot(),
                 image_revision_feedback: text,
+                intake_context: pendingImageRevisionArtifact.intakeContext,
                 materials: flowMaterials,
                 image_prepare: imagePrepare,
                 image_result: imageResult,
@@ -854,6 +876,7 @@ export function WorkspacePage() {
           mergedVideo,
           intent: "video",
           formValues: revisionArtifact.formValues,
+          intakeContext: revisionArtifact.intakeContext,
           materials: flowMaterials,
           selectedDirection: revisionArtifact.selectedDirection,
           plan: revisionArtifact.plan,
@@ -865,6 +888,7 @@ export function WorkspacePage() {
               context: {
                 ...makeSnapshot(),
                 video_revision_feedback: text,
+                intake_context: revisionArtifact.intakeContext,
                 materials: flowMaterials,
                 video_flaw_analysis: flawAnalysis,
               } as unknown as Record<string, unknown>,
@@ -919,7 +943,12 @@ export function WorkspacePage() {
           setPendingIntent(intake.intent);
           setPendingFormValues(intake.values || {});
           setPendingMaterials(materials);
-          pendingDialogContextRef.current = { conversationId: activeConversation, coreMessage: text, materials };
+          pendingDialogContextRef.current = {
+            conversationId: activeConversation,
+            coreMessage: text,
+            materials,
+            intakeContext: intake.intake_context,
+          };
         }
         pushAssistant(`采集 Agent 判断这是${intake.intent === "video" ? "视频生成" : "图片生成"}需求，已把能识别的信息自动填进表单。请补充确认。`, activeConversation);
         if (activeConversation) {
@@ -931,6 +960,7 @@ export function WorkspacePage() {
                 intent: intake.intent,
                 materials,
                 intake_intent: intake,
+                intake_context: intake.intake_context,
               } as unknown as Record<string, unknown>,
             })
             .catch(() => {});
@@ -1118,12 +1148,18 @@ export function WorkspacePage() {
     const targetConversationId = dialogContext?.conversationId || conversationIdRef.current;
     const flowMaterials = dialogContext?.materials || pendingMaterials;
     const flowCoreMessage = dialogContext?.coreMessage || pendingCore;
+    const flowIntakeContext = dialogContext?.intakeContext || {};
     setDialogOpen(false);
     setPendingFormValues({});
     setBusyForConversation(targetConversationId, true);
     const values = valuesFromForm(form);
     try {
-      const directionResult = await api.generateCreativeDirections({ intent: form.intent, values, materials: flowMaterials });
+      const directionResult = await api.generateCreativeDirections({
+        intent: form.intent,
+        values,
+        materials: flowMaterials,
+        intake_context: flowIntakeContext,
+      });
       if (!directionResult.validation.is_complete) {
         pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", targetConversationId);
         setBusyForConversation(targetConversationId, false);
@@ -1134,6 +1170,7 @@ export function WorkspacePage() {
         formValues: values,
         materials: flowMaterials,
         coreMessage: flowCoreMessage,
+        intakeContext: directionResult.intake_context || flowIntakeContext,
       }, targetConversationId);
       pendingDialogContextRef.current = null;
       if (targetConversationId) {
@@ -1145,6 +1182,7 @@ export function WorkspacePage() {
               [`${form.intent}_form`]: form,
               creative_directions: directionResult.creative_directions,
               form_values: values,
+              intake_context: directionResult.intake_context || flowIntakeContext,
               materials: flowMaterials,
               intent: form.intent,
             } as unknown as Record<string, unknown>,
@@ -1171,6 +1209,7 @@ export function WorkspacePage() {
         form_values: msg.artifact.formValues,
         selected_direction: direction as unknown as Record<string, unknown>,
         product_creative_profile: { core_message: msg.artifact.coreMessage || pendingCore },
+        intake_context: msg.artifact.intakeContext,
         materials: msg.artifact.materials || [],
       });
       pushPlanArtifact(plan, direction, {
@@ -1178,6 +1217,7 @@ export function WorkspacePage() {
         formValues: msg.artifact.formValues,
         materials: msg.artifact.materials || [],
         coreMessage: msg.artifact.coreMessage || pendingCore,
+        intakeContext: msg.artifact.intakeContext,
       }, targetConversationId);
       if (targetConversationId) {
         void api
@@ -1187,6 +1227,7 @@ export function WorkspacePage() {
               ...makeSnapshot(),
               intent: msg.artifact.intent,
               form_values: msg.artifact.formValues,
+              intake_context: msg.artifact.intakeContext,
               materials: msg.artifact.materials || [],
               selected_direction: direction,
               plan_markdown: plan.plan_markdown,
@@ -1216,6 +1257,7 @@ export function WorkspacePage() {
           plan_markdown: artifact.plan.plan_markdown,
           selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
           materials: artifact.materials || [],
+          intake_context: artifact.intakeContext,
         });
         if (!imagePrepare.ok) {
           pushArtifact("图片生成准备发现当前能力暂不可用，请按提示调整。", {
@@ -1226,6 +1268,7 @@ export function WorkspacePage() {
             imagePrepare,
             intent: "image",
             formValues: artifact.formValues,
+            intakeContext: artifact.intakeContext,
             materials: artifact.materials || [],
             selectedDirection: artifact.selectedDirection,
             plan: artifact.plan,
@@ -1238,6 +1281,7 @@ export function WorkspacePage() {
                   ...makeSnapshot(),
                   plan_approved: true,
                   plan_markdown: artifact.plan.plan_markdown,
+                  intake_context: artifact.intakeContext,
                   materials: artifact.materials || [],
                   image_prepare: imagePrepare,
                 } as unknown as Record<string, unknown>,
@@ -1264,6 +1308,7 @@ export function WorkspacePage() {
           imagePrepare,
           intent: "image",
           formValues: artifact.formValues,
+          intakeContext: artifact.intakeContext,
           materials: artifact.materials || [],
           selectedDirection: artifact.selectedDirection,
           plan: artifact.plan,
@@ -1281,6 +1326,7 @@ export function WorkspacePage() {
                 ...makeSnapshot(),
                 plan_approved: true,
                 plan_markdown: artifact.plan.plan_markdown,
+                intake_context: artifact.intakeContext,
                 materials: artifact.materials || [],
                 image_prepare: imagePrepare,
                 image_result: imageResult,
@@ -1340,6 +1386,7 @@ export function WorkspacePage() {
             sceneAssetFailures,
             intent: "video",
             formValues,
+            intakeContext: artifact.intakeContext,
             materials: artifact.materials || [],
             selectedDirection,
             plan: artifact.plan,
@@ -1351,6 +1398,7 @@ export function WorkspacePage() {
                 context: {
                   ...makeSnapshot(),
                   form_values: formValues,
+                  intake_context: artifact.intakeContext,
                   materials: artifact.materials || [],
                   selected_direction: selectedDirection,
                   plan_markdown: artifact.plan.plan_markdown,
@@ -1376,6 +1424,7 @@ export function WorkspacePage() {
         sceneAssetFailures,
         intent: "video",
         formValues,
+        intakeContext: artifact.intakeContext,
         materials: artifact.materials || [],
         selectedDirection,
         plan: artifact.plan,
@@ -1387,6 +1436,7 @@ export function WorkspacePage() {
             context: {
               ...makeSnapshot(),
               form_values: formValues,
+              intake_context: artifact.intakeContext,
               materials: artifact.materials || [],
               selected_direction: selectedDirection,
               plan_markdown: artifact.plan.plan_markdown,
@@ -1439,6 +1489,7 @@ export function WorkspacePage() {
         sceneAssetFailures: sceneAssets.failed_assets,
         intent: "video",
         formValues: msg.artifact?.formValues,
+        intakeContext: msg.artifact?.intakeContext,
         materials: msg.artifact?.materials || [],
         selectedDirection: msg.artifact?.selectedDirection,
         plan: msg.artifact?.plan,
@@ -1450,6 +1501,7 @@ export function WorkspacePage() {
             context: {
               ...makeSnapshot(),
               global_assets: nextPackages.global_assets,
+              intake_context: msg.artifact?.intakeContext,
               scene_packages: nextPackages.scene_packages,
               scene_asset_failures: sceneAssets.failed_assets,
             } as unknown as Record<string, unknown>,
@@ -1657,6 +1709,7 @@ export function WorkspacePage() {
           generatedSceneVideos,
           intent: "video",
           formValues: msg.artifact?.formValues,
+          intakeContext: msg.artifact?.intakeContext,
           materials: msg.artifact?.materials || [],
           selectedDirection: msg.artifact?.selectedDirection,
           plan: msg.artifact?.plan,
@@ -1668,6 +1721,7 @@ export function WorkspacePage() {
               context: {
                 ...makeSnapshot(),
                 global_assets: videoScenePackages.global_assets,
+                intake_context: msg.artifact?.intakeContext,
                 scene_packages: videoScenePackages.scene_packages,
                 generated_scene_videos: generatedSceneVideos.scene_videos,
                 failed_scenes: generatedSceneVideos.failed_scenes,
@@ -1700,6 +1754,7 @@ export function WorkspacePage() {
         mergedVideo,
         intent: "video",
         formValues: msg.artifact?.formValues,
+        intakeContext: msg.artifact?.intakeContext,
         materials: msg.artifact?.materials || [],
         selectedDirection: msg.artifact?.selectedDirection,
         plan: msg.artifact?.plan,
@@ -1726,6 +1781,7 @@ export function WorkspacePage() {
             context: {
               ...makeSnapshot(),
               global_assets: videoScenePackages.global_assets,
+              intake_context: msg.artifact?.intakeContext,
               scene_packages: videoScenePackages.scene_packages,
               generated_scene_videos: generatedSceneVideos.scene_videos,
               merged_video: mergedVideo,
@@ -1883,6 +1939,7 @@ export function WorkspacePage() {
           mergedVideo: artifact.mergedVideo,
           intent: "video",
           formValues: artifact.formValues,
+          intakeContext: artifact.intakeContext,
           materials: artifact.materials || [],
           selectedDirection: artifact.selectedDirection,
           plan: artifact.plan,

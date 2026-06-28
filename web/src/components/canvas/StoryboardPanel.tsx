@@ -1,8 +1,9 @@
 import { ArrowLeft, Box, ImageIcon, MapPin, Sparkles, UserRound } from "lucide-react";
+import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import type { ChatMessage } from "@/lib/chat";
+import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
 import {
   collectSceneImageUrls,
-  MAX_REFERENCE_IMAGE_COUNT,
   stringArray,
   type GlobalSceneAssets,
   type ScenePackagePatch,
@@ -66,10 +67,6 @@ function shotRecord(scene: ScenePackageRecord | undefined): Record<string, unkno
   return value && typeof value === "object" ? value : {};
 }
 
-function textInputClass() {
-  return "w-full rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none focus:border-accent";
-}
-
 function textareaClass(extra = "") {
   return cn("min-h-24 w-full resize-none rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none focus:border-accent", extra);
 }
@@ -110,10 +107,14 @@ export function StoryboardPanel({
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
-  const [referenceSearch, setReferenceSearch] = useState("");
   const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
+  const mentionCandidates = useMemo(() => buildMentionCandidates(assets), [assets]);
+  const shotMentions = useMemo(
+    () => normalizeShotMentions(shot, selectedReferenceIds, assets),
+    [assets, selectedReferenceIds, shot],
+  );
   const allReferenceAssets = useMemo(
     () =>
       (["characters", "scenes", "props"] as AssetGroup[]).flatMap((group) =>
@@ -127,11 +128,6 @@ export function StoryboardPanel({
       ),
     [assets],
   );
-  const filteredReferenceAssets = allReferenceAssets.filter((asset) => {
-    const keyword = referenceSearch.replace(/^@/, "").trim();
-    if (!keyword) return true;
-    return asset.name.includes(keyword) || asset.id.includes(keyword) || assetGroupTitle[asset.group].includes(keyword);
-  });
   const previewUrls = selectedScene ? collectSceneImageUrls(selectedScene, assets) : [];
   const previewUrl = previewUrls[0] || allReferenceAssets.find((asset) => asset.image)?.image || "";
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
@@ -141,19 +137,15 @@ export function StoryboardPanel({
     onUpdateVideoScenePackage?.(selectedScene.scene_id, patch);
   };
 
-  const updateShotDescriptionText = (value: string) => {
-    updateScene({ shot_description: { text: value } });
-  };
-
-  const toggleReference = (assetIdValue: string) => {
-    if (!selectedScene || !assetIdValue) return;
-    const selected = selectedReferenceIds.includes(assetIdValue);
-    const nextIds = selected
-      ? selectedReferenceIds.filter((id) => id !== assetIdValue)
-      : selectedReferenceIds.length >= MAX_REFERENCE_IMAGE_COUNT
-        ? selectedReferenceIds
-        : [...selectedReferenceIds, assetIdValue];
-    updateScene({ reference_asset_ids: nextIds });
+  const updateShotDescription = (next: { text: string; mentions: SceneMention[] }) => {
+    updateScene({
+      shot_description: {
+        ...shot,
+        text: next.text,
+        mentions: next.mentions,
+      },
+      reference_asset_ids: next.mentions.map((mention) => mention.asset_id),
+    });
   };
 
   return (
@@ -242,43 +234,13 @@ export function StoryboardPanel({
                 <div className="grid gap-3 rounded-2xl border border-line bg-canvas p-3">
                   <label className="grid gap-1.5 text-[12px] text-ink-soft">
                     <span className="font-semibold text-ink">镜头描述 <span className="font-normal text-ink-soft">可以通过 @ 来添加参考</span></span>
-                    <textarea
-                      value={shotDescriptionText(shot)}
-                      onChange={(event) => updateShotDescriptionText(event.currentTarget.value)}
-                      placeholder="0-5秒: 地点:@办公室走廊 中,角色:@赵总监 完成动作。5-12秒: 地点:@办公室走廊 中,角色:@林晓 进入近景。"
-                      className={textareaClass("min-h-44")}
+                    <SceneMentionEditor
+                      text={shotDescriptionText(shot)}
+                      shotDescription={{ ...shot, mentions: shotMentions }}
+                      candidates={mentionCandidates}
+                      onChange={updateShotDescription}
                     />
                   </label>
-                  <div className="grid gap-2">
-                    <div className="flex items-center justify-between gap-2 text-[12px]">
-                      <span className="font-medium text-ink">参考素材</span>
-                      <span className={selectedReferenceIds.length >= MAX_REFERENCE_IMAGE_COUNT ? "text-amber" : "text-ink-soft"}>
-                        已选 {selectedReferenceIds.length}/{MAX_REFERENCE_IMAGE_COUNT}，最多 9 张
-                      </span>
-                    </div>
-                    <input value={referenceSearch} onChange={(event) => setReferenceSearch(event.currentTarget.value)} placeholder="输入 @ 搜索出场角色、场景、道具" className={textInputClass()} />
-                    <div className="flex flex-wrap gap-2">
-                      {filteredReferenceAssets.map((asset) => {
-                        const selected = selectedReferenceIds.includes(asset.id);
-                        const disabled = !selected && selectedReferenceIds.length >= MAX_REFERENCE_IMAGE_COUNT;
-                        return (
-                          <button
-                            key={asset.id}
-                            type="button"
-                            disabled={disabled}
-                            onClick={() => toggleReference(asset.id)}
-                            className={cn(
-                              "flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[12px]",
-                              selected ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
-                              disabled && "cursor-not-allowed opacity-40",
-                            )}
-                          >
-                            @{asset.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
                 </div>
                 <label className="grid gap-1.5 text-[12px] font-medium text-ink-soft">
                   旁白

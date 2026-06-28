@@ -77,10 +77,15 @@ export function updateScenePackageAssetField<T extends ScenePackageRecord>(
 }
 
 export function collectSceneImageUrls(
-  scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images" | "reference_asset_ids">,
+  scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images" | "reference_asset_ids" | "shot_description">,
   globalAssets?: GlobalSceneAssets,
 ): string[] {
   const urls = new Set(stringArray(scene.image_urls));
+  const mentionUrls = collectMentionImageUrls(scene.shot_description);
+  mentionUrls.forEach((url) => urls.add(url));
+  if (mentionUrls.length > 0) {
+    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+  }
   if (globalAssets && stringArray(scene.reference_asset_ids).length > 0) {
     stringArray(scene.reference_asset_ids).forEach((assetId) => {
       collectGlobalAssetUrls(globalAssets, assetId).forEach((url) => urls.add(url));
@@ -174,6 +179,28 @@ function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string
     ...stringArray(asset.image_urls),
     ...stringArray(asset.three_view_images),
   ];
+}
+
+function collectMentionImageUrls(shotDescription: unknown): string[] {
+  if (!shotDescription || typeof shotDescription !== "object") return [];
+  const mentions = (shotDescription as Record<string, unknown>).mentions;
+  if (!Array.isArray(mentions)) return [];
+  const urls: string[] = [];
+  for (const mention of mentions) {
+    if (!mention || typeof mention !== "object") continue;
+    const record = mention as Record<string, unknown>;
+    const direct =
+      stringValue(record.image_url) ||
+      stringValue(record.imageUrl) ||
+      stringValue(record.url) ||
+      stringValue(record.download_url) ||
+      stringValue(record.downloadUrl);
+    if (direct) urls.push(direct);
+    for (const key of ["images", "image_urls", "imageUrls"]) {
+      stringArray(record[key]).forEach((url) => urls.push(url));
+    }
+  }
+  return urls;
 }
 
 function findGlobalAsset(globalAssets: GlobalSceneAssets, assetId: string): Record<string, unknown> | undefined {

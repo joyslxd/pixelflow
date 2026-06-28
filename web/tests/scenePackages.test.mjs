@@ -175,6 +175,27 @@ test("collectSceneImageUrls prefers selected global @ references and limits all-
   assert.equal(collectSceneImageUrls(manyScene, manyGlobalAssets).length, 9);
 });
 
+test("collectSceneImageUrls also uses inline shot description mention image urls", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    image_urls: [],
+    reference_asset_ids: [],
+    shot_description: {
+      text: "地点:@桌面场景 中,角色:@讲解者 展示道具:@耳机。",
+      mentions: [
+        { asset_id: "character-host", image_url: "https://x/role-mention.png" },
+        { asset_id: "scene-desk", image_url: "https://x/scene-mention.png" },
+      ],
+    },
+  };
+
+  assert.deepEqual(collectSceneImageUrls(sceneWithMentions, sampleGlobalAssets()), [
+    "https://x/role-mention.png",
+    "https://x/scene-mention.png",
+  ]);
+});
+
 test("sceneIdsForRevision maps explicit scene mentions and falls back to all scenes", () => {
   const scenes = sampleScenes();
 

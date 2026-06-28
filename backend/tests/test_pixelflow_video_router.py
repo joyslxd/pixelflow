@@ -482,6 +482,45 @@ def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
+def test_video_router_clamps_scene_call_duration_to_seedance_single_call_range(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(
+                ok=True,
+                task_id=f"task-{kwargs['duration']}",
+                url=f"https://x/{kwargs['duration']}.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {"scene_id": "scene-1", "scene_index": 1, "duration_ms": 4000, "prompt": "4秒业务片段", "generation_mode": "text_to_video"},
+                    {"scene_id": "scene-2", "scene_index": 2, "duration_ms": 15000, "prompt": "15秒业务片段", "generation_mode": "text_to_video"},
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert [call["duration"] for call in calls] == [5, 10]
+    assert [scene["duration_ms"] for scene in data["scene_videos"]] == [4000, 15000]
+
+
 def test_video_router_starts_scene_video_job_and_polls_result(monkeypatch):
     import time
 
