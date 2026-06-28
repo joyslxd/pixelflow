@@ -71,6 +71,37 @@ def test_recognize_intent_preserves_requested_image_count_from_llm_json() -> Non
     assert result.values["image_count"] == 3
 
 
+def test_recognize_intent_enriches_generic_image_goal_with_product_subject() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "image_generation",
+          "confidence": 0.95,
+          "reason": "用户明确要生成书包宣传图",
+          "product_subject": "书包",
+          "creation_goal": "宣传图",
+          "industry_type": "服饰鞋包",
+          "values": {
+            "image_goal": "宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "活动宣传",
+            "image_style": "真实摄影",
+            "image_size": "自动适配"
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("帮我生成书包的宣传图", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "image"
+    assert result.values["image_goal"] == "书包宣传图"
+    assert result.intake_context["source_prompt"] == "帮我生成书包的宣传图"
+    assert result.intake_context["product_subject"] == "书包"
+    assert result.intake_context["creation_goal"] == "书包宣传图"
+    assert result.intake_context["industry_type"] == "服饰鞋包"
+
+
 def test_recognize_intent_accepts_video_analysis() -> None:
     fake_model = FakeModel('{"intent":"video_analysis","confidence":0.88,"reason":"用户要求分析参考视频","values":{}}')
 

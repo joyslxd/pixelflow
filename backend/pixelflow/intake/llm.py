@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pixelflow.intake.context import normalize_intake_context
 from pixelflow.intake.forms import CreationIntent, CreativeDirection, draft_creative_directions, get_form_schema
 
 INTAKE_LLM_MODEL_NAME = "deepseek-v4-pro"
@@ -26,6 +27,7 @@ class IntentRecognitionResult:
     confidence: float = 0
     reason: str = ""
     values: dict[str, Any] = field(default_factory=dict)
+    intake_context: dict[str, Any] = field(default_factory=dict)
     llm_used: bool = False
     model_name: str = INTAKE_LLM_MODEL_NAME
     error: str | None = None
@@ -36,6 +38,7 @@ class IntentRecognitionResult:
             "confidence": self.confidence,
             "reason": self.reason,
             "values": self.values,
+            "intake_context": self.intake_context,
             "llm_used": self.llm_used,
             "model_name": self.model_name,
             "error": self.error,
@@ -64,22 +67,38 @@ async def recognize_intent_with_llm(
         if not isinstance(payload, dict):
             raise ValueError("intent response must be a JSON object")
         intent = _normalize_intent(payload.get("intent"))
-        values = _augment_intent_values(intent, _filter_form_values(intent, payload.get("values")), text)
+        filtered_values = _augment_intent_values(intent, _filter_form_values(intent, payload.get("values")), text)
+        context = normalize_intake_context(
+            intent=intent,
+            source_prompt=prompt,
+            extracted={
+                **payload,
+                "requested_output_count": payload.get("requested_output_count") or filtered_values.get("image_count"),
+                "values": filtered_values,
+            },
+        )
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
             reason=str(payload.get("reason") or ""),
-            values=values,
+            values=context.form_values,
+            intake_context=context.to_dict(),
             llm_used=True,
             model_name=model_name,
         )
     except Exception as exc:  # noqa: BLE001 - LLM boundary must degrade gracefully
         fallback = _fallback_intent(text)
+        context = normalize_intake_context(
+            intent=fallback,
+            source_prompt=prompt,
+            extracted={"values": _augment_intent_values(fallback, {}, text)},
+        )
         return IntentRecognitionResult(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
             reason="LLM 调用失败，已使用本地兜底规则。",
-            values=_augment_intent_values(fallback, {}, text),
+            values=context.form_values,
+            intake_context=context.to_dict(),
             llm_used=False,
             model_name=model_name,
             error=str(exc),
@@ -160,8 +179,14 @@ product_info, product_category, target_audience, conversion_goal。
 image_goal, image_type, image_usage, image_style, image_size, image_count。
 image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
 
+无论哪种生成任务，都要尽量抽取顶层字段：
+- product_subject: 用户真正要创作的产品、人物、活动或内容主体，例如“书包”。
+- creation_goal: 完整创作目标，例如“书包宣传图”或“书包宣传视频”；不要只写“宣传图”。
+- industry_type: 行业类型，例如“服饰鞋包”“数码3C”；无法判断时写 general。
+- requested_output_count: 用户明确要求的产物数量；没有明确数量时写 1。
+
 只返回 JSON，不要解释，不要 Markdown：
-{{"intent":"video_generation|image_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","values":{{}}}}
+{{"intent":"video_generation|image_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","product_subject":"","creation_goal":"","industry_type":"general","requested_output_count":1,"values":{{}}}}
 
 用户输入和素材：
 {text}
