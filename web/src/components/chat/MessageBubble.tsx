@@ -47,7 +47,7 @@ function assetTitle(record: Record<string, unknown>, fallback: string): string {
 }
 
 function assetImage(record: Record<string, unknown>): string {
-  return stringArray(record.three_view_images)[0] || stringArray(record.images)[0] || stringArray(record.image_urls)[0] || stringValue(record.url);
+  return stringArray(record.images)[0] || stringArray(record.image_urls)[0] || stringArray(record.three_view_images)[0] || stringValue(record.url);
 }
 
 function materialUrl(record: Record<string, unknown>): string {

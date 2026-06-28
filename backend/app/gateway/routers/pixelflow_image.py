@@ -68,60 +68,120 @@ async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
 @router.post("/generate", response_model=ImageGenerateResponse)
 async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
     skill = get_image_skill()
-    if body.method == "image_edit":
-        model = _optional_str(body.params.get("model"))
-        result = await skill.image_edit(
-            image_url=_first_image_url(body.params),
-            prompt=body.prompt or str(body.params.get("prompt") or ""),
-            model=model,
-            ratio=_ratio_from_params(body.params),
-            size=_image_size_from_params(body.params, model),
-            max_images=int(body.params.get("max_images") or body.params.get("num_images") or body.params.get("num") or 1),
-        )
-    elif body.method == "multi_reference_image_generation":
-        model = _optional_str(body.params.get("model"))
-        result = await skill.reference_image(
-            reference_images=_image_urls_from_params(body.params, primary_keys=("reference_image_urls", "referenceImageUrls")),
-            prompt=body.prompt or str(body.params.get("prompt") or ""),
-            ratio=_ratio_from_params(body.params),
-            size=_image_size_from_params(body.params, model),
-            model=model,
-            max_images=int(body.params.get("max_images") or body.params.get("num_images") or 1),
-        )
-    elif body.method == "multi_image_fusion":
-        model = _optional_str(body.params.get("model"))
-        result = await skill.multi_image_fusion(
-            image_urls=_image_urls_from_params(body.params, primary_keys=("image_urls", "imageUrls")),
-            prompt=body.prompt or str(body.params.get("prompt") or ""),
-            ratio=_ratio_from_params(body.params),
-            size=_image_size_from_params(body.params, model),
-            model=model,
-            num_images=int(body.params.get("num_images") or body.params.get("num") or 1),
-        )
-    else:
-        model = _optional_str(body.params.get("model"))
-        result = await skill.text_to_image(
-            prompt=body.prompt or str(body.params.get("prompt") or ""),
-            ratio=str(body.params.get("ratio") or "1:1"),
-            size=_image_size_from_params(body.params, model),
-            model=model,
-            num_images=int(body.params.get("num_images") or body.params.get("num") or 1),
-        )
-    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
-    message = "图片生成完成。" if result.ok else (result.error or "图片生成失败。")
-    if quota_insufficient:
-        message = quota_resume_message(result.error)
+    requested_count = _requested_image_count(body.params)
+    images: list[dict[str, Any]] = []
+    raw_results: list[dict[str, Any]] = []
+    task_ids: list[str] = []
+    last_result = None
+    for _index in range(requested_count):
+        params = _single_image_params(body.method, body.params)
+        result = await _generate_image_once(skill, body, params)
+        last_result = result
+        raw_results.append(result.raw)
+        if result.task_id:
+            task_ids.append(result.task_id)
+        if result.images:
+            images.extend(result.images)
+        quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+        if not result.ok or quota_insufficient:
+            message = quota_resume_message(result.error) if quota_insufficient else (result.error or "图片生成失败。")
+            return ImageGenerateResponse(
+                ok=False,
+                method=body.method,
+                endpoint=_endpoint_for(body.method, result.raw),
+                task_id=task_ids[0] if task_ids else result.task_id,
+                images=images,
+                error=result.error,
+                message=message,
+                quota_insufficient=quota_insufficient,
+                raw=_aggregate_raw(raw_results, requested_count),
+            )
+        if len(images) >= requested_count:
+            break
+    if last_result is None:
+        raise RuntimeError("图片生成未执行")
     return ImageGenerateResponse(
-        ok=result.ok,
+        ok=True,
         method=body.method,
-        endpoint=_endpoint_for(body.method, result.raw),
-        task_id=result.task_id,
-        images=result.images,
-        error=result.error,
-        message=message,
-        quota_insufficient=quota_insufficient,
-        raw=result.raw,
+        endpoint=_endpoint_for(body.method, last_result.raw),
+        task_id=task_ids[0] if task_ids else last_result.task_id,
+        images=images[:requested_count],
+        message="图片生成完成。",
+        quota_insufficient=False,
+        raw=_aggregate_raw(raw_results, requested_count),
     )
+
+
+async def _generate_image_once(skill: Any, body: ImageGenerateRequest, params: dict[str, Any]):
+    if body.method == "image_edit":
+        model = _optional_str(params.get("model"))
+        return await skill.image_edit(
+            image_url=_first_image_url(params),
+            prompt=body.prompt or str(params.get("prompt") or ""),
+            model=model,
+            ratio=_ratio_from_params(params),
+            size=_image_size_from_params(params, model),
+            max_images=int(params.get("max_images") or params.get("num_images") or params.get("num") or 1),
+        )
+    if body.method == "multi_reference_image_generation":
+        model = _optional_str(params.get("model"))
+        return await skill.reference_image(
+            reference_images=_image_urls_from_params(params, primary_keys=("reference_image_urls", "referenceImageUrls")),
+            prompt=body.prompt or str(params.get("prompt") or ""),
+            ratio=_ratio_from_params(params),
+            size=_image_size_from_params(params, model),
+            model=model,
+            max_images=int(params.get("max_images") or params.get("num_images") or 1),
+        )
+    if body.method == "multi_image_fusion":
+        model = _optional_str(params.get("model"))
+        return await skill.multi_image_fusion(
+            image_urls=_image_urls_from_params(params, primary_keys=("image_urls", "imageUrls")),
+            prompt=body.prompt or str(params.get("prompt") or ""),
+            ratio=_ratio_from_params(params),
+            size=_image_size_from_params(params, model),
+            model=model,
+            num_images=int(params.get("num_images") or params.get("num") or 1),
+        )
+    model = _optional_str(params.get("model"))
+    return await skill.text_to_image(
+        prompt=body.prompt or str(params.get("prompt") or ""),
+        ratio=str(params.get("ratio") or "1:1"),
+        size=_image_size_from_params(params, model),
+        model=model,
+        num_images=int(params.get("num_images") or params.get("num") or 1),
+    )
+
+
+def _requested_image_count(params: dict[str, Any]) -> int:
+    try:
+        count = int(params.get("max_images") or params.get("num_images") or params.get("num") or 1)
+    except (TypeError, ValueError):
+        count = 1
+    return max(1, min(10, count))
+
+
+def _single_image_params(method: ImageMethod, params: dict[str, Any]) -> dict[str, Any]:
+    single = dict(params)
+    if method in {"image_edit", "multi_reference_image_generation"}:
+        single["max_images"] = 1
+    else:
+        single["num_images"] = 1
+        single["num"] = 1
+    return single
+
+
+def _aggregate_raw(raw_results: list[dict[str, Any]], requested_count: int) -> dict[str, Any]:
+    if len(raw_results) == 1:
+        raw = dict(raw_results[0])
+        raw["requested_images"] = requested_count
+        return raw
+    endpoint = next((raw.get("endpoint") for raw in raw_results if isinstance(raw.get("endpoint"), str)), None)
+    return {
+        "endpoint": endpoint,
+        "requested_images": requested_count,
+        "results": raw_results,
+    }
 
 
 def _endpoint_for(method: ImageMethod, raw: dict[str, Any]) -> str:

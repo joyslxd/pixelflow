@@ -54,7 +54,7 @@ function assetName(record: Record<string, unknown>, fallback: string): string {
 }
 
 function assetImage(record: Record<string, unknown>): string {
-  return stringArray(record.three_view_images)[0] || stringArray(record.images)[0] || stringArray(record.image_urls)[0] || stringValue(record.url);
+  return stringArray(record.images)[0] || stringArray(record.image_urls)[0] || stringArray(record.three_view_images)[0] || stringValue(record.url);
 }
 
 function globalAssetRecords(assets: GlobalSceneAssets, group: AssetGroup): Array<Record<string, unknown>> {
@@ -72,6 +72,21 @@ function textInputClass() {
 
 function textareaClass(extra = "") {
   return cn("min-h-24 w-full resize-none rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none focus:border-accent", extra);
+}
+
+function shotDescriptionText(shot: Record<string, unknown>): string {
+  const direct = stringValue(shot.text) || stringValue(shot.description_text) || stringValue(shot.shotText);
+  if (direct) return direct;
+  const legacyParts = [
+    stringValue(shot.time_range) || stringValue(shot.timeRange),
+    stringValue(shot.location) ? `地点:${stringValue(shot.location)} 中,` : "",
+    stringArray(shot.characters).length > 0 ? `角色:${stringArray(shot.characters).join("、")}` : "",
+    stringValue(shot.description),
+    stringArray(shot.props).length > 0 ? `道具:${stringArray(shot.props).join("、")}` : "",
+    stringValue(shot.shot_size) || stringValue(shot.shotSize),
+    stringValue(shot.visual_style) ? `视觉风格:${stringValue(shot.visual_style)}` : "",
+  ];
+  return legacyParts.filter(Boolean).join("");
 }
 
 function quotaInsufficient(value: unknown): boolean {
@@ -126,8 +141,8 @@ export function StoryboardPanel({
     onUpdateVideoScenePackage?.(selectedScene.scene_id, patch);
   };
 
-  const updateShot = (field: string, value: unknown) => {
-    updateScene({ shot_description: { ...shot, [field]: value } });
+  const updateShotDescriptionText = (value: string) => {
+    updateScene({ shot_description: { text: value } });
   };
 
   const toggleReference = (assetIdValue: string) => {
@@ -225,32 +240,18 @@ export function StoryboardPanel({
                   <textarea value={selectedScene.storyline || ""} onChange={(event) => updateScene({ storyline: event.currentTarget.value })} className={textareaClass()} />
                 </label>
                 <div className="grid gap-3 rounded-2xl border border-line bg-canvas p-3">
-                  <div className="text-[13px] font-semibold text-ink">镜头描述</div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <label className="grid gap-1 text-[12px] text-ink-soft">
-                      时间范围
-                      <input value={stringValue(shot.time_range)} onChange={(event) => updateShot("time_range", event.currentTarget.value)} className={textInputClass()} />
-                    </label>
-                    <label className="grid gap-1 text-[12px] text-ink-soft">
-                      地点标注
-                      <input value={stringValue(shot.location)} onChange={(event) => updateShot("location", event.currentTarget.value)} className={textInputClass()} />
-                    </label>
-                    <label className="grid gap-1 text-[12px] text-ink-soft">
-                      角色标注
-                      <input value={stringArray(shot.characters).join("、")} onChange={(event) => updateShot("characters", event.currentTarget.value.split(/[、,\s]+/).filter(Boolean))} className={textInputClass()} />
-                    </label>
-                    <label className="grid gap-1 text-[12px] text-ink-soft">
-                      景别
-                      <input value={stringValue(shot.shot_size)} onChange={(event) => updateShot("shot_size", event.currentTarget.value)} className={textInputClass()} />
-                    </label>
-                  </div>
-                  <label className="grid gap-1 text-[12px] text-ink-soft">
-                    镜头描述
-                    <textarea value={stringValue(shot.description)} onChange={(event) => updateShot("description", event.currentTarget.value)} className={textareaClass("min-h-32")} />
+                  <label className="grid gap-1.5 text-[12px] text-ink-soft">
+                    <span className="font-semibold text-ink">镜头描述 <span className="font-normal text-ink-soft">可以通过 @ 来添加参考</span></span>
+                    <textarea
+                      value={shotDescriptionText(shot)}
+                      onChange={(event) => updateShotDescriptionText(event.currentTarget.value)}
+                      placeholder="0-5秒: 地点:@办公室走廊 中,角色:@赵总监 完成动作。5-12秒: 地点:@办公室走廊 中,角色:@林晓 进入近景。"
+                      className={textareaClass("min-h-44")}
+                    />
                   </label>
                   <div className="grid gap-2">
                     <div className="flex items-center justify-between gap-2 text-[12px]">
-                      <span className="font-medium text-ink">可以通过 @ 来添加参考</span>
+                      <span className="font-medium text-ink">参考素材</span>
                       <span className={selectedReferenceIds.length >= MAX_REFERENCE_IMAGE_COUNT ? "text-amber" : "text-ink-soft"}>
                         已选 {selectedReferenceIds.length}/{MAX_REFERENCE_IMAGE_COUNT}，最多 9 张
                       </span>

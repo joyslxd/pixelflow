@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const workspaceSource = fs.readFileSync(path.resolve("src/pages/WorkspacePage.tsx"), "utf8");
+const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -45,6 +46,17 @@ test("image form values preserve requested multi-image count", () => {
   assert.notEqual(valuesEnd, -1, "revisedScenePrompt must follow valuesFromForm");
   const source = workspaceSource.slice(valuesStart, valuesEnd);
   assert.match(source, /image_count:\s*form\.image_count/);
+});
+
+test("image requirement form only exposes approved image size choices", () => {
+  const match = genParamsDialogSource.match(/const IMAGE_SIZES = \[(.*?)\];/s);
+  assert.ok(match, "IMAGE_SIZES must be declared");
+  assert.equal(match[1].includes("1:1"), true);
+  assert.equal(match[1].includes("16:9"), true);
+  assert.equal(match[1].includes("9:16"), true);
+  assert.equal(match[1].includes("自动适配"), true);
+  assert.equal(match[1].includes("3:4"), false);
+  assert.equal(match[1].includes("4:5"), false);
 });
 
 test("image plan approval continues through image generation instead of stopping at prepare", () => {

@@ -29,7 +29,7 @@ def test_image_form_schema_matches_required_screenshot_fields():
     assert schema.fields[1].options == ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"]
     assert schema.fields[2].options == ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"]
     assert schema.fields[3].options == ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"]
-    assert schema.fields[4].options == ["1:1 正方形", "3:4 竖图", "4:5 信息流图", "9:16 竖版海报", "16:9 横版图", "自动适配"]
+    assert schema.fields[4].options == ["1:1", "16:9", "9:16", "自动适配"]
 
 
 def test_validate_form_returns_missing_fields_and_terminates_after_three_rounds():

@@ -31,6 +31,7 @@ REFERENCE_IMAGE_QUALITY = "4K"
 IMAGE_EDIT_MODEL = "gpt-image-2"
 IMAGE_EDIT_QUALITY = "4K"
 RATIO_PATTERN = re.compile(r"(\d{1,2})\s*:\s*(\d{1,2})")
+SUPPORTED_OUTPUT_RATIOS = {"1:1", "9:16", "16:9"}
 
 
 @dataclass(frozen=True)
@@ -248,7 +249,7 @@ def _resolve_ratio(form_values: dict[str, Any], plan_markdown: str, selected_dir
     explicit = _explicit_ratio(label)
     if explicit:
         return explicit
-    if not label or _is_auto_size(label):
+    if not label or _is_auto_size(label) or RATIO_PATTERN.search(label):
         return _auto_ratio(form_values, plan_markdown, selected_direction)
     return "1:1"
 
@@ -256,7 +257,8 @@ def _resolve_ratio(form_values: dict[str, Any], plan_markdown: str, selected_dir
 def _explicit_ratio(label: str) -> str:
     match = RATIO_PATTERN.search(label)
     if match:
-        return f"{int(match.group(1))}:{int(match.group(2))}"
+        ratio = f"{int(match.group(1))}:{int(match.group(2))}"
+        return ratio if ratio in SUPPORTED_OUTPUT_RATIOS else ""
     if "正方" in label or "方图" in label:
         return "1:1"
     return ""
@@ -273,18 +275,18 @@ def _auto_ratio(form_values: dict[str, Any], plan_markdown: str, selected_direct
         return "16:9"
     if _has_any(context, ["商品主图", "主图", "头像", "logo", "图标", "电商主图", "正方形", "1:1"]):
         return "1:1"
-    if _has_any(context, ["信息流", "4:5", "feed"]):
-        return "4:5"
     if _has_any(context, ["竖版", "竖图", "海报", "封面", "小红书", "社媒", "短视频", "种草", "抖音", "快手", "投放", "9:16"]):
         return "9:16"
+    if _has_any(context, ["信息流", "4:5", "feed"]):
+        return "9:16"
     if _has_any(context, ["人物", "场景图", "3:4"]):
-        return "3:4"
+        return "9:16"
     return "1:1"
 
 
 def _context_text(form_values: dict[str, Any], plan_markdown: str, selected_direction: dict[str, Any]) -> str:
     parts = [plan_markdown]
-    parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style"])
+    parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style", "image_size"])
     parts.extend(_text(value) for value in selected_direction.values())
     return " ".join(part for part in parts if part).lower()
 

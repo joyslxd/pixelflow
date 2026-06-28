@@ -126,6 +126,51 @@ def test_image_router_generates_text_to_image(monkeypatch):
     assert data["images"][0]["url"] == "https://x/image.png"
 
 
+def test_image_router_generates_requested_multiple_images_by_repeated_calls(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    calls: list[dict] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs)
+            assert kwargs["num_images"] == 1
+            index = len(calls)
+            return ImageGenerationResult(
+                ok=True,
+                task_id=f"img-task-{index}",
+                images=[{"asset_id": f"img-{index}", "url": f"https://x/image-{index}.png"}],
+                raw={"endpoint": "/api/picture/text_to_image", "task_id": f"img-task-{index}"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/generate",
+            json={
+                "method": "text_to_image",
+                "prompt": "帮我生成3张台球图片",
+                "params": {"ratio": "1:1", "size": "1080p", "num_images": 3},
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert len(calls) == 3
+    assert data["task_id"] == "img-task-1"
+    assert [image["url"] for image in data["images"]] == [
+        "https://x/image-1.png",
+        "https://x/image-2.png",
+        "https://x/image-3.png",
+    ]
+
+
 def test_image_router_marks_quota_insufficient_generation(monkeypatch):
     from app.gateway.routers import pixelflow_image
     from pixelflow.skills import ImageGenerationResult

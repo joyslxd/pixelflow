@@ -170,9 +170,9 @@ function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string
   const asset = findGlobalAsset(globalAssets, assetId);
   if (!asset) return [];
   return [
-    ...stringArray(asset.three_view_images),
     ...stringArray(asset.images),
     ...stringArray(asset.image_urls),
+    ...stringArray(asset.three_view_images),
   ];
 }
 

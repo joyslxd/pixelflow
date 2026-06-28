@@ -357,9 +357,9 @@ async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSce
     asset_jobs: list[tuple[dict[str, Any], str, str, str, dict[str, Any]]] = []
     if global_assets:
         for character in _list_of_dicts(global_assets.get("characters")):
-            prompt = str(character.get("three_view_prompt") or character.get("description") or "").strip()
+            prompt = str(character.get("image_prompt") or character.get("three_view_prompt") or character.get("description") or "").strip()
             if prompt:
-                asset_jobs.append((character, "three_view_images", prompt, "1:1", {"asset_id": character.get("asset_id"), "asset_type": "character"}))
+                asset_jobs.append((character, "images", prompt, "1:1", {"asset_id": character.get("asset_id"), "asset_type": "character"}))
         for scene_image in _list_of_dicts(global_assets.get("scenes")):
             prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
             if prompt:
@@ -372,9 +372,9 @@ async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSce
         for scene in enriched:
             scene_id = str(scene.get("scene_id") or "")
             for character in _list_of_dicts(scene.get("characters")):
-                prompt = str(character.get("three_view_prompt") or character.get("description") or "").strip()
+                prompt = str(character.get("image_prompt") or character.get("three_view_prompt") or character.get("description") or "").strip()
                 if prompt:
-                    asset_jobs.append((character, "three_view_images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "character"}))
+                    asset_jobs.append((character, "images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "character"}))
             for scene_image in _list_of_dicts(scene.get("scene_images")):
                 prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
                 if prompt:
@@ -715,6 +715,9 @@ def _build_scene_video_prompt(scene: SceneGenerationItem) -> str:
 
 
 def _shot_description_text(shot_description: dict[str, Any]) -> str:
+    text = shot_description.get("text") or shot_description.get("description_text") or shot_description.get("shotText")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
     return "；".join(
         part
         for part in (

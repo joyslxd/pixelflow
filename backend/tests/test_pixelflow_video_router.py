@@ -62,12 +62,16 @@ def test_video_router_prepares_scene_packages():
     assert data["ok"] is True
     assert data["requires_confirmation"] is True
     assert data["review_timeout_sec"] is None
-    assert data["global_assets"]["characters"][0]["asset_id"] == "character-host"
+    character_assets = data["global_assets"]["characters"]
+    assert len(character_assets) >= 2
+    assert all("image_prompt" in asset for asset in character_assets)
+    assert all("three_view_prompt" not in asset for asset in character_assets)
     assert data["global_assets"]["visual_style"]["name"]
     assert data["scene_packages"][0]["scene_id"] == "scene-1"
     assert 4_000 <= data["scene_packages"][0]["duration_ms"] <= 15_000
     assert data["scene_packages"][0]["reference_asset_ids"]
-    assert set(data["scene_packages"][0]["shot_description"]) >= {"time_range", "location", "characters", "shot_size", "description"}
+    assert set(data["scene_packages"][0]["shot_description"]) == {"text"}
+    assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
 
 
@@ -79,9 +83,9 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
         async def text_to_image(self, **kwargs):
             prompt = kwargs["prompt"]
             assert kwargs["size"] == "1080p"
-            if "三视图" in prompt:
+            if "角色图" in prompt:
                 assert kwargs["ratio"] == "1:1"
-                return ImageGenerationResult(ok=True, images=[{"url": "https://x/three-view.png"}], raw={"endpoint": "/api/picture/text_to_image"})
+                return ImageGenerationResult(ok=True, images=[{"url": "https://x/role.png"}], raw={"endpoint": "/api/picture/text_to_image"})
             if "场景图" in prompt:
                 assert kwargs["ratio"] == "9:16"
                 return ImageGenerationResult(ok=True, images=[{"url": "https://x/scene.png"}], raw={"endpoint": "/api/picture/text_to_image"})
@@ -100,7 +104,7 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
             "/agent/flows/video/generate-scene-assets",
             json={
                 "global_assets": {
-                    "characters": [{"asset_id": "character-host", "name": "讲解者", "three_view_prompt": "角色三视图"}],
+                    "characters": [{"asset_id": "character-presenter", "name": "讲解者", "image_prompt": "讲解者角色图"}],
                     "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
                     "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
                     "visual_style": {"asset_id": "style-main", "name": "真实摄影"},
@@ -109,7 +113,7 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
                     {
                         "scene_id": "scene-1",
                         "scene_index": 1,
-                        "reference_asset_ids": ["character-host", "scene-desk", "prop-product"],
+                        "reference_asset_ids": ["character-presenter", "scene-desk", "prop-product"],
                     }
                 ]
             },
@@ -119,7 +123,7 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
     data = response.json()
     assert data["ok"] is True
     assert data["endpoint"] == "/api/picture/text_to_image"
-    assert data["global_assets"]["characters"][0]["three_view_images"] == ["https://x/three-view.png"]
+    assert data["global_assets"]["characters"][0]["images"] == ["https://x/role.png"]
     assert data["global_assets"]["scenes"][0]["images"] == ["https://x/scene.png"]
     assert data["global_assets"]["props"][0]["images"] == ["https://x/prop.png"]
 
@@ -149,7 +153,7 @@ def test_video_router_stops_scene_asset_generation_on_quota_failure(monkeypatch)
             "/agent/flows/video/generate-scene-assets",
             json={
                 "global_assets": {
-                    "characters": [{"asset_id": "character-host", "name": "讲解者", "three_view_prompt": "角色三视图"}],
+                    "characters": [{"asset_id": "character-presenter", "name": "讲解者", "image_prompt": "讲解者角色图"}],
                     "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
                 },
                 "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],

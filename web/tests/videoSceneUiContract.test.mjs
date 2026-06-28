@@ -37,6 +37,11 @@ test("storyboard detail panel edits global assets and scene-varying fields", () 
   assert.match(storyboardPanelSource, /故事线/);
   assert.match(storyboardPanelSource, /镜头描述/);
   assert.match(storyboardPanelSource, /旁白/);
+  assert.doesNotMatch(storyboardPanelSource, />\s*时间范围\s*</);
+  assert.doesNotMatch(storyboardPanelSource, />\s*地点标注\s*</);
+  assert.doesNotMatch(storyboardPanelSource, />\s*角色标注\s*</);
+  assert.doesNotMatch(storyboardPanelSource, />\s*景别\s*</);
+  assert.match(storyboardPanelSource, /shotDescriptionText/);
 });
 
 test("storyboard detail panel enforces at-reference image limit and failure details", () => {

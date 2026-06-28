@@ -92,7 +92,7 @@ def test_prepare_image_generation_auto_size_uses_context_for_horizontal_banner()
     assert result.params["ratio"] == "16:9"
 
 
-def test_prepare_image_generation_keeps_explicit_non_default_ratio():
+def test_prepare_image_generation_normalizes_unsupported_explicit_ratio():
     result = prepare_image_generation(
         {"image_goal": "信息流广告图", "image_style": "真实摄影", "image_size": "4:5 信息流图"},
         "plan",
@@ -100,7 +100,7 @@ def test_prepare_image_generation_keeps_explicit_non_default_ratio():
     )
 
     assert result.ok is True
-    assert result.params["ratio"] == "4:5"
+    assert result.params["ratio"] == "9:16"
 
 
 def test_prepare_image_generation_uses_multi_reference_with_image_materials():
@@ -167,5 +167,5 @@ def test_prepare_image_generation_prepares_multi_image_fusion():
     assert result.endpoint == "/api/picture/multi_image_fusion"
     assert result.method == "multi_image_fusion"
     assert result.params["image_urls"] == ["https://x/a.png", "https://x/b.png"]
-    assert result.params["width"] == 4
-    assert result.params["height"] == 5
+    assert result.params["width"] == 9
+    assert result.params["height"] == 16

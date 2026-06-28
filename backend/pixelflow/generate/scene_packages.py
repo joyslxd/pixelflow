@@ -68,7 +68,7 @@ def prepare_video_scene_packages(
             product_category=product_category,
             conversion_goal=conversion_goal,
         )
-        reference_asset_ids = ["character-host", stage["asset_id"], "prop-product"]
+        reference_asset_ids = _default_reference_asset_ids(global_assets, stage["asset_id"])
         shot_description = _default_shot_description(
             stage=stage,
             start_ms=elapsed_ms,
@@ -225,15 +225,19 @@ def _scene_package_prompt(
 1. 必须返回 {len(durations)} 个 scene_packages，顺序和 durations_ms 完全对应。
 2. 每个片段时长必须在 {MIN_SCENE_DURATION_MS} 到 {MAX_SCENE_DURATION_MS} ms 之间。
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
-4. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
-5. shot_description 必须包含 time_range、location、characters、props、shot_size、description、visual_style。
-6. shot_description 中引用角色、场景、道具、视觉风格时使用 @asset_id，例如 @character-host。
-7. reference_asset_ids 最多 9 个，必须来自 global_assets 的 asset_id。
-8. 只返回 JSON，不要 Markdown，不要解释。
+4. global_assets.characters 是整片固定的不同出场角色或产品主体，每个 asset 都是一张独立参考图，不要生成正面/侧面/背面的三视图。
+5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
+6. shot_description 只包含 text 字段。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
+7. shot_description.text 中引用角色、场景、道具、视觉风格时使用 @asset_id，例如 @character-presenter。
+8. reference_asset_ids 最多 9 个，必须来自 global_assets 的 asset_id。
+9. 只返回 JSON，不要 Markdown，不要解释。
 
 输出格式：
 {{"global_assets":{{
-  "characters":[{{"asset_id":"character-host","name":"角色名","description":"角色描述","three_view_prompt":"角色三视图生成提示词"}}],
+  "characters":[
+    {{"asset_id":"character-presenter","name":"角色名","description":"角色描述","image_prompt":"角色单张参考图生成提示词"}},
+    {{"asset_id":"character-user","name":"另一个角色名","description":"另一个角色描述","image_prompt":"另一个角色单张参考图生成提示词"}}
+  ],
   "scenes":[{{"asset_id":"scene-opening","name":"场景名","description":"场景描述","image_prompt":"场景图生成提示词"}}],
   "props":[{{"asset_id":"prop-product","name":"道具名","description":"道具描述","image_prompt":"道具图生成提示词"}}],
   "visual_style":{{"asset_id":"style-main","name":"视觉风格名","description":"视觉风格描述","prompt":"视觉风格约束"}}
@@ -242,8 +246,8 @@ def _scene_package_prompt(
   {{
     "title":"场景标题",
     "storyline":"故事线",
-    "shot_description":{{"time_range":"00:00.000-00:10.000","location":"@scene-opening","characters":["@character-host"],"props":["@prop-product"],"shot_size":"中景","description":"镜头描述","visual_style":"@style-main"}},
-    "reference_asset_ids":["character-host","scene-opening","prop-product"],
+    "shot_description":{{"text":"0-10秒: 地点:@scene-opening 中,角色:@character-presenter 在画面中完成动作,道具:@prop-product 清晰可见。景别和运动方式写在这段话里。"}},
+    "reference_asset_ids":["character-presenter","scene-opening","prop-product"],
     "prompt":"分镜片段创作提示词",
     "narration":"旁白"
   }}
@@ -292,7 +296,7 @@ def _normalize_llm_scene_packages(
             raw.get("shot_prompt"),
             _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style")),
         )
-        if not storyline or not shot_description.get("description") or not prompt:
+        if not storyline or not shot_description.get("text") or not prompt:
             return []
         title = _first_text(raw.get("title"), f"场景 {index}")
         return_scene = {
@@ -327,7 +331,7 @@ def _normalize_llm_global_assets(
             raw.get("characters"),
             fallback=defaults["characters"],
             default_prefix="character",
-            required_fields=("name", "description", "three_view_prompt"),
+            required_fields=("name", "description", "image_prompt"),
         ),
         "scenes": _normalize_global_asset_list(
             raw.get("scenes"),
@@ -360,8 +364,13 @@ def _normalize_global_asset_list(
             continue
         asset_id = _first_text(item.get("asset_id"), item.get("id"), f"{default_prefix}-{index}")
         cleaned = {field_name: _first_text(item.get(field_name)) for field_name in required_fields}
+        if "image_prompt" in required_fields and not cleaned.get("image_prompt"):
+            cleaned["image_prompt"] = _first_text(item.get("three_view_prompt"), item.get("prompt"))
         if all(cleaned.values()):
-            normalized.append({**item, **cleaned, "asset_id": asset_id})
+            cleaned_item = {**item, **cleaned, "asset_id": asset_id}
+            cleaned_item.pop("three_view_prompt", None)
+            cleaned_item.pop("three_view_images", None)
+            normalized.append(cleaned_item)
     return normalized or fallback
 
 
@@ -385,7 +394,7 @@ def _normalize_reference_asset_ids(value: Any, global_assets: dict[str, Any], st
     raw_ids = [str(item).lstrip("@").strip() for item in value] if isinstance(value, list) else []
     reference_ids = [asset_id for asset_id in raw_ids if asset_id and asset_id in known_ids]
     if not reference_ids:
-        reference_ids = ["character-host", stage_asset_id, "prop-product"]
+        reference_ids = _default_reference_asset_ids(global_assets, stage_asset_id)
     deduped: list[str] = []
     for asset_id in reference_ids:
         if asset_id in known_ids and asset_id not in deduped:
@@ -409,17 +418,10 @@ def _normalize_shot_description(
     )
     if not isinstance(value, dict):
         return fallback
-    characters = _normalize_at_list(value.get("characters"), fallback["characters"])
-    props = _normalize_at_list(value.get("props"), fallback["props"])
-    return {
-        "time_range": _first_text(value.get("time_range"), value.get("timeRange"), fallback["time_range"]),
-        "location": _normalize_at_text(value.get("location"), fallback["location"]),
-        "characters": characters,
-        "props": props,
-        "shot_size": _first_text(value.get("shot_size"), value.get("shotSize"), value.get("景别"), fallback["shot_size"]),
-        "description": _first_text(value.get("description"), value.get("镜头描述"), fallback["description"]),
-        "visual_style": _normalize_at_text(value.get("visual_style"), fallback["visual_style"]),
-    }
+    text = _first_text(value.get("text"), value.get("镜头描述"))
+    if not text:
+        text = _legacy_shot_description_text(value, fallback["text"])
+    return {"text": _normalize_shot_text(text)}
 
 
 def _normalize_at_list(value: Any, fallback: list[str]) -> list[str]:
@@ -434,6 +436,41 @@ def _normalize_at_text(value: Any, fallback: str) -> str:
     if not text:
         return fallback
     return text if text.startswith("@") else f"@{text}"
+
+
+def _legacy_shot_description_text(value: dict[str, Any], fallback: str) -> str:
+    description = _first_text(value.get("description"), value.get("镜头描述"))
+    if not description:
+        return fallback
+    time_range = _first_text(value.get("time_range"), value.get("timeRange"))
+    location = _normalize_at_text(value.get("location"), "")
+    characters = _normalize_at_list(value.get("characters"), [])
+    props = _normalize_at_list(value.get("props"), [])
+    shot_size = _first_text(value.get("shot_size"), value.get("shotSize"), value.get("景别"))
+    visual_style = _normalize_at_text(value.get("visual_style"), "")
+    pieces = []
+    if time_range:
+        pieces.append(f"{time_range}:")
+    if location:
+        pieces.append(f"地点:{location} 中,")
+    if characters:
+        pieces.append(f"角色:{'、'.join(characters)}")
+    pieces.append(description)
+    if props:
+        pieces.append(f"道具:{'、'.join(props)}")
+    if shot_size:
+        pieces.append(f"景别:{shot_size}")
+    if visual_style:
+        pieces.append(f"视觉风格:{visual_style}")
+    return "".join(pieces)
+
+
+def _normalize_shot_text(text: str) -> str:
+    normalized = _first_text(text)
+    for label in ("地点", "角色", "道具", "视觉风格"):
+        normalized = re.sub(rf"({label})\s*[：:]\s*@([\w\-\u4e00-\u9fff]+)", r"\1:@\2", normalized)
+        normalized = re.sub(rf"({label})\s*@([\w\-\u4e00-\u9fff]+)", r"\1:@\2", normalized)
+    return normalized
 
 
 def _normalize_scene_items(value: Any, *, fallback: list[dict[str, Any]], required_fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -453,10 +490,10 @@ def _default_character(form_values: dict[str, Any]) -> dict[str, Any]:
     target_audience = _first_text(form_values.get("target_audience"), "目标用户")
     product_name = _first_text(form_values.get("product_info"), "产品")
     return {
-        "name": "讲解者",
+        "name": "主讲人",
         "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-        "three_view_prompt": f"{product_name}短视频讲解者三视图，正面、侧面、背面，统一服饰和发型",
-        "three_view_images": [],
+        "image_prompt": f"{product_name}短视频主讲人单张角色参考图，半身或全身，服饰发型统一，真实摄影，干净背景",
+        "images": [],
     }
 
 
@@ -509,12 +546,19 @@ def _default_global_assets(
     return {
         "characters": [
             {
-                "asset_id": "character-host",
-                "name": "讲解者",
+                "asset_id": "character-presenter",
+                "name": "主讲人",
                 "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-                "three_view_prompt": f"{product_name}短视频讲解者三视图，正面、侧面、背面，统一服饰和发型",
-                "three_view_images": [],
-            }
+                "image_prompt": f"{product_name}短视频主讲人单张角色参考图，半身或全身，服饰发型统一，真实摄影，干净背景",
+                "images": [],
+            },
+            {
+                "asset_id": "character-product",
+                "name": product_name,
+                "description": f"{product_category}商品主体，作为视频中的核心出场对象保持外观一致",
+                "image_prompt": f"{product_name}单张产品角色参考图，干净背景，主体完整，细节清晰，颜色和外观稳定",
+                "images": [],
+            },
         ],
         "scenes": scene_assets,
         "props": [
@@ -615,17 +659,37 @@ def _default_shot_description(
     reference_asset_ids: list[str],
 ) -> dict[str, Any]:
     location_id = next((asset_id for asset_id in reference_asset_ids if asset_id.startswith("scene-")), stage["asset_id"])
-    character_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("character-")] or ["character-host"]
+    character_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("character-")] or ["character-presenter"]
     prop_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("prop-")] or ["prop-product"]
+    time_range = _format_time_range(start_ms, start_ms + duration_ms)
+    character_text = "、".join(f"@{asset_id}" for asset_id in character_ids)
+    prop_text = "、".join(f"@{asset_id}" for asset_id in prop_ids)
     return {
-        "time_range": _format_time_range(start_ms, start_ms + duration_ms),
-        "location": f"@{location_id}",
-        "characters": [f"@{asset_id}" for asset_id in character_ids],
-        "props": [f"@{asset_id}" for asset_id in prop_ids],
-        "shot_size": stage.get("shot_size", "中景"),
-        "description": stage.get("shot_action") or stage["scene_description"],
-        "visual_style": "@style-main",
+        "text": (
+            f"{time_range}: 地点:@{location_id} 中,"
+            f"角色:{character_text} {stage.get('shot_action') or stage['scene_description']},"
+            f"道具:{prop_text} 保持清晰可见。景别:{stage.get('shot_size', '中景')}。视觉风格:@style-main。"
+        ),
     }
+
+
+def _default_reference_asset_ids(global_assets: dict[str, Any], stage_asset_id: str) -> list[str]:
+    known_ids = _global_asset_ids(global_assets)
+    character_id = _first_asset_id(global_assets, "characters", "character-presenter")
+    prop_id = _first_asset_id(global_assets, "props", "prop-product")
+    reference_ids = [character_id, stage_asset_id, prop_id]
+    return [asset_id for asset_id in reference_ids if asset_id in known_ids][:9]
+
+
+def _first_asset_id(global_assets: dict[str, Any], collection: str, fallback: str) -> str:
+    value = global_assets.get(collection)
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                asset_id = _first_text(item.get("asset_id"), item.get("id"))
+                if asset_id:
+                    return asset_id
+    return fallback
 
 
 def _global_asset_ids(global_assets: dict[str, Any]) -> set[str]:
@@ -691,18 +755,18 @@ def _build_prompt_from_scene_fields(
         visual_style_text = _first_text(visual_style.get("prompt"), visual_style.get("description"), visual_style.get("name"))
     else:
         visual_style_text = _first_text(visual_style)
-    shot_parts = [
-        f"时间范围：{_first_text(shot_description.get('time_range'))}",
-        f"地点标注：{_first_text(shot_description.get('location'))}",
-        f"角色标注：{'、'.join(_normalize_at_list(shot_description.get('characters'), []))}",
-        f"道具标注：{'、'.join(_normalize_at_list(shot_description.get('props'), []))}",
-        f"景别：{_first_text(shot_description.get('shot_size'))}",
-        f"镜头描述：{_first_text(shot_description.get('description'))}",
-        f"视觉风格：{visual_style_text}",
-    ]
+    shot_text = _shot_description_text(shot_description)
+    shot_parts = [f"镜头描述：{shot_text}", f"视觉风格：{visual_style_text}"]
     if narration:
         shot_parts.append(f"旁白：{narration}")
     return f"故事线：{storyline}。" + "；".join(part for part in shot_parts if not part.endswith("："))
+
+
+def _shot_description_text(shot_description: dict[str, Any]) -> str:
+    text = _first_text(shot_description.get("text"))
+    if text:
+        return text
+    return _legacy_shot_description_text(shot_description, "")
 
 
 def _summarize_plan(plan_markdown: str) -> str:
