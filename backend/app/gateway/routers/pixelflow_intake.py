@@ -12,7 +12,10 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pixelflow.intake.context import IntakeContext as StandardIntakeContext
+from pixelflow.intake.context import normalize_intake_context
 from pixelflow.intake.forms import CreationIntent, get_form_schema, validate_form
+from pixelflow.intake.industry_profile import resolve_industry_profile
 from pixelflow.intake.llm import IntakeIntent, draft_creative_directions_with_llm, recognize_intent_with_llm
 
 router = APIRouter(prefix="/agent/flows/intake", tags=["pixelflow-flows"])
@@ -48,6 +51,7 @@ class IntentAnalyzeResponse(BaseModel):
     confidence: float = 0
     reason: str = ""
     values: dict[str, Any] = Field(default_factory=dict)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
     llm_used: bool = False
     model_name: str = "deepseek-v4-pro"
     error: str | None = None
@@ -69,12 +73,14 @@ class IntakeValidationResponse(BaseModel):
 
 class CreativeDirectionsRequest(IntakeValidateRequest):
     product_creative_profile: dict[str, Any] = Field(default_factory=dict)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
     materials: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreativeDirectionsResponse(BaseModel):
     validation: IntakeValidationResponse
     creative_directions: list[dict[str, Any]] = Field(default_factory=list)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/forms/{intent}")
@@ -103,16 +109,55 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
     data["form_schema"] = data.pop("schema")
     validation_response = IntakeValidationResponse(**data, creative_directions=[])
     if not validation.is_complete or validation.terminated:
-        return CreativeDirectionsResponse(validation=validation_response, creative_directions=[])
+        return CreativeDirectionsResponse(validation=validation_response, creative_directions=[], intake_context=body.intake_context)
+    context = _context_for_directions(body, validation.values)
     product_creative_profile = dict(body.product_creative_profile)
+    if not product_creative_profile and body.intake_context:
+        profile_result = await resolve_industry_profile(
+            industry_type=context.industry_type,
+            source_prompt=context.source_prompt,
+            form_values=context.form_values,
+            materials=body.materials,
+        )
+        product_creative_profile = profile_result.profile
     if body.materials:
         product_creative_profile["materials"] = body.materials
+    context = StandardIntakeContext(
+        source_prompt=context.source_prompt,
+        intent=context.intent,
+        product_subject=context.product_subject,
+        creation_goal=context.creation_goal,
+        industry_type=context.industry_type,
+        requested_output_count=context.requested_output_count,
+        form_values=context.form_values,
+        product_creative_profile=product_creative_profile,
+    )
     directions = [
         direction.to_dict()
         for direction in await draft_creative_directions_with_llm(
             body.intent,
-            validation.values,
+            context.form_values,
             product_creative_profile,
         )
     ]
-    return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions)
+    return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions, intake_context=context.to_dict())
+
+
+def _context_for_directions(body: CreativeDirectionsRequest, values: dict[str, Any]) -> StandardIntakeContext:
+    if body.intake_context:
+        source_prompt = str(body.intake_context.get("source_prompt") or "")
+        extracted = {
+            **body.intake_context,
+            "values": values,
+            "requested_output_count": body.intake_context.get("requested_output_count") or values.get("image_count"),
+        }
+        return normalize_intake_context(intent=body.intent, source_prompt=source_prompt, extracted=extracted)
+    return normalize_intake_context(
+        intent=body.intent,
+        source_prompt="",
+        extracted={
+            "product_creative_profile": body.product_creative_profile,
+            "values": values,
+            "requested_output_count": values.get("image_count"),
+        },
+    )

@@ -103,6 +103,16 @@ def test_intake_router_analyzes_intent_with_llm(monkeypatch):
             confidence=0.91,
             reason="用户要求分析视频",
             values={},
+            intake_context={
+                "source_prompt": prompt,
+                "intent": "video_analysis",
+                "product_subject": "",
+                "creation_goal": "",
+                "industry_type": "general",
+                "requested_output_count": 1,
+                "form_values": {},
+                "product_creative_profile": {},
+            },
             llm_used=True,
             model_name="deepseek-v4-pro",
         )
@@ -126,6 +136,62 @@ def test_intake_router_analyzes_intent_with_llm(monkeypatch):
     assert data["intent"] == "video_analysis"
     assert data["llm_used"] is True
     assert data["model_name"] == "deepseek-v4-pro"
+    assert data["intake_context"]["intent"] == "video_analysis"
+
+
+def test_intake_router_analyze_returns_complete_backpack_context(monkeypatch):
+    from app.gateway.routers import pixelflow_intake
+    from pixelflow.intake.llm import IntentRecognitionResult
+
+    async def fake_recognize_intent_with_llm(prompt, materials=None):
+        assert prompt == "帮我生成书包的宣传图"
+        return IntentRecognitionResult(
+            intent="image",
+            confidence=0.95,
+            reason="用户要生成书包宣传图",
+            values={
+                "image_goal": "书包宣传图",
+                "image_type": "商品广告图",
+                "image_usage": "活动宣传",
+                "image_style": "真实摄影",
+                "image_size": "自动适配",
+                "image_count": 1,
+            },
+            intake_context={
+                "source_prompt": "帮我生成书包的宣传图",
+                "intent": "image",
+                "product_subject": "书包",
+                "creation_goal": "书包宣传图",
+                "industry_type": "服饰鞋包",
+                "requested_output_count": 1,
+                "form_values": {
+                    "image_goal": "书包宣传图",
+                    "image_type": "商品广告图",
+                    "image_usage": "活动宣传",
+                    "image_style": "真实摄影",
+                    "image_size": "自动适配",
+                    "image_count": 1,
+                },
+                "product_creative_profile": {},
+            },
+            llm_used=True,
+            model_name="deepseek-v4-pro",
+        )
+
+    monkeypatch.setattr(pixelflow_intake, "recognize_intent_with_llm", fake_recognize_intent_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_intake.router)
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/intake/analyze", json={"prompt": "帮我生成书包的宣传图"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["values"]["image_goal"] == "书包宣传图"
+    assert data["intake_context"]["product_subject"] == "书包"
+    assert data["intake_context"]["creation_goal"] == "书包宣传图"
+    assert data["intake_context"]["industry_type"] == "服饰鞋包"
 
 
 def test_intake_router_directions_use_llm_when_form_complete(monkeypatch):
@@ -209,3 +275,70 @@ def test_intake_router_passes_materials_to_creative_direction_llm(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["creative_directions"][0]["title"] == "素材主视觉"
+
+
+def test_intake_router_directions_resolve_industry_profile(monkeypatch):
+    from app.gateway.routers import pixelflow_intake
+    from pixelflow.intake.forms import CreativeDirection
+    from pixelflow.intake.industry_profile import IndustryProfileResult
+
+    async def fake_resolve_industry_profile(**kwargs):
+        assert kwargs["industry_type"] == "文具教育"
+        assert kwargs["source_prompt"] == "帮我生成儿童书包的宣传图"
+        return IndustryProfileResult(
+            industry="stationery",
+            industry_name="文具教育",
+            profile={
+                "core_message": "儿童书包宣传图需要突出护脊结构",
+                "visual_anchor_keywords": ["护脊结构", "开学场景"],
+            },
+            source="llm",
+        )
+
+    async def fake_draft_creative_directions_with_llm(intent, values, product_creative_profile=None):
+        assert intent == "image"
+        assert values["image_goal"] == "儿童书包宣传图"
+        assert product_creative_profile["core_message"] == "儿童书包宣传图需要突出护脊结构"
+        return [
+            CreativeDirection(direction_id="direction_1", title="护脊开学主视觉", description="围绕儿童书包展示护脊结构。", recommended=True),
+            CreativeDirection(direction_id="direction_2", title="课堂使用场景", description="围绕儿童书包展示课堂收纳。"),
+            CreativeDirection(direction_id="direction_3", title="通学安全海报", description="围绕儿童书包展示夜间反光。"),
+        ]
+
+    monkeypatch.setattr(pixelflow_intake, "resolve_industry_profile", fake_resolve_industry_profile)
+    monkeypatch.setattr(pixelflow_intake, "draft_creative_directions_with_llm", fake_draft_creative_directions_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_intake.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/intake/directions",
+            json={
+                "intent": "image",
+                "values": {
+                    "image_goal": "儿童书包宣传图",
+                    "image_type": "商品广告图",
+                    "image_usage": "活动宣传",
+                    "image_style": "真实摄影",
+                    "image_size": "自动适配",
+                    "image_count": 1,
+                },
+                "intake_context": {
+                    "source_prompt": "帮我生成儿童书包的宣传图",
+                    "intent": "image",
+                    "product_subject": "儿童书包",
+                    "creation_goal": "儿童书包宣传图",
+                    "industry_type": "文具教育",
+                    "requested_output_count": 1,
+                    "form_values": {"image_goal": "儿童书包宣传图"},
+                    "product_creative_profile": {},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["intake_context"]["product_creative_profile"]["core_message"] == "儿童书包宣传图需要突出护脊结构"
+    assert len(data["creative_directions"]) == 3
+    assert all("儿童书包" in item["description"] for item in data["creative_directions"])
