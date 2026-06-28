@@ -40,9 +40,11 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert "prop_images" not in first_scene
     assert first_scene["reference_asset_ids"][:1] == [character_assets[0]["asset_id"]]
     assert first_scene["reference_asset_ids"][1:] == ["scene-opening", "prop-product"]
-    assert set(first_scene["shot_description"]) == {"text"}
+    assert set(first_scene["shot_description"]) == {"text", "mentions"}
     assert "地点:@" in first_scene["shot_description"]["text"]
     assert "角色:@" in first_scene["shot_description"]["text"]
+    assert [mention["asset_id"] for mention in first_scene["shot_description"]["mentions"]] == first_scene["reference_asset_ids"]
+    assert {mention["type"] for mention in first_scene["shot_description"]["mentions"]} == {"character", "scene", "prop"}
 
 
 def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video():
@@ -102,3 +104,8 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
     assert "LLM 镜头描述 1" in result["scene_packages"][0]["shot_description"]["text"]
     assert "地点:@" in result["scene_packages"][0]["shot_description"]["text"]
     assert "角色:@" in result["scene_packages"][0]["shot_description"]["text"]
+    assert [mention["asset_id"] for mention in result["scene_packages"][0]["shot_description"]["mentions"]] == [
+        "character-presenter",
+        "scene-home",
+        "prop-product",
+    ]

@@ -70,8 +70,9 @@ def test_video_router_prepares_scene_packages():
     assert data["scene_packages"][0]["scene_id"] == "scene-1"
     assert 4_000 <= data["scene_packages"][0]["duration_ms"] <= 15_000
     assert data["scene_packages"][0]["reference_asset_ids"]
-    assert set(data["scene_packages"][0]["shot_description"]) == {"text"}
+    assert set(data["scene_packages"][0]["shot_description"]) == {"text", "mentions"}
     assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
+    assert data["scene_packages"][0]["shot_description"]["mentions"]
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
 
 
@@ -219,6 +220,98 @@ def test_video_router_generates_scene_videos(monkeypatch):
     assert data["endpoint"] == "/api/video/reference-mode-video"
     assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-1", "scene-2"]
     assert data["scene_videos"][0]["video_url"] == "https://x/第一幕展示白色耳机.mp4"
+
+
+def test_video_router_uses_shot_description_mentions_as_reference_images(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(
+                ok=True,
+                task_id="scene-task",
+                url="https://x/scene.mp4",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕展示白色耳机",
+                        "shot_description": {
+                            "text": "0-8秒: 地点:@scene-desk 中,角色:@character-presenter 展示道具:@prop-product。",
+                            "mentions": [
+                                {"asset_id": "character-presenter", "name": "讲解者", "type": "character", "image_url": "https://x/role.png"},
+                                {"asset_id": "scene-desk", "name": "桌面", "type": "scene", "image_url": "https://x/scene.png"},
+                                {"asset_id": "prop-product", "name": "耳机", "type": "prop", "image_url": "https://x/prop.png"},
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["scene_videos"][0]["mode"] == "reference_mode_video"
+    assert calls[0]["image_urls"] == ["https://x/role.png", "https://x/scene.png", "https://x/prop.png"]
+
+
+def test_video_router_rejects_more_than_nine_mention_reference_images(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **_kwargs):
+            raise AssertionError("should not call video skill when mentions exceed limit")
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "参考图太多",
+                        "shot_description": {
+                            "text": "0-8秒: 参考太多。",
+                            "mentions": [
+                                {"asset_id": f"asset-{index}", "image_url": f"https://x/ref-{index}.png"}
+                                for index in range(10)
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["failed_scenes"][0]["scene_id"] == "scene-1"
+    assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
 def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch):

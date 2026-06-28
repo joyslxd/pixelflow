@@ -74,6 +74,7 @@ def prepare_video_scene_packages(
             start_ms=elapsed_ms,
             duration_ms=duration,
             reference_asset_ids=reference_asset_ids,
+            global_assets=global_assets,
         )
         prompt = _build_scene_prompt(
             product_name=product_name,
@@ -227,9 +228,9 @@ def _scene_package_prompt(
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
 4. global_assets.characters 是整片固定的不同出场角色或产品主体，每个 asset 都是一张独立参考图，不要生成正面/侧面/背面的三视图。
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
-6. shot_description 只包含 text 字段。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
-7. shot_description.text 中引用角色、场景、道具、视觉风格时使用 @asset_id，例如 @character-presenter。
-8. reference_asset_ids 最多 9 个，必须来自 global_assets 的 asset_id。
+6. shot_description 包含 text 和 mentions。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
+7. shot_description.text 中引用角色、场景、道具图片时使用 @asset_id，例如 @character-presenter；视觉风格只作为文字描述，不作为图片 mention。
+8. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。
 9. 只返回 JSON，不要 Markdown，不要解释。
 
 输出格式：
@@ -246,7 +247,14 @@ def _scene_package_prompt(
   {{
     "title":"场景标题",
     "storyline":"故事线",
-    "shot_description":{{"text":"0-10秒: 地点:@scene-opening 中,角色:@character-presenter 在画面中完成动作,道具:@prop-product 清晰可见。景别和运动方式写在这段话里。"}},
+    "shot_description":{{
+      "text":"0-10秒: 地点:@scene-opening 中,角色:@character-presenter 在画面中完成动作,道具:@prop-product 清晰可见。景别和运动方式写在这段话里。",
+      "mentions":[
+        {{"asset_id":"character-presenter","type":"character","name":"角色名"}},
+        {{"asset_id":"scene-opening","type":"scene","name":"场景名"}},
+        {{"asset_id":"prop-product","type":"prop","name":"道具名"}}
+      ]
+    }},
     "reference_asset_ids":["character-presenter","scene-opening","prop-product"],
     "prompt":"分镜片段创作提示词",
     "narration":"旁白"
@@ -289,6 +297,7 @@ def _normalize_llm_scene_packages(
             start_ms=elapsed_ms,
             duration_ms=duration,
             reference_asset_ids=reference_asset_ids,
+            global_assets=global_assets,
         )
         prompt = _first_text(
             raw.get("prompt"),
@@ -390,7 +399,7 @@ def _normalize_visual_style(value: Any, fallback: dict[str, Any]) -> dict[str, A
 
 
 def _normalize_reference_asset_ids(value: Any, global_assets: dict[str, Any], stage_asset_id: str) -> list[str]:
-    known_ids = _global_asset_ids(global_assets)
+    known_ids = _global_image_asset_ids(global_assets)
     raw_ids = [str(item).lstrip("@").strip() for item in value] if isinstance(value, list) else []
     reference_ids = [asset_id for asset_id in raw_ids if asset_id and asset_id in known_ids]
     if not reference_ids:
@@ -409,19 +418,76 @@ def _normalize_shot_description(
     start_ms: int,
     duration_ms: int,
     reference_asset_ids: list[str],
+    global_assets: dict[str, Any],
 ) -> dict[str, Any]:
     fallback = _default_shot_description(
         stage=stage,
         start_ms=start_ms,
         duration_ms=duration_ms,
         reference_asset_ids=reference_asset_ids,
+        global_assets=global_assets,
     )
     if not isinstance(value, dict):
         return fallback
     text = _first_text(value.get("text"), value.get("镜头描述"))
     if not text:
         text = _legacy_shot_description_text(value, fallback["text"])
-    return {"text": _normalize_shot_text(text)}
+    mentions = _normalize_shot_mentions(value.get("mentions"), reference_asset_ids, global_assets)
+    return {"text": _normalize_shot_text(text), "mentions": mentions}
+
+
+def _normalize_shot_mentions(value: Any, reference_asset_ids: list[str], global_assets: dict[str, Any]) -> list[dict[str, Any]]:
+    defaults = _shot_mentions(reference_asset_ids, global_assets)
+    if not isinstance(value, list):
+        return defaults
+    lookup = _global_image_asset_lookup(global_assets)
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        asset_id = _first_text(item.get("asset_id"), item.get("id"), item.get("assetId"))
+        image_url = _asset_image_url(item)
+        key = asset_id or image_url or f"mention-{index}"
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        known = lookup.get(asset_id, {}) if asset_id else {}
+        mention = {
+            "asset_id": asset_id or key,
+            "type": _first_text(item.get("type"), item.get("asset_type"), known.get("type"), "reference"),
+            "name": _first_text(item.get("name"), item.get("label"), known.get("name"), asset_id or key),
+        }
+        if image_url:
+            mention["image_url"] = image_url
+        elif known.get("image_url"):
+            mention["image_url"] = known["image_url"]
+        normalized.append(mention)
+        if len(normalized) >= 9:
+            break
+    return normalized or defaults
+
+
+def _shot_mentions(reference_asset_ids: list[str], global_assets: dict[str, Any]) -> list[dict[str, Any]]:
+    lookup = _global_image_asset_lookup(global_assets)
+    mentions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for asset_id in reference_asset_ids:
+        asset = lookup.get(asset_id)
+        if not asset or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        mention = {
+            "asset_id": asset_id,
+            "type": asset["type"],
+            "name": asset["name"],
+        }
+        if asset.get("image_url"):
+            mention["image_url"] = asset["image_url"]
+        mentions.append(mention)
+        if len(mentions) >= 9:
+            break
+    return mentions
 
 
 def _normalize_at_list(value: Any, fallback: list[str]) -> list[str]:
@@ -657,6 +723,7 @@ def _default_shot_description(
     start_ms: int,
     duration_ms: int,
     reference_asset_ids: list[str],
+    global_assets: dict[str, Any],
 ) -> dict[str, Any]:
     location_id = next((asset_id for asset_id in reference_asset_ids if asset_id.startswith("scene-")), stage["asset_id"])
     character_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("character-")] or ["character-presenter"]
@@ -664,17 +731,20 @@ def _default_shot_description(
     time_range = _format_time_range(start_ms, start_ms + duration_ms)
     character_text = "、".join(f"@{asset_id}" for asset_id in character_ids)
     prop_text = "、".join(f"@{asset_id}" for asset_id in prop_ids)
+    visual_style = global_assets.get("visual_style")
+    visual_style_name = _first_text(visual_style.get("name") if isinstance(visual_style, dict) else None, "真实摄影电商广告")
     return {
         "text": (
             f"{time_range}: 地点:@{location_id} 中,"
             f"角色:{character_text} {stage.get('shot_action') or stage['scene_description']},"
-            f"道具:{prop_text} 保持清晰可见。景别:{stage.get('shot_size', '中景')}。视觉风格:@style-main。"
+            f"道具:{prop_text} 保持清晰可见。景别:{stage.get('shot_size', '中景')}。视觉风格:{visual_style_name}。"
         ),
+        "mentions": _shot_mentions(reference_asset_ids, global_assets),
     }
 
 
 def _default_reference_asset_ids(global_assets: dict[str, Any], stage_asset_id: str) -> list[str]:
-    known_ids = _global_asset_ids(global_assets)
+    known_ids = _global_image_asset_ids(global_assets)
     character_id = _first_asset_id(global_assets, "characters", "character-presenter")
     prop_id = _first_asset_id(global_assets, "props", "prop-product")
     reference_ids = [character_id, stage_asset_id, prop_id]
@@ -692,7 +762,7 @@ def _first_asset_id(global_assets: dict[str, Any], collection: str, fallback: st
     return fallback
 
 
-def _global_asset_ids(global_assets: dict[str, Any]) -> set[str]:
+def _global_image_asset_ids(global_assets: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
     for collection in ("characters", "scenes", "props"):
         value = global_assets.get(collection)
@@ -703,12 +773,55 @@ def _global_asset_ids(global_assets: dict[str, Any]) -> set[str]:
                 asset_id = _first_text(item.get("asset_id"), item.get("id"))
                 if asset_id:
                     ids.add(asset_id)
-    visual_style = global_assets.get("visual_style")
-    if isinstance(visual_style, dict):
-        asset_id = _first_text(visual_style.get("asset_id"), visual_style.get("id"))
-        if asset_id:
-            ids.add(asset_id)
     return ids
+
+
+def _global_image_asset_lookup(global_assets: dict[str, Any]) -> dict[str, dict[str, str]]:
+    lookup: dict[str, dict[str, str]] = {}
+    collection_types = {
+        "characters": "character",
+        "scenes": "scene",
+        "props": "prop",
+    }
+    for collection, asset_type in collection_types.items():
+        value = global_assets.get(collection)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            asset_id = _first_text(item.get("asset_id"), item.get("id"))
+            if not asset_id:
+                continue
+            lookup[asset_id] = {
+                "asset_id": asset_id,
+                "type": asset_type,
+                "name": _first_text(item.get("name"), item.get("label"), item.get("description"), asset_id),
+                "image_url": _asset_image_url(item),
+            }
+    return lookup
+
+
+def _asset_image_url(value: dict[str, Any]) -> str:
+    direct = _first_text(
+        value.get("image_url"),
+        value.get("imageUrl"),
+        value.get("url"),
+        value.get("download_url"),
+        value.get("downloadUrl"),
+    )
+    if direct:
+        return direct
+    images = value.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, str) and image.strip():
+                return image.strip()
+            if isinstance(image, dict):
+                nested = _first_text(image.get("url"), image.get("download_url"), image.get("downloadUrl"))
+                if nested:
+                    return nested
+    return ""
 
 
 def _format_time_range(start_ms: int, end_ms: int) -> str:

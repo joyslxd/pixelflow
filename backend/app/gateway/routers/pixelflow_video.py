@@ -544,7 +544,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
     skill = get_video_skill()
 
     async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
-        image_urls = _dedupe_urls(scene.image_urls)
+        image_urls = _scene_reference_image_urls(scene)
         if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
             return {
                 "scene_id": scene.scene_id,
@@ -737,6 +737,38 @@ def _join_shot_value(value: Any) -> str:
     if isinstance(value, list):
         return "、".join(str(item) for item in value if item)
     return str(value or "")
+
+
+def _scene_reference_image_urls(scene: SceneGenerationItem) -> list[str]:
+    urls = list(scene.image_urls)
+    mentions = scene.shot_description.get("mentions")
+    if isinstance(mentions, list):
+        for mention in mentions:
+            urls.extend(_urls_from_value(mention))
+    return _dedupe_urls(urls)
+
+
+def _urls_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text.startswith(("http://", "https://")) else []
+    if isinstance(value, dict):
+        urls: list[str] = []
+        for key in ("image_url", "imageUrl", "url", "download_url", "downloadUrl", "src"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip().startswith(("http://", "https://")):
+                urls.append(item.strip())
+        for key in ("images", "image_urls", "imageUrls", "reference_image_urls", "referenceImageUrls"):
+            urls.extend(_urls_from_value(value.get(key)))
+        return urls
+    if isinstance(value, list):
+        urls: list[str] = []
+        for item in value:
+            urls.extend(_urls_from_value(item))
+        return urls
+    return []
 
 
 async def _run_scene_video_generation(
