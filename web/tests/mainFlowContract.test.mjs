@@ -5,6 +5,7 @@ import test from "node:test";
 
 const workspaceSource = fs.readFileSync(path.resolve("src/pages/WorkspacePage.tsx"), "utf8");
 const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
+const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -29,6 +30,28 @@ test("new conversation stores the user message before agent replies", () => {
   assert.notEqual(appendIndex, -1, "handleSend must await user message persistence");
   assert.notEqual(firstAgentIndex, -1, "handleSend must still call the intake agent");
   assert.ok(appendIndex < firstAgentIndex, "user message persistence must happen before the first agent reply");
+});
+
+test("persisted chat messages keep the optimistic client id for action dedupe", () => {
+  const persistStart = workspaceSource.indexOf("const persistChatMessage = async");
+  const persistEnd = workspaceSource.indexOf("const appendMessageForConversation", persistStart);
+  const responseStart = workspaceSource.indexOf("function messageFromResponse");
+  const responseEnd = workspaceSource.indexOf("export function WorkspacePage", responseStart);
+  assert.notEqual(persistStart, -1, "persistChatMessage must exist");
+  assert.notEqual(persistEnd, -1, "appendMessageForConversation must follow persistChatMessage");
+  assert.notEqual(responseStart, -1, "messageFromResponse must exist");
+  assert.notEqual(responseEnd, -1, "WorkspacePage must follow messageFromResponse");
+  const persistSource = workspaceSource.slice(persistStart, persistEnd);
+  const responseSource = workspaceSource.slice(responseStart, responseEnd);
+  assert.match(persistSource, /client_message_id:\s*message\.id/, "persisted payload must include the frontend client message id");
+  assert.match(persistSource, /id:\s*message\.id/, "saved optimistic message must keep the same id used by pending timers");
+  assert.match(responseSource, /client_message_id/, "restored history must prefer the persisted client message id");
+});
+
+test("artifact action dedupe is scoped by conversation id", () => {
+  assert.match(workspaceSource, /function processedArtifactKey/, "WorkspacePage must build a stable artifact action key");
+  assert.match(workspaceSource, /conversationId \|\| "local"/, "artifact action key must include the owning conversation id");
+  assert.match(workspaceSource, /beginArtifactAction\(msg,\s*targetConversationId\)/, "artifact actions must be guarded after resolving message conversation");
 });
 
 test("video plan approval always enters scene package and merge main flow", () => {
@@ -69,4 +92,15 @@ test("image plan approval continues through image generation instead of stopping
   assert.equal(imageBranch.includes("api.prepareImageGeneration"), true, "image branch must still choose the image endpoint through prepare");
   assert.equal(imageBranch.includes("api.generateImage"), true, "image branch must invoke image generation after prepare");
   assert.equal(imageBranch.includes('type: "image_result"'), true, "image branch must return an image result artifact");
+});
+
+test("failed image video and analysis stages expose retry paths", () => {
+  const source = handleApprovePlanSource();
+  assert.match(source, /if \(!imagePrepare\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image prepare failure must release the plan action");
+  assert.match(source, /if \(!imageResult\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image generation failure must let the previous stage retry");
+  assert.match(source, /if \(!scenePackagesForReview\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene package failure must release the plan action");
+  assert.match(workspaceSource, /if \(!generatedSceneVideos\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene video failure must let the scene package card retry");
+  assert.match(workspaceSource, /if \(!mergedVideo\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "merge failure must release the generating scene package action");
+  assert.match(messageBubbleSource, /videoGenerationFailed/, "video generation failure card must render a retry affordance");
+  assert.match(messageBubbleSource, /onRetryVideoAnalysis/, "video analysis failure card must render a retry affordance");
 });

@@ -20,6 +20,7 @@ interface MessageBubbleProps {
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
+  onRetryVideoAnalysis?: (msg: ChatMessage) => void;
 }
 
 function stringArray(value: unknown): string[] {
@@ -102,6 +103,7 @@ export function MessageBubble({
   onRetryImageResult,
   onRetrySceneAssets,
   onRetryVideoMerge,
+  onRetryVideoAnalysis,
 }: MessageBubbleProps) {
   const isUser = msg.role === "user";
   const planPreview = msg.artifact?.plan?.plan_markdown || "";
@@ -112,6 +114,11 @@ export function MessageBubble({
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
   const imageQuotaPaused = quotaInsufficient(msg.artifact?.imageResult);
   const mergeQuotaPaused = quotaInsufficient(msg.artifact?.mergedVideo);
+  const sceneAssetFailed = Boolean(msg.artifact?.sceneAssetFailures?.length);
+  const imageGenerationFailed = Boolean(msg.artifact?.imageResult && !canAcceptImageResult(msg.artifact.imageResult));
+  const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
+  const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
+  const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}>
       <div
@@ -328,14 +335,14 @@ export function MessageBubble({
                 <FileText size={15} />
                 查看分镜
               </button>
-              {sceneAssetQuotaPaused ? (
+              {sceneAssetFailed ? (
                 <button
                   type="button"
                   onClick={() => onRetrySceneAssets?.(msg)}
                   className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
                 >
                   <Sparkles size={15} />
-                  继续生成参考图
+                  {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
                 </button>
               ) : (
                 <button
@@ -388,14 +395,14 @@ export function MessageBubble({
                 ))}
               </div>
             )}
-            {imageQuotaPaused && (
+            {imageGenerationFailed && (
               <button
                 type="button"
                 onClick={() => onRetryImageResult?.(msg)}
                 className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
                 <Sparkles size={15} />
-                充值后继续生成
+                {imageQuotaPaused ? "充值后继续生成" : "重新生成图片"}
               </button>
             )}
             {canAcceptImageResult(msg.artifact.imageResult) && (
@@ -477,6 +484,16 @@ export function MessageBubble({
             <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] leading-relaxed text-ink-soft">
               调用链路：{msg.artifact.videoAnalysis.extract_endpoint} → {msg.artifact.videoAnalysis.endpoint || "未进入视频分析"}
             </div>
+            {videoAnalysisFailed && (
+              <button
+                type="button"
+                onClick={() => onRetryVideoAnalysis?.(msg)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                <Sparkles size={15} />
+                重新分析视频
+              </button>
+            )}
           </div>
         ) : msg.artifact?.type === "video_flaw_analysis" && msg.artifact.videoFlawAnalysis ? (
           <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
@@ -597,14 +614,24 @@ export function MessageBubble({
                 ))}
               </div>
             ) : null}
-            {mergeQuotaPaused && msg.artifact.generatedSceneVideos?.scene_videos.length ? (
+            {videoGenerationFailed ? (
+              <button
+                type="button"
+                onClick={() => onGenerateVideoFromScenePackages?.(msg)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                <Sparkles size={15} />
+                重新生成场景视频
+              </button>
+            ) : null}
+            {videoMergeFailed ? (
               <button
                 type="button"
                 onClick={() => onRetryVideoMerge?.(msg)}
                 className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
                 <Sparkles size={15} />
-                继续合并视频
+                {mergeQuotaPaused ? "继续合并视频" : "重新合并视频"}
               </button>
             ) : null}
             {msg.artifact.mergedVideo?.ok && (

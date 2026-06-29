@@ -22,6 +22,7 @@ interface ChatPanelProps {
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
+  onRetryVideoAnalysis?: (msg: ChatMessage) => void;
   busy?: boolean;
 }
 
@@ -42,6 +43,7 @@ export function ChatPanel({
   onRetryImageResult,
   onRetrySceneAssets,
   onRetryVideoMerge,
+  onRetryVideoAnalysis,
   busy,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -82,6 +84,7 @@ export function ChatPanel({
               onRetryImageResult={onRetryImageResult}
               onRetrySceneAssets={onRetrySceneAssets}
               onRetryVideoMerge={onRetryVideoMerge}
+              onRetryVideoAnalysis={onRetryVideoAnalysis}
             />
           ))
         )}
