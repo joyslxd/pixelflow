@@ -209,7 +209,8 @@ corepack pnpm dev
 
 ```bash
 cd web
-corepack pnpm build
+corepack pnpm build-prod   # 使用 web/.env.production，产物到 web/dist/
+corepack pnpm build-dev    # 使用 web/.env.development，联调测试环境时使用
 ```
 
 如果本机没有 corepack 或 pnpm，也可以临时使用：
@@ -217,10 +218,22 @@ corepack pnpm build
 ```bash
 cd web
 npm install
-npm run build
+npm run build-prod
 ```
 
-不要直接运行裸 `tsc -b && vite build`，本机没有全局 `tsc` 或 `vite` 时会报 `command not found`。应通过 `pnpm build`、`corepack pnpm build` 或 `npm run build` 触发 `package.json` 脚本。
+不要直接运行裸 `tsc -b && vite build`，本机没有全局 `tsc` 或 `vite` 时会报 `command not found`。应通过 `pnpm build-prod`、`corepack pnpm build-prod` 或 `npm run build-prod` 触发 `package.json` 脚本。
+
+前端环境变量文件在 `web/` 目录下，`web/vite.config.ts` 会从该目录读取：
+
+| 文件 | 当前目标 | 用途 |
+| --- | --- | --- |
+| `web/.env.development` | `https://test-video.borgrise.com` | `pnpm dev`、`pnpm build-dev`，测试环境联调 |
+| `web/.env.production` | `https://video.borgrise.com` | `pnpm prod`、`pnpm build-prod`，生产环境 |
+
+变量含义：
+
+- `VITE_API_TARGET`：Vite dev server 将 `/agent` 代理到的目标。当前 development/production 分别指向测试/正式 content-app 域名；如需联调本机后端，可临时执行 `VITE_API_TARGET=http://localhost:8001 pnpm dev`。
+- `VITE_CONTENT_APP_TARGET`：Vite dev server 将 `/api/upload` 代理到的 content-app 目标，通常应与当前环境的 content-app 域名一致。
 
 ## 鉴权与调试
 
@@ -293,7 +306,7 @@ cd web
 corepack pnpm test:scene-packages
 corepack pnpm test:scene-mentions
 corepack pnpm test:conversation-routing
-corepack pnpm build
+corepack pnpm build-prod
 ```
 
 文档变更至少跑：

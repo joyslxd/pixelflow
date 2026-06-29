@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "vite --mode development",
+    "prod": "vite --mode production",
+    "build-dev": "tsc -b && vite build --mode development",
+    "build-prod": "tsc -b && vite build --mode production",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test:api-auth": "rm -rf /tmp/pixelflow-api-test && tsc -p tests/tsconfig.api-auth.json && node -e \"const fs=require('fs'); const p='/tmp/pixelflow-api-test/api.js'; fs.writeFileSync(p, fs.readFileSync(p,'utf8').replaceAll('@/lib/authStorage','./authStorage.js'));\" && API_TEST_MODULE=file:///tmp/pixelflow-api-test/api.js node --test tests/apiAuth.test.mjs",

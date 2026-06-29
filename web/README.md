@@ -9,12 +9,34 @@ PixelFlow 前端 —— **对话 + canvas** 工作区(Vite + React + TS + Tailwi
 cd web
 pnpm install
 pnpm dev          # http://localhost:5273
+pnpm prod         # 用 production 环境变量启动 Vite dev server
 pnpm lint         # tsc 类型检查
 pnpm test:auth-storage # Authorization 本地存储工具测试
-pnpm build        # 产物到 dist/
+pnpm build-dev    # 使用 .env.development，产物到 dist/
+pnpm build-prod   # 使用 .env.production，产物到 dist/
 ```
 
-`/agent` 在 dev 下代理到后端(默认 `http://localhost:8001`,可用 `VITE_API_TARGET` 覆盖):
+## 环境变量
+
+Vite 配置会从当前 `web/` 目录读取环境文件：
+
+| 文件 | 当前值 | 使用场景 |
+| --- | --- | --- |
+| `.env.development` | `https://test-video.borgrise.com` | `pnpm dev`、`pnpm build-dev` |
+| `.env.production` | `https://video.borgrise.com` | `pnpm prod`、`pnpm build-prod` |
+
+支持的变量：
+
+- `VITE_API_TARGET`：开发服务器把 `/agent` 代理到的目标。
+- `VITE_CONTENT_APP_TARGET`：开发服务器把 `/api/upload` 代理到的目标。
+
+当前 development 默认走测试 content-app。如果要联调本机 PixelFlow 后端：
+
+```bash
+VITE_API_TARGET=http://localhost:8001 pnpm dev
+```
+
+如果后端临时端口是 8123：
 
 ```bash
 VITE_API_TARGET=http://localhost:8123 pnpm dev
@@ -27,7 +49,7 @@ src/
   components/layout/    Sidebar(对话列表) + AppLayout
   components/chat/      ChatPanel + MessageBubble
   components/composer/  Composer(输入器) + Chip(参数胶囊)
-  components/canvas/    CanvasPanel + BriefCard + FlowTimeline + VideoResultGrid
+  components/canvas/    CanvasPanel + BriefCard + FlowTimeline + VideoResultCard + VideoPreviewPanel
   pages/WorkspacePage   对话 + canvas 双栏
   pages/AuthTokenPage   本地调试 content-app Authorization 的设置页
   lib/                  api / authStorage / types / chat 类型 / utils
