@@ -1,8 +1,10 @@
 import { Check, FileText, FileVideo, Pencil, Sparkles } from "lucide-react";
+import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
 import type { CreativeDirectionResponse } from "@/lib/api";
+import type { VideoResult } from "@/lib/types";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
@@ -16,6 +18,7 @@ interface MessageBubbleProps {
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
+  onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
   onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
@@ -87,6 +90,36 @@ function quotaInsufficient(value: unknown): boolean {
   return ["额度不足", "余额不足", "没有有效的额度", "充值", "quota insufficient", "payment required"].some((keyword) => text.includes(keyword));
 }
 
+function secondsFromMilliseconds(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value / 1000) : undefined;
+}
+
+function mergedVideoResultForMessage(msg: ChatMessage): VideoResult | null {
+  const mergedVideo = msg.artifact?.mergedVideo;
+  if (!mergedVideo?.merged_video_url) return null;
+  return {
+    id: mergedVideo.task_id || "merged-video",
+    title: "final_video.mp4",
+    url: mergedVideo.merged_video_url,
+    assetType: "final_video",
+    durationSec: secondsFromMilliseconds(msg.artifact?.videoScenePackages?.target_duration_ms),
+    status: mergedVideo.ok ? "success" : "failed",
+  };
+}
+
+function sceneVideoResultsForMessage(msg: ChatMessage): VideoResult[] {
+  return (msg.artifact?.generatedSceneVideos?.scene_videos || [])
+    .filter((scene) => Boolean(scene.video_url))
+    .map((scene, index) => ({
+      id: scene.scene_id || `scene-${index + 1}`,
+      title: `scene_${String(scene.scene_index || index + 1).padStart(2, "0")}.mp4`,
+      url: scene.video_url,
+      assetType: "generated_video",
+      durationSec: secondsFromMilliseconds(scene.duration_ms),
+      status: "success",
+    }));
+}
+
 export function MessageBubble({
   msg,
   onOpenArtifact,
@@ -99,6 +132,7 @@ export function MessageBubble({
   onGenerateVideoFromScenePackages,
   onAcceptVideoResult,
   onReviseVideoResult,
+  onOpenVideoResult,
   onRegenerateVideoWithRevision,
   onRetryImageResult,
   onRetrySceneAssets,
@@ -119,6 +153,9 @@ export function MessageBubble({
   const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
   const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
   const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
+  const mergedVideoResult = mergedVideoResultForMessage(msg);
+  const sceneVideoResults = sceneVideoResultsForMessage(msg);
+  const videoResults = [mergedVideoResult, ...sceneVideoResults].filter((result): result is VideoResult => Boolean(result));
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}>
       <div
@@ -580,24 +617,29 @@ export function MessageBubble({
                 {msg.artifact.mergedVideo.error}
               </div>
             )}
-            {msg.artifact.mergedVideo?.merged_video_url && (
-              <a
-                href={msg.artifact.mergedVideo.merged_video_url}
-                target="_blank"
-                rel="noreferrer"
-                className="block truncate rounded-xl border border-line bg-canvas px-3 py-2 text-[12px] text-accent hover:bg-accent-soft"
-              >
-                合并视频：{msg.artifact.mergedVideo.merged_video_url}
-              </a>
+            {mergedVideoResult && (
+              <section className="space-y-2">
+                <div className="text-[13px] font-semibold text-ink">成品视频</div>
+                <VideoResultCard
+                  result={mergedVideoResult}
+                  className="max-w-[324px]"
+                  onOpen={(video) => onOpenVideoResult?.(msg, video, videoResults)}
+                />
+              </section>
             )}
-            {msg.artifact.generatedSceneVideos?.scene_videos.length ? (
-              <div className="grid gap-2 text-[12px] text-ink-soft">
-                {msg.artifact.generatedSceneVideos.scene_videos.map((scene) => (
-                  <a key={scene.scene_id} href={scene.video_url} target="_blank" rel="noreferrer" className="truncate rounded-lg bg-canvas px-2 py-1.5 text-accent">
-                    {scene.scene_index}. {scene.video_url}
-                  </a>
-                ))}
-              </div>
+            {sceneVideoResults.length > 0 ? (
+              <section className="space-y-2">
+                <div className="text-[13px] font-semibold text-ink">分镜视频生成结果</div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {sceneVideoResults.map((result) => (
+                    <VideoResultCard
+                      key={result.id}
+                      result={result}
+                      onOpen={(video) => onOpenVideoResult?.(msg, video, videoResults)}
+                    />
+                  ))}
+                </div>
+              </section>
             ) : null}
             {msg.artifact.generatedSceneVideos?.failed_scenes.length ? (
               <div className="space-y-2 rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">

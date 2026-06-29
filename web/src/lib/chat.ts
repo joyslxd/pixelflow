@@ -80,6 +80,7 @@ export interface CanvasState {
   phase: TaskPhase | "idle";
   brief?: Brief;
   results: VideoResult[];
+  selectedVideo?: VideoResult | null;
   qcReport?: {
     passed?: boolean;
     score?: number;

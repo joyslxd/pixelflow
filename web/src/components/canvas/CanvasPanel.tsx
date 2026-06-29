@@ -1,8 +1,9 @@
 import { LayoutPanelLeft, X } from "lucide-react";
 import { BriefCard } from "./BriefCard";
 import { FlowTimeline } from "./FlowTimeline";
-import { VideoResultGrid } from "./VideoResultGrid";
+import { VideoPreviewPanel } from "./VideoPreviewPanel";
 import type { CanvasState } from "@/lib/chat";
+import type { VideoResult } from "@/lib/types";
 
 interface CanvasPanelProps {
   state: CanvasState;
@@ -10,6 +11,7 @@ interface CanvasPanelProps {
   onRevise: () => void;
   onConfirmStage?: (stage: "segments" | "edit" | "qc", approved: boolean) => void;
   onClose?: () => void;
+  onSelectVideo?: (video: VideoResult | null) => void;
   briefConfirmed?: boolean;
 }
 
@@ -33,12 +35,25 @@ const REVIEW_COPY = {
   qc_review: { stage: "qc", title: "质检结果已就绪", approve: "确认通过,完成任务", reject: "重新生成" },
 } as const;
 
-export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, briefConfirmed = false }: CanvasPanelProps) {
-  const { phase, brief, results, qcReport, timeline, estCost, actualCost } = state;
+export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, onSelectVideo, briefConfirmed = false }: CanvasPanelProps) {
+  const { phase, brief, selectedVideo, qcReport, timeline, estCost, actualCost } = state;
   // 只有 Brief 阶段、后端已返回 Brief、且用户尚未确认时，才展示审核卡。
   // 其他 review 阶段展示对应确认卡；没有内容时展示空画布。
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
   const review = phase in REVIEW_COPY ? REVIEW_COPY[phase as keyof typeof REVIEW_COPY] : null;
+  if (selectedVideo) {
+    return (
+      <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
+        <VideoPreviewPanel
+          video={selectedVideo}
+          onBack={() => {
+            onSelectVideo?.(null);
+            onClose?.();
+          }}
+        />
+      </div>
+    );
+  }
   return (
     <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
       <div className="flex h-12 shrink-0 items-center justify-between px-5">
@@ -75,7 +90,6 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
           <BriefCard brief={brief} onApprove={onApprove} onRevise={onRevise} readonly />
         ) : review ? (
           <div className="space-y-3">
-            {results.length > 0 && <VideoResultGrid results={results} />}
             {phase === "qc_review" && qcReport && (
               <div className="rounded-card border border-line bg-surface p-4">
                 <div className="flex items-center justify-between">
@@ -123,8 +137,6 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
               </div>
             </div>
           </div>
-        ) : results.length > 0 ? (
-          <VideoResultGrid results={results} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center text-center text-ink-soft">
             <LayoutPanelLeft size={28} className="mb-2 opacity-40" />

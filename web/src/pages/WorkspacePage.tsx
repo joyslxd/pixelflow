@@ -220,6 +220,36 @@ function isQuotaInsufficientPayload(value: unknown): boolean {
   );
 }
 
+function secondsFromMilliseconds(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value / 1000) : undefined;
+}
+
+function videoResultsFromGeneratedScenes(
+  mergedVideoUrl: string,
+  mergedVideoTaskId: string | null | undefined,
+  generatedSceneVideos: NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"],
+  targetDurationMs?: number,
+  mergedVideoOk = true,
+): VideoResult[] {
+  const finalVideo: VideoResult = {
+    id: mergedVideoTaskId || "merged-video",
+    title: "final_video.mp4",
+    url: mergedVideoUrl,
+    assetType: "final_video",
+    durationSec: secondsFromMilliseconds(targetDurationMs),
+    status: mergedVideoOk ? "success" : "failed",
+  };
+  const sceneVideos: VideoResult[] = (generatedSceneVideos?.scene_videos || []).map((scene, index) => ({
+    id: scene.scene_id || `scene-${index + 1}`,
+    title: `scene_${String(scene.scene_index || index + 1).padStart(2, "0")}.mp4`,
+    url: scene.video_url,
+    assetType: "generated_video",
+    durationSec: secondsFromMilliseconds(scene.duration_ms),
+    status: "success",
+  }));
+  return [finalVideo, ...sceneVideos].filter((video) => Boolean(video.url));
+}
+
 function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
@@ -1837,13 +1867,14 @@ export function WorkspacePage() {
         }, 30_000);
       }
       if (mergedVideo.merged_video_url) {
-        const result: VideoResult = {
-          id: mergedVideo.task_id || "merged-video",
-          url: mergedVideo.merged_video_url,
-          assetType: "final_video",
-          status: mergedVideo.ok ? "success" : "failed",
-        };
-        setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results: [result] }));
+        const results = videoResultsFromGeneratedScenes(
+          mergedVideo.merged_video_url,
+          mergedVideo.task_id,
+          generatedSceneVideos,
+          videoScenePackages.target_duration_ms,
+          mergedVideo.ok,
+        );
+        setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results, selectedVideo: null }));
         setCanvasOpenForConversation(targetConversationId, true);
       }
       if (targetConversationId) {
@@ -1911,10 +1942,18 @@ export function WorkspacePage() {
         }, 30_000);
       }
       if (mergedVideo.merged_video_url) {
+        const results = videoResultsFromGeneratedScenes(
+          mergedVideo.merged_video_url,
+          mergedVideo.task_id,
+          generatedSceneVideos,
+          msg.artifact?.videoScenePackages?.target_duration_ms,
+          mergedVideo.ok,
+        );
         setCanvasForConversation(targetConversationId, (c) => ({
           ...c,
           phase: mergedVideo.ok ? "done" : c.phase,
-          results: [{ id: mergedVideo.task_id || "merged-video", url: mergedVideo.merged_video_url || "", assetType: "final_video", status: mergedVideo.ok ? "success" : "failed" }],
+          results,
+          selectedVideo: null,
         }));
         setCanvasOpenForConversation(targetConversationId, true);
       }
@@ -2062,17 +2101,18 @@ export function WorkspacePage() {
         }, 30_000);
       }
       if (mergedVideo.merged_video_url) {
+        const results = videoResultsFromGeneratedScenes(
+          mergedVideo.merged_video_url,
+          mergedVideo.task_id || "merged-video-revision",
+          generatedSceneVideos,
+          artifact.videoScenePackages.target_duration_ms,
+          mergedVideo.ok,
+        );
         setCanvasForConversation(targetConversationId, (c) => ({
           ...c,
           phase: mergedVideo.ok ? "done" : c.phase,
-          results: [
-            {
-              id: mergedVideo.task_id || "merged-video-revision",
-              url: mergedVideo.merged_video_url || "",
-              assetType: "final_video",
-              status: mergedVideo.ok ? "success" : "failed",
-            },
-          ],
+          results,
+          selectedVideo: null,
         }));
         setCanvasOpenForConversation(targetConversationId, true);
       }
@@ -2140,6 +2180,17 @@ export function WorkspacePage() {
     }
   };
 
+  const handleOpenVideoResult = (_msg: ChatMessage, video: VideoResult, results: VideoResult[]) => {
+    setSelectedStoryboardMessageId("");
+    setCanvasOpen(true);
+    setCanvas((current) => ({
+      ...current,
+      phase: "done",
+      results: results.length > 0 ? results : current.results,
+      selectedVideo: video,
+    }));
+  };
+
   const selectedStoryboardMessage = selectedStoryboardMessageId
     ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.type === "video_scene_packages")
     : undefined;
@@ -2159,6 +2210,7 @@ export function WorkspacePage() {
         onGenerateVideoFromScenePackages={handleGenerateVideoFromScenePackages}
         onAcceptVideoResult={handleAcceptVideoResult}
         onReviseVideoResult={handleReviseVideoResult}
+        onOpenVideoResult={handleOpenVideoResult}
         onRegenerateVideoWithRevision={handleRegenerateVideoWithRevision}
         onRetryImageResult={handleRetryImageResult}
         onRetrySceneAssets={handleRetrySceneAssets}
@@ -2177,7 +2229,7 @@ export function WorkspacePage() {
           if (msg.artifact.type === "segments") setCanvas((c) => ({ ...c, phase: "segment_review" }));
           if (msg.artifact.type === "edit") setCanvas((c) => ({ ...c, phase: "edit_review" }));
           if (msg.artifact.type === "qc") setCanvas((c) => ({ ...c, phase: "qc_review" }));
-          if (msg.artifact.type === "video_result") setCanvas((c) => ({ ...c, phase: "done" }));
+          if (msg.artifact.type === "video_result") setCanvas((c) => ({ ...c, phase: "done", selectedVideo: null }));
           if (["segments", "edit", "qc"].includes(msg.artifact.type)) {
             const phaseByType = { segments: "segment_review", edit: "edit_review", qc: "qc_review" } as const;
             void loadResults(phaseByType[msg.artifact.type as "segments" | "edit" | "qc"]);
@@ -2201,6 +2253,7 @@ export function WorkspacePage() {
           onApprove={handleApprove}
           onRevise={handleRevise}
           onConfirmStage={handleConfirmStage}
+          onSelectVideo={(video) => setCanvas((current) => ({ ...current, selectedVideo: video }))}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");

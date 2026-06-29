@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Composer } from "@/components/composer/Composer";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
+import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse } from "@/lib/api";
 
@@ -18,6 +19,7 @@ interface ChatPanelProps {
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
+  onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
   onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
@@ -39,6 +41,7 @@ export function ChatPanel({
   onGenerateVideoFromScenePackages,
   onAcceptVideoResult,
   onReviseVideoResult,
+  onOpenVideoResult,
   onRegenerateVideoWithRevision,
   onRetryImageResult,
   onRetrySceneAssets,
@@ -80,6 +83,7 @@ export function ChatPanel({
               onGenerateVideoFromScenePackages={onGenerateVideoFromScenePackages}
               onAcceptVideoResult={onAcceptVideoResult}
               onReviseVideoResult={onReviseVideoResult}
+              onOpenVideoResult={onOpenVideoResult}
               onRegenerateVideoWithRevision={onRegenerateVideoWithRevision}
               onRetryImageResult={onRetryImageResult}
               onRetrySceneAssets={onRetrySceneAssets}

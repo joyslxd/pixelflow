@@ -26,6 +26,7 @@ export interface GenParams {
 export interface VideoResult {
   id: string;
   url: string;
+  title?: string;
   assetType?: "generated_video" | "final_video" | string;
   thumbUrl?: string;
   durationSec?: number;
