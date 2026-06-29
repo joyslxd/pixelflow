@@ -1,185 +1,318 @@
 # PixelFlow
 
-> ⚠️ **项目状态:开发中(Work in Progress)**
->
-> 这不是一个完整可交付的项目。核心流水线已经跑通,但仍有关键环节(成片渲染仅 v1、P1 语义记忆、前端体验完善等)未完成,接口与数据结构可能随时调整。请勿用于生产环境。
+PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自然语言和素材附件出发，完成图片生成、短视频生成和视频分析拆解。
 
-PixelFlow 是一个电商带货短视频生成 AI Agent:输入商品信息,经过「采集 → 策划 → 人工确认 → 生成 → 剪辑 → 质检」的阶段化流水线,产出可剪辑的短视频草稿。
+当前项目仍在快速迭代中，但主流程已经从早期 LangGraph-only 任务流演进为前端工作台驱动的 v2 分段工作流：采集意图、补全表单、生成创意方向、填充 plan.md、人工审核，再分别进入图片、视频或视频分析链路。
 
-## 架构
+详细 Agent/Skill 流程见：
 
-后端基于 [DeerFlow](https://github.com/bytedance/deer-flow) 精简提取的 harness(FastAPI 网关、LangGraph 运行时/checkpointer、持久化等基础设施,移除了 IM 渠道集成),其上是 PixelFlow 自己的业务包。版权说明见 [`NOTICE`](NOTICE)。
+- `docs/pixelflow-agent-skill-flow-latest-design.md`
+- `AGENTS.md`
 
+## 当前能力
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
+| 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/视频分析意图，抽取主体、行业、目标和生成数量 |
+| 表单补全 | 可用 | 图片和视频分别有表单 schema，最多 3 轮补充 |
+| 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
+| 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
+| plan.md 策划 | 可用 | 使用项目内模板填充 plan.md，并返回前端审核 |
+| 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
+| 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
+| 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
+| 视频修改循环 | 可用 | 支持穿帮分析、按受影响场景重生并重新合并 |
+| 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
+| 旧 LangGraph 任务流 | 保留 | `/agent/flows` 旧任务、SSE、资产接口仍存在，用于兼容 |
+
+## 架构概览
+
+```mermaid
+flowchart LR
+  FE["Web 前端<br/>React + Vite"] --> GW["FastAPI Gateway<br/>/agent/*"]
+  GW --> PF["PixelFlow 业务层<br/>intake / creative / generate / skills"]
+  PF --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
+  PF --> Store["Task / Conversation Store"]
+  PF --> Skill["Skill Protocol"]
+  Skill --> Borgrise["content-app / Borgrise API"]
+  FE --> Upload["content-app /api/upload"]
 ```
+
+代码结构：
+
+```text
 pixelflow/
 ├── backend/
-│   ├── pixelflow/                   # 业务包(本项目核心)
-│   │   ├── graph.py                 # LangGraph 状态机:9 节点编排(5 阶段 agent + 4 人工确认门)
-│   │   ├── nodes.py                 # 各阶段节点实现 + 阶段路由
-│   │   ├── state.py                 # TaskState:贯穿全图的单一状态
-│   │   ├── intake/                  # 采集 Agent:商品信息提取、参数归一、参考视频拆解、需求完整性门控
-│   │   ├── creative/                # 策划 Agent:Brief 生成(LLM)+ 硬约束校验修复(纯逻辑)
-│   │   ├── generate/                # 生成 Agent:分段规划 + Seedance 提示词引擎(纯逻辑)
-│   │   ├── edit/                    # 剪辑 Agent:Timeline IR + DraftPlan + FFmpeg argv(纯逻辑)
-│   │   ├── qc/                      # 质检 Agent:片段完整性/时长(纯逻辑)+ 分辨率/黑屏(ffprobe)
-│   │   ├── skills/                  # 能力边界(Protocol):borgrise 生成/拆解、jianying 草稿、ffmpeg 渲染
-│   │   ├── preferences/             # P0 结构化用户偏好
-│   │   ├── tasks/                   # 业务任务/资产持久化(Memory / SQL / MySQL)
-│   │   └── evals/                   # 评测:creative_brief Brief 质量打分器
-│   ├── app/gateway/                 # FastAPI 网关(/agent/flows、/agent/users、content-app 鉴权、uploads、threads/runs…)
-│   ├── packages/harness/deerflow/   # DeerFlow 基础设施(运行时 / checkpointer / 持久化 / skills 加载器)
-│   ├── skills/public/               # 安装的标准 Claude skill(borgrise-creative-assistant-v2,供 lead_agent 自主调用)
-│   ├── evals/                       # 评测数据集与初始 skill
-│   ├── scripts/                     # 辅助脚本(成片/Brief 打分等)
-│   └── tests/                       # 离线单测(不依赖外部服务)
-├── web/                             # 前端(Vite + React + TS + Tailwind v4):对话 + canvas 工作区
-│   └── src/
-│       ├── pages/                   # WorkspacePage(对话 + canvas 双栏)
-│       ├── components/
-│       │   ├── chat/                # 消息流
-│       │   ├── composer/            # 极简输入器 + 视频参数弹窗
-│       │   ├── canvas/              # Brief 卡 / 结果网格 / 阶段确认 / 质检报告
-│       │   └── layout/              # 侧栏 + 整体布局
-│       └── lib/                     # API client(/agent 代理)、类型
-└── docs/                            # 技术设计文档 v1.3(gitignore,不入库)
+│   ├── app/gateway/                 # FastAPI 网关、/agent Controller、鉴权、配置加载
+│   ├── pixelflow/                   # PixelFlow 业务逻辑
+│   │   ├── intake/                  # 意图识别、表单、垂类画像、采集上下文
+│   │   ├── creative/                # plan.md 填充、Brief/策划逻辑
+│   │   ├── generate/                # 图片参数准备、视频场景包
+│   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
+│   │   ├── tasks/                   # 任务、会话、消息、资产持久化
+│   │   └── preferences/             # 用户偏好
+│   ├── packages/harness/deerflow/   # DeerFlow 基础设施
+│   ├── skills/public/               # Borgrise creative assistant skill 与模板
+│   └── tests/                       # 后端测试
+├── web/
+│   ├── src/pages/WorkspacePage.tsx  # 前端主流程编排
+│   ├── src/lib/api.ts               # /agent API client
+│   └── src/components/canvas/       # plan、图片结果、视频分镜、结果展示
+├── docs/
+│   └── pixelflow-agent-skill-flow-latest-design.md
+├── AGENTS.md
+└── README.md
 ```
 
-### 子 Agent(流水线节点)
+## 主流程
 
-当前共 **9 个 LangGraph 节点** —— **5 个阶段 Agent**(各负责一段确定性工作)+ **4 个人工确认门**(human-in-the-loop interrupt):
-
-| 阶段 Agent | 职责 | 人工确认门 |
-|---|---|---|
-| 采集 INTAKE | 商品信息/参数/参考视频拆解 + 完整性门控 | — |
-| 策划 CREATIVE | 生成分镜 Brief + 校验修复 | **Brief 确认**(approve / revise) |
-| 生成 GENERATE | 分段并行图生视频 | **片段确认**(segment_review) |
-| 剪辑 EDIT | Timeline → FFmpeg 成片 | **剪辑确认**(edit_review) |
-| 质检 QC | 完整性/时长/分辨率/黑屏 | **质检确认**(qc_review) |
-
-> 另:`skills/public/` 装有标准 Claude skill,可由 DeerFlow 的通用 **lead_agent** 自主调用(与上述确定性流水线并存)。
-
-设计原则:**创意交给 LLM,机械逻辑用纯函数**。所有纯逻辑模块(校验、完整性检查、Timeline、QC 时长、PromptEngine)可离线测试;外部依赖(Borgrise、剪映、FFmpeg)收敛在 `skills/` 的 Protocol 边界后面,通过工厂函数 + 环境变量切换实现,缺失时优雅降级而不是崩溃。
-
-### 流水线
-
-```
-采集 → 策划 → [Brief 确认] → 生成 → [片段确认] → 剪辑 → [剪辑确认] → 质检 → [质检确认] → done
-            ↑___ revise ___|        ↑_ 重新生成 _|        ↑_ 重新剪辑 _|        ↑_ 重新生成 _|
+```mermaid
+flowchart TD
+  A["用户输入提示词和附件"] --> B["采集 Agent 识别意图"]
+  B --> C{"intent"}
+  C -->|"image"| D["图片表单 + 创意方向 + plan.md"]
+  C -->|"video"| E["视频表单 + 创意方向 + plan.md"]
+  C -->|"video_analysis"| F["视频链接识别 + storyboard 拆解"]
+  D --> G["图片参数准备"]
+  G --> H["调用图片 Skill"]
+  H --> I["图片结果确认或重新生成"]
+  E --> J["生成可编辑视频场景包"]
+  J --> K["生成角色三视图、场景图、道具图"]
+  K --> L["前端编辑故事线、镜头描述、旁白和 @参考图"]
+  L --> M["逐场景生成视频"]
+  M --> N["按顺序合并视频"]
+  N --> O["视频结果确认或修改循环"]
+  F --> P["返回分析结果"]
 ```
 
-- 每个产出阶段后都有 **human-in-the-loop `interrupt()` 确认门**:approve 进入下一阶段,reject 退回重做。
-- **Brief 确认**:approve 进入生成,revise 回到策划。
-- **QC** 失败回到生成重试,上限 `MAX_QC_ATTEMPTS = 2`;采集补充信息上限 `MAX_INTAKE_ROUNDS = 3`。
-- 图注册在 [`backend/langgraph.json`](backend/langgraph.json),入口 `pixelflow`,checkpointer 由平台层注入。
+## 关键约束
 
-## 当前进度
+- 新增 Python 网关接口必须以 `/agent` 开头。
+- 前端上传附件直接调用 content-app `/api/upload`，上传结果作为 `materials` 交给 Agent。
+- 所有 `/agent` 请求必须携带 content-app `Authorization: Bearer <token>`。
+- Skill 调用 content-app/Borgrise 计费接口时必须透传入口请求的 Authorization。
+- 不允许把用户 token、用户名、密码写死到配置、代码或测试脚本里。
+- content-app 返回额度不足、余额不足、HTTP 402 等信息时，当前生成必须立即暂停并保存可恢复上下文。
+- 前端展示 Agent 进度时只能展示业务摘要，不能暴露原始 prompt、思维链、供应商密钥或完整内部堆栈。
 
-| 阶段 / 模块 | 状态 | 说明 |
-|---|---|---|
-| 采集 INTAKE | ✅ 已完成 | LLM 提取商品信息 + 参数归一 + 需求完整性门控(信息不足时中断补充,≤3 轮) |
-| 策划 CREATIVE | ✅ 已完成 | LLM 生成分镜 Brief + 纯逻辑校验修复(validator) |
-| Brief 人工确认 | ✅ 已完成 | `interrupt()` 门控,支持 approve / revise |
-| 生成 GENERATE | ✅ 已完成 | 按总时长分段生成(seedance 单次 ≤10s):≤10s 融合所有分镜提示词**一次出整条**,>10s 拆多段**并行**生成后拼接;商品主图锚定每段。**真机已验证**:单段、多段并行(30s→3 段)均跑通真出片 |
-| 剪辑 EDIT | ✅ 已完成 | Timeline IR + DraftPlan 纯逻辑;两条渲染路径:剪映草稿(pyJianYingDraft,精修用)或 FFmpeg 无头渲染直出 mp4(`PIXELFLOW_EDIT_SKILL=ffmpeg`),保留源音轨;单段直通、多段 concat 均真机验证 |
-| 质检 QC | ✅ 已完成 | 片段完整性(阻断)+ 时长达标(警告)纯逻辑;成片再用 ffprobe 检分辨率/黑屏(产品一致性留 P0 占位,P1 接 VLM),不通过回 GENERATE |
-| 任务 API | ✅ 已完成 | `/agent/flows`:建任务、查询、结果/资产、Brief 确认/修订、SSE 进度事件和可解释执行日志;Memory/SQL/MySQL 三种存储 |
-| 用户偏好 P0 | ✅ 已完成 | `/agent/users/{id}/preferences`:结构化偏好(正则确定性抽取),建任务时注入初始状态 |
-| 参考视频拆解 | ✅ 已完成 | INTAKE 调用博观 decompose_video_to_storyboard(视觉模型 gemini-3-flash-preview)拆分镜,纯逻辑摘要后注入 Brief 提示词;按参考数量切换创意模式(original / reference / attribution),拆解失败仅警告不阻断。**真机已验证**(小红书链接 → 分镜) |
-| 最终视频渲染 | 🚧 v1 可用 | FFmpeg 直出 mp4(裁时长、缩放/填充、保留源音轨、可选花字烧录),已端到端验证产出真实成片(1080×1920 / 30fps / H.264 + AAC,单段与 30s 多段拼接均验证)。暂不支持转场、TTS 旁白与 BGM;1080p 原生生成待博观接口修复(当前 720p 生成 + 上采样) |
-| P1 语义记忆 | ❌ 未开始 | mem0/Qdrant 预留位,P0 只有结构化偏好 |
-| P1 PPT / 图片生成 | ❌ 未开始 | 规划中 |
-| 前端 | 🚧 v1 可用 | React + Vite 工作台已接入任务 API、SSE、Agent 执行时间线、Brief/片段/剪辑/QC 多阶段确认和会话恢复;参考视频输入、历史任务路由等仍待完善 |
+## 核心 API
 
-测试:各纯逻辑模块与关键节点均有离线单测(`backend/tests/test_pixelflow_*`、`test_intake_*`、`test_creative_*`、`test_generate_*`、`test_edit_*`、`test_qc_*`、`test_borgrise_*`、`test_reference_video_nodes.py`、`test_prompt_engine.py`),不依赖外部服务。
+前端 `web/src/lib/api.ts` 使用 `AGENT_API_PREFIX="/agent"`，下表展示最终路径。
 
-## 本地开发
+| 模块 | 方法 | 路径 | 说明 |
+| --- | --- | --- | --- |
+| 采集 | POST | `/agent/flows/intake/analyze` | LLM 意图识别 |
+| 采集 | GET | `/agent/flows/intake/forms/{intent}` | 表单 schema |
+| 采集 | POST | `/agent/flows/intake/validate` | 表单完整性校验 |
+| 采集 | POST | `/agent/flows/intake/directions` | 生成 3 个创意方向 |
+| 策划 | POST | `/agent/flows/planning/plan` | 填充 plan.md |
+| 图片 | POST | `/agent/flows/image/prepare` | 选择图片接口并生成参数 |
+| 图片 | POST | `/agent/flows/image/generate` | 生成图片 |
+| 视频 | POST | `/agent/flows/video/analyze-storyboards` | 视频分析拆解 |
+| 视频 | POST | `/agent/flows/video/prepare-scene-packages` | 生成视频场景包 |
+| 视频 | POST | `/agent/flows/video/generate-scene-assets` | 生成场景参考图 |
+| 视频 | POST | `/agent/flows/video/generate-scenes/start` | 启动场景视频异步生成 |
+| 视频 | GET | `/agent/flows/video/generate-scenes/jobs/{job_id}` | 查询场景视频生成结果 |
+| 视频 | POST | `/agent/flows/video/generate-direct/start` | 启动直接视频异步生成 |
+| 视频 | GET | `/agent/flows/video/generate-direct/jobs/{job_id}` | 查询直接视频生成结果 |
+| 视频 | POST | `/agent/flows/video/merge` | 合并场景视频 |
+| 视频 | POST | `/agent/flows/video/analyze-flaws` | 视频穿帮分析 |
+| 对话 | POST | `/agent/conversations` | 新建对话 |
+| 对话 | GET | `/agent/conversations?page_size=5` | 最近对话分页 |
+| 对话 | GET | `/agent/conversations/{conversation_id}` | 对话详情 |
+| 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息 |
+| 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
+
+旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+## content-app/Borgrise 接口
+
+图片：
+
+| PixelFlow Skill | content-app/Borgrise 接口 |
+| --- | --- |
+| 文生图 | `/api/picture/text_to_image` |
+| 图片编辑 | `/api/picture/image_edit` |
+| 参考图生成 | `/api/picture/multi_reference_image_generation` |
+| 多图融合 | `/api/picture/multi_image_fusion` |
+
+视频：
+
+| PixelFlow Skill | content-app/Borgrise 接口 |
+| --- | --- |
+| 文生视频 | `/api/video/text-to-video` |
+| 首帧图生视频 | `/api/video/image-to-video` |
+| 首尾帧生视频 | `/api/video/two-image-to-video` |
+| 全能参考模式 | `/api/video/reference-mode-video` |
+| 编辑视频 | `/api/video/edit-video` |
+| 延伸视频 | `/api/video/extend-video` |
+| 合并视频 | `/api/video/merge` |
+
+视频理解：
+
+| PixelFlow Skill | content-app/Borgrise 接口 |
+| --- | --- |
+| 文本抽取媒体链接 | `/api/creative/extractMediaLinks` |
+| 单视频拆解 | `/api/creative/decompose_video_to_storyboard` |
+| 多视频拆解 | `/api/creative/batch_decompose_video_to_storyboard` |
+| 视频穿帮分析 | `/api/creative/analyze_video_flaws` |
+
+## 视频场景包规则
+
+视频生成主流程固定为：plan.md -> 多个视频场景片段 -> 每段生成视频 -> 按顺序合并。
+
+- 每个场景片段最少 4 秒，最多 15 秒。
+- 全局固定资产是 `characters`、`scenes`、`props`、`visual_style`。
+- `characters` 只能是人物角色，每个角色必须是同一个人物的正面、侧面、背面三视图。
+- 产品、商品、包装、工具、书包、球、床垫等非人物主体放到 `props`。
+- `shot_description.text` 是一整段镜头描述，不能拆成时间、地点、角色、景别等多个字段。
+- 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
+- 每个视频场景片段最多 9 张参考图。
+
+## 本地启动
+
+### 后端
+
+要求：Python 3.12、uv。
 
 ```bash
 cd backend
-uv sync                          # 安装依赖(Python 3.12)
-make dev                         # 默认加载 config.dev.yml 并启动网关
-PIXELFLOW_CONFIG_ENV=prod make gateway  # 加载 config.prod.yml 启动生产模式网关
-uv run ruff check                # lint
-uv run pytest tests/ -k pixelflow  # 跑 PixelFlow 相关测试
+uv sync
+make dev
 ```
 
-### 登录与鉴权
+默认读取 `backend/config.dev.yml`，监听 `0.0.0.0:8001`。
 
-PixelFlow 不再提供自己的登录、注册、初始化管理员接口。登录统一由同级项目
-`content-app` 完成，前端或第三方调用 PixelFlow 时必须携带：
+常用命令：
+
+```bash
+cd backend
+make gateway                              # 非 reload 模式
+PIXELFLOW_CONFIG_ENV=prod make gateway    # 使用 config.prod.yml
+make test
+make lint
+```
+
+### 前端
+
+要求：Node.js。仓库有 `pnpm-lock.yaml`，推荐用 corepack 调 pnpm，避免依赖版本漂移。
+
+```bash
+cd web
+corepack enable
+corepack pnpm install
+corepack pnpm dev
+```
+
+打包：
+
+```bash
+cd web
+corepack pnpm build
+```
+
+如果本机没有 corepack 或 pnpm，也可以临时使用：
+
+```bash
+cd web
+npm install
+npm run build
+```
+
+不要直接运行裸 `tsc -b && vite build`，本机没有全局 `tsc` 或 `vite` 时会报 `command not found`。应通过 `pnpm build`、`corepack pnpm build` 或 `npm run build` 触发 `package.json` 脚本。
+
+## 鉴权与调试
+
+PixelFlow 不提供自己的登录体系。登录统一由 content-app 完成，前端或第三方调用 PixelFlow 时必须携带：
 
 ```http
 Authorization: Bearer <content-app 登录 token>
 ```
 
-后端处理方式：
+后端处理：
 
-1. `AuthMiddleware` 从 `Authorization` 读取 token。
-2. `content_app_auth.py` 只读取 JWT payload 里的 `sub` 字段，把它当作 content-app 用户名；不在 PixelFlow 保存或配置 content-app 的签名密钥。
-3. 再调用 content-app `/api/auth/verify` 做实时校验，由 content-app 判断 token 真伪、过期状态和用户是否被禁用；禁用用户会立即无法访问任务列表和 SSE。
-4. 业务层把 content-app 用户名作为 `user_id` 做任务、资产、偏好隔离。
-5. `borgrise` skill 调用 content-app/Borgrise 图片视频生成接口时，透传同一个 `Authorization`，不再使用配置文件里的固定 token、账号或密码。
-6. content-app/Borgrise 返回 HTTP 402 或“额度不足 / 没有有效的额度”等业务失败时，PixelFlow 不继续重试或发起后续生成调用；当前对话会停在可恢复状态，用户充值后回到同一对话可继续原来的图片、参考图、场景视频或合并步骤。
+1. `AuthMiddleware` 读取 `Authorization`。
+2. `content_app_auth.py` 从 JWT payload 读取 `sub` 作为用户名。
+3. 后端调用 content-app `/api/auth/verify` 做实时校验。
+4. 当前用户名用于任务、会话、资产、偏好隔离。
+5. Borgrise Skill 调用生成接口时透传同一个 Authorization。
 
-前端普通请求和 SSE 都会携带 `Authorization`。由于原生 `EventSource` 不能加 header，事件流使用 `fetch` 读取 `text/event-stream`。
+本地单独调试前端时，可以打开：
 
-本地单独调试 PixelFlow 前端时，可以打开 `http://localhost:5273/auth-token`，粘贴 content-app 登录 token 并保存。前端会写入 `localStorage.Authorization`，后续 `/agent/flows`、`/agent/auth/me`、SSE、资产内容拉取都会自动带同一个请求头。
+```text
+http://localhost:5273/auth-token
+```
 
-### 配置文件
+把 content-app token 保存到 `localStorage.Authorization`。正式集成优先由 content-app 宿主注入 `window.__CONTENT_APP_AUTHORIZATION__`。
 
-后端主配置已收敛到 `backend/config.dev.yml` 和 `backend/config.prod.yml`，用法类似 Spring Boot 的 `application-dev.yml` / `application-prod.yml`。
+## 配置
+
+后端主配置：
 
 | 文件 | 说明 |
-|---|---|
-| `backend/config.dev.yml` | 开发/测试环境配置，默认开启接口文档，默认用 sqlite，本地更方便调试 |
-| `backend/config.prod.yml` | 生产环境配置，默认关闭接口文档，输出目录和安全配置更偏生产 |
+| --- | --- |
+| `backend/config.dev.yml` | 开发环境，Swagger/OpenAPI 默认开启 |
+| `backend/config.prod.yml` | 生产环境，Swagger/OpenAPI 默认关闭 |
 
-启动时选择配置：
+关键配置：
+
+| 配置段 | 说明 |
+| --- | --- |
+| `gateway.*` | FastAPI host、port、docs、CORS |
+| `pixelflow.*` | MySQL、media_skill、edit_skill、输出目录 |
+| `borgrise.*` | content-app/Borgrise base_url、auth verify、轮询超时、重试次数 |
+| `models` | LLM 配置，当前主模型是 `deepseek-v4-pro` |
+| `database` | DeerFlow checkpointer 和平台持久化 |
+| `skills` | DeerFlow skills 路径 |
+
+轮询默认值：
+
+- 图片：10 分钟。
+- 视频：1 小时。
+- 视频分析：15 分钟。
+- content-app `/api/auth/verify`：10 秒。
+
+## 测试与验证
+
+后端核心测试：
 
 ```bash
 cd backend
-make dev                                  # 默认 PIXELFLOW_CONFIG_ENV=dev
-PIXELFLOW_CONFIG_ENV=dev make gateway     # 明确加载 config.dev.yml
-PIXELFLOW_CONFIG_ENV=prod make gateway    # 加载 config.prod.yml
-PIXELFLOW_CONFIG_FILE=/abs/path/custom.yml make gateway  # 加载指定配置文件
+uv run pytest tests/test_intake_llm.py tests/test_intake_forms.py tests/test_industry_profile.py -q
+uv run pytest tests/test_creative_plan_markdown.py tests/test_image_prepare.py -q
+uv run pytest tests/test_pixelflow_image_router.py tests/test_video_scene_packages.py tests/test_pixelflow_video_router.py -q
+uv run pytest tests/test_borgrise_poll.py tests/test_borgrise_authorization_passthrough.py tests/test_borgrise_quota_detection.py -q
+uv run ruff check .
 ```
 
-配置文件会先加载，再映射到现有代码读取的环境变量。命令行临时传入的环境变量优先级更高，例如：
+前端核心测试：
 
 ```bash
-GATEWAY_PORT=8123 PIXELFLOW_CONFIG_ENV=dev make gateway
+cd web
+corepack pnpm test:scene-packages
+corepack pnpm test:scene-mentions
+corepack pnpm test:conversation-routing
+corepack pnpm build
 ```
 
-### 接口文档
+文档变更至少跑：
 
-本项目使用 FastAPI 内置的 OpenAPI 3 接口文档，类似 Java 项目里的 Knife4j / Swagger。
+```bash
+git diff --check
+```
 
-启动后端网关后访问：
+## 文档维护
 
-| 页面 | 地址 | 说明 |
-|---|---|---|
-| Swagger UI | `http://localhost:8001/agent/docs` | 常用调试页面，可查看接口、参数、响应模型，也可以在线 Try it out |
-| ReDoc | `http://localhost:8001/agent/redoc` | 阅读型接口文档，适合整体浏览 |
-| OpenAPI JSON | `http://localhost:8001/agent/openapi.json` | 原始 OpenAPI 3 JSON，可导入 Apifox、Postman、Knife4j 等工具 |
+以下变更必须同步更新 `docs/pixelflow-agent-skill-flow-latest-design.md`、`AGENTS.md` 和本 README：
 
-开发配置默认开启接口文档；生产配置 `backend/config.prod.yml` 中 `gateway.enable_docs: false`，默认关闭。
-
-### 常用配置项
-
-常用项都在 `backend/config.dev.yml` / `backend/config.prod.yml` 中，并且每个 key 都有中文注释：
-
-| 配置 | 说明 |
-|---|---|
-| `gateway.*` | 后端监听 host/port、接口文档开关、CORS |
-| `pixelflow.*` | 业务 MySQL、媒体生成供应商 `media_skill`、剪辑/渲染 `edit_skill`、产物输出目录 |
-| `borgrise.*` | `media_skill: "borgrise"` 时使用的 Borgrise/content-app Client 配置；也配置 `/api/auth/verify` 登录态校验开关和 10 秒超时，以及视频 1 小时、图片 10 分钟、视频分析 15 分钟三类轮询超时 |
-| `models` | DeerFlow/Agent 使用的大模型配置 |
-| `database` | DeerFlow 平台数据持久化，开发默认 sqlite |
-| `tracing.*` | LangSmith/Langfuse 链路追踪 |
-| `environment.variables` | 少量非常规环境变量直通区 |
-
-> 剪映草稿生成依赖 `pyJianYingDraft`(及原生 `pymediainfo`),未安装时 EDIT 阶段会优雅降级:草稿生成失败记入 `edit_notes`,流水线继续推进。
+- Agent 流程变化。
+- Skill Protocol 或 Borgrise/content-app 接口变化。
+- 前端确认、倒计时、重试、恢复逻辑变化。
+- 对话隔离、历史记录、上下文恢复变化。
+- 鉴权、额度不足、错误处理策略变化。
+- 核心运行命令或配置变化。
 
 ## License
 
-见 [`LICENSE`](LICENSE) 与 [`NOTICE`](NOTICE)(DeerFlow 归属说明)。
+见 `LICENSE` 与 `NOTICE`。
