@@ -226,18 +226,19 @@ def _scene_package_prompt(
 1. 必须返回 {len(durations)} 个 scene_packages，顺序和 durations_ms 完全对应。
 2. 每个片段时长必须在 {MIN_SCENE_DURATION_MS} 到 {MAX_SCENE_DURATION_MS} ms 之间。
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
-4. global_assets.characters 是整片固定的不同出场角色或产品主体，每个 asset 都是一张独立参考图，不要生成正面/侧面/背面的三视图。
+4. global_assets.characters 只能是人物角色，不能放产品、商品、道具或场景；每个角色必须提供 three_view_prompt，用来生成当前人物的正面、侧面、背面三视图。
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
 6. shot_description 包含 text 和 mentions。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
 7. shot_description.text 中引用角色、场景、道具图片时使用 @asset_id，例如 @character-presenter；视觉风格只作为文字描述，不作为图片 mention。
 8. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。
-9. 只返回 JSON，不要 Markdown，不要解释。
+9. 产品主体、商品、工具、包装、卖点物件一律放在 global_assets.props，不允许放进 global_assets.characters。
+10. 只返回 JSON，不要 Markdown，不要解释。
 
 输出格式：
 {{"global_assets":{{
   "characters":[
-    {{"asset_id":"character-presenter","name":"角色名","description":"角色描述","image_prompt":"角色单张参考图生成提示词"}},
-    {{"asset_id":"character-user","name":"另一个角色名","description":"另一个角色描述","image_prompt":"另一个角色单张参考图生成提示词"}}
+    {{"asset_id":"character-presenter","name":"人物角色名","description":"人物角色描述","three_view_prompt":"同一个人物角色三视图生成提示词，必须包含正面、侧面、背面"}},
+    {{"asset_id":"character-user","name":"另一个人物角色名","description":"另一个人物角色描述","three_view_prompt":"另一个人物角色三视图生成提示词，必须包含正面、侧面、背面"}}
   ],
   "scenes":[{{"asset_id":"scene-opening","name":"场景名","description":"场景描述","image_prompt":"场景图生成提示词"}}],
   "props":[{{"asset_id":"prop-product","name":"道具名","description":"道具描述","image_prompt":"道具图生成提示词"}}],
@@ -335,12 +336,14 @@ def _normalize_llm_global_assets(
 ) -> dict[str, Any]:
     defaults = _default_global_assets(form_values=form_values, selected_direction=selected_direction, stage_templates=stage_templates)
     raw = payload.get("global_assets") if isinstance(payload, dict) and isinstance(payload.get("global_assets"), dict) else {}
+    product_name = _first_text(form_values.get("product_info"), form_values.get("product_name"), selected_direction.get("product_name"), "产品")
+    product_category = _first_text(form_values.get("product_category"), selected_direction.get("product_category"), "商品")
     return {
-        "characters": _normalize_global_asset_list(
+        "characters": _normalize_character_asset_list(
             raw.get("characters"),
             fallback=defaults["characters"],
-            default_prefix="character",
-            required_fields=("name", "description", "image_prompt"),
+            product_name=product_name,
+            product_category=product_category,
         ),
         "scenes": _normalize_global_asset_list(
             raw.get("scenes"),
@@ -356,6 +359,101 @@ def _normalize_llm_global_assets(
         ),
         "visual_style": _normalize_visual_style(raw.get("visual_style"), defaults["visual_style"]),
     }
+
+
+def _normalize_character_asset_list(
+    value: Any,
+    *,
+    fallback: list[dict[str, Any]],
+    product_name: str,
+    product_category: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return fallback
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict) or _looks_like_non_person_asset(item, product_name):
+            continue
+        asset_id = _first_text(item.get("asset_id"), item.get("id"), f"character-{index}")
+        name = _first_text(item.get("name"), item.get("label"), f"人物角色 {index}")
+        description = _first_text(item.get("description"), item.get("role"), item.get("persona"))
+        three_view_prompt = _ensure_three_view_prompt(
+            _first_text(item.get("three_view_prompt"), item.get("image_prompt"), item.get("prompt")),
+            name=name,
+            description=description,
+            product_name=product_name,
+            product_category=product_category,
+        )
+        if name and description and three_view_prompt:
+            normalized.append(
+                {
+                    **item,
+                    "asset_id": asset_id,
+                    "name": name,
+                    "description": description,
+                    "three_view_prompt": three_view_prompt,
+                }
+            )
+    return normalized or fallback
+
+
+def _looks_like_non_person_asset(item: dict[str, Any], product_name: str) -> bool:
+    asset_id = _first_text(item.get("asset_id"), item.get("id")).lower()
+    name = _first_text(item.get("name"), item.get("label"))
+    description = _first_text(item.get("description"))
+    prompt = _first_text(item.get("three_view_prompt"), item.get("image_prompt"), item.get("prompt"))
+    text = f"{asset_id} {name} {description} {prompt}"
+    normalized_product = product_name.strip()
+    if asset_id.startswith("prop-") or "product" in asset_id or "prop" in asset_id:
+        return True
+    if normalized_product and normalized_product not in {"产品", "商品"} and normalized_product in name:
+        return True
+    person_markers = ("人物", "角色", "讲解者", "主讲人", "主播", "用户", "顾客", "模特", "学生", "男性", "女性", "男", "女", "person", "human")
+    if any(marker in text for marker in person_markers):
+        return False
+    if normalized_product and normalized_product not in {"产品", "商品"} and normalized_product in text:
+        return True
+    non_person_markers = ("产品主体", "商品主体", "道具", "产品图", "商品图", "物件", "包装", "设备主体")
+    return any(marker in text for marker in non_person_markers)
+
+
+def _ensure_three_view_prompt(prompt: str, *, name: str, description: str, product_name: str = "", product_category: str = "") -> str:
+    descriptor = _safe_person_descriptor(prompt=prompt, description=description, product_name=product_name, product_category=product_category)
+    base = f"{name}人物角色三视图，{descriptor}，同一个人物的正面、侧面、背面三视图"
+    constraints = "只出现同一个人物，服饰发型五官一致，干净背景，不出现产品、道具、文字或水印"
+    return f"{base}，{constraints}"
+
+
+def _safe_person_descriptor(*, prompt: str, description: str, product_name: str, product_category: str) -> str:
+    forbidden_terms = {term for term in (product_name.strip(), product_category.strip()) if term and term not in {"产品", "商品", "未指定品类"}}
+    object_markers = {
+        "产品",
+        "商品",
+        "道具",
+        "拿着",
+        "手持",
+        "背着",
+        "展示",
+        "包装",
+        "书包",
+        "耳机",
+        "洗地机",
+        "水杯",
+        "平板",
+    }
+    pieces: list[str] = []
+    for source in (description, prompt):
+        for piece in re.split(r"[，,。；;、]", _first_text(source)):
+            cleaned = piece.strip()
+            if not cleaned:
+                continue
+            if any(term and term in cleaned for term in forbidden_terms):
+                continue
+            if any(marker in cleaned for marker in object_markers):
+                continue
+            if cleaned not in pieces:
+                pieces.append(cleaned)
+    return "，".join(pieces[:4]) or "电商短视频人物角色，真实自然，表情清晰"
 
 
 def _normalize_global_asset_list(
@@ -554,12 +652,14 @@ def _normalize_scene_items(value: Any, *, fallback: list[dict[str, Any]], requir
 
 def _default_character(form_values: dict[str, Any]) -> dict[str, Any]:
     target_audience = _first_text(form_values.get("target_audience"), "目标用户")
-    product_name = _first_text(form_values.get("product_info"), "产品")
+    product_category = _first_text(form_values.get("product_category"), "商品")
+    name = "主讲人"
+    description = f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信"
     return {
-        "name": "主讲人",
-        "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-        "image_prompt": f"{product_name}短视频主讲人单张角色参考图，半身或全身，服饰发型统一，真实摄影，干净背景",
-        "images": [],
+        "name": name,
+        "description": description,
+        "three_view_prompt": _ensure_three_view_prompt("", name=name, description=description, product_category=product_category),
+        "three_view_images": [],
     }
 
 
@@ -615,15 +715,27 @@ def _default_global_assets(
                 "asset_id": "character-presenter",
                 "name": "主讲人",
                 "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-                "image_prompt": f"{product_name}短视频主讲人单张角色参考图，半身或全身，服饰发型统一，真实摄影，干净背景",
-                "images": [],
+                "three_view_prompt": _ensure_three_view_prompt(
+                    "",
+                    name="主讲人",
+                    description=f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
+                    product_name=product_name,
+                    product_category=product_category,
+                ),
+                "three_view_images": [],
             },
             {
-                "asset_id": "character-product",
-                "name": product_name,
-                "description": f"{product_category}商品主体，作为视频中的核心出场对象保持外观一致",
-                "image_prompt": f"{product_name}单张产品角色参考图，干净背景，主体完整，细节清晰，颜色和外观稳定",
-                "images": [],
+                "asset_id": "character-user",
+                "name": "目标用户",
+                "description": f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
+                "three_view_prompt": _ensure_three_view_prompt(
+                    "",
+                    name="目标用户",
+                    description=f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
+                    product_name=product_name,
+                    product_category=product_category,
+                ),
+                "three_view_images": [],
             },
         ],
         "scenes": scene_assets,
@@ -812,8 +924,10 @@ def _asset_image_url(value: dict[str, Any]) -> str:
     )
     if direct:
         return direct
-    images = value.get("images")
-    if isinstance(images, list):
+    for key in ("images", "image_urls", "three_view_images", "threeViewImages"):
+        images = value.get(key)
+        if not isinstance(images, list):
+            continue
         for image in images:
             if isinstance(image, str) and image.strip():
                 return image.strip()

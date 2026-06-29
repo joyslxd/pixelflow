@@ -24,11 +24,14 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert len(character_assets) >= 2
     assert character_assets[0]["asset_id"].startswith("character-")
     assert character_assets[0]["asset_id"] != character_assets[1]["asset_id"]
-    assert all("image_prompt" in asset for asset in character_assets)
-    assert all("three_view_prompt" not in asset for asset in character_assets)
-    assert all("three_view_images" not in asset for asset in character_assets)
+    assert all("three_view_prompt" in asset for asset in character_assets)
+    assert all("三视图" in asset["three_view_prompt"] for asset in character_assets)
+    assert all("正面" in asset["three_view_prompt"] and "侧面" in asset["three_view_prompt"] and "背面" in asset["three_view_prompt"] for asset in character_assets)
+    assert all(asset["asset_id"] != "character-product" for asset in character_assets)
+    assert all("苹果降噪耳机 Pro" not in asset["name"] for asset in character_assets)
     assert result["global_assets"]["scenes"][0]["asset_id"].startswith("scene-")
     assert result["global_assets"]["props"][0]["asset_id"] == "prop-product"
+    assert result["global_assets"]["props"][0]["name"] == "苹果降噪耳机 Pro"
     assert [scene["scene_id"] for scene in result["scene_packages"]] == ["scene-1", "scene-2", "scene-3"]
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 30_000
     assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
@@ -56,11 +59,12 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
         def invoke(self, _prompt):
             global_assets = {
                 "characters": [
-                    {"asset_id": "character-presenter", "name": "主讲人", "description": "稳定的讲解者", "image_prompt": "主讲人单人角色图"},
+                    {"asset_id": "character-presenter", "name": "主讲人", "description": "稳定的讲解者", "three_view_prompt": "主讲人拿着智能洗地机 X9产品，正面侧面背面人物三视图"},
+                    {"asset_id": "character-product", "name": "智能洗地机 X9", "description": "产品主体", "image_prompt": "产品图"},
                     {"asset_id": "character-user", "name": "养宠用户", "description": "目标用户", "image_prompt": "目标用户单人角色图"},
                 ],
                 "scenes": [{"asset_id": "scene-home", "name": "居家场景", "description": "真实居家场景", "image_prompt": "真实场景图"}],
-                "props": [{"asset_id": "prop-product", "name": "产品", "description": "产品道具", "image_prompt": "产品道具图"}],
+                "props": [],
                 "visual_style": {"asset_id": "style-main", "name": "真实摄影", "description": "真实电商广告风格"},
             }
             scenes = [
@@ -95,6 +99,12 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
 
     assert result["ok"] is True
     assert result["global_assets"]["characters"][0]["asset_id"] == "character-presenter"
+    assert all("three_view_prompt" in asset for asset in result["global_assets"]["characters"])
+    assert all("智能洗地机 X9" not in asset["name"] for asset in result["global_assets"]["characters"])
+    assert "智能洗地机 X9" not in result["global_assets"]["characters"][0]["three_view_prompt"]
+    assert "拿着" not in result["global_assets"]["characters"][0]["three_view_prompt"]
+    assert result["global_assets"]["props"][0]["asset_id"] == "prop-product"
+    assert result["global_assets"]["props"][0]["name"] == "智能洗地机 X9"
     assert len(result["scene_packages"]) == 9
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 90_000
     assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
