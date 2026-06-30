@@ -4,6 +4,20 @@ export const MAX_REFERENCE_IMAGE_COUNT = 9;
 export const DEFAULT_TARGET_DURATION_MS = 30_000;
 
 export type SceneAssetCollection = "characters" | "scene_images" | "prop_images";
+export type GlobalSceneAssetGroup = "characters" | "scenes" | "props";
+
+export interface SceneGlobalAssetReference extends Record<string, unknown> {
+  source: "scene_global_asset";
+  asset_id: string;
+  asset_group: GlobalSceneAssetGroup;
+  name: string;
+  source_image_url: string;
+  url: string;
+  type: "image";
+  filename: string;
+  description?: string;
+  storyboard_message_id?: string;
+}
 
 export interface GlobalSceneAssets {
   characters?: Array<Record<string, unknown>>;
@@ -72,6 +86,53 @@ export function updateScenePackageAssetField<T extends ScenePackageRecord>(
     return {
       ...scene,
       [collection]: items.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item)),
+    };
+  });
+}
+
+export function replaceGlobalSceneAssetImage<T extends GlobalSceneAssets>(
+  globalAssets: T,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
+): T {
+  const rawGroupRecords = globalAssets[input.assetGroup];
+  const groupRecords: Array<Record<string, unknown>> = Array.isArray(rawGroupRecords) ? rawGroupRecords : [];
+  return {
+    ...globalAssets,
+    [input.assetGroup]: groupRecords.map((asset) => {
+      if (stringValue(asset.asset_id) !== input.assetId && stringValue(asset.id) !== input.assetId) return asset;
+      if (input.assetGroup === "characters") {
+        return replaceFirstUrl(asset, "three_view_images", input.editedImageUrl);
+      }
+      return replaceFirstUrl(asset, "images", input.editedImageUrl);
+    }),
+  } as T;
+}
+
+export function syncScenePackageMentionImageUrls<T extends ScenePackageRecord>(
+  scenes: T[],
+  input: { assetId: string; editedImageUrl: string },
+): T[] {
+  return scenes.map((scene) => {
+    const shotDescription = scene.shot_description;
+    if (!shotDescription || typeof shotDescription !== "object") return scene;
+    const mentions = (shotDescription as Record<string, unknown>).mentions;
+    if (!Array.isArray(mentions)) return scene;
+    let changed = false;
+    const nextMentions = mentions.map((mention) => {
+      if (!mention || typeof mention !== "object") return mention;
+      const record = mention as Record<string, unknown>;
+      const mentionAssetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
+      if (mentionAssetId !== input.assetId) return mention;
+      changed = true;
+      return { ...record, image_url: input.editedImageUrl };
+    });
+    if (!changed) return scene;
+    return {
+      ...scene,
+      shot_description: {
+        ...shotDescription,
+        mentions: nextMentions,
+      },
     };
   });
 }
@@ -169,6 +230,16 @@ function normalizeDurationMs(value: number | string): number | "" {
 function normalizeTargetDurationMs(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_TARGET_DURATION_MS;
   return Math.max(1_000, Math.min(180_000, Math.round(value)));
+}
+
+function replaceFirstUrl(record: Record<string, unknown>, key: string, editedImageUrl: string): Record<string, unknown> {
+  const current = stringArray(record[key]);
+  return {
+    ...record,
+    [key]: current.length > 0 ? [editedImageUrl, ...current.slice(1)] : [editedImageUrl],
+    image_url: editedImageUrl,
+    url: editedImageUrl,
+  };
 }
 
 function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string): string[] {

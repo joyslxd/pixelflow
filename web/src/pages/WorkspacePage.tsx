@@ -10,6 +10,7 @@ import {
   type ConversationDetailResponse,
   type ConversationMessageResponse,
   type CreativeDirectionResponse,
+  type ImageAssetEditResponse,
   type PlanMarkdownResponse,
   type PrepareScenePackagesResponse,
   type TaskEvent,
@@ -28,8 +29,12 @@ import {
   collectSceneImageUrls,
   durationMsForSubmit,
   inferTargetDurationMs,
+  replaceGlobalSceneAssetImage,
   sceneIdsForRevision,
+  syncScenePackageMentionImageUrls,
   updateScenePackageField,
+  type GlobalSceneAssetGroup,
+  type SceneGlobalAssetReference,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -37,7 +42,8 @@ import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 
 let seq = 0;
-const uid = () => `m${++seq}`;
+const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
+const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image";
@@ -206,6 +212,40 @@ function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefi
   return merged;
 }
 
+function sceneGlobalAssetMaterialKey(item: Record<string, unknown>): string {
+  return String(item.asset_id || item.source_image_url || item.url || item.filename || JSON.stringify(item));
+}
+
+function sceneGlobalAssetReferenceFromMaterials(materials: Array<Record<string, unknown>>): SceneGlobalAssetReference | null {
+  const material = materials.find((item) => item.source === "scene_global_asset");
+  if (!material) return null;
+  const assetId = String(material.asset_id || "");
+  const assetGroup = String(material.asset_group || "");
+  const sourceImageUrl = String(material.source_image_url || material.url || "");
+  if (!assetId || !isGlobalSceneAssetGroup(assetGroup) || !sourceImageUrl) return null;
+  return {
+    ...material,
+    source: "scene_global_asset",
+    asset_id: assetId,
+    asset_group: assetGroup,
+    name: String(material.name || material.asset_name || assetId),
+    source_image_url: sourceImageUrl,
+    url: sourceImageUrl,
+    type: "image",
+    filename: String(material.filename || `${assetId}.png`),
+    description: typeof material.description === "string" ? material.description : undefined,
+    storyboard_message_id: typeof material.storyboard_message_id === "string" ? material.storyboard_message_id : undefined,
+  };
+}
+
+function isGlobalSceneAssetGroup(value: string): value is GlobalSceneAssetGroup {
+  return value === "characters" || value === "scenes" || value === "props";
+}
+
+function editedImageUrl(result: ImageAssetEditResponse): string {
+  return result.edited_image.url || result.edited_image.download_url || "";
+}
+
 function isQuotaInsufficientPayload(value: unknown): boolean {
   if (!value) return false;
   if (typeof value === "object") {
@@ -274,6 +314,52 @@ function messageFromResponse(message: ConversationMessageResponse, conversationI
   };
 }
 
+function normalizeRestoredMessageReferences(messages: ChatMessage[]): ChatMessage[] {
+  const latestStoryboardIdsByAsset = new Map<string, string>();
+  for (const message of messages) {
+    const videoScenePackages = message.artifact?.videoScenePackages;
+    const globalAssets = videoScenePackages?.global_assets;
+    for (const group of ["characters", "scenes", "props"] as const) {
+      const records = globalAssets?.[group];
+      if (!Array.isArray(records)) continue;
+      records.forEach((record) => {
+        const assetId = String(record.asset_id || record.id || "");
+        if (assetId) latestStoryboardIdsByAsset.set(assetId, message.id);
+      });
+    }
+  }
+  return messages.map((message) => {
+    const materials = normalizeMaterialStoryboardReferences(message.artifact?.materials, latestStoryboardIdsByAsset);
+    if (!materials) return message;
+    return {
+      ...message,
+      artifact: message.artifact
+        ? {
+            ...message.artifact,
+            materials,
+          }
+        : message.artifact,
+    };
+  });
+}
+
+function normalizeMaterialStoryboardReferences(
+  materials: Array<Record<string, unknown>> | undefined,
+  latestStoryboardIdsByAsset: Map<string, string>,
+): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(materials)) return materials;
+  let changed = false;
+  const nextMaterials = materials.map((material) => {
+    if (material.source !== "scene_global_asset") return material;
+    const assetId = String(material.asset_id || "");
+    const storyboardMessageId = assetId ? latestStoryboardIdsByAsset.get(assetId) : "";
+    if (!storyboardMessageId || material.storyboard_message_id === storyboardMessageId) return material;
+    changed = true;
+    return { ...material, storyboard_message_id: storyboardMessageId };
+  });
+  return changed ? nextMaterials : materials;
+}
+
 export function WorkspacePage() {
   const navigate = useNavigate();
   const { conversationId } = useParams<{ conversationId?: string }>();
@@ -287,6 +373,7 @@ export function WorkspacePage() {
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
   const [pendingFormValues, setPendingFormValues] = useState<Record<string, unknown>>({});
   const [pendingMaterials, setPendingMaterials] = useState<Array<Record<string, unknown>>>([]);
+  const [referencedMaterials, setReferencedMaterials] = useState<SceneGlobalAssetReference[]>([]);
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
@@ -412,8 +499,13 @@ export function WorkspacePage() {
     void appendMessageForConversation(message, targetConversationId);
   };
 
-  const pushArtifact = (content: string, artifact: ChatArtifact, targetConversationId = conversationIdRef.current) => {
-    const message: ChatMessage = { id: uid(), conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
+  const pushArtifact = (
+    content: string,
+    artifact: ChatArtifact,
+    targetConversationId = conversationIdRef.current,
+    messageId = uid(),
+  ) => {
+    const message: ChatMessage = { id: messageId, conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
     void appendMessageForConversation(message, targetConversationId);
     return message;
   };
@@ -441,8 +533,200 @@ export function WorkspacePage() {
     );
   };
 
+  const updateVideoScenePackageArtifactInMessage = (
+    messageId: string,
+    updater: (videoScenePackages: PrepareScenePackagesResponse) => PrepareScenePackagesResponse,
+  ): PrepareScenePackagesResponse | undefined => {
+    let updatedPackages: PrepareScenePackagesResponse | undefined;
+    setMessages((items) =>
+      items.map((message) => {
+        const artifact = message.artifact;
+        const videoScenePackages = artifact?.videoScenePackages;
+        if (message.id !== messageId || !artifact || !videoScenePackages) return message;
+        updatedPackages = updater(videoScenePackages);
+        return {
+          ...message,
+          artifact: {
+            ...artifact,
+            videoScenePackages: updatedPackages,
+          },
+        };
+      }),
+    );
+    return updatedPackages;
+  };
+
+  const storyboardMessageHasGlobalAsset = (message: ChatMessage | undefined, reference: SceneGlobalAssetReference): boolean => {
+    const globalAssets = message?.artifact?.videoScenePackages?.global_assets;
+    const records = globalAssets?.[reference.asset_group];
+    if (!Array.isArray(records)) return false;
+    return records.some((record) => String(record.asset_id || record.id || "") === reference.asset_id);
+  };
+
+  const findStoryboardMessageForGlobalAsset = (
+    reference: SceneGlobalAssetReference,
+    targetConversationId: string,
+  ): ChatMessage | undefined => {
+    const selectedCandidate = selectedStoryboardMessageId
+      ? messages.find((item) => item.id === selectedStoryboardMessageId && item.artifact?.videoScenePackages)
+      : undefined;
+    if (storyboardMessageHasGlobalAsset(selectedCandidate, reference)) return selectedCandidate;
+    const latestCandidate = [...messages]
+      .reverse()
+      .find(
+        (item) =>
+          messageConversationId(item, targetConversationId) === targetConversationId &&
+          Boolean(item.artifact?.videoScenePackages) &&
+          storyboardMessageHasGlobalAsset(item, reference),
+      );
+    if (latestCandidate) return latestCandidate;
+    const referencedCandidate = reference.storyboard_message_id
+      ? messages.find((item) => item.id === reference.storyboard_message_id && item.artifact?.videoScenePackages)
+      : undefined;
+    return storyboardMessageHasGlobalAsset(referencedCandidate, reference) ? referencedCandidate : undefined;
+  };
+
   const handleUpdateVideoScenePackage = (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => {
     updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageField(scenePackages, sceneId, patch));
+  };
+
+  const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
+    const material = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    setReferencedMaterials((items) => {
+      const next = items.filter((item) => item.asset_id !== material.asset_id);
+      return [material, ...next].slice(0, 1);
+    });
+  };
+
+  const handleRemoveReferencedMaterial = (key: string) => {
+    setReferencedMaterials((items) => items.filter((item) => sceneGlobalAssetMaterialKey(item) !== key));
+  };
+
+  const handleEditReferencedGlobalAsset = async (
+    reference: SceneGlobalAssetReference,
+    prompt: string,
+    targetConversationId: string,
+  ): Promise<boolean> => {
+    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
+    if (!storyboardMessage?.artifact?.videoScenePackages) {
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再编辑。", targetConversationId);
+      return true;
+    }
+    if (!prompt.trim()) {
+      pushAssistant("已引用素材，请在输入框里写清楚要怎么修改这张图片。", targetConversationId);
+      return true;
+    }
+
+    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant(`正在调用图片编辑接口修改「${reference.name}」…`, targetConversationId);
+    try {
+      const editResult = await api.editImageAsset({
+        asset_id: reference.asset_id,
+        asset_name: reference.name,
+        asset_group: reference.asset_group,
+        source_image_url: reference.source_image_url,
+        prompt,
+      });
+      const nextUrl = editedImageUrl(editResult);
+      const quotaInsufficient = isQuotaInsufficientPayload(editResult);
+      if (!editResult.ok || !nextUrl) {
+        pushArtifact("全局素材图片编辑失败，请查看错误信息。", {
+          type: "image_result",
+          title: "全局素材图片编辑结果",
+          description: quotaInsufficient ? quotaMessage(editResult.message || "图片编辑额度不足。") : editResult.message,
+          actionLabel: "查看",
+          imageResult: {
+            ok: false,
+            method: "image_edit",
+            endpoint: editResult.endpoint,
+            task_id: null,
+            images: nextUrl ? [editResult.edited_image] : [],
+            error: editResult.message,
+            message: editResult.message,
+            quota_insufficient: quotaInsufficient,
+            raw: editResult.raw,
+          },
+          intent: "image",
+          materials: [reference],
+          imageRevisionFeedback: prompt,
+        }, targetConversationId);
+        return true;
+      }
+
+      const updatedPackages = {
+        ...storyboardMessage.artifact.videoScenePackages,
+        global_assets: replaceGlobalSceneAssetImage(storyboardMessage.artifact.videoScenePackages.global_assets, {
+          assetId: reference.asset_id,
+          assetGroup: reference.asset_group,
+          editedImageUrl: nextUrl,
+        }),
+        scene_packages: syncScenePackageMentionImageUrls(storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[], {
+          assetId: reference.asset_id,
+          editedImageUrl: nextUrl,
+        }) as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+      };
+      updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+
+      const updatedScenePackageMessageId = uid();
+      pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
+        type: "image_result",
+        title: "全局素材图片编辑结果",
+        description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
+        actionLabel: "查看",
+        imageResult: {
+          ok: true,
+          method: "image_edit",
+          endpoint: editResult.endpoint,
+          task_id: null,
+          images: [editResult.edited_image],
+          error: null,
+          message: editResult.message,
+          quota_insufficient: false,
+          raw: editResult.raw,
+        },
+        intent: "image",
+        materials: [{ ...reference, url: nextUrl, source_image_url: nextUrl, storyboard_message_id: updatedScenePackageMessageId }],
+        imageRevisionFeedback: prompt,
+      }, targetConversationId);
+      const updatedScenePackageMessage = pushArtifact("已把编辑后的图片同步回视频场景包，请继续确认或生成分镜视频。", {
+        type: "video_scene_packages",
+        title: "视频场景包",
+        description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
+        actionLabel: "确认",
+        videoScenePackages: updatedPackages,
+        sceneAssetFailures: storyboardMessage.artifact.sceneAssetFailures || [],
+        intent: "video",
+        formValues: storyboardMessage.artifact.formValues,
+        intakeContext: storyboardMessage.artifact.intakeContext,
+        materials: storyboardMessage.artifact.materials || [],
+        selectedDirection: storyboardMessage.artifact.selectedDirection,
+        plan: storyboardMessage.artifact.plan,
+      }, targetConversationId, updatedScenePackageMessageId);
+      if (isVisibleConversation(targetConversationId)) {
+        setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
+        setCanvasOpen(true);
+      }
+
+      if (targetConversationId) {
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: "scene_global_asset_edited",
+            context: {
+              ...makeSnapshot(),
+              global_assets: updatedPackages?.global_assets,
+              scene_packages: updatedPackages?.scene_packages,
+              scene_global_asset_edit: editResult,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+    } catch (err) {
+      pushAssistant(`全局素材图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+    return true;
   };
 
   const pushDirectionsArtifact = (
@@ -613,6 +897,7 @@ export function WorkspacePage() {
     setPendingCore("");
     setPendingIntent("video");
     setPendingMaterials([]);
+    setReferencedMaterials([]);
     setBusy(false);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
@@ -632,7 +917,7 @@ export function WorkspacePage() {
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
-    applySnapshot({ ...snapshot, messages: restoredConversationMessages(undefined, restoredMessages) });
+    applySnapshot({ ...snapshot, messages: normalizeRestoredMessageReferences(restoredConversationMessages(undefined, restoredMessages)) });
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -740,6 +1025,11 @@ export function WorkspacePage() {
       pushAssistant(`对话保存失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       return;
     }
+    const sceneGlobalAssetReference = sceneGlobalAssetReferenceFromMaterials(materials);
+    if (sceneGlobalAssetReference) {
+      await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+      return;
+    }
     const pendingPlanRevision = planRevisionArtifactRef.current;
     if (pendingPlanRevision?.conversationId === activeConversation && pendingPlanRevision.artifact.intent && pendingPlanRevision.artifact.formValues) {
       const revisionArtifact = pendingPlanRevision.artifact;
@@ -793,6 +1083,19 @@ export function WorkspacePage() {
     }
     const pendingImageRevision = imageRevisionArtifactRef.current;
     const pendingImageRevisionArtifact = pendingImageRevision?.artifact;
+    const pendingSceneGlobalAssetReference =
+      pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imageResult
+        ? sceneGlobalAssetReferenceFromMaterials(pendingImageRevisionArtifact.materials || [])
+        : null;
+    if (pendingSceneGlobalAssetReference) {
+      if (!text.trim()) {
+        pushAssistant(`请在输入框填写「${pendingSceneGlobalAssetReference.name}」的图片修改意见，我会继续编辑这张全局素材。`, activeConversation);
+        return;
+      }
+      imageRevisionArtifactRef.current = null;
+      await handleEditReferencedGlobalAsset(pendingSceneGlobalAssetReference, text, activeConversation);
+      return;
+    }
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {
       const flowMaterials = mergeMaterials(pendingImageRevisionArtifact.materials, materials);
       imageRevisionArtifactRef.current = null;
@@ -1760,12 +2063,22 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     imageRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
-    pushAssistant("请在输入框填写图片修改意见，我会基于当前 plan.md 和图片参数重新生成。", targetConversationId);
+    const sceneGlobalAssetReference = sceneGlobalAssetReferenceFromMaterials(msg.artifact.materials || []);
+    pushAssistant(
+      sceneGlobalAssetReference
+        ? `请在输入框填写「${sceneGlobalAssetReference.name}」的图片修改意见，我会继续编辑这张全局素材并替换回场景包。`
+        : "请在输入框填写图片修改意见，我会基于当前 plan.md 和图片参数重新生成。",
+      targetConversationId,
+    );
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
-          last_phase: "image_revision_requested",
-          context: { ...makeSnapshot(), image_revision_requested: true } as unknown as Record<string, unknown>,
+          last_phase: sceneGlobalAssetReference ? "scene_global_asset_revision_requested" : "image_revision_requested",
+          context: {
+            ...makeSnapshot(),
+            image_revision_requested: true,
+            scene_global_asset_revision_requested: Boolean(sceneGlobalAssetReference),
+          } as unknown as Record<string, unknown>,
         })
         .catch(() => {});
     }
@@ -2200,6 +2513,8 @@ export function WorkspacePage() {
       <ChatPanel
         messages={messages}
         onSubmit={handleSend}
+        referencedMaterials={referencedMaterials}
+        onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         busy={busy || dialogOpen}
         onSelectDirection={handleSelectDirection}
         onApprovePlan={handleApprovePlan}
@@ -2240,6 +2555,7 @@ export function WorkspacePage() {
         <StoryboardPanel
           msg={selectedStoryboardMessage}
           onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
+          onReferenceGlobalAsset={handleReferenceGlobalAsset}
           onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
           onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
           onClose={() => {

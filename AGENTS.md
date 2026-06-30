@@ -93,6 +93,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 | 策划 | `POST /agent/flows/planning/plan` | 根据模板填充 plan.md |
 | 图片 | `POST /agent/flows/image/prepare` | 判断图片接口并生成参数 |
 | 图片 | `POST /agent/flows/image/generate` | 调用图片 skill 生成，支持多张循环生成 |
+| 图片 | `POST /agent/flows/image/edit-asset` | 编辑视频场景包全局素材图片，复用图片编辑 skill |
 | 视频 | `POST /agent/flows/video/analyze-storyboards` | 视频分析，自动单个/批量拆解 |
 | 视频 | `POST /agent/flows/video/prepare-scene-packages` | 生成可编辑视频场景包 |
 | 视频 | `POST /agent/flows/video/generate-scene-assets` | 生成角色三视图、场景图、道具图 |
@@ -193,6 +194,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 - `shot_description.mentions` 保存 @ 选择对应的图片 URL，生成视频时这些 URL 会作为参考图集合。
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
+- 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset` 走原图片编辑 skill。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset`，不能掉回普通采集 Agent。
+- 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
 
 场景视频接口选择：
 
@@ -355,6 +358,7 @@ corepack pnpm build
 - @ 选择的 mentions 要包含 `image_url`，后端生成场景视频时用作参考图。
 - 每段最多 9 张参考图。
 - 场景视频失败时 artifact 要保留 `failed_scenes`，方便用户查看失败原因和重试。
+- 全局素材图片编辑后要同步替换 `global_assets` 和 mentions，避免后续场景视频仍引用旧图。
 
 ### 修改对话历史/串会话问题
 

@@ -11,7 +11,9 @@ const {
   MAX_REFERENCE_IMAGE_COUNT,
   MAX_SCENE_DURATION_MS,
   MIN_SCENE_DURATION_MS,
+  replaceGlobalSceneAssetImage,
   sceneIdsForRevision,
+  syncScenePackageMentionImageUrls,
   updateScenePackageAssetField,
   updateScenePackageField,
 } = await import(moduleUrl);
@@ -194,6 +196,64 @@ test("collectSceneImageUrls also uses inline shot description mention image urls
     "https://x/role-mention.png",
     "https://x/scene-mention.png",
   ]);
+});
+
+test("replaceGlobalSceneAssetImage replaces character three-view image as one asset", () => {
+  const assets = sampleGlobalAssets();
+
+  const updated = replaceGlobalSceneAssetImage(assets, {
+    assetId: "character-host",
+    assetGroup: "characters",
+    editedImageUrl: "https://x/global-role-white.png",
+  });
+
+  assert.equal(assets.characters[0].three_view_images[0], "https://x/global-role.png");
+  assert.equal(updated.characters[0].three_view_images[0], "https://x/global-role-white.png");
+  assert.equal(updated.characters[0].image_url, "https://x/global-role-white.png");
+  assert.equal(updated.scenes[0], assets.scenes[0]);
+});
+
+test("replaceGlobalSceneAssetImage replaces scene and prop first image", () => {
+  const assets = sampleGlobalAssets();
+
+  const sceneUpdated = replaceGlobalSceneAssetImage(assets, {
+    assetId: "scene-desk",
+    assetGroup: "scenes",
+    editedImageUrl: "https://x/global-scene-new.png",
+  });
+  const propUpdated = replaceGlobalSceneAssetImage(sceneUpdated, {
+    assetId: "prop-product",
+    assetGroup: "props",
+    editedImageUrl: "https://x/global-prop-new.png",
+  });
+
+  assert.equal(propUpdated.scenes[0].images[0], "https://x/global-scene-new.png");
+  assert.equal(propUpdated.props[0].images[0], "https://x/global-prop-new.png");
+});
+
+test("syncScenePackageMentionImageUrls updates mention image urls by asset id", () => {
+  const [scene] = sampleScenes();
+  const scenes = [
+    {
+      ...scene,
+      shot_description: {
+        text: "地点:@桌面场景 中,角色:@讲解者 展示道具:@耳机。",
+        mentions: [
+          { asset_id: "character-host", image_url: "https://x/role-old.png" },
+          { asset_id: "prop-product", image_url: "https://x/prop-old.png" },
+        ],
+      },
+    },
+  ];
+
+  const updated = syncScenePackageMentionImageUrls(scenes, {
+    assetId: "character-host",
+    editedImageUrl: "https://x/role-new.png",
+  });
+
+  assert.equal(scenes[0].shot_description.mentions[0].image_url, "https://x/role-old.png");
+  assert.equal(updated[0].shot_description.mentions[0].image_url, "https://x/role-new.png");
+  assert.equal(updated[0].shot_description.mentions[1].image_url, "https://x/prop-old.png");
 });
 
 test("sceneIdsForRevision maps explicit scene mentions and falls back to all scenes", () => {

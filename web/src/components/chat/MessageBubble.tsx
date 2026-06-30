@@ -8,6 +8,7 @@ import type { VideoResult } from "@/lib/types";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
+  isLatestVideoScenePackage?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -55,11 +56,11 @@ function assetImage(record: Record<string, unknown>): string {
 }
 
 function materialUrl(record: Record<string, unknown>): string {
-  return stringValue(record.url) || stringValue(record.path) || stringValue(record.image_url) || stringValue(record.imageUrl);
+  return stringValue(record.url) || stringValue(record.source_image_url) || stringValue(record.path) || stringValue(record.image_url) || stringValue(record.imageUrl);
 }
 
 function materialName(record: Record<string, unknown>, index: number): string {
-  return stringValue(record.name) || stringValue(record.filename) || `附件 ${index + 1}`;
+  return stringValue(record.name) || stringValue(record.asset_name) || stringValue(record.filename) || `附件 ${index + 1}`;
 }
 
 function previewAssets(msg: ChatMessage): Array<{ id: string; title: string; image: string }> {
@@ -122,6 +123,7 @@ function sceneVideoResultsForMessage(msg: ChatMessage): VideoResult[] {
 
 export function MessageBubble({
   msg,
+  isLatestVideoScenePackage,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -183,6 +185,7 @@ export function MessageBubble({
               const url = materialUrl(material);
               const name = materialName(material, index);
               const type = stringValue(material.type).toLowerCase();
+              const isImage = type === "image" || material.source === "scene_global_asset";
               return (
                 <a
                   key={`${url}-${index}`}
@@ -191,7 +194,7 @@ export function MessageBubble({
                   rel="noreferrer"
                   className="flex max-w-[220px] items-center gap-2 rounded-xl border border-line bg-white px-2.5 py-1.5 text-[12px] text-ink hover:bg-canvas"
                 >
-                  {type === "image" && url ? (
+                  {isImage && url ? (
                     <img src={url} alt="" className="h-8 w-8 shrink-0 rounded-md object-cover" />
                   ) : (
                     <FileText size={15} className="shrink-0 text-ink-soft" />
@@ -363,35 +366,37 @@ export function MessageBubble({
                 {sceneAssetQuotaPaused ? "参考图生成因额度不足暂停，充值后可继续。" : `${msg.artifact.sceneAssetFailures.length} 个参考图生成失败，可进入分镜检查。`}
               </div>
             ) : null}
-            <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => onOpenArtifact?.(msg)}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-              >
-                <FileText size={15} />
-                查看分镜
-              </button>
-              {sceneAssetFailed ? (
+            {isLatestVideoScenePackage ? (
+              <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
                 <button
                   type="button"
-                  onClick={() => onRetrySceneAssets?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  onClick={() => onOpenArtifact?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
                 >
-                  <Sparkles size={15} />
-                  {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
+                  <FileText size={15} />
+                  查看分镜
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onGenerateVideoFromScenePackages?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
-                >
-                  <Sparkles size={15} />
-                  确认并生成视频
-                </button>
-              )}
-            </div>
+                {sceneAssetFailed ? (
+                  <button
+                    type="button"
+                    onClick={() => onRetrySceneAssets?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  >
+                    <Sparkles size={15} />
+                    {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onGenerateVideoFromScenePackages?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  >
+                    <Sparkles size={15} />
+                    确认并生成视频
+                  </button>
+                )}
+              </div>
+            ) : null}
           </div>
         ) : msg.artifact?.type === "image_result" && msg.artifact.imageResult ? (
           <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">

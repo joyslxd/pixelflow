@@ -174,6 +174,19 @@ export interface ImageGenerateResponse {
   raw: Record<string, unknown>;
 }
 
+export interface ImageAssetEditResponse {
+  ok: boolean;
+  method: "image_edit";
+  endpoint: string;
+  source_image_url: string;
+  edited_image: { asset_id?: string; url?: string; download_url?: string };
+  asset_id: string;
+  asset_group: string;
+  message: string;
+  quota_insufficient?: boolean;
+  raw: Record<string, unknown>;
+}
+
 export interface UploadedAttachment extends Record<string, unknown> {
   name: string;
   filename: string;
@@ -629,6 +642,17 @@ export const api = {
     negative_prompt?: string;
     params: Record<string, unknown>;
   }) => req<ImageGenerateResponse>(`${FLOW_BASE}/image/generate`, { method: "POST", body: JSON.stringify(body) }),
+
+  editImageAsset: (body: {
+    asset_id: string;
+    asset_name?: string;
+    asset_group: string;
+    source_image_url: string;
+    prompt: string;
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+  }) => req<ImageAssetEditResponse>(`${FLOW_BASE}/image/edit-asset`, { method: "POST", body: JSON.stringify(body) }),
 
   prepareVideoScenePackages: (body: {
     form_values: Record<string, unknown>;

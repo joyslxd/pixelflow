@@ -38,6 +38,17 @@ test("appendVisibleConversationMessage keeps async results out of another active
   );
 });
 
+test("appendVisibleConversationMessage upserts duplicate client ids instead of duplicating React keys", () => {
+  const currentMessages = [{ id: "m1", content: "旧内容" }];
+  const next = appendVisibleConversationMessage(currentMessages, {
+    activeConversationId: "conversation-a",
+    targetConversationId: "conversation-a",
+    message: { id: "m1", content: "新内容" },
+  });
+
+  assert.deepEqual(next, [{ id: "m1", content: "新内容" }]);
+});
+
 test("messageConversationId prefers the message owner over current visible conversation", () => {
   assert.equal(messageConversationId({ conversationId: "conversation-a" }, "conversation-b"), "conversation-a");
   assert.equal(messageConversationId({}, "conversation-b"), "conversation-b");
@@ -61,6 +72,21 @@ test("restoredConversationMessages ignores stale snapshot messages and uses pers
   const persistedMessages = [{ id: "right", conversationId: "current", content: "当前会话消息" }];
 
   assert.deepEqual(restoredConversationMessages(snapshotMessages, persistedMessages), persistedMessages);
+});
+
+test("restoredConversationMessages makes duplicate persisted client ids unique for rendering", () => {
+  assert.deepEqual(
+    restoredConversationMessages(undefined, [
+      { id: "m1", content: "第一条" },
+      { id: "m1", content: "第二条" },
+      { id: "m1", content: "第三条" },
+    ]),
+    [
+      { id: "m1", content: "第一条" },
+      { id: "m1-2", content: "第二条" },
+      { id: "m1-3", content: "第三条" },
+    ],
+  );
 });
 
 test("shouldApplyVisibleConversationSideEffect only allows visible conversation UI updates", () => {

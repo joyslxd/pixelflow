@@ -159,6 +159,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
 - 每段片段最少 4 秒，最多 15 秒。
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
+- 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。该流程走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`，成功后直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片编辑 prompt 处理，不重新走 intake。
+- 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
 
 ### 5.5 视频分析类 Skill
@@ -458,7 +460,7 @@ flowchart TD
 | 垂类画像 | `intake/industry_profile.py`、`templates/industry_profile.md` |
 | plan.md | `creative/plan_markdown.py`、`templates/plan.md` |
 | 图片接口 | `generate/image_prepare.py`、`pixelflow_image.py`、`run_generation.py`、`api.ts` |
-| 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx` |
+| 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx`、`scenePackages.ts` |
 | 视频接口 | `pixelflow_video.py`、`run_generation.py`、`api.ts` |
 | 对话隔离 | `pixelflow_conversations.py`、`tasks/store.py`、`WorkspacePage.tsx` |
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
@@ -502,7 +504,7 @@ corepack pnpm build
 
 - 图片：单张文生图、多张文生图、图片编辑、参考图生成、多图融合。
 - 视频分析：单视频拆解、多视频批量拆解。
-- 视频生成：文生视频、首帧图生视频、首尾帧图生视频、全能参考视频、编辑视频、延伸视频。
+- 视频生成：文生视频、首帧图生视频、首尾帧图生视频、全能参考视频、编辑视频、延伸视频，以及场景包全局素材引用后图片编辑并替换原素材。
 - 每个流程都从“新对话 + 用户输入 + 附件”开始，验证对话隔离、失败重试、额度不足暂停恢复。
 
 ## 16. 当前实现边界

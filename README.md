@@ -109,6 +109,7 @@ flowchart TD
 | 策划 | POST | `/agent/flows/planning/plan` | 填充 plan.md |
 | 图片 | POST | `/agent/flows/image/prepare` | 选择图片接口并生成参数 |
 | 图片 | POST | `/agent/flows/image/generate` | 生成图片 |
+| 图片 | POST | `/agent/flows/image/edit-asset` | 按提示词编辑视频场景包里的全局素材图片 |
 | 视频 | POST | `/agent/flows/video/analyze-storyboards` | 视频分析拆解 |
 | 视频 | POST | `/agent/flows/video/prepare-scene-packages` | 生成视频场景包 |
 | 视频 | POST | `/agent/flows/video/generate-scene-assets` | 生成场景参考图 |
@@ -169,6 +170,8 @@ flowchart TD
 - `shot_description.text` 是一整段镜头描述，不能拆成时间、地点、角色、景别等多个字段。
 - 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
 - 每个视频场景片段最多 9 张参考图。
+- 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
+- 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
 
 ## 本地启动
 

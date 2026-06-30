@@ -15,6 +15,7 @@ def test_pixelflow_image_router_prefix_and_paths():
     assert pixelflow_image.router.prefix == "/agent/flows/image"
     assert "/agent/flows/image/prepare" in paths
     assert "/agent/flows/image/generate" in paths
+    assert "/agent/flows/image/edit-asset" in paths
 
 
 def _stable_user() -> User:
@@ -355,3 +356,108 @@ def test_image_router_generates_multi_image_fusion(monkeypatch):
     assert data["ok"] is True
     assert data["endpoint"] == "/api/picture/multi_image_fusion"
     assert data["images"][0]["url"] == "https://x/fusion.png"
+
+
+def test_image_router_edits_scene_global_asset(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            assert kwargs == {
+                "image_url": "https://x/role.png",
+                "prompt": "把衣服改成白色",
+                "model": "gpt-image-2",
+                "ratio": "1:1",
+                "size": "4K",
+                "max_images": 1,
+            }
+            return ImageGenerationResult(
+                ok=True,
+                task_id="edit-asset-task-1",
+                images=[{"asset_id": "edit-asset-task-1-0", "url": "https://x/role-white.png", "download_url": "https://x/role-white.png"}],
+                raw={"endpoint": "/api/picture/image_edit"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/edit-asset",
+            json={
+                "asset_id": "character-host",
+                "asset_name": "女上班族",
+                "asset_group": "characters",
+                "source_image_url": "https://x/role.png",
+                "prompt": "把衣服改成白色",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["method"] == "image_edit"
+    assert data["endpoint"] == "/api/picture/image_edit"
+    assert data["source_image_url"] == "https://x/role.png"
+    assert data["edited_image"]["url"] == "https://x/role-white.png"
+    assert data["asset_id"] == "character-host"
+    assert data["asset_group"] == "characters"
+
+
+def test_image_router_edit_asset_requires_source_image_url():
+    from app.gateway.routers import pixelflow_image
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/edit-asset",
+            json={
+                "asset_id": "character-host",
+                "asset_group": "characters",
+                "source_image_url": "",
+                "prompt": "把衣服改成白色",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "source_image_url不能为空" in response.text
+
+
+def test_image_router_edit_asset_marks_quota_insufficient(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度: 0，需要: 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度: 0，需要: 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/edit-asset",
+            json={
+                "asset_id": "character-host",
+                "asset_group": "characters",
+                "source_image_url": "https://x/role.png",
+                "prompt": "把衣服改成白色",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["quota_insufficient"] is True
+    assert "充值后" in data["message"]

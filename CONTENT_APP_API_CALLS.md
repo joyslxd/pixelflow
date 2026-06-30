@@ -38,6 +38,7 @@
 | `/api/creative/decompose_video_to_storyboard` | `POST` | `skill._decompose_blocking()`，由 `nodes._decompose_reference_videos()` 触发 | 将用户上传/输入的参考视频拆解为 storyboard shots，供后续 Brief 和分镜规划使用。 | `CreativeController.decomposeVideoToStoryboard()` | 可能返回异步 task，随后会调用 `/api/task/{taskId}/status` 轮询；视频分析默认最多等 20 分钟。 |
 | `/api/video/image-to-video` | `POST` | `run_generation.image_to_video()`，由 `BorgriseSkill.image_to_video()` 和 `nodes._generate_segment()` 触发 | 按 segment 的首图和 prompt 生成视频片段，是当前 GENERATE 阶段的主生成接口。 | `VideoController.imageToVideo()` | 不再传 `projectId`；视频生成默认最多等 1 小时。 |
 | `/api/task/{taskId}/status` | `GET` | `run_generation.poll_task()` | 轮询异步生成、拆解任务，直到完成、失败或超时。 | `TaskController.getTaskStatus()` | 被多个 wrapper 复用，但超时按入口区分：视频生成 1 小时、图片生成 10 分钟、视频分析/参考拆解 20 分钟。 |
+| `/api/picture/image_edit` | `POST` | `run_generation.image_edit()`，由 `pixelflow_image.generate_image()` 和 `pixelflow_image.edit_image_asset()` 触发 | 对已有图片按 prompt 编辑；也用于视频场景包全局素材引用后编辑并替换原素材。 | `ImageController.imageEdit()` | `edit-asset` 请求只传单张 `source_image_url`、用户编辑 prompt、`max_images=1`；生成后通过 `/api/task/{taskId}/status` 轮询结果，图片默认最多等 10 分钟。 |
 
 ## Borgrise 工具和 CLI 封装的接口
 
@@ -55,7 +56,7 @@
 | `/api/video/merge` | `POST` | `run_generation.merge_videos()` | 合并多个视频 URL 为一个交付视频。 | `VideoController.mergeVideos()` | 请求 body 只传 `videoUrls`，项目归属由 content-app 登录态处理。 |
 | `/api/picture/text_to_image` | `POST` | `run_generation.text_to_image()` | 文生图。 | `ImageController.textToImage()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
 | `/api/picture/multi_reference_image_generation` | `POST` | `run_generation.reference_image()` | 多参考图生图。 | `ImageController.multiReferenceImageGeneration()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
-| `/api/picture/image_edit` | `POST` | `run_generation.image_edit()` | 对已有图片按 prompt 编辑。 | `ImageController.imageEdit()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
+| `/api/picture/image_edit` | `POST` | `run_generation.image_edit()` | 对已有图片按 prompt 编辑。 | `ImageController.imageEdit()` | 主 PixelFlow 图片流程和视频场景包全局素材编辑都会复用；生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
 | `/api/picture/batch_text_to_image` | `POST` | `run_generation.batch_text_to_image()` | 批量文生图。 | `ImageController.batchTextToImage()` | 可能返回多个 task id；每个图片任务默认最多等 10 分钟。 |
 
 ## 当前已知注意点
