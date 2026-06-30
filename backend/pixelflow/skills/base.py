@@ -155,6 +155,25 @@ class VideoFlawAnalysisResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class PptGenerationResult:
+    """智能 PPT 生成调用的统一返回 DTO。"""
+
+    ok: bool
+    task_id: str | None = None
+    smart_ppt_project_id: int | None = None
+    summary: str = ""
+    content_json: Any = None
+    pages: list[dict[str, Any]] = field(default_factory=list)
+    image_url: str | None = None
+    ppt_url: str | None = None
+    filename: str | None = None
+    slide_count: int | None = None
+    error: str | None = None
+    quota_insufficient: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VideoGenerationSkill(Protocol):
     """GENERATE 阶段依赖的视频生成能力接口。
 
@@ -328,6 +347,44 @@ class VideoFlawAnalysisSkill(Protocol):
     ) -> VideoFlawAnalysisResult: ...
 
 
+class PptGenerationSkill(Protocol):
+    """智能 PPT 生成能力接口。"""
+
+    async def generate_ppt_summary(
+        self,
+        topic: str,
+        ppt_style: str,
+        file_urls: list[str],
+        smart_ppt_project_id: int | None = None,
+    ) -> PptGenerationResult: ...
+
+    async def update_ppt_summary(
+        self,
+        original_outline: str,
+        modification_opinion: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult: ...
+
+    async def generate_ppt_content_json(
+        self,
+        original_outline: str,
+        ppt_style: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult: ...
+
+    async def generate_ppt_image(
+        self,
+        json_content: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult: ...
+
+    async def generate_ppt_file(
+        self,
+        file_urls: list[str],
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult: ...
+
+
 def _get_media_skill_impl() -> str:
     """读取当前媒体生成/理解供应商配置。
 
@@ -405,6 +462,14 @@ def get_media_link_extraction_skill() -> MediaLinkExtractionSkill:
 
 def get_video_flaw_analysis_skill() -> VideoFlawAnalysisSkill:
     """返回当前配置的视频穿帮分析 skill。"""
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
+def get_ppt_skill() -> PptGenerationSkill:
+    """返回当前配置的智能 PPT 生成 skill。"""
     impl = _get_media_skill_impl()
     if impl == "borgrise":
         return _get_borgrise_media_skill()

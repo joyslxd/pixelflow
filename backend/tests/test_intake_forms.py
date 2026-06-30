@@ -32,6 +32,20 @@ def test_image_form_schema_matches_required_screenshot_fields():
     assert schema.fields[4].options == ["1:1", "16:9", "9:16", "自动适配"]
 
 
+def test_ppt_form_schema_requires_topic_style_and_office_attachments():
+    schema = get_form_schema("ppt")
+
+    assert schema.form_id == "ppt_generation_intake"
+    assert schema.title == "PPT生成需求收集"
+    assert schema.output_type == "ppt"
+    assert [field.id for field in schema.fields] == ["ppt_topic", "ppt_style", "attachments"]
+    assert schema.fields[0].placeholder == "例如：2026年度营销策略汇报"
+    assert schema.fields[1].options == ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自由发挥"]
+    assert schema.fields[2].type == "file_list"
+    assert schema.fields[2].accept == [".doc", ".docx", ".xls", ".xlsx", ".pdf"]
+    assert schema.fields[2].multiple is True
+
+
 def test_validate_form_returns_missing_fields_and_terminates_after_three_rounds():
     result = validate_form("video", {"product_info": "  "}, intake_rounds=3)
 
@@ -59,6 +73,44 @@ def test_validate_form_accepts_complete_image_values():
     assert result.terminated is False
     assert result.missing_fields == []
     assert result.values["image_style"] == "科技感"
+
+
+def test_validate_ppt_form_accepts_only_word_excel_and_pdf_attachments():
+    result = validate_form(
+        "ppt",
+        {
+            "ppt_topic": "2026年度营销策略汇报",
+            "ppt_style": "极简商务",
+            "attachments": [
+                {"name": "report.docx", "url": "https://x/report.docx?token=abc"},
+                {"name": "data.xlsx", "url": "https://x/data.xlsx"},
+                {"name": "process.pdf", "url": "https://x/process.pdf#page=1"},
+            ],
+        },
+    )
+
+    assert result.is_complete is True
+    assert result.missing_fields == []
+    assert [item["url"] for item in result.values["attachments"]] == [
+        "https://x/report.docx?token=abc",
+        "https://x/data.xlsx",
+        "https://x/process.pdf#page=1",
+    ]
+
+
+def test_validate_ppt_form_rejects_unsupported_attachment_extensions():
+    result = validate_form(
+        "ppt",
+        {
+            "ppt_topic": "新品上市汇报",
+            "ppt_style": "产品发布",
+            "attachments": [{"name": "cover.png", "url": "https://x/cover.png"}],
+        },
+    )
+
+    assert result.is_complete is False
+    assert result.missing_fields == ["attachments"]
+    assert "仅支持 Word、Excel、PDF" in result.message
 
 
 def test_validate_image_form_preserves_hidden_image_count_metadata():

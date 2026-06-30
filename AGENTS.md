@@ -4,11 +4,11 @@
 
 ## 项目定位
 
-PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工作台。当前源码里同时存在两条能力线：
+PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制作 Agent 工作台。当前源码里同时存在两条能力线：
 
 | 能力线 | 主要入口 | Java 类比 | 当前用途 |
 | --- | --- | --- | --- |
-| v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
+| v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -26,20 +26,21 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 5. `backend/app/gateway/routers/pixelflow_planning.py`
 6. `backend/app/gateway/routers/pixelflow_image.py`
 7. `backend/app/gateway/routers/pixelflow_video.py`
-8. `backend/app/gateway/routers/pixelflow_conversations.py`
-9. `backend/pixelflow/intake/llm.py`
-10. `backend/pixelflow/intake/forms.py`
-11. `backend/pixelflow/intake/industry_profile.py`
-12. `backend/pixelflow/creative/plan_markdown.py`
-13. `backend/pixelflow/generate/image_prepare.py`
-14. `backend/pixelflow/generate/scene_packages.py`
-15. `backend/pixelflow/skills/base.py`
-16. `backend/pixelflow/skills/borgrise/skill.py`
-17. `backend/pixelflow/skills/borgrise/run_generation.py`
-18. `web/src/pages/WorkspacePage.tsx`
-19. `web/src/lib/api.ts`
-20. `web/src/components/canvas/StoryboardPanel.tsx`
-21. `web/src/components/canvas/SceneMentionEditor.tsx`
+8. `backend/app/gateway/routers/pixelflow_ppt.py`
+9. `backend/app/gateway/routers/pixelflow_conversations.py`
+10. `backend/pixelflow/intake/llm.py`
+11. `backend/pixelflow/intake/forms.py`
+12. `backend/pixelflow/intake/industry_profile.py`
+13. `backend/pixelflow/creative/plan_markdown.py`
+14. `backend/pixelflow/generate/image_prepare.py`
+15. `backend/pixelflow/generate/scene_packages.py`
+16. `backend/pixelflow/skills/base.py`
+17. `backend/pixelflow/skills/borgrise/skill.py`
+18. `backend/pixelflow/skills/borgrise/run_generation.py`
+19. `web/src/pages/WorkspacePage.tsx`
+20. `web/src/lib/api.ts`
+21. `web/src/components/canvas/StoryboardPanel.tsx`
+22. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
@@ -61,16 +62,17 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
   -> 生成 3 个创意方向
   -> 策划 Agent 填充 plan.md
   -> 人工审核 plan.md
-  -> 图片生成 / 视频生成 / 视频分析
+  -> 图片生成 / 视频生成 / 视频分析 / PPT制作
   -> 用户确认、修改、重试或结束
 ```
 
-三类 intent：
+四类 intent：
 
 | intent | 判定入口 | 后续流程 |
 | --- | --- | --- |
 | `image` | 图片生成、图片编辑、参考图生成、融合等需求 | 表单 -> 创意方向 -> plan.md -> 图片参数准备 -> Borgrise 图片接口 |
 | `video` | 文生视频、图生视频、参考生成视频、编辑视频、延伸视频等需求 | 表单 -> 创意方向 -> plan.md -> 视频场景包 -> 场景资产图 -> 场景视频 -> 合并 -> 修改循环 |
+| `ppt` | PPT、演示文稿、汇报、路演材料等需求 | PPT表单 -> 垂类画像 -> SmartPPT大纲 -> 页面JSON -> 页面图片 -> PPT文件 |
 | `video_analysis` | 分析视频、拆解视频、视频拆解等需求 | 媒体链接识别 -> 单视频/多视频 storyboard 拆解 |
 
 默认人工确认规则：
@@ -87,7 +89,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 | 模块 | 路径 | 说明 |
 | --- | --- | --- |
 | 采集 | `POST /agent/flows/intake/analyze` | LLM 识别 intent、主体、行业、目标、数量 |
-| 采集 | `GET /agent/flows/intake/forms/{intent}` | 获取图片或视频表单 schema |
+| 采集 | `GET /agent/flows/intake/forms/{intent}` | 获取图片、视频或PPT表单 schema |
 | 采集 | `POST /agent/flows/intake/validate` | 表单完整性校验，最多 3 轮 |
 | 采集 | `POST /agent/flows/intake/directions` | 生成 3 个创意方向 |
 | 策划 | `POST /agent/flows/planning/plan` | 根据模板填充 plan.md |
@@ -103,6 +105,13 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 | 视频 | `GET /agent/flows/video/generate-direct/jobs/{job_id}` | 轮询直接视频生成结果 |
 | 视频 | `POST /agent/flows/video/merge` | 按场景顺序合并视频 |
 | 视频 | `POST /agent/flows/video/analyze-flaws` | 视频穿帮分析 |
+| PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
+| PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
+| PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
+| PPT | `POST /agent/flows/ppt/images/start` | 启动 PPT 页面图片生成 |
+| PPT | `POST /agent/flows/ppt/images/regenerate/start` | 重新生成单页 PPT 图片 |
+| PPT | `POST /agent/flows/ppt/file/start` | 启动 PPT 文件生成 |
+| PPT | `GET /agent/flows/ppt/jobs/{job_id}` | 查询 PPT 阶段异步 job |
 | 对话 | `POST /agent/conversations` | 新建独立对话 |
 | 对话 | `GET /agent/conversations?page_size=5` | 最近对话列表，按创建时间倒序分页 |
 | 对话 | `GET /agent/conversations/{conversation_id}` | 进入历史对话并恢复消息 |
@@ -118,12 +127,13 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 
 | Agent | 主要文件 | 调用的 Skill / Service | 职责 |
 | --- | --- | --- | --- |
-| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py`、`intake/industry_profile.py` | IntentRecognitionSkill、FormValidationSkill、IndustryProfileSkill、CreativeDirectionSkill | 识别图片/视频/视频分析，补全表单，生成创意方向 |
+| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py`、`intake/industry_profile.py` | IntentRecognitionSkill、FormValidationSkill、IndustryProfileSkill、CreativeDirectionSkill | 识别图片/视频/PPT/视频分析，补全表单，生成创意方向 |
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill | 使用项目内模板生成 plan.md |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoFlawAnalysisSkill | 生成场景包、资产图、场景视频、合并、穿帮分析和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
+| PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
 
 ## Borgrise/content-app 能力
@@ -160,12 +170,22 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 | `batch_decompose_video_to_storyboard` | `/api/creative/batch_decompose_video_to_storyboard` |
 | `analyze_video_flaws` | `/api/creative/analyze_video_flaws` |
 
+SmartPPT接口：
+
+| Skill 方法 | content-app/Borgrise 接口 |
+| --- | --- |
+| `generate_ppt_summary` | `/api/picture/smart-ppt/generatePptSummary` |
+| `update_ppt_summary` | `/api/picture/smart-ppt/updatePptSummary` |
+| `generate_ppt_content_json` | `/api/picture/smart-ppt/generatePptContentToJson` |
+| `generate_ppt_image` | `/api/picture/smart-ppt/generatePptImage` |
+| `generate_ppt_file` | `/api/picture/smart-ppt/generatePptFile` |
+
 调用约束：
 
 - 必须透传入口请求的 content-app `Authorization`。
 - 不要把用户 token、账号、密码写入配置或代码。
 - content-app 返回 HTTP 402 或“额度不足/余额不足/没有有效额度/充值”等文案时，必须暂停当前流程并返回可恢复提示。
-- 图片轮询超时按配置默认 10 分钟，视频轮询默认 1 小时，视频分析默认 15 分钟。
+- 图片轮询超时按配置默认 10 分钟，视频轮询默认 1 小时，视频分析默认 15 分钟，SmartPPT 每一步默认 2 小时。
 - 第三方异常可按 `borgrise.max_retries` 重试；业务失败不要无意义重试。
 
 ## 图片流程要点
@@ -202,6 +222,18 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析 Agent 工
 - 如果片段显式给了 `generation_mode`，以后端传入为准。
 - 否则 `pixelflow_video.py` 根据图片、视频、音频素材和提示词选择 `text_to_video`、`image_to_video`、`two_image_to_video`、`reference_mode_video`、`edit_video` 或 `extend_video`。
 - 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞。
+
+## PPT流程要点
+
+PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大纲 -> 用户确认/修改大纲 -> 页面JSON -> 页面图片 -> PPT文件。
+
+- PPT 表单字段在 `intake/forms.py`，包含 `ppt_topic`、`ppt_style`、`attachments`。
+- PPT 附件只允许 Word、Excel、PDF，前端上传仍走 content-app `/api/upload`。
+- PPT 行业补充复用 `resolve_industry_profile()`：先查项目内垂类模板，未命中就调用当前项目 LLM `deepseek-v4-pro` 生成同结构行业画像，LLM 失败时才使用通用电商兜底。
+- SmartPPT 的大纲、更新大纲、转 JSON、生成页面图、生成文件都经 `/agent/flows/ppt/*/start` 启动异步 job，再由前端轮询 `/agent/flows/ppt/jobs/{job_id}`。
+- PPT 页面图片阶段会先展示所有页面格子为“图片生成中”，后端每生成一页更新一次 job result，前端把 partial status 原地写回同一张卡片。
+- 任意 SmartPPT 阶段如果遇到额度不足，需要进入可恢复暂停；用户充值后回到同一对话可以继续点击上一阶段按钮重新执行。
+- PPT 文件生成完成后前端展示下载入口；用户选择重新生成附件时只重复文件生成阶段，不重新跑大纲和页面图。
 
 ## 对话隔离与恢复
 
@@ -359,6 +391,29 @@ corepack pnpm build
 - 每段最多 9 张参考图。
 - 场景视频失败时 artifact 要保留 `failed_scenes`，方便用户查看失败原因和重试。
 - 全局素材图片编辑后要同步替换 `global_assets` 和 mentions，避免后续场景视频仍引用旧图。
+
+### 修改 PPT 流程
+
+读：
+
+- `backend/app/gateway/routers/pixelflow_ppt.py`
+- `backend/pixelflow/intake/forms.py`
+- `backend/pixelflow/intake/industry_profile.py`
+- `backend/pixelflow/skills/base.py`
+- `backend/pixelflow/skills/borgrise/run_generation.py`
+- `backend/pixelflow/skills/borgrise/skill.py`
+- `web/src/pages/WorkspacePage.tsx`
+- `web/src/components/composer/GenParamsDialog.tsx`
+- `web/src/components/chat/MessageBubble.tsx`
+
+重点检查：
+
+- PPT intent 是否由 LLM 和 fallback 都能识别。
+- PPT 主题不能丢失，未知行业必须先调用 LLM 生成行业画像。
+- 附件必须只允许 `.doc`、`.docx`、`.xls`、`.xlsx`、`.pdf`。
+- 每个 SmartPPT 接口都是异步任务，前端必须轮询 Python job，不能让浏览器请求卡 2 小时。
+- 页面图片生成要逐页更新卡片，失败页要展示错误并允许单页重新生成。
+- 新增或调整 SmartPPT content-app 接口调用时同步修改 `CONTENT_APP_API_CALLS.md`。
 
 ### 修改对话历史/串会话问题
 

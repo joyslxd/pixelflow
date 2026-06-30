@@ -37,6 +37,11 @@ class IntakeValidateRequest(BaseModel):
             "generate_image": "image",
             "image_generation": "image",
             "生成图片": "image",
+            "generate_ppt": "ppt",
+            "ppt_generation": "ppt",
+            "smart_ppt": "ppt",
+            "生成ppt": "ppt",
+            "制作ppt": "ppt",
         }
         return aliases.get(normalized, value)
 
@@ -112,7 +117,7 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
         return CreativeDirectionsResponse(validation=validation_response, creative_directions=[], intake_context=body.intake_context)
     context = _context_for_directions(body, validation.values)
     product_creative_profile = dict(body.product_creative_profile)
-    if not product_creative_profile and body.intake_context:
+    if not product_creative_profile:
         profile_result = await resolve_industry_profile(
             industry_type=context.industry_type,
             source_prompt=context.source_prompt,

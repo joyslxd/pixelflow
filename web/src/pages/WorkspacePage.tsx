@@ -12,6 +12,11 @@ import {
   type CreativeDirectionResponse,
   type ImageAssetEditResponse,
   type PlanMarkdownResponse,
+  type PptFileResult,
+  type PptImagesResult,
+  type PptPageImage,
+  type PptContentJsonResult,
+  type PptSummaryResult,
   type PrepareScenePackagesResponse,
   type TaskEvent,
 } from "@/lib/api";
@@ -46,7 +51,7 @@ const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
 const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
-const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image";
+const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
 
 const PHASE_MSG: Record<string, string> = {
   intake: "正在理解商品与需求…",
@@ -168,21 +173,29 @@ interface PendingDialogContext {
 }
 
 function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
-  return form.intent === "video"
-    ? {
-        product_info: form.product_info,
-        product_category: form.product_category,
-        target_audience: form.target_audience,
-        conversion_goal: form.conversion_goal,
-      }
-    : {
-        image_goal: form.image_goal,
-        image_type: form.image_type,
-        image_usage: form.image_usage,
-        image_style: form.image_style,
-        image_size: form.image_size,
-        image_count: form.image_count,
-      };
+  if (form.intent === "video") {
+    return {
+      product_info: form.product_info,
+      product_category: form.product_category,
+      target_audience: form.target_audience,
+      conversion_goal: form.conversion_goal,
+    };
+  }
+  if (form.intent === "ppt") {
+    return {
+      ppt_topic: form.ppt_topic,
+      ppt_style: form.ppt_style,
+      attachments: form.attachments,
+    };
+  }
+  return {
+    image_goal: form.image_goal,
+    image_type: form.image_type,
+    image_usage: form.image_usage,
+    image_style: form.image_style,
+    image_size: form.image_size,
+    image_count: form.image_count,
+  };
 }
 
 function revisedScenePrompt(
@@ -210,6 +223,63 @@ function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefi
     }
   }
   return merged;
+}
+
+function numericValue(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function pptProjectId(artifact: ChatArtifact): number | null {
+  return (
+    numericValue(artifact.smartPptProjectId)
+    ?? numericValue(artifact.pptSummary?.smart_ppt_project_id)
+    ?? numericValue(artifact.pptImages?.smart_ppt_project_id)
+    ?? numericValue(artifact.pptFile?.smart_ppt_project_id)
+  );
+}
+
+function pptImageFileUrls(artifact: ChatArtifact): string[] {
+  return (artifact.pptImages?.pages || [])
+    .map((page) => (typeof page.image_url === "string" ? page.image_url : ""))
+    .filter((url) => url.trim().length > 0);
+}
+
+function pptPageJson(artifact: ChatArtifact, pageIndex: number): Record<string, unknown> | null {
+  const page = artifact.pptImages?.pages?.find((item) => item.page_index === pageIndex);
+  if (page?.json_content && typeof page.json_content === "object") return page.json_content;
+  const pages = artifact.pptContentJson?.pages;
+  const fallback = Array.isArray(pages) ? pages[pageIndex - 1] : null;
+  return fallback && typeof fallback === "object" ? fallback as Record<string, unknown> : null;
+}
+
+function pptContentPages(contentJson: PptContentJsonResult): Array<Record<string, unknown>> {
+  if (Array.isArray(contentJson.pages)) return contentJson.pages;
+  const raw = contentJson.content_json;
+  if (Array.isArray(raw)) return raw.filter((page): page is Record<string, unknown> => Boolean(page && typeof page === "object"));
+  if (raw && typeof raw === "object") {
+    const record = raw as Record<string, unknown>;
+    const maybePages = record.pages || record.slides;
+    if (Array.isArray(maybePages)) return maybePages.filter((page): page is Record<string, unknown> => Boolean(page && typeof page === "object"));
+    return [record];
+  }
+  return [];
+}
+
+function pendingPptImagesFromContentJson(contentJson: PptContentJsonResult, projectId: number): PptImagesResult {
+  const pages = pptContentPages(contentJson);
+  return {
+    ok: false,
+    smart_ppt_project_id: numericValue(contentJson.smart_ppt_project_id) || projectId,
+    pages: pages.map((page, index) => ({
+      page_index: index + 1,
+      title: String(page.title || page.name || `第 ${index + 1} 页`),
+      json_content: page,
+      status: "running",
+      image_url: null,
+    })),
+    message: "PPT 图片生成中。",
+  };
 }
 
 function sceneGlobalAssetMaterialKey(item: Record<string, unknown>): string {
@@ -406,6 +476,7 @@ export function WorkspacePage() {
   const processedArtifactIdsRef = useRef(new Set<string>());
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
   const planRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
+  const pptOutlineRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const videoRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const briefReadyShownRef = useRef(false);
@@ -508,6 +579,30 @@ export function WorkspacePage() {
     const message: ChatMessage = { id: messageId, conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
     void appendMessageForConversation(message, targetConversationId);
     return message;
+  };
+
+  const updatePptImagesArtifactInMessage = (
+    messageId: string,
+    targetConversationId: string,
+    pptImages: PptImagesResult,
+  ) => {
+    if (!isVisibleConversation(targetConversationId)) return;
+    setMessages((items) =>
+      items.map((message) => {
+        const artifact = message.artifact;
+        if (message.id !== messageId || !artifact || artifact.type !== "ppt_images") return message;
+        return {
+          ...message,
+          content: pptImages.ok ? "PPT 页面图片已生成，请确认后生成 PPT 附件。" : "PPT 页面图片生成中，请查看每页状态。",
+          artifact: {
+            ...artifact,
+            description: String(pptImages.message || `${pptImages.pages.length} 页 PPT 图片`),
+            pptImages,
+            smartPptProjectId: pptProjectId(artifact) ?? numericValue(pptImages.smart_ppt_project_id),
+          },
+        };
+      }),
+    );
   };
 
   const updateVideoScenePackagesInMessage = (
@@ -790,6 +885,80 @@ export function WorkspacePage() {
     }, Math.max(1, plan.review_timeout_sec) * 1000);
   };
 
+  const pushPptOutlineArtifact = (
+    pptSummary: PptSummaryResult,
+    context: {
+      formValues: Record<string, unknown>;
+      coreMessage: string;
+      materials?: Array<Record<string, unknown>>;
+      intakeContext?: Record<string, unknown>;
+      pptStyle: string;
+    },
+    targetConversationId = conversationIdRef.current,
+  ) => {
+    const projectId = numericValue(pptSummary.smart_ppt_project_id);
+    return pushArtifact(pptSummary.ok ? "PPT 大纲已生成，请确认是否需要修改。" : "PPT 大纲生成失败，请查看错误信息。", {
+      type: "ppt_outline",
+      title: "PPT大纲",
+      description: String(pptSummary.message || (pptSummary.ok ? "确认后将生成 PPT 页面结构和页面图片。" : "可充值或调整附件后继续。")),
+      actionLabel: "审核",
+      intent: "ppt",
+      formValues: context.formValues,
+      intakeContext: context.intakeContext,
+      materials: context.materials || [],
+      coreMessage: context.coreMessage,
+      pptSummary,
+      pptStyle: context.pptStyle,
+      smartPptProjectId: projectId,
+    }, targetConversationId);
+  };
+
+  const pushPptImagesArtifact = (
+    pptImages: PptImagesResult,
+    pptContentJson: PptContentJsonResult,
+    sourceArtifact: ChatArtifact,
+    targetConversationId = conversationIdRef.current,
+  ) =>
+    pushArtifact(pptImages.ok ? "PPT 页面图片已生成，请确认后生成 PPT 附件。" : "PPT 页面图片生成未完成，请查看每页状态。", {
+      type: "ppt_images",
+      title: "PPT页面图片",
+      description: String(pptImages.message || `${pptImages.pages.length} 页 PPT 图片`),
+      actionLabel: "生成附件",
+      intent: "ppt",
+      formValues: sourceArtifact.formValues,
+      intakeContext: sourceArtifact.intakeContext,
+      materials: sourceArtifact.materials || [],
+      coreMessage: sourceArtifact.coreMessage,
+      pptSummary: sourceArtifact.pptSummary,
+      pptContentJson,
+      pptImages,
+      pptStyle: sourceArtifact.pptStyle,
+      smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptImages.smart_ppt_project_id),
+    }, targetConversationId);
+
+  const pushPptFileArtifact = (
+    pptFile: PptFileResult,
+    sourceArtifact: ChatArtifact,
+    targetConversationId = conversationIdRef.current,
+  ) =>
+    pushArtifact(pptFile.ok ? "PPT 附件已生成，请下载确认。" : "PPT 附件生成失败，请查看原因。", {
+      type: "ppt_file",
+      title: "PPT附件",
+      description: String(pptFile.message || (pptFile.ok ? "文件生成完成。" : "文件生成失败。")),
+      actionLabel: "下载",
+      intent: "ppt",
+      formValues: sourceArtifact.formValues,
+      intakeContext: sourceArtifact.intakeContext,
+      materials: sourceArtifact.materials || [],
+      coreMessage: sourceArtifact.coreMessage,
+      pptSummary: sourceArtifact.pptSummary,
+      pptContentJson: sourceArtifact.pptContentJson,
+      pptImages: sourceArtifact.pptImages,
+      pptFile,
+      pptStyle: sourceArtifact.pptStyle,
+      smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptFile.smart_ppt_project_id),
+    }, targetConversationId);
+
   const pushReviewArtifact = (phase: TaskPhase) => {
     const artifact = REVIEW_ARTIFACT[phase];
     if (!artifact) return;
@@ -1028,6 +1197,48 @@ export function WorkspacePage() {
     const sceneGlobalAssetReference = sceneGlobalAssetReferenceFromMaterials(materials);
     if (sceneGlobalAssetReference) {
       await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+      return;
+    }
+    const pendingPptOutlineRevision = pptOutlineRevisionArtifactRef.current;
+    const pendingPptOutlineArtifact = pendingPptOutlineRevision?.artifact;
+    if (pendingPptOutlineRevision?.conversationId === activeConversation && pendingPptOutlineArtifact?.pptSummary) {
+      const projectId = pptProjectId(pendingPptOutlineArtifact);
+      pptOutlineRevisionArtifactRef.current = null;
+      if (!projectId) {
+        pushAssistant("当前 PPT 项目 ID 缺失，无法更新大纲。请重新生成 PPT 大纲。", activeConversation);
+        return;
+      }
+      setBusyForConversation(activeConversation, true);
+      pushAssistant("已收到 PPT 大纲修改意见，正在调用 SmartPPT 更新大纲…", activeConversation);
+      try {
+        const updatedSummary = await api.updatePptSummaryJob({
+          original_outline: String(pendingPptOutlineArtifact.pptSummary.summary || ""),
+          modification_opinion: text,
+          smart_ppt_project_id: projectId,
+        });
+        pushPptOutlineArtifact(updatedSummary, {
+          formValues: pendingPptOutlineArtifact.formValues || {},
+          materials: mergeMaterials(pendingPptOutlineArtifact.materials, materials),
+          coreMessage: `${pendingPptOutlineArtifact.coreMessage || pendingCore}\n大纲修改意见：${text}`,
+          intakeContext: pendingPptOutlineArtifact.intakeContext,
+          pptStyle: String(pendingPptOutlineArtifact.pptStyle || pendingPptOutlineArtifact.formValues?.ppt_style || "极简商务"),
+        }, activeConversation);
+        void api
+          .updateConversation(activeConversation, {
+            last_phase: updatedSummary.ok ? "ppt_outline_updated" : "ppt_outline_update_failed",
+            context: {
+              ...makeSnapshot(),
+              intent: "ppt",
+              ppt_summary: updatedSummary,
+              ppt_outline_feedback: text,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      } catch (err) {
+        pushAssistant(`PPT 大纲更新失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
+      } finally {
+        setBusyForConversation(activeConversation, false);
+      }
       return;
     }
     const pendingPlanRevision = planRevisionArtifactRef.current;
@@ -1285,6 +1496,37 @@ export function WorkspacePage() {
             })
             .catch(() => {});
         }
+        return;
+      }
+      if (intake.intent === "ppt") {
+        if (isVisibleConversation(activeConversation)) {
+          setPendingCore(text);
+          setPendingIntent("ppt");
+          setPendingFormValues(intake.values || {});
+          setPendingMaterials(materials);
+          pendingDialogContextRef.current = {
+            conversationId: activeConversation,
+            coreMessage: text,
+            materials,
+            intakeContext: intake.intake_context,
+          };
+        }
+        pushAssistant("采集 Agent 判断这是PPT制作需求，已把能识别的信息自动填进表单。请补充确认并上传 Word、Excel 或 PDF 附件。", activeConversation);
+        if (activeConversation) {
+          void api
+            .updateConversation(activeConversation, {
+              last_phase: "ppt_form_pending",
+              context: {
+                ...makeSnapshot(),
+                intent: "ppt",
+                materials,
+                intake_intent: intake,
+                intake_context: intake.intake_context,
+              } as unknown as Record<string, unknown>,
+            })
+            .catch(() => {});
+        }
+        if (isVisibleConversation(activeConversation)) setDialogOpen(true);
         return;
       }
       if (isCreationIntent(intake.intent)) {
@@ -1550,6 +1792,40 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     const values = valuesFromForm(form);
     try {
+      if (form.intent === "ppt") {
+        pushAssistant("正在调用 SmartPPT 生成 PPT 大纲，这一步可能需要等待一会儿…", targetConversationId);
+        const pptSummary = await api.startPptSummaryJob({
+          ppt_topic: form.ppt_topic,
+          ppt_style: form.ppt_style,
+          attachments: form.attachments,
+        });
+        pushPptOutlineArtifact(pptSummary, {
+          formValues: values,
+          materials: mergeMaterials(flowMaterials, form.attachments),
+          coreMessage: flowCoreMessage,
+          intakeContext: flowIntakeContext,
+          pptStyle: form.ppt_style,
+        }, targetConversationId);
+        pendingDialogContextRef.current = null;
+        if (targetConversationId) {
+          void api
+            .updateConversation(targetConversationId, {
+              last_phase: pptSummary.ok ? "ppt_outline_review" : "ppt_outline_failed",
+              context: {
+                ...makeSnapshot(),
+                intent: "ppt",
+                ppt_form: form,
+                form_values: values,
+                intake_context: flowIntakeContext,
+                materials: mergeMaterials(flowMaterials, form.attachments),
+                ppt_summary: pptSummary,
+              } as unknown as Record<string, unknown>,
+            })
+            .catch(() => {});
+        }
+        setBusyForConversation(targetConversationId, false);
+        return;
+      }
       const directionResult = await api.generateCreativeDirections({
         intent: form.intent,
         values,
@@ -1590,6 +1866,184 @@ export function WorkspacePage() {
       pushAssistant(`采集处理失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
       setBusyForConversation(targetConversationId, false);
     }
+  };
+
+  const handleApprovePptOutline = async (msg: ChatMessage) => {
+    const artifact = msg.artifact;
+    if (!artifact?.pptSummary) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const projectId = pptProjectId(artifact);
+    if (!projectId) {
+      pushAssistant("当前 PPT 项目 ID 缺失，无法继续生成页面结构。", targetConversationId);
+      return;
+    }
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("PPT 大纲已确认，正在生成页面 JSON 并准备生成 PPT 图片…", targetConversationId);
+    try {
+      const pptStyle = String(artifact.pptStyle || artifact.formValues?.ppt_style || "极简商务");
+      const contentJson = await api.startPptContentJsonJob({
+        original_outline: String(artifact.pptSummary.summary || ""),
+        ppt_style: pptStyle,
+        smart_ppt_project_id: projectId,
+      });
+      if (!contentJson.ok) {
+        const failedImages: PptImagesResult = {
+          ok: false,
+          smart_ppt_project_id: projectId,
+          pages: [],
+          message: String(contentJson.message || contentJson.error || "PPT 页面 JSON 生成失败。"),
+          quota_insufficient: Boolean(contentJson.quota_insufficient),
+        };
+        pushPptImagesArtifact(failedImages, contentJson, artifact, targetConversationId);
+        releaseArtifactAction(processedKey);
+        return;
+      }
+      pushAssistant("PPT 页面结构已生成，正在并行生成每页 PPT 图片…", targetConversationId);
+      const imageProjectId = numericValue(contentJson.smart_ppt_project_id) || projectId;
+      const imageArtifactSource = { ...artifact, pptContentJson: contentJson };
+      const pendingImages = pendingPptImagesFromContentJson(contentJson, imageProjectId);
+      const imageMessage = pushPptImagesArtifact(pendingImages, contentJson, imageArtifactSource, targetConversationId);
+      const pptImages = await api.startPptImagesJob({
+        content_json: contentJson.content_json || contentJson.pages || [],
+        smart_ppt_project_id: imageProjectId,
+      }, (status) => {
+        const partialImages = status.result as PptImagesResult | null;
+        if (partialImages?.pages) updatePptImagesArtifactInMessage(imageMessage.id, targetConversationId, partialImages);
+      });
+      updatePptImagesArtifactInMessage(imageMessage.id, targetConversationId, pptImages);
+      if (!pptImages.ok) releaseArtifactAction(processedKey);
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: pptImages.ok ? "ppt_images_ready" : "ppt_images_failed",
+          context: {
+            ...makeSnapshot(),
+            intent: "ppt",
+            ppt_content_json: contentJson,
+            ppt_images: pptImages,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(`PPT 页面图片生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleRevisePptOutline = (msg: ChatMessage) => {
+    if (!msg.artifact?.pptSummary) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    pptOutlineRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
+    pushAssistant("请在输入框填写 PPT 大纲修改意见，我会基于当前大纲继续更新。", targetConversationId);
+  };
+
+  const handleRegeneratePptImage = async (msg: ChatMessage, pageIndex: number) => {
+    const artifact = msg.artifact;
+    if (!artifact?.pptImages) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const projectId = pptProjectId(artifact);
+    const pageJson = pptPageJson(artifact, pageIndex);
+    if (!projectId || !pageJson) {
+      pushAssistant("当前页缺少 PPT 项目 ID 或页面 JSON，无法重新生成。", targetConversationId);
+      return;
+    }
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant(`正在重新生成第 ${pageIndex} 页 PPT 图片…`, targetConversationId);
+    try {
+      const result = await api.regeneratePptImageJob({
+        page_index: pageIndex,
+        page_json: pageJson,
+        smart_ppt_project_id: projectId,
+      });
+      const nextPage = result.page as PptPageImage | undefined;
+      const nextImages: PptImagesResult = {
+        ...artifact.pptImages,
+        ok: Boolean(nextPage?.image_url) && artifact.pptImages.pages.every((page) => page.page_index === pageIndex || page.status === "completed"),
+        pages: artifact.pptImages.pages.map((page) => (page.page_index === pageIndex && nextPage ? nextPage : page)),
+        message: String(result.message || "PPT 页面图片已重新生成。"),
+        quota_insufficient: Boolean(result.quota_insufficient),
+      };
+      pushPptImagesArtifact(nextImages, artifact.pptContentJson || ({ ok: true, pages: [] } as PptContentJsonResult), artifact, targetConversationId);
+    } catch (err) {
+      pushAssistant(`PPT 页面图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleGeneratePptFile = async (msg: ChatMessage) => {
+    const artifact = msg.artifact;
+    if (!artifact?.pptImages) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const projectId = pptProjectId(artifact);
+    const fileUrls = pptImageFileUrls(artifact);
+    if (!projectId || !fileUrls.length) {
+      pushAssistant("请先确保所有 PPT 页面图片都已生成成功。", targetConversationId);
+      return;
+    }
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("正在调用 SmartPPT 生成 PPT 附件…", targetConversationId);
+    try {
+      const pptFile = await api.startPptFileJob({ smart_ppt_project_id: projectId, file_urls: fileUrls });
+      pushPptFileArtifact(pptFile, artifact, targetConversationId);
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: pptFile.ok ? "ppt_file_ready" : "ppt_file_failed",
+          context: {
+            ...makeSnapshot(),
+            intent: "ppt",
+            ppt_file: pptFile,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(`PPT 附件生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleRegeneratePptFile = async (msg: ChatMessage) => {
+    const artifact = msg.artifact;
+    if (!artifact?.pptFile) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const projectId = pptProjectId(artifact);
+    const fileUrls = pptImageFileUrls(artifact);
+    if (!projectId || !fileUrls.length) {
+      pushAssistant("没有找到可用于重新生成 PPT 附件的页面图片。", targetConversationId);
+      return;
+    }
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("正在重新生成 PPT 附件…", targetConversationId);
+    try {
+      const pptFile = await api.startPptFileJob({ smart_ppt_project_id: projectId, file_urls: fileUrls });
+      pushPptFileArtifact(pptFile, artifact, targetConversationId);
+    } catch (err) {
+      pushAssistant(`PPT 附件重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleAcceptPptFile = (msg: ChatMessage) => {
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    pushAssistant("已确认 PPT 附件满意，制作 PPT 流程结束。", targetConversationId);
+    void api
+      .updateConversation(targetConversationId, {
+        last_phase: "ppt_done",
+        context: {
+          ...makeSnapshot(),
+          intent: "ppt",
+          ppt_done: true,
+        } as unknown as Record<string, unknown>,
+      })
+      .catch(() => {});
   };
 
   const handleSelectDirection = async (msg: ChatMessage, direction: CreativeDirectionResponse, auto = false) => {
@@ -2531,6 +2985,12 @@ export function WorkspacePage() {
         onRetrySceneAssets={handleRetrySceneAssets}
         onRetryVideoMerge={handleRetryVideoMerge}
         onRetryVideoAnalysis={handleRetryVideoAnalysis}
+        onApprovePptOutline={handleApprovePptOutline}
+        onRevisePptOutline={handleRevisePptOutline}
+        onRegeneratePptImage={handleRegeneratePptImage}
+        onGeneratePptFile={handleGeneratePptFile}
+        onAcceptPptFile={handleAcceptPptFile}
+        onRegeneratePptFile={handleRegeneratePptFile}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
@@ -2584,6 +3044,7 @@ export function WorkspacePage() {
           intent={pendingIntent}
           initialCoreMessage={pendingCore}
           initialValues={pendingFormValues}
+          initialMaterials={pendingMaterials}
           onConfirm={handleConfirmParams}
           onCancel={() => {
             setPendingFormValues({});

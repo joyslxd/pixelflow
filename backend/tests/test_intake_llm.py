@@ -112,6 +112,33 @@ def test_recognize_intent_accepts_video_analysis() -> None:
     assert result.values == {}
 
 
+def test_recognize_intent_uses_llm_json_and_normalizes_ppt_generation() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "ppt_generation",
+          "confidence": 0.94,
+          "reason": "用户明确要求制作PPT",
+          "product_subject": "绿色供应链",
+          "creation_goal": "绿色供应链转型汇报PPT",
+          "industry_type": "企业服务",
+          "values": {
+            "ppt_topic": "绿色供应链转型汇报",
+            "ppt_style": "极简商务"
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("帮我做绿色供应链转型汇报PPT", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "ppt"
+    assert result.llm_used is True
+    assert result.values["ppt_topic"] == "绿色供应链转型汇报"
+    assert result.values["ppt_style"] == "极简商务"
+    assert result.intake_context["industry_type"] == "企业服务"
+
+
 def test_recognize_intent_falls_back_when_llm_fails() -> None:
     class BrokenModel:
         def invoke(self, _prompt):
@@ -122,6 +149,24 @@ def test_recognize_intent_falls_back_when_llm_fails() -> None:
     assert result.intent == "video_analysis"
     assert result.llm_used is False
     assert "model down" in (result.error or "")
+
+
+def test_recognize_intent_fallback_routes_ppt_phrases() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    phrases = [
+        "帮我做一份新品发布PPT",
+        "制作企业培训ppt",
+        "生成一份营销策略演示文稿",
+        "把这些附件做成汇报幻灯片",
+    ]
+
+    for phrase in phrases:
+        result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
+        assert result.intent == "ppt", phrase
+        assert result.values["ppt_topic"], phrase
 
 
 def test_recognize_intent_fallback_covers_natural_video_analysis_phrases() -> None:

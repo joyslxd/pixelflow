@@ -6,6 +6,7 @@ import test from "node:test";
 const workspaceSource = fs.readFileSync(path.resolve("src/pages/WorkspacePage.tsx"), "utf8");
 const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
+const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -80,6 +81,24 @@ test("image requirement form only exposes approved image size choices", () => {
   assert.equal(match[1].includes("自动适配"), true);
   assert.equal(match[1].includes("3:4"), false);
   assert.equal(match[1].includes("4:5"), false);
+});
+
+test("ppt intent opens a ppt requirement form instead of image video planning", () => {
+  assert.match(genParamsDialogSource, /export type CreationIntent = "video" \| "image" \| "ppt"/, "CreationIntent must include ppt");
+  assert.match(genParamsDialogSource, /PPT生成需求收集/, "GenParamsDialog must render a PPT form");
+  assert.match(genParamsDialogSource, /ppt_topic/, "PPT form must include ppt_topic");
+  assert.match(genParamsDialogSource, /ppt_style/, "PPT form must include ppt_style");
+  assert.match(genParamsDialogSource, /attachments/, "PPT form must include attachments");
+  assert.match(workspaceSource, /if \(intake\.intent === "ppt"\)/, "handleSend must branch PPT intent before image/video creation flow");
+  assert.match(workspaceSource, /api\.startPptSummaryJob/, "PPT form confirmation must start SmartPPT summary job");
+});
+
+test("ppt image pages stream partial status into the existing artifact card", () => {
+  assert.match(apiSource, /type PptJobStatusCallback/, "PPT job polling must expose status callbacks");
+  assert.match(apiSource, /startPptImagesJob:[\s\S]*onStatus\?: PptJobStatusCallback/, "PPT image job must accept a status callback");
+  assert.match(workspaceSource, /pendingPptImagesFromContentJson/, "Workspace must show PPT page placeholders before images finish");
+  assert.match(workspaceSource, /updatePptImagesArtifactInMessage/, "Workspace must update the existing PPT image card");
+  assert.match(workspaceSource, /api\.startPptImagesJob\([\s\S]*partialImages\?\.pages/, "PPT image polling must stream page status into the card");
 });
 
 test("image plan approval continues through image generation instead of stopping at prepare", () => {

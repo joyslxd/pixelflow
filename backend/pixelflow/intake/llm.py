@@ -18,7 +18,7 @@ from pixelflow.intake.context import normalize_intake_context
 from pixelflow.intake.forms import CreationIntent, CreativeDirection, draft_creative_directions, get_form_schema
 
 INTAKE_LLM_MODEL_NAME = "deepseek-v4-pro"
-IntakeIntent = Literal["video", "image", "video_analysis", "unknown"]
+IntakeIntent = Literal["video", "image", "ppt", "video_analysis", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ async def recognize_intent_with_llm(
     model_name: str = INTAKE_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> IntentRecognitionResult:
-    """用 LLM 识别图片生成、视频生成、视频分析意图，并抽取可填表字段。"""
+    """用 LLM 识别图片、视频、PPT、视频分析意图，并抽取可填表字段。"""
     text = _combined_text(prompt, materials or [])
     try:
         payload = await asyncio.to_thread(
@@ -169,6 +169,7 @@ def _intent_prompt(text: str) -> str:
 可选 intent:
 - video_generation: 用户要生成图片以外的视频/短视频/广告视频。
 - image_generation: 用户要生成图片/海报/封面/主图/素材图。
+- ppt_generation: 用户要制作 PPT/演示文稿/汇报幻灯片。
 - video_analysis: 用户要分析、拆解、对比一个或多个已有视频。
 - unknown: 需求不足，无法判断。
 
@@ -179,6 +180,9 @@ product_info, product_category, target_audience, conversion_goal。
 image_goal, image_type, image_usage, image_style, image_size, image_count。
 image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
 
+如果是 ppt_generation，可抽取 values 字段：
+ppt_topic, ppt_style。附件由前端上传，不要编造 attachments。
+
 无论哪种生成任务，都要尽量抽取顶层字段：
 - product_subject: 用户真正要创作的产品、人物、活动或内容主体，例如“书包”。
 - creation_goal: 完整创作目标，例如“书包宣传图”或“书包宣传视频”；不要只写“宣传图”。
@@ -186,7 +190,7 @@ image_count 表示用户明确要求生成的图片张数；没有明确数量�
 - requested_output_count: 用户明确要求的产物数量；没有明确数量时写 1。
 
 只返回 JSON，不要解释，不要 Markdown：
-{{"intent":"video_generation|image_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","product_subject":"","creation_goal":"","industry_type":"general","requested_output_count":1,"values":{{}}}}
+{{"intent":"video_generation|image_generation|ppt_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","product_subject":"","creation_goal":"","industry_type":"general","requested_output_count":1,"values":{{}}}}
 
 用户输入和素材：
 {text}
@@ -246,13 +250,15 @@ def _normalize_intent(value: Any) -> IntakeIntent:
         return "video"
     if normalized in {"image", "image_generation", "generate_image", "图片生成", "生成图片"}:
         return "image"
+    if normalized in {"ppt", "ppt_generation", "generate_ppt", "smart_ppt", "presentation", "演示文稿", "生成ppt", "制作ppt", "ppt制作"}:
+        return "ppt"
     if normalized in {"video_analysis", "analyze_video", "video_decompose", "视频分析", "视频拆解"}:
         return "video_analysis"
     return "unknown"
 
 
 def _filter_form_values(intent: IntakeIntent, values: Any) -> dict[str, Any]:
-    if intent not in {"video", "image"} or not isinstance(values, dict):
+    if intent not in {"video", "image", "ppt"} or not isinstance(values, dict):
         return {}
     schema = get_form_schema(intent)
     allowed = {field.id for field in schema.fields}
@@ -334,6 +340,19 @@ def _fallback_intent(text: str) -> IntakeIntent:
         "篮球图片",
         "image",
     )
+    ppt_hints = (
+        "ppt",
+        "演示文稿",
+        "幻灯片",
+        "汇报材料",
+        "汇报ppt",
+        "路演ppt",
+        "做一份汇报",
+        "制作汇报",
+        "智能ppt",
+        "powerpoint",
+        "presentation",
+    )
     video_hints = (
         "生成视频",
         "宣传视频",
@@ -357,6 +376,8 @@ def _fallback_intent(text: str) -> IntakeIntent:
     )
     if any(hint in lowered for hint in analysis_hints) or ("视频" in lowered and any(word in lowered for word in video_analysis_words)):
         return "video_analysis"
+    if any(hint in lowered for hint in ppt_hints):
+        return "ppt"
     if any(hint in lowered for hint in image_hints):
         return "image"
     if any(hint in lowered for hint in video_hints):
@@ -367,6 +388,9 @@ def _fallback_intent(text: str) -> IntakeIntent:
 
 
 def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: str) -> dict[str, Any]:
+    if intent == "ppt" and not values.get("ppt_topic"):
+        topic = _extract_ppt_topic(text)
+        return {**values, "ppt_topic": topic} if topic else values
     if intent != "image":
         return values
     if _normalize_image_count(values.get("image_count")):
@@ -375,6 +399,28 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
     if not image_count:
         return values
     return {**values, "image_count": image_count}
+
+
+def _extract_ppt_topic(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text.strip())
+    if not normalized:
+        return ""
+    patterns = [
+        r"(?:帮我|给我|请|需要)?(?:做|制作|生成|输出|写)?(?:一份|一个|套)?(.{2,40}?)(?:PPT|ppt|演示文稿|幻灯片)",
+        r"(?:帮我|给我|请|需要)?(?:做|制作|生成|输出|写)?(?:一份|一个|套)?(.{2,40}?)(?:汇报材料|汇报)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        topic = match.group(1)
+        topic = re.sub(r"^(关于|一个|一份|这个|那个)", "", topic)
+        topic = re.sub(r"(的|得)$", "", topic)
+        if topic:
+            if "PPT" not in topic.upper() and "汇报" not in topic:
+                return f"{topic}PPT"
+            return topic
+    return normalized[:40]
 
 
 def _extract_image_count(text: str) -> int | None:

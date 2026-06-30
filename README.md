@@ -1,8 +1,8 @@
 # PixelFlow
 
-PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自然语言和素材附件出发，完成图片生成、短视频生成和视频分析拆解。
+PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自然语言和素材附件出发，完成图片生成、短视频生成、视频分析拆解和 PPT 制作。
 
-当前项目仍在快速迭代中，但主流程已经从早期 LangGraph-only 任务流演进为前端工作台驱动的 v2 分段工作流：采集意图、补全表单、生成创意方向、填充 plan.md、人工审核，再分别进入图片、视频或视频分析链路。
+当前项目仍在快速迭代中，但主流程已经从早期 LangGraph-only 任务流演进为前端工作台驱动的 v2 分段工作流：采集意图、补全表单、生成创意方向、填充 plan.md、人工审核，再分别进入图片、视频、视频分析或 PPT 制作链路。
 
 详细 Agent/Skill 流程见：
 
@@ -14,8 +14,8 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
-| 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/视频分析意图，抽取主体、行业、目标和生成数量 |
-| 表单补全 | 可用 | 图片和视频分别有表单 schema，最多 3 轮补充 |
+| 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图，抽取主体、行业、目标和生成数量 |
+| 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
 | plan.md 策划 | 可用 | 使用项目内模板填充 plan.md，并返回前端审核 |
@@ -23,6 +23,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
 | 视频修改循环 | 可用 | 支持穿帮分析、按受影响场景重生并重新合并 |
+| PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
 | 旧 LangGraph 任务流 | 保留 | `/agent/flows` 旧任务、SSE、资产接口仍存在，用于兼容 |
 
@@ -74,6 +75,7 @@ flowchart TD
   C -->|"image"| D["图片表单 + 创意方向 + plan.md"]
   C -->|"video"| E["视频表单 + 创意方向 + plan.md"]
   C -->|"video_analysis"| F["视频链接识别 + storyboard 拆解"]
+  C -->|"ppt"| Q["PPT表单 + 附件"]
   D --> G["图片参数准备"]
   G --> H["调用图片 Skill"]
   H --> I["图片结果确认或重新生成"]
@@ -84,6 +86,9 @@ flowchart TD
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
   F --> P["返回分析结果"]
+  Q --> R["SmartPPT 生成/修改大纲"]
+  R --> S["大纲转JSON + 生成页面图片"]
+  S --> T["生成PPT附件并确认"]
 ```
 
 ## 关键约束
@@ -119,6 +124,13 @@ flowchart TD
 | 视频 | GET | `/agent/flows/video/generate-direct/jobs/{job_id}` | 查询直接视频生成结果 |
 | 视频 | POST | `/agent/flows/video/merge` | 合并场景视频 |
 | 视频 | POST | `/agent/flows/video/analyze-flaws` | 视频穿帮分析 |
+| PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
+| PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
+| PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
+| PPT | POST | `/agent/flows/ppt/images/start` | 启动 PPT 页面图片生成 |
+| PPT | POST | `/agent/flows/ppt/images/regenerate/start` | 重新生成单页 PPT 图片 |
+| PPT | POST | `/agent/flows/ppt/file/start` | 启动 PPT 文件生成 |
+| PPT | GET | `/agent/flows/ppt/jobs/{job_id}` | 查询 PPT 阶段异步 job |
 | 对话 | POST | `/agent/conversations` | 新建对话 |
 | 对话 | GET | `/agent/conversations?page_size=5` | 最近对话分页 |
 | 对话 | GET | `/agent/conversations/{conversation_id}` | 对话详情 |
@@ -158,6 +170,18 @@ flowchart TD
 | 单视频拆解 | `/api/creative/decompose_video_to_storyboard` |
 | 多视频拆解 | `/api/creative/batch_decompose_video_to_storyboard` |
 | 视频穿帮分析 | `/api/creative/analyze_video_flaws` |
+
+SmartPPT：
+
+| PixelFlow Skill | content-app/Borgrise 接口 |
+| --- | --- |
+| 生成 PPT 大纲 | `/api/picture/smart-ppt/generatePptSummary` |
+| 更新 PPT 大纲 | `/api/picture/smart-ppt/updatePptSummary` |
+| 大纲转页面 JSON | `/api/picture/smart-ppt/generatePptContentToJson` |
+| 生成 PPT 页面图片 | `/api/picture/smart-ppt/generatePptImage` |
+| 生成 PPT 文件 | `/api/picture/smart-ppt/generatePptFile` |
+
+SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/status` 轮询，默认超时 2 小时。
 
 ## 视频场景包规则
 

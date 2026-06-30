@@ -8,6 +8,10 @@ import type {
   MergeSceneVideosResponse,
   PlanMarkdownResponse,
   PrepareScenePackagesResponse,
+  PptContentJsonResult,
+  PptFileResult,
+  PptImagesResult,
+  PptSummaryResult,
   VideoFlawAnalysisResponse,
 } from "./api";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
@@ -33,7 +37,10 @@ export interface ChatMessage {
       | "video_scene_packages"
       | "video_flaw_analysis"
       | "video_analysis_result"
-      | "video_result";
+      | "video_result"
+      | "ppt_outline"
+      | "ppt_images"
+      | "ppt_file";
     title: string;
     description: string;
     actionLabel: string;
@@ -55,6 +62,12 @@ export interface ChatMessage {
     videoFlawAnalysis?: VideoFlawAnalysisResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;
+    pptSummary?: PptSummaryResult;
+    pptContentJson?: PptContentJsonResult;
+    pptImages?: PptImagesResult;
+    pptFile?: PptFileResult;
+    pptStyle?: string;
+    smartPptProjectId?: number | null;
   };
 }
 

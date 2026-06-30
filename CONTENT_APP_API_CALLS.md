@@ -15,7 +15,7 @@
 
 - `backend/pixelflow/skills/borgrise/run_generation.py`
 - `backend/pixelflow/skills/borgrise/skill.py`
-- 主工作流入口在 `backend/pixelflow/nodes.py`
+- 主工作流入口在 `backend/app/gateway/routers/pixelflow_*.py` 和旧 `backend/pixelflow/nodes.py`
 
 凭据来源：
 
@@ -35,10 +35,15 @@
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | `/api/auth/verify` | `POST` | `content_app_auth.verify_authorization_header_remote()`、SSE 生成器 | 实时校验 content-app token，禁用用户或失效 token 立即拒绝。 | `AuthController.verifyToken()` | pixelflow 本地只读取 JWT payload 里的 `sub` 作为用户名；token 真伪、过期和用户禁用状态以此接口返回为准。 |
-| `/api/creative/decompose_video_to_storyboard` | `POST` | `skill._decompose_blocking()`，由 `nodes._decompose_reference_videos()` 触发 | 将用户上传/输入的参考视频拆解为 storyboard shots，供后续 Brief 和分镜规划使用。 | `CreativeController.decomposeVideoToStoryboard()` | 可能返回异步 task，随后会调用 `/api/task/{taskId}/status` 轮询；视频分析默认最多等 20 分钟。 |
+| `/api/creative/decompose_video_to_storyboard` | `POST` | `skill._decompose_blocking()`，由 `nodes._decompose_reference_videos()` 或 `/agent/flows/video/analyze-storyboards` 触发 | 将用户上传/输入的参考视频拆解为 storyboard shots，供后续 Brief、分镜规划或视频分析结果展示使用。 | `CreativeController.decomposeVideoToStoryboard()` | 可能返回异步 task，随后会调用 `/api/task/{taskId}/status` 轮询；视频分析默认最多等 15 分钟。 |
 | `/api/video/image-to-video` | `POST` | `run_generation.image_to_video()`，由 `BorgriseSkill.image_to_video()` 和 `nodes._generate_segment()` 触发 | 按 segment 的首图和 prompt 生成视频片段，是当前 GENERATE 阶段的主生成接口。 | `VideoController.imageToVideo()` | 不再传 `projectId`；视频生成默认最多等 1 小时。 |
-| `/api/task/{taskId}/status` | `GET` | `run_generation.poll_task()` | 轮询异步生成、拆解任务，直到完成、失败或超时。 | `TaskController.getTaskStatus()` | 被多个 wrapper 复用，但超时按入口区分：视频生成 1 小时、图片生成 10 分钟、视频分析/参考拆解 20 分钟。 |
+| `/api/task/{taskId}/status` | `GET` | `run_generation.poll_task()` | 轮询异步生成、拆解和 SmartPPT 任务，直到完成、失败或超时。 | `TaskController.getTaskStatus()` | 被多个 wrapper 复用，但超时按入口区分：视频生成 1 小时、图片生成 10 分钟、视频分析/参考拆解 15 分钟、SmartPPT 2 小时。 |
 | `/api/picture/image_edit` | `POST` | `run_generation.image_edit()`，由 `pixelflow_image.generate_image()` 和 `pixelflow_image.edit_image_asset()` 触发 | 对已有图片按 prompt 编辑；也用于视频场景包全局素材引用后编辑并替换原素材。 | `ImageController.imageEdit()` | `edit-asset` 请求只传单张 `source_image_url`、用户编辑 prompt、`max_images=1`；生成后通过 `/api/task/{taskId}/status` 轮询结果，图片默认最多等 10 分钟。 |
+| `/api/picture/smart-ppt/generatePptSummary` | `POST` | `run_generation.generate_ppt_summary()`，由 `pixelflow_ppt.start_ppt_summary()` 触发 | 根据 PPT 主题、风格和 Word/Excel/PDF 附件生成 PPT 大纲。 | `SmartPptController.generatePptSummary()` | 请求 body 传 `topic`、`pptStyle`、`fileUrls`、可选 `smartPptProjectId`；返回 taskId 后通过 `/api/task/{taskId}/status` 轮询，PPT 默认最多等 2 小时。 |
+| `/api/picture/smart-ppt/updatePptSummary` | `POST` | `run_generation.update_ppt_summary()`，由 `pixelflow_ppt.start_update_ppt_summary()` 触发 | 根据用户修改意见更新 PPT 大纲。 | `SmartPptController.updatePptSummary()` | 请求 body 传 `originalOutline`、`smartPptProjectId`、`modificationOpinion`；返回 taskId 后轮询。 |
+| `/api/picture/smart-ppt/generatePptContentToJson` | `POST` | `run_generation.generate_ppt_content_json()`，由 `pixelflow_ppt.start_ppt_content_json()` 触发 | 将确认后的 PPT 大纲转为页面 JSON。 | `SmartPptController.generatePptContentToJson()` | 请求 body 传 `originalOutline`、`smartPptProjectId`、`pptStyle`；轮询结果读取 `content_json`。 |
+| `/api/picture/smart-ppt/generatePptImage` | `POST` | `run_generation.generate_ppt_image()`，由 `pixelflow_ppt.start_ppt_images()` 和 `start_regenerate_ppt_image()` 触发 | 根据单页 JSON 生成 PPT 页面图片。 | `SmartPptController.generatePptImage()` | 请求 body 传 `jsonContent`、`smartPptProjectId`；轮询结果可能直接是图片 URL 字符串。 |
+| `/api/picture/smart-ppt/generatePptFile` | `POST` | `run_generation.generate_ppt_file()`，由 `pixelflow_ppt.start_ppt_file()` 触发 | 根据已生成的页面图片 URL 集合生成 PPT 文件。 | `SmartPptController.generatePptFile()` | 请求 body 传页面图片 `fileUrls`、`smartPptProjectId`；轮询结果读取 `ppt_url`、`filename`、`slide_count`。 |
 
 ## Borgrise 工具和 CLI 封装的接口
 

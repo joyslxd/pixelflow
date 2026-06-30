@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-CreationIntent = Literal["video", "image"]
+CreationIntent = Literal["video", "image", "ppt"]
 
 VIDEO_CATEGORIES = ["美妆护肤", "食品饮料", "数码3C", "服饰鞋包", "家居日用", "保健养生", "其他品类"]
 VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"]
@@ -19,16 +20,20 @@ IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插�
 IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"]
 IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"]
 IMAGE_SIZES = ["1:1", "16:9", "9:16", "自动适配"]
+PPT_STYLES = ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自由发挥"]
+PPT_ATTACHMENT_EXTENSIONS = [".doc", ".docx", ".xls", ".xlsx", ".pdf"]
 
 
 @dataclass(frozen=True)
 class FormField:
     id: str
     label: str
-    type: Literal["text", "radio_group"]
+    type: Literal["text", "radio_group", "file_list"]
     required: bool = True
     placeholder: str = ""
     options: list[str] = field(default_factory=list)
+    accept: list[str] = field(default_factory=list)
+    multiple: bool = False
     default_value: str = ""
     source: Literal["system", "user", "llm"] = "system"
     confidence: float = 0
@@ -41,6 +46,8 @@ class FormField:
             "required": self.required,
             "placeholder": self.placeholder,
             "options": self.options,
+            "accept": self.accept,
+            "multiple": self.multiple,
             "default_value": self.default_value,
             "source": self.source,
             "confidence": self.confidence,
@@ -120,6 +127,24 @@ def get_form_schema(intent: CreationIntent) -> FormSchema:
                 FormField(id="conversion_goal", label="转化目标", type="radio_group", options=VIDEO_GOALS),
             ],
         )
+    if intent == "ppt":
+        return FormSchema(
+            form_id="ppt_generation_intake",
+            title="PPT生成需求收集",
+            output_type="ppt",
+            fields=[
+                FormField(id="ppt_topic", label="PPT主题", type="text", placeholder="例如：2026年度营销策略汇报"),
+                FormField(id="ppt_style", label="PPT风格", type="radio_group", options=PPT_STYLES),
+                FormField(
+                    id="attachments",
+                    label="附件",
+                    type="file_list",
+                    placeholder="仅支持 Word、Excel、PDF，可上传多个",
+                    accept=PPT_ATTACHMENT_EXTENSIONS,
+                    multiple=True,
+                ),
+            ],
+        )
     return FormSchema(
         form_id="image_generation_intake",
         title="图片生成需求收集",
@@ -138,10 +163,15 @@ def validate_form(intent: CreationIntent, values: dict[str, Any] | None, intake_
     schema = get_form_schema(intent)
     normalized = _normalize_values(schema, values or {})
     missing = [field.id for field in schema.fields if field.required and not _has(normalized.get(field.id))]
+    attachment_errors = _unsupported_ppt_attachments(normalized.get("attachments")) if intent == "ppt" else []
+    if attachment_errors and "attachments" not in missing:
+        missing.append("attachments")
     is_complete = not missing
     terminated = bool(missing and intake_rounds >= 3)
     if is_complete:
         message = "表单信息已完整，可以生成创意方向。"
+    elif attachment_errors:
+        message = "附件类型不支持，仅支持 Word、Excel、PDF 文件。"
     elif terminated:
         message = f"最多确认 3 次后仍缺少关键数据：{', '.join(missing)}。"
     else:
@@ -193,6 +223,31 @@ def draft_creative_directions(
                 data={"structure": "contrast_result", "visual_anchor": anchor_text},
             ),
         ]
+    if intent == "ppt":
+        return [
+            CreativeDirection(
+                direction_id="direction_1",
+                title="问题洞察 + 解决路径",
+                description=f"围绕「{subject}」先建立业务背景和核心问题，再用数据、案例和行动计划支撑「{goal}」。",
+                recommended=True,
+                tags=["汇报逻辑", "问题解决", "可落地"],
+                data={"structure": "problem_solution_report", "visual_anchor": anchor_text},
+            ),
+            CreativeDirection(
+                direction_id="direction_2",
+                title="趋势判断 + 策略拆解",
+                description=f"从行业趋势切入「{subject}」，拆成关键机会、策略动作和阶段目标，适合管理层决策汇报。",
+                tags=["趋势", "策略", "管理汇报"],
+                data={"structure": "trend_strategy", "visual_anchor": anchor_text},
+            ),
+            CreativeDirection(
+                direction_id="direction_3",
+                title="成果展示 + 资源诉求",
+                description=f"用阶段成果、重点数据和下一步资源需求组织「{subject}」，让听众快速理解价值和推进方向。",
+                tags=["成果展示", "资源诉求", "清晰结论"],
+                data={"structure": "result_ask", "visual_anchor": anchor_text},
+            ),
+        ]
     return [
         CreativeDirection(
             direction_id="direction_1",
@@ -223,10 +278,53 @@ def _normalize_values(schema: FormSchema, values: dict[str, Any]) -> dict[str, A
     normalized: dict[str, Any] = {}
     for form_field in schema.fields:
         raw = values.get(form_field.id, form_field.default_value)
-        normalized[form_field.id] = raw.strip() if isinstance(raw, str) else raw
+        if form_field.id == "attachments":
+            normalized[form_field.id] = _normalize_attachments(raw)
+        else:
+            normalized[form_field.id] = raw.strip() if isinstance(raw, str) else raw
     if schema.output_type == "image" and _has(values.get("image_count")):
         normalized["image_count"] = _normalize_image_count(values.get("image_count"))
     return normalized
+
+
+def _normalize_attachments(value: Any) -> list[dict[str, Any]]:
+    if value is None or value == "":
+        return []
+    items = value if isinstance(value, list) else [value]
+    attachments: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str):
+            attachments.append({"url": item, "name": item.rsplit("/", 1)[-1]})
+        elif isinstance(item, dict):
+            attachments.append({str(key): raw for key, raw in item.items() if raw is not None})
+    return attachments
+
+
+def _unsupported_ppt_attachments(value: Any) -> list[dict[str, Any]]:
+    attachments = _normalize_attachments(value)
+    unsupported: list[dict[str, Any]] = []
+    for attachment in attachments:
+        path = str(
+            attachment.get("url")
+            or attachment.get("fileUrl")
+            or attachment.get("file_url")
+            or attachment.get("path")
+            or attachment.get("name")
+            or attachment.get("filename")
+            or ""
+        )
+        suffix = _attachment_suffix(path)
+        if suffix not in PPT_ATTACHMENT_EXTENSIONS:
+            unsupported.append(attachment)
+    return unsupported
+
+
+def _attachment_suffix(path: str) -> str:
+    parsed = urlparse(path.strip())
+    candidate = parsed.path or path
+    if "." not in candidate:
+        return ""
+    return "." + candidate.rsplit(".", 1)[-1].lower()
 
 
 def _normalize_image_count(value: Any) -> int:
@@ -250,4 +348,6 @@ def _has(value: Any) -> bool:
 def _subject_for(intent: CreationIntent, values: dict[str, Any]) -> str:
     if intent == "video":
         return str(values.get("product_info") or "产品")
+    if intent == "ppt":
+        return str(values.get("ppt_topic") or "PPT主题")
     return str(values.get("image_goal") or "图片创作目标")

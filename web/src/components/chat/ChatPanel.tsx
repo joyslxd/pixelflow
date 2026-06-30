@@ -27,6 +27,12 @@ interface ChatPanelProps {
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
   onRetryVideoAnalysis?: (msg: ChatMessage) => void;
+  onApprovePptOutline?: (msg: ChatMessage) => void;
+  onRevisePptOutline?: (msg: ChatMessage) => void;
+  onRegeneratePptImage?: (msg: ChatMessage, pageIndex: number) => void;
+  onGeneratePptFile?: (msg: ChatMessage) => void;
+  onAcceptPptFile?: (msg: ChatMessage) => void;
+  onRegeneratePptFile?: (msg: ChatMessage) => void;
   busy?: boolean;
 }
 
@@ -51,6 +57,12 @@ export function ChatPanel({
   onRetrySceneAssets,
   onRetryVideoMerge,
   onRetryVideoAnalysis,
+  onApprovePptOutline,
+  onRevisePptOutline,
+  onRegeneratePptImage,
+  onGeneratePptFile,
+  onAcceptPptFile,
+  onRegeneratePptFile,
   busy,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -98,6 +110,12 @@ export function ChatPanel({
               onRetrySceneAssets={onRetrySceneAssets}
               onRetryVideoMerge={onRetryVideoMerge}
               onRetryVideoAnalysis={onRetryVideoAnalysis}
+              onApprovePptOutline={onApprovePptOutline}
+              onRevisePptOutline={onRevisePptOutline}
+              onRegeneratePptImage={onRegeneratePptImage}
+              onGeneratePptFile={onGeneratePptFile}
+              onAcceptPptFile={onAcceptPptFile}
+              onRegeneratePptFile={onRegeneratePptFile}
             />
           ))
         )}
