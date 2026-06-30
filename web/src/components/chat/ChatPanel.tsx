@@ -69,6 +69,9 @@ export function ChatPanel({
   const latestVideoScenePackageMessageId = [...messages]
     .reverse()
     .find((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages)?.id;
+  const latestActionableMessageId = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.artifact)?.id;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -94,6 +97,7 @@ export function ChatPanel({
               key={m.id}
               msg={m}
               isLatestVideoScenePackage={m.id === latestVideoScenePackageMessageId}
+              actionsDisabled={Boolean(busy) || Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId)}
               onOpenArtifact={onOpenArtifact}
               onSelectDirection={onSelectDirection}
               onApprovePlan={onApprovePlan}

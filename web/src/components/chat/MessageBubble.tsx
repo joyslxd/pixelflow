@@ -1,3 +1,4 @@
+import { useEffect, useState, type MouseEvent } from "react";
 import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
@@ -9,6 +10,7 @@ import type { VideoResult } from "@/lib/types";
 interface MessageBubbleProps {
   msg: ChatMessage;
   isLatestVideoScenePackage?: boolean;
+  actionsDisabled?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -139,6 +141,7 @@ function pptPagesReady(msg: ChatMessage): boolean {
 export function MessageBubble({
   msg,
   isLatestVideoScenePackage,
+  actionsDisabled,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -181,6 +184,28 @@ export function MessageBubble({
   const videoResults = [mergedVideoResult, ...sceneVideoResults].filter((result): result is VideoResult => Boolean(result));
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
+  const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
+  const [loadingDots, setLoadingDots] = useState(0);
+
+  useEffect(() => {
+    if (!hasRunningPptPage) {
+      setLoadingDots(3);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setLoadingDots((current) => (current + 1) % 4);
+    }, 450);
+    return () => window.clearInterval(timer);
+  }, [hasRunningPptPage]);
+
+  const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
+    if (!actionsDisabled) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (!target?.closest("button")) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}>
       <div
@@ -228,6 +253,11 @@ export function MessageBubble({
             })}
           </div>
         )}
+        <div
+          className={cn(actionsDisabled && "opacity-60 [&_button]:cursor-not-allowed [&_button]:hover:opacity-100")}
+          onClickCapture={blockDisabledAction}
+          aria-disabled={actionsDisabled || undefined}
+        >
         {msg.artifact?.type === "directions" && msg.artifact.directions ? (
           <div className="mt-2 w-full max-w-[520px] space-y-2 rounded-2xl border border-accent/20 bg-accent-soft/50 p-3">
             <div className="text-[13px] font-semibold text-ink">{msg.artifact.title}</div>
@@ -487,17 +517,19 @@ export function MessageBubble({
                     </a>
                   ) : (
                     <div className="flex aspect-[16/9] items-center justify-center text-[12px] text-ink-soft">
-                      {page.status === "failed" ? "生成失败" : "图片生成中"}
+                      {page.status === "failed" ? "生成失败" : `图片生成中${".".repeat(loadingDots)}`}
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => onRegeneratePptImage?.(msg, page.page_index)}
-                    className="absolute right-2 top-2 hidden h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink shadow-sm hover:text-accent group-hover:flex"
-                    aria-label="重新生成本页"
-                  >
-                    <RefreshCw size={15} />
-                  </button>
+                  {page.status !== "running" && (
+                    <button
+                      type="button"
+                      onClick={() => onRegeneratePptImage?.(msg, page.page_index)}
+                      className="absolute right-2 top-2 hidden h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink shadow-sm hover:text-accent group-hover:flex"
+                      aria-label="重新生成本页"
+                    >
+                      <RefreshCw size={15} />
+                    </button>
+                  )}
                   <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] text-ink-soft">
                     <span className="truncate">{page.title || `第 ${page.page_index} 页`}</span>
                     <span>第 {page.page_index} 页</span>
@@ -899,6 +931,7 @@ export function MessageBubble({
             </span>
           </button>
         ) : null}
+        </div>
         <span className="mt-1 px-1 text-[11px] text-ink-soft/60">{msg.time}</span>
       </div>
     </div>

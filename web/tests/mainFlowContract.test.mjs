@@ -5,6 +5,7 @@ import test from "node:test";
 
 const workspaceSource = fs.readFileSync(path.resolve("src/pages/WorkspacePage.tsx"), "utf8");
 const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
+const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPanel.tsx"), "utf8");
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 
@@ -99,6 +100,35 @@ test("ppt image pages stream partial status into the existing artifact card", ()
   assert.match(workspaceSource, /pendingPptImagesFromContentJson/, "Workspace must show PPT page placeholders before images finish");
   assert.match(workspaceSource, /updatePptImagesArtifactInMessage/, "Workspace must update the existing PPT image card");
   assert.match(workspaceSource, /api\.startPptImagesJob\([\s\S]*partialImages\?\.pages/, "PPT image polling must stream page status into the card");
+});
+
+test("closing the requirement dialog cancels and terminates the pending flow", () => {
+  assert.match(workspaceSource, /const handleCancelParamsDialog = \(\) =>/, "Workspace must have an explicit dialog-cancel handler");
+  assert.match(workspaceSource, /pendingDialogContextRef\.current = null/, "cancel must clear pending dialog context");
+  assert.match(workspaceSource, /已取消当前需求表单，流程已终止/, "cancel should write a visible terminal message");
+  assert.match(workspaceSource, /last_phase:\s*"form_cancelled"/, "cancel should persist a cancelled phase");
+  assert.match(workspaceSource, /onCancel=\{handleCancelParamsDialog\}/, "GenParamsDialog X must call the flow-cancel handler");
+});
+
+test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
+  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
+  assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
+  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\|/, "ChatPanel must disable actions while busy or on older artifacts");
+  assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
+  assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");
+});
+
+test("ppt page regenerate updates the same card and hides regenerate while a page is running", () => {
+  const start = workspaceSource.indexOf("const handleRegeneratePptImage = async");
+  const end = workspaceSource.indexOf("const handleGeneratePptFile = async", start);
+  assert.notEqual(start, -1, "handleRegeneratePptImage must exist");
+  assert.notEqual(end, -1, "handleGeneratePptFile must follow handleRegeneratePptImage");
+  const source = workspaceSource.slice(start, end);
+  assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*runningImages\)/, "regenerate must switch the target page to running inside the same card");
+  assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*nextImages\)/, "regenerate result must update the same card");
+  assert.equal(source.includes("pushPptImagesArtifact"), false, "regenerate must not append a new PPT image grid");
+  assert.match(messageBubbleSource, /page\.status !== "running"/, "running PPT pages must hide the regenerate button");
+  assert.match(messageBubbleSource, /loadingDots/, "PPT loading text should use animated dots");
 });
 
 test("image plan approval continues through image generation instead of stopping at prepare", () => {

@@ -81,6 +81,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - plan.md 审核：后端返回 `review_timeout_sec=30`，前端 30 秒未操作默认同意。
 - 图片生成结果、视频生成结果：30 秒未反馈默认满意或无意见。
 - 视频场景包确认：当前代码返回 `review_timeout_sec=None`，不做倒计时自动确认。
+- 图片、视频、PPT 的需求表单弹出后，如果用户点击右上角 `X` 关闭，视为取消并终止当前流程；前端需要清空 pending 表单上下文并记录 `form_cancelled`。
 
 ## 核心 API
 
@@ -231,7 +232,8 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - PPT 附件只允许 Word、Excel、PDF，前端上传仍走 content-app `/api/upload`。
 - PPT 行业补充复用 `resolve_industry_profile()`：先查项目内垂类模板，未命中就调用当前项目 LLM `deepseek-v4-pro` 生成同结构行业画像，LLM 失败时才使用通用电商兜底。
 - SmartPPT 的大纲、更新大纲、转 JSON、生成页面图、生成文件都经 `/agent/flows/ppt/*/start` 启动异步 job，再由前端轮询 `/agent/flows/ppt/jobs/{job_id}`。
-- PPT 页面图片阶段会先展示所有页面格子为“图片生成中”，后端每生成一页更新一次 job result，前端把 partial status 原地写回同一张卡片。
+- PPT 页面图片阶段会先展示所有页面格子为“图片生成中...”，省略号动态循环；后端每生成一页更新一次 job result，前端把 partial status 原地写回同一张卡片。
+- PPT 单页图片 `running` 时不展示重新生成按钮；已生成或失败后才允许重试。重试单页时必须把原小格子切回生成中并原位更新，不能追加新的整组 PPT 图片卡片；所有页面都完成且无失败时才展示“开始生成PPT附件”。
 - 任意 SmartPPT 阶段如果遇到额度不足，需要进入可恢复暂停；用户充值后回到同一对话可以继续点击上一阶段按钮重新执行。
 - PPT 文件生成完成后前端展示下载入口；用户选择重新生成附件时只重复文件生成阶段，不重新跑大纲和页面图。
 
@@ -244,6 +246,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - 最近对话默认 5 条，继续下拉按 cursor 分页；SQL store 按 `created_at desc, conversation_id desc` 排序。
 - 前端切换对话后，异步回调必须写回原来的 `conversation_id`，不能写到当前可见对话。
 - 进入历史对话时应恢复 `context`，允许从原先的表单、plan、场景包、额度不足暂停点继续。
+- 当前对话中任意阶段正在处理时，所有历史消息里的操作按钮都必须禁用；处理完成后只允许最新可操作 artifact 的按钮继续，旧 artifact 只能作为历史预览。失败或额度暂停时，最新可恢复 artifact 的重试按钮保留可用。
 
 ## 鉴权与安全
 

@@ -1868,6 +1868,31 @@ export function WorkspacePage() {
     }
   };
 
+  const handleCancelParamsDialog = () => {
+    const dialogContext = pendingDialogContextRef.current;
+    const targetConversationId = dialogContext?.conversationId || conversationIdRef.current;
+    const cancelledIntent = pendingIntent;
+    setDialogOpen(false);
+    setPendingCore("");
+    setPendingFormValues({});
+    setPendingMaterials([]);
+    pendingDialogContextRef.current = null;
+    setBusyForConversation(targetConversationId, false);
+    pushAssistant("已取消当前需求表单，流程已终止。", targetConversationId);
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: "form_cancelled",
+          context: {
+            ...makeSnapshot(),
+            intent: cancelledIntent,
+            form_cancelled: true,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
+  };
+
   const handleApprovePptOutline = async (msg: ChatMessage) => {
     const artifact = msg.artifact;
     if (!artifact?.pptSummary) return;
@@ -1950,6 +1975,24 @@ export function WorkspacePage() {
       pushAssistant("当前页缺少 PPT 项目 ID 或页面 JSON，无法重新生成。", targetConversationId);
       return;
     }
+    const runningImages: PptImagesResult = {
+      ...artifact.pptImages,
+      ok: false,
+      pages: artifact.pptImages.pages.map((page) =>
+        page.page_index === pageIndex
+          ? {
+              ...page,
+              status: "running",
+              image_url: null,
+              error: null,
+              json_content: page.json_content || pageJson,
+            }
+          : page,
+      ),
+      message: `第 ${pageIndex} 页 PPT 图片重新生成中。`,
+      quota_insufficient: false,
+    };
+    updatePptImagesArtifactInMessage(msg.id, targetConversationId, runningImages);
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在重新生成第 ${pageIndex} 页 PPT 图片…`, targetConversationId);
     try {
@@ -1959,15 +2002,48 @@ export function WorkspacePage() {
         smart_ppt_project_id: projectId,
       });
       const nextPage = result.page as PptPageImage | undefined;
+      const nextPages = runningImages.pages.map((page) => {
+        if (page.page_index !== pageIndex) return page;
+        if (!nextPage) {
+          return {
+            ...page,
+            status: "failed",
+            image_url: null,
+            error: String(result.message || result.error || "本页图片重新生成失败。"),
+          };
+        }
+        return {
+          ...nextPage,
+          page_index: pageIndex,
+          json_content: nextPage.json_content || page.json_content || pageJson,
+          status: nextPage.status || (nextPage.image_url ? "completed" : "failed"),
+        };
+      });
       const nextImages: PptImagesResult = {
-        ...artifact.pptImages,
-        ok: Boolean(nextPage?.image_url) && artifact.pptImages.pages.every((page) => page.page_index === pageIndex || page.status === "completed"),
-        pages: artifact.pptImages.pages.map((page) => (page.page_index === pageIndex && nextPage ? nextPage : page)),
+        ...runningImages,
+        ok: nextPages.length > 0 && nextPages.every((page) => page.status === "completed" && Boolean(page.image_url)),
+        pages: nextPages,
         message: String(result.message || "PPT 页面图片已重新生成。"),
         quota_insufficient: Boolean(result.quota_insufficient),
       };
-      pushPptImagesArtifact(nextImages, artifact.pptContentJson || ({ ok: true, pages: [] } as PptContentJsonResult), artifact, targetConversationId);
+      updatePptImagesArtifactInMessage(msg.id, targetConversationId, nextImages);
     } catch (err) {
+      const failedImages: PptImagesResult = {
+        ...runningImages,
+        ok: false,
+        pages: runningImages.pages.map((page) =>
+          page.page_index === pageIndex
+            ? {
+                ...page,
+                status: "failed",
+                image_url: null,
+                error: err instanceof Error ? err.message : String(err),
+              }
+            : page,
+        ),
+        message: `第 ${pageIndex} 页 PPT 图片重新生成失败。`,
+      };
+      updatePptImagesArtifactInMessage(msg.id, targetConversationId, failedImages);
       pushAssistant(`PPT 页面图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
@@ -3046,10 +3122,7 @@ export function WorkspacePage() {
           initialValues={pendingFormValues}
           initialMaterials={pendingMaterials}
           onConfirm={handleConfirmParams}
-          onCancel={() => {
-            setPendingFormValues({});
-            setDialogOpen(false);
-          }}
+          onCancel={handleCancelParamsDialog}
         />
       )}
     </div>
