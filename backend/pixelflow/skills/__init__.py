@@ -18,11 +18,14 @@ from pixelflow.skills.base import (
     VideoFlawAnalysisResult,
     VideoFlawAnalysisSkill,
     VideoGenerationSkill,
+    VideoQualityReviewResult,
+    VideoQualityReviewSkill,
     get_image_skill,
     get_media_link_extraction_skill,
     get_video_decompose_skill,
     get_video_edit_skill,
     get_video_flaw_analysis_skill,
+    get_video_quality_review_skill,
     get_video_skill,
 )
 
@@ -40,10 +43,13 @@ __all__ = [
     "VideoFlawAnalysisResult",
     "VideoFlawAnalysisSkill",
     "VideoGenerationSkill",
+    "VideoQualityReviewResult",
+    "VideoQualityReviewSkill",
     "get_image_skill",
     "get_media_link_extraction_skill",
     "get_video_decompose_skill",
     "get_video_edit_skill",
     "get_video_flaw_analysis_skill",
+    "get_video_quality_review_skill",
     "get_video_skill",
 ]

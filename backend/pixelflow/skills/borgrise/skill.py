@@ -26,6 +26,7 @@ from pixelflow.skills.base import (
     MediaLinkExtractionResult,
     StoryboardResult,
     VideoFlawAnalysisResult,
+    VideoQualityReviewResult,
 )
 from pixelflow.skills.borgrise import run_generation
 
@@ -102,6 +103,28 @@ def _to_flaw_analysis_result(raw: dict[str, Any]) -> VideoFlawAnalysisResult:
         ok=True,
         task_id=raw.get("task_id"),
         flaw_analysis_markdown=str(raw.get("flaw_analysis_markdown") or ""),
+        issues=[issue for issue in raw.get("issues", []) if isinstance(issue, dict)],
+        affected_scene_ids=[str(scene_id) for scene_id in raw.get("affected_scene_ids", []) if scene_id],
+        revision_prompt=str(raw.get("revision_prompt") or ""),
+        raw=raw,
+    )
+
+
+def _to_quality_review_result(raw: dict[str, Any]) -> VideoQualityReviewResult:
+    """把 ``run_generation`` 的综合质检原始 dict 映射成统一结果。"""
+    if not raw or raw.get("error"):
+        return VideoQualityReviewResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "video quality review failed",
+            raw=raw or {},
+        )
+    summary = str(raw.get("summary_markdown") or raw.get("flaw_analysis_markdown") or "")
+    return VideoQualityReviewResult(
+        ok=True,
+        task_id=raw.get("task_id"),
+        summary_markdown=summary,
+        flaw_analysis_markdown=str(raw.get("flaw_analysis_markdown") or summary),
         issues=[issue for issue in raw.get("issues", []) if isinstance(issue, dict)],
         affected_scene_ids=[str(scene_id) for scene_id in raw.get("affected_scene_ids", []) if scene_id],
         revision_prompt=str(raw.get("revision_prompt") or ""),
@@ -261,6 +284,16 @@ async def _run_flaw_analysis(fn: Callable[..., dict[str, Any]], **kwargs: Any) -
         logger.exception("borgrise video flaw analysis %s failed", getattr(fn, "__name__", "call"))
         return VideoFlawAnalysisResult(ok=False, error=str(exc))
     return _to_flaw_analysis_result(raw)
+
+
+async def _run_quality_review(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> VideoQualityReviewResult:
+    """在线程中运行阻塞综合质检调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise video quality review %s failed", getattr(fn, "__name__", "call"))
+        return VideoQualityReviewResult(ok=False, error=str(exc))
+    return _to_quality_review_result(raw)
 
 
 async def _run_media_links(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> MediaLinkExtractionResult:
@@ -559,4 +592,30 @@ class BorgriseSkill:
             scene_packages=scene_packages or [],
             materials=materials or [],
             user_feedback=user_feedback,
+        )
+
+    async def review_video_quality(
+        self,
+        merged_video_url: str,
+        scene_videos: list[dict[str, Any]],
+        scene_packages: list[dict[str, Any]] | None = None,
+        materials: list[dict[str, Any]] | None = None,
+        user_feedback: str | None = None,
+        checks: list[str] | None = None,
+        platform: str | None = None,
+        ratio: str | None = None,
+        size: str | None = None,
+    ) -> VideoQualityReviewResult:
+        """分析合并视频和场景视频中的综合质检问题。"""
+        return await _run_quality_review(
+            run_generation.analyze_video_flaws,
+            merged_video_url=merged_video_url,
+            scene_videos=scene_videos,
+            scene_packages=scene_packages or [],
+            materials=materials or [],
+            user_feedback=user_feedback,
+            checks=checks or [],
+            platform=platform,
+            ratio=ratio,
+            size=size,
         )

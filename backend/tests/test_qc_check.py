@@ -58,3 +58,25 @@ def test_all_clips_failed_fails():
     result = qc_check(_brief(), _assets(3), _timeline(0, 0.0))
     assert not result.passed
     assert _status(result, "片段完整性") == "fail"
+
+
+def test_local_video_ratio_mismatch_warns(monkeypatch):
+    monkeypatch.setattr("pixelflow.qc.check._probe_video", lambda path: {"width": 1920, "height": 1080, "duration": 30.0})
+    monkeypatch.setattr("pixelflow.qc.check._has_black_frames", lambda path: False)
+    monkeypatch.setattr("pixelflow.qc.check._has_freeze_frames", lambda path: False)
+
+    result = qc_check({**_brief(), "ratio": "9:16", "size": "1080x1920"}, _assets(1), _timeline(1), "/tmp/out.mp4")
+
+    assert result.passed
+    assert _status(result, "手机端画幅适配") == "warn"
+
+
+def test_local_video_freeze_fails(monkeypatch):
+    monkeypatch.setattr("pixelflow.qc.check._probe_video", lambda path: {"width": 1080, "height": 1920, "duration": 30.0})
+    monkeypatch.setattr("pixelflow.qc.check._has_black_frames", lambda path: False)
+    monkeypatch.setattr("pixelflow.qc.check._has_freeze_frames", lambda path: True)
+
+    result = qc_check({**_brief(), "ratio": "9:16", "size": "1080x1920"}, _assets(1), _timeline(1), "/tmp/out.mp4")
+
+    assert not result.passed
+    assert _status(result, "卡顿/冻结检测") == "fail"
