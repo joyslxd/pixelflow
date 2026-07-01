@@ -579,6 +579,7 @@ export function WorkspacePage() {
   const lastEventIdRef = useRef(0);
   const restoringRef = useRef(false);
   const saveTimerRef = useRef<number | undefined>(undefined);
+  const skipRouteRestoreConversationRef = useRef("");
   const unsubRef = useRef<() => void>(() => {});
 
   const setActiveTaskId = (taskId: string) => {
@@ -1395,6 +1396,11 @@ export function WorkspacePage() {
         restoringRef.current = false;
         return;
       }
+      if (skipRouteRestoreConversationRef.current === conversationId) {
+        skipRouteRestoreConversationRef.current = "";
+        restoringRef.current = false;
+        return;
+      }
       unsubRef.current();
       seenEventIdsRef.current = new Set();
       announcedPhasesRef.current = new Set();
@@ -1462,6 +1468,7 @@ export function WorkspacePage() {
       current_task_id: currentTaskId || null,
       context: makeSnapshot() as unknown as Record<string, unknown>,
     });
+    skipRouteRestoreConversationRef.current = created.conversation_id;
     setActiveConversationId(created.conversation_id);
     window.dispatchEvent(new Event("pixelflow-conversations-updated"));
     return created.conversation_id;

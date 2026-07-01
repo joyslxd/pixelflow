@@ -34,6 +34,26 @@ test("new conversation stores the user message before agent replies", () => {
   assert.ok(appendIndex < firstAgentIndex, "user message persistence must happen before the first agent reply");
 });
 
+test("new conversation route replacement does not clear the first intake progress message", () => {
+  const ensureStart = workspaceSource.indexOf("const ensureConversation = async");
+  const ensureEnd = workspaceSource.indexOf("const normalizeSendInput", ensureStart);
+  const restoreStart = workspaceSource.indexOf("useEffect(() => {\n    let cancelled = false;");
+  const restoreEnd = workspaceSource.indexOf("  useEffect(() => {\n    if (restoringRef.current", restoreStart);
+  assert.notEqual(ensureStart, -1, "ensureConversation must exist");
+  assert.notEqual(ensureEnd, -1, "normalizeSendInput must follow ensureConversation");
+  assert.notEqual(restoreStart, -1, "conversation restore effect must exist");
+  assert.notEqual(restoreEnd, -1, "snapshot save effect must follow conversation restore");
+  const ensureSource = workspaceSource.slice(ensureStart, ensureEnd);
+  const restoreSource = workspaceSource.slice(restoreStart, restoreEnd);
+  assert.match(workspaceSource, /skipRouteRestoreConversationRef/, "Workspace must track route restores started by the current send");
+  assert.match(ensureSource, /skipRouteRestoreConversationRef\.current = created\.conversation_id/, "newly created conversations should skip the immediate route restore");
+  assert.match(restoreSource, /if \(skipRouteRestoreConversationRef\.current === conversationId\)/, "restore effect must ignore the immediate replacement navigation");
+  assert.ok(
+    restoreSource.indexOf("skipRouteRestoreConversationRef.current === conversationId") < restoreSource.indexOf("api.resumeConversation"),
+    "skip check must happen before loading a stale server snapshot",
+  );
+});
+
 test("persisted chat messages keep the optimistic client id for action dedupe", () => {
   const persistStart = workspaceSource.indexOf("const persistChatMessage = async");
   const persistEnd = workspaceSource.indexOf("const appendMessageForConversation", persistStart);
