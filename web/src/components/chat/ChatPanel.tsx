@@ -94,36 +94,41 @@ export function ChatPanel({
             </p>
           </div>
         ) : (
-          messages.map((m) => (
-            <MessageBubble
-              key={m.id}
-              msg={m}
-              isLatestVideoScenePackage={m.id === latestVideoScenePackageMessageId}
-              actionsDisabled={Boolean(busy) || Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId)}
-              onOpenArtifact={onOpenArtifact}
-              onSelectDirection={onSelectDirection}
-              onApprovePlan={onApprovePlan}
-              onRevisePlan={onRevisePlan}
-              onGenerateImage={onGenerateImage}
-              onAcceptImageResult={onAcceptImageResult}
-              onReviseImageResult={onReviseImageResult}
-              onGenerateVideoFromScenePackages={onGenerateVideoFromScenePackages}
-              onAcceptVideoResult={onAcceptVideoResult}
-              onReviseVideoResult={onReviseVideoResult}
-              onOpenVideoResult={onOpenVideoResult}
-              onRegenerateVideoWithRevision={onRegenerateVideoWithRevision}
-              onRetryImageResult={onRetryImageResult}
-              onRetrySceneAssets={onRetrySceneAssets}
-              onRetryVideoMerge={onRetryVideoMerge}
-              onRetryVideoAnalysis={onRetryVideoAnalysis}
-              onApprovePptOutline={onApprovePptOutline}
-              onRevisePptOutline={onRevisePptOutline}
-              onRegeneratePptImage={onRegeneratePptImage}
-              onGeneratePptFile={onGeneratePptFile}
-              onAcceptPptFile={onAcceptPptFile}
-              onRegeneratePptFile={onRegeneratePptFile}
-            />
-          ))
+          messages.map((m) => {
+            const isLatestVideoScenePackage = m.id === latestVideoScenePackageMessageId;
+            const isSupersededArtifact = Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId);
+            const keepScenePackageActions = isLatestVideoScenePackage && m.artifact?.type === "video_scene_packages";
+            return (
+              <MessageBubble
+                key={m.id}
+                msg={m}
+                isLatestVideoScenePackage={isLatestVideoScenePackage}
+                actionsDisabled={Boolean(busy) || (isSupersededArtifact && !keepScenePackageActions)}
+                onOpenArtifact={onOpenArtifact}
+                onSelectDirection={onSelectDirection}
+                onApprovePlan={onApprovePlan}
+                onRevisePlan={onRevisePlan}
+                onGenerateImage={onGenerateImage}
+                onAcceptImageResult={onAcceptImageResult}
+                onReviseImageResult={onReviseImageResult}
+                onGenerateVideoFromScenePackages={onGenerateVideoFromScenePackages}
+                onAcceptVideoResult={onAcceptVideoResult}
+                onReviseVideoResult={onReviseVideoResult}
+                onOpenVideoResult={onOpenVideoResult}
+                onRegenerateVideoWithRevision={onRegenerateVideoWithRevision}
+                onRetryImageResult={onRetryImageResult}
+                onRetrySceneAssets={onRetrySceneAssets}
+                onRetryVideoMerge={onRetryVideoMerge}
+                onRetryVideoAnalysis={onRetryVideoAnalysis}
+                onApprovePptOutline={onApprovePptOutline}
+                onRevisePptOutline={onRevisePptOutline}
+                onRegeneratePptImage={onRegeneratePptImage}
+                onGeneratePptFile={onGeneratePptFile}
+                onAcceptPptFile={onAcceptPptFile}
+                onRegeneratePptFile={onRegeneratePptFile}
+              />
+            );
+          })
         )}
         <div ref={endRef} />
       </div>

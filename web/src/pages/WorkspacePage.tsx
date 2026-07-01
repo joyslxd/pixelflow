@@ -3089,6 +3089,7 @@ export function WorkspacePage() {
       releaseArtifactAction(processedKey);
       pushAssistant(`视频生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
+      releaseArtifactAction(processedKey);
       setBusyForConversation(targetConversationId, false);
     }
   };

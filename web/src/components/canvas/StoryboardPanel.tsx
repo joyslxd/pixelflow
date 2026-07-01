@@ -339,7 +339,7 @@ export function StoryboardPanel({
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
                 <Sparkles size={15} />
-                {sceneAssetQuotaPaused ? "继续生成参考图" : "保存并生成分镜"}
+                {sceneAssetQuotaPaused ? "继续生成参考图" : "确认并生成视频"}
               </button>
             </div>
           </div>
