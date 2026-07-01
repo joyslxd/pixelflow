@@ -1,4 +1,4 @@
-import { ArrowLeft, Box, ImageIcon, MapPin, Sparkles, UserRound } from "lucide-react";
+import { ArrowLeft, Box, Download, ImageIcon, MapPin, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import type { ChatMessage } from "@/lib/chat";
 import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
@@ -6,6 +6,7 @@ import {
   collectSceneImageUrls,
   stringArray,
   type GlobalSceneAssets,
+  type SceneGlobalAssetReference,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -15,6 +16,8 @@ import { useMemo, useState } from "react";
 interface StoryboardPanelProps {
   msg: ChatMessage;
   onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void;
+  onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
+  onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
   onClose?: () => void;
@@ -58,6 +61,10 @@ function assetImage(record: Record<string, unknown>): string {
   return stringArray(record.images)[0] || stringArray(record.image_urls)[0] || stringArray(record.three_view_images)[0] || stringValue(record.url);
 }
 
+function assetDescription(record: Record<string, unknown>): string {
+  return stringValue(record.description) || stringValue(record.prompt) || stringValue(record.image_prompt) || stringValue(record.three_view_prompt);
+}
+
 function globalAssetRecords(assets: GlobalSceneAssets, group: AssetGroup): Array<Record<string, unknown>> {
   return records(assets[group]);
 }
@@ -99,6 +106,8 @@ function quotaInsufficient(value: unknown): boolean {
 export function StoryboardPanel({
   msg,
   onUpdateVideoScenePackage,
+  onReferenceGlobalAsset,
+  onDeleteGlobalAsset,
   onGenerateVideo,
   onRetrySceneAssets,
   onClose,
@@ -107,6 +116,7 @@ export function StoryboardPanel({
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
+  const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
@@ -148,6 +158,36 @@ export function StoryboardPanel({
     });
   };
 
+  const openAssetPreview = (group: AssetGroup, record: Record<string, unknown>, fallback: string) => {
+    const image = assetImage(record);
+    if (!image) return;
+    const id = assetId(record, fallback);
+    const name = assetName(record, id);
+    setPreviewAsset({
+      source: "scene_global_asset",
+      asset_id: id,
+      asset_group: group,
+      name,
+      source_image_url: image,
+      url: image,
+      type: "image",
+      filename: `${name}.png`,
+      description: assetDescription(record),
+    });
+  };
+
+  const referencePreviewAsset = () => {
+    if (!previewAsset) return;
+    onReferenceGlobalAsset?.(previewAsset);
+    setPreviewAsset(null);
+  };
+
+  const deletePreviewAsset = () => {
+    if (!previewAsset) return;
+    onDeleteGlobalAsset?.({ ...previewAsset, scene_global_asset_action: "delete" });
+    setPreviewAsset(null);
+  };
+
   return (
     <aside className="flex h-full w-[52vw] min-w-[680px] max-w-[980px] flex-col border-l border-line bg-[#f8fafc]">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-4">
@@ -180,14 +220,20 @@ export function StoryboardPanel({
                           const image = assetImage(asset);
                           const id = assetId(asset, `${group}-${index + 1}`);
                           return (
-                            <div key={id} className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas">
+                            <button
+                              key={id}
+                              type="button"
+                              onClick={() => openAssetPreview(group, asset, `${group}-${index + 1}`)}
+                              disabled={!image}
+                              className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent disabled:cursor-default disabled:hover:border-line"
+                            >
                               {image ? (
                                 <img src={image} alt={assetName(asset, id)} className="h-16 w-full object-cover" />
                               ) : (
                                 <div className="flex h-16 items-center justify-center text-[11px] text-ink-soft">待生成</div>
                               )}
                               <div className="truncate px-2 py-1 text-[11px] text-ink-soft">@{assetName(asset, id)}</div>
-                            </div>
+                            </button>
                           );
                         })
                       ) : (
@@ -299,6 +345,64 @@ export function StoryboardPanel({
           </div>
         </div>
       </div>
+      {previewAsset ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4" role="dialog" aria-modal="true">
+          <div className="relative w-full max-w-[672px] rounded-[8px] bg-white p-8 shadow-[0_24px_80px_rgba(15,23,42,0.28)]">
+            <button
+              type="button"
+              onClick={() => setPreviewAsset(null)}
+              className="absolute right-8 top-8 flex h-9 w-9 items-center justify-center rounded-full text-ink hover:bg-canvas"
+              aria-label="关闭"
+            >
+              <X size={22} />
+            </button>
+            <div className="pr-12 text-[22px] font-semibold text-ink">{previewAsset.name}</div>
+            <div className="mt-5 overflow-hidden rounded-[8px] bg-canvas">
+              <div className="relative mx-auto flex max-h-[420px] min-h-[260px] items-center justify-center">
+                <img src={previewAsset.source_image_url} alt={previewAsset.name} className="max-h-[420px] w-full object-contain" />
+                <div className="absolute right-4 top-4 flex overflow-hidden rounded-[8px] bg-ink/55 text-white backdrop-blur">
+                  <button
+                    type="button"
+                    onClick={referencePreviewAsset}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    title="引用素材"
+                    aria-label="引用素材"
+                  >
+                    <ImageIcon size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={deletePreviewAsset}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    title="删除素材"
+                    aria-label="删除素材"
+                  >
+                    <Trash2 size={17} />
+                  </button>
+                  <a
+                    href={previewAsset.source_image_url}
+                    download={previewAsset.filename}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    title="下载"
+                    aria-label="下载"
+                  >
+                    <Download size={17} />
+                  </a>
+                </div>
+              </div>
+            </div>
+            <div className="mt-5 flex items-baseline gap-2">
+              <span className="text-[15px] font-semibold text-ink">{previewAsset.name}</span>
+              <span className="text-[12px] text-ink-soft">{previewAsset.asset_id}</span>
+            </div>
+            {previewAsset.description ? (
+              <div className="mt-3 text-[13px] leading-relaxed text-ink-soft">{previewAsset.description}</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }

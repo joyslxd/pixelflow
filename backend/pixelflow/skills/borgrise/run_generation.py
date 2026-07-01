@@ -70,10 +70,12 @@ POLL_INTERVAL = 5  # 秒
 VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # 视频生成默认最多等 1 小时。
 IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # 图片生成默认最多等 10 分钟。
 VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "900"))  # 视频分析/拆解默认最多等 15 分钟。
+PPT_POLL_TIMEOUT = int(os.environ.get("BORGRISE_PPT_POLL_TIMEOUT", "7200"))  # 智能 PPT 默认最多等 2 小时。
 _cli_poll_timeout: int | None = None  # 由 --poll-timeout 命令行参数临时覆盖当前命令的业务默认值。
 
 # 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
+STATUS_POLL_ERROR_RECOVERY_ATTEMPTS = int(os.environ.get("BORGRISE_STATUS_POLL_ERROR_RECOVERY_ATTEMPTS", "3"))
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 QUOTA_INSUFFICIENT_STATUS_CODE = 402
 QUOTA_INSUFFICIENT_KEYWORDS = (
@@ -522,13 +524,27 @@ def poll_task(task_id: str, timeout: int | None = None, *, default_timeout: int 
     effective_timeout = timeout if timeout is not None else _effective_poll_timeout(business_default)
     start_time = time.time()
     last_status = None
+    last_error: dict | None = None
+    consecutive_status_errors = 0
 
     while time.time() - start_time < effective_timeout:
         result = make_request(f"/task/{task_id}/status", method="GET")
 
         if result.get("error"):
+            if _is_recoverable_status_poll_error(result) and consecutive_status_errors < STATUS_POLL_ERROR_RECOVERY_ATTEMPTS:
+                consecutive_status_errors += 1
+                last_error = result
+                print(
+                    f"Task {task_id}: status query error, retrying poll "
+                    f"({consecutive_status_errors}/{STATUS_POLL_ERROR_RECOVERY_ATTEMPTS}): "
+                    f"{result.get('message') or result}"
+                )
+                time.sleep(POLL_INTERVAL)
+                continue
             return result
 
+        consecutive_status_errors = 0
+        last_error = None
         status = result.get("data", result).get("status", "UNKNOWN")
         normalized_status = str(status).upper()
 
@@ -553,8 +569,18 @@ def poll_task(task_id: str, timeout: int | None = None, *, default_timeout: int 
         "error": True,
         "task_id": task_id,
         "message": f"Polling timeout after {effective_timeout} seconds",
-        "last_status": last_status
+        "last_status": last_status,
+        "last_error": last_error,
     }
+
+
+def _is_recoverable_status_poll_error(result: dict) -> bool:
+    if result.get("quota_insufficient") or result.get("non_retryable"):
+        return False
+    status_code = result.get("status_code")
+    if status_code in {401, QUOTA_INSUFFICIENT_STATUS_CODE}:
+        return False
+    return status_code is None or status_code in RETRYABLE_HTTP_CODES
 
 
 def craft_video_prompt(product_description: str, style: str = "cinematic") -> str:
@@ -826,6 +852,258 @@ def resolve_asset_urls(asset_ids: list[str]) -> dict:
         "endpoint": "/api/asset/refrence-urls",
         "asset_ids": clean_ids,
         "raw_response": result,
+    }
+
+
+def _extract_smart_ppt_project_id(*payloads: Any) -> int | None:
+    """从 SmartPPT 响应中提取项目 ID。"""
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        data = payload.get("data", payload)
+        candidates = [
+            data.get("smartPptProjectId") if isinstance(data, dict) else None,
+            data.get("smart_ppt_project_id") if isinstance(data, dict) else None,
+            payload.get("smartPptProjectId"),
+            payload.get("smart_ppt_project_id"),
+        ]
+        for candidate in candidates:
+            if candidate is None or candidate == "":
+                continue
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _task_result_payload(poll_result: dict) -> Any:
+    data = poll_result.get("data", poll_result)
+    if not isinstance(data, dict):
+        return data
+    if "result" in data:
+        return data["result"]
+    for key in ("resultData", "result_data", "data"):
+        if key in data:
+            return data[key]
+    return data
+
+
+def _walk_smart_ppt_payloads(payload: Any) -> list[dict[str, Any]]:
+    """按由外到内顺序展开 SmartPPT 常见响应包装层。"""
+    visited: set[int] = set()
+    items: list[dict[str, Any]] = []
+
+    def walk(value: Any) -> None:
+        if not isinstance(value, dict) or id(value) in visited:
+            return
+        visited.add(id(value))
+        items.append(value)
+        for key in ("data", "result", "resultData", "result_data"):
+            if key in value:
+                walk(value[key])
+
+    walk(payload)
+    return items
+
+
+def _smart_ppt_value(payload: Any, *keys: str) -> Any:
+    """从 SmartPPT 多层响应里读取第一个非空字段。"""
+    for item in _walk_smart_ppt_payloads(payload):
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _smart_ppt_error(endpoint: str, result: dict | None, *, task_id: str | None = None, project_id: int | None = None) -> dict:
+    payload = result or {}
+    message = _extract_error_message(payload, "SmartPPT task failed")
+    response = {
+        "error": True,
+        "success": False,
+        "endpoint": f"/api{endpoint}",
+        "task_id": task_id or extract_task_id(payload),
+        "smart_ppt_project_id": project_id or _extract_smart_ppt_project_id(payload),
+        "message": message,
+        "raw_response": payload,
+    }
+    if is_quota_insufficient(payload):
+        response.update(
+            {
+                "quota_insufficient": True,
+                "non_retryable": True,
+                "status_code": payload.get("status_code", QUOTA_INSUFFICIENT_STATUS_CODE),
+            }
+        )
+    return response
+
+
+def _submit_and_poll_smart_ppt(endpoint: str, request_data: dict) -> tuple[dict, dict] | dict:
+    result = make_request(endpoint, request_data)
+    if result.get("error") or result.get("success") is False:
+        return _smart_ppt_error(endpoint, result)
+    task_id = extract_task_id(result)
+    project_id = _extract_smart_ppt_project_id(result)
+    if not task_id:
+        return _smart_ppt_error(endpoint, {"message": "No taskId in SmartPPT response", "response": result}, project_id=project_id)
+
+    poll_result = poll_task(task_id, default_timeout=PPT_POLL_TIMEOUT)
+    if poll_result.get("error") or poll_result.get("success") is False:
+        return _smart_ppt_error(endpoint, poll_result, task_id=task_id, project_id=project_id)
+    return result, poll_result
+
+
+def generate_ppt_summary(
+    topic: str,
+    ppt_style: str,
+    file_urls: list[str],
+    smart_ppt_project_id: int | None = None,
+) -> dict:
+    """调用智能 PPT 生成大纲接口并轮询结果。"""
+    request_data: dict[str, Any] = {
+        "topic": topic,
+        "pptStyle": ppt_style,
+        "fileUrls": file_urls,
+    }
+    if smart_ppt_project_id is not None:
+        request_data["smartPptProjectId"] = smart_ppt_project_id
+
+    endpoint = "/picture/smart-ppt/generatePptSummary"
+    print(f"\n{'='*60}")
+    print("POST /api/picture/smart-ppt/generatePptSummary")
+    print(f"{'='*60}")
+    print(f"Topic: {topic}")
+    print(f"Style: {ppt_style}")
+    print(f"Files: {len(file_urls)}")
+    print(f"{'='*60}\n")
+
+    submitted = _submit_and_poll_smart_ppt(endpoint, request_data)
+    if isinstance(submitted, dict):
+        return submitted
+    start_result, poll_result = submitted
+    task_result = _task_result_payload(poll_result)
+    summary = _smart_ppt_value(task_result, "summary", "outline", "pptSummary") if isinstance(task_result, dict) else str(task_result or "")
+    return {
+        "success": True,
+        "endpoint": "/api/picture/smart-ppt/generatePptSummary",
+        "task_id": extract_task_id(start_result),
+        "smart_ppt_project_id": _extract_smart_ppt_project_id(start_result, poll_result),
+        "summary": summary or "",
+        "raw_response": {"start": start_result, "poll": poll_result},
+    }
+
+
+def update_ppt_summary(
+    original_outline: str,
+    modification_opinion: str,
+    smart_ppt_project_id: int,
+) -> dict:
+    """调用智能 PPT 更新大纲接口并轮询结果。"""
+    endpoint = "/picture/smart-ppt/updatePptSummary"
+    request_data = {
+        "originalOutline": original_outline,
+        "smartPptProjectId": smart_ppt_project_id,
+        "modificationOpinion": modification_opinion,
+    }
+    submitted = _submit_and_poll_smart_ppt(endpoint, request_data)
+    if isinstance(submitted, dict):
+        return submitted
+    start_result, poll_result = submitted
+    task_result = _task_result_payload(poll_result)
+    summary = _smart_ppt_value(task_result, "summary", "outline", "pptSummary") if isinstance(task_result, dict) else str(task_result or "")
+    return {
+        "success": True,
+        "endpoint": "/api/picture/smart-ppt/updatePptSummary",
+        "task_id": extract_task_id(start_result),
+        "smart_ppt_project_id": _extract_smart_ppt_project_id(start_result, poll_result) or smart_ppt_project_id,
+        "summary": summary or "",
+        "raw_response": {"start": start_result, "poll": poll_result},
+    }
+
+
+def generate_ppt_content_json(
+    original_outline: str,
+    ppt_style: str,
+    smart_ppt_project_id: int,
+) -> dict:
+    """调用智能 PPT 大纲转 JSON 接口并轮询结果。"""
+    endpoint = "/picture/smart-ppt/generatePptContentToJson"
+    request_data = {
+        "originalOutline": original_outline,
+        "smartPptProjectId": smart_ppt_project_id,
+        "pptStyle": ppt_style,
+    }
+    submitted = _submit_and_poll_smart_ppt(endpoint, request_data)
+    if isinstance(submitted, dict):
+        return submitted
+    start_result, poll_result = submitted
+    task_result = _task_result_payload(poll_result)
+    if isinstance(task_result, dict):
+        content_json = _smart_ppt_value(task_result, "content_json", "contentJson", "json", "pptJson")
+    else:
+        content_json = task_result
+    return {
+        "success": True,
+        "endpoint": "/api/picture/smart-ppt/generatePptContentToJson",
+        "task_id": extract_task_id(start_result),
+        "smart_ppt_project_id": _extract_smart_ppt_project_id(start_result, poll_result) or smart_ppt_project_id,
+        "content_json": content_json,
+        "raw_response": {"start": start_result, "poll": poll_result},
+    }
+
+
+def generate_ppt_image(json_content: str, smart_ppt_project_id: int) -> dict:
+    """调用智能 PPT 单页图片生成接口并轮询结果。"""
+    endpoint = "/picture/smart-ppt/generatePptImage"
+    request_data = {
+        "jsonContent": json_content,
+        "smartPptProjectId": smart_ppt_project_id,
+    }
+    submitted = _submit_and_poll_smart_ppt(endpoint, request_data)
+    if isinstance(submitted, dict):
+        return submitted
+    start_result, poll_result = submitted
+    task_result = _task_result_payload(poll_result)
+    if isinstance(task_result, str):
+        image_url = task_result
+    elif isinstance(task_result, dict):
+        image_url = _smart_ppt_value(task_result, "image_url", "imageUrl", "url", "ppt_image_url", "pptImageUrl")
+    else:
+        image_url = None
+    return {
+        "success": True,
+        "endpoint": "/api/picture/smart-ppt/generatePptImage",
+        "task_id": extract_task_id(start_result),
+        "smart_ppt_project_id": _extract_smart_ppt_project_id(start_result, poll_result) or smart_ppt_project_id,
+        "image_url": image_url,
+        "raw_response": {"start": start_result, "poll": poll_result},
+    }
+
+
+def generate_ppt_file(file_urls: list[str], smart_ppt_project_id: int) -> dict:
+    """调用智能 PPT 图片集合转 PPT 文件接口并轮询结果。"""
+    endpoint = "/picture/smart-ppt/generatePptFile"
+    request_data = {
+        "fileUrls": file_urls,
+        "smartPptProjectId": smart_ppt_project_id,
+    }
+    submitted = _submit_and_poll_smart_ppt(endpoint, request_data)
+    if isinstance(submitted, dict):
+        return submitted
+    start_result, poll_result = submitted
+    task_result = _task_result_payload(poll_result)
+    result_data = task_result if isinstance(task_result, dict) else {}
+    return {
+        "success": True,
+        "endpoint": "/api/picture/smart-ppt/generatePptFile",
+        "task_id": extract_task_id(start_result),
+        "smart_ppt_project_id": _extract_smart_ppt_project_id(start_result, poll_result) or smart_ppt_project_id,
+        "ppt_url": _smart_ppt_value(result_data, "ppt_url", "pptUrl", "url", "fileUrl"),
+        "filename": _smart_ppt_value(result_data, "filename", "fileName", "name"),
+        "slide_count": _smart_ppt_value(result_data, "slide_count", "slideCount", "pageCount"),
+        "raw_response": {"start": start_result, "poll": poll_result},
     }
 
 

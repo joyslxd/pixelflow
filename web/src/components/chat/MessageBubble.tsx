@@ -1,13 +1,16 @@
-import { Check, FileText, FileVideo, Pencil, Sparkles } from "lucide-react";
+import { useEffect, useState, type MouseEvent } from "react";
+import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
-import type { CreativeDirectionResponse } from "@/lib/api";
+import type { CreativeDirectionResponse, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
+  isLatestVideoScenePackage?: boolean;
+  actionsDisabled?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -24,6 +27,12 @@ interface MessageBubbleProps {
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
   onRetryVideoAnalysis?: (msg: ChatMessage) => void;
+  onApprovePptOutline?: (msg: ChatMessage) => void;
+  onRevisePptOutline?: (msg: ChatMessage) => void;
+  onRegeneratePptImage?: (msg: ChatMessage, pageIndex: number) => void;
+  onGeneratePptFile?: (msg: ChatMessage) => void;
+  onAcceptPptFile?: (msg: ChatMessage) => void;
+  onRegeneratePptFile?: (msg: ChatMessage) => void;
 }
 
 function stringArray(value: unknown): string[] {
@@ -55,11 +64,11 @@ function assetImage(record: Record<string, unknown>): string {
 }
 
 function materialUrl(record: Record<string, unknown>): string {
-  return stringValue(record.url) || stringValue(record.path) || stringValue(record.image_url) || stringValue(record.imageUrl);
+  return stringValue(record.url) || stringValue(record.source_image_url) || stringValue(record.path) || stringValue(record.image_url) || stringValue(record.imageUrl);
 }
 
 function materialName(record: Record<string, unknown>, index: number): string {
-  return stringValue(record.name) || stringValue(record.filename) || `附件 ${index + 1}`;
+  return stringValue(record.name) || stringValue(record.asset_name) || stringValue(record.filename) || `附件 ${index + 1}`;
 }
 
 function previewAssets(msg: ChatMessage): Array<{ id: string; title: string; image: string }> {
@@ -120,8 +129,19 @@ function sceneVideoResultsForMessage(msg: ChatMessage): VideoResult[] {
     }));
 }
 
+function pptPages(msg: ChatMessage): PptPageImage[] {
+  return Array.isArray(msg.artifact?.pptImages?.pages) ? msg.artifact.pptImages.pages : [];
+}
+
+function pptPagesReady(msg: ChatMessage): boolean {
+  const pages = pptPages(msg);
+  return pages.length > 0 && pages.every((page) => page.status === "completed" && Boolean(page.image_url));
+}
+
 export function MessageBubble({
   msg,
+  isLatestVideoScenePackage,
+  actionsDisabled,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -138,6 +158,12 @@ export function MessageBubble({
   onRetrySceneAssets,
   onRetryVideoMerge,
   onRetryVideoAnalysis,
+  onApprovePptOutline,
+  onRevisePptOutline,
+  onRegeneratePptImage,
+  onGeneratePptFile,
+  onAcceptPptFile,
+  onRegeneratePptFile,
 }: MessageBubbleProps) {
   const isUser = msg.role === "user";
   const planPreview = msg.artifact?.plan?.plan_markdown || "";
@@ -156,6 +182,30 @@ export function MessageBubble({
   const mergedVideoResult = mergedVideoResultForMessage(msg);
   const sceneVideoResults = sceneVideoResultsForMessage(msg);
   const videoResults = [mergedVideoResult, ...sceneVideoResults].filter((result): result is VideoResult => Boolean(result));
+  const pptImagePages = pptPages(msg);
+  const allPptPagesReady = pptPagesReady(msg);
+  const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
+  const [loadingDots, setLoadingDots] = useState(0);
+
+  useEffect(() => {
+    if (!hasRunningPptPage) {
+      setLoadingDots(3);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setLoadingDots((current) => (current + 1) % 4);
+    }, 450);
+    return () => window.clearInterval(timer);
+  }, [hasRunningPptPage]);
+
+  const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
+    if (!actionsDisabled) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (!target?.closest("button")) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}>
       <div
@@ -183,6 +233,7 @@ export function MessageBubble({
               const url = materialUrl(material);
               const name = materialName(material, index);
               const type = stringValue(material.type).toLowerCase();
+              const isImage = type === "image" || material.source === "scene_global_asset";
               return (
                 <a
                   key={`${url}-${index}`}
@@ -191,7 +242,7 @@ export function MessageBubble({
                   rel="noreferrer"
                   className="flex max-w-[220px] items-center gap-2 rounded-xl border border-line bg-white px-2.5 py-1.5 text-[12px] text-ink hover:bg-canvas"
                 >
-                  {type === "image" && url ? (
+                  {isImage && url ? (
                     <img src={url} alt="" className="h-8 w-8 shrink-0 rounded-md object-cover" />
                   ) : (
                     <FileText size={15} className="shrink-0 text-ink-soft" />
@@ -202,6 +253,11 @@ export function MessageBubble({
             })}
           </div>
         )}
+        <div
+          className={cn(actionsDisabled && "opacity-60 [&_button]:cursor-not-allowed [&_button]:hover:opacity-100")}
+          onClickCapture={blockDisabledAction}
+          aria-disabled={actionsDisabled || undefined}
+        >
         {msg.artifact?.type === "directions" && msg.artifact.directions ? (
           <div className="mt-2 w-full max-w-[520px] space-y-2 rounded-2xl border border-accent/20 bg-accent-soft/50 p-3">
             <div className="text-[13px] font-semibold text-ink">{msg.artifact.title}</div>
@@ -363,35 +419,195 @@ export function MessageBubble({
                 {sceneAssetQuotaPaused ? "参考图生成因额度不足暂停，充值后可继续。" : `${msg.artifact.sceneAssetFailures.length} 个参考图生成失败，可进入分镜检查。`}
               </div>
             ) : null}
-            <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
+            {isLatestVideoScenePackage ? (
+              <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => onOpenArtifact?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <FileText size={15} />
+                  查看分镜
+                </button>
+                {sceneAssetFailed ? (
+                  <button
+                    type="button"
+                    onClick={() => onRetrySceneAssets?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  >
+                    <Sparkles size={15} />
+                    {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onGenerateVideoFromScenePackages?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  >
+                    <Sparkles size={15} />
+                    确认并生成视频
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : msg.artifact?.type === "ppt_outline" && msg.artifact.pptSummary ? (
+          <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <Presentation size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+              </span>
+              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", msg.artifact.pptSummary.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
+                {msg.artifact.pptSummary.ok ? "待确认" : "失败"}
+              </span>
+            </div>
+            <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap rounded-xl bg-canvas p-3 text-[12px] leading-relaxed text-ink">
+              {String(msg.artifact.pptSummary.summary || msg.artifact.pptSummary.message || "")}
+            </pre>
+            {!msg.artifact.pptSummary.ok && (
+              <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
+                {String(msg.artifact.pptSummary.error || msg.artifact.pptSummary.message || "PPT 大纲生成失败")}
+              </div>
+            )}
+            {msg.artifact.pptSummary.ok && (
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => onApprovePptOutline?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                >
+                  <Check size={15} />
+                  同意大纲
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRevisePptOutline?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <Pencil size={15} />
+                  修改大纲
+                </button>
+              </div>
+            )}
+          </div>
+        ) : msg.artifact?.type === "ppt_images" && msg.artifact.pptImages ? (
+          <div className="mt-2 w-full max-w-[760px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <Presentation size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+              </span>
+              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", allPptPagesReady ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
+                {allPptPagesReady ? "已完成" : "生成中"}
+              </span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {pptImagePages.map((page) => (
+                <div key={page.page_index} className="group relative overflow-hidden rounded-xl border border-line bg-canvas">
+                  {page.image_url ? (
+                    <a href={page.image_url} target="_blank" rel="noreferrer">
+                      <img src={page.image_url} alt={page.title || `第 ${page.page_index} 页`} className="aspect-[16/9] w-full object-cover" />
+                    </a>
+                  ) : (
+                    <div className="flex aspect-[16/9] items-center justify-center text-[12px] text-ink-soft">
+                      {page.status === "failed" ? "生成失败" : `图片生成中${".".repeat(loadingDots)}`}
+                    </div>
+                  )}
+                  {page.status !== "running" && (
+                    <button
+                      type="button"
+                      onClick={() => onRegeneratePptImage?.(msg, page.page_index)}
+                      className="absolute right-2 top-2 hidden h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink shadow-sm hover:text-accent group-hover:flex"
+                      aria-label="重新生成本页"
+                    >
+                      <RefreshCw size={15} />
+                    </button>
+                  )}
+                  <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] text-ink-soft">
+                    <span className="truncate">{page.title || `第 ${page.page_index} 页`}</span>
+                    <span>第 {page.page_index} 页</span>
+                  </div>
+                  {page.error ? <div className="border-t border-line px-2 py-1.5 text-[11px] text-amber">{page.error}</div> : null}
+                </div>
+              ))}
+            </div>
+            {allPptPagesReady && (
               <button
                 type="button"
-                onClick={() => onOpenArtifact?.(msg)}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                onClick={() => onGeneratePptFile?.(msg)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
-                <FileText size={15} />
-                查看分镜
+                <Sparkles size={15} />
+                开始生成PPT附件
               </button>
-              {sceneAssetFailed ? (
-                <button
-                  type="button"
-                  onClick={() => onRetrySceneAssets?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
-                >
-                  <Sparkles size={15} />
-                  {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onGenerateVideoFromScenePackages?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
-                >
-                  <Sparkles size={15} />
-                  确认并生成视频
-                </button>
-              )}
+            )}
+          </div>
+        ) : msg.artifact?.type === "ppt_file" && msg.artifact.pptFile ? (
+          <div className="mt-2 w-full max-w-[560px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <Presentation size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+              </span>
+              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", msg.artifact.pptFile.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
+                {msg.artifact.pptFile.ok ? "已生成" : "失败"}
+              </span>
             </div>
+            {msg.artifact.pptFile.ppt_url ? (
+              <a
+                href={msg.artifact.pptFile.ppt_url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-3 rounded-xl border border-line bg-canvas px-3 py-3 text-[13px] text-ink hover:bg-accent-soft"
+              >
+                <Download size={17} className="text-accent" />
+                <span className="min-w-0 flex-1 truncate">{msg.artifact.pptFile.filename || msg.artifact.pptFile.ppt_url}</span>
+                {msg.artifact.pptFile.slide_count ? <span className="text-ink-soft">{msg.artifact.pptFile.slide_count} 页</span> : null}
+              </a>
+            ) : (
+              <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
+                {String(msg.artifact.pptFile.error || msg.artifact.pptFile.message || "PPT 附件生成失败")}
+              </div>
+            )}
+            {msg.artifact.pptFile.ok ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => onAcceptPptFile?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                >
+                  <Check size={15} />
+                  满意，结束
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRegeneratePptFile?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <RefreshCw size={15} />
+                  重新生成PPT附件
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onRegeneratePptFile?.(msg)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                <Sparkles size={15} />
+                重新生成PPT附件
+              </button>
+            )}
           </div>
         ) : msg.artifact?.type === "image_result" && msg.artifact.imageResult ? (
           <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">
@@ -715,6 +931,7 @@ export function MessageBubble({
             </span>
           </button>
         ) : null}
+        </div>
         <span className="mt-1 px-1 text-[11px] text-ink-soft/60">{msg.time}</span>
       </div>
     </div>

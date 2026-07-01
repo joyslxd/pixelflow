@@ -10,8 +10,10 @@ const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const DIRECT_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const PPT_JOB_POLL_INTERVAL_MS = 3000;
+const PPT_JOB_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
-export type CreationIntent = "video" | "image";
+export type CreationIntent = "video" | "image" | "ppt";
 export type IntakeIntent = CreationIntent | "video_analysis" | "unknown";
 
 export interface TaskResponse {
@@ -169,6 +171,19 @@ export interface ImageGenerateResponse {
   task_id: string | null;
   images: Array<{ asset_id?: string; url?: string; download_url?: string }>;
   error: string | null;
+  message: string;
+  quota_insufficient?: boolean;
+  raw: Record<string, unknown>;
+}
+
+export interface ImageAssetEditResponse {
+  ok: boolean;
+  method: "image_edit";
+  endpoint: string;
+  source_image_url: string;
+  edited_image: { asset_id?: string; url?: string; download_url?: string };
+  asset_id: string;
+  asset_group: string;
   message: string;
   quota_insufficient?: boolean;
   raw: Record<string, unknown>;
@@ -343,6 +358,71 @@ export interface AnalyzeStoryboardsResponse {
   message: string;
   quota_insufficient?: boolean;
   raw: Record<string, unknown>;
+}
+
+export interface PptJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: string;
+  message: string;
+}
+
+export interface PptJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  message: string;
+}
+
+export type PptJobStatusCallback = (status: PptJobStatusResponse) => void;
+
+export interface PptPageImage {
+  page_index: number;
+  title?: string;
+  json_content?: Record<string, unknown>;
+  status: "running" | "completed" | "failed" | string;
+  image_url?: string | null;
+  task_id?: string | null;
+  error?: string | null;
+  quota_insufficient?: boolean;
+  raw?: Record<string, unknown>;
+}
+
+export interface PptSummaryResult extends Record<string, unknown> {
+  ok: boolean;
+  smart_ppt_project_id?: number | null;
+  summary?: string;
+  message?: string;
+  quota_insufficient?: boolean;
+}
+
+export interface PptContentJsonResult extends Record<string, unknown> {
+  ok: boolean;
+  smart_ppt_project_id?: number | null;
+  content_json?: unknown;
+  pages?: Array<Record<string, unknown>>;
+  message?: string;
+  quota_insufficient?: boolean;
+}
+
+export interface PptImagesResult extends Record<string, unknown> {
+  ok: boolean;
+  smart_ppt_project_id?: number | null;
+  pages: PptPageImage[];
+  message?: string;
+  quota_insufficient?: boolean;
+}
+
+export interface PptFileResult extends Record<string, unknown> {
+  ok: boolean;
+  smart_ppt_project_id?: number | null;
+  ppt_url?: string | null;
+  filename?: string | null;
+  slide_count?: number | null;
+  message?: string;
+  quota_insufficient?: boolean;
 }
 
 export class ApiError extends Error {
@@ -521,6 +601,24 @@ async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoRes
   };
 }
 
+async function pollPptJob<T extends Record<string, unknown>>(jobId: string, onStatus?: PptJobStatusCallback): Promise<T> {
+  const deadline = Date.now() + PPT_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await req<PptJobStatusResponse>(`${FLOW_BASE}/ppt/jobs/${encodeURIComponent(jobId)}`);
+    onStatus?.(status);
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result as T;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        message: status.error || status.message || "PPT 生成失败",
+        error: status.error || status.message || "PPT 生成失败",
+      } as unknown as T;
+    }
+    await delay(PPT_JOB_POLL_INTERVAL_MS);
+  }
+  return { ok: false, message: "PPT 生成轮询超时", error: "PPT 生成轮询超时" } as unknown as T;
+}
+
 export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
@@ -630,6 +728,17 @@ export const api = {
     params: Record<string, unknown>;
   }) => req<ImageGenerateResponse>(`${FLOW_BASE}/image/generate`, { method: "POST", body: JSON.stringify(body) }),
 
+  editImageAsset: (body: {
+    asset_id: string;
+    asset_name?: string;
+    asset_group: string;
+    source_image_url: string;
+    prompt: string;
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+  }) => req<ImageAssetEditResponse>(`${FLOW_BASE}/image/edit-asset`, { method: "POST", body: JSON.stringify(body) }),
+
   prepareVideoScenePackages: (body: {
     form_values: Record<string, unknown>;
     plan_markdown: string;
@@ -704,6 +813,77 @@ export const api = {
     materials?: Array<Record<string, unknown>>;
     video_urls?: string[];
   }) => req<AnalyzeStoryboardsResponse>(`${FLOW_BASE}/video/analyze-storyboards`, { method: "POST", body: JSON.stringify(body) }),
+
+  startPptSummaryJob: async (body: {
+    ppt_topic: string;
+    ppt_style: string;
+    attachments: Array<Record<string, unknown>>;
+    smart_ppt_project_id?: number | null;
+  }) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<PptSummaryResult>(started.job_id);
+  },
+
+  updatePptSummaryJob: async (body: {
+    original_outline: string;
+    modification_opinion: string;
+    smart_ppt_project_id: number;
+  }) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/update/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<PptSummaryResult>(started.job_id);
+  },
+
+  startPptContentJsonJob: async (body: {
+    original_outline: string;
+    ppt_style: string;
+    smart_ppt_project_id: number;
+  }) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/content-json/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<PptContentJsonResult>(started.job_id);
+  },
+
+  startPptImagesJob: async (body: {
+    content_json: unknown;
+    smart_ppt_project_id: number;
+  }, onStatus?: PptJobStatusCallback) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<PptImagesResult>(started.job_id, onStatus);
+  },
+
+  regeneratePptImageJob: async (body: {
+    page_index: number;
+    page_json: Record<string, unknown>;
+    smart_ppt_project_id: number;
+  }) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/regenerate/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<Record<string, unknown>>(started.job_id);
+  },
+
+  startPptFileJob: async (body: {
+    file_urls: string[];
+    smart_ppt_project_id: number;
+  }) => {
+    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/file/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return pollPptJob<PptFileResult>(started.job_id);
+  },
 };
 
 /**

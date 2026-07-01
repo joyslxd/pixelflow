@@ -9,3 +9,6 @@ docs/*
 
 # Local DeerFlow/Pixelflow runtime data.
 .deer-flow/
+
+# Local Codex helper logs.
+**/.codex-*.log

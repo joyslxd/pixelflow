@@ -6,12 +6,15 @@ assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scen
 
 const {
   collectSceneImageUrls,
+  deleteGlobalSceneAssetReference,
   durationMsForSubmit,
   inferTargetDurationMs,
   MAX_REFERENCE_IMAGE_COUNT,
   MAX_SCENE_DURATION_MS,
   MIN_SCENE_DURATION_MS,
+  replaceGlobalSceneAssetImage,
   sceneIdsForRevision,
+  syncScenePackageMentionImageUrls,
   updateScenePackageAssetField,
   updateScenePackageField,
 } = await import(moduleUrl);
@@ -194,6 +197,178 @@ test("collectSceneImageUrls also uses inline shot description mention image urls
     "https://x/role-mention.png",
     "https://x/scene-mention.png",
   ]);
+});
+
+test("replaceGlobalSceneAssetImage replaces character three-view image as one asset", () => {
+  const assets = sampleGlobalAssets();
+
+  const updated = replaceGlobalSceneAssetImage(assets, {
+    assetId: "character-host",
+    assetGroup: "characters",
+    editedImageUrl: "https://x/global-role-white.png",
+  });
+
+  assert.equal(assets.characters[0].three_view_images[0], "https://x/global-role.png");
+  assert.equal(updated.characters[0].three_view_images[0], "https://x/global-role-white.png");
+  assert.equal(updated.characters[0].image_url, "https://x/global-role-white.png");
+  assert.equal(updated.scenes[0], assets.scenes[0]);
+});
+
+test("replaceGlobalSceneAssetImage replaces scene and prop first image", () => {
+  const assets = sampleGlobalAssets();
+
+  const sceneUpdated = replaceGlobalSceneAssetImage(assets, {
+    assetId: "scene-desk",
+    assetGroup: "scenes",
+    editedImageUrl: "https://x/global-scene-new.png",
+  });
+  const propUpdated = replaceGlobalSceneAssetImage(sceneUpdated, {
+    assetId: "prop-product",
+    assetGroup: "props",
+    editedImageUrl: "https://x/global-prop-new.png",
+  });
+
+  assert.equal(propUpdated.scenes[0].images[0], "https://x/global-scene-new.png");
+  assert.equal(propUpdated.props[0].images[0], "https://x/global-prop-new.png");
+});
+
+test("syncScenePackageMentionImageUrls updates mention image urls by asset id", () => {
+  const [scene] = sampleScenes();
+  const scenes = [
+    {
+      ...scene,
+      shot_description: {
+        text: "地点:@桌面场景 中,角色:@讲解者 展示道具:@耳机。",
+        mentions: [
+          { asset_id: "character-host", image_url: "https://x/role-old.png" },
+          { asset_id: "prop-product", image_url: "https://x/prop-old.png" },
+        ],
+      },
+    },
+  ];
+
+  const updated = syncScenePackageMentionImageUrls(scenes, {
+    assetId: "character-host",
+    editedImageUrl: "https://x/role-new.png",
+  });
+
+  assert.equal(scenes[0].shot_description.mentions[0].image_url, "https://x/role-old.png");
+  assert.equal(updated[0].shot_description.mentions[0].image_url, "https://x/role-new.png");
+  assert.equal(updated[0].shot_description.mentions[1].image_url, "https://x/prop-old.png");
+});
+
+test("deleteGlobalSceneAssetReference clears a character image but keeps the asset placeholder", () => {
+  const assets = {
+    characters: [
+      {
+        asset_id: "character-host",
+        name: "Host",
+        three_view_images: ["https://x/host.png"],
+        image_url: "https://x/host.png",
+        url: "https://x/host.png",
+      },
+      {
+        asset_id: "character-guest",
+        name: "Guest",
+        three_view_images: ["https://x/guest.png"],
+      },
+    ],
+  };
+  const scenes = [
+    {
+      scene_id: "scene-1",
+      scene_index: 1,
+      duration_ms: 8000,
+      prompt: "Keep this scene",
+      image_urls: ["https://x/host.png", "https://x/unrelated.png"],
+      reference_asset_ids: ["character-host", "character-guest"],
+      shot_description: {
+        text: "Host stands near @Host with @character-host while @Guest stays visible.",
+        mentions: [
+          { asset_id: "character-host", name: "Host", image_url: "https://x/host.png" },
+          { asset_id: "character-guest", name: "Guest", image_url: "https://x/guest.png" },
+        ],
+      },
+    },
+  ];
+
+  const updated = deleteGlobalSceneAssetReference(assets, scenes, {
+    assetId: "character-host",
+    assetGroup: "characters",
+    assetName: "Host",
+    sourceImageUrl: "https://x/host.png",
+  });
+
+  assert.equal(updated.global_assets.characters.length, 2);
+  assert.deepEqual(updated.global_assets.characters[0].three_view_images, []);
+  assert.equal(updated.global_assets.characters[0].image_url, "");
+  assert.equal(updated.global_assets.characters[0].url, "");
+  assert.deepEqual(updated.global_assets.characters[1].three_view_images, ["https://x/guest.png"]);
+  assert.deepEqual(updated.scene_packages[0].reference_asset_ids, ["character-guest"]);
+  assert.deepEqual(updated.scene_packages[0].image_urls, ["https://x/unrelated.png"]);
+  assert.deepEqual(updated.scene_packages[0].shot_description.mentions, [
+    { asset_id: "character-guest", name: "Guest", image_url: "https://x/guest.png" },
+  ]);
+  assert.equal(updated.scene_packages[0].shot_description.text, "Host stands near with while @Guest stays visible.");
+});
+
+test("deleteGlobalSceneAssetReference clears scene and prop image placeholders without changing unrelated content", () => {
+  const assets = {
+    scenes: [
+      {
+        asset_id: "scene-room",
+        name: "Gaming Room",
+        images: ["https://x/room.png"],
+        image_urls: ["https://x/room-alt.png"],
+        url: "https://x/room.png",
+      },
+    ],
+    props: [
+      {
+        asset_id: "prop-mouse",
+        name: "Mouse",
+        images: ["https://x/mouse.png"],
+      },
+    ],
+  };
+  const scenes = [
+    {
+      scene_id: "scene-1",
+      scene_index: 1,
+      duration_ms: 8000,
+      prompt: "Do not edit this prompt mentioning Gaming Room as plain text.",
+      reference_asset_ids: ["scene-room", "prop-mouse"],
+      shot_description: {
+        text: "Camera moves through @Gaming Room and ends on @Mouse.",
+        mentions: [
+          { asset_id: "scene-room", name: "Gaming Room", image_url: "https://x/room.png" },
+          { asset_id: "prop-mouse", name: "Mouse", image_url: "https://x/mouse.png" },
+        ],
+      },
+    },
+  ];
+
+  const withoutScene = deleteGlobalSceneAssetReference(assets, scenes, {
+    assetId: "scene-room",
+    assetGroup: "scenes",
+    assetName: "Gaming Room",
+    sourceImageUrl: "https://x/room.png",
+  });
+  const withoutProp = deleteGlobalSceneAssetReference(withoutScene.global_assets, withoutScene.scene_packages, {
+    assetId: "prop-mouse",
+    assetGroup: "props",
+    assetName: "Mouse",
+    sourceImageUrl: "https://x/mouse.png",
+  });
+
+  assert.deepEqual(withoutProp.global_assets.scenes[0].images, []);
+  assert.deepEqual(withoutProp.global_assets.scenes[0].image_urls, []);
+  assert.equal(withoutProp.global_assets.scenes[0].url, "");
+  assert.deepEqual(withoutProp.global_assets.props[0].images, []);
+  assert.deepEqual(withoutProp.scene_packages[0].reference_asset_ids, []);
+  assert.deepEqual(withoutProp.scene_packages[0].shot_description.mentions, []);
+  assert.equal(withoutProp.scene_packages[0].shot_description.text, "Camera moves through and ends on.");
+  assert.equal(withoutProp.scene_packages[0].prompt, "Do not edit this prompt mentioning Gaming Room as plain text.");
 });
 
 test("sceneIdsForRevision maps explicit scene mentions and falls back to all scenes", () => {

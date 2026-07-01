@@ -71,6 +71,36 @@ def test_recognize_intent_preserves_requested_image_count_from_llm_json() -> Non
     assert result.values["image_count"] == 3
 
 
+def test_recognize_intent_marks_image_edit_operation_from_llm_json() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "image_generation",
+          "confidence": 0.96,
+          "reason": "用户要求编辑上传图片",
+          "product_subject": "上传图片",
+          "creation_goal": "把上传图片背景改成白色摄影棚",
+          "industry_type": "general",
+          "requested_output_count": 2,
+          "image_operation": "image_edit",
+          "values": {
+            "image_goal": "把上传图片背景改成白色摄影棚",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+            "image_count": 2
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("把这张图背景换成白色摄影棚，生成2张", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "image"
+    assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_count"] == 2
+    assert result.intake_context["image_operation"] == "image_edit"
+
+
 def test_recognize_intent_enriches_generic_image_goal_with_product_subject() -> None:
     fake_model = FakeModel(
         """
@@ -112,6 +142,33 @@ def test_recognize_intent_accepts_video_analysis() -> None:
     assert result.values == {}
 
 
+def test_recognize_intent_uses_llm_json_and_normalizes_ppt_generation() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "ppt_generation",
+          "confidence": 0.94,
+          "reason": "用户明确要求制作PPT",
+          "product_subject": "绿色供应链",
+          "creation_goal": "绿色供应链转型汇报PPT",
+          "industry_type": "企业服务",
+          "values": {
+            "ppt_topic": "绿色供应链转型汇报",
+            "ppt_style": "极简商务"
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("帮我做绿色供应链转型汇报PPT", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "ppt"
+    assert result.llm_used is True
+    assert result.values["ppt_topic"] == "绿色供应链转型汇报"
+    assert result.values["ppt_style"] == "极简商务"
+    assert result.intake_context["industry_type"] == "企业服务"
+
+
 def test_recognize_intent_falls_back_when_llm_fails() -> None:
     class BrokenModel:
         def invoke(self, _prompt):
@@ -122,6 +179,24 @@ def test_recognize_intent_falls_back_when_llm_fails() -> None:
     assert result.intent == "video_analysis"
     assert result.llm_used is False
     assert "model down" in (result.error or "")
+
+
+def test_recognize_intent_fallback_routes_ppt_phrases() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    phrases = [
+        "帮我做一份新品发布PPT",
+        "制作企业培训ppt",
+        "生成一份营销策略演示文稿",
+        "把这些附件做成汇报幻灯片",
+    ]
+
+    for phrase in phrases:
+        result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
+        assert result.intent == "ppt", phrase
+        assert result.values["ppt_topic"], phrase
 
 
 def test_recognize_intent_fallback_covers_natural_video_analysis_phrases() -> None:
@@ -188,6 +263,19 @@ def test_recognize_intent_fallback_extracts_requested_image_count() -> None:
         result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
         assert result.intent == "image", phrase
         assert result.values["image_count"] == expected
+
+
+def test_recognize_intent_fallback_marks_image_edit_operation() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    result = asyncio.run(recognize_intent_with_llm("把这张图片改成蓝色背景，生成2张", model_factory=lambda *_args, **_kwargs: BrokenModel()))
+
+    assert result.intent == "image"
+    assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_count"] == 2
+    assert result.intake_context["image_operation"] == "image_edit"
 
 
 def test_draft_creative_directions_with_llm_returns_three_normalized_directions() -> None:

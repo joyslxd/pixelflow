@@ -9,6 +9,9 @@ import type { CreativeDirectionResponse } from "@/lib/api";
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSubmit: (payload: AgentUserMessagePayload) => void;
+  referencedMaterials?: Array<Record<string, unknown>>;
+  onRemoveReferencedMaterial?: (key: string) => void;
+  composerPrefillRequest?: { id: string; content: string } | null;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -25,12 +28,21 @@ interface ChatPanelProps {
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
   onRetryVideoAnalysis?: (msg: ChatMessage) => void;
+  onApprovePptOutline?: (msg: ChatMessage) => void;
+  onRevisePptOutline?: (msg: ChatMessage) => void;
+  onRegeneratePptImage?: (msg: ChatMessage, pageIndex: number) => void;
+  onGeneratePptFile?: (msg: ChatMessage) => void;
+  onAcceptPptFile?: (msg: ChatMessage) => void;
+  onRegeneratePptFile?: (msg: ChatMessage) => void;
   busy?: boolean;
 }
 
 export function ChatPanel({
   messages,
   onSubmit,
+  referencedMaterials,
+  onRemoveReferencedMaterial,
+  composerPrefillRequest,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -47,9 +59,22 @@ export function ChatPanel({
   onRetrySceneAssets,
   onRetryVideoMerge,
   onRetryVideoAnalysis,
+  onApprovePptOutline,
+  onRevisePptOutline,
+  onRegeneratePptImage,
+  onGeneratePptFile,
+  onAcceptPptFile,
+  onRegeneratePptFile,
   busy,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
+  const latestVideoScenePackageMessageId = [...messages]
+    .reverse()
+    .find((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages)?.id;
+  const latestActionableMessageId = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.artifact)?.id;
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -73,6 +98,8 @@ export function ChatPanel({
             <MessageBubble
               key={m.id}
               msg={m}
+              isLatestVideoScenePackage={m.id === latestVideoScenePackageMessageId}
+              actionsDisabled={Boolean(busy) || Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId)}
               onOpenArtifact={onOpenArtifact}
               onSelectDirection={onSelectDirection}
               onApprovePlan={onApprovePlan}
@@ -89,6 +116,12 @@ export function ChatPanel({
               onRetrySceneAssets={onRetrySceneAssets}
               onRetryVideoMerge={onRetryVideoMerge}
               onRetryVideoAnalysis={onRetryVideoAnalysis}
+              onApprovePptOutline={onApprovePptOutline}
+              onRevisePptOutline={onRevisePptOutline}
+              onRegeneratePptImage={onRegeneratePptImage}
+              onGeneratePptFile={onGeneratePptFile}
+              onAcceptPptFile={onAcceptPptFile}
+              onRegeneratePptFile={onRegeneratePptFile}
             />
           ))
         )}
@@ -96,7 +129,13 @@ export function ChatPanel({
       </div>
 
       <div className="shrink-0 p-4">
-        <Composer onSubmit={onSubmit} busy={busy} />
+        <Composer
+          onSubmit={onSubmit}
+          referencedMaterials={referencedMaterials}
+          onRemoveReferencedMaterial={onRemoveReferencedMaterial}
+          prefillRequest={composerPrefillRequest}
+          busy={busy}
+        />
       </div>
     </div>
   );

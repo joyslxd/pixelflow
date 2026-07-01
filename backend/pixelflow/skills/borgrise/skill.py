@@ -24,6 +24,7 @@ from pixelflow.skills.base import (
     GenerationResult,
     ImageGenerationResult,
     MediaLinkExtractionResult,
+    PptGenerationResult,
     StoryboardResult,
     VideoFlawAnalysisResult,
     VideoQualityReviewResult,
@@ -142,6 +143,36 @@ def _to_media_link_result(raw: dict[str, Any]) -> MediaLinkExtractionResult:
         )
     links = [str(link) for link in raw.get("links", []) if link] if isinstance(raw.get("links"), list) else []
     return MediaLinkExtractionResult(ok=True, links=links, raw=raw)
+
+
+def _to_ppt_result(raw: dict[str, Any]) -> PptGenerationResult:
+    """把 SmartPPT 原始 dict 映射成统一 PPT 结果。"""
+    if not raw or raw.get("error"):
+        return PptGenerationResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            smart_ppt_project_id=raw.get("smart_ppt_project_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "smart ppt generation failed",
+            quota_insufficient=run_generation.is_quota_insufficient(raw),
+            raw=raw or {},
+        )
+    slide_count = raw.get("slide_count")
+    try:
+        normalized_slide_count = int(slide_count) if slide_count is not None else None
+    except (TypeError, ValueError):
+        normalized_slide_count = None
+    return PptGenerationResult(
+        ok=True,
+        task_id=raw.get("task_id"),
+        smart_ppt_project_id=raw.get("smart_ppt_project_id"),
+        summary=str(raw.get("summary") or ""),
+        content_json=raw.get("content_json"),
+        image_url=raw.get("image_url"),
+        ppt_url=raw.get("ppt_url"),
+        filename=raw.get("filename"),
+        slide_count=normalized_slide_count,
+        raw=raw,
+    )
 
 
 def _to_batch_storyboard_result(raw: dict[str, Any]) -> BatchStoryboardResult:
@@ -314,6 +345,16 @@ async def _run_batch_storyboard(fn: Callable[..., dict[str, Any]], **kwargs: Any
         logger.exception("borgrise batch decompose %s failed", getattr(fn, "__name__", "call"))
         return BatchStoryboardResult(ok=False, error=str(exc))
     return _to_batch_storyboard_result(raw)
+
+
+async def _run_ppt(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> PptGenerationResult:
+    """在线程中运行阻塞 SmartPPT 调用，并归一化失败。"""
+    try:
+        raw = await asyncio.to_thread(fn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
+        logger.exception("borgrise smart ppt %s failed", getattr(fn, "__name__", "call"))
+        return PptGenerationResult(ok=False, error=str(exc))
+    return _to_ppt_result(raw)
 
 
 class BorgriseSkill:
@@ -618,4 +659,68 @@ class BorgriseSkill:
             platform=platform,
             ratio=ratio,
             size=size,
+        )
+
+    async def generate_ppt_summary(
+        self,
+        topic: str,
+        ppt_style: str,
+        file_urls: list[str],
+        smart_ppt_project_id: int | None = None,
+    ) -> PptGenerationResult:
+        kwargs: dict[str, Any] = {
+            "topic": topic,
+            "ppt_style": ppt_style,
+            "file_urls": file_urls,
+        }
+        if smart_ppt_project_id is not None:
+            kwargs["smart_ppt_project_id"] = smart_ppt_project_id
+        return await _run_ppt(run_generation.generate_ppt_summary, **kwargs)
+
+    async def update_ppt_summary(
+        self,
+        original_outline: str,
+        modification_opinion: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult:
+        return await _run_ppt(
+            run_generation.update_ppt_summary,
+            original_outline=original_outline,
+            modification_opinion=modification_opinion,
+            smart_ppt_project_id=smart_ppt_project_id,
+        )
+
+    async def generate_ppt_content_json(
+        self,
+        original_outline: str,
+        ppt_style: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult:
+        return await _run_ppt(
+            run_generation.generate_ppt_content_json,
+            original_outline=original_outline,
+            ppt_style=ppt_style,
+            smart_ppt_project_id=smart_ppt_project_id,
+        )
+
+    async def generate_ppt_image(
+        self,
+        json_content: str,
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult:
+        return await _run_ppt(
+            run_generation.generate_ppt_image,
+            json_content=json_content,
+            smart_ppt_project_id=smart_ppt_project_id,
+        )
+
+    async def generate_ppt_file(
+        self,
+        file_urls: list[str],
+        smart_ppt_project_id: int,
+    ) -> PptGenerationResult:
+        return await _run_ppt(
+            run_generation.generate_ppt_file,
+            file_urls=file_urls,
+            smart_ppt_project_id=smart_ppt_project_id,
         )

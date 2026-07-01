@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, ChevronUp, FilePenLine, X } from "lucide-react";
+import { Check, ChevronUp, FilePenLine, Upload, X } from "lucide-react";
+import { api, type UploadedAttachment } from "@/lib/api";
 
-export type CreationIntent = "video" | "image";
+export type CreationIntent = "video" | "image" | "ppt";
 
 export interface VideoRequirementForm {
   intent: "video";
@@ -22,7 +23,14 @@ export interface ImageRequirementForm {
   image_count?: number;
 }
 
-export type GenParamsForm = VideoRequirementForm | ImageRequirementForm;
+export interface PptRequirementForm {
+  intent: "ppt";
+  ppt_topic: string;
+  ppt_style: string;
+  attachments: Array<Record<string, unknown>>;
+}
+
+export type GenParamsForm = VideoRequirementForm | ImageRequirementForm | PptRequirementForm;
 
 interface GenParamsDialogProps {
   open: boolean;
@@ -31,6 +39,7 @@ interface GenParamsDialogProps {
   initialCoreMessage?: string;
   /** LLM 从用户提示词中自动抽取的表单初值 */
   initialValues?: Record<string, unknown>;
+  initialMaterials?: Array<Record<string, unknown>>;
   onConfirm: (form: GenParamsForm) => void;
   onCancel: () => void;
 }
@@ -42,6 +51,9 @@ const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", 
 const IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"];
 const IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"];
 const IMAGE_SIZES = ["1:1", "16:9", "9:16", "自动适配"];
+const PPT_CUSTOM_STYLE = "自定义";
+const PPT_STYLES = ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自定义"];
+const PPT_ACCEPT = ".doc,.docx,.xls,.xlsx,.pdf";
 
 const inputCls =
   "h-12 w-full rounded-xl border border-line bg-surface px-4 text-[14px] text-ink outline-none placeholder:text-ink-soft/55 focus:border-accent/40";
@@ -84,6 +96,56 @@ function imageInitialValues(initialCoreMessage: string | undefined, values: Reco
   };
 }
 
+function pptInitialValues(
+  initialCoreMessage: string | undefined,
+  values: Record<string, unknown>,
+  initialMaterials: Array<Record<string, unknown>>,
+): PptRequirementForm {
+  const style = textValue(values, "ppt_style", "极简商务");
+  return {
+    intent: "ppt",
+    ppt_topic: textValue(values, "ppt_topic", initialCoreMessage ?? ""),
+    ppt_style: style === "自由发挥" ? "" : style,
+    attachments: officeAttachments(records(values.attachments).concat(initialMaterials)),
+  };
+}
+
+function pptStyleModeValue(style: string): string {
+  return PPT_STYLES.includes(style) ? style : PPT_CUSTOM_STYLE;
+}
+
+function pptCustomStyleValue(style: string): string {
+  return style && !PPT_STYLES.includes(style) ? style : "";
+}
+
+function records(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+}
+
+function attachmentName(attachment: Record<string, unknown>): string {
+  return String(attachment.name || attachment.filename || attachment.url || "附件");
+}
+
+function attachmentUrl(attachment: Record<string, unknown>): string {
+  return String(attachment.url || attachment.path || attachment.fileUrl || attachment.file_url || "");
+}
+
+function isOfficeAttachment(value: Record<string, unknown>): boolean {
+  const target = `${attachmentName(value)} ${attachmentUrl(value)}`.toLowerCase().split("?")[0];
+  return /\.(docx?|xlsx?|pdf)(?:$|#)/.test(target);
+}
+
+function officeAttachments(values: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    if (!isOfficeAttachment(value)) return false;
+    const key = attachmentUrl(value) || attachmentName(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function PillGroup({ options, value, onChange }: { options: string[]; value: string; onChange: (value: string) => void }) {
   return (
     <div className="flex flex-wrap gap-3">
@@ -122,31 +184,82 @@ function FieldBlock({ index, label, children }: { index: number; label: string; 
   );
 }
 
-export function GenParamsDialog({ open, intent, initialCoreMessage, initialValues = {}, onConfirm, onCancel }: GenParamsDialogProps) {
+export function GenParamsDialog({ open, intent, initialCoreMessage, initialValues = {}, initialMaterials = [], onConfirm, onCancel }: GenParamsDialogProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
   const [video, setVideo] = useState<VideoRequirementForm>(() => videoInitialValues(initialCoreMessage, initialValues));
   const [image, setImage] = useState<ImageRequirementForm>(() => imageInitialValues(initialCoreMessage, initialValues));
+  const [ppt, setPpt] = useState<PptRequirementForm>(() => pptInitialValues(initialCoreMessage, initialValues, initialMaterials));
+  const [pptStyleMode, setPptStyleMode] = useState(() => pptStyleModeValue(ppt.ppt_style));
+  const [pptCustomStyle, setPptCustomStyle] = useState(() => pptCustomStyleValue(ppt.ppt_style));
 
   useEffect(() => {
     if (!open) return;
     setSubmitted(false);
     setCollapsed(false);
+    setUploadError("");
     setVideo(videoInitialValues(initialCoreMessage, initialValues));
     setImage(imageInitialValues(initialCoreMessage, initialValues));
-  }, [open, intent, initialCoreMessage, initialValues]);
+    const nextPpt = pptInitialValues(initialCoreMessage, initialValues, initialMaterials);
+    setPpt(nextPpt);
+    setPptStyleMode(pptStyleModeValue(nextPpt.ppt_style));
+    setPptCustomStyle(pptCustomStyleValue(nextPpt.ppt_style));
+  }, [open, intent, initialCoreMessage, initialValues, initialMaterials]);
 
   if (!open) return null;
 
   const isVideo = intent === "video";
+  const isPpt = intent === "ppt";
   const canConfirm = isVideo
     ? Boolean(video.product_info.trim() && video.product_category && video.target_audience.trim() && video.conversion_goal)
-    : Boolean(image.image_goal.trim() && image.image_type && image.image_usage && image.image_style && image.image_size);
+    : isPpt
+      ? Boolean(ppt.ppt_topic.trim() && ppt.ppt_style && ppt.attachments.length > 0 && !uploading)
+      : Boolean(image.image_goal.trim() && image.image_type && image.image_usage && image.image_style && image.image_size);
 
   const submit = () => {
     if (!canConfirm) return;
     setSubmitted(true);
-    onConfirm(isVideo ? video : image);
+    onConfirm(isVideo ? video : isPpt ? ppt : image);
+  };
+
+  const updatePptStyle = (value: string) => {
+    setPptStyleMode(value);
+    if (value === PPT_CUSTOM_STYLE) {
+      setPpt((prev) => ({ ...prev, ppt_style: pptCustomStyle.trim() }));
+      return;
+    }
+    setPptCustomStyle("");
+    setPpt((prev) => ({ ...prev, ppt_style: value }));
+  };
+
+  const updatePptCustomStyle = (value: string) => {
+    setPptCustomStyle(value);
+    setPpt((prev) => ({ ...prev, ppt_style: value.trim() }));
+  };
+
+  const uploadPptFiles = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setUploading(true);
+    setUploadError("");
+    try {
+      const uploads: UploadedAttachment[] = [];
+      for (const file of Array.from(files)) {
+        if (!/\.(docx?|xlsx?|pdf)$/i.test(file.name)) {
+          setUploadError("附件仅支持 Word、Excel、PDF 文件。");
+          continue;
+        }
+        uploads.push(await api.uploadAttachment(file));
+      }
+      if (uploads.length) {
+        setPpt((prev) => ({ ...prev, attachments: officeAttachments(prev.attachments.concat(uploads)) }));
+      }
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
+    }
   };
 
   return (
@@ -155,7 +268,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
         <div className="mb-8 flex items-center justify-between">
           <div className="flex items-center gap-3 text-[22px] font-semibold text-ink">
             <FilePenLine size={26} />
-            {isVideo ? "AD投放短视频需求收集" : "图片生成需求收集"}
+            {isVideo ? "AD投放短视频需求收集" : isPpt ? "PPT生成需求收集" : "图片生成需求收集"}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -202,6 +315,64 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                 </FieldBlock>
                 <FieldBlock index={4} label="转化目标">
                   <PillGroup options={VIDEO_GOALS} value={video.conversion_goal} onChange={(v) => setVideo((p) => ({ ...p, conversion_goal: v }))} />
+                </FieldBlock>
+              </>
+            ) : isPpt ? (
+              <>
+                <FieldBlock index={1} label="PPT主题">
+                  <input
+                    className={inputCls}
+                    value={ppt.ppt_topic}
+                    onChange={(e) => setPpt((p) => ({ ...p, ppt_topic: e.target.value }))}
+                    placeholder="例如：2026年度营销策略汇报"
+                  />
+                </FieldBlock>
+                <FieldBlock index={2} label="PPT风格">
+                  <PillGroup options={PPT_STYLES} value={pptStyleMode} onChange={updatePptStyle} />
+                  {pptStyleMode === PPT_CUSTOM_STYLE && (
+                    <input
+                      className={inputCls}
+                      value={pptCustomStyle}
+                      onChange={(e) => updatePptCustomStyle(e.target.value)}
+                      placeholder="输入自定义 PPT 风格"
+                    />
+                  )}
+                </FieldBlock>
+                <FieldBlock index={3} label="附件">
+                  <label className="flex min-h-[96px] cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-surface px-4 text-center text-[13px] text-ink-soft hover:border-accent/40 hover:text-ink">
+                    <Upload size={22} />
+                    <span>{uploading ? "上传中..." : "上传 Word、Excel、PDF，可上传多个"}</span>
+                    <input
+                      className="hidden"
+                      type="file"
+                      accept={PPT_ACCEPT}
+                      multiple
+                      disabled={uploading}
+                      onChange={(e) => {
+                        void uploadPptFiles(e.currentTarget.files);
+                        e.currentTarget.value = "";
+                      }}
+                    />
+                  </label>
+                  {uploadError && <div className="rounded-xl border border-amber/30 bg-amber/10 px-3 py-2 text-[12px] text-ink">{uploadError}</div>}
+                  {ppt.attachments.length > 0 ? (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {ppt.attachments.map((attachment, index) => (
+                        <div key={`${attachmentUrl(attachment)}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-line bg-white px-3 py-2 text-[13px] text-ink">
+                          <span className="truncate">{attachmentName(attachment)}</span>
+                          <button
+                            type="button"
+                            onClick={() => setPpt((p) => ({ ...p, attachments: p.attachments.filter((_, itemIndex) => itemIndex !== index) }))}
+                            className="shrink-0 text-ink-soft hover:text-ink"
+                          >
+                            移除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[12px] text-ink-soft">请上传至少一个 Word、Excel 或 PDF 附件。</div>
+                  )}
                 </FieldBlock>
               </>
             ) : (

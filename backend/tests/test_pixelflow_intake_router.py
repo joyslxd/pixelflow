@@ -238,19 +238,30 @@ def test_intake_router_directions_use_llm_when_form_complete(monkeypatch):
 def test_intake_router_passes_materials_to_creative_direction_llm(monkeypatch):
     from app.gateway.routers import pixelflow_intake
     from pixelflow.intake.forms import CreativeDirection
+    from pixelflow.intake.industry_profile import IndustryProfileResult
 
     materials = [{"type": "image", "url": "https://x/product.png", "filename": "product.png"}]
+
+    async def fake_resolve_industry_profile(**_kwargs):
+        return IndustryProfileResult(
+            industry="general",
+            industry_name="通用电商",
+            profile={"core_message": "参考上传素材生成商品海报需要保留素材主体。"},
+            source="llm",
+        )
 
     async def fake_draft_creative_directions_with_llm(intent, values, product_creative_profile=None):
         assert intent == "image"
         assert values["image_goal"] == "参考上传素材生成商品海报"
-        assert product_creative_profile == {"materials": materials}
+        assert product_creative_profile["core_message"] == "参考上传素材生成商品海报需要保留素材主体。"
+        assert product_creative_profile["materials"] == materials
         return [
             CreativeDirection(direction_id="direction_1", title="素材主视觉", description="参考上传素材组织画面。", recommended=True),
             CreativeDirection(direction_id="direction_2", title="素材场景图", description="延展产品使用场景。"),
             CreativeDirection(direction_id="direction_3", title="素材封面图", description="提炼素材卖点做封面。"),
         ]
 
+    monkeypatch.setattr(pixelflow_intake, "resolve_industry_profile", fake_resolve_industry_profile)
     monkeypatch.setattr(pixelflow_intake, "draft_creative_directions_with_llm", fake_draft_creative_directions_with_llm)
 
     app = make_authed_test_app(user_factory=_stable_user)

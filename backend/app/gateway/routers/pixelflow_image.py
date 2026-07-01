@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from pixelflow.generate.image_prepare import ImageMethod, prepare_image_generation
@@ -49,6 +49,30 @@ class ImageGenerateResponse(BaseModel):
     task_id: str | None = None
     images: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    message: str = ""
+    quota_insufficient: bool = False
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImageAssetEditRequest(BaseModel):
+    asset_id: str
+    asset_name: str = ""
+    asset_group: str
+    source_image_url: str
+    prompt: str
+    ratio: str = "1:1"
+    size: str = "4K"
+    model: str | None = "gpt-image-2"
+
+
+class ImageAssetEditResponse(BaseModel):
+    ok: bool
+    method: ImageMethod = "image_edit"
+    endpoint: str = "/api/picture/image_edit"
+    source_image_url: str
+    edited_image: dict[str, Any] = Field(default_factory=dict)
+    asset_id: str
+    asset_group: str
     message: str = ""
     quota_insufficient: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
@@ -111,6 +135,46 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         message="图片生成完成。",
         quota_insufficient=False,
         raw=_aggregate_raw(raw_results, requested_count),
+    )
+
+
+@router.post("/edit-asset", response_model=ImageAssetEditResponse)
+async def edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
+    source_image_url = body.source_image_url.strip()
+    prompt = body.prompt.strip()
+    if not source_image_url:
+        raise HTTPException(status_code=400, detail="source_image_url不能为空")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt不能为空")
+
+    result = await get_image_skill().image_edit(
+        image_url=source_image_url,
+        prompt=prompt,
+        model=_optional_str(body.model),
+        ratio=body.ratio or "1:1",
+        size=body.size or "4K",
+        max_images=1,
+    )
+    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+    edited_image = result.images[0] if result.images else {}
+    edited_url = _optional_str(edited_image.get("url") or edited_image.get("download_url")) if edited_image else None
+    ok = result.ok and bool(edited_url)
+    if ok:
+        message = "素材图片编辑完成。"
+    elif quota_insufficient:
+        message = quota_resume_message(result.error)
+    else:
+        message = result.error or "图片编辑结果没有URL。"
+    return ImageAssetEditResponse(
+        ok=ok,
+        endpoint=_endpoint_for("image_edit", result.raw),
+        source_image_url=source_image_url,
+        edited_image=edited_image,
+        asset_id=body.asset_id,
+        asset_group=body.asset_group,
+        message=message,
+        quota_insufficient=quota_insufficient,
+        raw=result.raw,
     )
 
 

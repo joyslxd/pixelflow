@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-IntakeIntent = Literal["video", "image", "video_analysis", "unknown"]
+IntakeIntent = Literal["video", "image", "ppt", "video_analysis", "unknown"]
 
 GENERIC_GOALS = {
     "宣传",
@@ -26,6 +26,11 @@ GENERIC_GOALS = {
     "视频",
     "宣传视频",
     "短视频",
+    "PPT",
+    "ppt",
+    "演示文稿",
+    "幻灯片",
+    "汇报",
 }
 
 
@@ -71,6 +76,10 @@ def normalize_intake_context(
         goal = _complete_goal(subject, goal, fallback_suffix="视频")
         if subject:
             values["product_info"] = _text(values.get("product_info")) or subject
+    elif intent == "ppt":
+        goal = _complete_goal(subject, goal, fallback_suffix="PPT")
+        if goal:
+            values["ppt_topic"] = _text(values.get("ppt_topic")) or goal
 
     count = _normalize_count(extracted.get("requested_output_count") or values.get("image_count"))
     if intent == "image":
@@ -101,6 +110,11 @@ def _complete_goal(subject: str, goal: str, *, fallback_suffix: str) -> str:
 def _subject_from_values(intent: IntakeIntent, values: dict[str, Any]) -> str:
     if intent == "video":
         return _text(values.get("product_info") or values.get("product_name"))
+    if intent == "ppt":
+        topic = _text(values.get("ppt_topic") or values.get("topic"))
+        if topic and not _is_generic_goal(topic):
+            return _strip_goal_suffix(topic)
+        return topic
     image_goal = _text(values.get("image_goal"))
     if intent == "image" and image_goal and not _is_generic_goal(image_goal):
         return _strip_goal_suffix(image_goal)
@@ -113,14 +127,16 @@ def _goal_from_values(intent: IntakeIntent, values: dict[str, Any]) -> str:
     if intent == "video":
         product = _text(values.get("product_info") or values.get("product_name"))
         return f"{product}视频" if product else ""
+    if intent == "ppt":
+        return _text(values.get("ppt_topic") or values.get("topic"))
     return ""
 
 
 def _subject_from_prompt(intent: IntakeIntent, source_prompt: str) -> str:
     text = source_prompt.strip()
-    if not text or intent not in {"image", "video"}:
+    if not text or intent not in {"image", "video", "ppt"}:
         return ""
-    target_words = "图片|图|海报|封面|主图|素材图|宣传图|视频|短视频|宣传视频|广告视频"
+    target_words = "图片|图|海报|封面|主图|素材图|宣传图|视频|短视频|宣传视频|广告视频|PPT|ppt|演示文稿|幻灯片|汇报"
     match = re.search(rf"(?:生成|做|制作|出|来|给我|帮我)?\s*(?:\d+|[一二两三四五六七八九十]+)?\s*(?:张|个|幅|条|段)?\s*([\u4e00-\u9fa5A-Za-z0-9]+?)\s*(?:的)?(?:{target_words})", text)
     if match:
         candidate = match.group(1)
@@ -132,7 +148,7 @@ def _subject_from_prompt(intent: IntakeIntent, source_prompt: str) -> str:
 
 def _strip_goal_suffix(value: str) -> str:
     stripped = value
-    for suffix in ("宣传视频", "广告视频", "短视频", "宣传图", "商品图", "产品图", "海报", "封面", "主图", "图片", "视频", "图"):
+    for suffix in ("宣传视频", "广告视频", "短视频", "宣传图", "商品图", "产品图", "PPT", "ppt", "演示文稿", "幻灯片", "汇报", "海报", "封面", "主图", "图片", "视频", "图"):
         if stripped.endswith(suffix) and len(stripped) > len(suffix):
             return stripped[: -len(suffix)]
     return stripped

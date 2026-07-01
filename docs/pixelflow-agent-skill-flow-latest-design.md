@@ -1,17 +1,17 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-06-29
+更新时间：2026-06-30
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
 ## 1. 设计目标
 
-PixelFlow 不是一个自由闲聊 Agent，而是一个围绕“电商图片/视频/视频分析”的阶段化 Agent 工作台。它需要同时满足：
+PixelFlow 不是一个自由闲聊 Agent，而是一个围绕“电商图片/视频/视频分析/PPT制作”的阶段化 Agent 工作台。它需要同时满足：
 
 - 用户用自然语言和附件发起需求。
 - 采集阶段用 LLM 理解意图、主体、行业、数量、素材含义。
 - 所有需要用户确认的节点都能落到前端对话里，并且能保存和恢复。
-- 图片、视频、视频分析最终都通过 content-app/Borgrise 能力落地。
+- 图片、视频、视频分析、PPT制作最终都通过 content-app/Borgrise 能力落地。
 - 额度不足、业务失败、网络异常要可解释；额度不足后用户充值回来仍能从当前对话继续。
 - 新增 Python 接口必须以 `/agent` 开头，前端直接上传附件到 content-app `/api/upload`。
 
@@ -23,7 +23,7 @@ flowchart LR
   GW --> Flow["PixelFlow 业务 Service<br/>intake / creative / generate / skills"]
   Flow --> Store["Task/Conversation Store<br/>Memory / SQL / MySQL"]
   Flow --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
-  Flow --> Skill["Skill Protocol<br/>Image / Video / Decompose / Flaw"]
+  Flow --> Skill["Skill Protocol<br/>Image / Video / Decompose / Flaw / SmartPPT"]
   Skill --> Borgrise["content-app/Borgrise API"]
   FE --> Upload["content-app /api/upload<br/>附件上传"]
 ```
@@ -51,8 +51,15 @@ flowchart TD
   E -->|"video_analysis"| VA["视频分析 Skill"]
   E -->|"image"| IF["图片需求表单"]
   E -->|"video"| VF["视频需求表单"]
+  E -->|"ppt"| PF["PPT需求表单<br/>主题 / 风格 / Word Excel PDF 附件"]
   IF --> IV["表单校验 + 垂类画像"]
   VF --> IV
+  PF --> PIV["PPT 表单校验 + 垂类画像"]
+  PIV --> PSUM["SmartPPT 生成大纲<br/>人工确认/修改"]
+  PSUM --> PJSON["大纲转页面 JSON"]
+  PJSON --> PIMG["并行生成 PPT 页面图片"]
+  PIMG --> PFILE["生成 PPT 附件"]
+  PFILE --> PDONE["PPT 文件确认<br/>满意结束 / 重新生成附件"]
   IV --> DIR["生成 3 个创意方向"]
   DIR --> CHOOSE["用户选择方向<br/>30 秒未选默认推荐"]
   CHOOSE --> PLAN["策划 Agent<br/>填充 plan.md"]
@@ -83,6 +90,7 @@ flowchart TD
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py` | plan.md、表单、创意方向、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 主流程是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
+| PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
 
 ## 5. Skill 清单
@@ -91,8 +99,8 @@ flowchart TD
 
 | Skill | 代码位置 | 作用 | 失败策略 |
 | --- | --- | --- | --- |
-| IntentRecognitionSkill | `backend/pixelflow/intake/llm.py` | 识别 `image` / `video` / `video_analysis`，抽取主体、目标、行业、数量 | LLM 失败时用关键词 fallback |
-| FormSchemaSkill | `backend/pixelflow/intake/forms.py` | 返回图片/视频表单 schema | 本地纯逻辑 |
+| IntentRecognitionSkill | `backend/pixelflow/intake/llm.py` | 识别 `image` / `video` / `ppt` / `video_analysis`，抽取主体、目标、行业、数量 | LLM 失败时用关键词 fallback |
+| FormSchemaSkill | `backend/pixelflow/intake/forms.py` | 返回图片/视频/PPT表单 schema | 本地纯逻辑 |
 | FormValidationSkill | `backend/pixelflow/intake/forms.py` | 检查必填字段，最多 3 轮 | 超 3 轮终止并友好提示 |
 | IndustryProfileSkill | `backend/pixelflow/intake/industry_profile.py` | 命中垂类模板或用 LLM 生成行业创作画像 | LLM 失败时通用电商兜底 |
 | CreativeDirectionSkill | `backend/pixelflow/intake/llm.py` | 生成 3 个可进入 plan.md 的创意方向 | LLM 失败时本地兜底方向 |
@@ -159,6 +167,9 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
 - 每段片段最少 4 秒，最多 15 秒。
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
+- 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。该流程走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`，成功后直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片编辑 prompt 处理，不重新走 intake。
+- 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
+- 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
 
 ### 5.5 视频分析类 Skill
@@ -183,6 +194,51 @@ flowchart TD
   F --> H["返回 storyboards"]
   G --> H
 ```
+
+### 5.6 PPT类 Skill
+
+| Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
+| --- | --- | --- | --- |
+| PptIntentRecognitionSkill | `backend/pixelflow/intake/llm.py` | LLM | 识别 PPT 制作意图、主题、行业、风格线索 |
+| PptFormSchemaSkill | `backend/pixelflow/intake/forms.py` | 无 | 返回 PPT 主题、PPT 风格、附件表单 |
+| PptAttachmentValidationSkill | `backend/pixelflow/intake/forms.py`、`pixelflow_ppt.py` | 无 | 仅允许 Word、Excel、PDF 附件 |
+| PptIndustryProfileSkill | `backend/pixelflow/intake/industry_profile.py` | LLM/模板 | 先命中垂类模板，未命中则调用 `deepseek-v4-pro` 生成行业画像 |
+| SmartPptSummarySkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/smart-ppt/generatePptSummary` | 生成 PPT 大纲 |
+| SmartPptUpdateSummarySkill | `run_generation.py` | `/api/picture/smart-ppt/updatePptSummary` | 根据用户意见更新 PPT 大纲 |
+| SmartPptContentJsonSkill | `run_generation.py` | `/api/picture/smart-ppt/generatePptContentToJson` | 大纲转 PPT 页面 JSON |
+| SmartPptImageSkill | `run_generation.py` | `/api/picture/smart-ppt/generatePptImage` | 按页面 JSON 生成单页图片 |
+| SmartPptFileSkill | `run_generation.py` | `/api/picture/smart-ppt/generatePptFile` | 根据页面图片生成 PPT 文件 |
+
+PPT 流程：
+
+```mermaid
+flowchart TD
+  A["用户提出 PPT 需求"] --> B["采集 Agent 识别 ppt + 行业"]
+  B --> C["PPT 表单<br/>主题 / 风格 / Word Excel PDF 附件"]
+  C --> D["垂类画像<br/>模板命中 / LLM 通用画像"]
+  D --> E["generatePptSummary<br/>生成大纲"]
+  E --> F{"用户确认大纲"}
+  F -->|"修改"| G["updatePptSummary"]
+  G --> F
+  F -->|"同意"| H["generatePptContentToJson"]
+  H --> I["按页面并行 generatePptImage"]
+  I --> J{"所有页面图片完成"}
+  J -->|"单页失败/不满意"| K["重新生成单页图片"]
+  K --> J
+  J -->|"完成"| L["generatePptFile"]
+  L --> M{"用户确认 PPT 文件"}
+  M -->|"重新生成附件"| L
+  M -->|"满意"| N["流程结束"]
+```
+
+PPT 异步规则：
+
+- content-app 每一步都返回 `taskId`，PixelFlow 通过 `/api/task/{taskId}/status` 轮询。
+- Python 网关对前端暴露 `/agent/flows/ppt/*/start` 和 `/agent/flows/ppt/jobs/{job_id}`，前端轮询 Python job，避免浏览器请求长时间阻塞。
+- PPT 页面图片生成时后端会先返回全部页面的 `running` 状态，之后每完成一页就更新 job result；前端在同一张 PPT 页面图片卡片中逐页回显，文案展示为动态“图片生成中...”。
+- PPT 页面图片处于 `running` 时不展示重新生成按钮；已生成或失败后才允许单页重试。单页重试必须原位更新该页小格子，不能追加新的整组 PPT 图片卡片；只要存在 running 或 failed 页面，“开始生成PPT附件”按钮必须隐藏。
+- PPT 轮询超时默认 2 小时：`BORGRISE_PPT_POLL_TIMEOUT=7200`。
+- content-app 返回额度不足时，job 状态为 `quota_paused`，前端提示充值后回到同一对话继续。
 
 ## 6. 视频场景包数据合同
 
@@ -294,6 +350,12 @@ sequenceDiagram
 | 用户说修改、编辑、换背景、修图等 | `image_edit` |
 | 用户说融合、合成一张、多图融合等 | `multi_image_fusion` |
 
+补充规则：
+
+- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：有原图时调用 `/agent/flows/image/prepare` 和 `/agent/flows/image/generate`，不再弹普通图片表单、不生成创意方向、不生成 plan.md。
+- 如果识别到图片编辑但没有原图，前端提示用户上传需要编辑的图片，并把 `pendingImageEditRequest` 写入对话 context；用户从同一对话上传图片后继续调用 `/api/picture/image_edit`。
+- 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
+
 ## 8. 视频流程
 
 ```mermaid
@@ -369,8 +431,11 @@ flowchart TD
 
 - content-app/Borgrise 业务失败：直接返回前端 `ok=false` 和具体 `message/error`。
 - 异常或网络失败：在 Borgrise Client 层按配置重试，默认 `max_retries=3`。
+- `/api/task/{taskId}/status` 状态轮询遇到可恢复网络错误时，除单次请求重试外，还会继续状态轮询最多 3 次；401、402、额度不足和非重试业务错误不进入恢复轮询。
 - 场景视频部分失败：返回 `failed_scenes`，前端展示失败原因，并允许用户回到上一步重新生成当前阶段。
 - 场景资产图部分失败：返回 `failed_assets`，前端允许重试资产图生成。
+- 图片、视频、PPT 的表单弹窗如果被用户点击右上角 `X` 关闭，视为取消当前流程；前端清空 pending 表单上下文并将会话阶段记录为 `form_cancelled`。
+- 当前对话有阶段正在生成或处理时，所有 artifact 操作按钮都禁用，避免切换对话或返回旧卡片后重复触发。阶段结束后只允许最新可操作 artifact 继续；失败或额度暂停时只保留当前可恢复 artifact 的重试入口。
 
 ### 10.2 额度不足
 
@@ -426,6 +491,7 @@ flowchart TD
 - 前端上传附件直接调用 content-app `/api/upload`。
 - 上传返回的 URL、文件名、类型会进入 `materials`。
 - 如果后续步骤要调用 LLM、图片编辑或视频编辑，必须把用户输入和 `materials` 一起提交给后端，让 Agent 理解素材语义。
+- PPT 表单附件只允许 Word、Excel、PDF；图片、视频、音频附件不能作为 SmartPPT 大纲输入文件。
 
 ## 13. 配置
 
@@ -446,7 +512,9 @@ flowchart TD
 | `borgrise.video_poll_timeout=3600` | 视频轮询默认 1 小时 |
 | `borgrise.image_poll_timeout=600` | 图片轮询默认 10 分钟 |
 | `borgrise.video_analysis_poll_timeout=900` | 视频分析轮询默认 15 分钟 |
+| `BORGRISE_PPT_POLL_TIMEOUT=7200` | SmartPPT 每一步轮询默认 2 小时 |
 | `borgrise.max_retries=3` | 异常重试次数 |
+| `BORGRISE_STATUS_POLL_ERROR_RECOVERY_ATTEMPTS=3` | `/api/task/{taskId}/status` 可恢复网络错误后的额外状态轮询次数 |
 
 ## 14. 文件更新要求
 
@@ -458,13 +526,29 @@ flowchart TD
 | 垂类画像 | `intake/industry_profile.py`、`templates/industry_profile.md` |
 | plan.md | `creative/plan_markdown.py`、`templates/plan.md` |
 | 图片接口 | `generate/image_prepare.py`、`pixelflow_image.py`、`run_generation.py`、`api.ts` |
-| 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx` |
+| 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx`、`scenePackages.ts` |
 | 视频接口 | `pixelflow_video.py`、`run_generation.py`、`api.ts` |
+| PPT接口 | `pixelflow_ppt.py`、`run_generation.py`、`api.ts`、`GenParamsDialog.tsx`、`MessageBubble.tsx` |
 | 对话隔离 | `pixelflow_conversations.py`、`tasks/store.py`、`WorkspacePage.tsx` |
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
-| 文档 | `README.md`、`AGENTS.md`、本文件 |
+| 文档 | `README.md`、`AGENTS.md`、`CONTENT_APP_API_CALLS.md`、本文件 |
 
 ## 15. 推荐验证清单
+
+本地 content_frontend + PixelFlow 联调启动链路：
+
+```bash
+cd backend
+make dev
+
+cd web
+corepack pnpm dev:test -- --host 0.0.0.0 --port 5273
+
+cd ../../content_frontend
+yarn test -- --host 0.0.0.0 --port 5174
+```
+
+其中 `web/.env.test` 将 PixelFlow 前端 `/agent` 代理到本地后端 `http://127.0.0.1:8001`；content_frontend 的 test 环境通过 `VITE_PIXELFLOW_AGENT_URL` 嵌入 `http://localhost:5273/agentfrontend/`。
 
 文档或纯前端展示变更：
 
@@ -502,7 +586,7 @@ corepack pnpm build
 
 - 图片：单张文生图、多张文生图、图片编辑、参考图生成、多图融合。
 - 视频分析：单视频拆解、多视频批量拆解。
-- 视频生成：文生视频、首帧图生视频、首尾帧图生视频、全能参考视频、编辑视频、延伸视频。
+- 视频生成：文生视频、首帧图生视频、首尾帧图生视频、全能参考视频、编辑视频、延伸视频，以及场景包全局素材引用后图片编辑并替换原素材。
 - 每个流程都从“新对话 + 用户输入 + 附件”开始，验证对话隔离、失败重试、额度不足暂停恢复。
 
 ## 16. 当前实现边界

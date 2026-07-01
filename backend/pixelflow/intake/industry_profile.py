@@ -270,7 +270,7 @@ def _is_generic_industry(industry_type: str) -> bool:
 def _product_hint(form_values: dict[str, Any]) -> str:
     return " ".join(
         str(form_values.get(key) or "")
-        for key in ("product_info", "product_category", "image_goal", "image_type")
+        for key in ("product_info", "product_category", "image_goal", "image_type", "ppt_topic", "ppt_style")
     )
 
 
@@ -278,6 +278,7 @@ def _target_text(source_prompt: str, form_values: dict[str, Any]) -> str:
     return str(
         form_values.get("image_goal")
         or form_values.get("product_info")
+        or form_values.get("ppt_topic")
         or form_values.get("creation_goal")
         or source_prompt
         or ""

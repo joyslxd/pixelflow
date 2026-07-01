@@ -92,6 +92,53 @@ def test_unknown_industry_uses_deepseek_profile_with_same_shape() -> None:
     assert "儿童书包" in result.profile["core_message"]
 
 
+def test_unknown_ppt_industry_uses_llm_profile_from_ppt_topic() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "industry": "industrial_robotics",
+          "industry_name": "工业机器人",
+          "product_creative_profile": {
+            "core_message": "工业机器人巡检方案PPT需要突出效率提升、安全巡检和数据看板",
+            "core_expression_rules": {
+              "must_include": ["巡检效率", "安全预警", "数据看板"],
+              "must_avoid": ["空泛科技感"],
+              "description": "PPT表达需要围绕业务痛点、方案架构和落地收益展开"
+            },
+            "key_scenes": {},
+            "product_display_rules": {},
+            "safety_compliance": {},
+            "audience_pain_points": [],
+            "emotional_triggers": [],
+            "visual_anchor_keywords": ["巡检机器人", "数据驾驶舱"],
+            "prompt_injection": {
+              "creative_direction_note": "突出工业巡检业务价值",
+              "plan_note": "按问题、方案、收益组织",
+              "video_generation_note": "show industrial inspection workflow"
+            }
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(
+        resolve_industry_profile(
+            industry_type="工业机器人",
+            source_prompt="帮我做一份工业机器人巡检方案PPT",
+            form_values={"ppt_topic": "工业机器人巡检方案PPT", "ppt_style": "科技数据"},
+            materials=[],
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert result.source == "llm"
+    assert result.industry == "industrial_robotics"
+    assert result.industry_name == "工业机器人"
+    assert "工业机器人巡检方案PPT" in result.profile["core_message"]
+    assert "工业机器人巡检方案PPT" in fake_model.prompts[0]
+    assert "科技数据" in fake_model.prompts[0]
+
+
 def test_unknown_industry_falls_back_to_general_profile_when_llm_fails() -> None:
     result = asyncio.run(
         resolve_industry_profile(
