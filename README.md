@@ -195,8 +195,10 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
 - 每个视频场景片段最多 9 张参考图。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
+- 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过表单、创意方向和 plan.md，直接复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。缺原图时会把等待上传状态写入对话，用户上传图片后可继续。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
 - 图片、视频、PPT 的需求表单弹出后，用户点击右上角 `X` 视为取消当前流程，前端会清空 pending 表单上下文并保存 `form_cancelled`。
+- PPT 表单的 `PPT风格` 支持“自定义”，选中后显示文本框，最终把用户输入的风格词作为 `ppt_style` 提交给 SmartPPT。
 - 当前对话中任意阶段正在生成或处理时，历史 artifact 按钮统一禁用；阶段结束后只保留最新可操作 artifact 的按钮，失败或额度暂停时只保留当前可恢复点的重试入口。
 
 ### PPT 页面图片交互
@@ -338,6 +340,8 @@ http://localhost:5273/auth-token
 - 视频：1 小时。
 - 视频分析：15 分钟。
 - content-app `/api/auth/verify`：10 秒。
+
+`/api/task/{taskId}/status` 状态查询如果出现短暂 SSL EOF、握手超时等可恢复网络错误，会在单次请求重试后继续轮询最多 3 次；401、402、额度不足和非重试业务错误仍会立即返回。
 
 ## 测试与验证
 

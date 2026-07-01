@@ -71,6 +71,36 @@ def test_recognize_intent_preserves_requested_image_count_from_llm_json() -> Non
     assert result.values["image_count"] == 3
 
 
+def test_recognize_intent_marks_image_edit_operation_from_llm_json() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "image_generation",
+          "confidence": 0.96,
+          "reason": "用户要求编辑上传图片",
+          "product_subject": "上传图片",
+          "creation_goal": "把上传图片背景改成白色摄影棚",
+          "industry_type": "general",
+          "requested_output_count": 2,
+          "image_operation": "image_edit",
+          "values": {
+            "image_goal": "把上传图片背景改成白色摄影棚",
+            "image_style": "真实摄影",
+            "image_size": "自动适配",
+            "image_count": 2
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(recognize_intent_with_llm("把这张图背景换成白色摄影棚，生成2张", model_factory=lambda *_args, **_kwargs: fake_model))
+
+    assert result.intent == "image"
+    assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_count"] == 2
+    assert result.intake_context["image_operation"] == "image_edit"
+
+
 def test_recognize_intent_enriches_generic_image_goal_with_product_subject() -> None:
     fake_model = FakeModel(
         """
@@ -233,6 +263,19 @@ def test_recognize_intent_fallback_extracts_requested_image_count() -> None:
         result = asyncio.run(recognize_intent_with_llm(phrase, model_factory=lambda *_args, **_kwargs: BrokenModel()))
         assert result.intent == "image", phrase
         assert result.values["image_count"] == expected
+
+
+def test_recognize_intent_fallback_marks_image_edit_operation() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    result = asyncio.run(recognize_intent_with_llm("把这张图片改成蓝色背景，生成2张", model_factory=lambda *_args, **_kwargs: BrokenModel()))
+
+    assert result.intent == "image"
+    assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_count"] == 2
+    assert result.intake_context["image_operation"] == "image_edit"
 
 
 def test_draft_creative_directions_with_llm_returns_three_normalized_directions() -> None:

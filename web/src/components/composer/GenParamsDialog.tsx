@@ -51,7 +51,8 @@ const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", 
 const IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"];
 const IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"];
 const IMAGE_SIZES = ["1:1", "16:9", "9:16", "自动适配"];
-const PPT_STYLES = ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自由发挥"];
+const PPT_CUSTOM_STYLE = "自定义";
+const PPT_STYLES = ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自定义"];
 const PPT_ACCEPT = ".doc,.docx,.xls,.xlsx,.pdf";
 
 const inputCls =
@@ -100,12 +101,21 @@ function pptInitialValues(
   values: Record<string, unknown>,
   initialMaterials: Array<Record<string, unknown>>,
 ): PptRequirementForm {
+  const style = textValue(values, "ppt_style", "极简商务");
   return {
     intent: "ppt",
     ppt_topic: textValue(values, "ppt_topic", initialCoreMessage ?? ""),
-    ppt_style: optionValue(values, "ppt_style", PPT_STYLES, "极简商务"),
+    ppt_style: style === "自由发挥" ? "" : style,
     attachments: officeAttachments(records(values.attachments).concat(initialMaterials)),
   };
+}
+
+function pptStyleModeValue(style: string): string {
+  return PPT_STYLES.includes(style) ? style : PPT_CUSTOM_STYLE;
+}
+
+function pptCustomStyleValue(style: string): string {
+  return style && !PPT_STYLES.includes(style) ? style : "";
 }
 
 function records(value: unknown): Array<Record<string, unknown>> {
@@ -182,6 +192,8 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
   const [video, setVideo] = useState<VideoRequirementForm>(() => videoInitialValues(initialCoreMessage, initialValues));
   const [image, setImage] = useState<ImageRequirementForm>(() => imageInitialValues(initialCoreMessage, initialValues));
   const [ppt, setPpt] = useState<PptRequirementForm>(() => pptInitialValues(initialCoreMessage, initialValues, initialMaterials));
+  const [pptStyleMode, setPptStyleMode] = useState(() => pptStyleModeValue(ppt.ppt_style));
+  const [pptCustomStyle, setPptCustomStyle] = useState(() => pptCustomStyleValue(ppt.ppt_style));
 
   useEffect(() => {
     if (!open) return;
@@ -190,7 +202,10 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     setUploadError("");
     setVideo(videoInitialValues(initialCoreMessage, initialValues));
     setImage(imageInitialValues(initialCoreMessage, initialValues));
-    setPpt(pptInitialValues(initialCoreMessage, initialValues, initialMaterials));
+    const nextPpt = pptInitialValues(initialCoreMessage, initialValues, initialMaterials);
+    setPpt(nextPpt);
+    setPptStyleMode(pptStyleModeValue(nextPpt.ppt_style));
+    setPptCustomStyle(pptCustomStyleValue(nextPpt.ppt_style));
   }, [open, intent, initialCoreMessage, initialValues, initialMaterials]);
 
   if (!open) return null;
@@ -207,6 +222,21 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     if (!canConfirm) return;
     setSubmitted(true);
     onConfirm(isVideo ? video : isPpt ? ppt : image);
+  };
+
+  const updatePptStyle = (value: string) => {
+    setPptStyleMode(value);
+    if (value === PPT_CUSTOM_STYLE) {
+      setPpt((prev) => ({ ...prev, ppt_style: pptCustomStyle.trim() }));
+      return;
+    }
+    setPptCustomStyle("");
+    setPpt((prev) => ({ ...prev, ppt_style: value }));
+  };
+
+  const updatePptCustomStyle = (value: string) => {
+    setPptCustomStyle(value);
+    setPpt((prev) => ({ ...prev, ppt_style: value.trim() }));
   };
 
   const uploadPptFiles = async (files: FileList | null) => {
@@ -298,7 +328,15 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                   />
                 </FieldBlock>
                 <FieldBlock index={2} label="PPT风格">
-                  <PillGroup options={PPT_STYLES} value={ppt.ppt_style} onChange={(v) => setPpt((p) => ({ ...p, ppt_style: v }))} />
+                  <PillGroup options={PPT_STYLES} value={pptStyleMode} onChange={updatePptStyle} />
+                  {pptStyleMode === PPT_CUSTOM_STYLE && (
+                    <input
+                      className={inputCls}
+                      value={pptCustomStyle}
+                      onChange={(e) => updatePptCustomStyle(e.target.value)}
+                      placeholder="输入自定义 PPT 风格"
+                    />
+                  )}
                 </FieldBlock>
                 <FieldBlock index={3} label="附件">
                   <label className="flex min-h-[96px] cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-surface px-4 text-center text-[13px] text-ink-soft hover:border-accent/40 hover:text-ink">

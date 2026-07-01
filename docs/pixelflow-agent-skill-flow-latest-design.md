@@ -349,6 +349,12 @@ sequenceDiagram
 | 用户说修改、编辑、换背景、修图等 | `image_edit` |
 | 用户说融合、合成一张、多图融合等 | `multi_image_fusion` |
 
+补充规则：
+
+- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：有原图时调用 `/agent/flows/image/prepare` 和 `/agent/flows/image/generate`，不再弹普通图片表单、不生成创意方向、不生成 plan.md。
+- 如果识别到图片编辑但没有原图，前端提示用户上传需要编辑的图片，并把 `pendingImageEditRequest` 写入对话 context；用户从同一对话上传图片后继续调用 `/api/picture/image_edit`。
+- 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
+
 ## 8. 视频流程
 
 ```mermaid
@@ -424,6 +430,7 @@ flowchart TD
 
 - content-app/Borgrise 业务失败：直接返回前端 `ok=false` 和具体 `message/error`。
 - 异常或网络失败：在 Borgrise Client 层按配置重试，默认 `max_retries=3`。
+- `/api/task/{taskId}/status` 状态轮询遇到可恢复网络错误时，除单次请求重试外，还会继续状态轮询最多 3 次；401、402、额度不足和非重试业务错误不进入恢复轮询。
 - 场景视频部分失败：返回 `failed_scenes`，前端展示失败原因，并允许用户回到上一步重新生成当前阶段。
 - 场景资产图部分失败：返回 `failed_assets`，前端允许重试资产图生成。
 - 图片、视频、PPT 的表单弹窗如果被用户点击右上角 `X` 关闭，视为取消当前流程；前端清空 pending 表单上下文并将会话阶段记录为 `form_cancelled`。
@@ -506,6 +513,7 @@ flowchart TD
 | `borgrise.video_analysis_poll_timeout=900` | 视频分析轮询默认 15 分钟 |
 | `BORGRISE_PPT_POLL_TIMEOUT=7200` | SmartPPT 每一步轮询默认 2 小时 |
 | `borgrise.max_retries=3` | 异常重试次数 |
+| `BORGRISE_STATUS_POLL_ERROR_RECOVERY_ATTEMPTS=3` | `/api/task/{taskId}/status` 可恢复网络错误后的额外状态轮询次数 |
 
 ## 14. 文件更新要求
 

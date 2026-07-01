@@ -68,37 +68,55 @@ async def recognize_intent_with_llm(
             raise ValueError("intent response must be a JSON object")
         intent = _normalize_intent(payload.get("intent"))
         filtered_values = _augment_intent_values(intent, _filter_form_values(intent, payload.get("values")), text)
+        image_operation = _image_operation_from_payload(intent, payload, filtered_values, text)
+        if image_operation:
+            filtered_values["image_operation"] = image_operation
         context = normalize_intake_context(
             intent=intent,
             source_prompt=prompt,
             extracted={
                 **payload,
+                "image_operation": image_operation,
                 "requested_output_count": payload.get("requested_output_count") or filtered_values.get("image_count"),
                 "values": filtered_values,
             },
         )
+        values = dict(context.form_values)
+        context_dict = context.to_dict()
+        if image_operation:
+            values["image_operation"] = image_operation
+            context_dict["image_operation"] = image_operation
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
             reason=str(payload.get("reason") or ""),
-            values=context.form_values,
-            intake_context=context.to_dict(),
+            values=values,
+            intake_context=context_dict,
             llm_used=True,
             model_name=model_name,
         )
     except Exception as exc:  # noqa: BLE001 - LLM boundary must degrade gracefully
         fallback = _fallback_intent(text)
+        fallback_values = _augment_intent_values(fallback, {}, text)
+        image_operation = _image_operation_from_payload(fallback, {}, fallback_values, text)
+        if image_operation:
+            fallback_values["image_operation"] = image_operation
         context = normalize_intake_context(
             intent=fallback,
             source_prompt=prompt,
-            extracted={"values": _augment_intent_values(fallback, {}, text)},
+            extracted={"values": fallback_values, "image_operation": image_operation},
         )
+        values = dict(context.form_values)
+        context_dict = context.to_dict()
+        if image_operation:
+            values["image_operation"] = image_operation
+            context_dict["image_operation"] = image_operation
         return IntentRecognitionResult(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
             reason="LLM 调用失败，已使用本地兜底规则。",
-            values=context.form_values,
-            intake_context=context.to_dict(),
+            values=values,
+            intake_context=context_dict,
             llm_used=False,
             model_name=model_name,
             error=str(exc),
@@ -179,6 +197,11 @@ product_info, product_category, target_audience, conversion_goal。
 如果是 image_generation，可抽取 values 字段：
 image_goal, image_type, image_usage, image_style, image_size, image_count。
 image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
+同时必须抽取顶层 image_operation：
+- text_to_image: 纯文生图，没有参考图和编辑诉求。
+- image_edit: 用户要修改、编辑、换背景、修图、改已有图片。
+- reference_image: 用户上传或引用图片作为参考生成新图。
+- multi_image_fusion: 用户要把多张图融合成一张图。
 
 如果是 ppt_generation，可抽取 values 字段：
 ppt_topic, ppt_style。附件由前端上传，不要编造 attachments。
@@ -190,7 +213,7 @@ ppt_topic, ppt_style。附件由前端上传，不要编造 attachments。
 - requested_output_count: 用户明确要求的产物数量；没有明确数量时写 1。
 
 只返回 JSON，不要解释，不要 Markdown：
-{{"intent":"video_generation|image_generation|ppt_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","product_subject":"","creation_goal":"","industry_type":"general","requested_output_count":1,"values":{{}}}}
+{{"intent":"video_generation|image_generation|ppt_generation|video_analysis|unknown","confidence":0.0,"reason":"一句话原因","product_subject":"","creation_goal":"","industry_type":"general","requested_output_count":1,"image_operation":"text_to_image|image_edit|reference_image|multi_image_fusion","values":{{}}}}
 
 用户输入和素材：
 {text}
@@ -401,6 +424,56 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
     return {**values, "image_count": image_count}
 
 
+def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any], values: dict[str, Any], text: str) -> str:
+    if intent != "image":
+        return ""
+    operation = _normalize_image_operation(
+        payload.get("image_operation")
+        or payload.get("operation")
+        or values.get("image_operation")
+        or values.get("operation")
+    )
+    return operation or _infer_image_operation(text)
+
+
+def _normalize_image_operation(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "text_to_image": "text_to_image",
+        "text2image": "text_to_image",
+        "txt2img": "text_to_image",
+        "文生图": "text_to_image",
+        "image_edit": "image_edit",
+        "edit": "image_edit",
+        "imageedit": "image_edit",
+        "图像编辑": "image_edit",
+        "图片编辑": "image_edit",
+        "改图": "image_edit",
+        "修图": "image_edit",
+        "reference_image": "reference_image",
+        "multi_reference_image_generation": "reference_image",
+        "reference": "reference_image",
+        "参考图": "reference_image",
+        "参考生成": "reference_image",
+        "multi_image_fusion": "multi_image_fusion",
+        "fusion": "multi_image_fusion",
+        "融合": "multi_image_fusion",
+        "多图融合": "multi_image_fusion",
+    }
+    return aliases.get(normalized, "")
+
+
+def _infer_image_operation(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ["融合", "合成一张", "多图合成", "multi_image_fusion", "fusion"]):
+        return "multi_image_fusion"
+    if any(keyword in lowered for keyword in ["编辑", "修改", "改成", "改图", "修图", "换背景", "替换背景", "去水印", "抠图", "image_edit", "edit"]):
+        return "image_edit"
+    if any(keyword in lowered for keyword in ["参考", "基于这张", "按照这张", "类似这张", "图生图", "reference"]):
+        return "reference_image"
+    return "text_to_image"
+
+
 def _extract_ppt_topic(text: str) -> str:
     normalized = re.sub(r"\s+", "", text.strip())
     if not normalized:
@@ -427,6 +500,7 @@ def _extract_image_count(text: str) -> int | None:
     normalized = text.lower()
     patterns = [
         r"(?:生成|做|出|制作|来|要|给我)?\s*(\d{1,2})\s*(?:张|幅|个)\s*[^，。,.；;]{0,12}(?:图片|图|海报|封面|主图|素材图)",
+        r"(?:生成|做|出|制作|来|要|给我)\s*(\d{1,2})\s*(?:张|幅|个)(?:$|[，。,.；;\s])",
         r"(?:图片|图|海报|封面|主图|素材图)\s*(\d{1,2})\s*(?:张|幅|个)",
     ]
     for pattern in patterns:
@@ -436,6 +510,9 @@ def _extract_image_count(text: str) -> int | None:
     cn_match = re.search(r"(?:生成|做|出|制作|来|要|给我)?\s*([一二两三四五六七八九十]{1,3})\s*(?:张|幅|个)\s*[^，。,.；;]{0,12}(?:图片|图|海报|封面|主图|素材图)", normalized)
     if cn_match:
         return _normalize_image_count(cn_match.group(1))
+    cn_short_match = re.search(r"(?:生成|做|出|制作|来|要|给我)\s*([一二两三四五六七八九十]{1,3})\s*(?:张|幅|个)(?:$|[，。,.；;\s])", normalized)
+    if cn_short_match:
+        return _normalize_image_count(cn_short_match.group(1))
     return None
 
 
