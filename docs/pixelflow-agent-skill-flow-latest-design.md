@@ -526,6 +526,21 @@ flowchart TD
 
 ## 15. 推荐验证清单
 
+本地 content_frontend + PixelFlow 联调启动链路：
+
+```bash
+cd backend
+make dev
+
+cd web
+corepack pnpm dev:test -- --host 0.0.0.0 --port 5273
+
+cd ../../content_frontend
+yarn test -- --host 0.0.0.0 --port 5174
+```
+
+其中 `web/.env.test` 将 PixelFlow 前端 `/agent` 代理到本地后端 `http://127.0.0.1:8001`；content_frontend 的 test 环境通过 `VITE_PIXELFLOW_AGENT_URL` 嵌入 `http://localhost:5273/agentfrontend/`。
+
 文档或纯前端展示变更：
 
 ```bash

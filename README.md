@@ -241,12 +241,28 @@ corepack pnpm install
 corepack pnpm dev
 ```
 
+本地联调 content_frontend + PixelFlow 本地后端时，使用 test 模式：
+
+```bash
+cd backend
+make dev
+
+cd web
+corepack pnpm dev:test -- --host 0.0.0.0 --port 5273
+
+cd ../../content_frontend
+yarn test -- --host 0.0.0.0 --port 5174
+```
+
+这条链路是：content_frontend test 环境 `http://localhost:5174/home/agent` 嵌入 PixelFlow `http://localhost:5273/agentfrontend/`，PixelFlow 前端再把 `/agent` 代理到本地后端 `http://127.0.0.1:8001`。
+
 打包：
 
 ```bash
 cd web
 corepack pnpm build-prod   # 使用 web/.env.production，产物到 web/dist/
 corepack pnpm build-dev    # 使用 web/.env.development，联调测试环境时使用
+corepack pnpm build-test   # 使用 web/.env.test，本地后端联调构建
 ```
 
 如果本机没有 corepack 或 pnpm，也可以临时使用：
@@ -264,11 +280,12 @@ npm run build-prod
 | 文件 | 当前目标 | 用途 |
 | --- | --- | --- |
 | `web/.env.development` | `https://test-video.borgrise.com` | `pnpm dev`、`pnpm build-dev`，测试环境联调 |
+| `web/.env.test` | `http://127.0.0.1:8001` | `pnpm dev:test`、`pnpm build-test`，content_frontend test + PixelFlow 本地后端联调 |
 | `web/.env.production` | `https://video.borgrise.com` | `pnpm prod`、`pnpm build-prod`，生产环境 |
 
 变量含义：
 
-- `VITE_API_TARGET`：Vite dev server 将 `/agent` 代理到的目标。当前 development/production 分别指向测试/正式 content-app 域名；如需联调本机后端，可临时执行 `VITE_API_TARGET=http://localhost:8001 pnpm dev`。
+- `VITE_API_TARGET`：Vite dev server 将 `/agent` 代理到的目标。development/production 分别指向测试/正式 content-app 域名；test 固定指向本机后端 `http://127.0.0.1:8001`。
 - `VITE_CONTENT_APP_TARGET`：Vite dev server 将 `/api/upload` 代理到的 content-app 目标，通常应与当前环境的 content-app 域名一致。
 
 ## 鉴权与调试

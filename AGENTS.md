@@ -311,9 +311,12 @@ cd web
 corepack enable
 corepack pnpm install
 corepack pnpm dev
+corepack pnpm dev:test -- --host 0.0.0.0 --port 5273
 corepack pnpm lint
 corepack pnpm build
 ```
+
+`corepack pnpm dev` 读取 `web/.env.development`，`/agent` 代理测试环境；`corepack pnpm dev:test` 读取 `web/.env.test`，`/agent` 代理本地 `http://127.0.0.1:8001`。本地完整联调推荐流程是先启动 `backend` 的 `make dev`，再启动 PixelFlow `dev:test`，最后在同级 `content_frontend` 里启动 `yarn test -- --host 0.0.0.0 --port 5174`，由 content_frontend test 环境嵌入 `http://localhost:5273/agentfrontend/`。
 
 如果本机没有 corepack/pnpm，可以临时用 `npm install && npm run build`。不要直接运行裸 `tsc`，本地没有全局 `tsc` 时会报 `command not found`；应使用 `corepack pnpm build`、`pnpm build` 或 `npm run build` 这类包管理器脚本。
 
