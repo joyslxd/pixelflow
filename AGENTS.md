@@ -216,6 +216,7 @@ SmartPPT接口：
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset` 走原图片编辑 skill。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset`，不能掉回普通采集 Agent。
+- 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
 
 场景视频接口选择：

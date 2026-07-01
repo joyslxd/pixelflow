@@ -10,6 +10,7 @@ export interface SceneGlobalAssetReference extends Record<string, unknown> {
   source: "scene_global_asset";
   asset_id: string;
   asset_group: GlobalSceneAssetGroup;
+  scene_global_asset_action?: "edit" | "delete";
   name: string;
   source_image_url: string;
   url: string;
@@ -137,6 +138,17 @@ export function syncScenePackageMentionImageUrls<T extends ScenePackageRecord>(
   });
 }
 
+export function deleteGlobalSceneAssetReference<T extends GlobalSceneAssets, S extends ScenePackageRecord[]>(
+  globalAssets: T,
+  scenes: S,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; assetName?: string; sourceImageUrl?: string },
+): { global_assets: T; scene_packages: S } {
+  return {
+    global_assets: clearGlobalSceneAssetImage(globalAssets, input) as T,
+    scene_packages: removeSceneAssetReferences(scenes, input) as S,
+  };
+}
+
 export function collectSceneImageUrls(
   scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images" | "reference_asset_ids" | "shot_description">,
   globalAssets?: GlobalSceneAssets,
@@ -240,6 +252,96 @@ function replaceFirstUrl(record: Record<string, unknown>, key: string, editedIma
     image_url: editedImageUrl,
     url: editedImageUrl,
   };
+}
+
+function clearGlobalSceneAssetImage<T extends GlobalSceneAssets>(
+  globalAssets: T,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup },
+): T {
+  const rawGroupRecords = globalAssets[input.assetGroup];
+  const groupRecords: Array<Record<string, unknown>> = Array.isArray(rawGroupRecords) ? rawGroupRecords : [];
+  return {
+    ...globalAssets,
+    [input.assetGroup]: groupRecords.map((asset) => {
+      if (stringValue(asset.asset_id) !== input.assetId && stringValue(asset.id) !== input.assetId) return asset;
+      return clearAssetImageFields(asset);
+    }),
+  } as T;
+}
+
+function clearAssetImageFields(asset: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...asset };
+  for (const key of ["three_view_images", "images", "image_urls"]) {
+    if (Array.isArray(next[key])) next[key] = [];
+  }
+  for (const key of ["image_url", "url"]) {
+    if (typeof next[key] === "string") next[key] = "";
+  }
+  return next;
+}
+
+function removeSceneAssetReferences<T extends ScenePackageRecord[]>(
+  scenes: T,
+  input: { assetId: string; assetName?: string; sourceImageUrl?: string },
+): T {
+  return scenes.map((scene) => removeSceneAssetReference(scene, input)) as T;
+}
+
+function removeSceneAssetReference<T extends ScenePackageRecord>(
+  scene: T,
+  input: { assetId: string; assetName?: string; sourceImageUrl?: string },
+): T {
+  const nextReferenceAssetIds = stringArray(scene.reference_asset_ids).filter((assetId) => assetId !== input.assetId);
+  const nextImageUrls = stringArray(scene.image_urls).filter((url) => !input.sourceImageUrl || url !== input.sourceImageUrl);
+  const nextShotDescription = removeShotDescriptionAssetReference(scene.shot_description, input);
+  const changed =
+    nextReferenceAssetIds.length !== stringArray(scene.reference_asset_ids).length ||
+    nextImageUrls.length !== stringArray(scene.image_urls).length ||
+    nextShotDescription !== scene.shot_description;
+  if (!changed) return scene;
+  return {
+    ...scene,
+    reference_asset_ids: nextReferenceAssetIds,
+    image_urls: nextImageUrls,
+    shot_description: nextShotDescription,
+  };
+}
+
+function removeShotDescriptionAssetReference(
+  shotDescription: Record<string, unknown> | undefined,
+  input: { assetId: string; assetName?: string },
+): Record<string, unknown> | undefined {
+  if (!shotDescription || typeof shotDescription !== "object") return shotDescription;
+  const mentions = Array.isArray(shotDescription.mentions) ? shotDescription.mentions : [];
+  const nextMentions = mentions.filter((mention) => {
+    if (!mention || typeof mention !== "object") return true;
+    const record = mention as Record<string, unknown>;
+    const mentionAssetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
+    return mentionAssetId !== input.assetId;
+  });
+  const text = stringValue(shotDescription.text);
+  const nextText = text ? removeAssetMentionTokens(text, [input.assetName, input.assetId]) : text;
+  if (nextMentions.length === mentions.length && nextText === text) return shotDescription;
+  return {
+    ...shotDescription,
+    text: nextText,
+    mentions: nextMentions,
+  };
+}
+
+function removeAssetMentionTokens(text: string, tokens: Array<string | undefined>): string {
+  return tokens.filter((token): token is string => Boolean(token?.trim())).reduce((current, token) => {
+    const escaped = escapeRegExp(token.trim());
+    return current
+      .replace(new RegExp(`@${escaped}(?=\\s|[，。,.、；;：:！!？?）)】\\]}]|$)`, "g"), "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+([，。,.、；;：:！!？?）)】\]}])/g, "$1")
+      .trim();
+  }, text);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string): string[] {

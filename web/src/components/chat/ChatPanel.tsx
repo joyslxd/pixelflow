@@ -11,6 +11,7 @@ interface ChatPanelProps {
   onSubmit: (payload: AgentUserMessagePayload) => void;
   referencedMaterials?: Array<Record<string, unknown>>;
   onRemoveReferencedMaterial?: (key: string) => void;
+  composerPrefillRequest?: { id: string; content: string } | null;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -41,6 +42,7 @@ export function ChatPanel({
   onSubmit,
   referencedMaterials,
   onRemoveReferencedMaterial,
+  composerPrefillRequest,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -131,6 +133,7 @@ export function ChatPanel({
           onSubmit={onSubmit}
           referencedMaterials={referencedMaterials}
           onRemoveReferencedMaterial={onRemoveReferencedMaterial}
+          prefillRequest={composerPrefillRequest}
           busy={busy}
         />
       </div>

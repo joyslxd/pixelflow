@@ -168,6 +168,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 每段片段最少 4 秒，最多 15 秒。
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
 - 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。该流程走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`，成功后直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片编辑 prompt 处理，不重新走 intake。
+- 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
 

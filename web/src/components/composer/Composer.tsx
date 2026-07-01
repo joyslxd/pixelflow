@@ -7,11 +7,12 @@ interface ComposerProps {
   onSubmit?: (payload: AgentUserMessagePayload) => void;
   referencedMaterials?: Array<Record<string, unknown>>;
   onRemoveReferencedMaterial?: (key: string) => void;
+  prefillRequest?: { id: string; content: string } | null;
   busy?: boolean;
 }
 
 /** 极简对话输入框。参数不在这里填 —— 检测到视频生成意图后再弹参数面板。 */
-export function Composer({ onSubmit, referencedMaterials = [], onRemoveReferencedMaterial, busy }: ComposerProps) {
+export function Composer({ onSubmit, referencedMaterials = [], onRemoveReferencedMaterial, prefillRequest, busy }: ComposerProps) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -24,6 +25,12 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   useEffect(() => {
     if (referencedMaterials.length > 0) textareaRef.current?.focus();
   }, [referencedMaterials.length]);
+
+  useEffect(() => {
+    if (!prefillRequest) return;
+    setText(prefillRequest.content);
+    textareaRef.current?.focus();
+  }, [prefillRequest]);
 
   const submit = () => {
     if (!canSend) return;

@@ -32,6 +32,7 @@ import {
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
   collectSceneImageUrls,
+  deleteGlobalSceneAssetReference,
   durationMsForSubmit,
   inferTargetDurationMs,
   replaceGlobalSceneAssetImage,
@@ -52,6 +53,7 @@ const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
+const SCENE_GLOBAL_ASSET_DELETE_PROMPT = (assetName: string) => `删除分镜故事板中的内容「${assetName}」。请只删除对应内容，并保持其他内容不变。`;
 
 const PHASE_MSG: Record<string, string> = {
   intake: "正在理解商品与需求…",
@@ -298,6 +300,7 @@ function sceneGlobalAssetReferenceFromMaterials(materials: Array<Record<string, 
     source: "scene_global_asset",
     asset_id: assetId,
     asset_group: assetGroup,
+    scene_global_asset_action: material.scene_global_asset_action === "delete" ? "delete" : "edit",
     name: String(material.name || material.asset_name || assetId),
     source_image_url: sourceImageUrl,
     url: sourceImageUrl,
@@ -413,6 +416,35 @@ function normalizeRestoredMessageReferences(messages: ChatMessage[]): ChatMessag
   });
 }
 
+function restoreLatestVideoScenePackagesFromContext(
+  messages: ChatMessage[],
+  context: Partial<Record<string, unknown>>,
+): ChatMessage[] {
+  const globalAssets = context.global_assets;
+  const scenePackages = context.scene_packages;
+  if (!globalAssets || !Array.isArray(scenePackages)) return messages;
+  const latestIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages);
+  if (latestIndex < 0) return messages;
+  const messageIndex = messages.length - 1 - latestIndex;
+  return messages.map((message, index) => {
+    const videoScenePackages = message.artifact?.videoScenePackages;
+    if (index !== messageIndex || !message.artifact || !videoScenePackages) return message;
+    return {
+      ...message,
+      artifact: {
+        ...message.artifact,
+        videoScenePackages: {
+          ...videoScenePackages,
+          global_assets: globalAssets as typeof videoScenePackages.global_assets,
+          scene_packages: scenePackages as typeof videoScenePackages.scene_packages,
+        },
+      },
+    };
+  });
+}
+
 function normalizeMaterialStoryboardReferences(
   materials: Array<Record<string, unknown>> | undefined,
   latestStoryboardIdsByAsset: Map<string, string>,
@@ -444,6 +476,7 @@ export function WorkspacePage() {
   const [pendingFormValues, setPendingFormValues] = useState<Record<string, unknown>>({});
   const [pendingMaterials, setPendingMaterials] = useState<Array<Record<string, unknown>>>([]);
   const [referencedMaterials, setReferencedMaterials] = useState<SceneGlobalAssetReference[]>([]);
+  const [composerPrefillRequest, setComposerPrefillRequest] = useState<{ id: string; content: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
@@ -686,11 +719,21 @@ export function WorkspacePage() {
   };
 
   const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
-    const material = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    const material = selectedStoryboardMessageId ? { ...asset, scene_global_asset_action: "edit" as const, storyboard_message_id: selectedStoryboardMessageId } : { ...asset, scene_global_asset_action: "edit" as const };
     setReferencedMaterials((items) => {
       const next = items.filter((item) => item.asset_id !== material.asset_id);
       return [material, ...next].slice(0, 1);
     });
+  };
+
+  const handleDeleteGlobalAsset = (asset: SceneGlobalAssetReference) => {
+    const material = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    const deleteMaterial = { ...material, scene_global_asset_action: "delete" as const };
+    setReferencedMaterials((items) => {
+      const next = items.filter((item) => item.asset_id !== deleteMaterial.asset_id);
+      return [deleteMaterial, ...next].slice(0, 1);
+    });
+    setComposerPrefillRequest({ id: uid(), content: SCENE_GLOBAL_ASSET_DELETE_PROMPT(deleteMaterial.name) });
   };
 
   const handleRemoveReferencedMaterial = (key: string) => {
@@ -820,6 +863,60 @@ export function WorkspacePage() {
       pushAssistant(`全局素材图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
+    }
+    return true;
+  };
+
+  const handleDeleteReferencedGlobalAsset = async (
+    reference: SceneGlobalAssetReference,
+    targetConversationId: string,
+  ): Promise<boolean> => {
+    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
+    if (!storyboardMessage?.artifact?.videoScenePackages) {
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再删除。", targetConversationId);
+      return true;
+    }
+
+    const updated = deleteGlobalSceneAssetReference(
+      storyboardMessage.artifact.videoScenePackages.global_assets,
+      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
+      {
+        assetId: reference.asset_id,
+        assetGroup: reference.asset_group,
+        assetName: reference.name,
+        sourceImageUrl: reference.source_image_url,
+      },
+    );
+    const updatedPackages = {
+      ...storyboardMessage.artifact.videoScenePackages,
+      global_assets: updated.global_assets,
+      scene_packages: updated.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+    };
+
+    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
+    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+    if (isVisibleConversation(targetConversationId)) {
+      setSelectedStoryboardMessageId(storyboardMessage.id);
+      setCanvasOpen(true);
+    }
+    pushAssistant(`已在当前场景包中删除「${reference.name}」的素材引用，并保留空占位符。`, targetConversationId);
+
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: "scene_global_asset_deleted",
+          context: {
+            ...makeSnapshot(),
+            global_assets: updatedPackages.global_assets,
+            scene_packages: updatedPackages.scene_packages,
+            scene_global_asset_deleted: {
+              asset_id: reference.asset_id,
+              asset_group: reference.asset_group,
+              name: reference.name,
+            },
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
     }
     return true;
   };
@@ -1067,6 +1164,7 @@ export function WorkspacePage() {
     setPendingIntent("video");
     setPendingMaterials([]);
     setReferencedMaterials([]);
+    setComposerPrefillRequest(null);
     setBusy(false);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
@@ -1086,7 +1184,11 @@ export function WorkspacePage() {
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
-    applySnapshot({ ...snapshot, messages: normalizeRestoredMessageReferences(restoredConversationMessages(undefined, restoredMessages)) });
+    const contextMessages = restoreLatestVideoScenePackagesFromContext(
+      restoredConversationMessages(undefined, restoredMessages),
+      snapshot as Partial<Record<string, unknown>>,
+    );
+    applySnapshot({ ...snapshot, messages: normalizeRestoredMessageReferences(contextMessages) });
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -1196,7 +1298,11 @@ export function WorkspacePage() {
     }
     const sceneGlobalAssetReference = sceneGlobalAssetReferenceFromMaterials(materials);
     if (sceneGlobalAssetReference) {
-      await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+      if (sceneGlobalAssetReference.scene_global_asset_action === "delete") {
+        await handleDeleteReferencedGlobalAsset(sceneGlobalAssetReference, activeConversation);
+      } else {
+        await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+      }
       return;
     }
     const pendingPptOutlineRevision = pptOutlineRevisionArtifactRef.current;
@@ -3045,6 +3151,7 @@ export function WorkspacePage() {
         onSubmit={handleSend}
         referencedMaterials={referencedMaterials}
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
+        composerPrefillRequest={composerPrefillRequest}
         busy={busy || dialogOpen}
         onSelectDirection={handleSelectDirection}
         onApprovePlan={handleApprovePlan}
@@ -3092,6 +3199,7 @@ export function WorkspacePage() {
           msg={selectedStoryboardMessage}
           onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
           onReferenceGlobalAsset={handleReferenceGlobalAsset}
+          onDeleteGlobalAsset={handleDeleteGlobalAsset}
           onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
           onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
           onClose={() => {

@@ -1,4 +1,4 @@
-import { ArrowLeft, Box, Download, ImageIcon, MapPin, Sparkles, UserRound, X } from "lucide-react";
+import { ArrowLeft, Box, Download, ImageIcon, MapPin, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import type { ChatMessage } from "@/lib/chat";
 import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
@@ -17,6 +17,7 @@ interface StoryboardPanelProps {
   msg: ChatMessage;
   onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void;
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
+  onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
   onClose?: () => void;
@@ -106,6 +107,7 @@ export function StoryboardPanel({
   msg,
   onUpdateVideoScenePackage,
   onReferenceGlobalAsset,
+  onDeleteGlobalAsset,
   onGenerateVideo,
   onRetrySceneAssets,
   onClose,
@@ -177,6 +179,12 @@ export function StoryboardPanel({
   const referencePreviewAsset = () => {
     if (!previewAsset) return;
     onReferenceGlobalAsset?.(previewAsset);
+    setPreviewAsset(null);
+  };
+
+  const deletePreviewAsset = () => {
+    if (!previewAsset) return;
+    onDeleteGlobalAsset?.({ ...previewAsset, scene_global_asset_action: "delete" });
     setPreviewAsset(null);
   };
 
@@ -361,6 +369,15 @@ export function StoryboardPanel({
                     aria-label="引用素材"
                   >
                     <ImageIcon size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={deletePreviewAsset}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    title="删除素材"
+                    aria-label="删除素材"
+                  >
+                    <Trash2 size={17} />
                   </button>
                   <a
                     href={previewAsset.source_image_url}
