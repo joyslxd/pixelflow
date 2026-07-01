@@ -188,6 +188,7 @@ SmartPPT接口：
 - content-app 返回 HTTP 402 或“额度不足/余额不足/没有有效额度/充值”等文案时，必须暂停当前流程并返回可恢复提示。
 - 图片轮询超时按配置默认 10 分钟，视频轮询默认 1 小时，视频分析默认 15 分钟，SmartPPT 每一步默认 2 小时。
 - 第三方异常可按 `borgrise.max_retries` 重试；业务失败不要无意义重试。
+- `/api/task/{taskId}/status` 状态轮询如果遇到 SSL EOF、握手超时等可恢复网络错误，`run_generation.poll_task()` 会在单次请求重试后继续轮询最多 3 次；401、402、额度不足和非重试业务错误仍立即返回。
 
 ## 图片流程要点
 
@@ -198,6 +199,8 @@ SmartPPT接口：
 - 前端图片尺寸只展示 `1:1`、`16:9`、`9:16`、`自动适配`。
 - `自动适配` 会由 `image_prepare.py` 根据用途和目标映射到供应商支持比例。
 - 用户明确要求多张图片时，`requested_output_count` 会进入 `intake_context`，最终 `image/generate` 按数量循环调用，默认 1 张，最多 10 张。
+- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时直接调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate`，最终走 `/api/picture/image_edit` 并结束流程。
+- 图片编辑必须有原图；如果用户没有上传图片，前端会提示“请上传需要编辑的图片”，并把 `pendingImageEditRequest` 存入对话 context，用户上传后可从同一对话继续执行。
 - 有附件时，附件 URL 会进入 `materials`，图片编辑/参考图/多图融合会根据素材数量和用户语义选择接口。
 
 ## 视频流程要点
@@ -229,7 +232,7 @@ SmartPPT接口：
 
 PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大纲 -> 用户确认/修改大纲 -> 页面JSON -> 页面图片 -> PPT文件。
 
-- PPT 表单字段在 `intake/forms.py`，包含 `ppt_topic`、`ppt_style`、`attachments`。
+- PPT 表单字段在 `intake/forms.py`，包含 `ppt_topic`、`ppt_style`、`attachments`；`ppt_style` 预设含“自定义”，用户选中后前端展示文本框，并把输入内容作为 `ppt_style` 传给 SmartPPT。
 - PPT 附件只允许 Word、Excel、PDF，前端上传仍走 content-app `/api/upload`。
 - PPT 行业补充复用 `resolve_industry_profile()`：先查项目内垂类模板，未命中就调用当前项目 LLM `deepseek-v4-pro` 生成同结构行业画像，LLM 失败时才使用通用电商兜底。
 - SmartPPT 的大纲、更新大纲、转 JSON、生成页面图、生成文件都经 `/agent/flows/ppt/*/start` 启动异步 job，再由前端轮询 `/agent/flows/ppt/jobs/{job_id}`。

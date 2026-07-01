@@ -11,6 +11,7 @@ import {
   type ConversationMessageResponse,
   type CreativeDirectionResponse,
   type ImageAssetEditResponse,
+  type IntakeIntentResponse,
   type PlanMarkdownResponse,
   type PptFileResult,
   type PptImagesResult,
@@ -152,6 +153,7 @@ interface WorkspaceSnapshot {
   taskId: string;
   messages?: ChatMessage[];
   pendingMaterials: Array<Record<string, unknown>>;
+  pendingImageEditRequest?: PendingImageEditRequest | null;
   canvas: CanvasState;
   canvasOpen: boolean;
   briefConfirmed: boolean;
@@ -172,6 +174,14 @@ interface PendingDialogContext {
   coreMessage: string;
   materials: Array<Record<string, unknown>>;
   intakeContext?: Record<string, unknown>;
+}
+
+interface PendingImageEditRequest {
+  conversationId: string;
+  prompt: string;
+  formValues: Record<string, unknown>;
+  intakeContext: Record<string, unknown>;
+  materials: Array<Record<string, unknown>>;
 }
 
 function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
@@ -225,6 +235,58 @@ function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefi
     }
   }
   return merged;
+}
+
+function materialUrl(item: Record<string, unknown>): string {
+  return String(item.url || item.image_url || item.imageUrl || item.download_url || item.downloadUrl || item.path || item.src || "");
+}
+
+function isImageMaterial(item: Record<string, unknown>): boolean {
+  const url = materialUrl(item);
+  const kind = String(item.type || item.kind || item.media_type || item.mediaType || item.mime_type || item.mimeType || "").toLowerCase();
+  return Boolean(
+    url
+    && (
+      kind === ""
+      || kind === "image"
+      || kind === "picture"
+      || kind.startsWith("image")
+      || /\.(png|jpe?g|webp)(?:$|\?)/i.test(url)
+    ),
+  );
+}
+
+function hasImageMaterial(materials: Array<Record<string, unknown>>): boolean {
+  return materials.some(isImageMaterial);
+}
+
+function recordTextValue(record: Record<string, unknown> | undefined, key: string): string {
+  const value = record?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function isImageEditIntake(intake: IntakeIntentResponse, prompt: string): boolean {
+  if (intake.intent !== "image") return false;
+  const operation = (
+    recordTextValue(intake.intake_context, "image_operation")
+    || recordTextValue(intake.values, "image_operation")
+    || recordTextValue(intake.values, "operation")
+  ).toLowerCase();
+  if (operation === "image_edit" || operation === "edit") return true;
+  return /编辑|修改|改图|修图|换背景|替换背景|去水印|抠图|image_edit|edit/i.test(prompt);
+}
+
+function directImageEditFormValues(prompt: string, values: Record<string, unknown>, intakeContext: Record<string, unknown>): Record<string, unknown> {
+  const requestedCount = intakeContext.requested_output_count || values.image_count || 1;
+  return {
+    image_goal: String(values.image_goal || intakeContext.creation_goal || prompt || "图片编辑"),
+    image_type: String(values.image_type || "其他"),
+    image_usage: String(values.image_usage || "社媒发布"),
+    image_style: String(values.image_style || "真实摄影"),
+    image_size: String(values.image_size || "自动适配"),
+    image_count: requestedCount,
+    image_operation: "image_edit",
+  };
 }
 
 function numericValue(value: unknown): number | null {
@@ -508,6 +570,7 @@ export function WorkspacePage() {
   const announcedPhasesRef = useRef(new Set<string>());
   const processedArtifactIdsRef = useRef(new Set<string>());
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
+  const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const planRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const pptOutlineRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
@@ -921,6 +984,116 @@ export function WorkspacePage() {
     return true;
   };
 
+  const executeDirectImageEdit = async (request: PendingImageEditRequest): Promise<void> => {
+    const targetConversationId = request.conversationId;
+    const flowMaterials = request.materials || [];
+    const formValues = directImageEditFormValues(request.prompt, request.formValues, request.intakeContext);
+    const intakeContext = {
+      ...request.intakeContext,
+      image_operation: "image_edit",
+      requested_output_count: request.intakeContext.requested_output_count || formValues.image_count || 1,
+    };
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("已识别为图片编辑需求，正在直接调用图片编辑接口生成结果…", targetConversationId);
+    try {
+      const imagePrepare = await api.prepareImageGeneration({
+        form_values: formValues,
+        plan_markdown: "",
+        selected_direction: {
+          title: "图片编辑",
+          description: request.prompt,
+          operation: "image_edit",
+        },
+        materials: flowMaterials,
+        intake_context: intakeContext,
+      });
+      if (!imagePrepare.ok) {
+        pendingImageEditRequestRef.current = { ...request, formValues, intakeContext };
+        pushArtifact("图片编辑需要先补充原图，请上传后我会继续。", {
+          type: "image_prepare",
+          title: "图片编辑准备",
+          description: imagePrepare.message,
+          actionLabel: "查看",
+          imagePrepare,
+          intent: "image",
+          formValues,
+          intakeContext,
+          materials: flowMaterials,
+          selectedDirection: {
+            direction_id: "image_edit",
+            title: "图片编辑",
+            description: request.prompt,
+            recommended: true,
+            tags: ["图片编辑"],
+            data: { operation: "image_edit" },
+          },
+        }, targetConversationId);
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: "image_edit_waiting_source_image",
+            context: {
+              ...makeSnapshot(),
+              intent: "image",
+              pendingImageEditRequest: pendingImageEditRequestRef.current,
+              pending_image_edit_request: pendingImageEditRequestRef.current,
+              image_prepare: imagePrepare,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+        return;
+      }
+      pushAssistant(`正在调用 ${imagePrepare.endpoint} 编辑图片…`, targetConversationId);
+      const imageResult = await api.generateImage({
+        method: imagePrepare.method,
+        prompt: imagePrepare.prompt,
+        negative_prompt: imagePrepare.negative_prompt,
+        params: imagePrepare.params,
+      });
+      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
+      pushArtifact(imageResult.ok ? "图片编辑完成，流程已结束。" : "图片编辑失败，请查看错误信息。", {
+        type: "image_result",
+        title: "图片编辑结果",
+        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片编辑额度不足。") : imageResultSummary(imageResult),
+        actionLabel: "查看",
+        imageResult,
+        imagePrepare,
+        intent: "image",
+        formValues,
+        intakeContext,
+        materials: flowMaterials,
+        selectedDirection: {
+          direction_id: "image_edit",
+          title: "图片编辑",
+          description: request.prompt,
+          recommended: true,
+          tags: ["图片编辑"],
+          data: { operation: "image_edit" },
+        },
+      }, targetConversationId);
+      pendingImageEditRequestRef.current = imageResult.ok ? null : { ...request, formValues, intakeContext, materials: flowMaterials };
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: imageResult.ok ? "image_edit_done" : imageQuotaInsufficient ? "image_edit_quota_paused" : "image_edit_failed",
+          context: {
+            ...makeSnapshot(),
+            intent: "image",
+            image_edit_done: imageResult.ok,
+            intake_context: intakeContext,
+            materials: flowMaterials,
+            image_prepare: imagePrepare,
+            image_result: imageResult,
+            pendingImageEditRequest: pendingImageEditRequestRef.current,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    } catch (err) {
+      pendingImageEditRequestRef.current = { ...request, formValues, intakeContext, materials: flowMaterials };
+      pushAssistant(`图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
   const pushDirectionsArtifact = (
     directions: CreativeDirectionResponse[],
     context: {
@@ -1124,7 +1297,12 @@ export function WorkspacePage() {
 
   const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
     if (Array.isArray(snapshot.messages)) setMessages(snapshot.messages);
-    if (Array.isArray(snapshot.pendingMaterials)) setPendingMaterials(snapshot.pendingMaterials);
+    setPendingMaterials(Array.isArray(snapshot.pendingMaterials) ? snapshot.pendingMaterials : []);
+    setPendingFormValues({});
+    setPendingCore("");
+    pendingDialogContextRef.current = null;
+    pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
+    setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
     if (typeof snapshot.briefConfirmed === "boolean") {
@@ -1143,6 +1321,8 @@ export function WorkspacePage() {
   const makeSnapshot = (): WorkspaceSnapshot => ({
     taskId: currentTaskId,
     pendingMaterials,
+    pendingImageEditRequest:
+      pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
     canvas,
     canvasOpen,
     briefConfirmed,
@@ -1162,6 +1342,7 @@ export function WorkspacePage() {
     setDialogOpen(false);
     setPendingCore("");
     setPendingIntent("video");
+    setPendingFormValues({});
     setPendingMaterials([]);
     setReferencedMaterials([]);
     setComposerPrefillRequest(null);
@@ -1172,6 +1353,7 @@ export function WorkspacePage() {
     announcedPhasesRef.current = new Set();
     processedArtifactIdsRef.current = new Set();
     pendingDialogContextRef.current = null;
+    pendingImageEditRequestRef.current = null;
     planRevisionArtifactRef.current = null;
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
@@ -1181,6 +1363,8 @@ export function WorkspacePage() {
 
   const applyConversation = async (detail: ConversationDetailResponse) => {
     const snapshot = (detail.conversation.context || {}) as Partial<WorkspaceSnapshot>;
+    const pendingImageEditRequest =
+      snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
@@ -1188,7 +1372,11 @@ export function WorkspacePage() {
       restoredConversationMessages(undefined, restoredMessages),
       snapshot as Partial<Record<string, unknown>>,
     );
-    applySnapshot({ ...snapshot, messages: normalizeRestoredMessageReferences(contextMessages) });
+    applySnapshot({
+      ...snapshot,
+      pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
+      messages: normalizeRestoredMessageReferences(contextMessages),
+    });
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -1303,6 +1491,22 @@ export function WorkspacePage() {
       } else {
         await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
       }
+      return;
+    }
+    if (pendingImageEditRequestRef.current?.conversationId === activeConversation) {
+      const pendingRequest = pendingImageEditRequestRef.current;
+      const flowMaterials = mergeMaterials(pendingRequest.materials, materials);
+      const nextPrompt = text.trim() || pendingRequest.prompt;
+      if (!hasImageMaterial(flowMaterials)) {
+        pushAssistant("我还没有找到需要编辑的原图，请上传需要编辑的图片后再提交。", activeConversation);
+        return;
+      }
+      pendingImageEditRequestRef.current = null;
+      await executeDirectImageEdit({
+        ...pendingRequest,
+        prompt: nextPrompt,
+        materials: flowMaterials,
+      });
       return;
     }
     const pendingPptOutlineRevision = pptOutlineRevisionArtifactRef.current;
@@ -1633,6 +1837,39 @@ export function WorkspacePage() {
             .catch(() => {});
         }
         if (isVisibleConversation(activeConversation)) setDialogOpen(true);
+        return;
+      }
+      if (intake.intent === "image" && isImageEditIntake(intake, text)) {
+        const imageEditRequest: PendingImageEditRequest = {
+          conversationId: activeConversation,
+          prompt: text,
+          formValues: intake.values || {},
+          intakeContext: intake.intake_context || {},
+          materials,
+        };
+        if (!hasImageMaterial(materials)) {
+          pendingImageEditRequestRef.current = imageEditRequest;
+          pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会直接调用图片编辑接口生成结果。", activeConversation);
+          if (activeConversation) {
+            void api
+              .updateConversation(activeConversation, {
+                last_phase: "image_edit_waiting_source_image",
+                context: {
+                  ...makeSnapshot(),
+                  intent: "image",
+                  materials,
+                  intake_intent: intake,
+                  intake_context: intake.intake_context,
+                  pendingImageEditRequest: imageEditRequest,
+                  pending_image_edit_request: imageEditRequest,
+                } as unknown as Record<string, unknown>,
+              })
+              .catch(() => {});
+          }
+          return;
+        }
+        pendingImageEditRequestRef.current = null;
+        await executeDirectImageEdit(imageEditRequest);
         return;
       }
       if (isCreationIntent(intake.intent)) {

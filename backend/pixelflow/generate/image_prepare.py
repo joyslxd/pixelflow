@@ -70,7 +70,7 @@ def prepare_image_generation(
 ) -> ImageGenerationPrepareResult:
     context = intake_context or {}
     image_materials = _image_materials(materials or [])
-    method = _decide_method(form_values, plan_markdown, selected_direction, image_materials, revision_feedback)
+    method = _decide_method(form_values, plan_markdown, selected_direction, image_materials, revision_feedback, context)
     endpoint = ENDPOINT_BY_METHOD[method]
     prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback, context)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
@@ -120,6 +120,24 @@ def prepare_image_generation(
         )
     if method == "image_edit":
         width, height = _ratio_pair(ratio)
+        if not reference_urls:
+            return ImageGenerationPrepareResult(
+                ok=False,
+                method=method,
+                endpoint=endpoint,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                params={
+                    "image_url": "",
+                    "prompt": prompt,
+                    "model": IMAGE_EDIT_MODEL,
+                    "imageSize": IMAGE_EDIT_QUALITY,
+                    "width": width,
+                    "height": height,
+                    "max_images": image_count,
+                },
+                message="图片编辑需要先上传一张需要修改的原图。",
+            )
         return ImageGenerationPrepareResult(
             ok=True,
             method=method,
@@ -180,7 +198,11 @@ def _decide_method(
     selected_direction: dict[str, Any],
     image_materials: list[dict[str, Any]],
     revision_feedback: str | None,
+    intake_context: dict[str, Any] | None = None,
 ) -> ImageMethod:
+    forced = _normalize_method(form_values.get("image_operation") or (intake_context or {}).get("image_operation"))
+    if forced:
+        return forced
     plan_text = _text(plan_markdown)
     operation_text = " ".join(
         _text(value)
@@ -207,6 +229,32 @@ def _decide_method(
     if image_materials:
         return "multi_reference_image_generation"
     return "text_to_image"
+
+
+def _normalize_method(value: Any) -> ImageMethod | None:
+    normalized = _text(value).strip().lower().replace("-", "_")
+    aliases: dict[str, ImageMethod] = {
+        "text_to_image": "text_to_image",
+        "text2image": "text_to_image",
+        "txt2img": "text_to_image",
+        "文生图": "text_to_image",
+        "image_edit": "image_edit",
+        "edit": "image_edit",
+        "图像编辑": "image_edit",
+        "图片编辑": "image_edit",
+        "改图": "image_edit",
+        "修图": "image_edit",
+        "reference_image": "multi_reference_image_generation",
+        "reference": "multi_reference_image_generation",
+        "multi_reference_image_generation": "multi_reference_image_generation",
+        "参考图": "multi_reference_image_generation",
+        "参考生成": "multi_reference_image_generation",
+        "multi_image_fusion": "multi_image_fusion",
+        "fusion": "multi_image_fusion",
+        "融合": "multi_image_fusion",
+        "多图融合": "multi_image_fusion",
+    }
+    return aliases.get(normalized)
 
 
 def _build_prompt(

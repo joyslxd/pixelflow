@@ -38,6 +38,22 @@ def test_poll_returns_error_on_lowercase_failed(monkeypatch):
     assert result.get("message") == "boom"
 
 
+def test_poll_recovers_from_transient_status_query_error(monkeypatch):
+    _patch(
+        monkeypatch,
+        [
+            {"data": {"status": "processing"}},
+            {"error": True, "message": "<urlopen error EOF occurred in violation of protocol>"},
+            {"data": {"status": "completed", "result": {"image_url": ["https://x/recovered.png"]}}},
+        ],
+    )
+
+    result = run_generation.poll_task("t1")
+
+    assert not result.get("error")
+    assert result["data"]["result"]["image_url"] == ["https://x/recovered.png"]
+
+
 def test_video_and_image_generation_use_separate_poll_timeouts(monkeypatch):
     """视频生成和图片生成都走 /task/status，但等待上限必须按业务类型区分。"""
     captured_defaults: list[int | None] = []

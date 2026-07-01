@@ -40,7 +40,7 @@ def test_ppt_form_schema_requires_topic_style_and_office_attachments():
     assert schema.output_type == "ppt"
     assert [field.id for field in schema.fields] == ["ppt_topic", "ppt_style", "attachments"]
     assert schema.fields[0].placeholder == "例如：2026年度营销策略汇报"
-    assert schema.fields[1].options == ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自由发挥"]
+    assert schema.fields[1].options == ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自定义"]
     assert schema.fields[2].type == "file_list"
     assert schema.fields[2].accept == [".doc", ".docx", ".xls", ".xlsx", ".pdf"]
     assert schema.fields[2].multiple is True

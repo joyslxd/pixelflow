@@ -94,6 +94,44 @@ test("ppt intent opens a ppt requirement form instead of image video planning", 
   assert.match(workspaceSource, /api\.startPptSummaryJob/, "PPT form confirmation must start SmartPPT summary job");
 });
 
+test("ppt form supports custom style and does not expose free-form as a fixed option", () => {
+  const match = genParamsDialogSource.match(/const PPT_STYLES = \[(.*?)\];/s);
+  assert.ok(match, "PPT_STYLES must be declared");
+  assert.equal(match[1].includes("自定义"), true);
+  assert.equal(match[1].includes("自由发挥"), false);
+  assert.match(genParamsDialogSource, /pptStyleMode/, "PPT dialog must track selected style mode separately from submitted style");
+  assert.match(genParamsDialogSource, /pptCustomStyle/, "PPT dialog must expose a custom style input state");
+  assert.match(genParamsDialogSource, /placeholder="输入自定义 PPT 风格"/, "custom style input should guide the user");
+});
+
+test("restoring or creating a conversation clears stale pending dialog attachments", () => {
+  const applyStart = workspaceSource.indexOf("const applySnapshot = ");
+  const applyEnd = workspaceSource.indexOf("const makeSnapshot", applyStart);
+  const resetStart = workspaceSource.indexOf("const resetWorkspace = ");
+  const resetEnd = workspaceSource.indexOf("const applyConversation", resetStart);
+  assert.notEqual(applyStart, -1, "applySnapshot must exist");
+  assert.notEqual(applyEnd, -1, "makeSnapshot must follow applySnapshot");
+  assert.notEqual(resetStart, -1, "resetWorkspace must exist");
+  assert.notEqual(resetEnd, -1, "applyConversation must follow resetWorkspace");
+  const applySource = workspaceSource.slice(applyStart, applyEnd);
+  const resetSource = workspaceSource.slice(resetStart, resetEnd);
+  assert.match(applySource, /setPendingMaterials\(Array\.isArray\(snapshot\.pendingMaterials\) \? snapshot\.pendingMaterials : \[\]\)/, "restore must replace missing pending materials with an empty list");
+  assert.match(applySource, /setPendingFormValues\(\{\}\)/, "restore must clear stale pending form values");
+  assert.match(applySource, /pendingDialogContextRef\.current = null/, "restore must clear stale pending dialog context");
+  assert.match(resetSource, /setPendingFormValues\(\{\}\)/, "new conversation reset must clear pending form values");
+});
+
+test("image edit intake bypasses the normal directions and plan flow", () => {
+  const source = handleSendSource();
+  assert.match(workspaceSource, /pendingImageEditRequestRef/, "Workspace must store an image-edit request while waiting for upload");
+  assert.match(workspaceSource, /function isImageEditIntake/, "Workspace must detect image-edit intake metadata");
+  assert.match(workspaceSource, /const executeDirectImageEdit = async/, "Workspace must have a direct image-edit executor");
+  assert.match(source, /if \(pendingImageEditRequestRef\.current\?\.conversationId === activeConversation\)/, "next user upload must resume pending image edit");
+  assert.match(source, /if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)/, "image-edit intake must branch before the generic image form");
+  assert.match(source, /请上传需要编辑的图片/, "missing source image should prompt the user to upload");
+  assert.match(source, /executeDirectImageEdit/, "image-edit branch must call the direct executor");
+});
+
 test("ppt image pages stream partial status into the existing artifact card", () => {
   assert.match(apiSource, /type PptJobStatusCallback/, "PPT job polling must expose status callbacks");
   assert.match(apiSource, /startPptImagesJob:[\s\S]*onStatus\?: PptJobStatusCallback/, "PPT image job must accept a status callback");

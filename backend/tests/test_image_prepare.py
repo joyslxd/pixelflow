@@ -186,6 +186,36 @@ def test_prepare_image_generation_uses_image_edit_when_plan_mentions_image_edit(
     assert result.params["image_url"] == "https://x/source.png"
 
 
+def test_prepare_image_generation_blocks_image_edit_without_source_image():
+    result = prepare_image_generation(
+        {"image_goal": "把上传图片背景改成蓝色摄影棚", "image_operation": "image_edit", "image_style": "真实摄影", "image_size": "自动适配"},
+        "",
+        {},
+        materials=[],
+        intake_context={"image_operation": "image_edit", "requested_output_count": 2},
+    )
+
+    assert result.ok is False
+    assert result.method == "image_edit"
+    assert result.endpoint == "/api/picture/image_edit"
+    assert "需要先上传" in result.message
+
+
+def test_prepare_image_generation_honors_image_edit_operation_from_intake_context():
+    result = prepare_image_generation(
+        {"image_goal": "把上传图片背景改成蓝色摄影棚", "image_style": "真实摄影", "image_size": "自动适配"},
+        "",
+        {},
+        materials=[{"type": "image", "url": "https://x/source.png"}],
+        intake_context={"image_operation": "image_edit", "requested_output_count": 2},
+    )
+
+    assert result.ok is True
+    assert result.method == "image_edit"
+    assert result.params["image_url"] == "https://x/source.png"
+    assert result.params["max_images"] == 2
+
+
 def test_prepare_image_generation_prepares_multi_image_fusion():
     result = prepare_image_generation(
         {"image_goal": "把两张图融合成一张", "image_style": "真实摄影", "image_size": "4:5 信息流图"},
