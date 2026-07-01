@@ -189,6 +189,26 @@ export interface ImageAssetEditResponse {
   raw: Record<string, unknown>;
 }
 
+export interface ImageModelParamConfig {
+  id?: number;
+  modelType: string;
+  modelCategoryType?: string;
+  paramConfig?: {
+    sizeList?: string[];
+    aspectRatioList?: string[];
+    imageNumList?: string[];
+    modelGenerateTypeList?: string[];
+    uploadFileTypeList?: string[];
+  };
+  isEnabled?: boolean;
+}
+
+export interface ImageEditModelSelection {
+  model: string;
+  ratio: string;
+  size: string;
+}
+
 export interface UploadedAttachment extends Record<string, unknown> {
   name: string;
   filename: string;
@@ -483,6 +503,22 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
+async function contentAppReq<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    ...authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    ...(init?.headers as Record<string, string>),
+  };
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res, path));
+  }
+  const raw = (await res.json()) as { success?: boolean; message?: string; data?: T };
+  if (raw.success === false) {
+    throw new ApiError(400, raw.message || `${path} 调用失败`);
+  }
+  return (raw.data ?? raw) as T;
+}
+
 async function responseErrorMessage(res: Response, path: string): Promise<string> {
   const text = await res.text().catch(() => "");
   const title = text.match(/<title>(.*?)<\/title>/is)?.[1] || text.match(/<h1>(.*?)<\/h1>/is)?.[1];
@@ -623,6 +659,9 @@ export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
   uploadAttachment: (file: File) => uploadFileToContentApp(file),
+
+  listImageGenerateModelConfigs: () =>
+    contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
 
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),

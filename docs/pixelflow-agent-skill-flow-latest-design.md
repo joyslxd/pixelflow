@@ -130,6 +130,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 | --- | --- | --- | --- |
 | ImageEndpointDecisionSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 根据素材和语义选择图片接口 |
 | ImagePromptBuildSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 组装图片 prompt、ratio、数量、素材 URL |
+| ImageModelConfigLookupSkill | `web/src/lib/api.ts` | `/api/modelParamConfig/listByCategory/image_generate` | 图片编辑前查询可选模型、尺寸和清晰度 |
 | TextToImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/text_to_image` | 文生图 |
 | ReferenceImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/multi_reference_image_generation` | 参考图生成组图 |
 | ImageEditSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/image_edit` | 图片编辑 |
@@ -329,16 +330,28 @@ sequenceDiagram
   U->>FE: "输入图片需求和附件"
   FE->>IA: "POST /agent/flows/intake/analyze"
   IA-->>FE: "intent=image + intake_context"
-  FE->>IA: "POST /agent/flows/intake/directions"
-  IA-->>FE: "3 个创意方向"
-  FE->>PA: "POST /agent/flows/planning/plan"
-  PA-->>FE: "plan.md"
-  FE->>IMG: "POST /agent/flows/image/prepare"
-  IMG-->>FE: "method + endpoint + params"
-  FE->>IMG: "POST /agent/flows/image/generate"
-  IMG->>BG: "调用对应图片接口，可循环多次"
-  BG-->>IMG: "图片 URL"
-  IMG-->>FE: "图片结果"
+  alt "image_operation=image_edit"
+    FE->>BG: "GET /api/modelParamConfig/listByCategory/image_generate"
+    BG-->>FE: "模型 + 支持尺寸/清晰度"
+    FE-->>U: "确认图片编辑模型和参数"
+    FE->>IMG: "POST /agent/flows/image/prepare"
+    IMG-->>FE: "image_edit params"
+    FE->>IMG: "POST /agent/flows/image/generate"
+    IMG->>BG: "POST /api/picture/image_edit"
+    BG-->>IMG: "图片 URL"
+    IMG-->>FE: "图片编辑结果"
+  else "普通图片生成"
+    FE->>IA: "POST /agent/flows/intake/directions"
+    IA-->>FE: "3 个创意方向"
+    FE->>PA: "POST /agent/flows/planning/plan"
+    PA-->>FE: "plan.md"
+    FE->>IMG: "POST /agent/flows/image/prepare"
+    IMG-->>FE: "method + endpoint + params"
+    FE->>IMG: "POST /agent/flows/image/generate"
+    IMG->>BG: "调用对应图片接口，可循环多次"
+    BG-->>IMG: "图片 URL"
+    IMG-->>FE: "图片结果"
+  end
 ```
 
 接口选择逻辑：
@@ -352,8 +365,10 @@ sequenceDiagram
 
 补充规则：
 
-- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：有原图时调用 `/agent/flows/image/prepare` 和 `/agent/flows/image/generate`，不再弹普通图片表单、不生成创意方向、不生成 plan.md。
+- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：不再弹普通图片表单、不生成创意方向、不生成 plan.md。
 - 如果识别到图片编辑但没有原图，前端提示用户上传需要编辑的图片，并把 `pendingImageEditRequest` 写入对话 context；用户从同一对话上传图片后继续调用 `/api/picture/image_edit`。
+- 如果已有原图，前端先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 查询图片模型配置，并展示“模型/尺寸/清晰度”确认卡；默认选 `gpt-image-2`。
+- 采集 Agent 会从用户 prompt 抽取图片编辑尺寸 `image_size` 和清晰度 `image_quality`。如果用户明确指定但所选模型不支持，前端提示并禁止提交；如果未指定，则根据所选模型自动选择一组可用尺寸和清晰度。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
 
 ## 8. 视频流程

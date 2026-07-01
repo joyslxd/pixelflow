@@ -149,6 +149,7 @@ flowchart TD
 | 图片编辑 | `/api/picture/image_edit` |
 | 参考图生成 | `/api/picture/multi_reference_image_generation` |
 | 多图融合 | `/api/picture/multi_image_fusion` |
+| 图片模型参数配置 | `/api/modelParamConfig/listByCategory/image_generate` |
 
 视频：
 
@@ -196,7 +197,8 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 每个视频场景片段最多 9 张参考图。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
-- 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过表单、创意方向和 plan.md，直接复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。缺原图时会把等待上传状态写入对话，用户上传图片后可继续。
+- 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过普通图片表单、创意方向和 plan.md。缺原图时会把等待上传状态写入对话，用户上传图片后可继续；有原图时先调用 `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。
+- 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并禁止提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
 - 图片、视频、PPT 的需求表单弹出后，用户点击右上角 `X` 视为取消当前流程，前端会清空 pending 表单上下文并保存 `form_cancelled`。
 - PPT 表单的 `PPT风格` 支持“自定义”，选中后显示文本框，最终把用户输入的风格词作为 `ppt_style` 提交给 SmartPPT。

@@ -216,6 +216,30 @@ def test_prepare_image_generation_honors_image_edit_operation_from_intake_contex
     assert result.params["max_images"] == 2
 
 
+def test_prepare_image_generation_honors_selected_image_edit_model_ratio_and_quality():
+    result = prepare_image_generation(
+        {
+            "image_goal": "把上传图片背景改成蓝色摄影棚",
+            "image_style": "真实摄影",
+            "image_operation": "image_edit",
+            "image_model": "seeddream-5.0",
+            "image_size": "16:9",
+            "image_quality": "1080p",
+        },
+        "",
+        {},
+        materials=[{"type": "image", "url": "https://x/source.png"}],
+        intake_context={"image_operation": "image_edit", "requested_output_count": 1},
+    )
+
+    assert result.ok is True
+    assert result.method == "image_edit"
+    assert result.params["model"] == "seeddream-5.0"
+    assert result.params["imageSize"] == "1080p"
+    assert result.params["width"] == 16
+    assert result.params["height"] == 9
+
+
 def test_prepare_image_generation_prepares_multi_image_fusion():
     result = prepare_image_generation(
         {"image_goal": "把两张图融合成一张", "image_style": "真实摄影", "image_size": "4:5 信息流图"},

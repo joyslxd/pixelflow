@@ -1,10 +1,10 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, Sparkles } from "lucide-react";
+import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
-import type { CreativeDirectionResponse, PptPageImage } from "@/lib/api";
+import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 
 interface MessageBubbleProps {
@@ -16,6 +16,7 @@ interface MessageBubbleProps {
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
+  onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
@@ -37,6 +38,10 @@ interface MessageBubbleProps {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function uniqueStringArray(value: unknown): string[] {
+  return Array.from(new Set(stringArray(value).map((item) => item.trim()).filter(Boolean)));
 }
 
 function stringValue(value: unknown): string {
@@ -138,6 +143,37 @@ function pptPagesReady(msg: ChatMessage): boolean {
   return pages.length > 0 && pages.every((page) => page.status === "completed" && Boolean(page.image_url));
 }
 
+function imageModelType(config: ImageModelParamConfig): string {
+  const record = config as unknown as Record<string, unknown>;
+  return stringValue(record.modelType) || stringValue(record.model_type) || stringValue(record.model);
+}
+
+function imageModelParamConfig(config?: ImageModelParamConfig): Record<string, unknown> {
+  const record = (config || {}) as unknown as Record<string, unknown>;
+  const raw = record.paramConfig || record.param_config || {};
+  return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+}
+
+function imageModelOptions(config?: ImageModelParamConfig): { ratios: string[]; sizes: string[] } {
+  const params = imageModelParamConfig(config);
+  return {
+    ratios: uniqueStringArray(params.aspectRatioList || params.aspect_ratio_list).length > 0
+      ? uniqueStringArray(params.aspectRatioList || params.aspect_ratio_list)
+      : ["1:1", "9:16", "16:9"],
+    sizes: uniqueStringArray(params.sizeList || params.size_list).length > 0
+      ? uniqueStringArray(params.sizeList || params.size_list)
+      : ["4K"],
+  };
+}
+
+function requestedImageEditParam(msg: ChatMessage, key: "ratio" | "size"): string {
+  const requested = msg.artifact?.imageEditRequestedParams || {};
+  if (key === "ratio") {
+    return stringValue(requested.ratio) || stringValue(msg.artifact?.formValues?.image_size) || stringValue(msg.artifact?.intakeContext?.image_size);
+  }
+  return stringValue(requested.size) || stringValue(msg.artifact?.formValues?.image_quality) || stringValue(msg.artifact?.intakeContext?.image_quality);
+}
+
 export function MessageBubble({
   msg,
   isLatestVideoScenePackage,
@@ -147,6 +183,7 @@ export function MessageBubble({
   onApprovePlan,
   onRevisePlan,
   onGenerateImage,
+  onConfirmImageEditOptions,
   onAcceptImageResult,
   onReviseImageResult,
   onGenerateVideoFromScenePackages,
@@ -168,6 +205,10 @@ export function MessageBubble({
   const isUser = msg.role === "user";
   const planPreview = msg.artifact?.plan?.plan_markdown || "";
   const imagePrepareParams = msg.artifact?.imagePrepare?.params ? JSON.stringify(msg.artifact.imagePrepare.params, null, 2) : "";
+  const imageEditModelConfigs = msg.artifact?.imageEditModelConfigs || [];
+  const imageEditModelNames = imageEditModelConfigs.map(imageModelType).filter(Boolean);
+  const requestedImageEditRatio = requestedImageEditParam(msg, "ratio");
+  const requestedImageEditSize = requestedImageEditParam(msg, "size");
   const scenePackages = msg.artifact?.videoScenePackages?.scene_packages || [];
   const videoAnalysisStoryboards = records(msg.artifact?.videoAnalysis?.storyboards);
   const messageMaterials = records(msg.materials);
@@ -186,6 +227,9 @@ export function MessageBubble({
   const allPptPagesReady = pptPagesReady(msg);
   const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
   const [loadingDots, setLoadingDots] = useState(0);
+  const [selectedImageEditModel, setSelectedImageEditModel] = useState("");
+  const [selectedImageEditRatio, setSelectedImageEditRatio] = useState("");
+  const [selectedImageEditSize, setSelectedImageEditSize] = useState("");
 
   useEffect(() => {
     if (!hasRunningPptPage) {
@@ -197,6 +241,28 @@ export function MessageBubble({
     }, 450);
     return () => window.clearInterval(timer);
   }, [hasRunningPptPage]);
+
+  useEffect(() => {
+    if (msg.artifact?.type !== "image_edit_options") return;
+    const preferredModel = imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2";
+    const preferredConfig = imageEditModelConfigs.find((config) => imageModelType(config) === preferredModel) || imageEditModelConfigs[0];
+    const options = imageModelOptions(preferredConfig);
+    setSelectedImageEditModel(preferredModel);
+    setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
+    setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
+  }, [msg.id]);
+
+  const currentImageEditModel = selectedImageEditModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
+  const currentImageEditConfig = imageEditModelConfigs.find((config) => imageModelType(config) === currentImageEditModel) || imageEditModelConfigs[0];
+  const currentImageEditOptions = imageModelOptions(currentImageEditConfig);
+  const imageEditRatioSupported = !requestedImageEditRatio || currentImageEditOptions.ratios.includes(requestedImageEditRatio);
+  const imageEditSizeSupported = !requestedImageEditSize || currentImageEditOptions.sizes.includes(requestedImageEditSize);
+  const effectiveImageEditRatio = requestedImageEditRatio || selectedImageEditRatio || currentImageEditOptions.ratios[0] || "1:1";
+  const effectiveImageEditSize = requestedImageEditSize || selectedImageEditSize || currentImageEditOptions.sizes[0] || "4K";
+  const imageEditUnsupportedReason = [
+    requestedImageEditRatio && !imageEditRatioSupported ? `当前模型不支持尺寸 ${requestedImageEditRatio}` : "",
+    requestedImageEditSize && !imageEditSizeSupported ? `当前模型不支持清晰度 ${requestedImageEditSize}` : "",
+  ].filter(Boolean).join("，");
 
   const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
     if (!actionsDisabled) return;
@@ -335,6 +401,120 @@ export function MessageBubble({
                 继续修改
               </button>
             </div>
+          </div>
+        ) : msg.artifact?.type === "image_edit_options" && msg.artifact.imageEditModelConfigs ? (
+          <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <SlidersHorizontal size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+              </span>
+            </div>
+            <label className="block space-y-1.5 text-[12px] text-ink-soft">
+              <span className="font-medium text-ink">模型</span>
+              <select
+                value={currentImageEditModel}
+                onChange={(event) => {
+                  const nextModel = event.target.value;
+                  const nextConfig = imageEditModelConfigs.find((config) => imageModelType(config) === nextModel);
+                  const options = imageModelOptions(nextConfig);
+                  setSelectedImageEditModel(nextModel);
+                  setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
+                  setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
+                }}
+                className="h-10 w-full rounded-xl border border-line bg-white px-3 text-[13px] text-ink outline-none focus:border-accent"
+              >
+                {(imageEditModelNames.length > 0 ? imageEditModelNames : ["gpt-image-2"]).map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="font-medium text-ink">尺寸</span>
+                  {requestedImageEditRatio ? <span className="text-ink-soft">需求指定 {requestedImageEditRatio}</span> : <span className="text-ink-soft">自动选择可用尺寸</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {currentImageEditOptions.ratios.map((ratio) => {
+                    const active = effectiveImageEditRatio === ratio;
+                    const locked = Boolean(requestedImageEditRatio && requestedImageEditRatio !== ratio);
+                    return (
+                      <button
+                        key={ratio}
+                        type="button"
+                        disabled={locked}
+                        onClick={() => setSelectedImageEditRatio(ratio)}
+                        className={cn(
+                          "rounded-full border px-3 py-1.5 text-[12px] font-medium",
+                          active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
+                          locked && "cursor-not-allowed opacity-45 hover:bg-white",
+                        )}
+                      >
+                        {ratio}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="font-medium text-ink">清晰度</span>
+                  {requestedImageEditSize ? <span className="text-ink-soft">需求指定 {requestedImageEditSize}</span> : <span className="text-ink-soft">自动选择可用清晰度</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {currentImageEditOptions.sizes.map((size) => {
+                    const active = effectiveImageEditSize === size;
+                    const locked = Boolean(requestedImageEditSize && requestedImageEditSize !== size);
+                    return (
+                      <button
+                        key={size}
+                        type="button"
+                        disabled={locked}
+                        onClick={() => setSelectedImageEditSize(size)}
+                        className={cn(
+                          "rounded-full border px-3 py-1.5 text-[12px] font-medium",
+                          active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
+                          locked && "cursor-not-allowed opacity-45 hover:bg-white",
+                        )}
+                      >
+                        {size}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            {imageEditUnsupportedReason ? (
+              <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] leading-relaxed text-ink">
+                {imageEditUnsupportedReason}，请切换支持该参数的模型后再提交。
+              </div>
+            ) : (
+              <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] leading-relaxed text-ink-soft">
+                将使用 {currentImageEditModel}，尺寸 {effectiveImageEditRatio}，清晰度 {effectiveImageEditSize}。
+              </div>
+            )}
+            <button
+              type="button"
+              disabled={Boolean(imageEditUnsupportedReason)}
+              onClick={() => onConfirmImageEditOptions?.(msg, {
+                model: currentImageEditModel,
+                ratio: effectiveImageEditRatio,
+                size: effectiveImageEditSize,
+              })}
+              className={cn(
+                "flex w-full items-center justify-center gap-1.5 rounded-xl py-2.5 text-[13px] font-medium",
+                imageEditUnsupportedReason ? "cursor-not-allowed bg-canvas text-ink-soft" : "bg-brand text-white hover:opacity-90",
+              )}
+            >
+              <Sparkles size={15} />
+              确认并编辑图片
+            </button>
           </div>
         ) : msg.artifact?.type === "image_prepare" && msg.artifact.imagePrepare ? (
           <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">

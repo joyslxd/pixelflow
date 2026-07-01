@@ -86,6 +86,7 @@ async def recognize_intent_with_llm(
         if image_operation:
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
+        _copy_image_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
@@ -111,6 +112,7 @@ async def recognize_intent_with_llm(
         if image_operation:
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
+        _copy_image_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
@@ -195,7 +197,8 @@ def _intent_prompt(text: str) -> str:
 product_info, product_category, target_audience, conversion_goal。
 
 如果是 image_generation，可抽取 values 字段：
-image_goal, image_type, image_usage, image_style, image_size, image_count。
+image_goal, image_type, image_usage, image_style, image_size, image_quality, image_count。
+其中 image_size 表示画面比例/尺寸，如 1:1、9:16、16:9；image_quality 表示清晰度，如 720p、1080p、2K、4K。
 image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
 同时必须抽取顶层 image_operation：
 - text_to_image: 纯文生图，没有参考图和编辑诉求。
@@ -285,6 +288,8 @@ def _filter_form_values(intent: IntakeIntent, values: Any) -> dict[str, Any]:
         return {}
     schema = get_form_schema(intent)
     allowed = {field.id for field in schema.fields}
+    if intent == "image":
+        allowed.add("image_quality")
     filtered = {key: value for key, value in values.items() if key in allowed and _has(value)}
     if intent == "image":
         image_count = _normalize_image_count(values.get("image_count"))
@@ -416,12 +421,21 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
         return {**values, "ppt_topic": topic} if topic else values
     if intent != "image":
         return values
-    if _normalize_image_count(values.get("image_count")):
-        return values
+    enriched = dict(values)
+    if not enriched.get("image_size"):
+        image_size = _extract_image_ratio(text)
+        if image_size:
+            enriched["image_size"] = image_size
+    if not enriched.get("image_quality"):
+        image_quality = _extract_image_quality(text)
+        if image_quality:
+            enriched["image_quality"] = image_quality
+    if _normalize_image_count(enriched.get("image_count")):
+        return enriched
     image_count = _extract_image_count(text)
     if not image_count:
-        return values
-    return {**values, "image_count": image_count}
+        return enriched
+    return {**enriched, "image_count": image_count}
 
 
 def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any], values: dict[str, Any], text: str) -> str:
@@ -514,6 +528,38 @@ def _extract_image_count(text: str) -> int | None:
     if cn_short_match:
         return _normalize_image_count(cn_short_match.group(1))
     return None
+
+
+def _extract_image_ratio(text: str) -> str:
+    match = re.search(r"\b(1\s*:\s*1|9\s*:\s*16|16\s*:\s*9)\b", text, flags=re.IGNORECASE)
+    if match:
+        left, right = match.group(1).split(":")
+        return f"{int(left.strip())}:{int(right.strip())}"
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ["竖版", "竖图", "竖屏", "9:16"]):
+        return "9:16"
+    if any(keyword in lowered for keyword in ["横版", "横图", "横屏", "横幅", "16:9"]):
+        return "16:9"
+    if any(keyword in lowered for keyword in ["正方形", "方图", "1:1"]):
+        return "1:1"
+    return ""
+
+
+def _extract_image_quality(text: str) -> str:
+    normalized = text.strip()
+    match = re.search(r"(?<![A-Za-z0-9])(720p|1080p|2k|4k)(?![A-Za-z0-9])", normalized, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper().replace("P", "p") if match.group(1).lower().endswith("p") else match.group(1).upper()
+    if "高清" in normalized:
+        return "1080p"
+    return ""
+
+
+def _copy_image_param_context(values: dict[str, Any], context_dict: dict[str, Any]) -> None:
+    for key in ("image_size", "image_quality", "image_model"):
+        value = values.get(key)
+        if _has(value):
+            context_dict[key] = value
 
 
 def _normalize_image_count(value: Any) -> int | None:

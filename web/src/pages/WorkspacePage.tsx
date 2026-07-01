@@ -10,7 +10,9 @@ import {
   type ConversationDetailResponse,
   type ConversationMessageResponse,
   type CreativeDirectionResponse,
+  type ImageEditModelSelection,
   type ImageAssetEditResponse,
+  type ImageModelParamConfig,
   type IntakeIntentResponse,
   type PlanMarkdownResponse,
   type PptFileResult,
@@ -182,7 +184,18 @@ interface PendingImageEditRequest {
   formValues: Record<string, unknown>;
   intakeContext: Record<string, unknown>;
   materials: Array<Record<string, unknown>>;
+  selection?: ImageEditModelSelection;
 }
+
+const DEFAULT_IMAGE_EDIT_MODEL_CONFIG: ImageModelParamConfig = {
+  modelType: "gpt-image-2",
+  modelCategoryType: "image_generate",
+  paramConfig: {
+    sizeList: ["4K"],
+    aspectRatioList: ["1:1", "9:16", "16:9"],
+  },
+  isEnabled: true,
+};
 
 function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
   if (form.intent === "video") {
@@ -276,14 +289,24 @@ function isImageEditIntake(intake: IntakeIntentResponse, prompt: string): boolea
   return /编辑|修改|改图|修图|换背景|替换背景|去水印|抠图|image_edit|edit/i.test(prompt);
 }
 
-function directImageEditFormValues(prompt: string, values: Record<string, unknown>, intakeContext: Record<string, unknown>): Record<string, unknown> {
+function directImageEditFormValues(
+  prompt: string,
+  values: Record<string, unknown>,
+  intakeContext: Record<string, unknown>,
+  selection?: ImageEditModelSelection,
+): Record<string, unknown> {
   const requestedCount = intakeContext.requested_output_count || values.image_count || 1;
+  const imageSize = selection?.ratio || values.image_size || intakeContext.image_size || "自动适配";
+  const imageQuality = selection?.size || values.image_quality || intakeContext.image_quality || "4K";
+  const imageModel = selection?.model || values.image_model || intakeContext.image_model || "gpt-image-2";
   return {
     image_goal: String(values.image_goal || intakeContext.creation_goal || prompt || "图片编辑"),
     image_type: String(values.image_type || "其他"),
     image_usage: String(values.image_usage || "社媒发布"),
     image_style: String(values.image_style || "真实摄影"),
-    image_size: String(values.image_size || "自动适配"),
+    image_size: String(imageSize),
+    image_quality: String(imageQuality),
+    image_model: String(imageModel),
     image_count: requestedCount,
     image_operation: "image_edit",
   };
@@ -985,13 +1008,83 @@ export function WorkspacePage() {
     return true;
   };
 
+  const showImageEditOptions = async (request: PendingImageEditRequest): Promise<void> => {
+    const targetConversationId = request.conversationId;
+    const flowMaterials = request.materials || [];
+    if (!hasImageMaterial(flowMaterials)) {
+      pendingImageEditRequestRef.current = request;
+      pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会先让你确认图片编辑模型和参数。", targetConversationId);
+      if (targetConversationId) {
+        void api
+          .updateConversation(targetConversationId, {
+            last_phase: "image_edit_waiting_source_image",
+            context: {
+              ...makeSnapshot(),
+              intent: "image",
+              pendingImageEditRequest: pendingImageEditRequestRef.current,
+              pending_image_edit_request: pendingImageEditRequestRef.current,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("已识别为图片编辑需求，正在读取可用图片模型和参数配置…", targetConversationId);
+    let modelConfigs: ImageModelParamConfig[] = [];
+    try {
+      modelConfigs = await api.listImageGenerateModelConfigs();
+    } catch (err) {
+      modelConfigs = [DEFAULT_IMAGE_EDIT_MODEL_CONFIG];
+      pushAssistant(`图片模型配置读取失败，已使用默认模型 gpt-image-2。${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+    const normalizedConfigs = modelConfigs.length > 0 ? modelConfigs : [DEFAULT_IMAGE_EDIT_MODEL_CONFIG];
+    pendingImageEditRequestRef.current = request;
+    pushArtifact("图片编辑模型和参数已准备好，请确认后开始编辑。", {
+      type: "image_edit_options",
+      title: "图片编辑参数确认",
+      description: "选择图片编辑模型。若需求里明确了尺寸或清晰度，所选模型必须支持后才能提交。",
+      actionLabel: "确认",
+      intent: "image",
+      formValues: request.formValues,
+      intakeContext: request.intakeContext,
+      materials: flowMaterials,
+      imageEditRequest: request as unknown as Record<string, unknown>,
+      imageEditModelConfigs: normalizedConfigs,
+      imageEditRequestedParams: {
+        ratio: request.selection?.ratio || request.formValues.image_size || request.intakeContext.image_size || "",
+        size: request.selection?.size || request.formValues.image_quality || request.intakeContext.image_quality || "",
+      },
+    }, targetConversationId);
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: "image_edit_model_pending",
+          context: {
+            ...makeSnapshot(),
+            intent: "image",
+            materials: flowMaterials,
+            pendingImageEditRequest: pendingImageEditRequestRef.current,
+            pending_image_edit_request: pendingImageEditRequestRef.current,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
+  };
+
   const executeDirectImageEdit = async (request: PendingImageEditRequest): Promise<void> => {
     const targetConversationId = request.conversationId;
     const flowMaterials = request.materials || [];
-    const formValues = directImageEditFormValues(request.prompt, request.formValues, request.intakeContext);
+    const formValues = directImageEditFormValues(request.prompt, request.formValues, request.intakeContext, request.selection);
     const intakeContext = {
       ...request.intakeContext,
       image_operation: "image_edit",
+      image_model: request.selection?.model || request.intakeContext.image_model || formValues.image_model,
+      image_size: request.selection?.ratio || request.intakeContext.image_size || formValues.image_size,
+      image_quality: request.selection?.size || request.intakeContext.image_quality || formValues.image_quality,
       requested_output_count: request.intakeContext.requested_output_count || formValues.image_count || 1,
     };
     setBusyForConversation(targetConversationId, true);
@@ -1093,6 +1186,25 @@ export function WorkspacePage() {
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
+  };
+
+  const handleConfirmImageEditOptions = async (msg: ChatMessage, selection: ImageEditModelSelection) => {
+    const artifact = msg.artifact;
+    if (artifact?.type !== "image_edit_options" || !artifact.imageEditRequest) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    const storedRequest = artifact.imageEditRequest as Partial<PendingImageEditRequest>;
+    const request: PendingImageEditRequest = {
+      conversationId: targetConversationId,
+      prompt: String(storedRequest.prompt || artifact.coreMessage || msg.content || ""),
+      formValues: (storedRequest.formValues || artifact.formValues || {}) as Record<string, unknown>,
+      intakeContext: (storedRequest.intakeContext || artifact.intakeContext || {}) as Record<string, unknown>,
+      materials: (storedRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
+      selection,
+    };
+    pendingImageEditRequestRef.current = null;
+    await executeDirectImageEdit(request);
   };
 
   const pushDirectionsArtifact = (
@@ -1508,8 +1620,7 @@ export function WorkspacePage() {
         pushAssistant("我还没有找到需要编辑的原图，请上传需要编辑的图片后再提交。", activeConversation);
         return;
       }
-      pendingImageEditRequestRef.current = null;
-      await executeDirectImageEdit({
+      await showImageEditOptions({
         ...pendingRequest,
         prompt: nextPrompt,
         materials: flowMaterials,
@@ -1856,7 +1967,7 @@ export function WorkspacePage() {
         };
         if (!hasImageMaterial(materials)) {
           pendingImageEditRequestRef.current = imageEditRequest;
-          pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会直接调用图片编辑接口生成结果。", activeConversation);
+          pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会先让你确认图片编辑模型和参数。", activeConversation);
           if (activeConversation) {
             void api
               .updateConversation(activeConversation, {
@@ -1875,8 +1986,7 @@ export function WorkspacePage() {
           }
           return;
         }
-        pendingImageEditRequestRef.current = null;
-        await executeDirectImageEdit(imageEditRequest);
+        await showImageEditOptions(imageEditRequest);
         return;
       }
       if (isCreationIntent(intake.intent)) {
@@ -3401,6 +3511,7 @@ export function WorkspacePage() {
         onApprovePlan={handleApprovePlan}
         onRevisePlan={handleRevisePlan}
         onGenerateImage={handleGenerateImage}
+        onConfirmImageEditOptions={handleConfirmImageEditOptions}
         onAcceptImageResult={handleAcceptImageResult}
         onReviseImageResult={handleReviseImageResult}
         onGenerateVideoFromScenePackages={handleGenerateVideoFromScenePackages}
