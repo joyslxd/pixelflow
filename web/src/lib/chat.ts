@@ -66,6 +66,7 @@ export interface ChatMessage {
     sceneAssetFailures?: Array<Record<string, unknown>>;
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;
+    videoScenePackageEditedSceneIds?: string[];
     videoFlawAnalysis?: VideoFlawAnalysisResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;

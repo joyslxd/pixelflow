@@ -166,6 +166,9 @@ interface WorkspaceSnapshot {
   lastEventId: number;
   announcedPhases: string[];
   briefReadyShown: boolean;
+  global_assets?: PrepareScenePackagesResponse["global_assets"];
+  scene_packages?: PrepareScenePackagesResponse["scene_packages"];
+  video_scene_package_edited_scene_ids?: string[];
 }
 
 type ChatArtifact = NonNullable<ChatMessage["artifact"]>;
@@ -593,10 +596,13 @@ function restoreLatestVideoScenePackagesFromContext(
 ): ChatMessage[] {
   const globalAssets = context.global_assets;
   const scenePackages = context.scene_packages;
+  const editedSceneIds = Array.isArray(context.video_scene_package_edited_scene_ids)
+    ? context.video_scene_package_edited_scene_ids.map((item) => String(item)).filter(Boolean)
+    : undefined;
   if (!globalAssets || !Array.isArray(scenePackages)) return messages;
   const latestIndex = [...messages]
     .reverse()
-    .findIndex((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages);
+    .findIndex((message) => Boolean(message.artifact?.videoScenePackages));
   if (latestIndex < 0) return messages;
   const messageIndex = messages.length - 1 - latestIndex;
   return messages.map((message, index) => {
@@ -611,6 +617,7 @@ function restoreLatestVideoScenePackagesFromContext(
           global_assets: globalAssets as typeof videoScenePackages.global_assets,
           scene_packages: scenePackages as typeof videoScenePackages.scene_packages,
         },
+        videoScenePackageEditedSceneIds: editedSceneIds || message.artifact.videoScenePackageEditedSceneIds,
       },
     };
   });
@@ -856,24 +863,47 @@ export function WorkspacePage() {
   const updateVideoScenePackagesInMessage = (
     messageId: string,
     updater: (scenePackages: ScenePackageRecord[]) => ScenePackageRecord[],
+    editedSceneId?: string,
   ) => {
+    let targetConversationId = "";
+    let updatedPackages: PrepareScenePackagesResponse | undefined;
+    let editedSceneIdsForContext: string[] = [];
     setMessages((items) =>
       items.map((message) => {
         const artifact = message.artifact;
         const videoScenePackages = artifact?.videoScenePackages;
         if (message.id !== messageId || !artifact || !videoScenePackages) return message;
+        targetConversationId = messageConversationId(message, conversationIdRef.current);
+        const editedSceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
+        if (editedSceneId) editedSceneIds.add(editedSceneId);
+        const nextScenePackages = updater(videoScenePackages.scene_packages as ScenePackageRecord[]) as typeof videoScenePackages.scene_packages;
+        editedSceneIdsForContext = Array.from(editedSceneIds);
+        updatedPackages = {
+          ...videoScenePackages,
+          scene_packages: nextScenePackages,
+        };
         return {
           ...message,
           artifact: {
             ...artifact,
-            videoScenePackages: {
-              ...videoScenePackages,
-              scene_packages: updater(videoScenePackages.scene_packages as ScenePackageRecord[]) as typeof videoScenePackages.scene_packages,
-            },
+            videoScenePackageEditedSceneIds: editedSceneIdsForContext,
+            videoScenePackages: updatedPackages,
           },
         };
       }),
     );
+    if (targetConversationId && updatedPackages) {
+      void api
+        .updateConversation(targetConversationId, {
+          context: {
+            ...makeSnapshot(),
+            global_assets: updatedPackages.global_assets,
+            scene_packages: updatedPackages.scene_packages,
+            video_scene_package_edited_scene_ids: editedSceneIdsForContext,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
   };
 
   const updateVideoScenePackageArtifactInMessage = (
@@ -930,7 +960,7 @@ export function WorkspacePage() {
   };
 
   const handleUpdateVideoScenePackage = (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => {
-    updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageField(scenePackages, sceneId, patch));
+    updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageField(scenePackages, sceneId, patch), sceneId);
   };
 
   const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
@@ -1508,8 +1538,13 @@ export function WorkspacePage() {
     await persistPendingVideoJob(null, targetConversationId, lastPhase, extraContext);
   };
 
-  const sceneVideoRequestFromPackages = (videoScenePackages: PrepareScenePackagesResponse): SceneVideosJobRequest => ({
-    scenes: videoScenePackages.scene_packages.map((scene) => ({
+  const sceneVideoRequestFromPackages = (
+    videoScenePackages: PrepareScenePackagesResponse,
+    sceneIds?: Set<string>,
+  ): SceneVideosJobRequest => ({
+    scenes: videoScenePackages.scene_packages
+      .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
+      .map((scene) => ({
       scene_id: scene.scene_id,
       scene_index: scene.scene_index,
       duration_ms: durationMsForSubmit(scene.duration_ms),
@@ -1658,6 +1693,7 @@ export function WorkspacePage() {
         description: regenerated.message || "受影响场景重生成失败，请查看失败场景。",
         actionLabel: "查看",
         videoScenePackages: artifact.videoScenePackages,
+        videoScenePackageEditedSceneIds: artifact.videoScenePackageEditedSceneIds || pendingVideoJob.affected_scene_ids || [],
         generatedSceneVideos: regenerated,
         mergedVideo: artifact.mergedVideo,
         intent: "video",
@@ -1706,6 +1742,7 @@ export function WorkspacePage() {
       videoScenePackages: artifact.videoScenePackages,
       generatedSceneVideos,
       mergedVideo,
+      videoScenePackageEditedSceneIds: [],
       intent: "video",
       formValues: artifact.formValues,
       materials: artifact.materials || [],
@@ -3551,26 +3588,46 @@ export function WorkspacePage() {
     const videoScenePackages = artifact.videoScenePackages;
     if (!videoScenePackages?.ok || videoScenePackages.scene_packages.length === 0) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const dirtySceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
+    const isFinalStoryboardRegeneration = artifact.type === "video_result" && Boolean(artifact.mergedVideo?.ok && artifact.generatedSceneVideos?.scene_videos.length);
+    if (isFinalStoryboardRegeneration && dirtySceneIds.size === 0) {
+      pushAssistant("当前分镜没有检测到修改内容，无需重新生成视频。", targetConversationId);
+      return;
+    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant("场景包已确认，正在生成场景视频…", targetConversationId);
+    pushAssistant(isFinalStoryboardRegeneration ? `已保存分镜修改，正在重生成 ${dirtySceneIds.size} 个已修改分镜视频…` : "场景包已确认，正在生成场景视频…", targetConversationId);
     try {
-      const request = sceneVideoRequestFromPackages(videoScenePackages);
+      const request = isFinalStoryboardRegeneration
+        ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds)
+        : sceneVideoRequestFromPackages(videoScenePackages);
       const started = await api.startSceneVideosJob(request);
-      const pendingVideoJob: PendingVideoJob = {
-        job_id: started.job_id,
-        conversation_id: targetConversationId,
-        source_message_id: msg.id,
-        kind: "scene_generation",
-        started_at: new Date().toISOString(),
-        request,
-        artifact,
-      };
-      await persistPendingVideoJob(pendingVideoJob, targetConversationId, "video_generation_running", {
+      const pendingVideoJob: PendingVideoJob = isFinalStoryboardRegeneration
+        ? {
+            job_id: started.job_id,
+            conversation_id: targetConversationId,
+            source_message_id: msg.id,
+            kind: "scene_regeneration",
+            started_at: new Date().toISOString(),
+            request,
+            artifact: { ...artifact, videoScenePackageEditedSceneIds: Array.from(dirtySceneIds) },
+            affected_scene_ids: Array.from(dirtySceneIds),
+          }
+        : {
+            job_id: started.job_id,
+            conversation_id: targetConversationId,
+            source_message_id: msg.id,
+            kind: "scene_generation",
+            started_at: new Date().toISOString(),
+            request,
+            artifact,
+          };
+      await persistPendingVideoJob(pendingVideoJob, targetConversationId, isFinalStoryboardRegeneration ? "video_regeneration_running" : "video_generation_running", {
         global_assets: videoScenePackages.global_assets,
         intake_context: artifact.intakeContext,
         scene_packages: videoScenePackages.scene_packages,
+        affected_scene_ids: isFinalStoryboardRegeneration ? Array.from(dirtySceneIds) : undefined,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);
     } catch (err) {
@@ -3783,7 +3840,7 @@ export function WorkspacePage() {
   };
 
   const selectedStoryboardMessage = selectedStoryboardMessageId
-    ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.type === "video_scene_packages")
+    ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.videoScenePackages)
     : undefined;
 
   return (
@@ -3820,7 +3877,7 @@ export function WorkspacePage() {
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
-          if (msg.artifact.type === "video_scene_packages") {
+          if (msg.artifact.type === "video_scene_packages" || (msg.artifact.type === "video_result" && msg.artifact.videoScenePackages)) {
             setSelectedStoryboardMessageId(msg.id);
             return;
           }

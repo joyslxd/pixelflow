@@ -363,3 +363,19 @@ test("video revision regeneration also uses recoverable scene video jobs", () =>
   assert.match(source, /affected_scene_ids:\s*Array\.from\(affectedSceneIds\)/, "video revision pending job must preserve affected scene ids");
   assert.equal(source.includes("api.generateSceneVideos"), false, "video revision must not use the start+poll convenience wrapper");
 });
+
+test("final storyboard edits regenerate only dirty scene videos before re-merge", () => {
+  const source = handleGenerateVideoFromScenePackagesSource();
+  assert.match(source, /videoScenePackageEditedSceneIds/, "final storyboard edits must track dirty scene ids");
+  assert.match(source, /new Set\(artifact\.videoScenePackageEditedSceneIds/, "dirty scene ids should drive the regeneration subset");
+  assert.match(source, /kind:\s*"scene_regeneration"/, "confirmed final storyboard edits must use recoverable scene regeneration jobs");
+  assert.match(source, /affected_scene_ids:\s*Array\.from\(dirtySceneIds\)/, "pending regeneration jobs must persist the dirty scene ids");
+  assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*dirtySceneIds\)/, "request builder must receive only dirty scenes for final storyboard edits");
+  assert.match(workspaceSource, /regeneratedByScene\.get\(scene\.scene_id\) \|\| previousByScene\.get\(scene\.scene_id\)/, "regeneration completion must reuse unchanged scene videos");
+});
+
+test("final storyboard edits persist and restore the latest scene package context", () => {
+  assert.match(workspaceSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
+  assert.match(workspaceSource, /findIndex\(\(message\) => Boolean\(message\.artifact\?\.videoScenePackages\)\)/, "restored context must target the latest message with scene packages");
+  assert.match(workspaceSource, /api\s*\.\s*updateConversation\(targetConversationId,[\s\S]*global_assets:[\s\S]*scene_packages:[\s\S]*video_scene_package_edited_scene_ids/, "scene package edits must update conversation context");
+});

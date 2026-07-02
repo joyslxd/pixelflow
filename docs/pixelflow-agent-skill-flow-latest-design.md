@@ -404,6 +404,11 @@ sequenceDiagram
   VA->>BG: "按 scene_index 合并"
   BG-->>VA: "merged_video_url"
   VA-->>FE: "合并视频 + 场景视频"
+  U->>FE: "查看分镜并修改部分分镜"
+  FE->>VA: "仅 dirty scenes generate-scenes/start"
+  VA-->>FE: "新分镜视频 + 复用旧分镜视频"
+  FE->>VA: "merge"
+  VA-->>FE: "新版合并视频"
 ```
 
 场景视频接口选择：
@@ -417,6 +422,13 @@ sequenceDiagram
 | 无参考素材 | `text_to_video` |
 
 如果 mode 是 `image_to_video` 但图片不足，或 `two_image_to_video` 但图片少于 2 张，后端会降级到 `reference_mode_video`。
+
+最终视频结果后的分镜修改：
+
+- `video_result` 卡片展示“无意见，结束 / 查看分镜 / 提出修改意见”。
+- 点击“查看分镜”复用 `StoryboardPanel`，但右侧镜头预览优先播放 `generatedSceneVideos.scene_videos` 中对应分镜视频；没有视频时才展示参考图。
+- 用户修改故事线、镜头描述、旁白或 @参考图时，前端把对应 `scene_id` 写入 `videoScenePackageEditedSceneIds`。
+- 再次点击“确认并生成视频”时，只把 `videoScenePackageEditedSceneIds` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`；生成完成后用新分镜视频覆盖旧分镜视频，未修改分镜直接复用旧视频，再调用 `/agent/flows/video/merge` 生成新版最终视频。
 
 ## 9. 视频修改循环
 
