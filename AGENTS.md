@@ -227,6 +227,7 @@ SmartPPT接口：
 - 如果片段显式给了 `generation_mode`，以后端传入为准。
 - 否则 `pixelflow_video.py` 根据图片、视频、音频素材和提示词选择 `text_to_video`、`image_to_video`、`two_image_to_video`、`reference_mode_video`、`edit_video` 或 `extend_video`。
 - 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞。
+- 场景视频生成和视频修改重生成启动后，前端必须把 `job_id`、原始请求、来源 artifact 和 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时只继续查询 `/agent/flows/video/generate-scenes/jobs/{job_id}`，不能重新调用 `/start`，避免重复生成和重复计费。
 
 ## PPT流程要点
 
@@ -250,6 +251,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - 最近对话默认 5 条，继续下拉按 cursor 分页；SQL store 按 `created_at desc, conversation_id desc` 排序。
 - 前端切换对话后，异步回调必须写回原来的 `conversation_id`，不能写到当前可见对话。
 - 进入历史对话时应恢复 `context`，允许从原先的表单、plan、场景包、额度不足暂停点继续。
+- 进入历史对话时如果发现 `pendingVideoJob` / `pending_video_job`，应恢复并轮询已有视频 job；如果 job 404 或过期，只提示用户手动重新生成，不自动重启任务。
 - 当前对话中任意阶段正在处理时，所有历史消息里的操作按钮都必须禁用；处理完成后只允许最新可操作 artifact 的按钮继续，旧 artifact 只能作为历史预览。失败或额度暂停时，最新可恢复 artifact 的重试按钮保留可用。
 
 ## 鉴权与安全
@@ -437,6 +439,7 @@ corepack pnpm build
 重点检查：
 
 - 异步回调必须带原 `conversation_id`。
+- 视频场景生成 pending job 必须保存在 conversation context，恢复历史对话后只能轮询已有 `job_id`，不能重复启动 `/generate-scenes/start`。
 - 新建对话不能继承旧对话消息或 context。
 - 历史消息顺序按 `created_at asc, message_id asc` 展示。
 - 最近对话列表按创建时间倒序分页。

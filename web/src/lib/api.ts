@@ -754,6 +754,23 @@ export const api = {
     model?: string | null;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
 
+  startSceneVideosJob: (body: {
+    scenes: SceneGenerationPayload[];
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+    sound?: string;
+  }) =>
+    req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getSceneVideosJob: (jobId: string) =>
+    req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`),
+
+  pollSceneVideoJob,
+
   generateSceneVideos: async (body: {
     scenes: SceneGenerationPayload[];
     ratio?: string;
@@ -761,10 +778,7 @@ export const api = {
     model?: string | null;
     sound?: string;
   }) => {
-    const started = await req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.startSceneVideosJob(body);
     return pollSceneVideoJob(started.job_id);
   },
 

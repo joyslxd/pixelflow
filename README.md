@@ -198,6 +198,7 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
 - 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过表单、创意方向和 plan.md，直接复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。缺原图时会把等待上传状态写入对话，用户上传图片后可继续。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
+- 场景视频生成和视频修改重生成会先调用 `/agent/flows/video/generate-scenes/start` 取得 `job_id`，并把 `pendingVideoJob` / `pending_video_job` 写入当前 conversation context；用户离开再返回同一对话时，前端只继续查询 `/jobs/{job_id}`，不会重复启动生成。
 - 图片、视频、PPT 的需求表单弹出后，用户点击右上角 `X` 视为取消当前流程，前端会清空 pending 表单上下文并保存 `form_cancelled`。
 - PPT 表单的 `PPT风格` 支持“自定义”，选中后显示文本框，最终把用户输入的风格词作为 `ppt_style` 提交给 SmartPPT。
 - 当前对话中任意阶段正在生成或处理时，历史 artifact 按钮统一禁用；阶段结束后只保留最新可操作 artifact 的按钮，失败或额度暂停时只保留当前可恢复点的重试入口。

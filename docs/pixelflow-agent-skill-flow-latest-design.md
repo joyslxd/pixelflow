@@ -171,6 +171,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
+- 场景视频生成和视频修改重生成启动后，前端必须把 Python job 的 `job_id`、原始请求、来源 artifact 和所属 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时，只允许继续轮询 `/agent/flows/video/generate-scenes/jobs/{job_id}`；如果 job 不存在或已过期，不自动重新启动，避免重复计费。
 
 ### 5.5 视频分析类 Skill
 
@@ -379,6 +380,7 @@ sequenceDiagram
   VA-->>FE: "可编辑场景包"
   U->>FE: "编辑故事线、镜头描述、旁白、@参考图"
   FE->>VA: "generate-scenes/start"
+  FE->>FE: "保存 pendingVideoJob 到 conversation context"
   VA->>BG: "按片段调用视频接口"
   FE->>VA: "轮询 jobs/{job_id}"
   VA-->>FE: "scene_videos"
@@ -474,6 +476,7 @@ flowchart TD
 - 用户关闭窗口再进入默认是新对话页面。
 - 点击历史对话时恢复该对话最后流程状态。
 - 异步回调必须带原始 `conversation_id`，不能因为用户切换页面就写到当前可见对话。
+- 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
 

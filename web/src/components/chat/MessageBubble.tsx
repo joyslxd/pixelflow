@@ -11,6 +11,7 @@ interface MessageBubbleProps {
   msg: ChatMessage;
   isLatestVideoScenePackage?: boolean;
   actionsDisabled?: boolean;
+  showProgressLoading?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -138,10 +139,28 @@ function pptPagesReady(msg: ChatMessage): boolean {
   return pages.length > 0 && pages.every((page) => page.status === "completed" && Boolean(page.image_url));
 }
 
+function progressDescription(content: string): string {
+  if (/三视图|场景图|道具图|参考图/.test(content)) return "生成角色、场景与道具参考图";
+  if (/场景视频|分镜视频/.test(content)) return "生成场景视频片段";
+  if (/合并/.test(content)) return "合并完整视频";
+  if (/PPT 大纲|SmartPPT.*大纲/.test(content)) return "生成 PPT 大纲";
+  if (/页面 JSON|页面结构/.test(content)) return "生成页面结构";
+  if (/PPT 图片|每页 PPT 图片|页面图片/.test(content)) return "生成 PPT 页面图片";
+  if (/PPT 附件/.test(content)) return "生成 PPT 附件";
+  if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
+  if (/生成图片|图片生成/.test(content)) return "生成图片";
+  if (/视频分析|媒体链接|穿帮分析/.test(content)) return "分析视频内容";
+  if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
+  if (/创意方向|plan\.md/.test(content)) return "生成创意方案";
+  if (/继续查询|任务状态/.test(content)) return "查询已有任务状态";
+  return "处理中";
+}
+
 export function MessageBubble({
   msg,
   isLatestVideoScenePackage,
   actionsDisabled,
+  showProgressLoading,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
@@ -185,6 +204,7 @@ export function MessageBubble({
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
   const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
+  const progressText = showProgressLoading ? progressDescription(msg.content) : "";
   const [loadingDots, setLoadingDots] = useState(0);
 
   useEffect(() => {
@@ -932,6 +952,18 @@ export function MessageBubble({
           </button>
         ) : null}
         </div>
+        {showProgressLoading ? (
+          <span
+            className="mt-1 ml-1 flex items-center gap-1.5 text-[11px] text-ink-soft"
+            role="status"
+            aria-label="loading"
+          >
+            <span className="block h-3.5 w-3.5 animate-spin rounded-full bg-[conic-gradient(from_0deg,#4f46e5,#60a5fa,#a78bfa,#4f46e5)] p-[1.5px]">
+              <span className="block h-full w-full rounded-full bg-canvas" />
+            </span>
+            <span>{progressText}</span>
+          </span>
+        ) : null}
         <span className="mt-1 px-1 text-[11px] text-ink-soft/60">{msg.time}</span>
       </div>
     </div>

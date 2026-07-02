@@ -37,6 +37,11 @@ interface ChatPanelProps {
   busy?: boolean;
 }
 
+function isProgressMessage(message: ChatMessage): boolean {
+  if (message.role !== "assistant" || message.artifact) return false;
+  return /正在|生成中|处理中|继续查询|准备|调用|轮询|合并|重生成/.test(message.content);
+}
+
 export function ChatPanel({
   messages,
   onSubmit,
@@ -74,6 +79,12 @@ export function ChatPanel({
   const latestActionableMessageId = [...messages]
     .reverse()
     .find((message) => message.role === "assistant" && message.artifact)?.id;
+  const latestAssistantMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const latestProgressMessageId = latestAssistantMessage && isProgressMessage(latestAssistantMessage)
+    ? latestAssistantMessage.id
+    : undefined;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -104,6 +115,7 @@ export function ChatPanel({
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
                 actionsDisabled={Boolean(busy) || (isSupersededArtifact && !keepScenePackageActions)}
+                showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}
                 onApprovePlan={onApprovePlan}
