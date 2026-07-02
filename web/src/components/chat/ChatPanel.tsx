@@ -4,7 +4,7 @@ import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
 import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
-import type { CreativeDirectionResponse } from "@/lib/api";
+import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -17,6 +17,7 @@ interface ChatPanelProps {
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
+  onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
@@ -53,6 +54,7 @@ export function ChatPanel({
   onApprovePlan,
   onRevisePlan,
   onGenerateImage,
+  onConfirmImageEditOptions,
   onAcceptImageResult,
   onReviseImageResult,
   onGenerateVideoFromScenePackages,
@@ -121,6 +123,7 @@ export function ChatPanel({
                 onApprovePlan={onApprovePlan}
                 onRevisePlan={onRevisePlan}
                 onGenerateImage={onGenerateImage}
+                onConfirmImageEditOptions={onConfirmImageEditOptions}
                 onAcceptImageResult={onAcceptImageResult}
                 onReviseImageResult={onReviseImageResult}
                 onGenerateVideoFromScenePackages={onGenerateVideoFromScenePackages}

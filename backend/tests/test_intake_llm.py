@@ -87,6 +87,7 @@ def test_recognize_intent_marks_image_edit_operation_from_llm_json() -> None:
             "image_goal": "把上传图片背景改成白色摄影棚",
             "image_style": "真实摄影",
             "image_size": "自动适配",
+            "image_quality": "4K",
             "image_count": 2
           }
         }
@@ -97,8 +98,10 @@ def test_recognize_intent_marks_image_edit_operation_from_llm_json() -> None:
 
     assert result.intent == "image"
     assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_quality"] == "4K"
     assert result.values["image_count"] == 2
     assert result.intake_context["image_operation"] == "image_edit"
+    assert result.intake_context["image_quality"] == "4K"
 
 
 def test_recognize_intent_enriches_generic_image_goal_with_product_subject() -> None:
@@ -276,6 +279,22 @@ def test_recognize_intent_fallback_marks_image_edit_operation() -> None:
     assert result.values["image_operation"] == "image_edit"
     assert result.values["image_count"] == 2
     assert result.intake_context["image_operation"] == "image_edit"
+
+
+def test_recognize_intent_fallback_extracts_image_edit_ratio_and_quality() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    result = asyncio.run(
+        recognize_intent_with_llm("把这张图片改成蓝色科技风海报，9:16，4K清晰度", model_factory=lambda *_args, **_kwargs: BrokenModel())
+    )
+
+    assert result.intent == "image"
+    assert result.values["image_operation"] == "image_edit"
+    assert result.values["image_size"] == "9:16"
+    assert result.values["image_quality"] == "4K"
+    assert result.intake_context["image_quality"] == "4K"
 
 
 def test_draft_creative_directions_with_llm_returns_three_normalized_directions() -> None:

@@ -173,7 +173,37 @@ test("image edit intake bypasses the normal directions and plan flow", () => {
   assert.match(source, /if \(pendingImageEditRequestRef\.current\?\.conversationId === activeConversation\)/, "next user upload must resume pending image edit");
   assert.match(source, /if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)/, "image-edit intake must branch before the generic image form");
   assert.match(source, /请上传需要编辑的图片/, "missing source image should prompt the user to upload");
-  assert.match(source, /executeDirectImageEdit/, "image-edit branch must call the direct executor");
+  assert.match(source, /showImageEditOptions/, "image-edit branch must show model options before generation");
+  assert.equal(/if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)[\s\S]*executeDirectImageEdit/.test(source), false, "image-edit intake must not generate before model confirmation");
+});
+
+test("image edit options load content-app model configs and submit selected model params", () => {
+  const optionsStart = workspaceSource.indexOf("const showImageEditOptions = async");
+  const optionsEnd = workspaceSource.indexOf("const executeDirectImageEdit = async", optionsStart);
+  const executeStart = workspaceSource.indexOf("const executeDirectImageEdit = async");
+  const executeEnd = workspaceSource.indexOf("const pushDirectionsArtifact", executeStart);
+  assert.notEqual(optionsStart, -1, "Workspace must have an image-edit model options step");
+  assert.notEqual(optionsEnd, -1, "executeDirectImageEdit must follow showImageEditOptions");
+  assert.notEqual(executeStart, -1, "executeDirectImageEdit must exist");
+  assert.notEqual(executeEnd, -1, "pushDirectionsArtifact must follow executeDirectImageEdit");
+  const optionsSource = workspaceSource.slice(optionsStart, optionsEnd);
+  const executeSource = workspaceSource.slice(executeStart, executeEnd);
+  assert.match(apiSource, /listImageGenerateModelConfigs/, "api client must expose content-app model config lookup");
+  assert.equal(apiSource.includes("/api/modelParamConfig/listByCategory/image_generate"), true, "model config lookup must call content-app image_generate category");
+  assert.match(optionsSource, /api\.listImageGenerateModelConfigs/, "image-edit options step must load live model configs");
+  assert.match(optionsSource, /type:\s*"image_edit_options"/, "image-edit options must be rendered as a chat artifact");
+  assert.match(optionsSource, /gpt-image-2/, "image-edit options should prefer gpt-image-2 by default");
+  assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
+  assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
+  assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
+  assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
+  assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
+  assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
+  assert.match(messageBubbleSource, /尺寸/, "image-edit options card must show ratio choices");
+  assert.match(messageBubbleSource, /imageEditUnsupportedReason/, "image-edit options must detect unsupported requested params");
+  assert.match(messageBubbleSource, /当前模型不支持尺寸/, "unsupported requested ratio should show a clear message");
+  assert.match(messageBubbleSource, /当前模型不支持清晰度/, "unsupported requested quality should show a clear message");
+  assert.match(messageBubbleSource, /disabled=\{Boolean\(imageEditUnsupportedReason\)\}/, "unsupported requested params must block submit");
 });
 
 test("ppt image pages stream partial status into the existing artifact card", () => {
