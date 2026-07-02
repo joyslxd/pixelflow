@@ -43,6 +43,7 @@ import {
   inferTargetDurationMs,
   replaceGlobalSceneAssetImage,
   sceneIdsForRevision,
+  scenePackagesWithRevisionContract,
   syncScenePackageMentionImageUrls,
   updateScenePackageField,
   type GlobalSceneAssetGroup,
@@ -289,11 +290,29 @@ function revisedScenePrompt(
   flawAnalysis: NonNullable<ChatMessage["artifact"]>["videoFlawAnalysis"] | undefined,
   useFlawAnalysis: boolean,
 ): string {
-  const parts = [scene.prompt, `用户修改意见：${feedback.trim()}`];
-  if (useFlawAnalysis && flawAnalysis?.revision_prompt) {
-    parts.push(`穿帮修复建议：${flawAnalysis.revision_prompt}`);
+  if (useFlawAnalysis && flawAnalysis) {
+    const parts = [
+      "请根据视频综合质检结果修复当前分镜。若当前分镜旧提示词与用户意见或质检修复建议冲突，必须以用户意见和质检修复建议为准。",
+      `当前分镜旧提示词（仅供定位，不可覆盖质检建议）：${scene.prompt}`,
+      `用户修改/质检意见：${feedback.trim()}`,
+    ];
+    if (flawAnalysis.revision_prompt) {
+      parts.push(`质检修复建议：${flawAnalysis.revision_prompt}`);
+    }
+    return parts.filter(Boolean).join("\n");
   }
+  const parts = [scene.prompt, `用户修改意见：${feedback.trim()}`];
   return parts.filter(Boolean).join("\n");
+}
+
+function formatSceneIndexesForMessage(
+  scenes: Array<Pick<PrepareScenePackagesResponse["scene_packages"][number], "scene_id" | "scene_index">>,
+  sceneIds: Set<string>,
+): string {
+  const indexes = scenes
+    .filter((scene) => sceneIds.has(scene.scene_id))
+    .map((scene) => `第${scene.scene_index}个分镜`);
+  return indexes.length ? indexes.join("、") : "未定位到具体分镜";
 }
 
 function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefined>): Array<Record<string, unknown>> {
@@ -1915,6 +1934,8 @@ export function WorkspacePage() {
         video_revision_feedback: artifact.videoRevisionFeedback,
         video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
         affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
+        global_assets: artifact.videoScenePackages.global_assets,
+        scene_packages: artifact.videoScenePackages.scene_packages,
         generated_scene_videos: artifact.generatedSceneVideos.scene_videos,
         failed_scenes: regenerated.failed_scenes,
       }).catch(() => {});
@@ -1983,6 +2004,8 @@ export function WorkspacePage() {
       video_revision_feedback: artifact.videoRevisionFeedback,
       video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
       affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
+      global_assets: artifact.videoScenePackages.global_assets,
+      scene_packages: artifact.videoScenePackages.scene_packages,
       generated_scene_videos: nextSceneVideos,
       merged_video: mergedVideo,
     }).catch(() => {});
@@ -2638,7 +2661,7 @@ export function WorkspacePage() {
         return;
       }
       setBusyForConversation(activeConversation, true);
-      pushAssistant("已收到视频修改意见，正在调用视频穿帮分析 Skill…", activeConversation);
+      pushAssistant("已收到视频修改意见，正在调用视频综合质检 Skill…", activeConversation);
       try {
         const flawAnalysis = await api.analyzeVideoFlaws({
           merged_video_url: mergedVideoUrl,
@@ -2648,14 +2671,20 @@ export function WorkspacePage() {
             video_url: scene.video_url,
           })),
           scene_packages: videoScenePackages.scene_packages as unknown as Array<Record<string, unknown>>,
+          plan: revisionArtifact.plan as unknown as Record<string, unknown>,
+          form_values: revisionArtifact.formValues || {},
+          intake_context: revisionArtifact.intakeContext || {},
+          selected_direction: revisionArtifact.selectedDirection as unknown as Record<string, unknown>,
           materials: flowMaterials,
           user_feedback: text,
         });
-        pushArtifact(flawAnalysis.ok ? "视频穿帮分析已完成，请选择本轮修改策略。" : "视频穿帮分析失败，可选择只按用户意见继续修改。", {
+        const affectedSceneIds = new Set(flawAnalysis.affected_scene_ids || []);
+        const affectedSceneLabel = formatSceneIndexesForMessage(videoScenePackages.scene_packages, affectedSceneIds);
+        pushArtifact(flawAnalysis.ok ? "视频综合质检已完成，请选择本轮修改策略。" : "视频综合质检失败，可选择只按用户意见继续修改。", {
           type: "video_flaw_analysis",
-          title: "视频穿帮分析",
+          title: "视频综合质检",
           description: flawAnalysis.ok
-            ? `${flawAnalysis.affected_scene_ids.length || videoScenePackages.scene_packages.length} 个场景可能需要处理。`
+            ? `质检定位：${affectedSceneLabel}。`
             : flawAnalysis.message,
           actionLabel: "选择",
           videoFlawAnalysis: flawAnalysis,
@@ -3964,9 +3993,32 @@ export function WorkspacePage() {
       artifact.videoFlawAnalysis,
       useFlawAnalysis,
     );
-    pushAssistant(`正在重生成 ${affectedSceneIds.size} 个受影响场景，并复用未受影响场景…`, targetConversationId);
+    if (affectedSceneIds.size === 0) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("综合质检没有定位到具体分镜。为了避免误把整条视频重做，请在修改意见里明确写出要修改的分镜，例如“只修改第2个分镜”。", targetConversationId);
+      setBusyForConversation(targetConversationId, false);
+      return;
+    }
+    const affectedSceneLabel = formatSceneIndexesForMessage(artifact.videoScenePackages.scene_packages, affectedSceneIds);
+    pushAssistant(`正在重生成 ${affectedSceneLabel}，并复用未受影响分镜…`, targetConversationId);
     try {
-      const request = sceneVideoRevisionRequest(artifact, affectedSceneIds, useFlawAnalysis);
+      const nextVideoScenePackages = useFlawAnalysis
+        ? {
+            ...artifact.videoScenePackages,
+            scene_packages: scenePackagesWithRevisionContract(
+              artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
+              affectedSceneIds,
+              artifact.videoRevisionFeedback || "",
+              artifact.videoFlawAnalysis,
+            ) as typeof artifact.videoScenePackages.scene_packages,
+          }
+        : artifact.videoScenePackages;
+      const revisionArtifact: ChatArtifact = {
+        ...artifact,
+        videoScenePackages: nextVideoScenePackages,
+        videoScenePackageEditedSceneIds: Array.from(affectedSceneIds),
+      };
+      const request = sceneVideoRevisionRequest(revisionArtifact, affectedSceneIds, useFlawAnalysis);
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = {
         job_id: started.job_id,
@@ -3975,7 +4027,7 @@ export function WorkspacePage() {
         kind: "scene_regeneration",
         started_at: new Date().toISOString(),
         request,
-        artifact,
+        artifact: revisionArtifact,
         affected_scene_ids: Array.from(affectedSceneIds),
         use_flaw_analysis: useFlawAnalysis,
       };
@@ -3983,6 +4035,8 @@ export function WorkspacePage() {
         video_revision_feedback: artifact.videoRevisionFeedback,
         video_revision_use_flaw_analysis: useFlawAnalysis,
         affected_scene_ids: Array.from(affectedSceneIds),
+        global_assets: nextVideoScenePackages.global_assets,
+        scene_packages: nextVideoScenePackages.scene_packages,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);
     } catch (err) {

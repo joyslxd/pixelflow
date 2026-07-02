@@ -185,19 +185,67 @@ export function sceneIdsForRevision(
   useFlawAnalysis: boolean,
 ): Set<string> {
   const ids = new Set<string>();
+  const normalizedFeedback = feedback.trim();
+  const explicitOnlyIds = new Set<string>();
+  scenes.forEach((scene) => {
+    const pattern = new RegExp(`(?:只|仅)\\s*(?:修复|修改)\\s*第\\s*${scene.scene_index}\\s*(?:个)?\\s*分镜`);
+    if (pattern.test(normalizedFeedback)) {
+      explicitOnlyIds.add(scene.scene_id);
+    }
+  });
+  if (explicitOnlyIds.size > 0) {
+    return explicitOnlyIds;
+  }
   if (useFlawAnalysis) {
     stringArray(flawAnalysis?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
   }
-  const normalizedFeedback = feedback.trim();
   scenes.forEach((scene) => {
     if (normalizedFeedback.includes(scene.scene_id) || normalizedFeedback.includes(`第${scene.scene_index}`)) {
       ids.add(scene.scene_id);
     }
   });
-  if (ids.size === 0) {
+  if (ids.size === 0 && !useFlawAnalysis) {
     scenes.forEach((scene) => ids.add(scene.scene_id));
   }
   return ids;
+}
+
+export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
+  scenes: T[],
+  affectedSceneIds: Set<string>,
+  feedback: string,
+  flawAnalysis: SceneFlawLike | undefined,
+): T[] {
+  const revisionPrompt = flawAnalysis?.revision_prompt?.trim();
+  if (!revisionPrompt) return scenes;
+  return scenes.map((scene) => {
+    if (!affectedSceneIds.has(scene.scene_id)) return scene;
+    const repairContract = [
+      `质检修复建议：${revisionPrompt}`,
+      `用户修改/质检意见：${feedback.trim()}`,
+      "只生成符合原方案产品主体和卖点的画面。不要沿用旧分镜中被质检判定为错误的画面主体、旁白、道具或场景。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return {
+      ...scene,
+      prompt: repairContract,
+      storyline: repairContract,
+      shot_description: {
+        ...(scene.shot_description || {}),
+        text: repairContract,
+        mentions: [],
+      },
+      narration: "",
+      reference_asset_ids: [],
+      image_urls: [],
+      video_urls: [],
+      audio_urls: [],
+      characters: [],
+      scene_images: [],
+      prop_images: [],
+    };
+  });
 }
 
 export function inferTargetDurationMs(texts: Array<string | undefined | null>): number {

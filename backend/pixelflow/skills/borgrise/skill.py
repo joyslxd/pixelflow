@@ -622,6 +622,7 @@ class BorgriseSkill:
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
     ) -> VideoFlawAnalysisResult:
@@ -631,6 +632,7 @@ class BorgriseSkill:
             merged_video_url=merged_video_url,
             scene_videos=scene_videos,
             scene_packages=scene_packages or [],
+            brief=brief or {},
             materials=materials or [],
             user_feedback=user_feedback,
         )
@@ -640,6 +642,7 @@ class BorgriseSkill:
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
         checks: list[str] | None = None,
@@ -653,6 +656,7 @@ class BorgriseSkill:
             merged_video_url=merged_video_url,
             scene_videos=scene_videos,
             scene_packages=scene_packages or [],
+            brief=brief or {},
             materials=materials or [],
             user_feedback=user_feedback,
             checks=checks or [],

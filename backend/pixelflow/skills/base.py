@@ -357,6 +357,7 @@ class VideoFlawAnalysisSkill(Protocol):
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
     ) -> VideoFlawAnalysisResult: ...
@@ -370,6 +371,7 @@ class VideoQualityReviewSkill(Protocol):
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
         checks: list[str] | None = None,

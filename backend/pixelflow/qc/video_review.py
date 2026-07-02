@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -89,6 +90,32 @@ class VideoQCResponse(BaseModel):
 
 class _VideoQualitySkill(Protocol):
     async def review_video_quality(self, **kwargs: Any) -> Any: ...
+
+
+class _VideoDecomposeSkill(Protocol):
+    async def decompose_video_to_storyboard(self, video_url: str) -> Any: ...
+
+
+_PRODUCT_TERMS = (
+    "电动牙刷",
+    "牙刷",
+    "保温杯",
+    "蓝牙耳机",
+    "耳机",
+    "手机",
+    "鼠标",
+    "键盘",
+    "电脑",
+    "平板",
+    "手表",
+    "音箱",
+    "背包",
+    "书包",
+    "口红",
+    "面霜",
+    "水杯",
+    "杯子",
+)
 
 
 def brief_to_scene_packages(brief: dict[str, Any]) -> list[dict[str, Any]]:
@@ -262,18 +289,304 @@ def _merge_check_results(deterministic: list[QCItem], semantic: list[QCItem]) ->
     return merged
 
 
-async def review_video_quality(request: VideoQCRequest, *, skill: _VideoQualitySkill | None = None) -> VideoQCResponse:
+def _affected_scene_ids(result: Any, issues: list[VideoQCIssue]) -> list[str]:
+    issue_scene_ids: list[str] = []
+    seen: set[str] = set()
+    for issue in issues:
+        if not issue.scene_id or issue.scene_id in seen:
+            continue
+        seen.add(issue.scene_id)
+        issue_scene_ids.append(issue.scene_id)
+    if issue_scene_ids:
+        return issue_scene_ids
+    return [str(scene_id) for scene_id in getattr(result, "affected_scene_ids", []) if scene_id]
+
+
+def _scene_id_by_index(request: VideoQCRequest, scene_index: int) -> str | None:
+    for scene in [*request.scene_packages, *request.scene_videos]:
+        if not isinstance(scene, dict):
+            continue
+        if int(scene.get("scene_index") or -1) == scene_index and scene.get("scene_id"):
+            return str(scene["scene_id"])
+    return None
+
+
+def _explicit_feedback_scene_ids(request: VideoQCRequest) -> list[str]:
+    feedback = request.user_feedback.strip()
+    if not feedback:
+        return []
+    if not any(keyword in feedback for keyword in ("只修复", "只修改", "仅修复", "仅修改", "不要重新生成", "没有问题")):
+        return []
+    scene_ids: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"(?:只|仅)\s*(?:修复|修改)\s*第\s*(\d+)\s*(?:个)?\s*分镜", feedback):
+        scene_id = _scene_id_by_index(request, int(match.group(1)))
+        if scene_id and scene_id not in seen:
+            seen.add(scene_id)
+            scene_ids.append(scene_id)
+    return scene_ids
+
+
+def _filter_issues_by_scene_ids(issues: list[VideoQCIssue], scene_ids: list[str]) -> list[VideoQCIssue]:
+    if not scene_ids:
+        return issues
+    allowed = set(scene_ids)
+    unscoped = [issue for issue in issues if not issue.scene_id]
+    scoped = [issue for issue in issues if issue.scene_id in allowed]
+    return unscoped + scoped
+
+
+def _dedupe_issues(issues: list[VideoQCIssue]) -> list[VideoQCIssue]:
+    deduped: list[VideoQCIssue] = []
+    seen: set[tuple[str, str, str | None, int | None, str]] = set()
+    for issue in issues:
+        key = (issue.code, issue.category, issue.scene_id, issue.scene_index, issue.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+    return deduped
+
+
+def _revision_prompt_for_scene_scope(request: VideoQCRequest, scene_ids: list[str]) -> str:
+    if not scene_ids:
+        return ""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for scene_id in scene_ids:
+        for scene in [*request.scene_packages, *request.scene_videos]:
+            if not isinstance(scene, dict) or str(scene.get("scene_id") or "") != scene_id:
+                continue
+            scene_index = scene.get("scene_index")
+            label = f"第{int(scene_index)}个分镜" if isinstance(scene_index, int | float) else scene_id
+            if label not in seen:
+                seen.add(label)
+                labels.append(label)
+            break
+    target = "、".join(labels) or "指定分镜"
+    return f"请只重生成{target}，恢复为原方案要求的产品一致性画面；其他分镜复用原视频，不要重新生成。"
+
+
+def _feedback_fallback_issues(request: VideoQCRequest, existing_issues: list[VideoQCIssue]) -> list[VideoQCIssue]:
+    if existing_issues:
+        return []
+    feedback = request.user_feedback.strip()
+    if not feedback:
+        return []
+    if not any(keyword in feedback for keyword in ("不一致", "无关", "红色手机", "手机", "错误", "不相关")):
+        return []
+    issues: list[VideoQCIssue] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"第\s*(\d+)\s*(?:个)?\s*分镜", feedback):
+        scene_index = int(match.group(1))
+        scene_id = _scene_id_by_index(request, scene_index)
+        if not scene_id or scene_id in seen:
+            continue
+        seen.add(scene_id)
+        issues.append(
+            VideoQCIssue(
+                code="feedback_product_consistency",
+                category="product_consistency",
+                severity="major",
+                scene_id=scene_id,
+                scene_index=scene_index,
+                message=f"用户质检意见指出第{scene_index}个分镜可能与原方案产品内容不一致",
+                expected="应与原方案中的产品主体、核心卖点和分镜合同保持一致",
+                observed="用户反馈中提到红色手机或其他无关内容",
+                suggestion=f"请只重生成第{scene_index}个分镜，恢复为原方案要求的产品卖点画面",
+            )
+        )
+    return issues
+
+
+def _scene_by_id(scenes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(scene.get("scene_id")): scene
+        for scene in scenes
+        if isinstance(scene, dict) and scene.get("scene_id")
+    }
+
+
+def _scene_contract_text(scene: dict[str, Any]) -> str:
+    pieces: list[str] = []
+    for key in ("title", "storyline", "prompt", "narration", "onscreen_text"):
+        value = scene.get(key)
+        if value:
+            pieces.append(str(value))
+    shot_description = scene.get("shot_description")
+    if isinstance(shot_description, dict):
+        pieces.append(str(shot_description.get("text") or shot_description.get("description") or ""))
+    elif shot_description:
+        pieces.append(str(shot_description))
+    return "\n".join(piece for piece in pieces if piece).strip()
+
+
+def _collect_text(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 4:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, int | float | bool) or value is None:
+        return []
+    if isinstance(value, list):
+        pieces: list[str] = []
+        for item in value:
+            pieces.extend(_collect_text(item, depth=depth + 1))
+        return pieces
+    if isinstance(value, dict):
+        pieces: list[str] = []
+        priority_keys = (
+            "product_info",
+            "product_name",
+            "product_subject",
+            "video_goal",
+            "image_goal",
+            "creative_goal",
+            "target",
+            "title",
+            "markdown",
+            "plan_markdown",
+            "summary",
+            "description",
+        )
+        for key in priority_keys:
+            if key in value:
+                pieces.extend(_collect_text(value.get(key), depth=depth + 1))
+        for key, item in value.items():
+            if key in priority_keys:
+                continue
+            pieces.extend(_collect_text(item, depth=depth + 1))
+        return pieces
+    return []
+
+
+def _global_contract_text(request: VideoQCRequest) -> str:
+    pieces: list[str] = []
+    pieces.extend(_collect_text(request.brief))
+    for scene in request.scene_packages:
+        if isinstance(scene, dict):
+            pieces.extend(_collect_text(scene.get("global_assets")))
+    text = "\n".join(piece for piece in pieces if piece).strip()
+    terms = _dominant_product_terms(_product_terms(text))
+    if not terms:
+        return text
+    return "\n".join([f"原始产品主体：{'、'.join(sorted(terms))}", text]).strip()
+
+
+def _storyboard_text(shots: list[Any]) -> str:
+    pieces: list[str] = []
+    for shot in shots:
+        if isinstance(shot, str):
+            pieces.append(shot)
+            continue
+        if not isinstance(shot, dict):
+            continue
+        for key in ("visual_description", "description", "visualContent", "content", "text", "prompt"):
+            value = shot.get(key)
+            if value:
+                pieces.append(str(value))
+    return "\n".join(pieces).strip()
+
+
+def _product_terms(text: str) -> set[str]:
+    return {term for term in _PRODUCT_TERMS if term in text}
+
+
+def _dominant_product_terms(terms: set[str]) -> set[str]:
+    # Longer terms carry the actual product identity, e.g. 蓝牙耳机 over 耳机.
+    return {term for term in terms if not any(term != other and term in other for other in terms)}
+
+
+def _semantic_product_mismatch_issue(
+    *,
+    scene: dict[str, Any],
+    expected_text: str,
+    observed_text: str,
+) -> VideoQCIssue | None:
+    expected_terms = _dominant_product_terms(_product_terms(expected_text))
+    observed_terms = _dominant_product_terms(_product_terms(observed_text))
+    if not expected_terms or not observed_terms:
+        return None
+    if expected_terms & observed_terms:
+        return None
+    scene_id = str(scene.get("scene_id") or "")
+    scene_index_value = scene.get("scene_index")
+    scene_index = int(scene_index_value) if isinstance(scene_index_value, int | float) else None
+    label = f"第{scene_index}个分镜" if scene_index is not None else scene_id
+    expected = "、".join(sorted(expected_terms))
+    observed = "、".join(sorted(observed_terms))
+    return VideoQCIssue(
+        code="auto_scene_product_mismatch",
+        category="product_consistency",
+        severity="major",
+        scene_id=scene_id or None,
+        scene_index=scene_index,
+        message=f"{label}实际画面主体与分镜合同不一致：期望展示{expected}，但视频理解结果显示为{observed}",
+        expected=expected_text,
+        observed=observed_text,
+        suggestion=f"请只重生成{label}，恢复为原方案要求的{expected}卖点画面",
+    )
+
+
+async def _auto_scene_storyboard_issues(
+    request: VideoQCRequest,
+    decompose_skill: _VideoDecomposeSkill,
+) -> list[VideoQCIssue]:
+    if not any(check in request.checks for check in ("product_consistency", "plan_consistency", "storyboard_coverage")):
+        return []
+    package_by_id = _scene_by_id(request.scene_packages)
+    global_contract_text = _global_contract_text(request)
+    has_global_product_contract = bool(_dominant_product_terms(_product_terms(global_contract_text)))
+    issues: list[VideoQCIssue] = []
+    for scene_video in request.scene_videos:
+        if not isinstance(scene_video, dict):
+            continue
+        scene_id = str(scene_video.get("scene_id") or "")
+        video_url = str(scene_video.get("video_url") or scene_video.get("url") or "")
+        scene_package = package_by_id.get(scene_id)
+        if not scene_id or not video_url or not scene_package:
+            continue
+        scene_contract_text = _scene_contract_text(scene_package)
+        expected_text = global_contract_text if has_global_product_contract else scene_contract_text
+        if not expected_text:
+            continue
+        try:
+            storyboard = await decompose_skill.decompose_video_to_storyboard(video_url)
+        except Exception:
+            continue
+        if not getattr(storyboard, "ok", False):
+            continue
+        observed_text = _storyboard_text(getattr(storyboard, "shots", []) or [])
+        if not observed_text:
+            continue
+        issue = _semantic_product_mismatch_issue(scene=scene_package, expected_text=expected_text, observed_text=observed_text)
+        if issue is not None:
+            issues.append(issue)
+    return issues
+
+
+async def review_video_quality(
+    request: VideoQCRequest,
+    *,
+    skill: _VideoQualitySkill | None = None,
+    decompose_skill: _VideoDecomposeSkill | None = None,
+) -> VideoQCResponse:
     """调用供应商综合质检能力并归一化报告。"""
     if skill is None:
         from pixelflow.skills import get_video_quality_review_skill
 
         skill = get_video_quality_review_skill()
+    if decompose_skill is None:
+        from pixelflow.skills import get_video_decompose_skill
+
+        decompose_skill = get_video_decompose_skill()
 
     deterministic_checks, deterministic_issues = _deterministic_qc(request)
     result = await skill.review_video_quality(
         merged_video_url=request.merged_video_url,
         scene_videos=request.scene_videos,
         scene_packages=request.scene_packages,
+        brief=request.brief,
         materials=request.materials,
         user_feedback=request.user_feedback,
         checks=request.checks,
@@ -303,10 +616,24 @@ async def review_video_quality(request: VideoQCRequest, *, skill: _VideoQualityS
             raw=raw,
         )
 
-    issues = deterministic_issues + [_normalize_issue(issue) for issue in getattr(result, "issues", []) if isinstance(issue, dict)]
+    supplier_issues = [_normalize_issue(issue) for issue in getattr(result, "issues", []) if isinstance(issue, dict)]
+    auto_storyboard_issues = await _auto_scene_storyboard_issues(request, decompose_skill)
+    feedback_issues = _feedback_fallback_issues(request, supplier_issues + auto_storyboard_issues)
+    semantic_issues = _dedupe_issues(supplier_issues + auto_storyboard_issues + feedback_issues)
+    scoped_scene_ids = _explicit_feedback_scene_ids(request)
+    if scoped_scene_ids:
+        semantic_issues = _filter_issues_by_scene_ids(semantic_issues, scoped_scene_ids)
+        if not semantic_issues:
+            semantic_issues = _feedback_fallback_issues(request, [])
+    issues = deterministic_issues + semantic_issues
     passed = not any(issue.severity == "blocker" for issue in issues)
     summary = str(getattr(result, "summary_markdown", "") or getattr(result, "flaw_analysis_markdown", "") or "")
-    check_results = _merge_check_results(deterministic_checks, _check_results([issue for issue in issues if issue not in deterministic_issues]))
+    check_results = _merge_check_results(deterministic_checks, _check_results(semantic_issues))
+    revision_prompt = str(getattr(result, "revision_prompt", "") or "")
+    if scoped_scene_ids:
+        revision_prompt = _revision_prompt_for_scene_scope(request, scoped_scene_ids)
+    if (feedback_issues or auto_storyboard_issues) and not revision_prompt:
+        revision_prompt = "；".join(issue.suggestion for issue in [*feedback_issues, *auto_storyboard_issues] if issue.suggestion)
     return VideoQCResponse(
         ok=True,
         passed=passed,
@@ -316,8 +643,8 @@ async def review_video_quality(request: VideoQCRequest, *, skill: _VideoQualityS
         summary_markdown=summary,
         flaw_analysis_markdown=summary,
         issues=issues,
-        affected_scene_ids=[str(scene_id) for scene_id in getattr(result, "affected_scene_ids", []) if scene_id],
-        revision_prompt=str(getattr(result, "revision_prompt", "") or ""),
+        affected_scene_ids=scoped_scene_ids or _affected_scene_ids(result, issues),
+        revision_prompt=revision_prompt,
         check_results=check_results,
         raw=raw,
     )

@@ -1838,6 +1838,7 @@ def analyze_video_flaws(
         merged_video_url: str,
         scene_videos: list[dict],
         scene_packages: list[dict] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict] | None = None,
         user_feedback: str | None = None,
         checks: list[str] | None = None,
@@ -1857,6 +1858,7 @@ def analyze_video_flaws(
         "merged_video_url": merged_video_url,
         "scene_videos": scene_videos,
         "scene_packages": scene_packages or [],
+        "brief": brief or {},
         "materials": materials or [],
         "user_feedback": user_feedback or "",
     }
