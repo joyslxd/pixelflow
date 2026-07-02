@@ -228,6 +228,12 @@ export function MessageBubble({
   const imageEditModelNames = imageEditModelConfigs.map(imageModelType).filter(Boolean);
   const requestedImageEditRatio = requestedImageEditParam(msg, "ratio");
   const requestedImageEditSize = requestedImageEditParam(msg, "size");
+  const imageEditConfigSignature = JSON.stringify(
+    imageEditModelConfigs.map((config) => ({
+      model: imageModelType(config),
+      options: imageModelOptions(config),
+    })),
+  );
   const scenePackages = msg.artifact?.videoScenePackages?.scene_packages || [];
   const videoAnalysisStoryboards = records(msg.artifact?.videoAnalysis?.storyboards);
   const messageMaterials = records(msg.materials);
@@ -270,19 +276,20 @@ export function MessageBubble({
     setSelectedImageEditModel(preferredModel);
     setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
     setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
-  }, [msg.id]);
+  }, [msg.id, imageEditConfigSignature, requestedImageEditRatio, requestedImageEditSize]);
 
   const currentImageEditModel = selectedImageEditModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
   const currentImageEditConfig = imageEditModelConfigs.find((config) => imageModelType(config) === currentImageEditModel) || imageEditModelConfigs[0];
   const currentImageEditOptions = imageModelOptions(currentImageEditConfig);
   const imageEditRatioSupported = !requestedImageEditRatio || currentImageEditOptions.ratios.includes(requestedImageEditRatio);
   const imageEditSizeSupported = !requestedImageEditSize || currentImageEditOptions.sizes.includes(requestedImageEditSize);
-  const effectiveImageEditRatio = requestedImageEditRatio || selectedImageEditRatio || currentImageEditOptions.ratios[0] || "1:1";
-  const effectiveImageEditSize = requestedImageEditSize || selectedImageEditSize || currentImageEditOptions.sizes[0] || "4K";
+  const effectiveImageEditRatio = selectedImageEditRatio || (imageEditRatioSupported ? requestedImageEditRatio : "") || currentImageEditOptions.ratios[0] || "1:1";
+  const effectiveImageEditSize = selectedImageEditSize || (imageEditSizeSupported ? requestedImageEditSize : "") || currentImageEditOptions.sizes[0] || "4K";
   const imageEditUnsupportedReason = [
-    requestedImageEditRatio && !imageEditRatioSupported ? `当前模型不支持尺寸 ${requestedImageEditRatio}` : "",
-    requestedImageEditSize && !imageEditSizeSupported ? `当前模型不支持清晰度 ${requestedImageEditSize}` : "",
+    requestedImageEditRatio && !imageEditRatioSupported ? `当前模型不支持需求尺寸 ${requestedImageEditRatio}，已改用 ${effectiveImageEditRatio}` : "",
+    requestedImageEditSize && !imageEditSizeSupported ? `当前模型不支持需求清晰度 ${requestedImageEditSize}，已改用 ${effectiveImageEditSize}` : "",
   ].filter(Boolean).join("，");
+  const imageEditSubmitDisabled = !currentImageEditModel || !effectiveImageEditRatio || !effectiveImageEditSize;
 
   const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
     if (!actionsDisabled) return;
@@ -463,17 +470,14 @@ export function MessageBubble({
                 <div className="flex flex-wrap gap-2">
                   {currentImageEditOptions.ratios.map((ratio) => {
                     const active = effectiveImageEditRatio === ratio;
-                    const locked = Boolean(requestedImageEditRatio && requestedImageEditRatio !== ratio);
                     return (
                       <button
                         key={ratio}
                         type="button"
-                        disabled={locked}
                         onClick={() => setSelectedImageEditRatio(ratio)}
                         className={cn(
                           "rounded-full border px-3 py-1.5 text-[12px] font-medium",
                           active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
-                          locked && "cursor-not-allowed opacity-45 hover:bg-white",
                         )}
                       >
                         {ratio}
@@ -490,17 +494,14 @@ export function MessageBubble({
                 <div className="flex flex-wrap gap-2">
                   {currentImageEditOptions.sizes.map((size) => {
                     const active = effectiveImageEditSize === size;
-                    const locked = Boolean(requestedImageEditSize && requestedImageEditSize !== size);
                     return (
                       <button
                         key={size}
                         type="button"
-                        disabled={locked}
                         onClick={() => setSelectedImageEditSize(size)}
                         className={cn(
                           "rounded-full border px-3 py-1.5 text-[12px] font-medium",
                           active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
-                          locked && "cursor-not-allowed opacity-45 hover:bg-white",
                         )}
                       >
                         {size}
@@ -512,7 +513,7 @@ export function MessageBubble({
             </div>
             {imageEditUnsupportedReason ? (
               <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] leading-relaxed text-ink">
-                {imageEditUnsupportedReason}，请切换支持该参数的模型后再提交。
+                {imageEditUnsupportedReason}。你也可以重新选择当前模型支持的参数后继续提交。
               </div>
             ) : (
               <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] leading-relaxed text-ink-soft">
@@ -521,7 +522,7 @@ export function MessageBubble({
             )}
             <button
               type="button"
-              disabled={Boolean(imageEditUnsupportedReason)}
+              disabled={imageEditSubmitDisabled}
               onClick={() => onConfirmImageEditOptions?.(msg, {
                 model: currentImageEditModel,
                 ratio: effectiveImageEditRatio,
@@ -529,7 +530,7 @@ export function MessageBubble({
               })}
               className={cn(
                 "flex w-full items-center justify-center gap-1.5 rounded-xl py-2.5 text-[13px] font-medium",
-                imageEditUnsupportedReason ? "cursor-not-allowed bg-canvas text-ink-soft" : "bg-brand text-white hover:opacity-90",
+                imageEditSubmitDisabled ? "cursor-not-allowed bg-canvas text-ink-soft" : "bg-brand text-white hover:opacity-90",
               )}
             >
               <Sparkles size={15} />

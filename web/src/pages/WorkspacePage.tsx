@@ -303,6 +303,14 @@ function recordTextValue(record: Record<string, unknown> | undefined, key: strin
   return typeof value === "string" ? value.trim() : "";
 }
 
+function looksLikeImageEditPrompt(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  const referencesExistingImage = /上传的?(图片|图)|这张(图片|图|照片)|这幅图|原图|当前(图片|图)|图片中|图中|照片中|素材图|参考图/i.test(text);
+  const editAction = /编辑|修改|改成|改为|变成|变为|换成|换为|替换|调整|调成|去掉|删除|移除|增加|添加|换背景|改背景|换色|改色|上色|修复|修图|抠图|去水印|image_edit|edit/i.test(text);
+  return editAction && referencesExistingImage;
+}
+
 function isImageEditIntake(intake: IntakeIntentResponse, prompt: string): boolean {
   if (intake.intent !== "image") return false;
   const operation = (
@@ -311,7 +319,7 @@ function isImageEditIntake(intake: IntakeIntentResponse, prompt: string): boolea
     || recordTextValue(intake.values, "operation")
   ).toLowerCase();
   if (operation === "image_edit" || operation === "edit") return true;
-  return /编辑|修改|改图|修图|换背景|替换背景|去水印|抠图|image_edit|edit/i.test(prompt);
+  return /编辑|修改|改图|修图|换背景|替换背景|去水印|抠图|image_edit|edit/i.test(prompt) || looksLikeImageEditPrompt(prompt);
 }
 
 function directImageEditFormValues(
@@ -1171,7 +1179,8 @@ export function WorkspacePage() {
         params: imagePrepare.params,
       });
       const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-      pushArtifact(imageResult.ok ? "图片编辑完成，流程已结束。" : "图片编辑失败，请查看错误信息。", {
+      pendingImageEditRequestRef.current = null;
+      const imageResultMessage = pushArtifact(imageResult.ok ? "图片编辑完成，请确认是否满意。30 秒未操作将默认满意并结束流程。" : "图片编辑失败，请查看错误信息。", {
         type: "image_result",
         title: "图片编辑结果",
         description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片编辑额度不足。") : imageResultSummary(imageResult),
@@ -1191,7 +1200,11 @@ export function WorkspacePage() {
           data: { operation: "image_edit" },
         },
       }, targetConversationId);
-      pendingImageEditRequestRef.current = imageResult.ok ? null : { ...request, formValues, intakeContext, materials: flowMaterials };
+      if (canAcceptImageResult(imageResult)) {
+        window.setTimeout(() => {
+          void handleAcceptImageResult(imageResultMessage, true);
+        }, 30_000);
+      }
       void api
         .updateConversation(targetConversationId, {
           last_phase: imageResult.ok ? "image_edit_done" : imageQuotaInsufficient ? "image_edit_quota_paused" : "image_edit_failed",
@@ -1208,7 +1221,7 @@ export function WorkspacePage() {
         })
         .catch(() => {});
     } catch (err) {
-      pendingImageEditRequestRef.current = { ...request, formValues, intakeContext, materials: flowMaterials };
+      pendingImageEditRequestRef.current = null;
       pushAssistant(`图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
@@ -1955,18 +1968,22 @@ export function WorkspacePage() {
     }
     if (pendingImageEditRequestRef.current?.conversationId === activeConversation) {
       const pendingRequest = pendingImageEditRequestRef.current;
-      const flowMaterials = mergeMaterials(pendingRequest.materials, materials);
-      const nextPrompt = text.trim() || pendingRequest.prompt;
-      if (!hasImageMaterial(flowMaterials)) {
-        pushAssistant("我还没有找到需要编辑的原图，请上传需要编辑的图片后再提交。", activeConversation);
+      if (looksLikeImageEditPrompt(text)) {
+        pendingImageEditRequestRef.current = null;
+      } else {
+        const flowMaterials = mergeMaterials(pendingRequest.materials, materials);
+        const nextPrompt = text.trim() || pendingRequest.prompt;
+        if (!hasImageMaterial(flowMaterials)) {
+          pushAssistant("我还没有找到需要编辑的原图，请上传需要编辑的图片后再提交。", activeConversation);
+          return;
+        }
+        await showImageEditOptions({
+          ...pendingRequest,
+          prompt: nextPrompt,
+          materials: flowMaterials,
+        });
         return;
       }
-      await showImageEditOptions({
-        ...pendingRequest,
-        prompt: nextPrompt,
-        materials: flowMaterials,
-      });
-      return;
     }
     const pendingPptOutlineRevision = pptOutlineRevisionArtifactRef.current;
     const pendingPptOutlineArtifact = pendingPptOutlineRevision?.artifact;

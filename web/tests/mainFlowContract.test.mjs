@@ -168,9 +168,11 @@ test("restoring or creating a conversation clears stale pending dialog attachmen
 test("image edit intake bypasses the normal directions and plan flow", () => {
   const source = handleSendSource();
   assert.match(workspaceSource, /pendingImageEditRequestRef/, "Workspace must store an image-edit request while waiting for upload");
+  assert.match(workspaceSource, /function looksLikeImageEditPrompt/, "Workspace must detect natural image-edit prompts");
   assert.match(workspaceSource, /function isImageEditIntake/, "Workspace must detect image-edit intake metadata");
   assert.match(workspaceSource, /const executeDirectImageEdit = async/, "Workspace must have a direct image-edit executor");
   assert.match(source, /if \(pendingImageEditRequestRef\.current\?\.conversationId === activeConversation\)/, "next user upload must resume pending image edit");
+  assert.match(source, /looksLikeImageEditPrompt\(text\)[\s\S]*pendingImageEditRequestRef\.current = null/, "a fresh image-edit prompt must reset stale pending image-edit state");
   assert.match(source, /if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)/, "image-edit intake must branch before the generic image form");
   assert.match(source, /请上传需要编辑的图片/, "missing source image should prompt the user to upload");
   assert.match(source, /showImageEditOptions/, "image-edit branch must show model options before generation");
@@ -196,14 +198,17 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
+  assert.match(executeSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*30_000/, "successful direct image edit must auto-accept after 30 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
   assert.match(messageBubbleSource, /尺寸/, "image-edit options card must show ratio choices");
   assert.match(messageBubbleSource, /imageEditUnsupportedReason/, "image-edit options must detect unsupported requested params");
-  assert.match(messageBubbleSource, /当前模型不支持尺寸/, "unsupported requested ratio should show a clear message");
-  assert.match(messageBubbleSource, /当前模型不支持清晰度/, "unsupported requested quality should show a clear message");
-  assert.match(messageBubbleSource, /disabled=\{Boolean\(imageEditUnsupportedReason\)\}/, "unsupported requested params must block submit");
+  assert.match(messageBubbleSource, /当前模型不支持需求尺寸/, "unsupported requested ratio should show a clear message");
+  assert.match(messageBubbleSource, /当前模型不支持需求清晰度/, "unsupported requested quality should show a clear message");
+  assert.match(messageBubbleSource, /你也可以重新选择当前模型支持的参数后继续提交/, "unsupported requested params should guide the user to choose supported values");
+  assert.match(messageBubbleSource, /imageEditSubmitDisabled/, "image-edit submit should only disable when no usable option exists");
+  assert.equal(messageBubbleSource.includes("disabled={Boolean(imageEditUnsupportedReason)}"), false, "unsupported requested params must not block submit after choosing supported values");
 });
 
 test("ppt image pages stream partial status into the existing artifact card", () => {

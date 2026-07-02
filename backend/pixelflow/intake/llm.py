@@ -205,6 +205,10 @@ image_count 表示用户明确要求生成的图片张数；没有明确数量�
 - image_edit: 用户要修改、编辑、换背景、修图、改已有图片。
 - reference_image: 用户上传或引用图片作为参考生成新图。
 - multi_image_fusion: 用户要把多张图融合成一张图。
+判断 image_operation 时要特别注意：
+- 只要用户提到“上传的图片/原图/这张图/图中/图片中”等已有图片，并要求“变成/改成/换成/替换/调整/去掉/增加”等局部或整体改动，就必须判为 image_edit。
+- 例如“帮我把上传的图片中的路飞衣服变成黄色”属于 image_edit，不属于 text_to_image。
+- 只有没有已有图片引用、也没有编辑诉求时，才判为 text_to_image。
 
 如果是 ppt_generation，可抽取 values 字段：
 ppt_topic, ppt_style。附件由前端上传，不要编造 attachments。
@@ -447,7 +451,10 @@ def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any],
         or values.get("image_operation")
         or values.get("operation")
     )
-    return operation or _infer_image_operation(text)
+    inferred = _infer_image_operation(text)
+    if inferred in {"image_edit", "multi_image_fusion"} and operation in {"", "text_to_image", "reference_image"}:
+        return inferred
+    return operation or inferred
 
 
 def _normalize_image_operation(value: Any) -> str:
@@ -481,11 +488,73 @@ def _infer_image_operation(text: str) -> str:
     lowered = text.lower()
     if any(keyword in lowered for keyword in ["融合", "合成一张", "多图合成", "multi_image_fusion", "fusion"]):
         return "multi_image_fusion"
-    if any(keyword in lowered for keyword in ["编辑", "修改", "改成", "改图", "修图", "换背景", "替换背景", "去水印", "抠图", "image_edit", "edit"]):
+    if _references_existing_image(lowered) and _has_image_edit_action(lowered):
+        return "image_edit"
+    if any(keyword in lowered for keyword in ["编辑", "修改", "改成", "改为", "变成", "变为", "改图", "修图", "换背景", "替换背景", "去水印", "抠图", "image_edit", "edit"]):
         return "image_edit"
     if any(keyword in lowered for keyword in ["参考", "基于这张", "按照这张", "类似这张", "图生图", "reference"]):
         return "reference_image"
     return "text_to_image"
+
+
+def _references_existing_image(text: str) -> bool:
+    return any(
+        keyword in text
+        for keyword in [
+            "上传的图片",
+            "上传图片",
+            "上传的图",
+            "上传图",
+            "这张图片",
+            "这张图",
+            "这幅图",
+            "这张照片",
+            "原图",
+            "当前图片",
+            "当前图",
+            "图片中",
+            "图中",
+            "照片中",
+            "素材图",
+            "参考图",
+        ]
+    )
+
+
+def _has_image_edit_action(text: str) -> bool:
+    return any(
+        keyword in text
+        for keyword in [
+            "变成",
+            "变为",
+            "变黄",
+            "变红",
+            "变蓝",
+            "变白",
+            "变黑",
+            "改成",
+            "改为",
+            "换成",
+            "换为",
+            "替换",
+            "修改",
+            "调整",
+            "调成",
+            "去掉",
+            "删除",
+            "移除",
+            "增加",
+            "添加",
+            "换背景",
+            "改背景",
+            "换色",
+            "改色",
+            "上色",
+            "修复",
+            "修图",
+            "抠图",
+        ]
+    )
 
 
 def _extract_ppt_topic(text: str) -> str:

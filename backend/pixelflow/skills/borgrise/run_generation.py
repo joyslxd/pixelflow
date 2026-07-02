@@ -2862,13 +2862,11 @@ def image_edit(
     quality_error = validate_image_model_quality(model, quality)
     if quality_error:
         return quality_error
-    if ratio and ratio != "1:1":
-        try:
-            width, height = ratio_to_dimensions(ratio)
-        except ValueError as exc:
-            return {"error": True, "message": str(exc)}
-    else:
-        width, height = 512, 512
+    ratio_value = ratio or "1:1"
+    try:
+        width, height = ratio_to_dimensions(ratio_value)
+    except ValueError as exc:
+        return {"error": True, "message": str(exc)}
 
     request_data = {
         "image_url": image_url,
@@ -2876,7 +2874,10 @@ def image_edit(
         "model": model,
         "width": width,
         "height": height,
+        "imageSize": quality,
+        "size": ratio_value,
         "max_images": max_images,
+        "num": max_images,
     }
 
     print(f"\n{'='*60}")
@@ -3257,6 +3258,9 @@ def main():
     p_edit.add_argument("--image-url", required=True, help="Original image URL")
     p_edit.add_argument("--prompt", required=True, help="Edit instruction")
     p_edit.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
+    p_edit.add_argument("--ratio", default="1:1", help="Aspect ratio")
+    p_edit.add_argument("--size", default=None, help="Image quality/size, e.g. 1080p, 2K, 4K")
+    p_edit.add_argument("--max-images", type=int, default=1, help="Number of edited images to generate")
 
     # 批量文本生成图片命令。
     p_batch = subparsers.add_parser("batch-text-to-image", help="Batch generate images")
@@ -3445,7 +3449,10 @@ def main():
             result = image_edit(
                 image_url=args.image_url,
                 prompt=args.prompt,
-                model=args.model
+                model=args.model,
+                ratio=args.ratio,
+                size=args.size,
+                max_images=args.max_images,
             )
         elif args.command == "batch-text-to-image":
             prompts = json.loads(args.prompts)
