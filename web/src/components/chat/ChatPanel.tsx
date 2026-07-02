@@ -40,6 +40,7 @@ interface ChatPanelProps {
 
 function isProgressMessage(message: ChatMessage): boolean {
   if (message.role !== "assistant" || message.artifact) return false;
+  if (/采集 Agent 判断这是视频生成需求/.test(message.content)) return true;
   return /正在|生成中|处理中|继续查询|准备|调用|轮询|合并|重生成/.test(message.content);
 }
 

@@ -145,6 +145,7 @@ function pptPagesReady(msg: ChatMessage): boolean {
 }
 
 function progressDescription(content: string): string {
+  if (/可编辑场景包|场景包/.test(content)) return "视频场景包生成中";
   if (/三视图|场景图|道具图|参考图/.test(content)) return "生成角色、场景与道具参考图";
   if (/场景视频|分镜视频/.test(content)) return "生成场景视频片段";
   if (/合并/.test(content)) return "合并完整视频";
@@ -155,8 +156,10 @@ function progressDescription(content: string): string {
   if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
   if (/生成图片|图片生成/.test(content)) return "生成图片";
   if (/视频分析|媒体链接|穿帮分析/.test(content)) return "分析视频内容";
+  if (/采集 Agent 判断这是视频生成需求/.test(content)) return "计划文件生成中";
   if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
-  if (/创意方向|plan\.md/.test(content)) return "生成创意方案";
+  if (/plan\.md|计划文件|创作方案/.test(content)) return "生成计划文件";
+  if (/创意方向/.test(content)) return "生成创意方案";
   if (/继续查询|任务状态/.test(content)) return "查询已有任务状态";
   return "处理中";
 }

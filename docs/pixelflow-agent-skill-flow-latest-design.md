@@ -172,6 +172,9 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
+- 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start` 启动 Python job，后端在同一个 job 内顺序完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即保存 `pendingScenePackageJob` / `pending_scene_package_job` 到 conversation context；用户切换历史对话、切到创作页、离开 iframe 或刷新后，只继续查询 `/agent/flows/video/prepare-scene-packages/jobs/{job_id}`，不重复启动。
+- 场景包卡片上的继续/重新生成参考图调用 `/agent/flows/video/generate-scene-assets/start`，保存同一类 `pendingScenePackageJob`，恢复时只查询 `/agent/flows/video/generate-scene-assets/jobs/{job_id}`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
+- 场景包 job 状态使用 `stage=prepare_scene_packages | generate_scene_assets | completed`；参考图额度不足时状态为 `quota_paused`，result 保留 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
 - 场景视频生成和视频修改重生成启动后，前端必须把 Python job 的 `job_id`、原始请求、来源 artifact 和所属 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时，只允许继续轮询 `/agent/flows/video/generate-scenes/jobs/{job_id}`；如果 job 不存在或已过期，不自动重新启动，避免重复计费。
 
 ### 5.5 视频分析类 Skill
@@ -388,12 +391,13 @@ sequenceDiagram
   IA-->>FE: "selected_direction"
   FE->>PA: "生成 plan.md"
   PA-->>FE: "plan.md"
-  FE->>VA: "prepare-scene-packages"
-  VA-->>FE: "global_assets + scene_packages"
-  FE->>VA: "generate-scene-assets"
+  FE->>VA: "prepare-scene-packages/start"
+  FE->>FE: "保存 pendingScenePackageJob 到 conversation context"
+  VA->>VA: "生成 global_assets + scene_packages"
   VA->>BG: "文生图生成角色三视图、场景图、道具图"
   BG-->>VA: "参考图 URL"
-  VA-->>FE: "可编辑场景包"
+  FE->>VA: "轮询 prepare-scene-packages/jobs/{job_id}"
+  VA-->>FE: "可编辑场景包 + sceneAssetFailures"
   U->>FE: "编辑故事线、镜头描述、旁白、@参考图"
   FE->>VA: "generate-scenes/start"
   FE->>FE: "保存 pendingVideoJob 到 conversation context"
@@ -504,6 +508,7 @@ flowchart TD
 - 用户关闭窗口再进入默认是新对话页面。
 - 点击历史对话时恢复该对话最后流程状态。
 - 异步回调必须带原始 `conversation_id`，不能因为用户切换页面就写到当前可见对话。
+- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐 `video_scene_packages` 卡片，额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
