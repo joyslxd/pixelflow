@@ -32,6 +32,8 @@
 
 ## 主 PixelFlow 流程实际调用
 
+视频场景包和场景参考图没有新增 content-app 接口路径：前端现在先调用 PixelFlow 网关的 `/agent/flows/video/prepare-scene-packages/start` 或 `/agent/flows/video/generate-scene-assets/start` 获取 Python `job_id`，再轮询对应 `/jobs/{job_id}`。其中场景包主链路 job 内部仍按原能力生成可编辑场景包，并通过 `/api/picture/text_to_image` 生成角色三视图、场景图和道具图；用户离开再回来只查询已有 Python job，不会重复触发 content-app 扣费接口。
+
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | `/api/auth/verify` | `POST` | `content_app_auth.verify_authorization_header_remote()`、SSE 生成器 | 实时校验 content-app token，禁用用户或失效 token 立即拒绝。 | `AuthController.verifyToken()` | pixelflow 本地只读取 JWT payload 里的 `sub` 作为用户名；token 真伪、过期和用户禁用状态以此接口返回为准。 |

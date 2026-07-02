@@ -49,6 +49,22 @@ function handleRegenerateVideoWithRevisionSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handleCompletedScenePackageJobSource() {
+  const start = workspaceSource.indexOf("const handleCompletedScenePackageJob = async");
+  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
+  assert.notEqual(start, -1, "handleCompletedScenePackageJob must exist");
+  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow scene package job completion");
+  return workspaceSource.slice(start, end);
+}
+
+function resumePendingScenePackageJobSource() {
+  const start = workspaceSource.indexOf("const resumePendingScenePackageJob = async");
+  const end = workspaceSource.indexOf("const pushReviewArtifact =", start);
+  assert.notEqual(start, -1, "resumePendingScenePackageJob must exist");
+  assert.notEqual(end, -1, "pushReviewArtifact must follow scene package resume");
+  return workspaceSource.slice(start, end);
+}
+
 test("new conversation stores the user message before agent replies", () => {
   const source = handleSendSource();
   const appendIndex = source.indexOf("await appendMessageForConversation(message, activeConversation)");
@@ -104,8 +120,9 @@ test("video plan approval always enters scene package and merge main flow", () =
   const source = handleApprovePlanSource();
   assert.equal(source.includes("api.generateDirectVideo"), false, "video approval must not bypass scene packages with direct video generation");
   assert.equal(source.includes("inferDirectVideoRequest"), false, "video approval must not infer direct-video shortcuts");
-  assert.equal(source.includes("api.prepareVideoScenePackages"), true, "video approval must prepare editable scene packages first");
-  assert.equal(source.includes("api.generateSceneAssets"), true, "video approval must generate scene reference assets before scene video generation");
+  assert.equal(source.includes("api.startPrepareScenePackagesJob"), true, "video approval must start a recoverable scene package job");
+  assert.equal(source.includes("api.prepareVideoScenePackages"), false, "video approval must not wait on the legacy synchronous scene package API");
+  assert.equal(source.includes("api.generateSceneAssets"), false, "video approval must not wait on the legacy synchronous scene asset API");
 });
 
 test("image form values preserve requested multi-image count", () => {
@@ -241,6 +258,11 @@ test("active assistant progress messages render a loading indicator", () => {
   assert.match(messageBubbleSource, /showProgressLoading[\s\S]*msg\.time/, "loading indicator should render above the message time");
   assert.match(messageBubbleSource, /animate-spin/, "loading indicator should spin");
   assert.match(messageBubbleSource, /conic-gradient/, "loading indicator should use a gradient ring");
+  assert.match(workspaceSource, /已默认采用推荐方向[\s\S]*正在生成 plan\.md/, "auto-selected directions must still show plan generation progress");
+  assert.match(chatPanelSource, /采集 Agent 判断这是视频生成需求/, "video intake confirmation should keep loading active before the next assistant result");
+  assert.match(messageBubbleSource, /采集 Agent 判断这是视频生成需求[\s\S]*计划文件生成中[\s\S]*采集 Agent\|理解\|表单/, "video intake confirmation loading should show plan file generation before generic intake text");
+  assert.match(messageBubbleSource, /可编辑场景包\|场景包[\s\S]*视频场景包生成中[\s\S]*plan\\\.md\|计划文件\|创作方案/, "scene package progress should be labeled before generic plan.md progress");
+  assert.match(messageBubbleSource, /计划文件/, "plan.md progress should be labeled as plan file generation");
 });
 
 test("ppt page regenerate updates the same card and hides regenerate while a page is running", () => {
@@ -270,9 +292,10 @@ test("image plan approval continues through image generation instead of stopping
 
 test("failed image video and analysis stages expose retry paths", () => {
   const source = handleApprovePlanSource();
+  const scenePackageJobSource = handleCompletedScenePackageJobSource();
   assert.match(source, /if \(!imagePrepare\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image prepare failure must release the plan action");
   assert.match(source, /if \(!imageResult\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image generation failure must let the previous stage retry");
-  assert.match(source, /if \(!scenePackagesForReview\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene package failure must release the plan action");
+  assert.match(scenePackageJobSource, /if \(!videoScenePackages\.ok \|\| quotaPaused\) releaseArtifactAction\(processedKey\)/, "scene package job failure must release the plan action");
   assert.match(workspaceSource, /if \(!generatedSceneVideos\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene video failure must let the scene package card retry");
   assert.match(workspaceSource, /if \(!mergedVideo\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "merge failure must release the generating scene package action");
   assert.match(messageBubbleSource, /videoGenerationFailed/, "video generation failure card must render a retry affordance");
@@ -299,12 +322,46 @@ test("scene video jobs persist their id before polling so conversations can reco
   assert.equal(source.includes("api.generateSceneVideos"), false, "WorkspacePage must not use the start+poll convenience wrapper for scene jobs");
 });
 
+test("scene package jobs persist their id before polling so conversations can recover", () => {
+  assert.match(apiSource, /startPrepareScenePackagesJob:/, "API client must expose a start-only scene package job call");
+  assert.match(apiSource, /getPrepareScenePackagesJob:/, "API client must expose a query-only scene package job call");
+  assert.match(apiSource, /pollPrepareScenePackagesJob,/, "API client must expose polling for existing scene package jobs");
+  assert.match(apiSource, /startSceneAssetsJob:/, "API client must expose a start-only scene asset job call");
+  assert.match(apiSource, /getSceneAssetsJob:/, "API client must expose a query-only scene asset job call");
+  assert.match(apiSource, /pollSceneAssetsJob,/, "API client must expose polling for existing scene asset jobs");
+  assert.match(workspaceSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
+  assert.match(workspaceSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
+  assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === currentConversationId/, "conversation snapshots must keep the active pending scene package job");
+
+  const source = handleApprovePlanSource();
+  const startIndex = source.indexOf("api.startPrepareScenePackagesJob(request)");
+  const persistIndex = source.indexOf("await persistPendingScenePackageJob(pendingScenePackageJob");
+  const pollIndex = source.indexOf("await resumePendingScenePackageJob(pendingScenePackageJob, processedKey)");
+  assert.notEqual(startIndex, -1, "video approval must start a backend scene package job explicitly");
+  assert.notEqual(persistIndex, -1, "video approval must persist the job id");
+  assert.notEqual(pollIndex, -1, "video approval must poll the persisted job");
+  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "scene package job id must be persisted before polling starts");
+  assert.match(source, /kind:\s*"scene_package_generation"/, "scene package generation must record its pending job kind");
+});
+
 test("restored conversations resume existing video jobs without starting duplicates", () => {
   const applySource = applyConversationSource();
   assert.match(applySource, /snapshot\.pendingVideoJob \|\| snapshot\.pending_video_job/, "restore must read pending video job metadata");
   assert.match(applySource, /resumePendingVideoJob\(pendingVideoJob\)/, "restore must resume polling an existing job");
   assert.equal(applySource.includes("startSceneVideosJob"), false, "restore must not start a duplicate scene video job");
   assert.equal(applySource.includes("pushAssistant"), false, "restore must not add a separate resume-polling progress message");
+});
+
+test("restored conversations resume existing scene package jobs without starting duplicates", () => {
+  const applySource = applyConversationSource();
+  const resumeSource = resumePendingScenePackageJobSource();
+  assert.match(applySource, /snapshot\.pendingScenePackageJob \|\| snapshot\.pending_scene_package_job/, "restore must read pending scene package job metadata");
+  assert.match(applySource, /resumePendingScenePackageJob\(pendingScenePackageJob\)/, "restore must resume polling an existing scene package job");
+  assert.equal(applySource.includes("startPrepareScenePackagesJob"), false, "restore must not start a duplicate scene package job");
+  assert.equal(applySource.includes("startSceneAssetsJob"), false, "restore must not start a duplicate scene asset job");
+  assert.equal(resumeSource.includes("已恢复上次场景包生成任务"), false, "restore polling should not append duplicate progress messages");
+  assert.match(resumeSource, /const shouldContinuePolling = \(\) => isVisibleConversation\(pendingScenePackageJob\.conversation_id\)/, "scene package polling must stop when the conversation is no longer visible");
+  assert.match(resumeSource, /pausedForHiddenConversation[\s\S]*releaseArtifactAction\(processedKey\)/, "stopping hidden conversation polling must release the local action lock without clearing the pending job");
 });
 
 test("video revision regeneration also uses recoverable scene video jobs", () => {
