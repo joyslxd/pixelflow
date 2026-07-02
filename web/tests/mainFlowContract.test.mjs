@@ -211,6 +211,44 @@ test("image edit options load content-app model configs and submit selected mode
   assert.equal(messageBubbleSource.includes("disabled={Boolean(imageEditUnsupportedReason)}"), false, "unsupported requested params must not block submit after choosing supported values");
 });
 
+test("confirmed image edit options survive conversation restore", () => {
+  const optionsStart = workspaceSource.indexOf("const showImageEditOptions = async");
+  const executeStart = workspaceSource.indexOf("const executeDirectImageEdit = async");
+  const confirmStart = workspaceSource.indexOf("const handleConfirmImageEditOptions = async");
+  const confirmEnd = workspaceSource.indexOf("const pushDirectionsArtifact", confirmStart);
+  const applyStart = workspaceSource.indexOf("const applyConversation = async");
+  const applyEnd = workspaceSource.indexOf("const taskId = snapshot.taskId", applyStart);
+  assert.notEqual(optionsStart, -1, "showImageEditOptions must exist");
+  assert.notEqual(executeStart, -1, "executeDirectImageEdit must exist");
+  assert.notEqual(confirmStart, -1, "handleConfirmImageEditOptions must exist");
+  assert.notEqual(confirmEnd, -1, "pushDirectionsArtifact must follow image edit confirmation");
+  assert.notEqual(applyStart, -1, "applyConversation must exist");
+  assert.notEqual(applyEnd, -1, "task reconciliation must follow restored messages");
+  const confirmSource = workspaceSource.slice(confirmStart, confirmEnd);
+  const applySource = workspaceSource.slice(applyStart, applyEnd);
+
+  assert.match(workspaceSource, /imageEditConfirmedSelectionsRef/, "Workspace must keep confirmed image-edit selections by message id");
+  assert.match(workspaceSource, /imageEditConfirmedSelections\?: Record<string, ImageEditModelSelection>/, "conversation snapshots must persist confirmed image-edit selections");
+  assert.match(confirmSource, /recordImageEditConfirmedSelection\(msg\.id,\s*targetConversationId,\s*selection\)/, "confirming image-edit options must record the selected model ratio and quality before generation");
+  assert.match(applySource, /applyImageEditConfirmedSelectionsToMessages/, "restored messages must be patched with confirmed selections from context");
+  assert.match(messageBubbleSource, /imageEditConfirmedSelection/, "MessageBubble must read the confirmed selection from restored artifacts");
+  assert.match(messageBubbleSource, /confirmedImageEditSelection\?\.model/, "confirmed model should initialize the options card after restore");
+  assert.match(messageBubbleSource, /confirmedImageEditSelection\?\.ratio/, "confirmed ratio should initialize the options card after restore");
+  assert.match(messageBubbleSource, /confirmedImageEditSelection\?\.size/, "confirmed quality should initialize the options card after restore");
+});
+
+test("failed direct image edit can reopen model options instead of blindly retrying stale params", () => {
+  const retryStart = workspaceSource.indexOf("const handleRetryImageResult = async");
+  const retryEnd = workspaceSource.indexOf("async function handleAcceptImageResult", retryStart);
+  assert.notEqual(retryStart, -1, "handleRetryImageResult must exist");
+  assert.notEqual(retryEnd, -1, "handleAcceptImageResult must follow retry handler");
+  const retrySource = workspaceSource.slice(retryStart, retryEnd);
+  assert.match(retrySource, /imagePrepare\.method === "image_edit"/, "image edit failures need a dedicated retry branch");
+  assert.match(retrySource, /showImageEditOptions/, "image edit retry should reopen the model and quality options card");
+  assert.match(retrySource, /imageEditRequest/, "retry should rebuild the image edit request from the failed result artifact");
+  assert.match(retrySource, /releaseArtifactAction\(processedKey\)/, "reopening options should release the failed result action so the user can submit again");
+});
+
 test("ppt image pages stream partial status into the existing artifact card", () => {
   assert.match(apiSource, /type PptJobStatusCallback/, "PPT job polling must expose status callbacks");
   assert.match(apiSource, /startPptImagesJob:[\s\S]*onStatus\?: PptJobStatusCallback/, "PPT image job must accept a status callback");

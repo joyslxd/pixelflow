@@ -226,6 +226,7 @@ export function MessageBubble({
   const imagePrepareParams = msg.artifact?.imagePrepare?.params ? JSON.stringify(msg.artifact.imagePrepare.params, null, 2) : "";
   const imageEditModelConfigs = msg.artifact?.imageEditModelConfigs || [];
   const imageEditModelNames = imageEditModelConfigs.map(imageModelType).filter(Boolean);
+  const confirmedImageEditSelection = msg.artifact?.imageEditConfirmedSelection;
   const requestedImageEditRatio = requestedImageEditParam(msg, "ratio");
   const requestedImageEditSize = requestedImageEditParam(msg, "size");
   const imageEditConfigSignature = JSON.stringify(
@@ -270,15 +271,28 @@ export function MessageBubble({
 
   useEffect(() => {
     if (msg.artifact?.type !== "image_edit_options") return;
-    const preferredModel = imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2";
+    const confirmedModel = confirmedImageEditSelection?.model && imageEditModelNames.includes(confirmedImageEditSelection.model) ? confirmedImageEditSelection.model : "";
+    const preferredModel = confirmedModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
     const preferredConfig = imageEditModelConfigs.find((config) => imageModelType(config) === preferredModel) || imageEditModelConfigs[0];
     const options = imageModelOptions(preferredConfig);
     setSelectedImageEditModel(preferredModel);
-    setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
-    setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
-  }, [msg.id, imageEditConfigSignature, requestedImageEditRatio, requestedImageEditSize]);
+    setSelectedImageEditRatio(
+      confirmedImageEditSelection?.ratio && options.ratios.includes(confirmedImageEditSelection.ratio)
+        ? confirmedImageEditSelection.ratio
+        : requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio)
+          ? requestedImageEditRatio
+          : options.ratios[0] || "1:1",
+    );
+    setSelectedImageEditSize(
+      confirmedImageEditSelection?.size && options.sizes.includes(confirmedImageEditSelection.size)
+        ? confirmedImageEditSelection.size
+        : requestedImageEditSize && options.sizes.includes(requestedImageEditSize)
+          ? requestedImageEditSize
+          : options.sizes[0] || "4K",
+    );
+  }, [msg.id, imageEditConfigSignature, requestedImageEditRatio, requestedImageEditSize, confirmedImageEditSelection?.model, confirmedImageEditSelection?.ratio, confirmedImageEditSelection?.size]);
 
-  const currentImageEditModel = selectedImageEditModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
+  const currentImageEditModel = selectedImageEditModel || confirmedImageEditSelection?.model || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
   const currentImageEditConfig = imageEditModelConfigs.find((config) => imageModelType(config) === currentImageEditModel) || imageEditModelConfigs[0];
   const currentImageEditOptions = imageModelOptions(currentImageEditConfig);
   const imageEditRatioSupported = !requestedImageEditRatio || currentImageEditOptions.ratios.includes(requestedImageEditRatio);

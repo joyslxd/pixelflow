@@ -200,8 +200,10 @@ SmartPPT接口：
 - 前端图片尺寸只展示 `1:1`、`16:9`、`9:16`、`自动适配`。
 - `自动适配` 会由 `image_prepare.py` 根据用途和目标映射到供应商支持比例。
 - 用户明确要求多张图片时，`requested_output_count` 会进入 `intake_context`，最终 `image/generate` 按数量循环调用，默认 1 张，最多 10 张。
-- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate`，最终走 `/api/picture/image_edit`。图片编辑结果成功后保留“满意，结束 / 重新生成”，30 秒未操作默认满意并结束。
-- 图片编辑分支会让 LLM 抽取用户指定的 `image_size` 和 `image_quality`；如果所选模型不支持该尺寸或清晰度，前端必须提示，并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有指定，则按所选模型自动选择一组可用参数。
+- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate`，最终走 `/api/picture/image_edit`。用户确认的模型、尺寸和清晰度必须写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新恢复后继续展示确认过的参数。图片编辑结果成功后保留“满意，结束 / 重新生成”，30 秒未操作默认满意并结束。
+- 图片编辑分支会让 LLM 抽取用户指定的 `image_size` 和 `image_quality`；如果所选模型不支持该尺寸或清晰度，前端必须提示，并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有指定，则按所选模型自动选择一组可用参数。图片编辑失败后，“重新生成图片”必须重新打开模型/尺寸/清晰度确认卡，不能直接复用失败参数盲重试。
+- 图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。模型级参数是否合法由前端实时配置和 content-app 生成接口共同兜底。
+- content-app 图片编辑请求体里 `size` 表示比例，如 `9:16`；`imageSize` 表示清晰度，如 `2K/4K/1080p`。PixelFlow 网关需要保持两者分离，不能把 `size` 当清晰度覆盖用户选择。
 - 图片编辑必须有原图；如果用户没有上传图片，前端会提示“请上传需要编辑的图片”，并把 `pendingImageEditRequest` 存入对话 context，用户上传后可从同一对话继续执行。
 - 有附件时，附件 URL 会进入 `materials`，图片编辑/参考图/多图融合会根据素材数量和用户语义选择接口。
 

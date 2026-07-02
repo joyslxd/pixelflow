@@ -315,6 +315,51 @@ def test_image_router_generates_image_edit_from_image_url_alias(monkeypatch):
     assert data["images"][0]["url"] == "https://x/edited.png"
 
 
+def test_image_router_keeps_content_app_ratio_size_separate_from_image_quality(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            assert kwargs == {
+                "image_url": "https://x/source.png",
+                "prompt": "换黄色衣服",
+                "model": "seeddream-5.0",
+                "ratio": "9:16",
+                "size": "2K",
+                "max_images": 1,
+            }
+            return ImageGenerationResult(
+                ok=True,
+                task_id="edit-task-2",
+                images=[{"asset_id": "edit-task-2-0", "url": "https://x/edited.png", "download_url": "https://x/edited.png"}],
+                raw={"endpoint": "/api/picture/image_edit"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/generate",
+            json={
+                "method": "image_edit",
+                "prompt": "换黄色衣服",
+                "params": {
+                    "image_url": "https://x/source.png",
+                    "model": "seeddream-5.0",
+                    "size": "9:16",
+                    "imageSize": "2K",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
 def test_image_router_generates_multi_image_fusion(monkeypatch):
     from app.gateway.routers import pixelflow_image
     from pixelflow.skills import ImageGenerationResult
@@ -325,7 +370,7 @@ def test_image_router_generates_multi_image_fusion(monkeypatch):
                 "image_urls": ["https://x/a.png", "https://x/b.png"],
                 "prompt": "融合两张图",
                 "ratio": "9:16",
-                "size": "1080p",
+                "size": "2K",
                 "model": "seeddream-5.0",
                 "num_images": 1,
             }

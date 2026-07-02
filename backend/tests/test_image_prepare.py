@@ -224,7 +224,7 @@ def test_prepare_image_generation_honors_selected_image_edit_model_ratio_and_qua
             "image_operation": "image_edit",
             "image_model": "seeddream-5.0",
             "image_size": "16:9",
-            "image_quality": "1080p",
+            "image_quality": "3K",
         },
         "",
         {},
@@ -235,7 +235,7 @@ def test_prepare_image_generation_honors_selected_image_edit_model_ratio_and_qua
     assert result.ok is True
     assert result.method == "image_edit"
     assert result.params["model"] == "seeddream-5.0"
-    assert result.params["imageSize"] == "1080p"
+    assert result.params["imageSize"] == "3K"
     assert result.params["width"] == 16
     assert result.params["height"] == 9
 

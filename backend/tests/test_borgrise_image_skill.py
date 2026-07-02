@@ -123,6 +123,64 @@ def test_image_edit_sends_content_app_frontend_contract(monkeypatch):
     }
 
 
+def test_seeddream_5_image_edit_accepts_current_3k_quality(monkeypatch):
+    captured_headers = {}
+    captured_payload = {}
+
+    def fake_make_request(path, payload, custom_headers=None):
+        assert path == "/picture/image_edit"
+        captured_payload.update(payload)
+        captured_headers.update(custom_headers or {})
+        return {"error": True, "message": "stop before polling"}
+
+    monkeypatch.setattr(run_generation, "_current_authorization", lambda: "Bearer test-token")
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+
+    result = run_generation.image_edit(
+        "https://x/source.png",
+        "把上传图片调成暖色调",
+        model="seeddream-5.0",
+        ratio="16:9",
+        size="3K",
+        max_images=1,
+    )
+
+    assert result["error"] is True
+    assert captured_headers["apiModelParamObj"] == '{"size": "3K"}'
+    assert captured_payload["model"] == "seeddream-5.0"
+    assert captured_payload["imageSize"] == "3K"
+    assert captured_payload["size"] == "16:9"
+
+
+def test_image_edit_defers_model_specific_quality_support_to_content_app(monkeypatch):
+    captured_headers = {}
+    captured_payload = {}
+
+    def fake_make_request(path, payload, custom_headers=None):
+        assert path == "/picture/image_edit"
+        captured_payload.update(payload)
+        captured_headers.update(custom_headers or {})
+        return {"error": True, "message": "stop before polling"}
+
+    monkeypatch.setattr(run_generation, "_current_authorization", lambda: "Bearer test-token")
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+
+    result = run_generation.image_edit(
+        "https://x/source.png",
+        "把上传图片调成暖色调",
+        model="seeddream-5.0",
+        ratio="16:9",
+        size="1080p",
+        max_images=1,
+    )
+
+    assert result["error"] is True
+    assert captured_headers["apiModelParamObj"] == '{"size": "1080p"}'
+    assert captured_payload["model"] == "seeddream-5.0"
+    assert captured_payload["imageSize"] == "1080p"
+    assert captured_payload["size"] == "16:9"
+
+
 def test_multi_image_fusion_sends_content_app_contract(monkeypatch):
     captured = {}
 
@@ -139,7 +197,7 @@ def test_multi_image_fusion_sends_content_app_contract(monkeypatch):
         ["https://x/a.png", "https://x/b.png"],
         "把两张图融合成商品海报",
         ratio="9:16",
-        size="1080p",
+        size="2K",
         model="seeddream-5.0",
         num_images=1,
     )
@@ -154,7 +212,7 @@ def test_multi_image_fusion_sends_content_app_contract(monkeypatch):
         "model": "seeddream-5.0",
         "num": 1,
     }
-    assert captured["headers"]["apiModelParamObj"] == '{"size": "1080p"}'
+    assert captured["headers"]["apiModelParamObj"] == '{"size": "2K"}'
 
 
 def test_image_edit_extracts_image_url_list_from_poll_result(monkeypatch):

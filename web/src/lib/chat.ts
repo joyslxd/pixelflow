@@ -3,6 +3,7 @@ import type {
   CreationIntent,
   CreativeDirectionResponse,
   GenerateSceneVideosResponse,
+  ImageEditModelSelection,
   ImageGenerateResponse,
   ImageModelParamConfig,
   ImagePrepareResponse,
@@ -59,6 +60,7 @@ export interface ChatMessage {
     imageEditRequest?: Record<string, unknown>;
     imageEditModelConfigs?: ImageModelParamConfig[];
     imageEditRequestedParams?: Record<string, unknown>;
+    imageEditConfirmedSelection?: ImageEditModelSelection;
     imageRevisionFeedback?: string;
     videoScenePackages?: PrepareScenePackagesResponse;
     sceneAssetFailures?: Array<Record<string, unknown>>;

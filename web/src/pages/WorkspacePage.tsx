@@ -157,6 +157,7 @@ interface WorkspaceSnapshot {
   messages?: ChatMessage[];
   pendingMaterials: Array<Record<string, unknown>>;
   pendingImageEditRequest?: PendingImageEditRequest | null;
+  imageEditConfirmedSelections?: Record<string, ImageEditModelSelection>;
   pendingVideoJob?: PendingVideoJob | null;
   pending_video_job?: PendingVideoJob | null;
   canvas: CanvasState;
@@ -343,6 +344,58 @@ function directImageEditFormValues(
     image_count: requestedCount,
     image_operation: "image_edit",
   };
+}
+
+function imageEditRatioFromPrepareParams(params: Record<string, unknown> | undefined): string {
+  const width = Number(params?.width);
+  const height = Number(params?.height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) return `${width}:${height}`;
+  return "";
+}
+
+function imageEditRequestFromArtifact(
+  artifact: ChatArtifact,
+  conversationId: string,
+): PendingImageEditRequest {
+  const storedRequest = (artifact.imageEditRequest || {}) as Partial<PendingImageEditRequest>;
+  const params = (artifact.imagePrepare?.params || {}) as Record<string, unknown>;
+  const formValues = (storedRequest.formValues || artifact.formValues || {}) as Record<string, unknown>;
+  const intakeContext = (storedRequest.intakeContext || artifact.intakeContext || {}) as Record<string, unknown>;
+  const selection = artifact.imageEditConfirmedSelection || storedRequest.selection || {
+    model: String(formValues.image_model || intakeContext.image_model || params.model || "gpt-image-2"),
+    ratio: String(formValues.image_size || intakeContext.image_size || imageEditRatioFromPrepareParams(params) || "1:1"),
+    size: String(formValues.image_quality || intakeContext.image_quality || params.imageSize || "4K"),
+  };
+  return {
+    conversationId,
+    prompt: String(storedRequest.prompt || artifact.selectedDirection?.description || artifact.imagePrepare?.prompt || artifact.coreMessage || "图片编辑"),
+    formValues,
+    intakeContext,
+    materials: (storedRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
+    selection,
+  };
+}
+
+function applyImageEditConfirmedSelectionsToMessages(
+  messages: ChatMessage[],
+  imageEditConfirmedSelections: Record<string, ImageEditModelSelection>,
+): ChatMessage[] {
+  if (Object.keys(imageEditConfirmedSelections).length === 0) return messages;
+  return messages.map((message) => {
+    const selection = imageEditConfirmedSelections[message.id];
+    if (!selection || message.artifact?.type !== "image_edit_options") return message;
+    return {
+      ...message,
+      artifact: {
+        ...message.artifact,
+        imageEditConfirmedSelection: selection,
+        imageEditRequest: {
+          ...(message.artifact.imageEditRequest || {}),
+          selection,
+        },
+      },
+    };
+  });
 }
 
 function numericValue(value: unknown): number | null {
@@ -627,6 +680,7 @@ export function WorkspacePage() {
   const processedArtifactIdsRef = useRef(new Set<string>());
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
+  const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const planRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const pptOutlineRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
@@ -734,6 +788,45 @@ export function WorkspacePage() {
     const message: ChatMessage = { id: messageId, conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
     void appendMessageForConversation(message, targetConversationId);
     return message;
+  };
+
+  const recordImageEditConfirmedSelection = (
+    messageId: string,
+    targetConversationId: string,
+    selection: ImageEditModelSelection,
+  ) => {
+    imageEditConfirmedSelectionsRef.current = {
+      ...imageEditConfirmedSelectionsRef.current,
+      [messageId]: selection,
+    };
+    setMessages((items) =>
+      items.map((message) => {
+        if (message.id !== messageId || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "image_edit_options") {
+          return message;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            imageEditConfirmedSelection: selection,
+            imageEditRequest: {
+              ...(message.artifact.imageEditRequest || {}),
+              selection,
+            },
+          },
+        };
+      }),
+    );
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          context: {
+            ...makeSnapshot(),
+            imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
   };
 
   const updatePptImagesArtifactInMessage = (
@@ -1122,6 +1215,8 @@ export function WorkspacePage() {
       image_quality: request.selection?.size || request.intakeContext.image_quality || formValues.image_quality,
       requested_output_count: request.intakeContext.requested_output_count || formValues.image_count || 1,
     };
+    const executableRequest: PendingImageEditRequest = { ...request, formValues, intakeContext };
+    pendingImageEditRequestRef.current = executableRequest;
     setBusyForConversation(targetConversationId, true);
     pushAssistant("已识别为图片编辑需求，正在直接调用图片编辑接口生成结果…", targetConversationId);
     try {
@@ -1187,6 +1282,8 @@ export function WorkspacePage() {
         actionLabel: "查看",
         imageResult,
         imagePrepare,
+        imageEditRequest: executableRequest as unknown as Record<string, unknown>,
+        imageEditConfirmedSelection: request.selection,
         intent: "image",
         formValues,
         intakeContext,
@@ -1216,6 +1313,7 @@ export function WorkspacePage() {
             materials: flowMaterials,
             image_prepare: imagePrepare,
             image_result: imageResult,
+            image_edit_request: executableRequest,
             pendingImageEditRequest: pendingImageEditRequestRef.current,
           } as unknown as Record<string, unknown>,
         })
@@ -1243,6 +1341,7 @@ export function WorkspacePage() {
       materials: (storedRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
       selection,
     };
+    recordImageEditConfirmedSelection(msg.id, targetConversationId, selection);
     pendingImageEditRequestRef.current = null;
     await executeDirectImageEdit(request);
   };
@@ -1751,6 +1850,7 @@ export function WorkspacePage() {
     setPendingCore("");
     pendingDialogContextRef.current = null;
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
+    imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
@@ -1773,6 +1873,7 @@ export function WorkspacePage() {
     pendingMaterials,
     pendingImageEditRequest:
       pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
+    imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
     pendingVideoJob:
       pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
     pending_video_job:
@@ -1808,6 +1909,7 @@ export function WorkspacePage() {
     processedArtifactIdsRef.current = new Set();
     pendingDialogContextRef.current = null;
     pendingImageEditRequestRef.current = null;
+    imageEditConfirmedSelectionsRef.current = {};
     pendingVideoJobRef.current = null;
     planRevisionArtifactRef.current = null;
     imageRevisionArtifactRef.current = null;
@@ -1820,16 +1922,19 @@ export function WorkspacePage() {
     const snapshot = (detail.conversation.context || {}) as Partial<WorkspaceSnapshot>;
     const pendingImageEditRequest =
       snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
+    const imageEditConfirmedSelections = snapshot.imageEditConfirmedSelections || {};
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
+    const restoredMessagesWithImageEditSelections = applyImageEditConfirmedSelectionsToMessages(restoredMessages, imageEditConfirmedSelections);
     const contextMessages = restoreLatestVideoScenePackagesFromContext(
-      restoredConversationMessages(undefined, restoredMessages),
+      restoredConversationMessages(undefined, restoredMessagesWithImageEditSelections),
       snapshot as Partial<Record<string, unknown>>,
     );
     applySnapshot({
       ...snapshot,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
+      imageEditConfirmedSelections,
       messages: normalizeRestoredMessageReferences(contextMessages),
     });
     const pendingVideoJob = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
@@ -1898,6 +2003,7 @@ export function WorkspacePage() {
       pendingMaterials,
       pendingImageEditRequest:
         pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
+      imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
       pendingVideoJob:
         pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
       pending_video_job:
@@ -3344,6 +3450,13 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
+    if (imagePrepare.method === "image_edit" && msg.artifact) {
+      const imageEditRequest = imageEditRequestFromArtifact(msg.artifact, targetConversationId);
+      pendingImageEditRequestRef.current = imageEditRequest;
+      releaseArtifactAction(processedKey);
+      await showImageEditOptions(imageEditRequest);
+      return;
+    }
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`已继续调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
     try {

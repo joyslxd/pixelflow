@@ -266,6 +266,9 @@ def _ratio_from_params(params: dict[str, Any]) -> str:
     ratio = params.get("ratio")
     if isinstance(ratio, str) and ratio:
         return ratio
+    content_app_size = params.get("size")
+    if _looks_like_ratio(content_app_size):
+        return str(content_app_size)
     width = params.get("width")
     height = params.get("height")
     if width and height:
@@ -281,12 +284,32 @@ def _optional_str(value: Any) -> str | None:
 
 
 def _image_size_from_params(params: dict[str, Any], model: str | None) -> str:
-    explicit = params.get("imageSize") or params.get("size")
+    explicit = params.get("imageSize") or params.get("image_quality")
     if explicit:
         return str(explicit)
-    if model == "gpt-image-2":
-        return "4K"
+    legacy_size = params.get("size")
+    if legacy_size and not _looks_like_ratio(legacy_size):
+        return str(legacy_size)
+    defaults = {
+        "gpt-image-2": "4K",
+        "seeddream-4.5": "2K",
+        "seeddream-5.0": "2K",
+        "nanobanana-pro": "1080p",
+        "nano-banana": "1080p",
+    }
+    if model in defaults:
+        return defaults[model]
     return "1080p"
+
+
+def _looks_like_ratio(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    left, sep, right = text.partition(":")
+    return bool(sep and left.isdigit() and right.isdigit())
 
 
 def _first_image_url(params: dict[str, Any]) -> str:
