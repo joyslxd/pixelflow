@@ -1,21 +1,23 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, Sparkles } from "lucide-react";
+import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
-import type { CreativeDirectionResponse, PptPageImage } from "@/lib/api";
+import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
   isLatestVideoScenePackage?: boolean;
   actionsDisabled?: boolean;
+  showProgressLoading?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
+  onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
@@ -37,6 +39,10 @@ interface MessageBubbleProps {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function uniqueStringArray(value: unknown): string[] {
+  return Array.from(new Set(stringArray(value).map((item) => item.trim()).filter(Boolean)));
 }
 
 function stringValue(value: unknown): string {
@@ -138,15 +144,68 @@ function pptPagesReady(msg: ChatMessage): boolean {
   return pages.length > 0 && pages.every((page) => page.status === "completed" && Boolean(page.image_url));
 }
 
+function progressDescription(content: string): string {
+  if (/可编辑场景包|场景包/.test(content)) return "视频场景包生成中";
+  if (/三视图|场景图|道具图|参考图/.test(content)) return "生成角色、场景与道具参考图";
+  if (/场景视频|分镜视频/.test(content)) return "生成场景视频片段";
+  if (/合并/.test(content)) return "合并完整视频";
+  if (/PPT 大纲|SmartPPT.*大纲/.test(content)) return "生成 PPT 大纲";
+  if (/页面 JSON|页面结构/.test(content)) return "生成页面结构";
+  if (/PPT 图片|每页 PPT 图片|页面图片/.test(content)) return "生成 PPT 页面图片";
+  if (/PPT 附件/.test(content)) return "生成 PPT 附件";
+  if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
+  if (/生成图片|图片生成/.test(content)) return "生成图片";
+  if (/视频分析|媒体链接|穿帮分析/.test(content)) return "分析视频内容";
+  if (/采集 Agent 判断这是视频生成需求/.test(content)) return "计划文件生成中";
+  if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
+  if (/plan\.md|计划文件|创作方案/.test(content)) return "生成计划文件";
+  if (/创意方向/.test(content)) return "生成创意方案";
+  if (/继续查询|任务状态/.test(content)) return "查询已有任务状态";
+  return "处理中";
+}
+
+function imageModelType(config: ImageModelParamConfig): string {
+  const record = config as unknown as Record<string, unknown>;
+  return stringValue(record.modelType) || stringValue(record.model_type) || stringValue(record.model);
+}
+
+function imageModelParamConfig(config?: ImageModelParamConfig): Record<string, unknown> {
+  const record = (config || {}) as unknown as Record<string, unknown>;
+  const raw = record.paramConfig || record.param_config || {};
+  return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+}
+
+function imageModelOptions(config?: ImageModelParamConfig): { ratios: string[]; sizes: string[] } {
+  const params = imageModelParamConfig(config);
+  return {
+    ratios: uniqueStringArray(params.aspectRatioList || params.aspect_ratio_list).length > 0
+      ? uniqueStringArray(params.aspectRatioList || params.aspect_ratio_list)
+      : ["1:1", "9:16", "16:9"],
+    sizes: uniqueStringArray(params.sizeList || params.size_list).length > 0
+      ? uniqueStringArray(params.sizeList || params.size_list)
+      : ["4K"],
+  };
+}
+
+function requestedImageEditParam(msg: ChatMessage, key: "ratio" | "size"): string {
+  const requested = msg.artifact?.imageEditRequestedParams || {};
+  if (key === "ratio") {
+    return stringValue(requested.ratio) || stringValue(msg.artifact?.formValues?.image_size) || stringValue(msg.artifact?.intakeContext?.image_size);
+  }
+  return stringValue(requested.size) || stringValue(msg.artifact?.formValues?.image_quality) || stringValue(msg.artifact?.intakeContext?.image_quality);
+}
+
 export function MessageBubble({
   msg,
   isLatestVideoScenePackage,
   actionsDisabled,
+  showProgressLoading,
   onOpenArtifact,
   onSelectDirection,
   onApprovePlan,
   onRevisePlan,
   onGenerateImage,
+  onConfirmImageEditOptions,
   onAcceptImageResult,
   onReviseImageResult,
   onGenerateVideoFromScenePackages,
@@ -168,6 +227,17 @@ export function MessageBubble({
   const isUser = msg.role === "user";
   const planPreview = msg.artifact?.plan?.plan_markdown || "";
   const imagePrepareParams = msg.artifact?.imagePrepare?.params ? JSON.stringify(msg.artifact.imagePrepare.params, null, 2) : "";
+  const imageEditModelConfigs = msg.artifact?.imageEditModelConfigs || [];
+  const imageEditModelNames = imageEditModelConfigs.map(imageModelType).filter(Boolean);
+  const confirmedImageEditSelection = msg.artifact?.imageEditConfirmedSelection;
+  const requestedImageEditRatio = requestedImageEditParam(msg, "ratio");
+  const requestedImageEditSize = requestedImageEditParam(msg, "size");
+  const imageEditConfigSignature = JSON.stringify(
+    imageEditModelConfigs.map((config) => ({
+      model: imageModelType(config),
+      options: imageModelOptions(config),
+    })),
+  );
   const scenePackages = msg.artifact?.videoScenePackages?.scene_packages || [];
   const videoAnalysisStoryboards = records(msg.artifact?.videoAnalysis?.storyboards);
   const messageMaterials = records(msg.materials);
@@ -185,7 +255,11 @@ export function MessageBubble({
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
   const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
+  const progressText = showProgressLoading ? progressDescription(msg.content) : "";
   const [loadingDots, setLoadingDots] = useState(0);
+  const [selectedImageEditModel, setSelectedImageEditModel] = useState("");
+  const [selectedImageEditRatio, setSelectedImageEditRatio] = useState("");
+  const [selectedImageEditSize, setSelectedImageEditSize] = useState("");
 
   useEffect(() => {
     if (!hasRunningPptPage) {
@@ -197,6 +271,42 @@ export function MessageBubble({
     }, 450);
     return () => window.clearInterval(timer);
   }, [hasRunningPptPage]);
+
+  useEffect(() => {
+    if (msg.artifact?.type !== "image_edit_options") return;
+    const confirmedModel = confirmedImageEditSelection?.model && imageEditModelNames.includes(confirmedImageEditSelection.model) ? confirmedImageEditSelection.model : "";
+    const preferredModel = confirmedModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
+    const preferredConfig = imageEditModelConfigs.find((config) => imageModelType(config) === preferredModel) || imageEditModelConfigs[0];
+    const options = imageModelOptions(preferredConfig);
+    setSelectedImageEditModel(preferredModel);
+    setSelectedImageEditRatio(
+      confirmedImageEditSelection?.ratio && options.ratios.includes(confirmedImageEditSelection.ratio)
+        ? confirmedImageEditSelection.ratio
+        : requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio)
+          ? requestedImageEditRatio
+          : options.ratios[0] || "1:1",
+    );
+    setSelectedImageEditSize(
+      confirmedImageEditSelection?.size && options.sizes.includes(confirmedImageEditSelection.size)
+        ? confirmedImageEditSelection.size
+        : requestedImageEditSize && options.sizes.includes(requestedImageEditSize)
+          ? requestedImageEditSize
+          : options.sizes[0] || "4K",
+    );
+  }, [msg.id, imageEditConfigSignature, requestedImageEditRatio, requestedImageEditSize, confirmedImageEditSelection?.model, confirmedImageEditSelection?.ratio, confirmedImageEditSelection?.size]);
+
+  const currentImageEditModel = selectedImageEditModel || confirmedImageEditSelection?.model || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
+  const currentImageEditConfig = imageEditModelConfigs.find((config) => imageModelType(config) === currentImageEditModel) || imageEditModelConfigs[0];
+  const currentImageEditOptions = imageModelOptions(currentImageEditConfig);
+  const imageEditRatioSupported = !requestedImageEditRatio || currentImageEditOptions.ratios.includes(requestedImageEditRatio);
+  const imageEditSizeSupported = !requestedImageEditSize || currentImageEditOptions.sizes.includes(requestedImageEditSize);
+  const effectiveImageEditRatio = selectedImageEditRatio || (imageEditRatioSupported ? requestedImageEditRatio : "") || currentImageEditOptions.ratios[0] || "1:1";
+  const effectiveImageEditSize = selectedImageEditSize || (imageEditSizeSupported ? requestedImageEditSize : "") || currentImageEditOptions.sizes[0] || "4K";
+  const imageEditUnsupportedReason = [
+    requestedImageEditRatio && !imageEditRatioSupported ? `当前模型不支持需求尺寸 ${requestedImageEditRatio}，已改用 ${effectiveImageEditRatio}` : "",
+    requestedImageEditSize && !imageEditSizeSupported ? `当前模型不支持需求清晰度 ${requestedImageEditSize}，已改用 ${effectiveImageEditSize}` : "",
+  ].filter(Boolean).join("，");
+  const imageEditSubmitDisabled = !currentImageEditModel || !effectiveImageEditRatio || !effectiveImageEditSize;
 
   const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
     if (!actionsDisabled) return;
@@ -336,6 +446,114 @@ export function MessageBubble({
               </button>
             </div>
           </div>
+        ) : msg.artifact?.type === "image_edit_options" && msg.artifact.imageEditModelConfigs ? (
+          <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <SlidersHorizontal size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+              </span>
+            </div>
+            <label className="block space-y-1.5 text-[12px] text-ink-soft">
+              <span className="font-medium text-ink">模型</span>
+              <select
+                value={currentImageEditModel}
+                onChange={(event) => {
+                  const nextModel = event.target.value;
+                  const nextConfig = imageEditModelConfigs.find((config) => imageModelType(config) === nextModel);
+                  const options = imageModelOptions(nextConfig);
+                  setSelectedImageEditModel(nextModel);
+                  setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
+                  setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
+                }}
+                className="h-10 w-full rounded-xl border border-line bg-white px-3 text-[13px] text-ink outline-none focus:border-accent"
+              >
+                {(imageEditModelNames.length > 0 ? imageEditModelNames : ["gpt-image-2"]).map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="font-medium text-ink">尺寸</span>
+                  {requestedImageEditRatio ? <span className="text-ink-soft">需求指定 {requestedImageEditRatio}</span> : <span className="text-ink-soft">自动选择可用尺寸</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {currentImageEditOptions.ratios.map((ratio) => {
+                    const active = effectiveImageEditRatio === ratio;
+                    return (
+                      <button
+                        key={ratio}
+                        type="button"
+                        onClick={() => setSelectedImageEditRatio(ratio)}
+                        className={cn(
+                          "rounded-full border px-3 py-1.5 text-[12px] font-medium",
+                          active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
+                        )}
+                      >
+                        {ratio}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="font-medium text-ink">清晰度</span>
+                  {requestedImageEditSize ? <span className="text-ink-soft">需求指定 {requestedImageEditSize}</span> : <span className="text-ink-soft">自动选择可用清晰度</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {currentImageEditOptions.sizes.map((size) => {
+                    const active = effectiveImageEditSize === size;
+                    return (
+                      <button
+                        key={size}
+                        type="button"
+                        onClick={() => setSelectedImageEditSize(size)}
+                        className={cn(
+                          "rounded-full border px-3 py-1.5 text-[12px] font-medium",
+                          active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink-soft hover:bg-canvas",
+                        )}
+                      >
+                        {size}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            {imageEditUnsupportedReason ? (
+              <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] leading-relaxed text-ink">
+                {imageEditUnsupportedReason}。你也可以重新选择当前模型支持的参数后继续提交。
+              </div>
+            ) : (
+              <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] leading-relaxed text-ink-soft">
+                将使用 {currentImageEditModel}，尺寸 {effectiveImageEditRatio}，清晰度 {effectiveImageEditSize}。
+              </div>
+            )}
+            <button
+              type="button"
+              disabled={imageEditSubmitDisabled}
+              onClick={() => onConfirmImageEditOptions?.(msg, {
+                model: currentImageEditModel,
+                ratio: effectiveImageEditRatio,
+                size: effectiveImageEditSize,
+              })}
+              className={cn(
+                "flex w-full items-center justify-center gap-1.5 rounded-xl py-2.5 text-[13px] font-medium",
+                imageEditSubmitDisabled ? "cursor-not-allowed bg-canvas text-ink-soft" : "bg-brand text-white hover:opacity-90",
+              )}
+            >
+              <Sparkles size={15} />
+              确认并编辑图片
+            </button>
+          </div>
         ) : msg.artifact?.type === "image_prepare" && msg.artifact.imagePrepare ? (
           <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">
             <div className="flex items-start gap-3">
@@ -421,14 +639,16 @@ export function MessageBubble({
             ) : null}
             {isLatestVideoScenePackage ? (
               <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => onOpenArtifact?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-                >
-                  <FileText size={15} />
-                  查看分镜
-                </button>
+                {msg.artifact.videoScenePackages ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenArtifact?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  >
+                    <FileText size={15} />
+                    查看分镜
+                  </button>
+                ) : null}
                 {sceneAssetFailed ? (
                   <button
                     type="button"
@@ -893,7 +1113,7 @@ export function MessageBubble({
               </button>
             ) : null}
             {msg.artifact.mergedVideo?.ok && (
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2 sm:grid-cols-3">
                 <button
                   type="button"
                   onClick={() => onAcceptVideoResult?.(msg)}
@@ -901,6 +1121,14 @@ export function MessageBubble({
                 >
                   <Check size={15} />
                   无意见，结束
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenArtifact?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <FileText size={15} />
+                  查看分镜
                 </button>
                 <button
                   type="button"
@@ -932,6 +1160,18 @@ export function MessageBubble({
           </button>
         ) : null}
         </div>
+        {showProgressLoading ? (
+          <span
+            className="mt-1 ml-1 flex items-center gap-1.5 text-[11px] text-ink-soft"
+            role="status"
+            aria-label="loading"
+          >
+            <span className="block h-3.5 w-3.5 animate-spin rounded-full bg-[conic-gradient(from_0deg,#4f46e5,#60a5fa,#a78bfa,#4f46e5)] p-[1.5px]">
+              <span className="block h-full w-full rounded-full bg-canvas" />
+            </span>
+            <span>{progressText}</span>
+          </span>
+        ) : null}
         <span className="mt-1 px-1 text-[11px] text-ink-soft/60">{msg.time}</span>
       </div>
     </div>

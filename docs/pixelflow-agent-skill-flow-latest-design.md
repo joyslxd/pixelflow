@@ -130,6 +130,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 | --- | --- | --- | --- |
 | ImageEndpointDecisionSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 根据素材和语义选择图片接口 |
 | ImagePromptBuildSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 组装图片 prompt、ratio、数量、素材 URL |
+| ImageModelConfigLookupSkill | `web/src/lib/api.ts` | `/api/modelParamConfig/listByCategory/image_generate` | 图片编辑前查询可选模型、尺寸和清晰度 |
 | TextToImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/text_to_image` | 文生图 |
 | ReferenceImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/multi_reference_image_generation` | 参考图生成组图 |
 | ImageEditSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/image_edit` | 图片编辑 |
@@ -171,6 +172,10 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
+- 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start` 启动 Python job，后端在同一个 job 内顺序完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即保存 `pendingScenePackageJob` / `pending_scene_package_job` 到 conversation context；用户切换历史对话、切到创作页、离开 iframe 或刷新后，只继续查询 `/agent/flows/video/prepare-scene-packages/jobs/{job_id}`，不重复启动。
+- 场景包卡片上的继续/重新生成参考图调用 `/agent/flows/video/generate-scene-assets/start`，保存同一类 `pendingScenePackageJob`，恢复时只查询 `/agent/flows/video/generate-scene-assets/jobs/{job_id}`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
+- 场景包 job 状态使用 `stage=prepare_scene_packages | generate_scene_assets | completed`；参考图额度不足时状态为 `quota_paused`，result 保留 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
+- 场景视频生成和视频修改重生成启动后，前端必须把 Python job 的 `job_id`、原始请求、来源 artifact 和所属 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时，只允许继续轮询 `/agent/flows/video/generate-scenes/jobs/{job_id}`；如果 job 不存在或已过期，不自动重新启动，避免重复计费。
 
 ### 5.5 视频分析类 Skill
 
@@ -329,16 +334,28 @@ sequenceDiagram
   U->>FE: "输入图片需求和附件"
   FE->>IA: "POST /agent/flows/intake/analyze"
   IA-->>FE: "intent=image + intake_context"
-  FE->>IA: "POST /agent/flows/intake/directions"
-  IA-->>FE: "3 个创意方向"
-  FE->>PA: "POST /agent/flows/planning/plan"
-  PA-->>FE: "plan.md"
-  FE->>IMG: "POST /agent/flows/image/prepare"
-  IMG-->>FE: "method + endpoint + params"
-  FE->>IMG: "POST /agent/flows/image/generate"
-  IMG->>BG: "调用对应图片接口，可循环多次"
-  BG-->>IMG: "图片 URL"
-  IMG-->>FE: "图片结果"
+  alt "image_operation=image_edit"
+    FE->>BG: "GET /api/modelParamConfig/listByCategory/image_generate"
+    BG-->>FE: "模型 + 支持尺寸/清晰度"
+    FE-->>U: "确认图片编辑模型和参数"
+    FE->>IMG: "POST /agent/flows/image/prepare"
+    IMG-->>FE: "image_edit params"
+    FE->>IMG: "POST /agent/flows/image/generate"
+    IMG->>BG: "POST /api/picture/image_edit"
+    BG-->>IMG: "图片 URL"
+    IMG-->>FE: "图片编辑结果"
+  else "普通图片生成"
+    FE->>IA: "POST /agent/flows/intake/directions"
+    IA-->>FE: "3 个创意方向"
+    FE->>PA: "POST /agent/flows/planning/plan"
+    PA-->>FE: "plan.md"
+    FE->>IMG: "POST /agent/flows/image/prepare"
+    IMG-->>FE: "method + endpoint + params"
+    FE->>IMG: "POST /agent/flows/image/generate"
+    IMG->>BG: "调用对应图片接口，可循环多次"
+    BG-->>IMG: "图片 URL"
+    IMG-->>FE: "图片结果"
+  end
 ```
 
 接口选择逻辑：
@@ -352,8 +369,11 @@ sequenceDiagram
 
 补充规则：
 
-- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：有原图时调用 `/agent/flows/image/prepare` 和 `/agent/flows/image/generate`，不再弹普通图片表单、不生成创意方向、不生成 plan.md。
+- 如果采集 Agent 在第一步识别到 `image_operation=image_edit`，前端直接进入图片编辑小分支：不再弹普通图片表单、不生成创意方向、不生成 plan.md。
 - 如果识别到图片编辑但没有原图，前端提示用户上传需要编辑的图片，并把 `pendingImageEditRequest` 写入对话 context；用户从同一对话上传图片后继续调用 `/api/picture/image_edit`。
+- 如果已有原图，前端先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 查询图片模型配置，并展示“模型/尺寸/清晰度”确认卡；默认选 `gpt-image-2`。用户确认的模型、尺寸和清晰度会写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新后重新进入该对话时仍按用户确认过的参数展示。
+- 采集 Agent 会从用户 prompt 抽取图片编辑尺寸 `image_size` 和清晰度 `image_quality`。如果用户明确指定但所选模型不支持，前端提示不兼容原因并自动落到当前模型可用参数；用户可以重新选择该模型支持的尺寸和清晰度后继续提交。如果未指定，则根据所选模型自动选择一组可用尺寸和清晰度。图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。content-app 请求体中 `size` 表示比例、`imageSize` 表示清晰度，网关需要保持二者分离。
+- 图片编辑成功后，前端展示“满意，结束 / 重新生成”；30 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
 
 ## 8. 视频流程
@@ -371,14 +391,16 @@ sequenceDiagram
   IA-->>FE: "selected_direction"
   FE->>PA: "生成 plan.md"
   PA-->>FE: "plan.md"
-  FE->>VA: "prepare-scene-packages"
-  VA-->>FE: "global_assets + scene_packages"
-  FE->>VA: "generate-scene-assets"
+  FE->>VA: "prepare-scene-packages/start"
+  FE->>FE: "保存 pendingScenePackageJob 到 conversation context"
+  VA->>VA: "生成 global_assets + scene_packages"
   VA->>BG: "文生图生成角色三视图、场景图、道具图"
   BG-->>VA: "参考图 URL"
-  VA-->>FE: "可编辑场景包"
+  FE->>VA: "轮询 prepare-scene-packages/jobs/{job_id}"
+  VA-->>FE: "可编辑场景包 + sceneAssetFailures"
   U->>FE: "编辑故事线、镜头描述、旁白、@参考图"
   FE->>VA: "generate-scenes/start"
+  FE->>FE: "保存 pendingVideoJob 到 conversation context"
   VA->>BG: "按片段调用视频接口"
   FE->>VA: "轮询 jobs/{job_id}"
   VA-->>FE: "scene_videos"
@@ -386,6 +408,11 @@ sequenceDiagram
   VA->>BG: "按 scene_index 合并"
   BG-->>VA: "merged_video_url"
   VA-->>FE: "合并视频 + 场景视频"
+  U->>FE: "查看分镜并修改部分分镜"
+  FE->>VA: "仅 dirty scenes generate-scenes/start"
+  VA-->>FE: "新分镜视频 + 复用旧分镜视频"
+  FE->>VA: "merge"
+  VA-->>FE: "新版合并视频"
 ```
 
 场景视频接口选择：
@@ -399,6 +426,13 @@ sequenceDiagram
 | 无参考素材 | `text_to_video` |
 
 如果 mode 是 `image_to_video` 但图片不足，或 `two_image_to_video` 但图片少于 2 张，后端会降级到 `reference_mode_video`。
+
+最终视频结果后的分镜修改：
+
+- `video_result` 卡片展示“无意见，结束 / 查看分镜 / 提出修改意见”。
+- 点击“查看分镜”复用 `StoryboardPanel`，但右侧镜头预览优先播放 `generatedSceneVideos.scene_videos` 中对应分镜视频；没有视频时才展示参考图。
+- 用户修改故事线、镜头描述、旁白或 @参考图时，前端把对应 `scene_id` 写入 `videoScenePackageEditedSceneIds`。
+- 再次点击“确认并生成视频”时，只把 `videoScenePackageEditedSceneIds` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`；生成完成后用新分镜视频覆盖旧分镜视频，未修改分镜直接复用旧视频，再调用 `/agent/flows/video/merge` 生成新版最终视频。
 
 ## 9. 视频修改循环
 
@@ -474,6 +508,8 @@ flowchart TD
 - 用户关闭窗口再进入默认是新对话页面。
 - 点击历史对话时恢复该对话最后流程状态。
 - 异步回调必须带原始 `conversation_id`，不能因为用户切换页面就写到当前可见对话。
+- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐 `video_scene_packages` 卡片，额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
+- 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
 

@@ -64,3 +64,13 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
   assert.match(messageBubbleSource, /failed_scenes|失败场景/);
   assert.match(workspaceSource, /generatedSceneVideos\.failed_scenes|failed_scenes/);
 });
+
+test("final video result can reopen storyboard with scene video previews", () => {
+  assert.match(messageBubbleSource, /msg\.artifact\?\.type === "video_result"[\s\S]*查看分镜/);
+  assert.match(storyboardPanelSource, /generatedSceneVideos/);
+  assert.match(storyboardPanelSource, /sceneVideoForScene/);
+  assert.match(storyboardPanelSource, /<video[\s\S]*controls[\s\S]*preload="metadata"/);
+  assert.match(storyboardPanelSource, /dirtySceneIds|已修改/);
+  assert.match(workspaceSource, /msg\.artifact\.type === "video_result"[\s\S]*setSelectedStoryboardMessageId\(msg\.id\)/);
+  assert.match(workspaceSource, /videoScenePackageEditedSceneIds/);
+});

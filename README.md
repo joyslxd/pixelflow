@@ -117,7 +117,11 @@ flowchart TD
 | 图片 | POST | `/agent/flows/image/edit-asset` | 按提示词编辑视频场景包里的全局素材图片 |
 | 视频 | POST | `/agent/flows/video/analyze-storyboards` | 视频分析拆解 |
 | 视频 | POST | `/agent/flows/video/prepare-scene-packages` | 生成视频场景包 |
+| 视频 | POST | `/agent/flows/video/prepare-scene-packages/start` | 启动可恢复场景包+参考图生成 job |
+| 视频 | GET | `/agent/flows/video/prepare-scene-packages/jobs/{job_id}` | 查询场景包+参考图生成 job |
 | 视频 | POST | `/agent/flows/video/generate-scene-assets` | 生成场景参考图 |
+| 视频 | POST | `/agent/flows/video/generate-scene-assets/start` | 启动可恢复场景参考图生成 job |
+| 视频 | GET | `/agent/flows/video/generate-scene-assets/jobs/{job_id}` | 查询场景参考图生成 job |
 | 视频 | POST | `/agent/flows/video/generate-scenes/start` | 启动场景视频异步生成 |
 | 视频 | GET | `/agent/flows/video/generate-scenes/jobs/{job_id}` | 查询场景视频生成结果 |
 | 视频 | POST | `/agent/flows/video/generate-direct/start` | 启动直接视频异步生成 |
@@ -149,6 +153,7 @@ flowchart TD
 | 图片编辑 | `/api/picture/image_edit` |
 | 参考图生成 | `/api/picture/multi_reference_image_generation` |
 | 多图融合 | `/api/picture/multi_image_fusion` |
+| 图片模型参数配置 | `/api/modelParamConfig/listByCategory/image_generate` |
 
 视频：
 
@@ -196,8 +201,13 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 每个视频场景片段最多 9 张参考图。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
-- 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过表单、创意方向和 plan.md，直接复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。缺原图时会把等待上传状态写入对话，用户上传图片后可继续。
+- 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过普通图片表单、创意方向和 plan.md。缺原图时会把等待上传状态写入对话，用户上传图片后可继续；有原图时先调用 `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate` 调用 `/api/picture/image_edit`。用户确认过的模型、尺寸和清晰度会写入对话 context，切换对话或刷新后仍能恢复展示。图片编辑成功后同样展示“满意，结束 / 重新生成”，30 秒未操作默认满意并结束。
+- 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时配置为准，Python 侧不再用硬编码模型白名单拦截用户已确认的参数。content-app 图片编辑请求里 `size` 表示比例，`imageSize` 表示清晰度，网关会保持两者分离。图片编辑失败后，重新生成会先回到模型、尺寸和清晰度确认卡，避免继续复用失败参数。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
+- 场景视频和合并视频生成完成后，`video_result` 卡片会展示“无意见，结束 / 查看分镜 / 提出修改意见”。这里的“查看分镜”继续打开右侧 `StoryboardPanel`，镜头预览优先展示已生成的分镜视频；用户只修改某几个分镜后再次确认生成时，仅重生成这些已修改分镜，未修改分镜复用旧视频，再按分镜顺序重新合并。
+- 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 连续完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即把 `pendingScenePackageJob` / `pending_scene_package_job` 写入 conversation context；用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/jobs/{job_id}`，不会重复启动生成。参考图失败或额度不足时，job 返回已生成场景包和 `sceneAssetFailures`，前端展示可继续的场景包卡片。
+- 场景包卡片上的“继续生成参考图/重新生成参考图”调用 `/agent/flows/video/generate-scene-assets/start`，同样保存 `pendingScenePackageJob` 并恢复轮询；网关重启导致 job 404 时只提示手动重试，不自动重启，避免重复计费。
+- 场景视频生成和视频修改重生成会先调用 `/agent/flows/video/generate-scenes/start` 取得 `job_id`，并把 `pendingVideoJob` / `pending_video_job` 写入当前 conversation context；用户离开再返回同一对话时，前端只继续查询 `/jobs/{job_id}`，不会重复启动生成。
 - 图片、视频、PPT 的需求表单弹出后，用户点击右上角 `X` 视为取消当前流程，前端会清空 pending 表单上下文并保存 `form_cancelled`。
 - PPT 表单的 `PPT风格` 支持“自定义”，选中后显示文本框，最终把用户输入的风格词作为 `ppt_style` 提交给 SmartPPT。
 - 当前对话中任意阶段正在生成或处理时，历史 artifact 按钮统一禁用；阶段结束后只保留最新可操作 artifact 的按钮，失败或额度暂停时只保留当前可恢复点的重试入口。

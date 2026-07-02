@@ -120,6 +120,8 @@ def prepare_image_generation(
         )
     if method == "image_edit":
         width, height = _ratio_pair(ratio)
+        model = _resolve_image_model(form_values, context, IMAGE_EDIT_MODEL)
+        quality = _resolve_image_quality(form_values, context, IMAGE_EDIT_QUALITY)
         if not reference_urls:
             return ImageGenerationPrepareResult(
                 ok=False,
@@ -130,8 +132,8 @@ def prepare_image_generation(
                 params={
                     "image_url": "",
                     "prompt": prompt,
-                    "model": IMAGE_EDIT_MODEL,
-                    "imageSize": IMAGE_EDIT_QUALITY,
+                    "model": model,
+                    "imageSize": quality,
                     "width": width,
                     "height": height,
                     "max_images": image_count,
@@ -147,8 +149,8 @@ def prepare_image_generation(
             params={
                 "image_url": reference_urls[0] if reference_urls else "",
                 "prompt": prompt,
-                "model": IMAGE_EDIT_MODEL,
-                "imageSize": IMAGE_EDIT_QUALITY,
+                "model": model,
+                "imageSize": quality,
                 "width": width,
                 "height": height,
                 "max_images": image_count,
@@ -281,6 +283,7 @@ def _build_prompt(
         f"图片用途：{_text(form_values.get('image_usage'), '未指定')}",
         f"图片风格：{_text(form_values.get('image_style'), '自由发挥')}",
         f"图片尺寸：{_text(form_values.get('image_size'), '自动适配')}",
+        f"图片清晰度：{_text(form_values.get('image_quality') or intake_context.get('image_quality'))}" if _text(form_values.get("image_quality") or intake_context.get("image_quality")) else "",
         f"创意方向：{_text(selected_direction.get('title'), '推荐方向')}。{_text(selected_direction.get('description'))}",
         f"plan.md 摘要：{_compact_markdown(plan_markdown)}",
     ]
@@ -363,7 +366,7 @@ def _context_text(
     intake_context: dict[str, Any] | None = None,
 ) -> str:
     parts = [plan_markdown]
-    parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style", "image_size"])
+    parts.extend(_text(form_values.get(key)) for key in ["image_goal", "image_type", "image_usage", "image_style", "image_size", "image_quality"])
     parts.extend(_text(value) for value in selected_direction.values())
     context = intake_context or {}
     parts.extend(
@@ -417,6 +420,28 @@ def _ratio_pair(ratio: str) -> tuple[int, int]:
     if match:
         return int(match.group(1)), int(match.group(2))
     return 1, 1
+
+
+def _resolve_image_model(form_values: dict[str, Any], intake_context: dict[str, Any], default: str) -> str:
+    return _text(
+        form_values.get("image_model")
+        or form_values.get("model")
+        or intake_context.get("image_model")
+        or intake_context.get("model"),
+        default,
+    )
+
+
+def _resolve_image_quality(form_values: dict[str, Any], intake_context: dict[str, Any], default: str) -> str:
+    return _text(
+        form_values.get("image_quality")
+        or form_values.get("imageSize")
+        or form_values.get("size")
+        or intake_context.get("image_quality")
+        or intake_context.get("imageSize")
+        or intake_context.get("size"),
+        default,
+    )
 
 
 def _compact_markdown(markdown: str) -> str:

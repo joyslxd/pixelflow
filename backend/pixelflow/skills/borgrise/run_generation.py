@@ -52,15 +52,12 @@ DEFAULT_IMAGE_MODEL = "seeddream-5.0"
 DEFAULT_VIDEO_MODEL = "seedance-2.0"
 SUPPORTED_RATIOS = {"1:1", "9:16", "16:9"}
 SUPPORTED_IMAGE_QUALITIES = {"all", "480p", "720p", "1080p", "2K", "3K", "4K", "5K", "6K", "7K", "8K"}
-IMAGE_PRICE_CONFIGURED_QUALITIES = {
-    "nano-banana": {"1080p", "2K", "4K"},
-    "nanobanana-pro": {"1080p", "2K", "4K"},
-    "seeddream-4.5": {"1080p", "2K", "4K"},
-    "seeddream-5.0": {"1080p", "2K", "4K"},
-    "gpt-image-2": {"4K"},
-}
 DEFAULT_IMAGE_QUALITY_BY_MODEL = {
     "gpt-image-2": "4K",
+    "seeddream-4.5": "2K",
+    "seeddream-5.0": "2K",
+    "nanobanana-pro": "1080p",
+    "nano-banana": "1080p",
 }
 SEEDANCE_MAX_SEGMENT_DURATION = 10
 SAFE_MAX_LONG_VIDEO_DURATION = 30
@@ -145,21 +142,14 @@ def default_image_quality_for_model(model: str, fallback: str = "1080p") -> str:
 
 
 def validate_image_model_quality(model: str, size: str) -> dict | None:
-    quality_error = validate_image_quality(size)
-    if quality_error:
-        return quality_error
-    quality = normalize_image_quality(size)
-    allowed = IMAGE_PRICE_CONFIGURED_QUALITIES.get(model)
-    if allowed and quality not in allowed:
-        return {
-            "error": True,
-            "message": (
-                f"Unsupported image quality '{quality}' for model '{model}'. "
-                f"Use one of: {', '.join(sorted(allowed))}."
-            ),
-            "supported_image_qualities": sorted(allowed),
-        }
-    return None
+    """校验图片质量格式，模型级支持关系以 content-app 实时配置和接口为准。
+
+    前端图片编辑确认卡会调用 `/api/modelParamConfig/listByCategory/image_generate`
+    获取当前模型可选比例和清晰度。这里不再维护模型级白名单，避免 content-app
+    配置更新后 Python 侧仍用旧规则提前拦截用户已经确认的参数。
+    """
+    _ = model
+    return validate_image_quality(size)
 
 
 def validate_video_duration(duration: int, model: str) -> dict | None:
@@ -2649,7 +2639,7 @@ def resume_long_reference_mode_video(progress_file: str,
 
 
 def text_to_image(prompt: str | None = None, ratio: str = "1:1",
-                  size: str = "1080p", model: str = DEFAULT_IMAGE_MODEL,
+                  size: str | None = None, model: str = DEFAULT_IMAGE_MODEL,
                   product_description: str | None = None,
                   scene: str = "studio", num_images: int = 1) -> dict:
     """根据文本 prompt 生成图片。"""
@@ -2657,14 +2647,14 @@ def text_to_image(prompt: str | None = None, ratio: str = "1:1",
     validation_error = validate_ratio(ratio)
     if validation_error:
         return validation_error
-    quality_error = validate_image_model_quality(model, size)
+    quality = normalize_image_quality(size or default_image_quality_for_model(model))
+    quality_error = validate_image_model_quality(model, quality)
     if quality_error:
         return quality_error
     count_error = validate_positive_count(num_images, "num_images")
     if count_error:
         return count_error
     width, height = ratio_to_dimensions(ratio)
-    quality = normalize_image_quality(size)
 
     if not prompt and product_description:
         prompt = craft_image_prompt(product_description, scene)
@@ -2874,13 +2864,11 @@ def image_edit(
     quality_error = validate_image_model_quality(model, quality)
     if quality_error:
         return quality_error
-    if ratio and ratio != "1:1":
-        try:
-            width, height = ratio_to_dimensions(ratio)
-        except ValueError as exc:
-            return {"error": True, "message": str(exc)}
-    else:
-        width, height = 512, 512
+    ratio_value = ratio or "1:1"
+    try:
+        width, height = ratio_to_dimensions(ratio_value)
+    except ValueError as exc:
+        return {"error": True, "message": str(exc)}
 
     request_data = {
         "image_url": image_url,
@@ -2888,7 +2876,10 @@ def image_edit(
         "model": model,
         "width": width,
         "height": height,
+        "imageSize": quality,
+        "size": ratio_value,
         "max_images": max_images,
+        "num": max_images,
     }
 
     print(f"\n{'='*60}")
@@ -2943,7 +2934,7 @@ def multi_image_fusion(
     image_urls: list[str],
     prompt: str = "",
     ratio: str = "1:1",
-    size: str = "1080p",
+    size: str | None = None,
     model: str = DEFAULT_IMAGE_MODEL,
     num_images: int = 1,
 ) -> dict:
@@ -2954,14 +2945,14 @@ def multi_image_fusion(
     count_error = validate_positive_count(num_images, "num_images")
     if count_error:
         return count_error
-    quality_error = validate_image_model_quality(model, size)
+    quality = normalize_image_quality(size or default_image_quality_for_model(model))
+    quality_error = validate_image_model_quality(model, quality)
     if quality_error:
         return quality_error
     try:
         width, height = ratio_to_dimensions(ratio)
     except ValueError as exc:
         return {"error": True, "message": str(exc)}
-    quality = normalize_image_quality(size)
 
     request_data = {
         "image_urls": image_urls,
@@ -3024,18 +3015,18 @@ def multi_image_fusion(
 
 
 def batch_text_to_image(prompts: list[str], ratio: str = "1:1",
-                        size: str = "1080p",
+                        size: str | None = None,
                         model: str = DEFAULT_IMAGE_MODEL) -> dict:
     """根据多条 prompt 批量生成图片。"""
 
     validation_error = validate_ratio(ratio)
     if validation_error:
         return validation_error
-    quality_error = validate_image_model_quality(model, size)
+    quality = normalize_image_quality(size or default_image_quality_for_model(model))
+    quality_error = validate_image_model_quality(model, quality)
     if quality_error:
         return quality_error
     width, height = ratio_to_dimensions(ratio)
-    quality = normalize_image_quality(size)
 
     request_data = []
     for p in prompts:
@@ -3250,7 +3241,7 @@ def main():
     p_t2i.add_argument("--product-description", help="Product description (will craft prompt)")
     p_t2i.add_argument("--scene", default="studio", help="Scene type (studio/lifestyle/flatlay/hero)")
     p_t2i.add_argument("--ratio", default="1:1", help="Aspect ratio")
-    p_t2i.add_argument("--size", default="1080p", help="Image quality (1080p, 2K, 4K, etc.)")
+    p_t2i.add_argument("--size", default=None, help="Image quality (1080p, 2K, 3K, 4K, etc.); omitted uses model default")
     p_t2i.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
     p_t2i.add_argument("--num-images", type=int, default=1, help="Number of images to generate")
 
@@ -3269,12 +3260,15 @@ def main():
     p_edit.add_argument("--image-url", required=True, help="Original image URL")
     p_edit.add_argument("--prompt", required=True, help="Edit instruction")
     p_edit.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
+    p_edit.add_argument("--ratio", default="1:1", help="Aspect ratio")
+    p_edit.add_argument("--size", default=None, help="Image quality/size, e.g. 1080p, 2K, 4K")
+    p_edit.add_argument("--max-images", type=int, default=1, help="Number of edited images to generate")
 
     # 批量文本生成图片命令。
     p_batch = subparsers.add_parser("batch-text-to-image", help="Batch generate images")
     p_batch.add_argument("--prompts", required=True, help="JSON array of prompts")
     p_batch.add_argument("--ratio", default="1:1", help="Aspect ratio")
-    p_batch.add_argument("--size", default="1080p", help="Image quality (1080p, 2K, 4K, etc.)")
+    p_batch.add_argument("--size", default=None, help="Image quality (1080p, 2K, 3K, 4K, etc.); omitted uses model default")
     p_batch.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Model to use")
 
     # 任务轮询命令。
@@ -3457,7 +3451,10 @@ def main():
             result = image_edit(
                 image_url=args.image_url,
                 prompt=args.prompt,
-                model=args.model
+                model=args.model,
+                ratio=args.ratio,
+                size=args.size,
+                max_images=args.max_images,
             )
         elif args.command == "batch-text-to-image":
             prompts = json.loads(args.prompts)

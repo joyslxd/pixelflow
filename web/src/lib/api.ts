@@ -8,6 +8,8 @@ const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
+const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const DIRECT_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const PPT_JOB_POLL_INTERVAL_MS = 3000;
@@ -189,6 +191,26 @@ export interface ImageAssetEditResponse {
   raw: Record<string, unknown>;
 }
 
+export interface ImageModelParamConfig {
+  id?: number;
+  modelType: string;
+  modelCategoryType?: string;
+  paramConfig?: {
+    sizeList?: string[];
+    aspectRatioList?: string[];
+    imageNumList?: string[];
+    modelGenerateTypeList?: string[];
+    uploadFileTypeList?: string[];
+  };
+  isEnabled?: boolean;
+}
+
+export interface ImageEditModelSelection {
+  model: string;
+  ratio: string;
+  size: string;
+}
+
 export interface UploadedAttachment extends Record<string, unknown> {
   name: string;
   filename: string;
@@ -248,6 +270,50 @@ export interface GenerateSceneAssetsResponse {
   failed_assets: Array<Record<string, unknown>>;
   message: string;
   quota_insufficient?: boolean;
+}
+
+export interface PrepareScenePackagesJobResult {
+  ok: boolean;
+  videoScenePackages: PrepareScenePackagesResponse | null;
+  sceneAssetFailures: Array<Record<string, unknown>>;
+  quota_insufficient?: boolean;
+  message: string;
+}
+
+export interface PrepareScenePackagesJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  stage: "prepare_scene_packages" | "generate_scene_assets" | "completed" | string;
+  message: string;
+}
+
+export interface PrepareScenePackagesJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  stage: "prepare_scene_packages" | "generate_scene_assets" | "completed" | string;
+  result: PrepareScenePackagesJobResult | null;
+  error: string | null;
+  message: string;
+}
+
+export interface GenerateSceneAssetsJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  stage: "generate_scene_assets" | "completed" | string;
+  message: string;
+}
+
+export interface GenerateSceneAssetsJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  stage: "generate_scene_assets" | "completed" | string;
+  result: GenerateSceneAssetsResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface GenerateSceneVideosResponse {
@@ -483,6 +549,22 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
+async function contentAppReq<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    ...authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    ...(init?.headers as Record<string, string>),
+  };
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res, path));
+  }
+  const raw = (await res.json()) as { success?: boolean; message?: string; data?: T };
+  if (raw.success === false) {
+    throw new ApiError(400, raw.message || `${path} 调用失败`);
+  }
+  return (raw.data ?? raw) as T;
+}
+
 async function responseErrorMessage(res: Response, path: string): Promise<string> {
   const text = await res.text().catch(() => "");
   const title = text.match(/<title>(.*?)<\/title>/is)?.[1] || text.match(/<h1>(.*?)<\/h1>/is)?.[1];
@@ -570,6 +652,66 @@ async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResp
   };
 }
 
+async function pollPrepareScenePackagesJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<PrepareScenePackagesJobResult | null> {
+  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<PrepareScenePackagesJobStatusResponse>(`${FLOW_BASE}/video/prepare-scene-packages/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        videoScenePackages: null,
+        sceneAssetFailures: [{ error: status.error || status.message || "视频场景包生成失败" }],
+        message: status.error || status.message || "视频场景包生成失败",
+      };
+    }
+    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    videoScenePackages: null,
+    sceneAssetFailures: [{ error: "视频场景包生成轮询超时" }],
+    message: "视频场景包生成轮询超时",
+  };
+}
+
+async function pollSceneAssetsJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<GenerateSceneAssetsResponse | null> {
+  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        endpoint: "/api/picture/text_to_image",
+        global_assets: {},
+        scene_packages: [],
+        failed_assets: [{ error: status.error || status.message || "场景参考图生成失败" }],
+        message: status.error || status.message || "场景参考图生成失败",
+      };
+    }
+    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    endpoint: "/api/picture/text_to_image",
+    global_assets: {},
+    scene_packages: [],
+    failed_assets: [{ error: "场景参考图生成轮询超时" }],
+    message: "场景参考图生成轮询超时",
+  };
+}
+
 async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoResponse> {
   const deadline = Date.now() + DIRECT_VIDEO_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -623,6 +765,9 @@ export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
   uploadAttachment: (file: File) => uploadFileToContentApp(file),
+
+  listImageGenerateModelConfigs: () =>
+    contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
 
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),
@@ -747,12 +892,62 @@ export const api = {
     target_duration_ms?: number;
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
+  startPrepareScenePackagesJob: (body: {
+    form_values: Record<string, unknown>;
+    plan_markdown: string;
+    selected_direction: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+    target_duration_ms?: number;
+  }) =>
+    req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getPrepareScenePackagesJob: (jobId: string) =>
+    req<PrepareScenePackagesJobStatusResponse>(`${FLOW_BASE}/video/prepare-scene-packages/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPrepareScenePackagesJob,
+
   generateSceneAssets: (body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     image_size?: string;
     model?: string | null;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
+
+  startSceneAssetsJob: (body: {
+    global_assets?: Record<string, unknown>;
+    scene_packages: PrepareScenePackagesResponse["scene_packages"];
+    image_size?: string;
+    model?: string | null;
+  }) =>
+    req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getSceneAssetsJob: (jobId: string) =>
+    req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`),
+
+  pollSceneAssetsJob,
+
+  startSceneVideosJob: (body: {
+    scenes: SceneGenerationPayload[];
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+    sound?: string;
+  }) =>
+    req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getSceneVideosJob: (jobId: string) =>
+    req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`),
+
+  pollSceneVideoJob,
 
   generateSceneVideos: async (body: {
     scenes: SceneGenerationPayload[];
@@ -761,10 +956,7 @@ export const api = {
     model?: string | null;
     sound?: string;
   }) => {
-    const started = await req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.startSceneVideosJob(body);
     return pollSceneVideoJob(started.job_id);
   },
 

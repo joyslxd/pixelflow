@@ -86,6 +86,7 @@ async def recognize_intent_with_llm(
         if image_operation:
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
+        _copy_image_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
@@ -111,6 +112,7 @@ async def recognize_intent_with_llm(
         if image_operation:
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
+        _copy_image_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
@@ -195,13 +197,18 @@ def _intent_prompt(text: str) -> str:
 product_info, product_category, target_audience, conversion_goal。
 
 如果是 image_generation，可抽取 values 字段：
-image_goal, image_type, image_usage, image_style, image_size, image_count。
+image_goal, image_type, image_usage, image_style, image_size, image_quality, image_count。
+其中 image_size 表示画面比例/尺寸，如 1:1、9:16、16:9；image_quality 表示清晰度，如 720p、1080p、2K、4K。
 image_count 表示用户明确要求生成的图片张数；没有明确数量时不要猜测。
 同时必须抽取顶层 image_operation：
 - text_to_image: 纯文生图，没有参考图和编辑诉求。
 - image_edit: 用户要修改、编辑、换背景、修图、改已有图片。
 - reference_image: 用户上传或引用图片作为参考生成新图。
 - multi_image_fusion: 用户要把多张图融合成一张图。
+判断 image_operation 时要特别注意：
+- 只要用户提到“上传的图片/原图/这张图/图中/图片中”等已有图片，并要求“变成/改成/换成/替换/调整/去掉/增加”等局部或整体改动，就必须判为 image_edit。
+- 例如“帮我把上传的图片中的路飞衣服变成黄色”属于 image_edit，不属于 text_to_image。
+- 只有没有已有图片引用、也没有编辑诉求时，才判为 text_to_image。
 
 如果是 ppt_generation，可抽取 values 字段：
 ppt_topic, ppt_style。附件由前端上传，不要编造 attachments。
@@ -285,6 +292,8 @@ def _filter_form_values(intent: IntakeIntent, values: Any) -> dict[str, Any]:
         return {}
     schema = get_form_schema(intent)
     allowed = {field.id for field in schema.fields}
+    if intent == "image":
+        allowed.add("image_quality")
     filtered = {key: value for key, value in values.items() if key in allowed and _has(value)}
     if intent == "image":
         image_count = _normalize_image_count(values.get("image_count"))
@@ -416,12 +425,21 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
         return {**values, "ppt_topic": topic} if topic else values
     if intent != "image":
         return values
-    if _normalize_image_count(values.get("image_count")):
-        return values
+    enriched = dict(values)
+    if not enriched.get("image_size"):
+        image_size = _extract_image_ratio(text)
+        if image_size:
+            enriched["image_size"] = image_size
+    if not enriched.get("image_quality"):
+        image_quality = _extract_image_quality(text)
+        if image_quality:
+            enriched["image_quality"] = image_quality
+    if _normalize_image_count(enriched.get("image_count")):
+        return enriched
     image_count = _extract_image_count(text)
     if not image_count:
-        return values
-    return {**values, "image_count": image_count}
+        return enriched
+    return {**enriched, "image_count": image_count}
 
 
 def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any], values: dict[str, Any], text: str) -> str:
@@ -433,7 +451,10 @@ def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any],
         or values.get("image_operation")
         or values.get("operation")
     )
-    return operation or _infer_image_operation(text)
+    inferred = _infer_image_operation(text)
+    if inferred in {"image_edit", "multi_image_fusion"} and operation in {"", "text_to_image", "reference_image"}:
+        return inferred
+    return operation or inferred
 
 
 def _normalize_image_operation(value: Any) -> str:
@@ -467,11 +488,73 @@ def _infer_image_operation(text: str) -> str:
     lowered = text.lower()
     if any(keyword in lowered for keyword in ["融合", "合成一张", "多图合成", "multi_image_fusion", "fusion"]):
         return "multi_image_fusion"
-    if any(keyword in lowered for keyword in ["编辑", "修改", "改成", "改图", "修图", "换背景", "替换背景", "去水印", "抠图", "image_edit", "edit"]):
+    if _references_existing_image(lowered) and _has_image_edit_action(lowered):
+        return "image_edit"
+    if any(keyword in lowered for keyword in ["编辑", "修改", "改成", "改为", "变成", "变为", "改图", "修图", "换背景", "替换背景", "去水印", "抠图", "image_edit", "edit"]):
         return "image_edit"
     if any(keyword in lowered for keyword in ["参考", "基于这张", "按照这张", "类似这张", "图生图", "reference"]):
         return "reference_image"
     return "text_to_image"
+
+
+def _references_existing_image(text: str) -> bool:
+    return any(
+        keyword in text
+        for keyword in [
+            "上传的图片",
+            "上传图片",
+            "上传的图",
+            "上传图",
+            "这张图片",
+            "这张图",
+            "这幅图",
+            "这张照片",
+            "原图",
+            "当前图片",
+            "当前图",
+            "图片中",
+            "图中",
+            "照片中",
+            "素材图",
+            "参考图",
+        ]
+    )
+
+
+def _has_image_edit_action(text: str) -> bool:
+    return any(
+        keyword in text
+        for keyword in [
+            "变成",
+            "变为",
+            "变黄",
+            "变红",
+            "变蓝",
+            "变白",
+            "变黑",
+            "改成",
+            "改为",
+            "换成",
+            "换为",
+            "替换",
+            "修改",
+            "调整",
+            "调成",
+            "去掉",
+            "删除",
+            "移除",
+            "增加",
+            "添加",
+            "换背景",
+            "改背景",
+            "换色",
+            "改色",
+            "上色",
+            "修复",
+            "修图",
+            "抠图",
+        ]
+    )
 
 
 def _extract_ppt_topic(text: str) -> str:
@@ -514,6 +597,38 @@ def _extract_image_count(text: str) -> int | None:
     if cn_short_match:
         return _normalize_image_count(cn_short_match.group(1))
     return None
+
+
+def _extract_image_ratio(text: str) -> str:
+    match = re.search(r"\b(1\s*:\s*1|9\s*:\s*16|16\s*:\s*9)\b", text, flags=re.IGNORECASE)
+    if match:
+        left, right = match.group(1).split(":")
+        return f"{int(left.strip())}:{int(right.strip())}"
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ["竖版", "竖图", "竖屏", "9:16"]):
+        return "9:16"
+    if any(keyword in lowered for keyword in ["横版", "横图", "横屏", "横幅", "16:9"]):
+        return "16:9"
+    if any(keyword in lowered for keyword in ["正方形", "方图", "1:1"]):
+        return "1:1"
+    return ""
+
+
+def _extract_image_quality(text: str) -> str:
+    normalized = text.strip()
+    match = re.search(r"(?<![A-Za-z0-9])(720p|1080p|2k|4k)(?![A-Za-z0-9])", normalized, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper().replace("P", "p") if match.group(1).lower().endswith("p") else match.group(1).upper()
+    if "高清" in normalized:
+        return "1080p"
+    return ""
+
+
+def _copy_image_param_context(values: dict[str, Any], context_dict: dict[str, Any]) -> None:
+    for key in ("image_size", "image_quality", "image_model"):
+        value = values.get(key)
+        if _has(value):
+            context_dict[key] = value
 
 
 def _normalize_image_count(value: Any) -> int | None:

@@ -23,7 +23,11 @@ def test_pixelflow_video_router_prefix_and_paths():
     paths = {route.path for route in pixelflow_video.router.routes}
     assert pixelflow_video.router.prefix == "/agent/flows/video"
     assert "/agent/flows/video/prepare-scene-packages" in paths
+    assert "/agent/flows/video/prepare-scene-packages/start" in paths
+    assert "/agent/flows/video/prepare-scene-packages/jobs/{job_id}" in paths
     assert "/agent/flows/video/generate-scene-assets" in paths
+    assert "/agent/flows/video/generate-scene-assets/start" in paths
+    assert "/agent/flows/video/generate-scene-assets/jobs/{job_id}" in paths
     assert "/agent/flows/video/generate-scenes" in paths
     assert "/agent/flows/video/generate-scenes/start" in paths
     assert "/agent/flows/video/generate-scenes/jobs/{job_id}" in paths
@@ -77,6 +81,69 @@ def test_video_router_prepares_scene_packages():
     assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
     assert data["scene_packages"][0]["shot_description"]["mentions"]
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
+
+
+def test_video_router_starts_prepare_scene_package_job_and_polls_result(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    async def fake_prepare_video_scene_packages_with_llm(**_kwargs):
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": 30_000,
+            "global_assets": {
+                "characters": [{"asset_id": "character-presenter", "name": "讲解者", "three_view_prompt": "讲解者角色三视图"}],
+                "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
+                "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
+            },
+            "scene_packages": [{"scene_id": "scene-1", "scene_index": 1, "duration_ms": 8000, "prompt": "第一幕"}],
+        }
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/{kwargs['ratio']}.png"}], raw={"endpoint": "/api/picture/text_to_image"})
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/prepare-scene-packages/start",
+            json={
+                "form_values": {"product_info": "耳机"},
+                "plan_markdown": "耳机场景",
+                "selected_direction": {"title": "通勤"},
+                "target_duration_ms": 30_000,
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/prepare-scene-packages/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["stage"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["videoScenePackages"]["global_assets"]["characters"][0]["three_view_images"]
+    assert status["result"]["sceneAssetFailures"] == []
 
 
 def test_video_router_generates_scene_asset_images(monkeypatch):
@@ -170,6 +237,68 @@ def test_video_router_stops_scene_asset_generation_on_quota_failure(monkeypatch)
     assert data["quota_insufficient"] is True
     assert "充值后" in data["message"]
     assert len(calls) == 1
+
+
+def test_video_router_scene_asset_job_quota_paused(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="用户没有有效的额度",
+                raw={"quota_insufficient": True, "message": "用户没有有效的额度"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/generate-scene-assets/start",
+            json={
+                "global_assets": {
+                    "characters": [{"asset_id": "character-presenter", "name": "讲解者", "image_prompt": "讲解者角色图"}],
+                },
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/generate-scene-assets/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "quota_paused":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "quota_paused"
+    assert status["result"]["ok"] is False
+    assert status["result"]["quota_insufficient"] is True
+    assert status["result"]["failed_assets"][0]["asset_id"] == "character-presenter"
+
+
+def test_video_router_unknown_prepare_and_scene_asset_jobs_return_404():
+    from app.gateway.routers import pixelflow_video
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        scene_package_response = client.get("/agent/flows/video/prepare-scene-packages/jobs/missing")
+        scene_asset_response = client.get("/agent/flows/video/generate-scene-assets/jobs/missing")
+
+    assert scene_package_response.status_code == 404
+    assert scene_asset_response.status_code == 404
 
 
 def test_video_router_generates_scene_videos(monkeypatch):

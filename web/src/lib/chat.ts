@@ -3,7 +3,9 @@ import type {
   CreationIntent,
   CreativeDirectionResponse,
   GenerateSceneVideosResponse,
+  ImageEditModelSelection,
   ImageGenerateResponse,
+  ImageModelParamConfig,
   ImagePrepareResponse,
   MergeSceneVideosResponse,
   PlanMarkdownResponse,
@@ -33,6 +35,7 @@ export interface ChatMessage {
       | "directions"
       | "plan"
       | "image_prepare"
+      | "image_edit_options"
       | "image_result"
       | "video_scene_packages"
       | "video_flaw_analysis"
@@ -54,11 +57,16 @@ export interface ChatMessage {
     plan?: PlanMarkdownResponse;
     imagePrepare?: ImagePrepareResponse;
     imageResult?: ImageGenerateResponse;
+    imageEditRequest?: Record<string, unknown>;
+    imageEditModelConfigs?: ImageModelParamConfig[];
+    imageEditRequestedParams?: Record<string, unknown>;
+    imageEditConfirmedSelection?: ImageEditModelSelection;
     imageRevisionFeedback?: string;
     videoScenePackages?: PrepareScenePackagesResponse;
     sceneAssetFailures?: Array<Record<string, unknown>>;
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;
+    videoScenePackageEditedSceneIds?: string[];
     videoFlawAnalysis?: VideoFlawAnalysisResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;

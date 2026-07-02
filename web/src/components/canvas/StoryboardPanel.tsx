@@ -103,6 +103,14 @@ function quotaInsufficient(value: unknown): boolean {
   return String(value).includes("额度不足") || String(value).includes("充值");
 }
 
+function sceneVideoForScene(
+  scene: ScenePackageRecord | undefined,
+  generatedSceneVideos: NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"],
+) {
+  if (!scene) return undefined;
+  return (generatedSceneVideos?.scene_videos || []).find((video) => video.scene_id === scene.scene_id);
+}
+
 export function StoryboardPanel({
   msg,
   onUpdateVideoScenePackage,
@@ -113,11 +121,13 @@ export function StoryboardPanel({
   onClose,
 }: StoryboardPanelProps) {
   const videoScenePackages = msg.artifact?.videoScenePackages;
+  const generatedSceneVideos = msg.artifact?.generatedSceneVideos;
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
+  const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
   const mentionCandidates = useMemo(() => buildMentionCandidates(assets), [assets]);
@@ -140,6 +150,8 @@ export function StoryboardPanel({
   );
   const previewUrls = selectedScene ? collectSceneImageUrls(selectedScene, assets) : [];
   const previewUrl = previewUrls[0] || allReferenceAssets.find((asset) => asset.image)?.image || "";
+  const selectedSceneVideo = sceneVideoForScene(selectedScene, generatedSceneVideos);
+  const previewVideoUrl = selectedSceneVideo?.video_url || "";
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
 
   const updateScene = (patch: ScenePackagePatch) => {
@@ -267,7 +279,7 @@ export function StoryboardPanel({
                     scene.scene_id === selectedScene?.scene_id ? "border-accent bg-accent-soft text-accent" : "border-line text-ink-soft hover:bg-canvas",
                   )}
                 >
-                  分镜 {scene.scene_index}
+                  分镜 {scene.scene_index}{dirtySceneIds.has(scene.scene_id) ? " · 已修改" : ""}
                 </button>
               ))}
             </div>
@@ -304,15 +316,24 @@ export function StoryboardPanel({
           </div>
           <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
             <div className="flex min-h-[360px] flex-1 items-center justify-center rounded-2xl border border-line bg-canvas">
-              {previewUrl ? (
+              {previewVideoUrl ? (
+                <video
+                  src={previewVideoUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  className="max-h-full max-w-full rounded-xl object-contain"
+                />
+              ) : previewUrl ? (
                 <img src={previewUrl} alt="" className="max-h-full max-w-full object-contain" />
               ) : (
-                <div className="text-[13px] text-ink-soft">暂无预览图</div>
+                <div className="text-[13px] text-ink-soft">暂无预览</div>
               )}
             </div>
             <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
               {scenes.map((scene) => {
                 const thumb = collectSceneImageUrls(scene, assets)[0] || "";
+                const sceneVideo = sceneVideoForScene(scene, generatedSceneVideos);
                 return (
                   <button
                     key={scene.scene_id}
@@ -323,8 +344,16 @@ export function StoryboardPanel({
                       scene.scene_id === selectedScene?.scene_id ? "border-accent" : "border-line",
                     )}
                   >
-                    {thumb ? <img src={thumb} alt="" className="h-20 w-full object-cover" /> : <div className="flex h-20 items-center justify-center text-[11px] text-ink-soft">分镜 {scene.scene_index}</div>}
-                    <div className="truncate px-2 py-1.5 text-[12px] font-medium text-ink">分镜 {scene.scene_index}</div>
+                    {sceneVideo?.video_url ? (
+                      <video src={sceneVideo.video_url} muted playsInline preload="metadata" className="h-20 w-full object-cover" />
+                    ) : thumb ? (
+                      <img src={thumb} alt="" className="h-20 w-full object-cover" />
+                    ) : (
+                      <div className="flex h-20 items-center justify-center text-[11px] text-ink-soft">分镜 {scene.scene_index}</div>
+                    )}
+                    <div className="truncate px-2 py-1.5 text-[12px] font-medium text-ink">
+                      分镜 {scene.scene_index}{dirtySceneIds.has(scene.scene_id) ? " · 已修改" : ""}
+                    </div>
                   </button>
                 );
               })}
@@ -339,7 +368,7 @@ export function StoryboardPanel({
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
                 <Sparkles size={15} />
-                {sceneAssetQuotaPaused ? "继续生成参考图" : "保存并生成分镜"}
+                {sceneAssetQuotaPaused ? "继续生成参考图" : "确认并生成视频"}
               </button>
             </div>
           </div>

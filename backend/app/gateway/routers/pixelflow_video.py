@@ -29,6 +29,10 @@ _SCENE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_VIDEO_JOBS = 100
 _DIRECT_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_DIRECT_VIDEO_JOBS = 100
+_SCENE_PACKAGE_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_SCENE_PACKAGE_JOBS = 100
+_SCENE_ASSET_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_SCENE_ASSET_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
 _SEEDANCE_MIN_SINGLE_CALL_DURATION = 5
 _SEEDANCE_MAX_SINGLE_CALL_DURATION = 10
@@ -104,6 +108,50 @@ class GenerateSceneAssetsResponse(BaseModel):
     failed_assets: list[dict[str, Any]] = Field(default_factory=list)
     message: str = ""
     quota_insufficient: bool = False
+
+
+class PrepareScenePackagesJobResult(BaseModel):
+    ok: bool
+    videoScenePackages: PrepareScenePackagesResponse | None = None
+    sceneAssetFailures: list[dict[str, Any]] = Field(default_factory=list)
+    quota_insufficient: bool = False
+    message: str = ""
+
+
+class PrepareScenePackagesJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    stage: str = "prepare_scene_packages"
+    message: str = ""
+
+
+class PrepareScenePackagesJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    stage: str = "prepare_scene_packages"
+    result: PrepareScenePackagesJobResult | None = None
+    error: str | None = None
+    message: str = ""
+
+
+class GenerateSceneAssetsJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    stage: str = "generate_scene_assets"
+    message: str = ""
+
+
+class GenerateSceneAssetsJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    stage: str = "generate_scene_assets"
+    result: GenerateSceneAssetsResponse | None = None
+    error: str | None = None
+    message: str = ""
 
 
 class GeneratedSceneVideo(BaseModel):
@@ -274,6 +322,56 @@ class GenerateDirectVideoJobStatusResponse(BaseModel):
 
 @router.post("/prepare-scene-packages", response_model=PrepareScenePackagesResponse)
 async def prepare_scene_packages(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
+    return await _prepare_scene_packages_response(body)
+
+
+@router.post("/prepare-scene-packages/start", response_model=PrepareScenePackagesJobStartResponse)
+async def start_prepare_scene_packages(body: PrepareScenePackagesRequest) -> PrepareScenePackagesJobStartResponse:
+    _trim_scene_package_jobs()
+    job_id = uuid.uuid4().hex
+    _SCENE_PACKAGE_JOBS[job_id] = {
+        "status": "running",
+        "stage": "prepare_scene_packages",
+        "result": None,
+        "error": None,
+    }
+    asyncio.create_task(_run_prepare_scene_package_job(job_id, body))
+    return PrepareScenePackagesJobStartResponse(
+        ok=True,
+        job_id=job_id,
+        status="running",
+        stage="prepare_scene_packages",
+        message="视频场景包生成任务已启动。",
+    )
+
+
+@router.get("/prepare-scene-packages/jobs/{job_id}", response_model=PrepareScenePackagesJobStatusResponse)
+async def get_prepare_scene_packages_job(job_id: str) -> PrepareScenePackagesJobStatusResponse:
+    job = _SCENE_PACKAGE_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频场景包生成任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, PrepareScenePackagesJobResult):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = PrepareScenePackagesJobResult(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    stage = str(job.get("stage") or "prepare_scene_packages")
+    error = job.get("error")
+    return PrepareScenePackagesJobStatusResponse(
+        ok=status not in {"failed"},
+        job_id=job_id,
+        status=status,
+        stage=stage,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_scene_package_job_message(status, stage, result_payload, error),
+    )
+
+
+async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
     result = await prepare_video_scene_packages_with_llm(
         form_values=body.form_values,
         plan_markdown=body.plan_markdown,
@@ -350,6 +448,58 @@ async def analyze_storyboards(body: AnalyzeStoryboardsRequest) -> AnalyzeStorybo
 
 @router.post("/generate-scene-assets", response_model=GenerateSceneAssetsResponse)
 async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsResponse:
+    return await _generate_scene_assets_response(body)
+
+
+@router.post("/generate-scene-assets/start", response_model=GenerateSceneAssetsJobStartResponse)
+async def start_generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsJobStartResponse:
+    if not body.scene_packages:
+        raise HTTPException(status_code=400, detail="scene_packages不能为空")
+    _trim_scene_asset_jobs()
+    job_id = uuid.uuid4().hex
+    _SCENE_ASSET_JOBS[job_id] = {
+        "status": "running",
+        "stage": "generate_scene_assets",
+        "result": None,
+        "error": None,
+    }
+    asyncio.create_task(_run_scene_asset_job(job_id, body))
+    return GenerateSceneAssetsJobStartResponse(
+        ok=True,
+        job_id=job_id,
+        status="running",
+        stage="generate_scene_assets",
+        message="场景参考图生成任务已启动。",
+    )
+
+
+@router.get("/generate-scene-assets/jobs/{job_id}", response_model=GenerateSceneAssetsJobStatusResponse)
+async def get_generate_scene_assets_job(job_id: str) -> GenerateSceneAssetsJobStatusResponse:
+    job = _SCENE_ASSET_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="场景参考图生成任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, GenerateSceneAssetsResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = GenerateSceneAssetsResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    stage = str(job.get("stage") or "generate_scene_assets")
+    error = job.get("error")
+    return GenerateSceneAssetsJobStatusResponse(
+        ok=status not in {"failed"},
+        job_id=job_id,
+        status=status,
+        stage=stage,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_scene_asset_job_message(status, result_payload, error),
+    )
+
+
+async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsResponse:
     if not body.scene_packages:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
 
@@ -702,6 +852,95 @@ async def _run_direct_video_job(job_id: str, body: GenerateDirectVideoRequest) -
         _DIRECT_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
 
 
+async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackagesRequest) -> None:
+    try:
+        _SCENE_PACKAGE_JOBS[job_id] = {
+            "status": "running",
+            "stage": "prepare_scene_packages",
+            "result": None,
+            "error": None,
+        }
+        video_scene_packages = await _prepare_scene_packages_response(body)
+        if not video_scene_packages.ok:
+            _SCENE_PACKAGE_JOBS[job_id] = {
+                "status": "completed",
+                "stage": "completed",
+                "result": PrepareScenePackagesJobResult(
+                    ok=False,
+                    videoScenePackages=video_scene_packages,
+                    sceneAssetFailures=[],
+                    message=video_scene_packages.message,
+                ),
+                "error": None,
+            }
+            return
+
+        _SCENE_PACKAGE_JOBS[job_id] = {
+            "status": "running",
+            "stage": "generate_scene_assets",
+            "result": PrepareScenePackagesJobResult(
+                ok=True,
+                videoScenePackages=video_scene_packages,
+                sceneAssetFailures=[],
+                message="视频场景包已生成，正在生成场景参考图。",
+            ),
+            "error": None,
+        }
+        scene_assets = await _generate_scene_assets_response(
+            GenerateSceneAssetsRequest(
+                global_assets=video_scene_packages.global_assets,
+                scene_packages=video_scene_packages.scene_packages,
+                image_size="1080p",
+            )
+        )
+        scene_packages_for_review = PrepareScenePackagesResponse(
+            **{
+                **video_scene_packages.model_dump(),
+                "global_assets": scene_assets.global_assets or video_scene_packages.global_assets,
+                "scene_packages": scene_assets.scene_packages,
+                "message": video_scene_packages.message if scene_assets.ok else scene_assets.message,
+            }
+        )
+        quota_insufficient = bool(scene_assets.quota_insufficient)
+        _SCENE_PACKAGE_JOBS[job_id] = {
+            "status": "quota_paused" if quota_insufficient else "completed",
+            "stage": "completed",
+            "result": PrepareScenePackagesJobResult(
+                ok=scene_packages_for_review.ok and not quota_insufficient,
+                videoScenePackages=scene_packages_for_review,
+                sceneAssetFailures=scene_assets.failed_assets,
+                quota_insufficient=quota_insufficient,
+                message=scene_assets.message if scene_assets.message else scene_packages_for_review.message,
+            ),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _SCENE_PACKAGE_JOBS[job_id] = {
+            "status": "failed",
+            "stage": str(_SCENE_PACKAGE_JOBS.get(job_id, {}).get("stage") or "prepare_scene_packages"),
+            "result": None,
+            "error": str(exc),
+        }
+
+
+async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest) -> None:
+    try:
+        result = await _generate_scene_assets_response(body)
+        _SCENE_ASSET_JOBS[job_id] = {
+            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "stage": "completed",
+            "result": result,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _SCENE_ASSET_JOBS[job_id] = {
+            "status": "failed",
+            "stage": str(_SCENE_ASSET_JOBS.get(job_id, {}).get("stage") or "generate_scene_assets"),
+            "result": None,
+            "error": str(exc),
+        }
+
+
 def _trim_scene_video_jobs() -> None:
     if len(_SCENE_VIDEO_JOBS) < _MAX_SCENE_VIDEO_JOBS:
         return
@@ -714,6 +953,47 @@ def _trim_direct_video_jobs() -> None:
         return
     for job_id in list(_DIRECT_VIDEO_JOBS.keys())[: len(_DIRECT_VIDEO_JOBS) - _MAX_DIRECT_VIDEO_JOBS + 1]:
         _DIRECT_VIDEO_JOBS.pop(job_id, None)
+
+
+def _trim_scene_package_jobs() -> None:
+    if len(_SCENE_PACKAGE_JOBS) < _MAX_SCENE_PACKAGE_JOBS:
+        return
+    for job_id in list(_SCENE_PACKAGE_JOBS.keys())[: len(_SCENE_PACKAGE_JOBS) - _MAX_SCENE_PACKAGE_JOBS + 1]:
+        _SCENE_PACKAGE_JOBS.pop(job_id, None)
+
+
+def _trim_scene_asset_jobs() -> None:
+    if len(_SCENE_ASSET_JOBS) < _MAX_SCENE_ASSET_JOBS:
+        return
+    for job_id in list(_SCENE_ASSET_JOBS.keys())[: len(_SCENE_ASSET_JOBS) - _MAX_SCENE_ASSET_JOBS + 1]:
+        _SCENE_ASSET_JOBS.pop(job_id, None)
+
+
+def _scene_package_job_message(
+    status: str,
+    stage: str,
+    result: PrepareScenePackagesJobResult | None,
+    error: Any,
+) -> str:
+    if status == "completed":
+        return result.message if result and result.message else "视频场景包和参考图已准备完成。"
+    if status == "quota_paused":
+        return quota_resume_message(result.message if result else None)
+    if status == "failed":
+        return str(error or "视频场景包生成失败。")
+    if stage == "generate_scene_assets":
+        return "视频场景包已生成，正在生成场景参考图。"
+    return "视频场景包生成中。"
+
+
+def _scene_asset_job_message(status: str, result: GenerateSceneAssetsResponse | None, error: Any) -> str:
+    if status == "completed":
+        return result.message if result and result.message else "场景参考图生成完成。"
+    if status == "quota_paused":
+        return quota_resume_message(result.message if result else None)
+    if status == "failed":
+        return str(error or "场景参考图生成失败。")
+    return "场景参考图生成中。"
 
 
 def _select_scene_video_mode(scene: SceneGenerationItem, image_urls: list[str]) -> DirectVideoMode:

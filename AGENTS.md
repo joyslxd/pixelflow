@@ -99,7 +99,11 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 图片 | `POST /agent/flows/image/edit-asset` | 编辑视频场景包全局素材图片，复用图片编辑 skill |
 | 视频 | `POST /agent/flows/video/analyze-storyboards` | 视频分析，自动单个/批量拆解 |
 | 视频 | `POST /agent/flows/video/prepare-scene-packages` | 生成可编辑视频场景包 |
+| 视频 | `POST /agent/flows/video/prepare-scene-packages/start` | 启动可恢复场景包+参考图生成 job |
+| 视频 | `GET /agent/flows/video/prepare-scene-packages/jobs/{job_id}` | 查询场景包+参考图生成 job |
 | 视频 | `POST /agent/flows/video/generate-scene-assets` | 生成角色三视图、场景图、道具图 |
+| 视频 | `POST /agent/flows/video/generate-scene-assets/start` | 启动可恢复场景参考图生成 job |
+| 视频 | `GET /agent/flows/video/generate-scene-assets/jobs/{job_id}` | 查询场景参考图生成 job |
 | 视频 | `POST /agent/flows/video/generate-scenes/start` | 启动场景视频生成异步任务 |
 | 视频 | `GET /agent/flows/video/generate-scenes/jobs/{job_id}` | 轮询场景视频结果 |
 | 视频 | `POST /agent/flows/video/generate-direct/start` | 启动直接视频生成异步任务 |
@@ -149,6 +153,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | `reference_image` | `/api/picture/multi_reference_image_generation` |
 | `image_edit` | `/api/picture/image_edit` |
 | `multi_image_fusion` | `/api/picture/multi_image_fusion` |
+| 图片模型参数配置 | `/api/modelParamConfig/listByCategory/image_generate` |
 
 视频接口：
 
@@ -199,7 +204,10 @@ SmartPPT接口：
 - 前端图片尺寸只展示 `1:1`、`16:9`、`9:16`、`自动适配`。
 - `自动适配` 会由 `image_prepare.py` 根据用途和目标映射到供应商支持比例。
 - 用户明确要求多张图片时，`requested_output_count` 会进入 `intake_context`，最终 `image/generate` 按数量循环调用，默认 1 张，最多 10 张。
-- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时直接调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate`，最终走 `/api/picture/image_edit` 并结束流程。
+- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate`，最终走 `/api/picture/image_edit`。用户确认的模型、尺寸和清晰度必须写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新恢复后继续展示确认过的参数。图片编辑结果成功后保留“满意，结束 / 重新生成”，30 秒未操作默认满意并结束。
+- 图片编辑分支会让 LLM 抽取用户指定的 `image_size` 和 `image_quality`；如果所选模型不支持该尺寸或清晰度，前端必须提示，并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有指定，则按所选模型自动选择一组可用参数。图片编辑失败后，“重新生成图片”必须重新打开模型/尺寸/清晰度确认卡，不能直接复用失败参数盲重试。
+- 图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。模型级参数是否合法由前端实时配置和 content-app 生成接口共同兜底。
+- content-app 图片编辑请求体里 `size` 表示比例，如 `9:16`；`imageSize` 表示清晰度，如 `2K/4K/1080p`。PixelFlow 网关需要保持两者分离，不能把 `size` 当清晰度覆盖用户选择。
 - 图片编辑必须有原图；如果用户没有上传图片，前端会提示“请上传需要编辑的图片”，并把 `pendingImageEditRequest` 存入对话 context，用户上传后可从同一对话继续执行。
 - 有附件时，附件 URL 会进入 `materials`，图片编辑/参考图/多图融合会根据素材数量和用户语义选择接口。
 
@@ -221,12 +229,18 @@ SmartPPT接口：
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset` 走原图片编辑 skill。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset`，不能掉回普通采集 Agent。
 - 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
+- 场景视频和合并视频生成完成后，`video_result` 卡片展示“无意见，结束 / 查看分镜 / 提出修改意见”。此处“查看分镜”仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
+- 用户在最终视频结果后的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge` 合并新版最终视频。
+- 视频 plan.md 同意后，前端必须调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 内部顺序执行“生成可编辑场景包 -> 生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后必须立即写入 conversation context 的 `pendingScenePackageJob` / `pending_scene_package_job`，字段包含 `job_id`、`conversation_id`、`kind`、`started_at`、`request`、`artifact`、`source_message_id`。
+- `pendingScenePackageJob.kind` 固定为 `scene_package_generation` 或 `scene_asset_generation`。用户离开再返回同一对话时，只继续查询已有 `/prepare-scene-packages/jobs/{job_id}` 或 `/generate-scene-assets/jobs/{job_id}`，不能重新调用 `/start`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
+- 场景包主链路 job 的 `stage` 包含 `prepare_scene_packages`、`generate_scene_assets`、`completed`。参考图额度不足时 job 状态为 `quota_paused`，result 必须保留已生成的 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
 
 场景视频接口选择：
 
 - 如果片段显式给了 `generation_mode`，以后端传入为准。
 - 否则 `pixelflow_video.py` 根据图片、视频、音频素材和提示词选择 `text_to_video`、`image_to_video`、`two_image_to_video`、`reference_mode_video`、`edit_video` 或 `extend_video`。
 - 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞。
+- 场景视频生成和视频修改重生成启动后，前端必须把 `job_id`、原始请求、来源 artifact 和 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时只继续查询 `/agent/flows/video/generate-scenes/jobs/{job_id}`，不能重新调用 `/start`，避免重复生成和重复计费。
 
 ## PPT流程要点
 
@@ -250,6 +264,8 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - 最近对话默认 5 条，继续下拉按 cursor 分页；SQL store 按 `created_at desc, conversation_id desc` 排序。
 - 前端切换对话后，异步回调必须写回原来的 `conversation_id`，不能写到当前可见对话。
 - 进入历史对话时应恢复 `context`，允许从原先的表单、plan、场景包、额度不足暂停点继续。
+- 进入历史对话时如果发现 `pendingScenePackageJob` / `pending_scene_package_job`，应静默轮询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐场景包结果卡，404 或过期只提示手动重试，不自动重启任务。
+- 进入历史对话时如果发现 `pendingVideoJob` / `pending_video_job`，应恢复并轮询已有视频 job；如果 job 404 或过期，只提示用户手动重新生成，不自动重启任务。
 - 当前对话中任意阶段正在处理时，所有历史消息里的操作按钮都必须禁用；处理完成后只允许最新可操作 artifact 的按钮继续，旧 artifact 只能作为历史预览。失败或额度暂停时，最新可恢复 artifact 的重试按钮保留可用。
 
 ## 鉴权与安全
@@ -437,6 +453,8 @@ corepack pnpm build
 重点检查：
 
 - 异步回调必须带原 `conversation_id`。
+- 视频场景包/参考图 pending job 必须保存在 conversation context，恢复历史对话后只能轮询已有 `job_id`，不能重复启动 `/prepare-scene-packages/start` 或 `/generate-scene-assets/start`。
+- 视频场景生成 pending job 必须保存在 conversation context，恢复历史对话后只能轮询已有 `job_id`，不能重复启动 `/generate-scenes/start`。
 - 新建对话不能继承旧对话消息或 context。
 - 历史消息顺序按 `created_at asc, message_id asc` 展示。
 - 最近对话列表按创建时间倒序分页。
