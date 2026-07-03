@@ -53,7 +53,7 @@ def test_build_image_plan_markdown_marks_video_only_sections_not_applicable():
     assert "图片生成" in result.plan_markdown
     assert "视频生成不适用" in result.plan_markdown
     assert result.output_type == "image"
-    assert result.review_timeout_sec == 30
+    assert result.review_timeout_sec is None
 
 
 def test_build_image_plan_markdown_uses_intake_context_complete_goal():

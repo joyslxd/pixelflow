@@ -145,9 +145,9 @@ function pptPagesReady(msg: ChatMessage): boolean {
 }
 
 function progressDescription(content: string): string {
+  if (/场景视频|分镜视频/.test(content)) return "场景视频生成中";
   if (/可编辑场景包|场景包/.test(content)) return "视频场景包生成中";
   if (/三视图|场景图|道具图|参考图/.test(content)) return "生成角色、场景与道具参考图";
-  if (/场景视频|分镜视频/.test(content)) return "生成场景视频片段";
   if (/合并/.test(content)) return "合并完整视频";
   if (/PPT 大纲|SmartPPT.*大纲/.test(content)) return "生成 PPT 大纲";
   if (/页面 JSON|页面结构/.test(content)) return "生成页面结构";

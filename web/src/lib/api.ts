@@ -153,7 +153,7 @@ export interface PlanMarkdownResponse {
   plan_markdown: string;
   template_path: string;
   consistency_issues: string[];
-  review_timeout_sec: number;
+  review_timeout_sec: number | null;
 }
 
 export interface ImagePrepareResponse {
@@ -661,10 +661,15 @@ function attachmentType(mimeType: string, filename: string): string {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResponse> {
+async function pollSceneVideoJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<GenerateSceneVideosResponse | null> {
   const deadline = Date.now() + SCENE_VIDEO_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
     const status = await req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
     if (status.status === "completed" && status.result) return status.result;
     if (status.status === "failed") {
       return {
@@ -686,10 +691,15 @@ async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResp
   };
 }
 
-async function pollImageGenerationJob(jobId: string): Promise<ImageGenerateResponse> {
+async function pollImageGenerationJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ImageGenerateResponse | null> {
   const deadline = Date.now() + IMAGE_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
     const status = await req<ImageGenerateJobStatusResponse>(`${FLOW_BASE}/image/generate/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
     if (status.status === "failed") {
       return {
@@ -717,10 +727,15 @@ async function pollImageGenerationJob(jobId: string): Promise<ImageGenerateRespo
   };
 }
 
-async function pollImageAssetEditJob(jobId: string): Promise<ImageAssetEditResponse> {
+async function pollImageAssetEditJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ImageAssetEditResponse | null> {
   const deadline = Date.now() + IMAGE_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
     const status = await req<ImageAssetEditJobStatusResponse>(`${FLOW_BASE}/image/edit-asset/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
     if (status.status === "failed") {
       return {
@@ -843,10 +858,16 @@ async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoRes
   };
 }
 
-async function pollPptJob<T extends Record<string, unknown>>(jobId: string, onStatus?: PptJobStatusCallback): Promise<T> {
+async function pollPptJob<T extends Record<string, unknown>>(
+  jobId: string,
+  onStatus?: PptJobStatusCallback,
+  shouldContinue: () => boolean = () => true,
+): Promise<T | null> {
   const deadline = Date.now() + PPT_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
     const status = await req<PptJobStatusResponse>(`${FLOW_BASE}/ppt/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
     onStatus?.(status);
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result as T;
     if (status.status === "failed") {
@@ -1134,16 +1155,77 @@ export const api = {
     video_urls?: string[];
   }) => req<AnalyzeStoryboardsResponse>(`${FLOW_BASE}/video/analyze-storyboards`, { method: "POST", body: JSON.stringify(body) }),
 
+  createPptSummaryJob: (body: {
+    ppt_topic: string;
+    ppt_style: string;
+    attachments: Array<Record<string, unknown>>;
+    smart_ppt_project_id?: number | null;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  createPptSummaryUpdateJob: (body: {
+    original_outline: string;
+    modification_opinion: string;
+    smart_ppt_project_id: number;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/update/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  createPptContentJsonJob: (body: {
+    original_outline: string;
+    ppt_style: string;
+    smart_ppt_project_id: number;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/content-json/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  createPptImagesJob: (body: {
+    content_json: unknown;
+    smart_ppt_project_id: number;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  createPptImageRegenerationJob: (body: {
+    page_index: number;
+    page_json: Record<string, unknown>;
+    smart_ppt_project_id: number;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/regenerate/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  createPptFileJob: (body: {
+    file_urls: string[];
+    smart_ppt_project_id: number;
+  }) =>
+    req<PptJobStartResponse>(`${FLOW_BASE}/ppt/file/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getPptJob: (jobId: string) =>
+    req<PptJobStatusResponse>(`${FLOW_BASE}/ppt/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPptJob,
+
   startPptSummaryJob: async (body: {
     ppt_topic: string;
     ppt_style: string;
     attachments: Array<Record<string, unknown>>;
     smart_ppt_project_id?: number | null;
   }) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptSummaryJob(body);
     return pollPptJob<PptSummaryResult>(started.job_id);
   },
 
@@ -1152,10 +1234,7 @@ export const api = {
     modification_opinion: string;
     smart_ppt_project_id: number;
   }) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/summary/update/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptSummaryUpdateJob(body);
     return pollPptJob<PptSummaryResult>(started.job_id);
   },
 
@@ -1164,10 +1243,7 @@ export const api = {
     ppt_style: string;
     smart_ppt_project_id: number;
   }) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/content-json/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptContentJsonJob(body);
     return pollPptJob<PptContentJsonResult>(started.job_id);
   },
 
@@ -1175,10 +1251,7 @@ export const api = {
     content_json: unknown;
     smart_ppt_project_id: number;
   }, onStatus?: PptJobStatusCallback) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptImagesJob(body);
     return pollPptJob<PptImagesResult>(started.job_id, onStatus);
   },
 
@@ -1187,10 +1260,7 @@ export const api = {
     page_json: Record<string, unknown>;
     smart_ppt_project_id: number;
   }) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/images/regenerate/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptImageRegenerationJob(body);
     return pollPptJob<Record<string, unknown>>(started.job_id);
   },
 
@@ -1198,10 +1268,7 @@ export const api = {
     file_urls: string[];
     smart_ppt_project_id: number;
   }) => {
-    const started = await req<PptJobStartResponse>(`${FLOW_BASE}/ppt/file/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    const started = await api.createPptFileJob(body);
     return pollPptJob<PptFileResult>(started.job_id);
   },
 };

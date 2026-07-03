@@ -30,7 +30,7 @@ class PlanMarkdownResult:
     plan_markdown: str
     template_path: Path = PLAN_TEMPLATE_PATH
     consistency_issues: list[str] = field(default_factory=list)
-    review_timeout_sec: int = 30
+    review_timeout_sec: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

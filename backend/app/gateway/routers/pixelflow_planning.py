@@ -54,7 +54,7 @@ class PlanMarkdownResponse(BaseModel):
     plan_markdown: str
     template_path: str
     consistency_issues: list[str] = Field(default_factory=list)
-    review_timeout_sec: int = 30
+    review_timeout_sec: int | None = None
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)

@@ -54,7 +54,7 @@ def test_planning_router_creates_reviewable_plan_markdown():
     assert response.status_code == 200
     data = response.json()
     assert data["output_type"] == "video"
-    assert data["review_timeout_sec"] == 30
+    assert data["review_timeout_sec"] is None
     assert data["consistency_issues"] == []
     assert data["template_path"].endswith("backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md")
     assert "苹果什么什么PRO" in data["plan_markdown"]

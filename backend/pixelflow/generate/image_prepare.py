@@ -44,7 +44,7 @@ class ImageGenerationPrepareResult:
     params: dict[str, Any]
     images: list[dict[str, Any]] = field(default_factory=list)
     message: str = ""
-    review_timeout_sec: int = 30
+    review_timeout_sec: int = 60
 
     def to_dict(self) -> dict[str, Any]:
         return {

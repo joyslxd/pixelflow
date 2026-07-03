@@ -39,7 +39,7 @@ class ImagePrepareResponse(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     images: list[dict[str, Any]] = Field(default_factory=list)
     message: str = ""
-    review_timeout_sec: int = 30
+    review_timeout_sec: int = 60
 
 
 class ImageGenerateRequest(BaseModel):

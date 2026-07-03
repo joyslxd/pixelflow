@@ -19,6 +19,7 @@ import {
   type PlanMarkdownResponse,
   type PptFileResult,
   type PptImagesResult,
+  type PptJobStatusResponse,
   type PptPageImage,
   type PptContentJsonResult,
   type PptSummaryResult,
@@ -61,6 +62,9 @@ const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
+const AUTO_CONFIRM_TIMEOUT_MS = 60_000;
+const AUTO_CONFIRM_TIMEOUT_SECONDS = AUTO_CONFIRM_TIMEOUT_MS / 1000;
+const CONTENT_APP_CONVERSATIONS_UPDATED_MESSAGE_TYPE = "PIXELFLOW_CONVERSATIONS_UPDATED";
 const SCENE_GLOBAL_ASSET_DELETE_PROMPT = (assetName: string) => `删除分镜故事板中的内容「${assetName}」。请只删除对应内容，并保持其他内容不变。`;
 
 const PHASE_MSG: Record<string, string> = {
@@ -75,6 +79,24 @@ const PHASE_MSG: Record<string, string> = {
   qc_review: "质检完成,请在画布确认。",
   done: "全部完成 🎉",
 };
+
+function notifyContentAppConversationsUpdated(conversationId: string): void {
+  if (typeof window === "undefined" || window.parent === window || !conversationId) return;
+  let targetOrigin = "*";
+  try {
+    targetOrigin = document.referrer ? new URL(document.referrer).origin : "*";
+  } catch {
+    targetOrigin = "*";
+  }
+  window.parent.postMessage(
+    {
+      type: CONTENT_APP_CONVERSATIONS_UPDATED_MESSAGE_TYPE,
+      conversation_id: conversationId,
+      conversationId,
+    },
+    targetOrigin,
+  );
+}
 
 const REVIEW_ARTIFACT: Partial<Record<TaskPhase, NonNullable<ChatMessage["artifact"]>>> = {
   segment_review: {
@@ -168,6 +190,8 @@ interface WorkspaceSnapshot {
   pending_scene_package_job?: PendingScenePackageJob | null;
   pendingVideoJob?: PendingVideoJob | null;
   pending_video_job?: PendingVideoJob | null;
+  pendingPptJob?: PendingPptJob | null;
+  pending_ppt_job?: PendingPptJob | null;
   canvas: CanvasState;
   canvasOpen: boolean;
   briefConfirmed: boolean;
@@ -285,6 +309,76 @@ interface PendingVideoJob {
   artifact: ChatArtifact;
   affected_scene_ids?: string[];
   use_flaw_analysis?: boolean;
+}
+
+type PendingPptJobKind =
+  | "summary_generation"
+  | "summary_update"
+  | "content_json_generation"
+  | "image_generation"
+  | "image_regeneration"
+  | "file_generation"
+  | "file_regeneration";
+
+interface PptSummaryJobRequest {
+  ppt_topic: string;
+  ppt_style: string;
+  attachments: Array<Record<string, unknown>>;
+  smart_ppt_project_id?: number | null;
+}
+
+interface PptSummaryUpdateJobRequest {
+  original_outline: string;
+  modification_opinion: string;
+  smart_ppt_project_id: number;
+}
+
+interface PptContentJsonJobRequest {
+  original_outline: string;
+  ppt_style: string;
+  smart_ppt_project_id: number;
+}
+
+interface PptImagesJobRequest {
+  content_json: unknown;
+  smart_ppt_project_id: number;
+}
+
+interface PptImageRegenerationJobRequest {
+  page_index: number;
+  page_json: Record<string, unknown>;
+  smart_ppt_project_id: number;
+}
+
+interface PptFileJobRequest {
+  file_urls: string[];
+  smart_ppt_project_id: number;
+}
+
+interface PendingPptJobContext {
+  formValues: Record<string, unknown>;
+  coreMessage: string;
+  materials?: Array<Record<string, unknown>>;
+  intakeContext?: Record<string, unknown>;
+  pptStyle: string;
+}
+
+interface PendingPptJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: PendingPptJobKind;
+  started_at: string;
+  request:
+    | PptSummaryJobRequest
+    | PptSummaryUpdateJobRequest
+    | PptContentJsonJobRequest
+    | PptImagesJobRequest
+    | PptImageRegenerationJobRequest
+    | PptFileJobRequest;
+  artifact?: ChatArtifact;
+  context?: PendingPptJobContext;
+  image_message_id?: string;
 }
 
 const DEFAULT_IMAGE_EDIT_MODEL_CONFIG: ImageModelParamConfig = {
@@ -787,6 +881,7 @@ export function WorkspacePage() {
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
   const [currentTaskId, setCurrentTaskId] = useState("");
   const conversationIdRef = useRef<string>("");
+  const routeConversationIdRef = useRef<string>("");
   const taskIdRef = useRef<string>("");
   const briefConfirmedRef = useRef(false);
   const seenEventIdsRef = useRef(new Set<number>());
@@ -805,12 +900,16 @@ export function WorkspacePage() {
   const activeScenePackageJobPollsRef = useRef(new Set<string>());
   const pendingVideoJobRef = useRef<PendingVideoJob | null>(null);
   const activeVideoJobPollsRef = useRef(new Set<string>());
+  const pendingPptJobRef = useRef<PendingPptJob | null>(null);
+  const activePptJobPollsRef = useRef(new Set<string>());
   const briefReadyShownRef = useRef(false);
   const lastEventIdRef = useRef(0);
+  const pageVisibleRef = useRef(true);
   const restoringRef = useRef(false);
   const saveTimerRef = useRef<number | undefined>(undefined);
   const skipRouteRestoreConversationRef = useRef("");
   const unsubRef = useRef<() => void>(() => {});
+  routeConversationIdRef.current = conversationId || "";
 
   const setActiveTaskId = (taskId: string) => {
     taskIdRef.current = taskId;
@@ -822,8 +921,10 @@ export function WorkspacePage() {
     setCurrentConversationId(id);
   };
 
-  const isVisibleConversation = (targetConversationId: string) =>
-    shouldApplyVisibleConversationSideEffect(conversationIdRef.current, targetConversationId);
+  const isVisibleConversation = (targetConversationId: string) => {
+    const activeConversationId = conversationIdRef.current || routeConversationIdRef.current;
+    return pageVisibleRef.current && shouldApplyVisibleConversationSideEffect(activeConversationId, targetConversationId);
+  };
 
   const setBusyForConversation = (targetConversationId: string, value: boolean) => {
     if (isVisibleConversation(targetConversationId)) setBusy(value);
@@ -1421,7 +1522,7 @@ export function WorkspacePage() {
     },
     targetConversationId = conversationIdRef.current,
   ) => {
-    const message = pushArtifact("已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。30 秒未选择将采用推荐方向。", {
+    const message = pushArtifact(`已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未选择将采用推荐方向。`, {
       type: "directions",
       title: "创意方向",
       description: `${directions.length} 个方向，第一项为推荐方向`,
@@ -1437,7 +1538,7 @@ export function WorkspacePage() {
     if (recommended) {
       window.setTimeout(() => {
         void handleSelectDirection(message, recommended, true);
-      }, 30_000);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
   };
 
@@ -1453,7 +1554,7 @@ export function WorkspacePage() {
     },
     targetConversationId = conversationIdRef.current,
   ) => {
-    const message = pushArtifact("plan.md 创作方案已生成，请审核后继续。30 秒未操作将默认同意。", {
+    pushArtifact("plan.md 创作方案已生成，请审核后点击「同意方案」继续。", {
       type: "plan",
       title: "plan.md 创作方案",
       description: `基于「${selectedDirection.title}」生成，模板来自项目内 plan.md`,
@@ -1466,9 +1567,6 @@ export function WorkspacePage() {
       materials: context.materials || [],
       coreMessage: context.coreMessage,
     }, targetConversationId);
-    window.setTimeout(() => {
-      void handleApprovePlan(message, true);
-    }, Math.max(1, plan.review_timeout_sec) * 1000);
   };
 
   const pushPptOutlineArtifact = (
@@ -1553,7 +1651,7 @@ export function WorkspacePage() {
   ) => {
     pendingImageJobRef.current = pendingImageJob;
     if (!targetConversationId) return;
-    const baseSnapshot = isVisibleConversation(targetConversationId) ? makeSnapshot() : {};
+    const baseSnapshot = makeSnapshot(targetConversationId);
     await api.updateConversation(targetConversationId, {
       last_phase: lastPhase,
       context: {
@@ -1584,7 +1682,7 @@ export function WorkspacePage() {
     await api.updateConversation(targetConversationId, {
       last_phase: lastPhase,
       context: {
-        ...makeSnapshot(),
+        ...makeSnapshot(targetConversationId),
         ...extraContext,
         pendingVideoJob,
         pending_video_job: pendingVideoJob,
@@ -1608,7 +1706,7 @@ export function WorkspacePage() {
   ) => {
     pendingScenePackageJobRef.current = pendingScenePackageJob;
     if (!targetConversationId) return;
-    const baseSnapshot = isVisibleConversation(targetConversationId) ? makeSnapshot() : {};
+    const baseSnapshot = makeSnapshot(targetConversationId);
     await api.updateConversation(targetConversationId, {
       last_phase: lastPhase,
       context: {
@@ -1626,6 +1724,34 @@ export function WorkspacePage() {
     extraContext: Record<string, unknown> = {},
   ) => {
     await persistPendingScenePackageJob(null, targetConversationId, lastPhase, extraContext);
+  };
+
+  const persistPendingPptJob = async (
+    pendingPptJob: PendingPptJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingPptJobRef.current = pendingPptJob;
+    if (!targetConversationId) return;
+    const baseSnapshot = makeSnapshot(targetConversationId);
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...baseSnapshot,
+        ...extraContext,
+        pendingPptJob,
+        pending_ppt_job: pendingPptJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingPptJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingPptJob(null, targetConversationId, lastPhase, extraContext);
   };
 
   const scenePackageContext = (
@@ -1699,7 +1825,7 @@ export function WorkspacePage() {
 
   const imageResultSuccessContentForJob = (pendingImageJob: PendingImageJob): string =>
     pendingImageJob.kind === "direct_image_edit"
-      ? "图片编辑完成，请确认是否满意。30 秒未操作将默认满意并结束流程。"
+      ? `图片编辑完成，请确认是否满意。${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未操作将默认满意并结束流程。`
       : pendingImageJob.kind === "image_regeneration"
         ? "图片已按修改意见重新生成，请查看结果。"
         : "图片生成完成，请查看结果。";
@@ -1765,7 +1891,7 @@ export function WorkspacePage() {
     if (canAcceptImageResult(imageResult)) {
       window.setTimeout(() => {
         void handleAcceptImageResult(imageResultMessage, true);
-      }, 30_000);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     await clearPendingImageJob(targetConversationId, imageResultLastPhaseForJob(pendingImageJob, imageResult), {
       plan_approved: pendingImageJob.kind === "image_generation" ? true : undefined,
@@ -2055,7 +2181,7 @@ export function WorkspacePage() {
     if (mergedVideo.ok) {
       window.setTimeout(() => {
         void handleAcceptVideoResult(videoResultMessage, true);
-      }, 30_000);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     if (mergedVideo.merged_video_url) {
       const results = videoResultsFromGeneratedScenes(
@@ -2153,7 +2279,7 @@ export function WorkspacePage() {
     if (mergedVideo.ok) {
       window.setTimeout(() => {
         void handleAcceptVideoResult(videoResultMessage, true);
-      }, 30_000);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     if (mergedVideo.merged_video_url) {
       const results = videoResultsFromGeneratedScenes(
@@ -2184,19 +2310,30 @@ export function WorkspacePage() {
     const pollKey = `${pendingVideoJob.conversation_id}:${pendingVideoJob.job_id}`;
     if (activeVideoJobPollsRef.current.has(pollKey)) return;
     activeVideoJobPollsRef.current.add(pollKey);
+    let pausedForHiddenConversation = false;
+    const shouldContinuePolling = () => isVisibleConversation(pendingVideoJob.conversation_id);
+    const stopIfHidden = () => {
+      if (shouldContinuePolling()) return false;
+      pausedForHiddenConversation = true;
+      return true;
+    };
     setBusyForConversation(pendingVideoJob.conversation_id, true);
     try {
+      if (stopIfHidden()) return;
       const status = await api.getSceneVideosJob(pendingVideoJob.job_id);
+      if (stopIfHidden()) return;
       const generatedSceneVideos =
         status.status === "completed" && status.result
           ? status.result
-          : await api.pollSceneVideoJob(pendingVideoJob.job_id);
+          : await api.pollSceneVideoJob(pendingVideoJob.job_id, shouldContinuePolling);
+      if (!generatedSceneVideos || stopIfHidden()) return;
       if (pendingVideoJob.kind === "scene_regeneration") {
         await handleCompletedSceneRegenerationJob(pendingVideoJob, generatedSceneVideos, processedKey);
       } else {
         await handleCompletedSceneGenerationJob(pendingVideoJob, generatedSceneVideos, processedKey);
       }
     } catch (err) {
+      if (stopIfHidden()) return;
       releaseArtifactAction(processedKey);
       const message = err instanceof Error ? err.message : String(err);
       pushAssistant(
@@ -2209,6 +2346,7 @@ export function WorkspacePage() {
         video_job_resume_error: message,
       }).catch(() => {});
     } finally {
+      if (pausedForHiddenConversation) releaseArtifactAction(processedKey);
       activeVideoJobPollsRef.current.delete(pollKey);
       setBusyForConversation(pendingVideoJob.conversation_id, false);
     }
@@ -2218,24 +2356,37 @@ export function WorkspacePage() {
     const pollKey = `${pendingImageJob.conversation_id}:${pendingImageJob.job_api}:${pendingImageJob.job_id}`;
     if (activeImageJobPollsRef.current.has(pollKey)) return;
     activeImageJobPollsRef.current.add(pollKey);
+    let pausedForHiddenConversation = false;
+    const shouldContinuePolling = () => isVisibleConversation(pendingImageJob.conversation_id);
+    const stopIfHidden = () => {
+      if (shouldContinuePolling()) return false;
+      pausedForHiddenConversation = true;
+      return true;
+    };
     setBusyForConversation(pendingImageJob.conversation_id, true);
     try {
+      if (stopIfHidden()) return;
       if (pendingImageJob.job_api === "edit_asset") {
         const status = await api.getImageAssetEditJob(pendingImageJob.job_id);
+        if (stopIfHidden()) return;
         const editResult =
           (status.status === "completed" || status.status === "quota_paused") && status.result
             ? status.result
-            : await api.pollImageAssetEditJob(pendingImageJob.job_id);
+            : await api.pollImageAssetEditJob(pendingImageJob.job_id, shouldContinuePolling);
+        if (!editResult || stopIfHidden()) return;
         await handleCompletedImageAssetEditJob(pendingImageJob, editResult, processedKey);
       } else {
         const status = await api.getImageGenerationJob(pendingImageJob.job_id);
+        if (stopIfHidden()) return;
         const imageResult =
           (status.status === "completed" || status.status === "quota_paused") && status.result
             ? status.result
-            : await api.pollImageGenerationJob(pendingImageJob.job_id);
+            : await api.pollImageGenerationJob(pendingImageJob.job_id, shouldContinuePolling);
+        if (!imageResult || stopIfHidden()) return;
         await handleCompletedImageGenerationJob(pendingImageJob, imageResult, processedKey);
       }
     } catch (err) {
+      if (stopIfHidden()) return;
       releaseArtifactAction(processedKey);
       const message = err instanceof Error ? err.message : String(err);
       pushAssistant(
@@ -2248,6 +2399,7 @@ export function WorkspacePage() {
         image_job_resume_error: message,
       }).catch(() => {});
     } finally {
+      if (pausedForHiddenConversation) releaseArtifactAction(processedKey);
       activeImageJobPollsRef.current.delete(pollKey);
       setBusyForConversation(pendingImageJob.conversation_id, false);
     }
@@ -2302,6 +2454,277 @@ export function WorkspacePage() {
       if (pausedForHiddenConversation) releaseArtifactAction(processedKey);
       activeScenePackageJobPollsRef.current.delete(pollKey);
       setBusyForConversation(pendingScenePackageJob.conversation_id, false);
+    }
+  };
+
+  const pollPptJobResult = async <T extends Record<string, unknown>>(
+    pendingPptJob: PendingPptJob,
+    onStatus?: (status: PptJobStatusResponse) => void,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<T | null> => {
+    if (!shouldContinue()) return null;
+    const status = await api.getPptJob(pendingPptJob.job_id);
+    if (!shouldContinue()) return null;
+    onStatus?.(status);
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result as T;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        message: status.error || status.message || "PPT 生成失败",
+        error: status.error || status.message || "PPT 生成失败",
+      } as unknown as T;
+    }
+    return api.pollPptJob<T>(pendingPptJob.job_id, onStatus, shouldContinue);
+  };
+
+  const completedPptLastPhase = (pendingPptJob: PendingPptJob, ok: boolean): string => {
+    const failed = !ok;
+    if (pendingPptJob.kind === "summary_generation") return failed ? "ppt_outline_failed" : "ppt_outline_review";
+    if (pendingPptJob.kind === "summary_update") return failed ? "ppt_outline_update_failed" : "ppt_outline_updated";
+    if (pendingPptJob.kind === "content_json_generation") return failed ? "ppt_content_json_failed" : "ppt_content_json_ready";
+    if (pendingPptJob.kind === "image_generation" || pendingPptJob.kind === "image_regeneration") return failed ? "ppt_images_failed" : "ppt_images_ready";
+    if (pendingPptJob.kind === "file_generation" || pendingPptJob.kind === "file_regeneration") return failed ? "ppt_file_failed" : "ppt_file_ready";
+    return failed ? "ppt_job_failed" : "ppt_job_completed";
+  };
+
+  const findLatestPptImagesMessageId = (targetConversationId: string): string => {
+    const message = [...messages]
+      .reverse()
+      .find((item) => messageConversationId(item, targetConversationId) === targetConversationId && item.artifact?.type === "ppt_images");
+    return message?.id || "";
+  };
+
+  const handleCompletedPptSummaryJob = async (pendingPptJob: PendingPptJob, result: PptSummaryResult) => {
+    const context = pendingPptJob.context;
+    if (!context) {
+      throw new Error("PPT 大纲任务缺少恢复上下文");
+    }
+    const targetConversationId = pendingPptJob.conversation_id;
+    pushPptOutlineArtifact(result, context, targetConversationId);
+    await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, result.ok), {
+      intent: "ppt",
+      form_values: context.formValues,
+      intake_context: context.intakeContext,
+      materials: context.materials || [],
+      ppt_summary: result,
+      ppt_outline_feedback: pendingPptJob.kind === "summary_update"
+        ? (pendingPptJob.request as PptSummaryUpdateJobRequest).modification_opinion
+        : undefined,
+    }).catch(() => {});
+  };
+
+  const startPptImagesFromContentJson = async (
+    contentJson: PptContentJsonResult,
+    sourceArtifact: ChatArtifact,
+    pendingPptJob: PendingPptJob,
+    processedKey = "",
+  ) => {
+    const targetConversationId = pendingPptJob.conversation_id;
+    const projectId =
+      numericValue(contentJson.smart_ppt_project_id)
+      || numericValue((pendingPptJob.request as PptContentJsonJobRequest).smart_ppt_project_id)
+      || pptProjectId(sourceArtifact);
+    if (!projectId) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("当前 PPT 项目 ID 缺失，无法继续生成页面图片。", targetConversationId);
+      await clearPendingPptJob(targetConversationId, "ppt_images_failed", {
+        intent: "ppt",
+        ppt_content_json: contentJson,
+      }).catch(() => {});
+      return;
+    }
+    const imageArtifactSource = { ...sourceArtifact, pptContentJson: contentJson };
+    const pendingImages = pendingPptImagesFromContentJson(contentJson, projectId);
+    const imageMessage = pushPptImagesArtifact(pendingImages, contentJson, imageArtifactSource, targetConversationId);
+    const request: PptImagesJobRequest = {
+      content_json: contentJson.content_json || contentJson.pages || [],
+      smart_ppt_project_id: projectId,
+    };
+    const started = await api.createPptImagesJob(request);
+    const nextPendingPptJob: PendingPptJob = {
+      job_id: started.job_id,
+      conversation_id: targetConversationId,
+      source_message_id: pendingPptJob.source_message_id,
+      kind: "image_generation",
+      started_at: new Date().toISOString(),
+      request,
+      artifact: imageArtifactSource,
+      image_message_id: imageMessage.id,
+    };
+    await persistPendingPptJob(nextPendingPptJob, targetConversationId, "ppt_images_running", {
+      intent: "ppt",
+      ppt_content_json: contentJson,
+      ppt_images: pendingImages,
+    });
+    await resumePendingPptJob(nextPendingPptJob, processedKey);
+  };
+
+  const handleCompletedPptContentJsonJob = async (
+    pendingPptJob: PendingPptJob,
+    contentJson: PptContentJsonResult,
+    processedKey = "",
+  ) => {
+    const targetConversationId = pendingPptJob.conversation_id;
+    const sourceArtifact = pendingPptJob.artifact;
+    if (!sourceArtifact) {
+      throw new Error("PPT 页面结构任务缺少来源卡片");
+    }
+    if (!contentJson.ok) {
+      releaseArtifactAction(processedKey);
+      const projectId = pptProjectId(sourceArtifact) || numericValue((pendingPptJob.request as PptContentJsonJobRequest).smart_ppt_project_id) || 0;
+      const failedImages: PptImagesResult = {
+        ok: false,
+        smart_ppt_project_id: projectId || null,
+        pages: [],
+        message: String(contentJson.message || contentJson.error || "PPT 页面 JSON 生成失败。"),
+        quota_insufficient: Boolean(contentJson.quota_insufficient),
+      };
+      pushPptImagesArtifact(failedImages, contentJson, sourceArtifact, targetConversationId);
+      await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, false), {
+        intent: "ppt",
+        ppt_content_json: contentJson,
+        ppt_images: failedImages,
+      }).catch(() => {});
+      return;
+    }
+    pushAssistant("PPT 页面结构已生成，正在并行生成每页 PPT 图片…", targetConversationId);
+    await startPptImagesFromContentJson(contentJson, sourceArtifact, pendingPptJob, processedKey);
+  };
+
+  const handleCompletedPptImagesJob = async (
+    pendingPptJob: PendingPptJob,
+    pptImages: PptImagesResult,
+    processedKey = "",
+  ) => {
+    const targetConversationId = pendingPptJob.conversation_id;
+    const imageMessageId = pendingPptJob.image_message_id || findLatestPptImagesMessageId(targetConversationId);
+    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, pptImages);
+    if (!pptImages.ok) releaseArtifactAction(processedKey);
+    await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, pptImages.ok), {
+      intent: "ppt",
+      ppt_content_json: pendingPptJob.artifact?.pptContentJson,
+      ppt_images: pptImages,
+    }).catch(() => {});
+  };
+
+  const handleCompletedPptImageRegenerationJob = async (
+    pendingPptJob: PendingPptJob,
+    result: Record<string, unknown>,
+  ) => {
+    const targetConversationId = pendingPptJob.conversation_id;
+    const sourceArtifact = pendingPptJob.artifact;
+    const pageIndex = (pendingPptJob.request as PptImageRegenerationJobRequest).page_index;
+    if (!sourceArtifact?.pptImages) {
+      throw new Error("PPT 单页重生任务缺少来源页面图片");
+    }
+    const nextPage = result.page as PptPageImage | undefined;
+    const nextPages = sourceArtifact.pptImages.pages.map((page) => {
+      if (page.page_index !== pageIndex) return page;
+      if (!nextPage) {
+        return {
+          ...page,
+          status: "failed",
+          image_url: null,
+          error: String(result.message || result.error || "本页图片重新生成失败。"),
+        };
+      }
+      return {
+        ...nextPage,
+        page_index: pageIndex,
+        json_content: nextPage.json_content || page.json_content || (pendingPptJob.request as PptImageRegenerationJobRequest).page_json,
+        status: nextPage.status || (nextPage.image_url ? "completed" : "failed"),
+      };
+    });
+    const nextImages: PptImagesResult = {
+      ...sourceArtifact.pptImages,
+      ok: nextPages.length > 0 && nextPages.every((page) => page.status === "completed" && Boolean(page.image_url)),
+      pages: nextPages,
+      message: String(result.message || "PPT 页面图片已重新生成。"),
+      quota_insufficient: Boolean(result.quota_insufficient),
+    };
+    const imageMessageId = pendingPptJob.image_message_id || findLatestPptImagesMessageId(targetConversationId);
+    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, nextImages);
+    await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, nextImages.ok), {
+      intent: "ppt",
+      ppt_content_json: sourceArtifact.pptContentJson,
+      ppt_images: nextImages,
+    }).catch(() => {});
+  };
+
+  const handleCompletedPptFileJob = async (pendingPptJob: PendingPptJob, pptFile: PptFileResult, processedKey = "") => {
+    const sourceArtifact = pendingPptJob.artifact;
+    if (!sourceArtifact) {
+      throw new Error("PPT 附件任务缺少来源卡片");
+    }
+    const targetConversationId = pendingPptJob.conversation_id;
+    if (!pptFile.ok) releaseArtifactAction(processedKey);
+    pushPptFileArtifact(pptFile, sourceArtifact, targetConversationId);
+    await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, pptFile.ok), {
+      intent: "ppt",
+      ppt_content_json: sourceArtifact.pptContentJson,
+      ppt_images: sourceArtifact.pptImages,
+      ppt_file: pptFile,
+    }).catch(() => {});
+  };
+
+  const resumePendingPptJob = async (pendingPptJob: PendingPptJob, processedKey = "") => {
+    const pollKey = `${pendingPptJob.conversation_id}:${pendingPptJob.kind}:${pendingPptJob.job_id}`;
+    if (activePptJobPollsRef.current.has(pollKey)) return;
+    activePptJobPollsRef.current.add(pollKey);
+    let pausedForHiddenConversation = false;
+    const shouldContinuePolling = () => isVisibleConversation(pendingPptJob.conversation_id);
+    const stopIfHidden = () => {
+      if (shouldContinuePolling()) return false;
+      pausedForHiddenConversation = true;
+      return true;
+    };
+    setBusyForConversation(pendingPptJob.conversation_id, true);
+    try {
+      if (stopIfHidden()) return;
+      if (pendingPptJob.kind === "summary_generation" || pendingPptJob.kind === "summary_update") {
+        const result = await pollPptJobResult<PptSummaryResult>(pendingPptJob, undefined, shouldContinuePolling);
+        if (!result || stopIfHidden()) return;
+        await handleCompletedPptSummaryJob(pendingPptJob, result);
+      } else if (pendingPptJob.kind === "content_json_generation") {
+        const result = await pollPptJobResult<PptContentJsonResult>(pendingPptJob, undefined, shouldContinuePolling);
+        if (!result || stopIfHidden()) return;
+        await handleCompletedPptContentJsonJob(pendingPptJob, result, processedKey);
+      } else if (pendingPptJob.kind === "image_generation") {
+        const imageMessageId = pendingPptJob.image_message_id || findLatestPptImagesMessageId(pendingPptJob.conversation_id);
+        const result = await pollPptJobResult<PptImagesResult>(pendingPptJob, (status) => {
+          const partialImages = status.result as PptImagesResult | null;
+          if (partialImages?.pages && imageMessageId) {
+            updatePptImagesArtifactInMessage(imageMessageId, pendingPptJob.conversation_id, partialImages);
+          }
+        }, shouldContinuePolling);
+        if (!result || stopIfHidden()) return;
+        await handleCompletedPptImagesJob(pendingPptJob, result, processedKey);
+      } else if (pendingPptJob.kind === "image_regeneration") {
+        const result = await pollPptJobResult<Record<string, unknown>>(pendingPptJob, undefined, shouldContinuePolling);
+        if (!result || stopIfHidden()) return;
+        await handleCompletedPptImageRegenerationJob(pendingPptJob, result);
+      } else {
+        const result = await pollPptJobResult<PptFileResult>(pendingPptJob, undefined, shouldContinuePolling);
+        if (!result || stopIfHidden()) return;
+        await handleCompletedPptFileJob(pendingPptJob, result, processedKey);
+      }
+    } catch (err) {
+      if (stopIfHidden()) return;
+      releaseArtifactAction(processedKey);
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的 PPT 生成任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新 PPT 卡片手动重试。"
+          : `继续查询 PPT 生成任务失败:${message}`,
+        pendingPptJob.conversation_id,
+      );
+      await clearPendingPptJob(pendingPptJob.conversation_id, "ppt_job_resume_failed", {
+        ppt_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      if (pausedForHiddenConversation) releaseArtifactAction(processedKey);
+      activePptJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(pendingPptJob.conversation_id, false);
     }
   };
 
@@ -2382,6 +2805,7 @@ export function WorkspacePage() {
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
+    pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
@@ -2398,24 +2822,28 @@ export function WorkspacePage() {
     if (typeof snapshot.briefReadyShown === "boolean") briefReadyShownRef.current = snapshot.briefReadyShown;
   };
 
-  const makeSnapshot = (): WorkspaceSnapshot => ({
+  const makeSnapshot = (snapshotConversationId = currentConversationId): WorkspaceSnapshot => ({
     taskId: currentTaskId,
     pendingMaterials,
     pendingImageEditRequest:
-      pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
+      pendingImageEditRequestRef.current?.conversationId === snapshotConversationId ? pendingImageEditRequestRef.current : null,
     imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
     pendingImageJob:
-      pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
+      pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
     pending_image_job:
-      pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
+      pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
     pendingScenePackageJob:
-      pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
+      pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
     pending_scene_package_job:
-      pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
+      pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
     pendingVideoJob:
-      pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
+      pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
     pending_video_job:
-      pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
+      pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
+    pendingPptJob:
+      pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
+    pending_ppt_job:
+      pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
     canvas,
     canvasOpen,
     briefConfirmed,
@@ -2451,6 +2879,7 @@ export function WorkspacePage() {
     pendingImageJobRef.current = null;
     pendingScenePackageJobRef.current = null;
     pendingVideoJobRef.current = null;
+    pendingPptJobRef.current = null;
     planRevisionArtifactRef.current = null;
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
@@ -2465,6 +2894,7 @@ export function WorkspacePage() {
     const imageEditConfirmedSelections = snapshot.imageEditConfirmedSelections || {};
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
+    const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
@@ -2481,6 +2911,8 @@ export function WorkspacePage() {
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
+      pendingPptJob,
+      pending_ppt_job: pendingPptJob,
       imageEditConfirmedSelections,
       messages: normalizedMessages,
     });
@@ -2520,6 +2952,11 @@ export function WorkspacePage() {
         void resumePendingVideoJob(pendingVideoJob);
       }, 0);
     }
+    if (pendingPptJob?.job_id && pendingPptJob.conversation_id === detail.conversation.conversation_id) {
+      window.setTimeout(() => {
+        void resumePendingPptJob(pendingPptJob);
+      }, 0);
+    }
     const taskId = snapshot.taskId || detail.conversation.current_task_id || "";
     if (taskId) {
       setActiveTaskId(taskId);
@@ -2527,6 +2964,44 @@ export function WorkspacePage() {
       await reconcileTaskFromServer(taskId);
     }
   };
+
+  const resumeVisiblePendingJobs = () => {
+    const activeConversationId = conversationIdRef.current;
+    if (!activeConversationId || !pageVisibleRef.current) return;
+    const pendingImageJob = pendingImageJobRef.current;
+    if (pendingImageJob?.job_id && pendingImageJob.conversation_id === activeConversationId) {
+      void resumePendingImageJob(pendingImageJob);
+    }
+    const pendingScenePackageJob = pendingScenePackageJobRef.current;
+    if (pendingScenePackageJob?.job_id && pendingScenePackageJob.conversation_id === activeConversationId) {
+      void resumePendingScenePackageJob(pendingScenePackageJob);
+    }
+    const pendingVideoJob = pendingVideoJobRef.current;
+    if (pendingVideoJob?.job_id && pendingVideoJob.conversation_id === activeConversationId) {
+      void resumePendingVideoJob(pendingVideoJob);
+    }
+    const pendingPptJob = pendingPptJobRef.current;
+    if (pendingPptJob?.job_id && pendingPptJob.conversation_id === activeConversationId) {
+      void resumePendingPptJob(pendingPptJob);
+    }
+  };
+
+  useEffect(() => {
+    const handleVisibilityResume = () => {
+      pageVisibleRef.current = typeof document === "undefined" || document.visibilityState !== "hidden";
+      if (pageVisibleRef.current) resumeVisiblePendingJobs();
+    };
+    const handleFocusResume = () => {
+      pageVisibleRef.current = true;
+      resumeVisiblePendingJobs();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityResume);
+    window.addEventListener("focus", handleFocusResume);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityResume);
+      window.removeEventListener("focus", handleFocusResume);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -2569,6 +3044,9 @@ export function WorkspacePage() {
     void restoreConversation();
     return () => {
       cancelled = true;
+      if (conversationIdRef.current === conversationId) {
+        setActiveConversationId("");
+      }
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
   }, [conversationId]);
@@ -2595,6 +3073,10 @@ export function WorkspacePage() {
           pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
         pending_video_job:
           pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
+        pendingPptJob:
+          pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
+        pending_ppt_job:
+          pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
         canvas,
         canvasOpen,
         briefConfirmed,
@@ -2628,6 +3110,7 @@ export function WorkspacePage() {
     skipRouteRestoreConversationRef.current = created.conversation_id;
     setActiveConversationId(created.conversation_id);
     window.dispatchEvent(new Event("pixelflow-conversations-updated"));
+    notifyContentAppConversationsUpdated(created.conversation_id);
     return created.conversation_id;
   };
 
@@ -2688,29 +3171,36 @@ export function WorkspacePage() {
       setBusyForConversation(activeConversation, true);
       pushAssistant("已收到 PPT 大纲修改意见，正在调用 SmartPPT 更新大纲…", activeConversation);
       try {
-        const updatedSummary = await api.updatePptSummaryJob({
+        const request: PptSummaryUpdateJobRequest = {
           original_outline: String(pendingPptOutlineArtifact.pptSummary.summary || ""),
           modification_opinion: text,
           smart_ppt_project_id: projectId,
-        });
-        pushPptOutlineArtifact(updatedSummary, {
+        };
+        const started = await api.createPptSummaryUpdateJob(request);
+        const pendingPptJob: PendingPptJob = {
+          job_id: started.job_id,
+          conversation_id: activeConversation,
+          source_message_id: "",
+          kind: "summary_update",
+          started_at: new Date().toISOString(),
+          request,
+          artifact: pendingPptOutlineArtifact,
+          context: {
+            formValues: pendingPptOutlineArtifact.formValues || {},
+            materials: mergeMaterials(pendingPptOutlineArtifact.materials, materials),
+            coreMessage: `${pendingPptOutlineArtifact.coreMessage || pendingCore}\n大纲修改意见：${text}`,
+            intakeContext: pendingPptOutlineArtifact.intakeContext,
+            pptStyle: String(pendingPptOutlineArtifact.pptStyle || pendingPptOutlineArtifact.formValues?.ppt_style || "极简商务"),
+          },
+        };
+        await persistPendingPptJob(pendingPptJob, activeConversation, "ppt_outline_update_running", {
+          intent: "ppt",
+          ppt_outline_feedback: text,
           formValues: pendingPptOutlineArtifact.formValues || {},
           materials: mergeMaterials(pendingPptOutlineArtifact.materials, materials),
-          coreMessage: `${pendingPptOutlineArtifact.coreMessage || pendingCore}\n大纲修改意见：${text}`,
           intakeContext: pendingPptOutlineArtifact.intakeContext,
-          pptStyle: String(pendingPptOutlineArtifact.pptStyle || pendingPptOutlineArtifact.formValues?.ppt_style || "极简商务"),
-        }, activeConversation);
-        void api
-          .updateConversation(activeConversation, {
-            last_phase: updatedSummary.ok ? "ppt_outline_updated" : "ppt_outline_update_failed",
-            context: {
-              ...makeSnapshot(),
-              intent: "ppt",
-              ppt_summary: updatedSummary,
-              ppt_outline_feedback: text,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
+        });
+        await resumePendingPptJob(pendingPptJob);
       } catch (err) {
         pushAssistant(`PPT 大纲更新失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
@@ -3292,35 +3782,36 @@ export function WorkspacePage() {
     try {
       if (form.intent === "ppt") {
         pushAssistant("正在调用 SmartPPT 生成 PPT 大纲，这一步可能需要等待一会儿…", targetConversationId);
-        const pptSummary = await api.startPptSummaryJob({
+        const request: PptSummaryJobRequest = {
           ppt_topic: form.ppt_topic,
           ppt_style: form.ppt_style,
           attachments: form.attachments,
-        });
-        pushPptOutlineArtifact(pptSummary, {
-          formValues: values,
-          materials: mergeMaterials(flowMaterials, form.attachments),
-          coreMessage: flowCoreMessage,
-          intakeContext: flowIntakeContext,
-          pptStyle: form.ppt_style,
-        }, targetConversationId);
+        };
+        const started = await api.createPptSummaryJob(request);
         pendingDialogContextRef.current = null;
-        if (targetConversationId) {
-          void api
-            .updateConversation(targetConversationId, {
-              last_phase: pptSummary.ok ? "ppt_outline_review" : "ppt_outline_failed",
-              context: {
-                ...makeSnapshot(),
-                intent: "ppt",
-                ppt_form: form,
-                form_values: values,
-                intake_context: flowIntakeContext,
-                materials: mergeMaterials(flowMaterials, form.attachments),
-                ppt_summary: pptSummary,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
+        const pendingPptJob: PendingPptJob = {
+          job_id: started.job_id,
+          conversation_id: targetConversationId,
+          source_message_id: "",
+          kind: "summary_generation",
+          started_at: new Date().toISOString(),
+          request,
+          context: {
+            formValues: values,
+            materials: mergeMaterials(flowMaterials, form.attachments),
+            coreMessage: flowCoreMessage,
+            intakeContext: flowIntakeContext,
+            pptStyle: form.ppt_style,
+          },
+        };
+        await persistPendingPptJob(pendingPptJob, targetConversationId, "ppt_outline_running", {
+          intent: "ppt",
+          ppt_form: form,
+          form_values: values,
+          intake_context: flowIntakeContext,
+          materials: mergeMaterials(flowMaterials, form.attachments),
+        });
+        await resumePendingPptJob(pendingPptJob);
         setBusyForConversation(targetConversationId, false);
         return;
       }
@@ -3406,48 +3897,26 @@ export function WorkspacePage() {
     pushAssistant("PPT 大纲已确认，正在生成页面 JSON 并准备生成 PPT 图片…", targetConversationId);
     try {
       const pptStyle = String(artifact.pptStyle || artifact.formValues?.ppt_style || "极简商务");
-      const contentJson = await api.startPptContentJsonJob({
+      const request: PptContentJsonJobRequest = {
         original_outline: String(artifact.pptSummary.summary || ""),
         ppt_style: pptStyle,
         smart_ppt_project_id: projectId,
+      };
+      const started = await api.createPptContentJsonJob(request);
+      const pendingPptJob: PendingPptJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "content_json_generation",
+        started_at: new Date().toISOString(),
+        request,
+        artifact,
+      };
+      await persistPendingPptJob(pendingPptJob, targetConversationId, "ppt_content_json_running", {
+        intent: "ppt",
+        ppt_summary: artifact.pptSummary,
       });
-      if (!contentJson.ok) {
-        const failedImages: PptImagesResult = {
-          ok: false,
-          smart_ppt_project_id: projectId,
-          pages: [],
-          message: String(contentJson.message || contentJson.error || "PPT 页面 JSON 生成失败。"),
-          quota_insufficient: Boolean(contentJson.quota_insufficient),
-        };
-        pushPptImagesArtifact(failedImages, contentJson, artifact, targetConversationId);
-        releaseArtifactAction(processedKey);
-        return;
-      }
-      pushAssistant("PPT 页面结构已生成，正在并行生成每页 PPT 图片…", targetConversationId);
-      const imageProjectId = numericValue(contentJson.smart_ppt_project_id) || projectId;
-      const imageArtifactSource = { ...artifact, pptContentJson: contentJson };
-      const pendingImages = pendingPptImagesFromContentJson(contentJson, imageProjectId);
-      const imageMessage = pushPptImagesArtifact(pendingImages, contentJson, imageArtifactSource, targetConversationId);
-      const pptImages = await api.startPptImagesJob({
-        content_json: contentJson.content_json || contentJson.pages || [],
-        smart_ppt_project_id: imageProjectId,
-      }, (status) => {
-        const partialImages = status.result as PptImagesResult | null;
-        if (partialImages?.pages) updatePptImagesArtifactInMessage(imageMessage.id, targetConversationId, partialImages);
-      });
-      updatePptImagesArtifactInMessage(imageMessage.id, targetConversationId, pptImages);
-      if (!pptImages.ok) releaseArtifactAction(processedKey);
-      void api
-        .updateConversation(targetConversationId, {
-          last_phase: pptImages.ok ? "ppt_images_ready" : "ppt_images_failed",
-          context: {
-            ...makeSnapshot(),
-            intent: "ppt",
-            ppt_content_json: contentJson,
-            ppt_images: pptImages,
-          } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
+      await resumePendingPptJob(pendingPptJob, processedKey);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`PPT 页面图片生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -3494,37 +3963,27 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在重新生成第 ${pageIndex} 页 PPT 图片…`, targetConversationId);
     try {
-      const result = await api.regeneratePptImageJob({
+      const request: PptImageRegenerationJobRequest = {
         page_index: pageIndex,
         page_json: pageJson,
         smart_ppt_project_id: projectId,
-      });
-      const nextPage = result.page as PptPageImage | undefined;
-      const nextPages = runningImages.pages.map((page) => {
-        if (page.page_index !== pageIndex) return page;
-        if (!nextPage) {
-          return {
-            ...page,
-            status: "failed",
-            image_url: null,
-            error: String(result.message || result.error || "本页图片重新生成失败。"),
-          };
-        }
-        return {
-          ...nextPage,
-          page_index: pageIndex,
-          json_content: nextPage.json_content || page.json_content || pageJson,
-          status: nextPage.status || (nextPage.image_url ? "completed" : "failed"),
-        };
-      });
-      const nextImages: PptImagesResult = {
-        ...runningImages,
-        ok: nextPages.length > 0 && nextPages.every((page) => page.status === "completed" && Boolean(page.image_url)),
-        pages: nextPages,
-        message: String(result.message || "PPT 页面图片已重新生成。"),
-        quota_insufficient: Boolean(result.quota_insufficient),
       };
-      updatePptImagesArtifactInMessage(msg.id, targetConversationId, nextImages);
+      const started = await api.createPptImageRegenerationJob(request);
+      const pendingPptJob: PendingPptJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "image_regeneration",
+        started_at: new Date().toISOString(),
+        request,
+        artifact: { ...artifact, pptImages: runningImages },
+        image_message_id: msg.id,
+      };
+      await persistPendingPptJob(pendingPptJob, targetConversationId, "ppt_image_regeneration_running", {
+        intent: "ppt",
+        ppt_images: runningImages,
+      });
+      await resumePendingPptJob(pendingPptJob);
     } catch (err) {
       const failedImages: PptImagesResult = {
         ...runningImages,
@@ -3563,18 +4022,22 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant("正在调用 SmartPPT 生成 PPT 附件…", targetConversationId);
     try {
-      const pptFile = await api.startPptFileJob({ smart_ppt_project_id: projectId, file_urls: fileUrls });
-      pushPptFileArtifact(pptFile, artifact, targetConversationId);
-      void api
-        .updateConversation(targetConversationId, {
-          last_phase: pptFile.ok ? "ppt_file_ready" : "ppt_file_failed",
-          context: {
-            ...makeSnapshot(),
-            intent: "ppt",
-            ppt_file: pptFile,
-          } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
+      const request: PptFileJobRequest = { smart_ppt_project_id: projectId, file_urls: fileUrls };
+      const started = await api.createPptFileJob(request);
+      const pendingPptJob: PendingPptJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "file_generation",
+        started_at: new Date().toISOString(),
+        request,
+        artifact,
+      };
+      await persistPendingPptJob(pendingPptJob, targetConversationId, "ppt_file_generation_running", {
+        intent: "ppt",
+        ppt_images: artifact.pptImages,
+      });
+      await resumePendingPptJob(pendingPptJob, processedKey);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`PPT 附件生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -3596,8 +4059,22 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant("正在重新生成 PPT 附件…", targetConversationId);
     try {
-      const pptFile = await api.startPptFileJob({ smart_ppt_project_id: projectId, file_urls: fileUrls });
-      pushPptFileArtifact(pptFile, artifact, targetConversationId);
+      const request: PptFileJobRequest = { smart_ppt_project_id: projectId, file_urls: fileUrls };
+      const started = await api.createPptFileJob(request);
+      const pendingPptJob: PendingPptJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "file_regeneration",
+        started_at: new Date().toISOString(),
+        request,
+        artifact,
+      };
+      await persistPendingPptJob(pendingPptJob, targetConversationId, "ppt_file_regeneration_running", {
+        intent: "ppt",
+        ppt_images: artifact.pptImages,
+      });
+      await resumePendingPptJob(pendingPptJob);
     } catch (err) {
       pushAssistant(`PPT 附件重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
@@ -3626,7 +4103,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(auto ? `30 秒未选择，已默认采用推荐方向「${direction.title}」，正在生成 plan.md…` : `已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
+    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未选择，已默认采用推荐方向「${direction.title}」，正在生成 plan.md…` : `已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
     try {
       const plan = await api.createPlanMarkdown({
         intent: msg.artifact.intent,
@@ -3675,7 +4152,7 @@ export function WorkspacePage() {
     if (!processedKey) return;
     if (artifact.intent === "image") {
       setBusyForConversation(targetConversationId, true);
-      pushAssistant(auto ? "30 秒未操作，已默认同意图片 plan.md，正在准备图片生成参数…" : "图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
+      pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未操作，已默认同意图片 plan.md，正在准备图片生成参数…` : "图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
       try {
         const imagePrepare = await api.prepareImageGeneration({
           form_values: artifact.formValues,
@@ -3760,7 +4237,7 @@ export function WorkspacePage() {
       selectedDirection.title,
       selectedDirection.description,
     ]);
-    pushAssistant(auto ? "30 秒未操作，已默认同意视频 plan.md，正在准备可编辑场景包…" : "视频 plan.md 已同意，正在准备可编辑场景包…", targetConversationId);
+    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未操作，已默认同意视频 plan.md，正在准备可编辑场景包…` : "视频 plan.md 已同意，正在准备可编辑场景包…", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
         form_values: formValues,
@@ -3946,7 +4423,7 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    pushAssistant(auto ? "30 秒未收到图片修改意见，已默认满意并结束流程。" : "已确认图片满意，流程结束。", targetConversationId);
+    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未收到图片修改意见，已默认满意并结束流程。` : "已确认图片满意，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -4080,7 +4557,7 @@ export function WorkspacePage() {
       if (mergedVideo.ok) {
         window.setTimeout(() => {
           void handleAcceptVideoResult(videoResultMessage, true);
-        }, 30_000);
+        }, AUTO_CONFIRM_TIMEOUT_MS);
       }
       if (mergedVideo.merged_video_url) {
         const results = videoResultsFromGeneratedScenes(
@@ -4119,7 +4596,7 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    pushAssistant(auto ? "30 秒未收到视频修改意见，已默认无意见并结束流程。" : "已确认视频无修改意见，流程结束。", targetConversationId);
+    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未收到视频修改意见，已默认无意见并结束流程。` : "已确认视频无修改意见，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
