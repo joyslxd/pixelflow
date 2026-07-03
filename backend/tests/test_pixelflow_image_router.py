@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -15,7 +16,11 @@ def test_pixelflow_image_router_prefix_and_paths():
     assert pixelflow_image.router.prefix == "/agent/flows/image"
     assert "/agent/flows/image/prepare" in paths
     assert "/agent/flows/image/generate" in paths
+    assert "/agent/flows/image/generate/start" in paths
+    assert "/agent/flows/image/generate/jobs/{job_id}" in paths
     assert "/agent/flows/image/edit-asset" in paths
+    assert "/agent/flows/image/edit-asset/start" in paths
+    assert "/agent/flows/image/edit-asset/jobs/{job_id}" in paths
 
 
 def _stable_user() -> User:
@@ -211,6 +216,130 @@ def test_image_router_generates_requested_multiple_images_by_repeated_calls(monk
         "https://x/image-2.png",
         "https://x/image-3.png",
     ]
+
+
+def test_image_router_starts_generate_job_and_polls_result(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    calls: list[dict] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs)
+            return ImageGenerationResult(
+                ok=True,
+                task_id=f"img-task-{len(calls)}",
+                images=[{"asset_id": f"img-{len(calls)}", "url": f"https://x/image-{len(calls)}.png"}],
+                raw={"endpoint": "/api/picture/text_to_image"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/generate/start",
+            json={
+                "method": "text_to_image",
+                "prompt": "帮我生成2张台球图片",
+                "params": {"ratio": "1:1", "size": "1080p", "num_images": 2},
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/generate/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert len(calls) == 2
+    assert [image["url"] for image in status["result"]["images"]] == ["https://x/image-1.png", "https://x/image-2.png"]
+
+
+def test_image_router_generate_job_marks_quota_paused(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度: 0，需要: 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度: 0，需要: 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/generate/start",
+            json={"method": "text_to_image", "prompt": "生成商品主图", "params": {"ratio": "9:16"}},
+        )
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/generate/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "quota_paused":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "quota_paused"
+    assert status["result"]["ok"] is False
+    assert status["result"]["quota_insufficient"] is True
+    assert "充值后" in status["result"]["message"]
+
+
+def test_image_router_generate_job_records_unhandled_exception(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/generate/start",
+            json={"method": "text_to_image", "prompt": "生成商品主图", "params": {"ratio": "9:16"}},
+        )
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/generate/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "failed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "failed"
+    assert status["error"] == "boom"
 
 
 def test_image_router_marks_quota_insufficient_generation(monkeypatch):
@@ -452,6 +581,55 @@ def test_image_router_edits_scene_global_asset(monkeypatch):
     assert data["asset_group"] == "characters"
 
 
+def test_image_router_starts_edit_asset_job_and_polls_result(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            assert kwargs["image_url"] == "https://x/role.png"
+            assert kwargs["prompt"] == "把衣服改成白色"
+            return ImageGenerationResult(
+                ok=True,
+                task_id="edit-asset-task-1",
+                images=[{"asset_id": "edit-asset-task-1-0", "url": "https://x/role-white.png"}],
+                raw={"endpoint": "/api/picture/image_edit"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/edit-asset/start",
+            json={
+                "asset_id": "character-host",
+                "asset_name": "女上班族",
+                "asset_group": "characters",
+                "source_image_url": "https://x/role.png",
+                "prompt": "把衣服改成白色",
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/edit-asset/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["edited_image"]["url"] == "https://x/role-white.png"
+
+
 def test_image_router_edit_asset_requires_source_image_url():
     from app.gateway.routers import pixelflow_image
 
@@ -506,3 +684,47 @@ def test_image_router_edit_asset_marks_quota_insufficient(monkeypatch):
     assert data["ok"] is False
     assert data["quota_insufficient"] is True
     assert "充值后" in data["message"]
+
+
+def test_image_router_edit_asset_job_marks_quota_paused(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度: 0，需要: 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度: 0，需要: 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/edit-asset/start",
+            json={
+                "asset_id": "character-host",
+                "asset_group": "characters",
+                "source_image_url": "https://x/role.png",
+                "prompt": "把衣服改成白色",
+            },
+        )
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/edit-asset/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "quota_paused":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "quota_paused"
+    assert status["result"]["ok"] is False
+    assert status["result"]["quota_insufficient"] is True

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -12,6 +14,11 @@ from pixelflow.skills import get_image_skill
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
 
 router = APIRouter(prefix="/agent/flows/image", tags=["pixelflow-flows"])
+
+_IMAGE_GENERATION_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_IMAGE_GENERATION_JOBS = 100
+_IMAGE_ASSET_EDIT_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_IMAGE_ASSET_EDIT_JOBS = 100
 
 
 class ImagePrepareRequest(BaseModel):
@@ -54,6 +61,22 @@ class ImageGenerateResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class ImageGenerateJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class ImageGenerateJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: ImageGenerateResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
 class ImageAssetEditRequest(BaseModel):
     asset_id: str
     asset_name: str = ""
@@ -78,6 +101,22 @@ class ImageAssetEditResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class ImageAssetEditJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class ImageAssetEditJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: ImageAssetEditResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
 @router.post("/prepare", response_model=ImagePrepareResponse)
 async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
     result = prepare_image_generation(
@@ -93,6 +132,43 @@ async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
 
 @router.post("/generate", response_model=ImageGenerateResponse)
 async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
+    return await _generate_image_response(body)
+
+
+@router.post("/generate/start", response_model=ImageGenerateJobStartResponse)
+async def start_generate_image(body: ImageGenerateRequest) -> ImageGenerateJobStartResponse:
+    _trim_image_generation_jobs()
+    job_id = uuid.uuid4().hex
+    _IMAGE_GENERATION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_image_generation_job(job_id, body))
+    return ImageGenerateJobStartResponse(ok=True, job_id=job_id, status="running", message="图片生成任务已启动。")
+
+
+@router.get("/generate/jobs/{job_id}", response_model=ImageGenerateJobStatusResponse)
+async def get_generate_image_job(job_id: str) -> ImageGenerateJobStatusResponse:
+    job = _IMAGE_GENERATION_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="图片生成任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, ImageGenerateResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = ImageGenerateResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return ImageGenerateJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_image_job_message(status, "图片生成"),
+    )
+
+
+async def _generate_image_response(body: ImageGenerateRequest) -> ImageGenerateResponse:
     skill = get_image_skill()
     requested_count = _requested_image_count(body.params)
     images: list[dict[str, Any]] = []
@@ -140,6 +216,43 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
 
 @router.post("/edit-asset", response_model=ImageAssetEditResponse)
 async def edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
+    return await _edit_image_asset_response(body)
+
+
+@router.post("/edit-asset/start", response_model=ImageAssetEditJobStartResponse)
+async def start_edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditJobStartResponse:
+    _trim_image_asset_edit_jobs()
+    job_id = uuid.uuid4().hex
+    _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_image_asset_edit_job(job_id, body))
+    return ImageAssetEditJobStartResponse(ok=True, job_id=job_id, status="running", message="素材图片编辑任务已启动。")
+
+
+@router.get("/edit-asset/jobs/{job_id}", response_model=ImageAssetEditJobStatusResponse)
+async def get_edit_image_asset_job(job_id: str) -> ImageAssetEditJobStatusResponse:
+    job = _IMAGE_ASSET_EDIT_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="素材图片编辑任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, ImageAssetEditResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = ImageAssetEditResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return ImageAssetEditJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_image_job_message(status, "素材图片编辑"),
+    )
+
+
+async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
     source_image_url = body.source_image_url.strip()
     prompt = body.prompt.strip()
     if not source_image_url:
@@ -176,6 +289,54 @@ async def edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditRespons
         quota_insufficient=quota_insufficient,
         raw=result.raw,
     )
+
+
+async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest) -> None:
+    try:
+        result = await _generate_image_response(body)
+        _IMAGE_GENERATION_JOBS[job_id] = {
+            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "result": result,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _IMAGE_GENERATION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
+async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest) -> None:
+    try:
+        result = await _edit_image_asset_response(body)
+        _IMAGE_ASSET_EDIT_JOBS[job_id] = {
+            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "result": result,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
+def _trim_image_generation_jobs() -> None:
+    if len(_IMAGE_GENERATION_JOBS) < _MAX_IMAGE_GENERATION_JOBS:
+        return
+    for job_id in list(_IMAGE_GENERATION_JOBS.keys())[: len(_IMAGE_GENERATION_JOBS) - _MAX_IMAGE_GENERATION_JOBS + 1]:
+        _IMAGE_GENERATION_JOBS.pop(job_id, None)
+
+
+def _trim_image_asset_edit_jobs() -> None:
+    if len(_IMAGE_ASSET_EDIT_JOBS) < _MAX_IMAGE_ASSET_EDIT_JOBS:
+        return
+    for job_id in list(_IMAGE_ASSET_EDIT_JOBS.keys())[: len(_IMAGE_ASSET_EDIT_JOBS) - _MAX_IMAGE_ASSET_EDIT_JOBS + 1]:
+        _IMAGE_ASSET_EDIT_JOBS.pop(job_id, None)
+
+
+def _image_job_message(status: str, label: str) -> str:
+    if status == "completed":
+        return f"{label}完成。"
+    if status == "quota_paused":
+        return f"{label}因额度不足暂停。"
+    if status == "failed":
+        return f"{label}失败。"
+    return f"{label}中。"
 
 
 async def _generate_image_once(skill: Any, body: ImageGenerateRequest, params: dict[str, Any]):

@@ -65,6 +65,22 @@ function resumePendingScenePackageJobSource() {
   return workspaceSource.slice(start, end);
 }
 
+function resumePendingImageJobSource() {
+  const start = workspaceSource.indexOf("const resumePendingImageJob = async");
+  const end = workspaceSource.indexOf("const resumePendingScenePackageJob = async", start);
+  assert.notEqual(start, -1, "resumePendingImageJob must exist");
+  assert.notEqual(end, -1, "resumePendingScenePackageJob must follow image job resume");
+  return workspaceSource.slice(start, end);
+}
+
+function handleEditReferencedGlobalAssetSource() {
+  const start = workspaceSource.indexOf("const handleEditReferencedGlobalAsset = async");
+  const end = workspaceSource.indexOf("const handleDeleteReferencedGlobalAsset = async", start);
+  assert.notEqual(start, -1, "handleEditReferencedGlobalAsset must exist");
+  assert.notEqual(end, -1, "handleDeleteReferencedGlobalAsset must follow global asset edit");
+  return workspaceSource.slice(start, end);
+}
+
 test("new conversation stores the user message before agent replies", () => {
   const source = handleSendSource();
   const appendIndex = source.indexOf("await appendMessageForConversation(message, activeConversation)");
@@ -215,7 +231,7 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
-  assert.match(executeSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*30_000/, "successful direct image edit must auto-accept after 30 seconds");
+  assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*30_000/, "successful direct image edit must auto-accept after 30 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
@@ -302,8 +318,8 @@ test("active assistant progress messages render a loading indicator", () => {
   assert.match(messageBubbleSource, /animate-spin/, "loading indicator should spin");
   assert.match(messageBubbleSource, /conic-gradient/, "loading indicator should use a gradient ring");
   assert.match(workspaceSource, /已默认采用推荐方向[\s\S]*正在生成 plan\.md/, "auto-selected directions must still show plan generation progress");
-  assert.match(chatPanelSource, /采集 Agent 判断这是视频生成需求/, "video intake confirmation should keep loading active before the next assistant result");
-  assert.match(messageBubbleSource, /采集 Agent 判断这是视频生成需求[\s\S]*计划文件生成中[\s\S]*采集 Agent\|理解\|表单/, "video intake confirmation loading should show plan file generation before generic intake text");
+  assert.match(chatPanelSource, /采集 Agent 判断这是\(\?:图片\|视频\)生成需求/, "image and video intake confirmation should keep loading active before the next assistant result");
+  assert.match(messageBubbleSource, /采集 Agent 判断这是\(\?:图片\|视频\)生成需求[\s\S]*计划文件生成中[\s\S]*采集 Agent\|理解\|表单/, "image and video intake confirmation loading should show plan file generation before generic intake text");
   assert.match(messageBubbleSource, /可编辑场景包\|场景包[\s\S]*视频场景包生成中[\s\S]*plan\\\.md\|计划文件\|创作方案/, "scene package progress should be labeled before generic plan.md progress");
   assert.match(messageBubbleSource, /计划文件/, "plan.md progress should be labeled as plan file generation");
 });
@@ -329,20 +345,73 @@ test("image plan approval continues through image generation instead of stopping
   assert.notEqual(imageBranchEnd, -1, "image branch must return before video flow");
   const imageBranch = source.slice(imageBranchStart, imageBranchEnd);
   assert.equal(imageBranch.includes("api.prepareImageGeneration"), true, "image branch must still choose the image endpoint through prepare");
-  assert.equal(imageBranch.includes("api.generateImage"), true, "image branch must invoke image generation after prepare");
-  assert.equal(imageBranch.includes('type: "image_result"'), true, "image branch must return an image result artifact");
+  assert.equal(imageBranch.includes("api.startImageGenerationJob(request)"), true, "image branch must start an image generation job after prepare");
+  assert.equal(imageBranch.includes("await persistPendingImageJob(pendingImageJob"), true, "image branch must persist the image job before polling");
+  assert.equal(imageBranch.includes("await resumePendingImageJob(pendingImageJob, processedKey)"), true, "image branch must resume polling the persisted image job");
+  assert.equal(imageBranch.includes("api.generateImage"), false, "image branch must not synchronously wait on image generation");
 });
 
 test("failed image video and analysis stages expose retry paths", () => {
   const source = handleApprovePlanSource();
+  const imageJobSource = workspaceSource.slice(
+    workspaceSource.indexOf("const handleCompletedImageGenerationJob = async"),
+    workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async"),
+  );
   const scenePackageJobSource = handleCompletedScenePackageJobSource();
   assert.match(source, /if \(!imagePrepare\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image prepare failure must release the plan action");
-  assert.match(source, /if \(!imageResult\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image generation failure must let the previous stage retry");
+  assert.match(imageJobSource, /if \(!imageResult\.ok\) releaseArtifactAction\(processedKey\)/, "image generation failure must let the previous stage retry");
   assert.match(scenePackageJobSource, /if \(!videoScenePackages\.ok \|\| quotaPaused\) releaseArtifactAction\(processedKey\)/, "scene package job failure must release the plan action");
   assert.match(workspaceSource, /if \(!generatedSceneVideos\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene video failure must let the scene package card retry");
   assert.match(workspaceSource, /if \(!mergedVideo\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "merge failure must release the generating scene package action");
   assert.match(messageBubbleSource, /videoGenerationFailed/, "video generation failure card must render a retry affordance");
   assert.match(messageBubbleSource, /onRetryVideoAnalysis/, "video analysis failure card must render a retry affordance");
+});
+
+test("image jobs persist their id before polling so conversations can recover", () => {
+  assert.match(apiSource, /startImageGenerationJob:/, "API client must expose a start-only image generation job call");
+  assert.match(apiSource, /getImageGenerationJob:/, "API client must expose a query-only image generation job call");
+  assert.match(apiSource, /pollImageGenerationJob,/, "API client must expose polling for existing image generation jobs");
+  assert.match(apiSource, /startImageAssetEditJob:/, "API client must expose a start-only image asset edit job call");
+  assert.match(apiSource, /getImageAssetEditJob:/, "API client must expose a query-only image asset edit job call");
+  assert.match(apiSource, /pollImageAssetEditJob,/, "API client must expose polling for existing image asset edit jobs");
+  assert.match(workspaceSource, /pendingImageJob\?: PendingImageJob \| null/, "WorkspaceSnapshot must store pending image jobs");
+  assert.match(workspaceSource, /pending_image_job\?: PendingImageJob \| null/, "WorkspaceSnapshot must restore snake_case pending image jobs");
+  assert.match(workspaceSource, /pendingImageJobRef\.current\?\.conversation_id === currentConversationId/, "conversation snapshots must keep the active pending image job");
+
+  const source = handleApprovePlanSource();
+  const imageBranchStart = source.indexOf('if (artifact.intent === "image")');
+  const imageBranchEnd = source.indexOf("const formValues = artifact.formValues", imageBranchStart);
+  const imageBranch = source.slice(imageBranchStart, imageBranchEnd);
+  const startIndex = imageBranch.indexOf("api.startImageGenerationJob(request)");
+  const persistIndex = imageBranch.indexOf("await persistPendingImageJob(pendingImageJob");
+  const pollIndex = imageBranch.indexOf("await resumePendingImageJob(pendingImageJob, processedKey)");
+  assert.notEqual(startIndex, -1, "image generation must start a backend job explicitly");
+  assert.notEqual(persistIndex, -1, "image generation must persist the job id");
+  assert.notEqual(pollIndex, -1, "image generation must poll the persisted job");
+  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "image job id must be persisted before polling starts");
+  assert.match(imageBranch, /kind:\s*"image_generation"/, "first-time image generation must record its pending job kind");
+});
+
+test("restored conversations resume existing image jobs without starting duplicates", () => {
+  const applySource = applyConversationSource();
+  assert.match(applySource, /snapshot\.pendingImageJob \|\| snapshot\.pending_image_job/, "restore must read pending image job metadata");
+  assert.match(applySource, /resumePendingImageJob\(pendingImageJob\)/, "restore must resume polling an existing image job");
+  assert.equal(applySource.includes("startImageGenerationJob"), false, "restore must not start a duplicate image generation job");
+  assert.equal(applySource.includes("startImageAssetEditJob"), false, "restore must not start a duplicate image asset edit job");
+  assert.equal(applySource.includes("pushAssistant"), false, "restore must not add a separate resume-polling progress message");
+});
+
+test("scene global asset image editing uses recoverable image edit jobs", () => {
+  const source = handleEditReferencedGlobalAssetSource();
+  const startIndex = source.indexOf("api.startImageAssetEditJob(request)");
+  const persistIndex = source.indexOf("await persistPendingImageJob(pendingImageJob");
+  const pollIndex = source.indexOf("await resumePendingImageJob(pendingImageJob)");
+  assert.notEqual(startIndex, -1, "global asset edit must start an image edit job explicitly");
+  assert.notEqual(persistIndex, -1, "global asset edit must persist the job id");
+  assert.notEqual(pollIndex, -1, "global asset edit must poll the persisted job");
+  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "global asset edit job id must be persisted before polling starts");
+  assert.match(source, /kind:\s*"scene_global_asset_edit"/, "global asset edit must record its pending job kind");
+  assert.equal(source.includes("api.editImageAsset"), false, "global asset edit must not synchronously wait on image editing");
 });
 
 test("scene video jobs persist their id before polling so conversations can recover", () => {

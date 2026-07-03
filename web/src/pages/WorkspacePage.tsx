@@ -12,7 +12,9 @@ import {
   type CreativeDirectionResponse,
   type ImageEditModelSelection,
   type ImageAssetEditResponse,
+  type ImageGenerateResponse,
   type ImageModelParamConfig,
+  type ImagePrepareResponse,
   type IntakeIntentResponse,
   type PlanMarkdownResponse,
   type PptFileResult,
@@ -160,6 +162,8 @@ interface WorkspaceSnapshot {
   pendingMaterials: Array<Record<string, unknown>>;
   pendingImageEditRequest?: PendingImageEditRequest | null;
   imageEditConfirmedSelections?: Record<string, ImageEditModelSelection>;
+  pendingImageJob?: PendingImageJob | null;
+  pending_image_job?: PendingImageJob | null;
   pendingScenePackageJob?: PendingScenePackageJob | null;
   pending_scene_package_job?: PendingScenePackageJob | null;
   pendingVideoJob?: PendingVideoJob | null;
@@ -196,6 +200,42 @@ interface PendingImageEditRequest {
   intakeContext: Record<string, unknown>;
   materials: Array<Record<string, unknown>>;
   selection?: ImageEditModelSelection;
+}
+
+type PendingImageJobKind = "image_generation" | "image_regeneration" | "direct_image_edit" | "scene_global_asset_edit";
+type PendingImageJobApi = "generate" | "edit_asset";
+
+interface ImageGenerationJobRequest {
+  method: ImagePrepareResponse["method"];
+  prompt: string;
+  negative_prompt?: string;
+  params: Record<string, unknown>;
+}
+
+interface ImageAssetEditJobRequest {
+  asset_id: string;
+  asset_name?: string;
+  asset_group: string;
+  source_image_url: string;
+  prompt: string;
+  ratio?: string;
+  size?: string;
+  model?: string | null;
+}
+
+interface PendingImageJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: PendingImageJobKind;
+  job_api: PendingImageJobApi;
+  started_at: string;
+  request: ImageGenerationJobRequest | ImageAssetEditJobRequest;
+  artifact: ChatArtifact;
+  imagePrepare?: ImagePrepareResponse;
+  sceneGlobalAssetReference?: SceneGlobalAssetReference;
+  storyboard_message_id?: string;
+  revision_feedback?: string;
 }
 
 type PendingScenePackageJobKind = "scene_package_generation" | "scene_asset_generation";
@@ -755,6 +795,8 @@ export function WorkspacePage() {
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
+  const pendingImageJobRef = useRef<PendingImageJob | null>(null);
+  const activeImageJobPollsRef = useRef(new Set<string>());
   const planRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const pptOutlineRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
@@ -1073,106 +1115,31 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在调用图片编辑接口修改「${reference.name}」…`, targetConversationId);
     try {
-      const editResult = await api.editImageAsset({
+      const request: ImageAssetEditJobRequest = {
         asset_id: reference.asset_id,
         asset_name: reference.name,
         asset_group: reference.asset_group,
         source_image_url: reference.source_image_url,
         prompt,
-      });
-      const nextUrl = editedImageUrl(editResult);
-      const quotaInsufficient = isQuotaInsufficientPayload(editResult);
-      if (!editResult.ok || !nextUrl) {
-        pushArtifact("全局素材图片编辑失败，请查看错误信息。", {
-          type: "image_result",
-          title: "全局素材图片编辑结果",
-          description: quotaInsufficient ? quotaMessage(editResult.message || "图片编辑额度不足。") : editResult.message,
-          actionLabel: "查看",
-          imageResult: {
-            ok: false,
-            method: "image_edit",
-            endpoint: editResult.endpoint,
-            task_id: null,
-            images: nextUrl ? [editResult.edited_image] : [],
-            error: editResult.message,
-            message: editResult.message,
-            quota_insufficient: quotaInsufficient,
-            raw: editResult.raw,
-          },
-          intent: "image",
-          materials: [reference],
-          imageRevisionFeedback: prompt,
-        }, targetConversationId);
-        return true;
-      }
-
-      const updatedPackages = {
-        ...storyboardMessage.artifact.videoScenePackages,
-        global_assets: replaceGlobalSceneAssetImage(storyboardMessage.artifact.videoScenePackages.global_assets, {
-          assetId: reference.asset_id,
-          assetGroup: reference.asset_group,
-          editedImageUrl: nextUrl,
-        }),
-        scene_packages: syncScenePackageMentionImageUrls(storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[], {
-          assetId: reference.asset_id,
-          editedImageUrl: nextUrl,
-        }) as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
       };
-      updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
-
-      const updatedScenePackageMessageId = uid();
-      pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
-        type: "image_result",
-        title: "全局素材图片编辑结果",
-        description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
-        actionLabel: "查看",
-        imageResult: {
-          ok: true,
-          method: "image_edit",
-          endpoint: editResult.endpoint,
-          task_id: null,
-          images: [editResult.edited_image],
-          error: null,
-          message: editResult.message,
-          quota_insufficient: false,
-          raw: editResult.raw,
-        },
-        intent: "image",
-        materials: [{ ...reference, url: nextUrl, source_image_url: nextUrl, storyboard_message_id: updatedScenePackageMessageId }],
-        imageRevisionFeedback: prompt,
-      }, targetConversationId);
-      const updatedScenePackageMessage = pushArtifact("已把编辑后的图片同步回视频场景包，请继续确认或生成分镜视频。", {
-        type: "video_scene_packages",
-        title: "视频场景包",
-        description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
-        actionLabel: "确认",
-        videoScenePackages: updatedPackages,
-        sceneAssetFailures: storyboardMessage.artifact.sceneAssetFailures || [],
-        intent: "video",
-        formValues: storyboardMessage.artifact.formValues,
-        intakeContext: storyboardMessage.artifact.intakeContext,
-        materials: storyboardMessage.artifact.materials || [],
-        selectedDirection: storyboardMessage.artifact.selectedDirection,
-        plan: storyboardMessage.artifact.plan,
-      }, targetConversationId, updatedScenePackageMessageId);
-      if (isVisibleConversation(targetConversationId)) {
-        setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-        setCanvasOpen(true);
-      }
-
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: "scene_global_asset_edited",
-            context: {
-              ...makeSnapshot(),
-              global_assets: updatedPackages?.global_assets,
-              scene_packages: updatedPackages?.scene_packages,
-              scene_global_asset_edit: editResult,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      const started = await api.startImageAssetEditJob(request);
+      const pendingImageJob: PendingImageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: storyboardMessage.id,
+        kind: "scene_global_asset_edit",
+        job_api: "edit_asset",
+        started_at: new Date().toISOString(),
+        request,
+        artifact: storyboardMessage.artifact,
+        sceneGlobalAssetReference: reference,
+        storyboard_message_id: storyboardMessage.id,
+      };
+      await persistPendingImageJob(pendingImageJob, targetConversationId, "scene_global_asset_edit_running", {
+        scene_global_asset_reference: reference,
+        scene_global_asset_edit_prompt: prompt,
+      });
+      await resumePendingImageJob(pendingImageJob);
     } catch (err) {
       pushAssistant(`全局素材图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
@@ -1366,57 +1333,55 @@ export function WorkspacePage() {
         return;
       }
       pushAssistant(`正在调用 ${imagePrepare.endpoint} 编辑图片…`, targetConversationId);
-      const imageResult = await api.generateImage({
+      const jobRequest: ImageGenerationJobRequest = {
         method: imagePrepare.method,
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
-      });
-      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-      pendingImageEditRequestRef.current = null;
-      const imageResultMessage = pushArtifact(imageResult.ok ? "图片编辑完成，请确认是否满意。30 秒未操作将默认满意并结束流程。" : "图片编辑失败，请查看错误信息。", {
-        type: "image_result",
-        title: "图片编辑结果",
-        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片编辑额度不足。") : imageResultSummary(imageResult),
-        actionLabel: "查看",
-        imageResult,
+      };
+      const selectedDirection = {
+        direction_id: "image_edit",
+        title: "图片编辑",
+        description: request.prompt,
+        recommended: true,
+        tags: ["图片编辑"],
+        data: { operation: "image_edit" },
+      };
+      const started = await api.startImageGenerationJob(jobRequest);
+      const pendingImageJob: PendingImageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: "",
+        kind: "direct_image_edit",
+        job_api: "generate",
+        started_at: new Date().toISOString(),
+        request: jobRequest,
         imagePrepare,
-        imageEditRequest: executableRequest as unknown as Record<string, unknown>,
-        imageEditConfirmedSelection: request.selection,
-        intent: "image",
-        formValues,
-        intakeContext,
-        materials: flowMaterials,
-        selectedDirection: {
-          direction_id: "image_edit",
-          title: "图片编辑",
-          description: request.prompt,
-          recommended: true,
-          tags: ["图片编辑"],
-          data: { operation: "image_edit" },
+        artifact: {
+          type: "image_result",
+          title: "图片编辑结果",
+          description: "图片编辑生成中。",
+          actionLabel: "查看",
+          imagePrepare,
+          imageEditRequest: executableRequest as unknown as Record<string, unknown>,
+          imageEditConfirmedSelection: request.selection,
+          intent: "image",
+          formValues,
+          intakeContext,
+          materials: flowMaterials,
+          selectedDirection,
         },
-      }, targetConversationId);
-      if (canAcceptImageResult(imageResult)) {
-        window.setTimeout(() => {
-          void handleAcceptImageResult(imageResultMessage, true);
-        }, 30_000);
-      }
-      void api
-        .updateConversation(targetConversationId, {
-          last_phase: imageResult.ok ? "image_edit_done" : imageQuotaInsufficient ? "image_edit_quota_paused" : "image_edit_failed",
-          context: {
-            ...makeSnapshot(),
-            intent: "image",
-            image_edit_done: imageResult.ok,
-            intake_context: intakeContext,
-            materials: flowMaterials,
-            image_prepare: imagePrepare,
-            image_result: imageResult,
-            image_edit_request: executableRequest,
-            pendingImageEditRequest: pendingImageEditRequestRef.current,
-          } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
+      };
+      await persistPendingImageJob(pendingImageJob, targetConversationId, "image_edit_generation_running", {
+        intent: "image",
+        image_edit_request: executableRequest,
+        intake_context: intakeContext,
+        materials: flowMaterials,
+        image_prepare: imagePrepare,
+        pendingImageEditRequest: pendingImageEditRequestRef.current,
+        pending_image_edit_request: pendingImageEditRequestRef.current,
+      });
+      await resumePendingImageJob(pendingImageJob);
     } catch (err) {
       pendingImageEditRequestRef.current = null;
       pushAssistant(`图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -1580,6 +1545,34 @@ export function WorkspacePage() {
       smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptFile.smart_ppt_project_id),
     }, targetConversationId);
 
+  const persistPendingImageJob = async (
+    pendingImageJob: PendingImageJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingImageJobRef.current = pendingImageJob;
+    if (!targetConversationId) return;
+    const baseSnapshot = isVisibleConversation(targetConversationId) ? makeSnapshot() : {};
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...baseSnapshot,
+        ...extraContext,
+        pendingImageJob,
+        pending_image_job: pendingImageJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingImageJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingImageJob(null, targetConversationId, lastPhase, extraContext);
+  };
+
   const persistPendingVideoJob = async (
     pendingVideoJob: PendingVideoJob | null,
     targetConversationId: string,
@@ -1695,6 +1688,205 @@ export function WorkspacePage() {
       videoScenePackages.ok ? quotaPaused ? "scene_asset_quota_paused" : "scene_package_ready" : "scene_package_failed",
       scenePackageContext(artifact, videoScenePackages, sceneAssetFailures),
     ).catch(() => {});
+  };
+
+  const imageResultTitleForJob = (pendingImageJob: PendingImageJob): string =>
+    pendingImageJob.kind === "direct_image_edit"
+      ? "图片编辑结果"
+      : pendingImageJob.kind === "image_regeneration"
+        ? "图片重新生成结果"
+        : "图片生成结果";
+
+  const imageResultSuccessContentForJob = (pendingImageJob: PendingImageJob): string =>
+    pendingImageJob.kind === "direct_image_edit"
+      ? "图片编辑完成，请确认是否满意。30 秒未操作将默认满意并结束流程。"
+      : pendingImageJob.kind === "image_regeneration"
+        ? "图片已按修改意见重新生成，请查看结果。"
+        : "图片生成完成，请查看结果。";
+
+  const imageResultFailureContentForJob = (pendingImageJob: PendingImageJob): string =>
+    pendingImageJob.kind === "direct_image_edit"
+      ? "图片编辑失败，请查看错误信息。"
+      : pendingImageJob.kind === "image_regeneration"
+        ? "图片重新生成失败，请查看错误信息。"
+        : "图片生成失败，请查看错误信息。";
+
+  const imageResultLastPhaseForJob = (pendingImageJob: PendingImageJob, imageResult: ImageGenerateResponse): string => {
+    const quotaPaused = isQuotaInsufficientPayload(imageResult);
+    if (pendingImageJob.kind === "direct_image_edit") {
+      return imageResult.ok ? "image_edit_done" : quotaPaused ? "image_edit_quota_paused" : "image_edit_failed";
+    }
+    if (pendingImageJob.kind === "image_regeneration") {
+      return imageResult.ok ? "image_regenerated" : quotaPaused ? "image_regeneration_quota_paused" : "image_regeneration_failed";
+    }
+    return imageResult.ok ? "image_generated" : quotaPaused ? "image_generation_quota_paused" : "image_generation_failed";
+  };
+
+  const handleCompletedImageGenerationJob = async (
+    pendingImageJob: PendingImageJob,
+    imageResult: ImageGenerateResponse,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingImageJob.conversation_id;
+    const artifact = pendingImageJob.artifact;
+    const imagePrepare = pendingImageJob.imagePrepare || artifact.imagePrepare;
+    if (!imagePrepare) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("图片生成任务完成，但没有找到对应的图片参数，请从最新卡片手动重试。", targetConversationId);
+      await clearPendingImageJob(targetConversationId, "image_job_resume_failed", {
+        image_job_resume_error: "缺少 imagePrepare",
+      }).catch(() => {});
+      return;
+    }
+    const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
+    if (!imageResult.ok) releaseArtifactAction(processedKey);
+    if (pendingImageJob.kind === "direct_image_edit") {
+      pendingImageEditRequestRef.current = null;
+    }
+    const imageResultMessage = pushArtifact(imageResult.ok ? imageResultSuccessContentForJob(pendingImageJob) : imageResultFailureContentForJob(pendingImageJob), {
+      type: "image_result",
+      title: imageResultTitleForJob(pendingImageJob),
+      description: imageQuotaInsufficient
+        ? quotaMessage(imageResult.message || (pendingImageJob.kind === "image_regeneration" ? "图片重新生成额度不足。" : "图片生成额度不足。"))
+        : imageResultSummary(imageResult),
+      actionLabel: "查看",
+      imageResult,
+      imagePrepare,
+      imageEditRequest: artifact.imageEditRequest,
+      imageEditConfirmedSelection: artifact.imageEditConfirmedSelection,
+      imageRevisionFeedback: pendingImageJob.revision_feedback || artifact.imageRevisionFeedback,
+      intent: "image",
+      formValues: artifact.formValues,
+      intakeContext: artifact.intakeContext,
+      materials: artifact.materials || [],
+      selectedDirection: artifact.selectedDirection,
+      plan: artifact.plan,
+    }, targetConversationId);
+    if (canAcceptImageResult(imageResult)) {
+      window.setTimeout(() => {
+        void handleAcceptImageResult(imageResultMessage, true);
+      }, 30_000);
+    }
+    await clearPendingImageJob(targetConversationId, imageResultLastPhaseForJob(pendingImageJob, imageResult), {
+      plan_approved: pendingImageJob.kind === "image_generation" ? true : undefined,
+      plan_markdown: artifact.plan?.plan_markdown,
+      image_revision_feedback: pendingImageJob.revision_feedback || artifact.imageRevisionFeedback,
+      image_edit_done: pendingImageJob.kind === "direct_image_edit" ? imageResult.ok : undefined,
+      intake_context: artifact.intakeContext,
+      materials: artifact.materials || [],
+      image_prepare: imagePrepare,
+      image_result: imageResult,
+      image_edit_request: artifact.imageEditRequest,
+      pendingImageEditRequest: pendingImageEditRequestRef.current,
+      pending_image_edit_request: pendingImageEditRequestRef.current,
+    }).catch(() => {});
+  };
+
+  const handleCompletedImageAssetEditJob = async (
+    pendingImageJob: PendingImageJob,
+    editResult: ImageAssetEditResponse,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingImageJob.conversation_id;
+    const reference = pendingImageJob.sceneGlobalAssetReference;
+    const storyboardMessage = reference ? findStoryboardMessageForGlobalAsset(reference, targetConversationId) : undefined;
+    if (!reference || !storyboardMessage?.artifact?.videoScenePackages) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("素材图片编辑任务完成，但没有找到对应的场景包卡片，请从当前场景包手动重试。", targetConversationId);
+      await clearPendingImageJob(targetConversationId, "scene_global_asset_edit_failed", {
+        scene_global_asset_edit_error: "缺少对应的场景包 artifact",
+      }).catch(() => {});
+      return;
+    }
+    const nextUrl = editedImageUrl(editResult);
+    const quotaInsufficient = isQuotaInsufficientPayload(editResult);
+    if (!editResult.ok || !nextUrl) {
+      releaseArtifactAction(processedKey);
+      pushArtifact("全局素材图片编辑失败，请查看错误信息。", {
+        type: "image_result",
+        title: "全局素材图片编辑结果",
+        description: quotaInsufficient ? quotaMessage(editResult.message || "图片编辑额度不足。") : editResult.message,
+        actionLabel: "查看",
+        imageResult: {
+          ok: false,
+          method: "image_edit",
+          endpoint: editResult.endpoint,
+          task_id: null,
+          images: nextUrl ? [editResult.edited_image] : [],
+          error: editResult.message,
+          message: editResult.message,
+          quota_insufficient: quotaInsufficient,
+          raw: editResult.raw,
+        },
+        intent: "image",
+        materials: [reference],
+        imageRevisionFeedback: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+      }, targetConversationId);
+      await clearPendingImageJob(targetConversationId, quotaInsufficient ? "scene_global_asset_edit_quota_paused" : "scene_global_asset_edit_failed", {
+        scene_global_asset_edit: editResult,
+      }).catch(() => {});
+      return;
+    }
+
+    const updatedPackages = {
+      ...storyboardMessage.artifact.videoScenePackages,
+      global_assets: replaceGlobalSceneAssetImage(storyboardMessage.artifact.videoScenePackages.global_assets, {
+        assetId: reference.asset_id,
+        assetGroup: reference.asset_group,
+        editedImageUrl: nextUrl,
+      }),
+      scene_packages: syncScenePackageMentionImageUrls(storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[], {
+        assetId: reference.asset_id,
+        editedImageUrl: nextUrl,
+      }) as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+    };
+    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+
+    const updatedScenePackageMessageId = uid();
+    pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
+      type: "image_result",
+      title: "全局素材图片编辑结果",
+      description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
+      actionLabel: "查看",
+      imageResult: {
+        ok: true,
+        method: "image_edit",
+        endpoint: editResult.endpoint,
+        task_id: null,
+        images: [editResult.edited_image],
+        error: null,
+        message: editResult.message,
+        quota_insufficient: false,
+        raw: editResult.raw,
+      },
+      intent: "image",
+      materials: [{ ...reference, url: nextUrl, source_image_url: nextUrl, storyboard_message_id: updatedScenePackageMessageId }],
+      imageRevisionFeedback: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+    }, targetConversationId);
+    const updatedScenePackageMessage = pushArtifact("已把编辑后的图片同步回视频场景包，请继续确认或生成分镜视频。", {
+      type: "video_scene_packages",
+      title: "视频场景包",
+      description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
+      actionLabel: "确认",
+      videoScenePackages: updatedPackages,
+      sceneAssetFailures: storyboardMessage.artifact.sceneAssetFailures || [],
+      intent: "video",
+      formValues: storyboardMessage.artifact.formValues,
+      intakeContext: storyboardMessage.artifact.intakeContext,
+      materials: storyboardMessage.artifact.materials || [],
+      selectedDirection: storyboardMessage.artifact.selectedDirection,
+      plan: storyboardMessage.artifact.plan,
+    }, targetConversationId, updatedScenePackageMessageId);
+    if (isVisibleConversation(targetConversationId)) {
+      setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
+      setCanvasOpen(true);
+    }
+
+    await clearPendingImageJob(targetConversationId, "scene_global_asset_edited", {
+      global_assets: updatedPackages.global_assets,
+      scene_packages: updatedPackages.scene_packages,
+      scene_global_asset_edit: editResult,
+    }).catch(() => {});
   };
 
   const handleCompletedSceneAssetJob = async (
@@ -2022,6 +2214,45 @@ export function WorkspacePage() {
     }
   };
 
+  const resumePendingImageJob = async (pendingImageJob: PendingImageJob, processedKey = "") => {
+    const pollKey = `${pendingImageJob.conversation_id}:${pendingImageJob.job_api}:${pendingImageJob.job_id}`;
+    if (activeImageJobPollsRef.current.has(pollKey)) return;
+    activeImageJobPollsRef.current.add(pollKey);
+    setBusyForConversation(pendingImageJob.conversation_id, true);
+    try {
+      if (pendingImageJob.job_api === "edit_asset") {
+        const status = await api.getImageAssetEditJob(pendingImageJob.job_id);
+        const editResult =
+          (status.status === "completed" || status.status === "quota_paused") && status.result
+            ? status.result
+            : await api.pollImageAssetEditJob(pendingImageJob.job_id);
+        await handleCompletedImageAssetEditJob(pendingImageJob, editResult, processedKey);
+      } else {
+        const status = await api.getImageGenerationJob(pendingImageJob.job_id);
+        const imageResult =
+          (status.status === "completed" || status.status === "quota_paused") && status.result
+            ? status.result
+            : await api.pollImageGenerationJob(pendingImageJob.job_id);
+        await handleCompletedImageGenerationJob(pendingImageJob, imageResult, processedKey);
+      }
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的图片生成任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新图片卡片手动重试。"
+          : `继续查询图片生成任务失败:${message}`,
+        pendingImageJob.conversation_id,
+      );
+      await clearPendingImageJob(pendingImageJob.conversation_id, "image_job_resume_failed", {
+        image_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      activeImageJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(pendingImageJob.conversation_id, false);
+    }
+  };
+
   const resumePendingScenePackageJob = async (pendingScenePackageJob: PendingScenePackageJob, processedKey = "") => {
     const pollKey = `${pendingScenePackageJob.conversation_id}:${pendingScenePackageJob.kind}:${pendingScenePackageJob.job_id}`;
     if (activeScenePackageJobPollsRef.current.has(pollKey)) return;
@@ -2148,6 +2379,7 @@ export function WorkspacePage() {
     pendingDialogContextRef.current = null;
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
+    pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     setReferencedMaterials([]);
@@ -2172,6 +2404,10 @@ export function WorkspacePage() {
     pendingImageEditRequest:
       pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
     imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
+    pendingImageJob:
+      pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
+    pending_image_job:
+      pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
     pendingScenePackageJob:
       pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
     pending_scene_package_job:
@@ -2212,6 +2448,7 @@ export function WorkspacePage() {
     pendingDialogContextRef.current = null;
     pendingImageEditRequestRef.current = null;
     imageEditConfirmedSelectionsRef.current = {};
+    pendingImageJobRef.current = null;
     pendingScenePackageJobRef.current = null;
     pendingVideoJobRef.current = null;
     planRevisionArtifactRef.current = null;
@@ -2226,6 +2463,7 @@ export function WorkspacePage() {
     const pendingImageEditRequest =
       snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
     const imageEditConfirmedSelections = snapshot.imageEditConfirmedSelections || {};
+    const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
@@ -2241,9 +2479,16 @@ export function WorkspacePage() {
       pendingScenePackageJob: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
       pending_scene_package_job: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
+      pendingImageJob,
+      pending_image_job: pendingImageJob,
       imageEditConfirmedSelections,
       messages: normalizedMessages,
     });
+    if (pendingImageJob?.job_id && pendingImageJob.conversation_id === detail.conversation.conversation_id) {
+      window.setTimeout(() => {
+        void resumePendingImageJob(pendingImageJob);
+      }, 0);
+    }
     if (
       pendingScenePackageJob?.job_id &&
       pendingScenePackageJob.conversation_id === detail.conversation.conversation_id &&
@@ -2338,6 +2583,10 @@ export function WorkspacePage() {
         pendingImageEditRequest:
           pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
         imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
+        pendingImageJob:
+          pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
+        pending_image_job:
+          pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
         pendingScenePackageJob:
           pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
         pending_scene_package_job:
@@ -2571,48 +2820,37 @@ export function WorkspacePage() {
           setBusyForConversation(activeConversation, false);
           return;
         }
-        const imageResult = await api.generateImage({
+        const request: ImageGenerationJobRequest = {
           method: imagePrepare.method,
           prompt: imagePrepare.prompt,
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
-        });
-        const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-        const imageResultMessage = pushArtifact(imageResult.ok ? "图片已按修改意见重新生成，请查看结果。" : "图片重新生成失败，请查看错误信息。", {
-          type: "image_result",
-          title: "图片重新生成结果",
-          description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片重新生成额度不足。") : imageResultSummary(imageResult),
-          actionLabel: "查看",
-          imageResult,
+        };
+        const started = await api.startImageGenerationJob(request);
+        const pendingImageJob: PendingImageJob = {
+          job_id: started.job_id,
+          conversation_id: activeConversation,
+          source_message_id: "",
+          kind: "image_regeneration",
+          job_api: "generate",
+          started_at: new Date().toISOString(),
+          request,
           imagePrepare,
-          imageRevisionFeedback: text,
-          intent: "image",
-          formValues: pendingImageRevisionArtifact.formValues,
-          intakeContext: pendingImageRevisionArtifact.intakeContext,
+          revision_feedback: text,
+          artifact: {
+            ...pendingImageRevisionArtifact,
+            imagePrepare,
+            imageRevisionFeedback: text,
+            materials: flowMaterials,
+          },
+        };
+        await persistPendingImageJob(pendingImageJob, activeConversation, "image_regeneration_running", {
+          image_revision_feedback: text,
+          intake_context: pendingImageRevisionArtifact.intakeContext,
           materials: flowMaterials,
-          selectedDirection: pendingImageRevisionArtifact.selectedDirection,
-          plan: pendingImageRevisionArtifact.plan,
-        }, activeConversation);
-        if (canAcceptImageResult(imageResult)) {
-          window.setTimeout(() => {
-            void handleAcceptImageResult(imageResultMessage, true);
-          }, 30_000);
-        }
-        if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
-              last_phase: imageResult.ok ? "image_regenerated" : "image_regeneration_failed",
-              context: {
-                ...makeSnapshot(),
-                image_revision_feedback: text,
-                intake_context: pendingImageRevisionArtifact.intakeContext,
-                materials: flowMaterials,
-                image_prepare: imagePrepare,
-                image_result: imageResult,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
+          image_prepare: imagePrepare,
+        });
+        await resumePendingImageJob(pendingImageJob);
       } catch (err) {
         pushAssistant(`图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
@@ -3479,49 +3717,32 @@ export function WorkspacePage() {
           return;
         }
         pushAssistant(`正在调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
-        const imageResult = await api.generateImage({
+        const request: ImageGenerationJobRequest = {
           method: imagePrepare.method,
           prompt: imagePrepare.prompt,
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
-        });
-        const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-        if (!imageResult.ok) releaseArtifactAction(processedKey);
-        const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
-          type: "image_result",
-          title: "图片生成结果",
-          description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
-          actionLabel: "查看",
-          imageResult,
+        };
+        const started = await api.startImageGenerationJob(request);
+        const pendingImageJob: PendingImageJob = {
+          job_id: started.job_id,
+          conversation_id: targetConversationId,
+          source_message_id: msg.id,
+          kind: "image_generation",
+          job_api: "generate",
+          started_at: new Date().toISOString(),
+          request,
+          artifact,
           imagePrepare,
-          intent: "image",
-          formValues: artifact.formValues,
-          intakeContext: artifact.intakeContext,
+        };
+        await persistPendingImageJob(pendingImageJob, targetConversationId, "image_generation_running", {
+          plan_approved: true,
+          plan_markdown: artifact.plan.plan_markdown,
+          intake_context: artifact.intakeContext,
           materials: artifact.materials || [],
-          selectedDirection: artifact.selectedDirection,
-          plan: artifact.plan,
-        }, targetConversationId);
-        if (canAcceptImageResult(imageResult)) {
-          window.setTimeout(() => {
-            void handleAcceptImageResult(imageResultMessage, true);
-          }, 30_000);
-        }
-        if (targetConversationId) {
-          void api
-            .updateConversation(targetConversationId, {
-              last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
-              context: {
-                ...makeSnapshot(),
-                plan_approved: true,
-                plan_markdown: artifact.plan.plan_markdown,
-                intake_context: artifact.intakeContext,
-                materials: artifact.materials || [],
-                image_prepare: imagePrepare,
-                image_result: imageResult,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
+          image_prepare: imagePrepare,
+        });
+        await resumePendingImageJob(pendingImageJob, processedKey);
       } catch (err) {
         releaseArtifactAction(processedKey);
         pushAssistant(`图片生成参数准备失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -3635,50 +3856,36 @@ export function WorkspacePage() {
   const handleGenerateImage = async (msg: ChatMessage) => {
     const imagePrepare = msg.artifact?.imagePrepare;
     if (!imagePrepare || !imagePrepare.ok) return;
+    const artifact = msg.artifact;
+    if (!artifact) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
     try {
-      const imageResult = await api.generateImage({
+      const request: ImageGenerationJobRequest = {
         method: imagePrepare.method,
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
-      });
-      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-      if (!imageResult.ok) releaseArtifactAction(processedKey);
-      const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
-        type: "image_result",
-        title: "图片生成结果",
-        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
-        actionLabel: "查看",
-        imageResult,
+      };
+      const started = await api.startImageGenerationJob(request);
+      const pendingImageJob: PendingImageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "image_generation",
+        job_api: "generate",
+        started_at: new Date().toISOString(),
+        request,
+        artifact,
         imagePrepare,
-        intent: "image",
-        formValues: msg.artifact?.formValues,
-        materials: msg.artifact?.materials || [],
-        selectedDirection: msg.artifact?.selectedDirection,
-        plan: msg.artifact?.plan,
-      }, targetConversationId);
-      if (canAcceptImageResult(imageResult)) {
-        window.setTimeout(() => {
-          void handleAcceptImageResult(imageResultMessage, true);
-        }, 30_000);
-      }
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
-            context: {
-              ...makeSnapshot(),
-              image_prepare: imagePrepare,
-              image_result: imageResult,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      };
+      await persistPendingImageJob(pendingImageJob, targetConversationId, "image_generation_running", {
+        image_prepare: imagePrepare,
+      });
+      await resumePendingImageJob(pendingImageJob, processedKey);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`图片生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -3703,40 +3910,29 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`已继续调用 ${imagePrepare.endpoint} 生成图片…`, targetConversationId);
     try {
-      const imageResult = await api.generateImage({
+      const request: ImageGenerationJobRequest = {
         method: imagePrepare.method,
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
-      });
-      const imageQuotaInsufficient = isQuotaInsufficientPayload(imageResult);
-      if (!imageResult.ok) releaseArtifactAction(processedKey);
-      const imageResultMessage = pushArtifact(imageResult.ok ? "图片生成完成，请查看结果。" : "图片生成失败，请查看错误信息。", {
-        type: "image_result",
-        title: "图片生成结果",
-        description: imageQuotaInsufficient ? quotaMessage(imageResult.message || "图片生成额度不足。") : imageResultSummary(imageResult),
-        actionLabel: "查看",
-        imageResult,
+      };
+      const artifact: ChatArtifact = msg.artifact;
+      const started = await api.startImageGenerationJob(request);
+      const pendingImageJob: PendingImageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "image_regeneration",
+        job_api: "generate",
+        started_at: new Date().toISOString(),
+        request,
+        artifact,
         imagePrepare,
-        intent: "image",
-        formValues: msg.artifact?.formValues,
-        materials: msg.artifact?.materials || [],
-        selectedDirection: msg.artifact?.selectedDirection,
-        plan: msg.artifact?.plan,
-      }, targetConversationId);
-      if (canAcceptImageResult(imageResult)) {
-        window.setTimeout(() => {
-          void handleAcceptImageResult(imageResultMessage, true);
-        }, 30_000);
-      }
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: imageResult.ok ? "image_generated" : imageQuotaInsufficient ? "image_generation_quota_paused" : "image_generation_failed",
-            context: { ...makeSnapshot(), image_prepare: imagePrepare, image_result: imageResult } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      };
+      await persistPendingImageJob(pendingImageJob, targetConversationId, "image_regeneration_running", {
+        image_prepare: imagePrepare,
+      });
+      await resumePendingImageJob(pendingImageJob, processedKey);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`图片继续生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);

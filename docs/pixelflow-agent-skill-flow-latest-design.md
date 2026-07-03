@@ -131,6 +131,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 | ImageEndpointDecisionSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 根据素材和语义选择图片接口 |
 | ImagePromptBuildSkill | `backend/pixelflow/generate/image_prepare.py` | 无 | 组装图片 prompt、ratio、数量、素材 URL |
 | ImageModelConfigLookupSkill | `web/src/lib/api.ts` | `/api/modelParamConfig/listByCategory/image_generate` | 图片编辑前查询可选模型、尺寸和清晰度 |
+| ImageGenerationJobSkill | `pixelflow_image.py` | `/agent/flows/image/generate/start` + `/jobs/{job_id}` | 图片生成可恢复 job，内部复用下列图片 Skill |
+| ImageAssetEditJobSkill | `pixelflow_image.py` | `/agent/flows/image/edit-asset/start` + `/jobs/{job_id}` | 视频场景包全局素材图片编辑可恢复 job |
 | TextToImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/text_to_image` | 文生图 |
 | ReferenceImageSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/multi_reference_image_generation` | 参考图生成组图 |
 | ImageEditSkill | `backend/pixelflow/skills/borgrise/run_generation.py` | `/api/picture/image_edit` | 图片编辑 |
@@ -340,9 +342,11 @@ sequenceDiagram
     FE-->>U: "确认图片编辑模型和参数"
     FE->>IMG: "POST /agent/flows/image/prepare"
     IMG-->>FE: "image_edit params"
-    FE->>IMG: "POST /agent/flows/image/generate"
+    FE->>IMG: "POST /agent/flows/image/generate/start"
+    FE->>FE: "保存 pendingImageJob 到 conversation context"
     IMG->>BG: "POST /api/picture/image_edit"
     BG-->>IMG: "图片 URL"
+    FE->>IMG: "GET /agent/flows/image/generate/jobs/{job_id}"
     IMG-->>FE: "图片编辑结果"
   else "普通图片生成"
     FE->>IA: "POST /agent/flows/intake/directions"
@@ -351,9 +355,11 @@ sequenceDiagram
     PA-->>FE: "plan.md"
     FE->>IMG: "POST /agent/flows/image/prepare"
     IMG-->>FE: "method + endpoint + params"
-    FE->>IMG: "POST /agent/flows/image/generate"
+    FE->>IMG: "POST /agent/flows/image/generate/start"
+    FE->>FE: "保存 pendingImageJob 到 conversation context"
     IMG->>BG: "调用对应图片接口，可循环多次"
     BG-->>IMG: "图片 URL"
+    FE->>IMG: "GET /agent/flows/image/generate/jobs/{job_id}"
     IMG-->>FE: "图片结果"
   end
 ```
@@ -375,6 +381,9 @@ sequenceDiagram
 - 采集 Agent 会从用户 prompt 抽取图片编辑尺寸 `image_size` 和清晰度 `image_quality`。如果用户明确指定但所选模型不支持，前端提示不兼容原因并自动落到当前模型可用参数；用户可以重新选择该模型支持的尺寸和清晰度后继续提交。如果未指定，则根据所选模型自动选择一组可用尺寸和清晰度。图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。content-app 请求体中 `size` 表示比例、`imageSize` 表示清晰度，网关需要保持二者分离。
 - 图片编辑成功后，前端展示“满意，结束 / 重新生成”；30 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
+- 图片 plan.md 同意、图片修改重生成、直接图片编辑确认后，前端调用 `/agent/flows/image/generate/start` 启动 Python 内存 job，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。恢复同一对话时只查询 `/agent/flows/image/generate/jobs/{job_id}`，不重复调用 `/start`；job 404 或过期时只提示手动重试，避免重复计费。
+- 视频场景包全局素材图片编辑调用 `/agent/flows/image/edit-asset/start`，同样保存 `pendingImageJob`，恢复时只查询 `/agent/flows/image/edit-asset/jobs/{job_id}`。完成后直接替换 `global_assets` 与同 `asset_id` 的 mentions 图片 URL。
+- `pendingImageJob.kind` 为 `image_generation`、`image_regeneration`、`direct_image_edit` 或 `scene_global_asset_edit`；`job_api` 为 `generate` 或 `edit_asset`；字段包含 `job_id`、`conversation_id`、`source_message_id`、`started_at`、`request`、`artifact`。
 
 ## 8. 视频流程
 
@@ -510,6 +519,7 @@ flowchart TD
 - 异步回调必须带原始 `conversation_id`，不能因为用户切换页面就写到当前可见对话。
 - 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐 `video_scene_packages` 卡片，额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
+- 如果 context 中存在 `pendingImageJob` / `pending_image_job`，进入历史对话后前端继续查询已有图片生成或全局素材编辑 job；恢复失败或 404 只提示用户手动重试，不自动重新启动，避免重复计费。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
 

@@ -154,9 +154,9 @@ function progressDescription(content: string): string {
   if (/PPT 图片|每页 PPT 图片|页面图片/.test(content)) return "生成 PPT 页面图片";
   if (/PPT 附件/.test(content)) return "生成 PPT 附件";
   if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
-  if (/生成图片|图片生成/.test(content)) return "生成图片";
   if (/视频分析|媒体链接|穿帮分析/.test(content)) return "分析视频内容";
-  if (/采集 Agent 判断这是视频生成需求/.test(content)) return "计划文件生成中";
+  if (/采集 Agent 判断这是(?:图片|视频)生成需求/.test(content)) return "计划文件生成中";
+  if (/生成图片|图片生成/.test(content)) return "生成图片";
   if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
   if (/plan\.md|计划文件|创作方案/.test(content)) return "生成计划文件";
   if (/创意方向/.test(content)) return "生成创意方案";

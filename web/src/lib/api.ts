@@ -8,6 +8,8 @@ const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
+const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
@@ -178,6 +180,22 @@ export interface ImageGenerateResponse {
   raw: Record<string, unknown>;
 }
 
+export interface ImageGenerateJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface ImageGenerateJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  result: ImageGenerateResponse | null;
+  error: string | null;
+  message: string;
+}
+
 export interface ImageAssetEditResponse {
   ok: boolean;
   method: "image_edit";
@@ -189,6 +207,22 @@ export interface ImageAssetEditResponse {
   message: string;
   quota_insufficient?: boolean;
   raw: Record<string, unknown>;
+}
+
+export interface ImageAssetEditJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface ImageAssetEditJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  result: ImageAssetEditResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface ImageModelParamConfig {
@@ -652,6 +686,72 @@ async function pollSceneVideoJob(jobId: string): Promise<GenerateSceneVideosResp
   };
 }
 
+async function pollImageGenerationJob(jobId: string): Promise<ImageGenerateResponse> {
+  const deadline = Date.now() + IMAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await req<ImageGenerateJobStatusResponse>(`${FLOW_BASE}/image/generate/jobs/${encodeURIComponent(jobId)}`);
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        method: "text_to_image",
+        endpoint: "/api/picture/text_to_image",
+        task_id: null,
+        images: [],
+        error: status.error || status.message || "图片生成失败",
+        message: status.error || status.message || "图片生成失败",
+        raw: {},
+      };
+    }
+    await delay(IMAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    method: "text_to_image",
+    endpoint: "/api/picture/text_to_image",
+    task_id: null,
+    images: [],
+    error: "图片生成轮询超时",
+    message: "图片生成轮询超时",
+    raw: {},
+  };
+}
+
+async function pollImageAssetEditJob(jobId: string): Promise<ImageAssetEditResponse> {
+  const deadline = Date.now() + IMAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await req<ImageAssetEditJobStatusResponse>(`${FLOW_BASE}/image/edit-asset/jobs/${encodeURIComponent(jobId)}`);
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        method: "image_edit",
+        endpoint: "/api/picture/image_edit",
+        source_image_url: "",
+        edited_image: {},
+        asset_id: "",
+        asset_group: "",
+        message: status.error || status.message || "素材图片编辑失败",
+        quota_insufficient: false,
+        raw: {},
+      };
+    }
+    await delay(IMAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    method: "image_edit",
+    endpoint: "/api/picture/image_edit",
+    source_image_url: "",
+    edited_image: {},
+    asset_id: "",
+    asset_group: "",
+    message: "素材图片编辑轮询超时",
+    quota_insufficient: false,
+    raw: {},
+  };
+}
+
 async function pollPrepareScenePackagesJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
@@ -873,6 +973,18 @@ export const api = {
     params: Record<string, unknown>;
   }) => req<ImageGenerateResponse>(`${FLOW_BASE}/image/generate`, { method: "POST", body: JSON.stringify(body) }),
 
+  startImageGenerationJob: (body: {
+    method: ImagePrepareResponse["method"];
+    prompt: string;
+    negative_prompt?: string;
+    params: Record<string, unknown>;
+  }) => req<ImageGenerateJobStartResponse>(`${FLOW_BASE}/image/generate/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getImageGenerationJob: (jobId: string) =>
+    req<ImageGenerateJobStatusResponse>(`${FLOW_BASE}/image/generate/jobs/${encodeURIComponent(jobId)}`),
+
+  pollImageGenerationJob,
+
   editImageAsset: (body: {
     asset_id: string;
     asset_name?: string;
@@ -883,6 +995,22 @@ export const api = {
     size?: string;
     model?: string | null;
   }) => req<ImageAssetEditResponse>(`${FLOW_BASE}/image/edit-asset`, { method: "POST", body: JSON.stringify(body) }),
+
+  startImageAssetEditJob: (body: {
+    asset_id: string;
+    asset_name?: string;
+    asset_group: string;
+    source_image_url: string;
+    prompt: string;
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+  }) => req<ImageAssetEditJobStartResponse>(`${FLOW_BASE}/image/edit-asset/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getImageAssetEditJob: (jobId: string) =>
+    req<ImageAssetEditJobStatusResponse>(`${FLOW_BASE}/image/edit-asset/jobs/${encodeURIComponent(jobId)}`),
+
+  pollImageAssetEditJob,
 
   prepareVideoScenePackages: (body: {
     form_values: Record<string, unknown>;
