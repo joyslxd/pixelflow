@@ -1202,8 +1202,17 @@ def _direct_video_endpoint(mode: str, raw: dict[str, Any]) -> str:
 async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosResponse:
     ordered_scenes = sorted(body.scene_videos, key=lambda scene: scene.scene_index if scene.scene_index is not None else 0)
     video_urls = [scene.video_url for scene in ordered_scenes if scene.video_url]
-    if len(video_urls) < 2:
-        raise HTTPException(status_code=400, detail="至少需要2个场景视频才能合并")
+    if not video_urls:
+        raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
+    if len(video_urls) == 1:
+        return MergeSceneVideosResponse(
+            ok=True,
+            endpoint="/api/video/merge",
+            merged_video_url=video_urls[0],
+            scene_videos=ordered_scenes,
+            message="只有一个场景视频，已直接作为合成视频返回。",
+            raw={"passthrough": True, "reason": "single_scene"},
+        )
 
     result = await get_video_skill().merge_videos(
         video_urls=video_urls,

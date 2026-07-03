@@ -230,9 +230,10 @@ def _scene_package_prompt(
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
 6. shot_description 包含 text 和 mentions。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
 7. shot_description.text 中引用角色、场景、道具图片时使用 @asset_id，例如 @character-presenter；视觉风格只作为文字描述，不作为图片 mention。
-8. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。
-9. 产品主体、商品、工具、包装、卖点物件一律放在 global_assets.props，不允许放进 global_assets.characters。
-10. 只返回 JSON，不要 Markdown，不要解释。
+8. shot_description.text 的时间范围必须使用秒，例如 0-10秒、10-15秒；不要使用 ms、毫秒或 00:00.000 这类毫秒时间码。
+9. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。
+10. 产品主体、商品、工具、包装、卖点物件一律放在 global_assets.props，不允许放进 global_assets.characters。
+11. 只返回 JSON，不要 Markdown，不要解释。
 
 输出格式：
 {{"global_assets":{{
@@ -631,10 +632,46 @@ def _legacy_shot_description_text(value: dict[str, Any], fallback: str) -> str:
 
 def _normalize_shot_text(text: str) -> str:
     normalized = _first_text(text)
+    normalized = _normalize_shot_time_ranges(normalized)
     for label in ("地点", "角色", "道具", "视觉风格"):
         normalized = re.sub(rf"({label})\s*[：:]\s*@([\w\-\u4e00-\u9fff]+)", r"\1:@\2", normalized)
         normalized = re.sub(rf"({label})\s*@([\w\-\u4e00-\u9fff]+)", r"\1:@\2", normalized)
     return normalized
+
+
+def _normalize_shot_time_ranges(text: str) -> str:
+    """把镜头描述里的毫秒/毫秒时间码归一成用户可读的秒级范围。"""
+
+    def ms_to_second(value: str) -> int:
+        number = max(0, int(value))
+        return 0 if number == 0 else math.ceil(number / 1000)
+
+    def timecode_to_second(minutes: str, seconds: str, millis: str) -> int:
+        total = max(0, int(minutes)) * 60 + max(0, int(seconds))
+        return total + (1 if int(millis.ljust(3, "0")[:3]) > 0 else 0)
+
+    def replace_timecode(match: re.Match[str]) -> str:
+        start = timecode_to_second(match.group(1), match.group(2), match.group(3))
+        end = timecode_to_second(match.group(4), match.group(5), match.group(6))
+        if end <= start:
+            end = start + 1
+        return f"{start}-{end}秒"
+
+    def replace_ms_pair(match: re.Match[str]) -> str:
+        start = ms_to_second(match.group(1))
+        end = ms_to_second(match.group(2))
+        if end <= start:
+            end = start + 1
+        return f"{start}-{end}秒"
+
+    normalized = re.sub(
+        r"\b(\d{1,3}):(\d{2})\.(\d{1,3})\s*[-~—–]\s*(\d{1,3}):(\d{2})\.(\d{1,3})\b",
+        replace_timecode,
+        text,
+    )
+    normalized = re.sub(r"\b(\d+)\s*ms\s*[-~—–]\s*(\d+)\s*ms\b", replace_ms_pair, normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b(\d+)\s*[-~—–]\s*(\d+)\s*ms\b", replace_ms_pair, normalized, flags=re.IGNORECASE)
+    return normalized.replace("毫秒", "秒")
 
 
 def _normalize_scene_items(value: Any, *, fallback: list[dict[str, Any]], required_fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -939,7 +976,11 @@ def _asset_image_url(value: dict[str, Any]) -> str:
 
 
 def _format_time_range(start_ms: int, end_ms: int) -> str:
-    return f"{_format_timecode(start_ms)}-{_format_timecode(end_ms)}"
+    start_seconds = max(0, start_ms) // 1000
+    end_seconds = math.ceil(max(0, end_ms) / 1000)
+    if end_seconds <= start_seconds:
+        end_seconds = start_seconds + 1
+    return f"{start_seconds}-{end_seconds}秒"
 
 
 def _format_timecode(ms: int) -> str:

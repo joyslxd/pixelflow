@@ -816,6 +816,37 @@ def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):
     assert data["merged_video_url"] == "https://x/merged.mp4"
 
 
+def test_video_router_returns_single_scene_video_as_merged_video_without_calling_merge(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    class FakeVideoSkill:
+        async def merge_videos(self, **_kwargs):
+            raise AssertionError("single-scene video should not call content-app merge")
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/merge",
+            json={
+                "scene_videos": [
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                ],
+                "duration": 8,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["merged_video_url"] == "https://x/scene-1.mp4"
+    assert data["scene_videos"] == [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}]
+    assert data["raw"]["passthrough"] is True
+
+
 def test_video_router_generates_direct_video_modes(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
