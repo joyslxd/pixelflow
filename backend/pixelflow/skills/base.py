@@ -156,6 +156,21 @@ class VideoFlawAnalysisResult:
 
 
 @dataclass
+class VideoQualityReviewResult:
+    """视频综合质检调用的统一返回 DTO。"""
+
+    ok: bool
+    summary_markdown: str = ""
+    flaw_analysis_markdown: str = ""
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    affected_scene_ids: list[str] = field(default_factory=list)
+    revision_prompt: str = ""
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class PptGenerationResult:
     """智能 PPT 生成调用的统一返回 DTO。"""
 
@@ -342,9 +357,28 @@ class VideoFlawAnalysisSkill(Protocol):
         merged_video_url: str,
         scene_videos: list[dict[str, Any]],
         scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict[str, Any]] | None = None,
         user_feedback: str | None = None,
     ) -> VideoFlawAnalysisResult: ...
+
+
+class VideoQualityReviewSkill(Protocol):
+    """视频综合质检能力接口。"""
+
+    async def review_video_quality(
+        self,
+        merged_video_url: str,
+        scene_videos: list[dict[str, Any]],
+        scene_packages: list[dict[str, Any]] | None = None,
+        brief: dict[str, Any] | None = None,
+        materials: list[dict[str, Any]] | None = None,
+        user_feedback: str | None = None,
+        checks: list[str] | None = None,
+        platform: str | None = None,
+        ratio: str | None = None,
+        size: str | None = None,
+    ) -> VideoQualityReviewResult: ...
 
 
 class PptGenerationSkill(Protocol):
@@ -462,6 +496,15 @@ def get_media_link_extraction_skill() -> MediaLinkExtractionSkill:
 
 def get_video_flaw_analysis_skill() -> VideoFlawAnalysisSkill:
     """返回当前配置的视频穿帮分析 skill。"""
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
+def get_video_quality_review_skill() -> VideoQualityReviewSkill:
+    """返回当前配置的视频综合质检 skill。"""
+
     impl = _get_media_skill_impl()
     if impl == "borgrise":
         return _get_borgrise_media_skill()

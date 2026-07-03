@@ -1838,8 +1838,13 @@ def analyze_video_flaws(
         merged_video_url: str,
         scene_videos: list[dict],
         scene_packages: list[dict] | None = None,
+        brief: dict[str, Any] | None = None,
         materials: list[dict] | None = None,
         user_feedback: str | None = None,
+        checks: list[str] | None = None,
+        platform: str | None = None,
+        ratio: str | None = None,
+        size: str | None = None,
         generation_dialog_id: int | None = None,
         parent_generation_dialog_id: int | None = None,
 ) -> dict:
@@ -1853,9 +1858,18 @@ def analyze_video_flaws(
         "merged_video_url": merged_video_url,
         "scene_videos": scene_videos,
         "scene_packages": scene_packages or [],
+        "brief": brief or {},
         "materials": materials or [],
         "user_feedback": user_feedback or "",
     }
+    if checks:
+        request_data["checks"] = checks
+    if platform:
+        request_data["platform"] = platform
+    if ratio:
+        request_data["ratio"] = ratio
+    if size:
+        request_data["size"] = size
     if generation_dialog_id is not None:
         request_data["generationDialogId"] = generation_dialog_id
     if parent_generation_dialog_id is not None:

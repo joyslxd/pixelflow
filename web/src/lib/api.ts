@@ -1124,6 +1124,10 @@ export const api = {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
+    plan?: Record<string, unknown>;
+    form_values?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    selected_direction?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     user_feedback?: string | null;
   }) => req<VideoFlawAnalysisResponse>(`${FLOW_BASE}/video/analyze-flaws`, { method: "POST", body: JSON.stringify(body) }),

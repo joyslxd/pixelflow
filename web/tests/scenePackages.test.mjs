@@ -13,7 +13,9 @@ const {
   MAX_SCENE_DURATION_MS,
   MIN_SCENE_DURATION_MS,
   replaceGlobalSceneAssetImage,
+  sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
+  scenePackagesWithRevisionContract,
   syncScenePackageMentionImageUrls,
   updateScenePackageAssetField,
   updateScenePackageField,
@@ -199,6 +201,46 @@ test("collectSceneImageUrls also uses inline shot description mention image urls
   ]);
 });
 
+test("sceneGenerationPayloadFromPackage makes edited storyboard text authoritative and drops implicit old references", () => {
+  const editedScene = {
+    scene_id: "scene-2",
+    scene_index: 2,
+    duration_ms: 10000,
+    prompt: "旧隐藏提示词：继续生成蓝牙耳机佩戴体验和耳机续航卖点。",
+    storyline: "故意错误分镜：只展示一台红色手机，不展示蓝牙耳机。",
+    narration: "这台红色手机外观醒目。",
+    shot_description: {
+      text: "红色手机放在桌面上，屏幕亮起，展示手机外观、边框和背面细节。",
+      mentions: [],
+    },
+    reference_asset_ids: [],
+    image_urls: ["https://x/old-earbud-material.png"],
+    characters: [{ name: "耳机用户", images: ["https://x/old-user.png"] }],
+    scene_images: [{ description: "耳机场景", images: ["https://x/old-scene.png"] }],
+    prop_images: [{ name: "蓝牙耳机", images: ["https://x/old-earbud.png"] }],
+  };
+
+  const payload = sceneGenerationPayloadFromPackage(editedScene, sampleGlobalAssets(), { edited: true });
+
+  assert.match(payload.prompt, /红色手机/);
+  assert.doesNotMatch(payload.prompt, /继续生成蓝牙耳机佩戴体验|耳机续航卖点/);
+  assert.deepEqual(payload.image_urls, []);
+});
+
+test("sceneGenerationPayloadFromPackage keeps original package behavior for unedited scenes", () => {
+  const [scene] = sampleScenes();
+
+  const payload = sceneGenerationPayloadFromPackage(scene, sampleGlobalAssets());
+
+  assert.equal(payload.prompt, scene.prompt);
+  assert.deepEqual(payload.image_urls, [
+    "https://x/material.png",
+    "https://x/global-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
+});
+
 test("replaceGlobalSceneAssetImage replaces character three-view image as one asset", () => {
   const assets = sampleGlobalAssets();
 
@@ -371,12 +413,162 @@ test("deleteGlobalSceneAssetReference clears scene and prop image placeholders w
   assert.equal(withoutProp.scene_packages[0].prompt, "Do not edit this prompt mentioning Gaming Room as plain text.");
 });
 
-test("sceneIdsForRevision maps explicit scene mentions and falls back to all scenes", () => {
+test("sceneIdsForRevision maps explicit scene mentions and non-QC revisions fall back to all scenes", () => {
   const scenes = sampleScenes();
 
   assert.deepEqual([...sceneIdsForRevision(scenes, "请修改第2段节奏", undefined, false)], ["scene-2"]);
   assert.deepEqual([...sceneIdsForRevision(scenes, "颜色穿帮", { affected_scene_ids: ["scene-1"] }, true)], ["scene-1"]);
   assert.deepEqual([...sceneIdsForRevision(scenes, "整体更高级", undefined, false)], ["scene-1", "scene-2"]);
+});
+
+test("sceneIdsForRevision does not regenerate every scene when QC has no affected scene ids", () => {
+  const scenes = sampleScenes();
+
+  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检修复", { affected_scene_ids: [] }, true)], []);
+  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检只修改第2段", { affected_scene_ids: [] }, true)], ["scene-2"]);
+});
+
+test("sceneIdsForRevision lets explicit only-scene feedback override broad QC affected ids", () => {
+  const scenes = sampleScenes();
+
+  assert.deepEqual(
+    [...sceneIdsForRevision(scenes, "请只修改第2个分镜，第1个分镜没有问题，不要重新生成。", { affected_scene_ids: ["scene-1", "scene-2"] }, true)],
+    ["scene-2"],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "第2个分镜画面出现红色手机，和产品无关。请只修复第2个分镜。第1个分镜和第3个分镜没有问题，不要重新生成。",
+        { affected_scene_ids: ["scene-1", "scene-2", "scene-3"] },
+        true,
+      ),
+    ],
+    ["scene-2"],
+  );
+});
+
+test("scenePackagesWithRevisionContract replaces repaired scene metadata without touching other scenes", () => {
+  const scenes = [
+    {
+      scene_id: "scene-1",
+      scene_index: 1,
+      duration_ms: 10000,
+      prompt: "第一段蓝牙耳机",
+      storyline: "第一段保持不变",
+      narration: "第一段旁白",
+      shot_description: { text: "第一段画面" },
+      image_urls: ["https://x/scene1.png"],
+    },
+    {
+      scene_id: "scene-2",
+      scene_index: 2,
+      duration_ms: 10000,
+      prompt: "旧提示词：红色手机",
+      storyline: "旧故事线：红色手机桌面展示",
+      narration: "旧旁白：这台红色手机外观醒目",
+      shot_description: {
+        text: "旧镜头：红色手机屏幕和外观",
+        mentions: [{ asset_id: "prop-phone", image_url: "https://x/phone.png" }],
+      },
+      reference_asset_ids: ["prop-phone"],
+      image_urls: ["https://x/phone.png"],
+      video_urls: ["https://x/phone.mp4"],
+      audio_urls: ["https://x/phone.mp3"],
+      characters: [{ name: "手机展示手模", images: ["https://x/hand.png"] }],
+      scene_images: [{ description: "手机桌面", images: ["https://x/desk.png"] }],
+      prop_images: [{ name: "红色手机", images: ["https://x/phone-prop.png"] }],
+    },
+  ];
+
+  const updated = scenePackagesWithRevisionContract(
+    scenes,
+    new Set(["scene-2"]),
+    "请只修复第2个分镜",
+    { revision_prompt: "重新生成 scene-2：展示白色蓝牙耳机和充电盒，无红色手机露出。" },
+    sampleGlobalAssets(),
+  );
+
+  assert.equal(updated[0], scenes[0]);
+  assert.match(updated[1].storyline, /白色蓝牙耳机/);
+  assert.doesNotMatch(updated[1].storyline, /旧故事线|红色手机桌面展示/);
+  assert.match(updated[1].prompt, /白色蓝牙耳机/);
+  assert.doesNotMatch(updated[1].prompt, /旧提示词/);
+  assert.match(updated[1].shot_description.text, /白色蓝牙耳机/);
+  assert.deepEqual(
+    updated[1].shot_description.mentions.map((mention) => mention.asset_id),
+    ["character-host", "scene-desk", "prop-product"],
+  );
+  assert.equal(updated[1].narration, "");
+  assert.deepEqual(updated[1].reference_asset_ids, ["character-host", "scene-desk", "prop-product"]);
+  assert.deepEqual(updated[1].image_urls, []);
+  assert.deepEqual(updated[1].video_urls, []);
+  assert.deepEqual(updated[1].audio_urls, []);
+  assert.deepEqual(updated[1].characters, []);
+  assert.deepEqual(updated[1].scene_images, []);
+  assert.deepEqual(updated[1].prop_images, []);
+
+  const payload = sceneGenerationPayloadFromPackage(updated[1], sampleGlobalAssets(), { edited: true });
+  assert.match(payload.prompt, /连续性要求/);
+  assert.deepEqual(payload.image_urls, [
+    "https://x/global-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
+});
+
+test("scenePackagesWithRevisionContract also rewrites affected scenes when only user feedback is used", () => {
+  const scenes = [
+    {
+      scene_id: "scene-1",
+      scene_index: 1,
+      duration_ms: 10000,
+      prompt: "第一段白色牙刷",
+      storyline: "第一段保持不变",
+      shot_description: { text: "第一段画面" },
+    },
+    {
+      scene_id: "scene-2",
+      scene_index: 2,
+      duration_ms: 10000,
+      prompt: "旧提示词：红色手机",
+      storyline: "旧故事线：红色手机桌面展示",
+      narration: "旧旁白：这台红色手机外观醒目",
+      shot_description: {
+        text: "旧镜头：红色手机屏幕和外观",
+        mentions: [{ asset_id: "prop-phone", image_url: "https://x/phone.png" }],
+      },
+      reference_asset_ids: ["prop-phone"],
+      image_urls: ["https://x/phone.png"],
+    },
+  ];
+
+  const updated = scenePackagesWithRevisionContract(
+    scenes,
+    new Set(["scene-2"]),
+    "请只修改第2个分镜，把红色手机改回白色电动牙刷，并保持第1和第3分镜风格一致。",
+    undefined,
+    sampleGlobalAssets(),
+  );
+
+  assert.equal(updated[0], scenes[0]);
+  assert.notEqual(updated[1], scenes[1]);
+  assert.match(updated[1].prompt, /只修改第2个分镜/);
+  assert.match(updated[1].storyline, /白色电动牙刷/);
+  assert.doesNotMatch(updated[1].storyline, /旧故事线|红色手机桌面展示/);
+  assert.deepEqual(
+    updated[1].shot_description.mentions.map((mention) => mention.asset_id),
+    ["character-host", "scene-desk", "prop-product"],
+  );
+
+  const payload = sceneGenerationPayloadFromPackage(updated[1], sampleGlobalAssets(), { edited: true });
+  assert.match(payload.prompt, /用户修改\/质检意见/);
+  assert.match(payload.prompt, /白色电动牙刷/);
+  assert.deepEqual(payload.image_urls, [
+    "https://x/global-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
 });
 
 test("inferTargetDurationMs reads seconds and minutes from user-facing flow text", () => {

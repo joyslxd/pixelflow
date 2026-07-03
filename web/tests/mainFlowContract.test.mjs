@@ -143,9 +143,9 @@ test("video plan approval always enters scene package and merge main flow", () =
 
 test("image form values preserve requested multi-image count", () => {
   const valuesStart = workspaceSource.indexOf("function valuesFromForm");
-  const valuesEnd = workspaceSource.indexOf("function revisedScenePrompt", valuesStart);
+  const valuesEnd = workspaceSource.indexOf("function formatSceneIndexesForMessage", valuesStart);
   assert.notEqual(valuesStart, -1, "valuesFromForm must exist");
-  assert.notEqual(valuesEnd, -1, "revisedScenePrompt must follow valuesFromForm");
+  assert.notEqual(valuesEnd, -1, "formatSceneIndexesForMessage must follow valuesFromForm");
   const source = workspaceSource.slice(valuesStart, valuesEnd);
   assert.match(source, /image_count:\s*form\.image_count/);
 });
@@ -487,6 +487,8 @@ test("video revision regeneration also uses recoverable scene video jobs", () =>
   assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "revision job id must be persisted before polling starts");
   assert.match(source, /kind:\s*"scene_regeneration"/, "video revision must record its pending job kind");
   assert.match(source, /affected_scene_ids:\s*Array\.from\(affectedSceneIds\)/, "video revision pending job must preserve affected scene ids");
+  assert.match(source, /scenePackagesWithRevisionContract/, "video revision must rewrite affected scene packages before regeneration");
+  assert.match(source, /sceneVideoRequestFromPackages\(nextVideoScenePackages,\s*affectedSceneIds\)/, "video revision request must use the rewritten scene package contract");
   assert.equal(source.includes("api.generateSceneVideos"), false, "video revision must not use the start+poll convenience wrapper");
 });
 
