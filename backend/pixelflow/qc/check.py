@@ -22,12 +22,25 @@ import subprocess
 from .models import QCItem, QCResult
 
 _NUM = re.compile(r"\d+(?:\.\d+)?")
+_RATIO = re.compile(r"(\d+(?:\.\d+)?)\s*[:x/]\s*(\d+(?:\.\d+)?)")
 
 
 def _parse_tolerance(spec: str) -> float:
     """从 ``'+2s'`` 这类容忍度字符串中提取秒数。"""
     m = _NUM.search(spec or "")
     return float(m.group()) if m else 0.0
+
+
+def _parse_ratio(spec: str) -> float | None:
+    """把 ``'9:16'`` 或 ``'1080x1920'`` 解析成宽高比。"""
+    m = _RATIO.search(spec or "")
+    if not m:
+        return None
+    width = float(m.group(1))
+    height = float(m.group(2))
+    if height <= 0:
+        return None
+    return width / height
 
 
 def _probe_video(path: str) -> dict[str, float | int]:
@@ -81,6 +94,22 @@ def _has_black_frames(path: str) -> bool | None:
     return "black_start:" in proc.stderr
 
 
+def _has_freeze_frames(path: str) -> bool | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path, "-vf", "freezedetect=n=-60dB:d=0.5", "-an", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode not in (0, 1):
+        return None
+    return "freeze_start:" in proc.stderr
+
+
 def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_video_url: str = "") -> QCResult:
     """评估产物是否通过质检。
 
@@ -128,6 +157,17 @@ def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_vi
                     message=f"输出分辨率 {width}x{height}；短边 {'达到' if min_edge >= 720 else '低于'} 720p 基线",
                 )
             )
+            expected_ratio = _parse_ratio(str(brief.get("ratio") or brief.get("size") or ""))
+            actual_ratio = (width / height) if height else None
+            if expected_ratio and actual_ratio:
+                ratio_ok = abs(actual_ratio - expected_ratio) <= 0.08
+                checks.append(
+                    QCItem(
+                        item="手机端画幅适配",
+                        status="pass" if ratio_ok else "warn",
+                        message=f"输出画幅 {width}x{height}；期望比例 {brief.get('ratio') or brief.get('size')}",
+                    )
+                )
         else:
             checks.append(QCItem(item="画面清晰度/分辨率", status="warn", message="未能读取视频分辨率，需人工复核清晰度"))
 
@@ -136,9 +176,16 @@ def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_vi
             checks.append(QCItem(item="黑屏/空帧检测", status="warn", message="未能运行黑屏检测，需人工复核"))
         else:
             checks.append(QCItem(item="黑屏/空帧检测", status="fail" if black else "pass", message="检测到连续黑屏片段" if black else "未检测到连续黑屏片段"))
+
+        freeze = _has_freeze_frames(final_video_url)
+        if freeze is None:
+            checks.append(QCItem(item="卡顿/冻结检测", status="warn", message="未能运行冻结帧检测，需人工复核"))
+        else:
+            checks.append(QCItem(item="卡顿/冻结检测", status="fail" if freeze else "pass", message="检测到连续冻结/卡顿片段" if freeze else "未检测到连续冻结/卡顿片段"))
     else:
         checks.append(QCItem(item="画面清晰度/分辨率", status="warn", message="暂无本地成片，无法自动读取分辨率"))
         checks.append(QCItem(item="黑屏/空帧检测", status="warn", message="暂无本地成片，无法自动检测黑屏"))
+        checks.append(QCItem(item="卡顿/冻结检测", status="warn", message="暂无本地成片，无法自动检测卡顿/冻结"))
 
     checks.append(
         QCItem(

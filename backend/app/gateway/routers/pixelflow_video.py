@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -12,11 +13,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
+from pixelflow.qc import VideoQCRequest, review_video_quality
+from pixelflow.qc import VideoQCResponse as CoreVideoQCResponse
 from pixelflow.skills import (
     get_image_skill,
     get_media_link_extraction_skill,
     get_video_decompose_skill,
-    get_video_flaw_analysis_skill,
+    get_video_quality_review_skill,
     get_video_skill,
 )
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
@@ -211,22 +214,52 @@ class VideoFlawAnalysisRequest(BaseModel):
     merged_video_url: str
     scene_videos: list[SceneVideo]
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    plan: dict[str, Any] = Field(default_factory=dict)
+    form_values: dict[str, Any] = Field(default_factory=dict)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
+    selected_direction: dict[str, Any] = Field(default_factory=dict)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     user_feedback: str | None = None
+
+
+class VideoQualityReviewRequest(BaseModel):
+    merged_video_url: str = ""
+    scene_videos: list[SceneVideo] = Field(default_factory=list)
+    scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    brief: dict[str, Any] = Field(default_factory=dict)
+    plan: dict[str, Any] = Field(default_factory=dict)
+    form_values: dict[str, Any] = Field(default_factory=dict)
+    intake_context: dict[str, Any] = Field(default_factory=dict)
+    selected_direction: dict[str, Any] = Field(default_factory=dict)
+    materials: list[dict[str, Any]] = Field(default_factory=list)
+    platform: str = ""
+    ratio: str = "9:16"
+    size: str = ""
+    expected_duration_sec: float | None = None
+    user_feedback: str = ""
+    checks: list[str] = Field(default_factory=list)
 
 
 class VideoFlawAnalysisResponse(BaseModel):
     ok: bool
     endpoint: str = "/api/creative/analyze_video_flaws"
     task_id: str | None = None
+    passed: bool = True
+    score: float = 1.0
+    summary_markdown: str = ""
     flaw_analysis_markdown: str = ""
     issues: list[dict[str, Any]] = Field(default_factory=list)
     affected_scene_ids: list[str] = Field(default_factory=list)
     revision_prompt: str = ""
+    check_results: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     message: str = ""
     quota_insufficient: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class VideoQualityReviewResponse(VideoFlawAnalysisResponse):
+    pass
 
 
 class AnalyzeStoryboardsRequest(BaseModel):
@@ -1169,29 +1202,176 @@ async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosR
     )
 
 
+def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message: str = "视频质检完成。") -> VideoQualityReviewResponse:
+    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+    message = success_message if result.ok else (result.error or "视频质检失败。")
+    if quota_insufficient:
+        message = quota_resume_message(result.error)
+    return VideoQualityReviewResponse(
+        ok=result.ok,
+        endpoint=result.endpoint,
+        task_id=result.task_id,
+        passed=result.passed,
+        score=result.score,
+        summary_markdown=result.summary_markdown,
+        flaw_analysis_markdown=result.flaw_analysis_markdown,
+        issues=[issue.model_dump() for issue in result.issues],
+        affected_scene_ids=result.affected_scene_ids,
+        revision_prompt=result.revision_prompt,
+        check_results=[item.model_dump() for item in result.check_results],
+        error=result.error,
+        message=message,
+        quota_insufficient=quota_insufficient,
+        raw=result.raw,
+    )
+
+
+def _is_product_consistency_issue(issue: dict[str, Any]) -> bool:
+    category = str(issue.get("category") or "")
+    if category:
+        return category == "product_consistency"
+    code = str(issue.get("code") or "")
+    return code in {"product_consistency", "flaw", "visual_flaw"} or not code
+
+
+def _legacy_flaw_issues(result: CoreVideoQCResponse) -> list[dict[str, Any]]:
+    raw_issues = result.raw.get("issues") if isinstance(result.raw, dict) else None
+    if isinstance(raw_issues, list):
+        return [issue for issue in raw_issues if isinstance(issue, dict) and _is_product_consistency_issue(issue)]
+    return [
+        issue.model_dump()
+        for issue in result.issues
+        if issue.category == "product_consistency"
+    ]
+
+
+def _legacy_flaw_affected_scene_ids(issues: list[dict[str, Any]], fallback: list[str]) -> list[str]:
+    scene_ids: list[str] = []
+    seen: set[str] = set()
+    for issue in issues:
+        scene_id = issue.get("scene_id")
+        if not scene_id or str(scene_id) in seen:
+            continue
+        seen.add(str(scene_id))
+        scene_ids.append(str(scene_id))
+    return scene_ids or fallback
+
+
+def _scene_ids_by_explicit_feedback_scope(feedback: str | None, scene_packages: list[dict[str, Any]], scene_videos: list[SceneVideo]) -> list[str]:
+    text = (feedback or "").strip()
+    if not text or not any(keyword in text for keyword in ("只修复", "只修改", "仅修复", "仅修改", "不要重新生成", "没有问题")):
+        return []
+    scene_by_index: dict[int, str] = {}
+    for scene in scene_packages:
+        try:
+            scene_index = int(scene.get("scene_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if scene_index and scene.get("scene_id"):
+            scene_by_index[scene_index] = str(scene["scene_id"])
+    for scene in scene_videos:
+        scene_by_index.setdefault(scene.scene_index, scene.scene_id)
+
+    scoped_ids: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"(?:只|仅)\s*(?:修复|修改)\s*第\s*(\d+)\s*(?:个)?\s*分镜", text):
+        scene_id = scene_by_index.get(int(match.group(1)))
+        if scene_id and scene_id not in seen:
+            seen.add(scene_id)
+            scoped_ids.append(scene_id)
+    return scoped_ids
+
+
+def _filter_issues_to_scene_ids(issues: list[dict[str, Any]], scene_ids: list[str]) -> list[dict[str, Any]]:
+    if not scene_ids:
+        return issues
+    allowed = set(scene_ids)
+    return [issue for issue in issues if str(issue.get("scene_id") or "") in allowed]
+
+
+@router.post("/quality-review", response_model=VideoQualityReviewResponse)
+async def quality_review(body: VideoQualityReviewRequest) -> VideoQualityReviewResponse:
+    brief = {
+        **body.brief,
+        "plan": body.plan,
+        "form_values": body.form_values,
+        "intake_context": body.intake_context,
+        "selected_direction": body.selected_direction,
+    }
+    result = await review_video_quality(
+        VideoQCRequest(
+            merged_video_url=body.merged_video_url,
+            scene_videos=[scene.model_dump() for scene in body.scene_videos],
+            scene_packages=body.scene_packages,
+            brief=brief,
+            materials=body.materials,
+            platform=body.platform,
+            ratio=body.ratio,
+            size=body.size,
+            expected_duration_sec=body.expected_duration_sec,
+            user_feedback=body.user_feedback,
+            checks=body.checks or list(VideoQCRequest().checks),
+        ),
+        skill=get_video_quality_review_skill(),
+    )
+    return _quality_response_from_core(result)
+
+
 @router.post("/analyze-flaws", response_model=VideoFlawAnalysisResponse)
 async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalysisResponse:
-    skill = get_video_flaw_analysis_skill()
-    result = await skill.analyze_video_flaws(
-        merged_video_url=body.merged_video_url,
-        scene_videos=[scene.model_dump() for scene in body.scene_videos],
-        scene_packages=body.scene_packages,
-        materials=body.materials,
-        user_feedback=body.user_feedback,
+    result = await review_video_quality(
+        VideoQCRequest(
+            merged_video_url=body.merged_video_url,
+            scene_videos=[scene.model_dump() for scene in body.scene_videos],
+            scene_packages=body.scene_packages,
+            brief={
+                "plan": body.plan,
+                "form_values": body.form_values,
+                "intake_context": body.intake_context,
+                "selected_direction": body.selected_direction,
+            },
+            materials=body.materials,
+            user_feedback=body.user_feedback or "",
+            checks=["product_consistency"],
+        ),
+        skill=get_video_quality_review_skill(),
     )
-    endpoint = result.raw.get("endpoint")
+    endpoint = result.endpoint
     quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
     message = "视频穿帮分析完成。" if result.ok else (result.error or "视频穿帮分析失败。")
     if quota_insufficient:
         message = quota_resume_message(result.error)
+    legacy_issues = _legacy_flaw_issues(result)
+    scoped_scene_ids = _scene_ids_by_explicit_feedback_scope(body.user_feedback, body.scene_packages, body.scene_videos)
+    if scoped_scene_ids:
+        legacy_issues = _filter_issues_to_scene_ids(legacy_issues, scoped_scene_ids)
+        if not legacy_issues:
+            legacy_issues = [
+                {
+                    "scene_id": scene_id,
+                    "category": "product_consistency",
+                    "message": "用户意见明确要求只修复该分镜",
+                }
+                for scene_id in scoped_scene_ids
+            ]
+    affected_scene_ids = scoped_scene_ids or _legacy_flaw_affected_scene_ids(legacy_issues, result.affected_scene_ids)
+    revision_prompt = result.revision_prompt
+    if scoped_scene_ids:
+        allowed = set(scoped_scene_ids)
+        scene_labels = "、".join(f"第{scene.scene_index}个分镜" for scene in body.scene_videos if scene.scene_id in allowed) or "指定分镜"
+        revision_prompt = f"请只重生成{scene_labels}，恢复为原方案要求的产品一致性画面；其他分镜复用原视频，不要重新生成。"
     return VideoFlawAnalysisResponse(
         ok=result.ok,
         endpoint=endpoint if isinstance(endpoint, str) and endpoint else "/api/creative/analyze_video_flaws",
         task_id=result.task_id,
+        passed=result.passed,
+        score=result.score,
+        summary_markdown=result.summary_markdown,
         flaw_analysis_markdown=result.flaw_analysis_markdown,
-        issues=result.issues,
-        affected_scene_ids=result.affected_scene_ids,
-        revision_prompt=result.revision_prompt,
+        issues=legacy_issues,
+        affected_scene_ids=affected_scene_ids,
+        revision_prompt=revision_prompt,
+        check_results=[item.model_dump() for item in result.check_results],
         error=result.error,
         message=message,
         quota_insufficient=quota_insufficient,

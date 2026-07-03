@@ -73,8 +73,8 @@ flowchart TD
   SB --> SV["生成每段场景视频"]
   SV --> MERGE["按 scene_index 合并视频"]
   MERGE --> VR["视频结果确认<br/>无意见结束 / 修改循环"]
-  VR -->|"提出修改"| FLAW["视频穿帮分析 Skill"]
-  FLAW --> SB
+  VR -->|"提出修改"| QC["视频综合质检 Skill"]
+  QC --> SB
   VA --> DONE["返回 storyboard 分析结果"]
   IR --> DONE
   VR --> DONE
@@ -162,7 +162,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 | EditVideoSkill | `run_generation.py` | `/api/video/edit-video` | 编辑视频 |
 | ExtendVideoSkill | `run_generation.py` | `/api/video/extend-video` | 延伸视频 |
 | VideoMergeSkill | `run_generation.py` | `/api/video/merge` | 合并视频 |
-| VideoFlawAnalysisSkill | `run_generation.py` | `/api/creative/analyze_video_flaws` | 穿帮分析 |
+| VideoQualityReviewSkill | `backend/pixelflow/qc/video_review.py` + `run_generation.py` | `/api/creative/analyze_video_flaws` | 综合质检：方案一致性、分镜覆盖、产品一致性/穿帮、播放稳定性、手机端需求 |
+| VideoFlawAnalysisSkill | `run_generation.py` | `/api/creative/analyze_video_flaws` | 旧穿帮分析兼容入口 |
 
 视频生成总规则：
 
@@ -449,11 +450,11 @@ sequenceDiagram
 flowchart TD
   A["用户查看合并视频"] --> B{"是否提出修改意见"}
   B -->|"否 / 30 秒无反馈"| DONE["流程结束"]
-  B -->|"是"| C["调用 /agent/flows/video/analyze-flaws"]
-  C --> D["返回穿帮信息、affected_scene_ids、revision_prompt"]
+  B -->|"是"| C["调用 /agent/flows/video/analyze-flaws<br/>旧入口内部转综合质检"]
+  C --> D["返回质检信息、affected_scene_ids、revision_prompt"]
   D --> E{"用户选择修改范围"}
   E -->|"只按用户意见"| F["定位用户意见涉及场景"]
-  E -->|"结合穿帮信息"| G["用户意见场景 + affected_scene_ids"]
+  E -->|"结合质检结果"| G["用户意见场景 + affected_scene_ids"]
   F --> H["重新生成受影响场景视频"]
   G --> H
   H --> I["复用未受影响场景视频"]
@@ -466,7 +467,10 @@ flowchart TD
 - 只重生受影响场景，未受影响场景直接复用。
 - 合并仍按 `scene_index` 排序。
 - 新旧场景视频和最新合并视频都要返回前端。
-- 如果穿帮分析失败，应允许用户只按自己的修改意见继续。
+- `/agent/flows/video/quality-review` 是综合质检直连接口；`/agent/flows/video/analyze-flaws` 为旧前端兼容入口，内部转调综合质检并保持旧 response schema。
+- 综合质检由 deterministic QC 和 semantic QC 合并：deterministic QC 覆盖片段完整性、黑屏/冻结、分辨率和画幅；semantic QC 覆盖方案一致性、分镜覆盖和产品一致性/穿帮。
+- 旧 `analyze-flaws` 只向旧调用方返回产品一致性/穿帮类 issues，避免播放稳定性或手机端规格问题破坏旧 schema 预期。
+- 如果综合质检失败，应允许用户只按自己的修改意见继续。
 
 ## 10. 失败、重试与额度不足
 
