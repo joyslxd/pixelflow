@@ -65,12 +65,20 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
   assert.match(workspaceSource, /generatedSceneVideos\.failed_scenes|failed_scenes/);
 });
 
-test("final video result can reopen storyboard with scene video previews", () => {
-  assert.match(messageBubbleSource, /msg\.artifact\?\.type === "video_result"[\s\S]*查看分镜/);
+function videoResultBranchSource() {
+  const start = messageBubbleSource.indexOf('msg.artifact?.type === "video_result"');
+  const end = messageBubbleSource.indexOf(") : msg.artifact ?", start);
+  assert.notEqual(start, -1, "video result branch must exist");
+  assert.notEqual(end, -1, "generic artifact branch must follow video result branch");
+  return messageBubbleSource.slice(start, end);
+}
+
+test("original scene package button reopens storyboard with generated scene video previews", () => {
+  assert.doesNotMatch(videoResultBranchSource(), /查看分镜/);
   assert.match(storyboardPanelSource, /generatedSceneVideos/);
   assert.match(storyboardPanelSource, /sceneVideoForScene/);
   assert.match(storyboardPanelSource, /<video[\s\S]*controls[\s\S]*preload="metadata"/);
   assert.match(storyboardPanelSource, /dirtySceneIds|已修改/);
-  assert.match(workspaceSource, /msg\.artifact\.type === "video_result"[\s\S]*setSelectedStoryboardMessageId\(msg\.id\)/);
+  assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/);
   assert.match(workspaceSource, /videoScenePackageEditedSceneIds/);
 });

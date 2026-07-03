@@ -794,13 +794,25 @@ function restoreLatestVideoScenePackagesFromContext(
 ): ChatMessage[] {
   const globalAssets = context.global_assets;
   const scenePackages = context.scene_packages;
+  const generatedSceneVideos = Array.isArray(context.generated_scene_videos)
+    ? {
+        ok: true,
+        endpoint: "/api/video/reference-mode-video",
+        scene_videos: context.generated_scene_videos as NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"],
+        failed_scenes: [],
+        message: "已恢复生成后的分镜视频。",
+      }
+    : undefined;
+  const mergedVideo = context.merged_video && typeof context.merged_video === "object"
+    ? context.merged_video as NonNullable<ChatArtifact["mergedVideo"]>
+    : undefined;
   const editedSceneIds = Array.isArray(context.video_scene_package_edited_scene_ids)
     ? context.video_scene_package_edited_scene_ids.map((item) => String(item)).filter(Boolean)
     : undefined;
   if (!globalAssets || !Array.isArray(scenePackages)) return messages;
   const latestIndex = [...messages]
     .reverse()
-    .findIndex((message) => Boolean(message.artifact?.videoScenePackages));
+    .findIndex((message) => message.artifact?.type === "video_scene_packages" && Boolean(message.artifact.videoScenePackages));
   if (latestIndex < 0) return messages;
   const messageIndex = messages.length - 1 - latestIndex;
   return messages.map((message, index) => {
@@ -815,6 +827,8 @@ function restoreLatestVideoScenePackagesFromContext(
           global_assets: globalAssets as typeof videoScenePackages.global_assets,
           scene_packages: scenePackages as typeof videoScenePackages.scene_packages,
         },
+        generatedSceneVideos: generatedSceneVideos || message.artifact.generatedSceneVideos,
+        mergedVideo: mergedVideo || message.artifact.mergedVideo,
         videoScenePackageEditedSceneIds: editedSceneIds || message.artifact.videoScenePackageEditedSceneIds,
       },
     };
@@ -1136,6 +1150,63 @@ export function WorkspacePage() {
       }),
     );
     return updatedPackages;
+  };
+
+  const updateOriginalScenePackageMessageWithVideoResult = (
+    sourceMessageId: string,
+    targetConversationId: string,
+    videoScenePackages: PrepareScenePackagesResponse,
+    generatedSceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>,
+    mergedVideo: NonNullable<ChatArtifact["mergedVideo"]>,
+  ) => {
+    setMessages((items) => {
+      const sourceIndex = items.findIndex(
+        (message) =>
+          message.id === sourceMessageId &&
+          messageConversationId(message, targetConversationId) === targetConversationId &&
+          message.artifact?.type === "video_scene_packages" &&
+          Boolean(message.artifact.videoScenePackages),
+      );
+      const targetIndex = sourceIndex >= 0
+        ? sourceIndex
+        : items
+            .map((message, index) => ({ message, index }))
+            .reverse()
+            .find(
+              ({ message }) =>
+                messageConversationId(message, targetConversationId) === targetConversationId &&
+                message.artifact?.type === "video_scene_packages" &&
+                Boolean(message.artifact.videoScenePackages),
+            )?.index ?? -1;
+      if (targetIndex < 0) return items;
+      return items.map((message, index) => {
+        if (index !== targetIndex || !message.artifact?.videoScenePackages) return message;
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            videoScenePackages,
+            generatedSceneVideos,
+            mergedVideo,
+            videoScenePackageEditedSceneIds: [],
+          },
+        };
+      });
+    });
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          context: {
+            ...makeSnapshot(),
+            global_assets: videoScenePackages.global_assets,
+            scene_packages: videoScenePackages.scene_packages,
+            generated_scene_videos: generatedSceneVideos.scene_videos,
+            merged_video: mergedVideo,
+            video_scene_package_edited_scene_ids: [],
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
   };
 
   const storyboardMessageHasGlobalAsset = (message: ChatMessage | undefined, reference: SceneGlobalAssetReference): boolean => {
@@ -2142,6 +2213,15 @@ export function WorkspacePage() {
       selectedDirection: artifact.selectedDirection,
       plan: artifact.plan,
     }, targetConversationId);
+    if (mergedVideo.ok) {
+      updateOriginalScenePackageMessageWithVideoResult(
+        pendingVideoJob.source_message_id,
+        targetConversationId,
+        videoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+      );
+    }
     if (!mergedVideo.ok) releaseArtifactAction(processedKey);
     if (mergedVideo.ok) {
       window.setTimeout(() => {
@@ -2242,6 +2322,15 @@ export function WorkspacePage() {
       selectedDirection: artifact.selectedDirection,
       plan: artifact.plan,
     }, targetConversationId);
+    if (mergedVideo.ok) {
+      updateOriginalScenePackageMessageWithVideoResult(
+        pendingVideoJob.source_message_id,
+        targetConversationId,
+        artifact.videoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+      );
+    }
     if (!mergedVideo.ok) releaseArtifactAction(processedKey);
     if (mergedVideo.ok) {
       window.setTimeout(() => {
@@ -4443,7 +4532,7 @@ export function WorkspacePage() {
     if (!videoScenePackages?.ok || videoScenePackages.scene_packages.length === 0) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const dirtySceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
-    const isFinalStoryboardRegeneration = artifact.type === "video_result" && Boolean(artifact.mergedVideo?.ok && artifact.generatedSceneVideos?.scene_videos.length);
+    const isFinalStoryboardRegeneration = Boolean(artifact.mergedVideo?.ok && artifact.generatedSceneVideos?.scene_videos.length);
     if (isFinalStoryboardRegeneration && dirtySceneIds.size === 0) {
       pushAssistant("当前分镜没有检测到修改内容，无需重新生成视频。", targetConversationId);
       return;
@@ -4529,6 +4618,15 @@ export function WorkspacePage() {
         selectedDirection: msg.artifact?.selectedDirection,
         plan: msg.artifact?.plan,
       }, targetConversationId);
+      if (mergedVideo.ok) {
+        updateOriginalScenePackageMessageWithVideoResult(
+          msg.id,
+          targetConversationId,
+          videoScenePackages,
+          generatedSceneVideos,
+          mergedVideo,
+        );
+      }
       if (mergedVideo.ok) {
         window.setTimeout(() => {
           void handleAcceptVideoResult(videoResultMessage, true);
@@ -4755,7 +4853,7 @@ export function WorkspacePage() {
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
-          if (msg.artifact.type === "video_scene_packages" || (msg.artifact.type === "video_result" && msg.artifact.videoScenePackages)) {
+          if (msg.artifact.type === "video_scene_packages") {
             setSelectedStoryboardMessageId(msg.id);
             return;
           }

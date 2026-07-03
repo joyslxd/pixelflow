@@ -1113,7 +1113,7 @@ export function MessageBubble({
               </button>
             ) : null}
             {msg.artifact.mergedVideo?.ok && (
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-2">
                 <button
                   type="button"
                   onClick={() => onAcceptVideoResult?.(msg)}
@@ -1121,14 +1121,6 @@ export function MessageBubble({
                 >
                   <Check size={15} />
                   无意见，结束
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onOpenArtifact?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-                >
-                  <FileText size={15} />
-                  查看分镜
                 </button>
                 <button
                   type="button"
