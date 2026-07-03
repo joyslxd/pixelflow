@@ -510,6 +510,56 @@ def test_video_router_generates_scene_videos_in_parallel_and_aggregates_quota_on
     assert max_active > 1
 
 
+def test_video_router_caps_single_scene_video_job_concurrency_at_100_and_queues_extra_scenes(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    active = 0
+    max_active = 0
+    calls: list[str] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(kwargs["prompt"])
+            await asyncio.sleep(0.03)
+            active -= 1
+            return GenerationResult(
+                ok=True,
+                task_id=f"{kwargs['prompt']}-task",
+                url=f"https://x/{kwargs['prompt']}.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    scenes = [
+        {
+            "scene_id": f"scene-{index}",
+            "scene_index": index,
+            "duration_ms": 5000,
+            "prompt": f"scene-{index}",
+            "generation_mode": "text_to_video",
+        }
+        for index in range(1, 106)
+    ]
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/generate-scenes", json={"scenes": scenes})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert len(data["scene_videos"]) == 105
+    assert len(calls) == 105
+    assert max_active == 100
+
+
 def test_video_router_retries_scene_video_exceptions_three_times_without_blocking_other_scenes(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult

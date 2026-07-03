@@ -239,7 +239,7 @@ SmartPPT接口：
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
 - 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。最终视频卡片不再展示“查看分镜”。
 - 场景视频和合并视频生成完成后，前端会把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。用户继续点击原来的“查看分镜”时仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
-- 场景视频 job 内部按 `scene_index` 排序后并行调用 content-app 视频接口，当前最大并发数为 3；必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge` 合并，不能按完成先后顺序合并；如果只有 1 个分镜，`/agent/flows/video/merge` 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
+- 场景视频 job 内部按 `scene_index` 排序后并行调用 content-app 视频接口，当前最大并发数为 100；必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge` 合并，不能按完成先后顺序合并；如果只有 1 个分镜，`/agent/flows/video/merge` 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
 - 场景视频并行生成时，每个分镜最多尝试 3 次；普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
 - 场景视频失败或额度暂停后，前端再次点击同一场景包的“确认并生成视频”时，只把 `generatedSceneVideos.failed_scenes` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`，已成功的分镜视频从 `generatedSceneVideos.scene_videos` 复用；补齐后再按 `scene_index` 合并完整视频。
 - 用户在原场景包的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge` 合并新版最终视频，并再次回填原场景包卡片。
