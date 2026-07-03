@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -446,22 +447,29 @@ def test_video_router_rejects_more_than_nine_mention_reference_images(monkeypatc
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
-def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch):
+def test_video_router_generates_scene_videos_in_parallel_and_aggregates_quota_once(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
 
     calls: list[str] = []
+    active = 0
+    max_active = 0
 
     class FakeVideoSkill:
         async def reference_mode_video(self, **kwargs):
+            nonlocal active, max_active
             calls.append(kwargs["prompt"])
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
             if kwargs["prompt"].startswith("第一幕"):
                 return GenerationResult(
                     ok=False,
                     error="用户没有有效的额度",
                     raw={"quota_insufficient": True, "message": "用户没有有效的额度"},
                 )
-            return GenerationResult(ok=True, task_id="should-not-run", url="https://x/should-not-run.mp4")
+            return GenerationResult(ok=True, task_id="scene-2-task", url="https://x/scene-2.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
 
     monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
 
@@ -495,8 +503,65 @@ def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch)
     data = response.json()
     assert data["ok"] is False
     assert data["quota_insufficient"] is True
-    assert data["scene_videos"] == []
-    assert len(calls) == 1
+    assert data["message"].count("额度") <= 1
+    assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-2"]
+    assert [scene["scene_id"] for scene in data["failed_scenes"]] == ["scene-1"]
+    assert sorted(calls) == ["第一幕展示白色耳机", "第二幕展示降噪场景"]
+    assert max_active > 1
+
+
+def test_video_router_retries_scene_video_exceptions_three_times_without_blocking_other_scenes(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    attempts: dict[str, int] = {}
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            prompt = kwargs["prompt"]
+            attempts[prompt] = attempts.get(prompt, 0) + 1
+            await asyncio.sleep(0.01)
+            if prompt.startswith("第一幕"):
+                raise RuntimeError("供应商连接超时")
+            return GenerationResult(ok=True, task_id="scene-2-task", url="https://x/scene-2.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕展示白色耳机",
+                        "image_urls": ["https://x/role.png"],
+                    },
+                    {
+                        "scene_id": "scene-2",
+                        "scene_index": 2,
+                        "duration_ms": 8000,
+                        "prompt": "第二幕展示降噪场景",
+                        "image_urls": ["https://x/scene.png"],
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-2"]
+    assert data["failed_scenes"][0]["scene_id"] == "scene-1"
+    assert data["failed_scenes"][0]["attempts"] == 3
+    assert "供应商连接超时" in data["failed_scenes"][0]["error"]
+    assert attempts["第一幕展示白色耳机"] == 3
+    assert attempts["第二幕展示降噪场景"] == 1
 
 
 def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch):

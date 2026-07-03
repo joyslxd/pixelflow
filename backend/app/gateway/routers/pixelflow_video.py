@@ -35,6 +35,8 @@ _MAX_SCENE_PACKAGE_JOBS = 100
 _SCENE_ASSET_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_ASSET_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
+_SCENE_VIDEO_MAX_CONCURRENCY = 3
+_SCENE_VIDEO_MAX_ATTEMPTS = 3
 _SEEDANCE_MIN_SINGLE_CALL_DURATION = 5
 _SEEDANCE_MAX_SINGLE_CALL_DURATION = 10
 
@@ -728,8 +730,9 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         raise HTTPException(status_code=400, detail="scenes不能为空")
 
     skill = get_video_skill()
+    semaphore = asyncio.Semaphore(max(1, min(_SCENE_VIDEO_MAX_CONCURRENCY, len(body.scenes))))
 
-    async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
+    async def run_scene_once(scene: SceneGenerationItem, attempt: int) -> GeneratedSceneVideo | dict[str, Any]:
         image_urls = _scene_reference_image_urls(scene)
         if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
             return {
@@ -737,6 +740,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "scene_index": scene.scene_index,
                 "error": f"最多只能选择9张参考图，当前选择了{len(image_urls)}张。",
                 "image_count": len(image_urls),
+                "attempts": attempt,
             }
         mode = _select_scene_video_mode(scene, image_urls)
         prompt = _build_scene_video_prompt(scene)
@@ -765,6 +769,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "error": result.error or "场景视频生成失败",
                 "quota_insufficient": quota_insufficient,
                 "raw": result.raw,
+                "attempts": attempt,
             }
         return GeneratedSceneVideo(
             scene_id=scene.scene_id,
@@ -777,31 +782,53 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
             raw=result.raw,
         )
 
-    results: list[GeneratedSceneVideo | dict[str, Any]] = []
-    for scene in sorted(body.scenes, key=lambda item: item.scene_index):
-        item = await run_scene(scene)
-        results.append(item)
-        if isinstance(item, dict) and is_quota_insufficient(item):
-            scene_videos = sorted((result for result in results if isinstance(result, GeneratedSceneVideo)), key=lambda result: result.scene_index)
-            failed_scenes = [result for result in results if isinstance(result, dict)]
-            return GenerateSceneVideosResponse(
-                ok=False,
-                scene_videos=scene_videos,
-                failed_scenes=failed_scenes,
-                quota_insufficient=True,
-                message=quota_resume_message(str(item.get("error") or "")),
-            )
+    async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
+        async with semaphore:
+            last_failure: dict[str, Any] | None = None
+            for attempt in range(1, _SCENE_VIDEO_MAX_ATTEMPTS + 1):
+                try:
+                    item = await run_scene_once(scene, attempt)
+                except Exception as exc:  # noqa: BLE001 - per-scene vendor failures must not abort sibling scenes.
+                    last_failure = {
+                        "scene_id": scene.scene_id,
+                        "scene_index": scene.scene_index,
+                        "error": str(exc) or exc.__class__.__name__,
+                        "attempts": attempt,
+                    }
+                    continue
+                if isinstance(item, GeneratedSceneVideo):
+                    return item
+                last_failure = item
+                if is_quota_insufficient(item):
+                    return item
+            return last_failure or {
+                "scene_id": scene.scene_id,
+                "scene_index": scene.scene_index,
+                "error": "场景视频生成失败",
+                "attempts": _SCENE_VIDEO_MAX_ATTEMPTS,
+            }
+
+    results = await asyncio.gather(*(run_scene(scene) for scene in sorted(body.scenes, key=lambda item: item.scene_index)))
     scene_videos = sorted((item for item in results if isinstance(item, GeneratedSceneVideo)), key=lambda item: item.scene_index)
     failed_scenes = [item for item in results if isinstance(item, dict)]
     quota_insufficient = any(is_quota_insufficient(item) for item in failed_scenes)
     endpoints = {scene.endpoint for scene in scene_videos}
+    if failed_scenes and quota_insufficient:
+        non_quota_failed = [item for item in failed_scenes if not is_quota_insufficient(item)]
+        message = quota_resume_message("场景视频生成额度不足")
+        if non_quota_failed:
+            message = f"{message} 另有 {len(non_quota_failed)} 个分镜生成异常，请展开 failed_scenes 查看原因。"
+    elif failed_scenes:
+        message = "部分场景视频生成失败，请查看 failed_scenes。"
+    else:
+        message = "场景视频生成完成。"
     return GenerateSceneVideosResponse(
         ok=not failed_scenes,
         endpoint=next(iter(endpoints)) if len(endpoints) == 1 else "/api/video/mixed",
         scene_videos=scene_videos,
         failed_scenes=failed_scenes,
         quota_insufficient=quota_insufficient,
-        message="场景视频生成完成。" if not failed_scenes else (quota_resume_message() if quota_insufficient else "部分场景视频生成失败，请查看 failed_scenes。"),
+        message=message,
     )
 
 

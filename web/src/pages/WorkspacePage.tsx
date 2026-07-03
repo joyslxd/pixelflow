@@ -62,7 +62,7 @@ const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
-const AUTO_CONFIRM_TIMEOUT_MS = 60_000;
+const AUTO_CONFIRM_TIMEOUT_MS = 30_000;
 const AUTO_CONFIRM_TIMEOUT_SECONDS = AUTO_CONFIRM_TIMEOUT_MS / 1000;
 const CONTENT_APP_CONVERSATIONS_UPDATED_MESSAGE_TYPE = "PIXELFLOW_CONVERSATIONS_UPDATED";
 const SCENE_GLOBAL_ASSET_DELETE_PROMPT = (assetName: string) => `删除分镜故事板中的内容「${assetName}」。请只删除对应内容，并保持其他内容不变。`;
@@ -289,7 +289,7 @@ interface PendingScenePackageJob {
   artifact: ChatArtifact;
 }
 
-type PendingVideoJobKind = "scene_generation" | "scene_regeneration";
+type PendingVideoJobKind = "scene_generation" | "scene_regeneration" | "scene_failed_retry";
 
 interface SceneVideosJobRequest {
   scenes: SceneGenerationPayload[];
@@ -425,6 +425,17 @@ function formatSceneIndexesForMessage(
     .filter((scene) => sceneIds.has(scene.scene_id))
     .map((scene) => `第${scene.scene_index}个分镜`);
   return indexes.length ? indexes.join("、") : "未定位到具体分镜";
+}
+
+function failedSceneIdsFromGeneratedSceneVideos(
+  generatedSceneVideos: ChatArtifact["generatedSceneVideos"] | undefined,
+): Set<string> {
+  const sceneIds = new Set<string>();
+  for (const failedScene of generatedSceneVideos?.failed_scenes || []) {
+    const sceneId = String(failedScene.scene_id || failedScene.sceneId || "");
+    if (sceneId) sceneIds.add(sceneId);
+  }
+  return sceneIds;
 }
 
 function mergeMaterials(...groups: Array<Array<Record<string, unknown>> | undefined>): Array<Record<string, unknown>> {
@@ -2364,6 +2375,117 @@ export function WorkspacePage() {
     }).catch(() => {});
   };
 
+  const handleCompletedFailedSceneRetryJob = async (
+    pendingVideoJob: PendingVideoJob,
+    retried: NonNullable<ChatArtifact["generatedSceneVideos"]>,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingVideoJob.conversation_id;
+    const artifact = pendingVideoJob.artifact;
+    if (!artifact.videoScenePackages || !artifact.generatedSceneVideos) return;
+    const previousByScene = new Map(artifact.generatedSceneVideos.scene_videos.map((scene) => [scene.scene_id, scene]));
+    const retriedByScene = new Map(retried.scene_videos.map((scene) => [scene.scene_id, scene]));
+    const nextSceneVideos = artifact.videoScenePackages.scene_packages
+      .map((scene) => retriedByScene.get(scene.scene_id) || previousByScene.get(scene.scene_id))
+      .filter((scene): scene is NonNullable<typeof scene> => Boolean(scene));
+    const generatedSceneVideos = {
+      ...retried,
+      scene_videos: nextSceneVideos,
+      failed_scenes: retried.failed_scenes || [],
+    };
+
+    if (!retried.ok) {
+      const videoQuotaInsufficient = isQuotaInsufficientPayload(retried);
+      releaseArtifactAction(processedKey);
+      pushArtifact("视频生成失败：部分场景视频生成失败，请展开失败场景查看原因。", {
+        type: "video_result",
+        title: "视频生成结果",
+        description: videoQuotaInsufficient ? quotaMessage(retried.message || "场景视频生成额度不足。") : (retried.message || "部分场景视频生成失败，请查看失败场景。"),
+        actionLabel: "查看",
+        videoScenePackages: artifact.videoScenePackages,
+        generatedSceneVideos,
+        intent: "video",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+      }, targetConversationId);
+      await clearPendingVideoJob(targetConversationId, videoQuotaInsufficient ? "video_generation_quota_paused" : "video_generation_failed", {
+        affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
+        global_assets: artifact.videoScenePackages.global_assets,
+        intake_context: artifact.intakeContext,
+        scene_packages: artifact.videoScenePackages.scene_packages,
+        generated_scene_videos: nextSceneVideos,
+        failed_scenes: retried.failed_scenes,
+        video_quota_insufficient: videoQuotaInsufficient,
+      }).catch(() => {});
+      return;
+    }
+
+    pushAssistant("失败分镜已补齐，正在按场景顺序合并完整视频…", targetConversationId);
+    const duration = Math.max(1, Math.ceil(artifact.videoScenePackages.target_duration_ms / 1000));
+    const mergedVideo = await api.mergeSceneVideos({
+      scene_videos: nextSceneVideos.map((scene) => ({
+        scene_id: scene.scene_id,
+        scene_index: scene.scene_index,
+        video_url: scene.video_url,
+      })),
+      duration,
+      size: "1080p",
+    });
+    const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
+    const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频生成完成，请查看合并视频和场景视频。" : "视频合并失败，请查看错误信息。", {
+      type: "video_result",
+      title: "视频生成结果",
+      description: mergedVideo.ok ? "已复用此前成功分镜，并合并完整视频。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
+      actionLabel: "查看",
+      videoScenePackages: artifact.videoScenePackages,
+      generatedSceneVideos,
+      mergedVideo,
+      intent: "video",
+      formValues: artifact.formValues,
+      intakeContext: artifact.intakeContext,
+      materials: artifact.materials || [],
+      selectedDirection: artifact.selectedDirection,
+      plan: artifact.plan,
+    }, targetConversationId);
+    if (mergedVideo.ok) {
+      updateOriginalScenePackageMessageWithVideoResult(
+        pendingVideoJob.source_message_id,
+        targetConversationId,
+        artifact.videoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+      );
+    }
+    if (!mergedVideo.ok) releaseArtifactAction(processedKey);
+    if (mergedVideo.ok) {
+      window.setTimeout(() => {
+        void handleAcceptVideoResult(videoResultMessage, true);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
+    }
+    if (mergedVideo.merged_video_url) {
+      const results = videoResultsFromGeneratedScenes(
+        mergedVideo.merged_video_url,
+        mergedVideo.task_id,
+        generatedSceneVideos,
+        artifact.videoScenePackages.target_duration_ms,
+        mergedVideo.ok,
+      );
+      setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results, selectedVideo: null }));
+      setCanvasOpenForConversation(targetConversationId, true);
+    }
+    await clearPendingVideoJob(targetConversationId, mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed", {
+      affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
+      global_assets: artifact.videoScenePackages.global_assets,
+      intake_context: artifact.intakeContext,
+      scene_packages: artifact.videoScenePackages.scene_packages,
+      generated_scene_videos: nextSceneVideos,
+      merged_video: mergedVideo,
+    }).catch(() => {});
+  };
+
   const resumePendingVideoJob = async (pendingVideoJob: PendingVideoJob, processedKey = "") => {
     const pollKey = `${pendingVideoJob.conversation_id}:${pendingVideoJob.job_id}`;
     if (activeVideoJobPollsRef.current.has(pollKey)) return;
@@ -2387,6 +2509,8 @@ export function WorkspacePage() {
       if (!generatedSceneVideos || stopIfHidden()) return;
       if (pendingVideoJob.kind === "scene_regeneration") {
         await handleCompletedSceneRegenerationJob(pendingVideoJob, generatedSceneVideos, processedKey);
+      } else if (pendingVideoJob.kind === "scene_failed_retry") {
+        await handleCompletedFailedSceneRetryJob(pendingVideoJob, generatedSceneVideos, processedKey);
       } else {
         await handleCompletedSceneGenerationJob(pendingVideoJob, generatedSceneVideos, processedKey);
       }
@@ -4532,19 +4656,34 @@ export function WorkspacePage() {
     if (!videoScenePackages?.ok || videoScenePackages.scene_packages.length === 0) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const dirtySceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
+    const retrySceneIds = failedSceneIdsFromGeneratedSceneVideos(artifact.generatedSceneVideos);
     const isFinalStoryboardRegeneration = Boolean(artifact.mergedVideo?.ok && artifact.generatedSceneVideos?.scene_videos.length);
+    const isFailedSceneRetry = Boolean(artifact.generatedSceneVideos && !artifact.generatedSceneVideos.ok && retrySceneIds.size > 0);
     if (isFinalStoryboardRegeneration && dirtySceneIds.size === 0) {
       pushAssistant("当前分镜没有检测到修改内容，无需重新生成视频。", targetConversationId);
+      return;
+    }
+    if (artifact.generatedSceneVideos && !artifact.generatedSceneVideos.ok && retrySceneIds.size === 0) {
+      pushAssistant("当前失败结果没有定位到具体分镜，无法只重试异常片段。请重新生成场景包后再试。", targetConversationId);
       return;
     }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(isFinalStoryboardRegeneration ? `已保存分镜修改，正在重生成 ${dirtySceneIds.size} 个已修改分镜视频…` : "场景包已确认，正在生成场景视频…", targetConversationId);
+    pushAssistant(
+      isFinalStoryboardRegeneration
+        ? `已保存分镜修改，正在重生成 ${dirtySceneIds.size} 个已修改分镜视频…`
+        : isFailedSceneRetry
+          ? `正在重新生成 ${retrySceneIds.size} 个失败或额度暂停的分镜视频…`
+          : "场景包已确认，正在生成场景视频…",
+      targetConversationId,
+    );
     try {
       const request = isFinalStoryboardRegeneration
         ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds)
-        : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds);
+        : isFailedSceneRetry
+          ? sceneVideoRequestFromPackages(videoScenePackages, retrySceneIds)
+          : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds);
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = isFinalStoryboardRegeneration
         ? {
@@ -4557,20 +4696,33 @@ export function WorkspacePage() {
             artifact: { ...artifact, videoScenePackageEditedSceneIds: Array.from(dirtySceneIds) },
             affected_scene_ids: Array.from(dirtySceneIds),
           }
-        : {
-            job_id: started.job_id,
-            conversation_id: targetConversationId,
-            source_message_id: msg.id,
-            kind: "scene_generation",
-            started_at: new Date().toISOString(),
-            request,
-            artifact,
-          };
-      await persistPendingVideoJob(pendingVideoJob, targetConversationId, isFinalStoryboardRegeneration ? "video_regeneration_running" : "video_generation_running", {
+        : isFailedSceneRetry
+          ? {
+              job_id: started.job_id,
+              conversation_id: targetConversationId,
+              source_message_id: msg.id,
+              kind: "scene_failed_retry",
+              started_at: new Date().toISOString(),
+              request,
+              artifact,
+              affected_scene_ids: Array.from(retrySceneIds),
+            }
+          : {
+              job_id: started.job_id,
+              conversation_id: targetConversationId,
+              source_message_id: msg.id,
+              kind: "scene_generation",
+              started_at: new Date().toISOString(),
+              request,
+              artifact,
+            };
+      await persistPendingVideoJob(pendingVideoJob, targetConversationId, isFinalStoryboardRegeneration || isFailedSceneRetry ? "video_regeneration_running" : "video_generation_running", {
         global_assets: videoScenePackages.global_assets,
         intake_context: artifact.intakeContext,
         scene_packages: videoScenePackages.scene_packages,
-        affected_scene_ids: isFinalStoryboardRegeneration ? Array.from(dirtySceneIds) : undefined,
+        generated_scene_videos: artifact.generatedSceneVideos?.scene_videos,
+        failed_scenes: artifact.generatedSceneVideos?.failed_scenes,
+        affected_scene_ids: isFinalStoryboardRegeneration ? Array.from(dirtySceneIds) : isFailedSceneRetry ? Array.from(retrySceneIds) : undefined,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);
     } catch (err) {

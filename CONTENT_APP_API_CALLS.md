@@ -32,7 +32,7 @@
 
 ## 主 PixelFlow 流程实际调用
 
-视频场景包和场景参考图没有新增 content-app 接口路径：前端现在先调用 PixelFlow 网关的 `/agent/flows/video/prepare-scene-packages/start` 或 `/agent/flows/video/generate-scene-assets/start` 获取 Python `job_id`，再轮询对应 `/jobs/{job_id}`。其中场景包主链路 job 内部仍按原能力生成可编辑场景包，并通过 `/api/picture/text_to_image` 生成角色三视图、场景图和道具图；用户离开再回来只查询已有 Python job，不会重复触发 content-app 扣费接口。
+视频场景包和场景参考图没有新增 content-app 接口路径：前端现在先调用 PixelFlow 网关的 `/agent/flows/video/prepare-scene-packages/start` 或 `/agent/flows/video/generate-scene-assets/start` 获取 Python `job_id`，再轮询对应 `/jobs/{job_id}`。其中场景包主链路 job 内部仍按原能力生成可编辑场景包，并通过 `/api/picture/text_to_image` 生成角色三视图、场景图和道具图；用户离开再回来只查询已有 Python job，不会重复触发 content-app 扣费接口。场景视频生成 job 内部会并行调用下方视频生成接口，当前最大并发数为 3；所有分镜都成功、失败或额度暂停后才统一返回。全部成功后按 `scene_index` 调用 `/api/video/merge`，失败重试时只重新提交 `failed_scenes` 中的分镜，已成功分镜复用旧视频 URL。
 
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
@@ -59,7 +59,7 @@
 | `/api/asset/create` | `POST` | `run_generation.create_virtual_human_asset()` | 在 content-app 资产库创建资产记录。 | `AssetLibraryController.createAsset()` | 依赖前一步返回的第三方资产 ID。 |
 | `/api/asset/refrence-urls` | `POST` | `run_generation.resolve_asset_urls()` | 根据 asset id 查询可引用的 `refrence_url`。 | `AssetLibraryController.getRefrenceUrls()` | 接口名保留了后端现有拼写 `refrence`。 |
 | `/api/video/text-to-video` | `POST` | `run_generation.text_to_video()` | 纯文本生成视频。 | `VideoController.textToVideo()` | CLI/工具能力，当前主流程未直接调用；视频生成默认最多等 1 小时。 |
-| `/api/video/reference-mode-video` | `POST` | `run_generation.reference_mode_video()` | 用图片、视频、音频参考素材生成视频。 | `VideoController.referenceModeVideo()` | 长参考视频、原生音频参考视频 helper 会复用该 wrapper；视频生成默认最多等 1 小时。最终视频生成后，用户从原 `video_scene_packages` 卡片进入“查看分镜”并只修改部分分镜时，PixelFlow 只会把 dirty scenes 提交到 `/agent/flows/video/generate-scenes/start`，该 wrapper 只为这些分镜实际触发；未修改分镜复用旧视频 URL。 |
+| `/api/video/reference-mode-video` | `POST` | `run_generation.reference_mode_video()` | 用图片、视频、音频参考素材生成视频。 | `VideoController.referenceModeVideo()` | 长参考视频、原生音频参考视频 helper 会复用该 wrapper；视频生成默认最多等 1 小时。场景视频 job 可能并行触发多个该 wrapper 调用，当前最大并发数为 3；最终视频生成后，用户从原 `video_scene_packages` 卡片进入“查看分镜”并只修改部分分镜时，PixelFlow 只会把 dirty scenes 提交到 `/agent/flows/video/generate-scenes/start`，该 wrapper 只为这些分镜实际触发；未修改分镜复用旧视频 URL。失败或额度暂停时，重试也只为 `failed_scenes` 中的分镜触发。 |
 | `/api/video/extend-video` | `POST` | `run_generation.extend_video()`，`BorgriseSkill.extend_video()` | 在已有视频基础上继续延展内容。 | `VideoController.extendVideo()` | 长视频 helper 会复用；当前 `nodes.py` 主生成流程未直接调用；视频生成默认最多等 1 小时。 |
 | `/api/video/merge` | `POST` | `run_generation.merge_videos()` | 合并多个视频 URL 为一个交付视频。 | `VideoController.mergeVideos()` | 请求 body 只传 `videoUrls`，项目归属由 content-app 登录态处理。 |
 | `/api/picture/text_to_image` | `POST` | `run_generation.text_to_image()` | 文生图。 | `ImageController.textToImage()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |

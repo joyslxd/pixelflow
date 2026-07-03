@@ -168,7 +168,7 @@ test("ppt intent opens a ppt requirement form instead of image video planning", 
   assert.match(genParamsDialogSource, /ppt_style/, "PPT form must include ppt_style");
   assert.match(genParamsDialogSource, /attachments/, "PPT form must include attachments");
   assert.match(workspaceSource, /if \(intake\.intent === "ppt"\)/, "handleSend must branch PPT intent before image/video creation flow");
-  assert.match(workspaceSource, /api\.startPptSummaryJob/, "PPT form confirmation must start SmartPPT summary job");
+  assert.match(workspaceSource, /api\.createPptSummaryJob/, "PPT form confirmation must start SmartPPT summary job");
 });
 
 test("ppt form supports custom style and does not expose free-form as a fixed option", () => {
@@ -231,7 +231,8 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
-  assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*30_000/, "successful direct image edit must auto-accept after 30 seconds");
+  assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 30_000/, "auto-confirm timeout must be 30 seconds");
+  assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 30 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
@@ -287,7 +288,8 @@ test("ppt image pages stream partial status into the existing artifact card", ()
   assert.match(apiSource, /startPptImagesJob:[\s\S]*onStatus\?: PptJobStatusCallback/, "PPT image job must accept a status callback");
   assert.match(workspaceSource, /pendingPptImagesFromContentJson/, "Workspace must show PPT page placeholders before images finish");
   assert.match(workspaceSource, /updatePptImagesArtifactInMessage/, "Workspace must update the existing PPT image card");
-  assert.match(workspaceSource, /api\.startPptImagesJob\([\s\S]*partialImages\?\.pages/, "PPT image polling must stream page status into the card");
+  assert.match(workspaceSource, /api\.createPptImagesJob/, "Workspace must start the PPT image job");
+  assert.match(workspaceSource, /partialImages\?\.pages[\s\S]*updatePptImagesArtifactInMessage/, "PPT image polling must stream page status into the card");
 });
 
 test("closing the requirement dialog cancels and terminates the pending flow", () => {
@@ -331,7 +333,8 @@ test("ppt page regenerate updates the same card and hides regenerate while a pag
   assert.notEqual(end, -1, "handleGeneratePptFile must follow handleRegeneratePptImage");
   const source = workspaceSource.slice(start, end);
   assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*runningImages\)/, "regenerate must switch the target page to running inside the same card");
-  assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*nextImages\)/, "regenerate result must update the same card");
+  assert.match(source, /image_message_id:\s*msg\.id/, "regenerate job must remember the target card id");
+  assert.match(workspaceSource, /handleCompletedPptImageRegenerationJob[\s\S]*updatePptImagesArtifactInMessage\(imageMessageId,\s*targetConversationId,\s*nextImages\)/, "regenerate result must update the same card");
   assert.equal(source.includes("pushPptImagesArtifact"), false, "regenerate must not append a new PPT image grid");
   assert.match(messageBubbleSource, /page\.status !== "running"/, "running PPT pages must hide the regenerate button");
   assert.match(messageBubbleSource, /loadingDots/, "PPT loading text should use animated dots");
@@ -501,6 +504,14 @@ test("scene package storyboard edits after final video regenerate only dirty sce
   assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*dirtySceneIds\)/, "request builder must receive only dirty scenes for final storyboard edits");
   assert.doesNotMatch(source, /artifact\.type === "video_result"/, "dirty-scene regeneration must work from the original scene package card, not only video_result cards");
   assert.match(workspaceSource, /regeneratedByScene\.get\(scene\.scene_id\) \|\| previousByScene\.get\(scene\.scene_id\)/, "regeneration completion must reuse unchanged scene videos");
+});
+
+test("failed scene video retries only resubmit failed scenes and reuse successful scene videos", () => {
+  const source = handleGenerateVideoFromScenePackagesSource();
+  assert.match(source, /failedSceneIdsFromGeneratedSceneVideos/, "failed scene ids must be extracted from generatedSceneVideos.failed_scenes");
+  assert.match(source, /kind:\s*"scene_failed_retry"/, "retrying failed scene videos must use a distinct recoverable job kind");
+  assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*retrySceneIds\)/, "failed scene retry must only submit the failed scene ids");
+  assert.match(workspaceSource, /previousByScene\.get\(scene\.scene_id\)/, "retry completion must reuse previously successful scene videos");
 });
 
 test("scene generation completion updates the original scene package card with videos", () => {
