@@ -155,7 +155,7 @@ function progressDescription(content: string): string {
   if (/PPT 附件/.test(content)) return "生成 PPT 附件";
   if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
   if (/生成图片|图片生成/.test(content)) return "生成图片";
-  if (/视频分析|媒体链接|穿帮分析/.test(content)) return "分析视频内容";
+  if (/视频分析|媒体链接|穿帮分析|综合质检/.test(content)) return "分析视频内容";
   if (/采集 Agent 判断这是视频生成需求/.test(content)) return "计划文件生成中";
   if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
   if (/plan\.md|计划文件|创作方案/.test(content)) return "生成计划文件";
@@ -1027,7 +1027,7 @@ export function MessageBubble({
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
               >
                 <Sparkles size={15} />
-                结合穿帮信息修改
+                结合质检结果修改
               </button>
             </div>
           </div>

@@ -22,7 +22,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
-| 视频修改循环 | 可用 | 支持穿帮分析、按受影响场景重生并重新合并 |
+| 视频修改循环 | 可用 | 支持综合质检、按受影响场景重生并重新合并 |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
 | 旧 LangGraph 任务流 | 保留 | `/agent/flows` 旧任务、SSE、资产接口仍存在，用于兼容 |
@@ -127,7 +127,8 @@ flowchart TD
 | 视频 | POST | `/agent/flows/video/generate-direct/start` | 启动直接视频异步生成 |
 | 视频 | GET | `/agent/flows/video/generate-direct/jobs/{job_id}` | 查询直接视频生成结果 |
 | 视频 | POST | `/agent/flows/video/merge` | 合并场景视频 |
-| 视频 | POST | `/agent/flows/video/analyze-flaws` | 视频穿帮分析 |
+| 视频 | POST | `/agent/flows/video/quality-review` | 视频综合质检，覆盖方案一致性、分镜覆盖、产品一致性/穿帮、播放稳定性和手机端需求 |
+| 视频 | POST | `/agent/flows/video/analyze-flaws` | 兼容旧前端的视频穿帮分析入口，内部转调综合质检并只返回产品一致性问题 |
 | PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -174,7 +175,7 @@ flowchart TD
 | 文本抽取媒体链接 | `/api/creative/extractMediaLinks` |
 | 单视频拆解 | `/api/creative/decompose_video_to_storyboard` |
 | 多视频拆解 | `/api/creative/batch_decompose_video_to_storyboard` |
-| 视频穿帮分析 | `/api/creative/analyze_video_flaws` |
+| 视频综合质检 / 旧穿帮分析 | `/api/creative/analyze_video_flaws` |
 
 SmartPPT：
 

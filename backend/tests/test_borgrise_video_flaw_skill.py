@@ -138,6 +138,27 @@ def test_borgrise_video_quality_review_passes_quality_context(monkeypatch):
     assert result.issues == []
 
 
+def test_borgrise_video_quality_review_treats_success_false_as_failure(monkeypatch):
+    def fake_analyze_video_flaws(**kwargs):
+        return {
+            "success": False,
+            "message": "供应商业务失败",
+            "endpoint": "/api/creative/analyze_video_flaws",
+        }
+
+    monkeypatch.setattr(run_generation, "analyze_video_flaws", fake_analyze_video_flaws)
+
+    result = asyncio.run(
+        BorgriseSkill().review_video_quality(
+            merged_video_url="https://x/merged.mp4",
+            scene_videos=[{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
+        )
+    )
+
+    assert result.ok is False
+    assert result.error == "供应商业务失败"
+
+
 def test_borgrise_media_link_extraction_maps_links(monkeypatch):
     def fake_extract_media_links(**kwargs):
         assert "请分析视频" in kwargs["text"]

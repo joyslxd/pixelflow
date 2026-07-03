@@ -37,11 +37,10 @@ import {
 } from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
-  collectSceneImageUrls,
   deleteGlobalSceneAssetReference,
-  durationMsForSubmit,
   inferTargetDurationMs,
   replaceGlobalSceneAssetImage,
+  sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
   syncScenePackageMentionImageUrls,
@@ -282,27 +281,6 @@ function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
     image_size: form.image_size,
     image_count: form.image_count,
   };
-}
-
-function revisedScenePrompt(
-  scene: PrepareScenePackagesResponse["scene_packages"][number],
-  feedback: string,
-  flawAnalysis: NonNullable<ChatMessage["artifact"]>["videoFlawAnalysis"] | undefined,
-  useFlawAnalysis: boolean,
-): string {
-  if (useFlawAnalysis && flawAnalysis) {
-    const parts = [
-      "请根据视频综合质检结果修复当前分镜。若当前分镜旧提示词与用户意见或质检修复建议冲突，必须以用户意见和质检修复建议为准。",
-      `当前分镜旧提示词（仅供定位，不可覆盖质检建议）：${scene.prompt}`,
-      `用户修改/质检意见：${feedback.trim()}`,
-    ];
-    if (flawAnalysis.revision_prompt) {
-      parts.push(`质检修复建议：${flawAnalysis.revision_prompt}`);
-    }
-    return parts.filter(Boolean).join("\n");
-  }
-  const parts = [scene.prompt, `用户修改意见：${feedback.trim()}`];
-  return parts.filter(Boolean).join("\n");
 }
 
 function formatSceneIndexesForMessage(
@@ -1768,47 +1746,15 @@ export function WorkspacePage() {
   const sceneVideoRequestFromPackages = (
     videoScenePackages: PrepareScenePackagesResponse,
     sceneIds?: Set<string>,
+    editedSceneIds: Set<string> = sceneIds || new Set<string>(),
   ): SceneVideosJobRequest => ({
     scenes: videoScenePackages.scene_packages
       .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
-      .map((scene) => ({
-        scene_id: scene.scene_id,
-        scene_index: scene.scene_index,
-        duration_ms: durationMsForSubmit(scene.duration_ms),
-        prompt: scene.prompt,
-        storyline: scene.storyline,
-        shot_description: scene.shot_description,
-        narration: scene.narration,
-        generation_mode: scene.generation_mode,
-        image_urls: collectSceneImageUrls(scene, videoScenePackages.global_assets),
-        video_urls: scene.video_urls || [],
-        audio_urls: scene.audio_urls || [],
-      })),
-    ratio: "9:16",
-    size: "720p",
-    sound: "on",
-  });
-
-  const sceneVideoRevisionRequest = (
-    artifact: ChatArtifact,
-    affectedSceneIds: Set<string>,
-    useFlawAnalysis: boolean,
-  ): SceneVideosJobRequest => ({
-    scenes: (artifact.videoScenePackages?.scene_packages || [])
-      .filter((scene) => affectedSceneIds.has(scene.scene_id))
-      .map((scene) => ({
-        scene_id: scene.scene_id,
-        scene_index: scene.scene_index,
-        duration_ms: durationMsForSubmit(scene.duration_ms),
-        prompt: revisedScenePrompt(scene, artifact.videoRevisionFeedback || "", artifact.videoFlawAnalysis, useFlawAnalysis),
-        storyline: scene.storyline,
-        shot_description: scene.shot_description,
-        narration: scene.narration,
-        generation_mode: scene.generation_mode,
-        image_urls: collectSceneImageUrls(scene, artifact.videoScenePackages?.global_assets),
-        video_urls: scene.video_urls || [],
-        audio_urls: scene.audio_urls || [],
-      })),
+      .map((scene) =>
+        sceneGenerationPayloadFromPackage(scene, videoScenePackages.global_assets, {
+          edited: editedSceneIds.has(scene.scene_id),
+        }) as SceneGenerationPayload,
+      ),
     ratio: "9:16",
     size: "720p",
     sound: "on",
@@ -2714,7 +2660,7 @@ export function WorkspacePage() {
             .catch(() => {});
         }
       } catch (err) {
-        pushAssistant(`视频穿帮分析失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
+        pushAssistant(`视频综合质检失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
         setBusyForConversation(activeConversation, false);
       }
@@ -3836,7 +3782,7 @@ export function WorkspacePage() {
     try {
       const request = isFinalStoryboardRegeneration
         ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds)
-        : sceneVideoRequestFromPackages(videoScenePackages);
+        : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds);
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = isFinalStoryboardRegeneration
         ? {
@@ -3969,7 +3915,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     videoRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
-    pushAssistant("请在输入框填写视频修改意见。我会先做穿帮分析，再让你选择是否结合分析结果重生成受影响场景。", targetConversationId);
+    pushAssistant("请在输入框填写视频修改意见。我会先做综合质检，再让你选择是否结合质检结果重生成受影响场景。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -4010,6 +3956,7 @@ export function WorkspacePage() {
               affectedSceneIds,
               artifact.videoRevisionFeedback || "",
               artifact.videoFlawAnalysis,
+              artifact.videoScenePackages.global_assets,
             ) as typeof artifact.videoScenePackages.scene_packages,
           }
         : artifact.videoScenePackages;
@@ -4018,7 +3965,9 @@ export function WorkspacePage() {
         videoScenePackages: nextVideoScenePackages,
         videoScenePackageEditedSceneIds: Array.from(affectedSceneIds),
       };
-      const request = sceneVideoRevisionRequest(revisionArtifact, affectedSceneIds, useFlawAnalysis);
+      const request = useFlawAnalysis
+        ? sceneVideoRequestFromPackages(nextVideoScenePackages, affectedSceneIds)
+        : sceneVideoRequestFromPackages(nextVideoScenePackages, affectedSceneIds, new Set<string>());
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = {
         job_id: started.job_id,

@@ -915,7 +915,7 @@ def test_video_router_analyzes_flaws(monkeypatch):
     assert data["issues"] == [{"scene_id": "scene-1", "current": "黑色", "expected": "白色", "category": "product_consistency"}]
     assert "code" not in data["issues"][0]
     assert "severity" not in data["issues"][0]
-    assert data["passed"] is True
+    assert data["passed"] is False
     assert "check_results" in data
 
 

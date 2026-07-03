@@ -62,6 +62,20 @@ export interface SceneFlawLike {
   revision_prompt?: string;
 }
 
+export interface SceneGenerationPayloadLike {
+  scene_id: string;
+  scene_index: number;
+  duration_ms: number;
+  prompt: string;
+  storyline?: string;
+  shot_description?: Record<string, unknown>;
+  narration?: string;
+  generation_mode?: string | null;
+  image_urls?: string[];
+  video_urls?: string[];
+  audio_urls?: string[];
+}
+
 export function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
@@ -178,6 +192,26 @@ export function collectSceneImageUrls(
   return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
 }
 
+export function sceneGenerationPayloadFromPackage(
+  scene: ScenePackageRecord,
+  globalAssets?: GlobalSceneAssets,
+  options: { edited?: boolean } = {},
+): SceneGenerationPayloadLike {
+  return {
+    scene_id: scene.scene_id,
+    scene_index: scene.scene_index,
+    duration_ms: durationMsForSubmit(scene.duration_ms),
+    prompt: options.edited ? editedSceneGenerationPrompt(scene) : scene.prompt,
+    storyline: scene.storyline,
+    shot_description: scene.shot_description,
+    narration: scene.narration,
+    generation_mode: scene.generation_mode,
+    image_urls: options.edited ? collectExplicitSceneImageUrls(scene, globalAssets) : collectSceneImageUrls(scene, globalAssets),
+    video_urls: scene.video_urls || [],
+    audio_urls: scene.audio_urls || [],
+  };
+}
+
 export function sceneIdsForRevision(
   scenes: Array<Pick<ScenePackageRecord, "scene_id" | "scene_index">>,
   feedback: string,
@@ -215,15 +249,19 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
   affectedSceneIds: Set<string>,
   feedback: string,
   flawAnalysis: SceneFlawLike | undefined,
+  globalAssets?: GlobalSceneAssets,
 ): T[] {
   const revisionPrompt = flawAnalysis?.revision_prompt?.trim();
   if (!revisionPrompt) return scenes;
+  const continuityReferences = revisionContinuityReferences(globalAssets);
+  const continuityReferenceIds = continuityReferences.map((reference) => reference.asset_id);
   return scenes.map((scene) => {
     if (!affectedSceneIds.has(scene.scene_id)) return scene;
     const repairContract = [
       `质检修复建议：${revisionPrompt}`,
       `用户修改/质检意见：${feedback.trim()}`,
       "只生成符合原方案产品主体和卖点的画面。不要沿用旧分镜中被质检判定为错误的画面主体、旁白、道具或场景。",
+      continuityReferences.length > 0 ? `连续性要求：必须与前后未受影响分镜保持同一人物、同一产品道具、同一场景质感和同一视觉风格；优先参考 ${continuityReferenceIds.map((id) => `@${id}`).join("、")}。` : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -234,10 +272,10 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
       shot_description: {
         ...(scene.shot_description || {}),
         text: repairContract,
-        mentions: [],
+        mentions: continuityReferences,
       },
       narration: "",
-      reference_asset_ids: [],
+      reference_asset_ids: continuityReferenceIds,
       image_urls: [],
       video_urls: [],
       audio_urls: [],
@@ -265,6 +303,76 @@ export function durationMsForSubmit(value: number | string | ""): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return MIN_SCENE_DURATION_MS;
   return Math.max(MIN_SCENE_DURATION_MS, Math.min(MAX_SCENE_DURATION_MS, Math.round(parsed)));
+}
+
+function editedSceneGenerationPrompt(scene: ScenePackageRecord): string {
+  const shotText = shotDescriptionText(scene.shot_description);
+  const pieces = [
+    "请严格按照用户已编辑的分镜内容生成本段视频。用户编辑后的故事线、镜头描述和旁白是最高优先级合同；如果历史生成内容或旧参考素材与它们冲突，必须忽略旧内容。",
+    scene.storyline ? `故事线：${scene.storyline}` : "",
+    shotText ? `镜头描述：${shotText}` : "",
+    scene.narration ? `旁白：${scene.narration}` : "",
+  ];
+  return pieces.filter(Boolean).join("\n");
+}
+
+function collectExplicitSceneImageUrls(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): string[] {
+  const urls = new Set<string>();
+  collectMentionImageUrls(scene.shot_description).forEach((url) => urls.add(url));
+  if (globalAssets) {
+    stringArray(scene.reference_asset_ids).forEach((assetId) => {
+      collectGlobalAssetUrls(globalAssets, assetId).forEach((url) => urls.add(url));
+    });
+  }
+  return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+function shotDescriptionText(shotDescription: Record<string, unknown> | undefined): string {
+  if (!shotDescription || typeof shotDescription !== "object") return "";
+  const text = shotDescription.text || shotDescription.description_text || shotDescription.shotText || shotDescription.description;
+  return typeof text === "string" ? text.trim() : "";
+}
+
+function revisionContinuityReferences(globalAssets?: GlobalSceneAssets): Array<{ asset_id: string; type: string; name: string; image_url?: string }> {
+  if (!globalAssets) return [];
+  const references = [
+    firstGlobalAssetReference(globalAssets.characters, "character"),
+    firstGlobalAssetReference(globalAssets.scenes, "scene"),
+    firstGlobalAssetReference(globalAssets.props, "prop"),
+  ].filter((reference): reference is { asset_id: string; type: string; name: string; image_url?: string } => Boolean(reference));
+  return references.slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+function firstGlobalAssetReference(records: Array<Record<string, unknown>> | undefined, type: string): { asset_id: string; type: string; name: string; image_url?: string } | undefined {
+  if (!Array.isArray(records)) return undefined;
+  for (const record of records) {
+    const assetId = stringValue(record.asset_id) || stringValue(record.id);
+    if (!assetId) continue;
+    const imageUrl = firstAssetImageUrl(record);
+    if (!imageUrl) continue;
+    return {
+      asset_id: assetId,
+      type,
+      name: stringValue(record.name) || stringValue(record.label) || stringValue(record.description) || assetId,
+      image_url: imageUrl,
+    };
+  }
+  return undefined;
+}
+
+function firstAssetImageUrl(record: Record<string, unknown>): string {
+  const direct =
+    stringValue(record.image_url) ||
+    stringValue(record.imageUrl) ||
+    stringValue(record.url) ||
+    stringValue(record.download_url) ||
+    stringValue(record.downloadUrl);
+  if (direct) return direct;
+  for (const key of ["images", "image_urls", "imageUrls", "three_view_images", "threeViewImages"]) {
+    const values = stringArray(record[key]);
+    if (values[0]) return values[0];
+  }
+  return "";
 }
 
 function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch {

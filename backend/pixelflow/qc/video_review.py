@@ -116,6 +116,12 @@ _PRODUCT_TERMS = (
     "水杯",
     "杯子",
 )
+_PRODUCT_IDENTITY_KEYS = {
+    "product_info",
+    "product_name",
+    "product_subject",
+    "product",
+}
 
 
 def brief_to_scene_packages(brief: dict[str, Any]) -> list[dict[str, Any]]:
@@ -220,7 +226,7 @@ def _check_results(issues: list[VideoQCIssue]) -> list[QCItem]:
 
     results: list[QCItem] = []
     for category, grouped in by_category.items():
-        status = "fail" if any(issue.severity == "blocker" for issue in grouped) else "warn"
+        status = "fail" if any(issue.severity in {"blocker", "major"} for issue in grouped) else "warn"
         results.append(
             QCItem(
                 item=_CATEGORY_LABELS.get(category, category),
@@ -232,13 +238,15 @@ def _check_results(issues: list[VideoQCIssue]) -> list[QCItem]:
 
 
 def _deterministic_qc(request: VideoQCRequest) -> tuple[list[QCItem], list[VideoQCIssue]]:
-    generated_assets = [
-        {"ok": True, "url": scene.get("video_url") or scene.get("url"), "segment_index": index}
-        for index, scene in enumerate(request.scene_videos)
+    scene_videos = [
+        scene
+        for scene in request.scene_videos
         if isinstance(scene, dict) and (scene.get("video_url") or scene.get("url"))
     ]
+    expected_scenes = [scene for scene in request.scene_packages if isinstance(scene, dict)] or scene_videos
+    generated_assets = [{"ok": True, "url": scene.get("video_url") or scene.get("url") or "", "segment_index": index} for index, scene in enumerate(expected_scenes)]
     timeline = {
-        "clips": [{} for _ in generated_assets],
+        "clips": [{} for _ in scene_videos],
         "total_duration": request.expected_duration_sec or request.brief.get("duration_sec", 0) or 0,
     }
     brief = dict(request.brief)
@@ -251,8 +259,49 @@ def _deterministic_qc(request: VideoQCRequest) -> tuple[list[QCItem], list[Video
 
     result = qc_check(brief, generated_assets, timeline, request.merged_video_url)
     issues: list[VideoQCIssue] = []
+    actual_scene_ids = {str(scene.get("scene_id")) for scene in scene_videos if scene.get("scene_id")}
+    actual_scene_indices = {
+        int(scene.get("scene_index"))
+        for scene in scene_videos
+        if isinstance(scene.get("scene_index"), int | float)
+    }
+    missing_scenes: list[dict[str, Any]] = []
+    if request.scene_packages:
+        for scene in expected_scenes:
+            scene_id = str(scene.get("scene_id") or "")
+            scene_index = scene.get("scene_index")
+            has_video = (scene_id and scene_id in actual_scene_ids) or (
+                isinstance(scene_index, int | float) and int(scene_index) in actual_scene_indices
+            )
+            if not has_video:
+                missing_scenes.append(scene)
+    if missing_scenes and all(item.item != "片段完整性" or item.status != "fail" for item in result.check_results):
+        result.check_results[0] = QCItem(
+            item="片段完整性",
+            status="fail",
+            message=f"缺少 {len(missing_scenes)} 个预期分镜视频片段",
+        )
     for item in result.check_results:
         if item.status != "fail":
+            continue
+        if item.item == "片段完整性" and missing_scenes:
+            for scene in missing_scenes:
+                scene_index_value = scene.get("scene_index")
+                scene_index = int(scene_index_value) if isinstance(scene_index_value, int | float) else None
+                label = f"第{scene_index}个分镜" if scene_index is not None else str(scene.get("scene_id") or "缺失分镜")
+                issues.append(
+                    VideoQCIssue(
+                        code="missing_scene_video",
+                        category="storyboard_coverage",
+                        severity="blocker",
+                        scene_id=str(scene.get("scene_id")) if scene.get("scene_id") else None,
+                        scene_index=scene_index,
+                        message=f"{label}缺少生成成功的视频片段",
+                        expected="每个分镜都应该有对应生成视频",
+                        observed="未找到该分镜的视频 URL",
+                        suggestion=f"请重新生成{label}后再次质检",
+                    )
+                )
             continue
         category: Category = "technical"
         code = "deterministic_qc_failed"
@@ -460,7 +509,31 @@ def _collect_text(value: Any, *, depth: int = 0) -> list[str]:
     return []
 
 
+def _collect_values_for_keys(value: Any, keys: set[str], *, depth: int = 0) -> list[str]:
+    if depth > 4:
+        return []
+    if isinstance(value, dict):
+        pieces: list[str] = []
+        for key, item in value.items():
+            if key in keys:
+                pieces.extend(_collect_text(item, depth=depth + 1))
+            elif isinstance(item, dict | list):
+                pieces.extend(_collect_values_for_keys(item, keys, depth=depth + 1))
+        return pieces
+    if isinstance(value, list):
+        pieces: list[str] = []
+        for item in value:
+            pieces.extend(_collect_values_for_keys(item, keys, depth=depth + 1))
+        return pieces
+    return []
+
+
 def _global_contract_text(request: VideoQCRequest) -> str:
+    explicit_product_text = "\n".join(_collect_values_for_keys(request.brief, _PRODUCT_IDENTITY_KEYS)).strip()
+    explicit_terms = _dominant_product_terms(_product_terms(explicit_product_text))
+    if explicit_terms:
+        return "\n".join([f"原始产品主体：{'、'.join(sorted(explicit_terms))}", explicit_product_text]).strip()
+
     pieces: list[str] = []
     pieces.extend(_collect_text(request.brief))
     for scene in request.scene_packages:
@@ -626,7 +699,7 @@ async def review_video_quality(
         if not semantic_issues:
             semantic_issues = _feedback_fallback_issues(request, [])
     issues = deterministic_issues + semantic_issues
-    passed = not any(issue.severity == "blocker" for issue in issues)
+    passed = not any(issue.severity in {"blocker", "major"} for issue in issues)
     summary = str(getattr(result, "summary_markdown", "") or getattr(result, "flaw_analysis_markdown", "") or "")
     check_results = _merge_check_results(deterministic_checks, _check_results(semantic_issues))
     revision_prompt = str(getattr(result, "revision_prompt", "") or "")

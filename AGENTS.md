@@ -109,7 +109,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频 | `POST /agent/flows/video/generate-direct/start` | 启动直接视频生成异步任务 |
 | 视频 | `GET /agent/flows/video/generate-direct/jobs/{job_id}` | 轮询直接视频生成结果 |
 | 视频 | `POST /agent/flows/video/merge` | 按场景顺序合并视频 |
-| 视频 | `POST /agent/flows/video/analyze-flaws` | 视频穿帮分析 |
+| 视频 | `POST /agent/flows/video/quality-review` | 视频综合质检 |
+| 视频 | `POST /agent/flows/video/analyze-flaws` | 旧视频穿帮分析兼容入口，内部转调综合质检 |
 | PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -136,7 +137,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill | 使用项目内模板生成 plan.md |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoFlawAnalysisSkill | 生成场景包、资产图、场景视频、合并、穿帮分析和修改循环 |
+| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`qc/video_review.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill、VideoFlawAnalysisSkill | 生成场景包、资产图、场景视频、合并、综合质检和修改循环；旧穿帮入口保持兼容 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |

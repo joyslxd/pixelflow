@@ -147,6 +147,71 @@ def test_review_video_quality_prefers_issue_scene_ids_over_broad_supplier_affect
     )
 
     assert result.affected_scene_ids == ["scene-2"]
+    assert result.passed is False
+
+
+def test_review_video_quality_fails_when_expected_scene_video_is_missing():
+    class FakeSkill:
+        async def review_video_quality(self, **kwargs):
+            return VideoQualityReviewResult(
+                ok=True,
+                summary_markdown="供应商未发现问题",
+                issues=[],
+                affected_scene_ids=[],
+                raw={"endpoint": "/api/creative/analyze_video_flaws"},
+            )
+
+    result = asyncio.run(
+        review_video_quality(
+            VideoQCRequest(
+                merged_video_url="",
+                scene_videos=[
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
+                ],
+                scene_packages=[
+                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "牙刷开场"},
+                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "牙刷清洁力展示"},
+                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "牙刷防水续航"},
+                ],
+                checks=["storyboard_coverage"],
+            ),
+            skill=FakeSkill(),
+        )
+    )
+
+    assert result.ok is True
+    assert result.passed is False
+    assert result.affected_scene_ids == ["scene-2"]
+    assert any(item.item == "片段完整性" and item.status == "fail" for item in result.check_results)
+    assert any(issue.category == "storyboard_coverage" and issue.scene_id == "scene-2" for issue in result.issues)
+
+
+def test_review_video_quality_fails_when_scene_video_ids_do_not_match_packages():
+    class FakeSkill:
+        async def review_video_quality(self, **kwargs):
+            return VideoQualityReviewResult(ok=True, summary_markdown="供应商未发现问题", issues=[], raw={})
+
+    result = asyncio.run(
+        review_video_quality(
+            VideoQCRequest(
+                scene_videos=[
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-extra", "scene_index": 99, "video_url": "https://x/scene-extra.mp4"},
+                ],
+                scene_packages=[
+                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "牙刷开场"},
+                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "牙刷清洁力展示"},
+                ],
+                checks=["storyboard_coverage"],
+            ),
+            skill=FakeSkill(),
+        )
+    )
+
+    assert result.passed is False
+    assert result.affected_scene_ids == ["scene-2"]
+    assert any(issue.code == "missing_scene_video" and issue.scene_id == "scene-2" for issue in result.issues)
 
 
 def test_review_video_quality_narrows_broad_supplier_issues_to_explicit_feedback_scene():
@@ -244,7 +309,7 @@ def test_review_video_quality_falls_back_to_user_feedback_when_supplier_misses_c
     )
 
     assert result.ok is True
-    assert result.passed is True
+    assert result.passed is False
     assert result.affected_scene_ids == ["scene-2"]
     assert result.issues[0].category == "product_consistency"
     assert result.issues[0].scene_id == "scene-2"
@@ -363,6 +428,65 @@ def test_review_video_quality_uses_original_product_contract_when_scene_package_
     assert result.affected_scene_ids == ["scene-2"]
     assert result.issues[0].code == "auto_scene_product_mismatch"
     assert result.issues[0].scene_id == "scene-2"
+
+
+def test_review_video_quality_does_not_treat_mobile_delivery_context_as_product_contract():
+    class FakeQualitySkill:
+        async def review_video_quality(self, **kwargs):
+            return VideoQualityReviewResult(
+                ok=True,
+                summary_markdown="未发现明显问题",
+                issues=[],
+                affected_scene_ids=[],
+                revision_prompt="",
+                raw={"endpoint": "/api/creative/analyze_video_flaws"},
+            )
+
+    class FakeDecomposeSkill:
+        async def decompose_video_to_storyboard(self, video_url: str):
+            descriptions = {
+                "https://x/scene-1.mp4": "白色电动牙刷刷头震动，泡沫清洁牙齿污渍",
+                "https://x/scene-2.mp4": "一台红色手机放在桌面上，屏幕亮起，展示手机外观细节",
+                "https://x/scene-3.mp4": "白色电动牙刷在水流下冲洗，展示防水和续航卖点",
+            }
+            return StoryboardResult(ok=True, shots=[{"visual_description": descriptions[video_url]}])
+
+    result = asyncio.run(
+        review_video_quality(
+            VideoQCRequest(
+                merged_video_url="https://x/merged.mp4",
+                scene_videos=[
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
+                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
+                ],
+                scene_packages=[
+                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "白色电动牙刷清洁力展示"},
+                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "白色电动牙刷清洁力和续航展示"},
+                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "白色电动牙刷防水续航展示"},
+                ],
+                brief={
+                    "form_values": {
+                        "product_info": "白色电动牙刷",
+                        "video_goal": "生成一个 9:16 手机端短视频广告",
+                    },
+                    "plan": {
+                        "markdown": "白色电动牙刷是唯一产品主体，适合手机端投放，突出清洁力、续航和防水。",
+                    },
+                },
+                checks=["product_consistency", "plan_consistency", "storyboard_coverage"],
+            ),
+            skill=FakeQualitySkill(),
+            decompose_skill=FakeDecomposeSkill(),
+        )
+    )
+
+    assert result.ok is True
+    assert result.passed is False
+    assert result.affected_scene_ids == ["scene-2"]
+    assert result.issues[0].code == "auto_scene_product_mismatch"
+    assert result.issues[0].expected.startswith("原始产品主体：电动牙刷")
+    assert "手机、" not in result.issues[0].expected
     assert "白色电动牙刷" in result.issues[0].expected
     assert "红色手机" in result.issues[0].observed
 
@@ -407,7 +531,7 @@ def test_review_video_quality_merges_deterministic_qc_and_supplier_issues(monkey
     assert result.passed is False
     assert any(item.item == "卡顿/冻结检测" and item.status == "fail" for item in result.check_results)
     assert any(item.item == "手机端画幅适配" and item.status == "pass" for item in result.check_results)
-    assert any(item.item == "方案一致性" and item.status == "warn" for item in result.check_results)
+    assert any(item.item == "方案一致性" and item.status == "fail" for item in result.check_results)
     assert any(issue.category == "playback_stability" and issue.severity == "blocker" for issue in result.issues)
     assert any(issue.category == "plan_consistency" and issue.severity == "major" for issue in result.issues)
 

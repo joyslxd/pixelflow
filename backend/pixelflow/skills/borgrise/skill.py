@@ -93,7 +93,7 @@ def _to_image_result(raw: dict[str, Any]) -> ImageGenerationResult:
 
 def _to_flaw_analysis_result(raw: dict[str, Any]) -> VideoFlawAnalysisResult:
     """把 ``run_generation`` 的穿帮分析原始 dict 映射成统一结果。"""
-    if not raw or raw.get("error"):
+    if not raw or raw.get("error") or raw.get("success") is False:
         return VideoFlawAnalysisResult(
             ok=False,
             task_id=raw.get("task_id") if raw else None,
@@ -113,7 +113,7 @@ def _to_flaw_analysis_result(raw: dict[str, Any]) -> VideoFlawAnalysisResult:
 
 def _to_quality_review_result(raw: dict[str, Any]) -> VideoQualityReviewResult:
     """把 ``run_generation`` 的综合质检原始 dict 映射成统一结果。"""
-    if not raw or raw.get("error"):
+    if not raw or raw.get("error") or raw.get("success") is False:
         return VideoQualityReviewResult(
             ok=False,
             task_id=raw.get("task_id") if raw else None,
