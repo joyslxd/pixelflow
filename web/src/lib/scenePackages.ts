@@ -36,6 +36,7 @@ export interface ScenePackageRecord {
   prompt: string;
   narration?: string;
   shot_description?: Record<string, unknown>;
+  revision_contract?: string;
   reference_asset_ids?: string[];
   generation_mode?: string | null;
   image_urls?: string[];
@@ -59,6 +60,8 @@ export interface ScenePackagePatch {
 
 export interface SceneFlawLike {
   affected_scene_ids?: unknown;
+  target_scene_ids?: unknown;
+  excluded_scene_ids?: unknown;
   revision_prompt?: string;
 }
 
@@ -219,6 +222,12 @@ export function sceneIdsForRevision(
   useFlawAnalysis: boolean,
 ): Set<string> {
   const ids = new Set<string>();
+  if (useFlawAnalysis) {
+    stringArray(flawAnalysis?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
+    if (ids.size > 0) return ids;
+    stringArray(flawAnalysis?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
+    return ids;
+  }
   const normalizedFeedback = feedback.trim();
   const explicitOnlyIds = new Set<string>();
   scenes.forEach((scene) => {
@@ -230,15 +239,12 @@ export function sceneIdsForRevision(
   if (explicitOnlyIds.size > 0) {
     return explicitOnlyIds;
   }
-  if (useFlawAnalysis) {
-    stringArray(flawAnalysis?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
-  }
   scenes.forEach((scene) => {
     if (normalizedFeedback.includes(scene.scene_id) || normalizedFeedback.includes(`第${scene.scene_index}`)) {
       ids.add(scene.scene_id);
     }
   });
-  if (ids.size === 0 && !useFlawAnalysis) {
+  if (ids.size === 0) {
     scenes.forEach((scene) => ids.add(scene.scene_id));
   }
   return ids;
@@ -250,14 +256,18 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
   feedback: string,
   flawAnalysis: SceneFlawLike | undefined,
   globalAssets?: GlobalSceneAssets,
+  baselineScenes?: ScenePackageRecord[],
 ): T[] {
   const revisionPrompt = flawAnalysis?.revision_prompt?.trim();
   const feedbackText = feedback.trim();
   if (!revisionPrompt && !feedbackText) return scenes;
   const continuityReferences = revisionContinuityReferences(globalAssets);
   const continuityReferenceIds = continuityReferences.map((reference) => reference.asset_id);
+  const baselineById = new Map((baselineScenes || []).map((scene) => [scene.scene_id, scene]));
   return scenes.map((scene) => {
     if (!affectedSceneIds.has(scene.scene_id)) return scene;
+    const baselineScene = baselineById.get(scene.scene_id);
+    const contractScene = baselineScene ? { ...scene, ...baselineScene } : scene;
     const repairContract = [
       revisionPrompt ? `质检修复建议：${revisionPrompt}` : "",
       feedbackText ? `用户修改/质检意见：${feedbackText}` : "",
@@ -268,14 +278,14 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
       .join("\n");
     return {
       ...scene,
-      prompt: repairContract,
-      storyline: repairContract,
+      prompt: contractScene.prompt,
+      storyline: contractScene.storyline,
       shot_description: {
-        ...(scene.shot_description || {}),
-        text: repairContract,
+        ...(contractScene.shot_description || {}),
         mentions: continuityReferences,
       },
-      narration: "",
+      narration: contractScene.narration || scene.narration || "",
+      revision_contract: repairContract,
       reference_asset_ids: continuityReferenceIds,
       image_urls: [],
       video_urls: [],
@@ -284,6 +294,14 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
       scene_images: [],
       prop_images: [],
     };
+  });
+}
+
+export function scenePackagesWithoutRevisionContract<T extends ScenePackageRecord>(scenes: T[]): T[] {
+  return scenes.map((scene) => {
+    if (!scene.revision_contract) return scene;
+    const { revision_contract: _revisionContract, ...cleanScene } = scene;
+    return cleanScene as T;
   });
 }
 
@@ -313,6 +331,7 @@ function editedSceneGenerationPrompt(scene: ScenePackageRecord): string {
     scene.storyline ? `故事线：${scene.storyline}` : "",
     shotText ? `镜头描述：${shotText}` : "",
     scene.narration ? `旁白：${scene.narration}` : "",
+    scene.revision_contract ? `质检修复合同：${scene.revision_contract}` : "",
   ];
   return pieces.filter(Boolean).join("\n");
 }

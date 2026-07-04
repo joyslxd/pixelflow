@@ -63,6 +63,7 @@ export interface ChatMessage {
     imageEditConfirmedSelection?: ImageEditModelSelection;
     imageRevisionFeedback?: string;
     videoScenePackages?: PrepareScenePackagesResponse;
+    originalVideoScenePackages?: PrepareScenePackagesResponse;
     sceneAssetFailures?: Array<Record<string, unknown>>;
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;

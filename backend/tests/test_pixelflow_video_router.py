@@ -1067,7 +1067,17 @@ def test_video_router_analyzes_flaws(monkeypatch):
 
 def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkeypatch):
     from app.gateway.routers import pixelflow_video
+    from pixelflow.qc.revision_scope import RevisionScopeResult
     from pixelflow.skills import VideoQualityReviewResult
+
+    async def fake_resolve_revision_scope(**_kwargs):
+        return RevisionScopeResult(
+            target_scene_ids=["scene-2"],
+            excluded_scene_ids=["scene-1", "scene-3"],
+            action="fix_specific",
+            confidence="high",
+            llm_used=True,
+        )
 
     class FakeVideoQualitySkill:
         async def review_video_quality(self, **kwargs):
@@ -1093,6 +1103,7 @@ def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkey
                 },
             )
 
+    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
     monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
 
     app = make_authed_test_app(user_factory=_stable_user)
@@ -1123,6 +1134,83 @@ def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkey
     assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2"]
     assert "第2个分镜" in data["revision_prompt"]
     assert "全部" not in data["revision_prompt"]
+
+
+def test_video_router_analyze_flaws_returns_llm_scope_without_changing_legacy_issue_schema(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.qc.revision_scope import RevisionScopeResult
+    from pixelflow.skills import VideoQualityReviewResult
+
+    async def fake_resolve_revision_scope(**kwargs):
+        assert kwargs["feedback"] == "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。"
+        return RevisionScopeResult(
+            target_scene_ids=["scene-2", "scene-3"],
+            excluded_scene_ids=["scene-1"],
+            action="fix_specific",
+            confidence="high",
+            llm_used=True,
+        )
+
+    class FakeVideoQualitySkill:
+        async def review_video_quality(self, **kwargs):
+            return VideoQualityReviewResult(
+                ok=True,
+                task_id="flaw-task-scope",
+                summary_markdown="多个分镜可能需要处理",
+                flaw_analysis_markdown="多个分镜可能需要处理",
+                issues=[
+                    {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
+                ],
+                affected_scene_ids=["scene-1", "scene-2", "scene-3"],
+                revision_prompt="修复全部分镜",
+                raw={
+                    "endpoint": "/api/creative/analyze_video_flaws",
+                    "issues": [
+                        {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
+                        {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
+                        {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    ],
+                },
+            )
+
+    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
+    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/analyze-flaws",
+            json={
+                "merged_video_url": "https://x/merged.mp4",
+                "scene_videos": [
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
+                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
+                ],
+                "scene_packages": [
+                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "蓝牙耳机开场"},
+                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "蓝牙耳机降噪证明"},
+                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "蓝牙耳机续航收口"},
+                ],
+                "user_feedback": "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["target_scene_ids"] == ["scene-2", "scene-3"]
+    assert data["excluded_scene_ids"] == ["scene-1"]
+    assert data["affected_scene_ids"] == ["scene-2", "scene-3"]
+    assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2", "scene-3"]
+    assert data["issues"][0] == {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"}
+    assert "code" not in data["issues"][0]
+    assert "severity" not in data["issues"][0]
+    assert "第2个分镜" in data["revision_prompt"]
+    assert "第3个分镜" in data["revision_prompt"]
 
 
 def test_video_router_reviews_video_quality(monkeypatch):

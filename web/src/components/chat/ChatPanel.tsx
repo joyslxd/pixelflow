@@ -112,12 +112,13 @@ export function ChatPanel({
             const isLatestVideoScenePackage = m.id === latestVideoScenePackageMessageId;
             const isSupersededArtifact = Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId);
             const keepScenePackageActions = isLatestVideoScenePackage && m.artifact?.type === "video_scene_packages";
+            const isLatestActionableFlawAnalysis = m.id === latestActionableMessageId && m.artifact?.type === "video_flaw_analysis";
             return (
               <MessageBubble
                 key={m.id}
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
-                actionsDisabled={Boolean(busy) || (isSupersededArtifact && !keepScenePackageActions)}
+                actionsDisabled={Boolean(busy) || (!isLatestActionableFlawAnalysis && isSupersededArtifact && !keepScenePackageActions)}
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}

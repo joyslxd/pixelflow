@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import re
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -216,6 +215,7 @@ class VideoFlawAnalysisRequest(BaseModel):
     merged_video_url: str
     scene_videos: list[SceneVideo]
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    original_scene_packages: list[dict[str, Any]] = Field(default_factory=list)
     plan: dict[str, Any] = Field(default_factory=dict)
     form_values: dict[str, Any] = Field(default_factory=dict)
     intake_context: dict[str, Any] = Field(default_factory=dict)
@@ -228,6 +228,7 @@ class VideoQualityReviewRequest(BaseModel):
     merged_video_url: str = ""
     scene_videos: list[SceneVideo] = Field(default_factory=list)
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    original_scene_packages: list[dict[str, Any]] = Field(default_factory=list)
     brief: dict[str, Any] = Field(default_factory=dict)
     plan: dict[str, Any] = Field(default_factory=dict)
     form_values: dict[str, Any] = Field(default_factory=dict)
@@ -252,6 +253,8 @@ class VideoFlawAnalysisResponse(BaseModel):
     flaw_analysis_markdown: str = ""
     issues: list[dict[str, Any]] = Field(default_factory=list)
     affected_scene_ids: list[str] = Field(default_factory=list)
+    target_scene_ids: list[str] = Field(default_factory=list)
+    excluded_scene_ids: list[str] = Field(default_factory=list)
     revision_prompt: str = ""
     check_results: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
@@ -1253,6 +1256,8 @@ def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message:
         flaw_analysis_markdown=result.flaw_analysis_markdown,
         issues=[issue.model_dump() for issue in result.issues],
         affected_scene_ids=result.affected_scene_ids,
+        target_scene_ids=result.target_scene_ids,
+        excluded_scene_ids=result.excluded_scene_ids,
         revision_prompt=result.revision_prompt,
         check_results=[item.model_dump() for item in result.check_results],
         error=result.error,
@@ -1293,31 +1298,6 @@ def _legacy_flaw_affected_scene_ids(issues: list[dict[str, Any]], fallback: list
     return scene_ids or fallback
 
 
-def _scene_ids_by_explicit_feedback_scope(feedback: str | None, scene_packages: list[dict[str, Any]], scene_videos: list[SceneVideo]) -> list[str]:
-    text = (feedback or "").strip()
-    if not text or not any(keyword in text for keyword in ("只修复", "只修改", "仅修复", "仅修改", "不要重新生成", "没有问题")):
-        return []
-    scene_by_index: dict[int, str] = {}
-    for scene in scene_packages:
-        try:
-            scene_index = int(scene.get("scene_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        if scene_index and scene.get("scene_id"):
-            scene_by_index[scene_index] = str(scene["scene_id"])
-    for scene in scene_videos:
-        scene_by_index.setdefault(scene.scene_index, scene.scene_id)
-
-    scoped_ids: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(r"(?:只|仅)\s*(?:修复|修改)\s*第\s*(\d+)\s*(?:个)?\s*分镜", text):
-        scene_id = scene_by_index.get(int(match.group(1)))
-        if scene_id and scene_id not in seen:
-            seen.add(scene_id)
-            scoped_ids.append(scene_id)
-    return scoped_ids
-
-
 def _filter_issues_to_scene_ids(issues: list[dict[str, Any]], scene_ids: list[str]) -> list[dict[str, Any]]:
     if not scene_ids:
         return issues
@@ -1339,6 +1319,7 @@ async def quality_review(body: VideoQualityReviewRequest) -> VideoQualityReviewR
             merged_video_url=body.merged_video_url,
             scene_videos=[scene.model_dump() for scene in body.scene_videos],
             scene_packages=body.scene_packages,
+            original_scene_packages=body.original_scene_packages,
             brief=brief,
             materials=body.materials,
             platform=body.platform,
@@ -1360,6 +1341,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
             merged_video_url=body.merged_video_url,
             scene_videos=[scene.model_dump() for scene in body.scene_videos],
             scene_packages=body.scene_packages,
+            original_scene_packages=body.original_scene_packages,
             brief={
                 "plan": body.plan,
                 "form_values": body.form_values,
@@ -1378,7 +1360,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
     if quota_insufficient:
         message = quota_resume_message(result.error)
     legacy_issues = _legacy_flaw_issues(result)
-    scoped_scene_ids = _scene_ids_by_explicit_feedback_scope(body.user_feedback, body.scene_packages, body.scene_videos)
+    scoped_scene_ids = result.target_scene_ids
     if scoped_scene_ids:
         legacy_issues = _filter_issues_to_scene_ids(legacy_issues, scoped_scene_ids)
         if not legacy_issues:
@@ -1406,6 +1388,8 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
         flaw_analysis_markdown=result.flaw_analysis_markdown,
         issues=legacy_issues,
         affected_scene_ids=affected_scene_ids,
+        target_scene_ids=scoped_scene_ids,
+        excluded_scene_ids=result.excluded_scene_ids,
         revision_prompt=revision_prompt,
         check_results=[item.model_dump() for item in result.check_results],
         error=result.error,

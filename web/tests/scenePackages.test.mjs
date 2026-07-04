@@ -16,6 +16,7 @@ const {
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
+  scenePackagesWithoutRevisionContract,
   syncScenePackageMentionImageUrls,
   updateScenePackageAssetField,
   updateScenePackageField,
@@ -421,18 +422,25 @@ test("sceneIdsForRevision maps explicit scene mentions and non-QC revisions fall
   assert.deepEqual([...sceneIdsForRevision(scenes, "整体更高级", undefined, false)], ["scene-1", "scene-2"]);
 });
 
-test("sceneIdsForRevision does not regenerate every scene when QC has no affected scene ids", () => {
+test("sceneIdsForRevision does not regenerate every scene or parse text when QC has no backend scope", () => {
   const scenes = sampleScenes();
 
   assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检修复", { affected_scene_ids: [] }, true)], []);
-  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检只修改第2段", { affected_scene_ids: [] }, true)], ["scene-2"]);
+  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检只修改第2段", { affected_scene_ids: [] }, true)], []);
 });
 
-test("sceneIdsForRevision lets explicit only-scene feedback override broad QC affected ids", () => {
+test("sceneIdsForRevision uses backend target scene ids instead of frontend text parsing on QC revisions", () => {
   const scenes = sampleScenes();
 
   assert.deepEqual(
-    [...sceneIdsForRevision(scenes, "请只修改第2个分镜，第1个分镜没有问题，不要重新生成。", { affected_scene_ids: ["scene-1", "scene-2"] }, true)],
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "请只修改第2个分镜，第1个分镜没有问题，不要重新生成。",
+        { target_scene_ids: ["scene-2"], affected_scene_ids: ["scene-1", "scene-2"] },
+        true,
+      ),
+    ],
     ["scene-2"],
   );
   assert.deepEqual(
@@ -440,7 +448,7 @@ test("sceneIdsForRevision lets explicit only-scene feedback override broad QC af
       ...sceneIdsForRevision(
         scenes,
         "第2个分镜画面出现红色手机，和产品无关。请只修复第2个分镜。第1个分镜和第3个分镜没有问题，不要重新生成。",
-        { affected_scene_ids: ["scene-1", "scene-2", "scene-3"] },
+        { target_scene_ids: ["scene-2"], affected_scene_ids: ["scene-1", "scene-2", "scene-3"] },
         true,
       ),
     ],
@@ -448,7 +456,54 @@ test("sceneIdsForRevision lets explicit only-scene feedback override broad QC af
   );
 });
 
-test("scenePackagesWithRevisionContract replaces repaired scene metadata without touching other scenes", () => {
+test("sceneIdsForRevision trusts backend target scene ids for QC revisions", () => {
+  const scenes = [
+    { scene_id: "scene-1", scene_index: 1 },
+    { scene_id: "scene-2", scene_index: 2 },
+    { scene_id: "scene-3", scene_index: 3 },
+  ];
+
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。",
+        {
+          target_scene_ids: ["scene-2", "scene-3"],
+          affected_scene_ids: ["scene-1", "scene-2", "scene-3"],
+        },
+        true,
+      ),
+    ],
+    ["scene-2", "scene-3"],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "分镜3也不对 你怎么没修改",
+        {
+          target_scene_ids: ["scene-3"],
+          affected_scene_ids: ["scene-1", "scene-2", "scene-3"],
+        },
+        true,
+      ),
+    ],
+    ["scene-3"],
+  );
+});
+
+test("sceneIdsForRevision does not parse user text or default to all scenes on QC revisions without backend scope", () => {
+  const scenes = [
+    { scene_id: "scene-1", scene_index: 1 },
+    { scene_id: "scene-2", scene_index: 2 },
+    { scene_id: "scene-3", scene_index: 3 },
+  ];
+
+  assert.deepEqual([...sceneIdsForRevision(scenes, "分镜3也不对 你怎么没修改", { affected_scene_ids: [] }, true)], []);
+});
+
+test("scenePackagesWithRevisionContract preserves each repaired scene contract and appends QC constraints", () => {
   const scenes = [
     {
       scene_id: "scene-1",
@@ -464,11 +519,11 @@ test("scenePackagesWithRevisionContract replaces repaired scene metadata without
       scene_id: "scene-2",
       scene_index: 2,
       duration_ms: 10000,
-      prompt: "旧提示词：红色手机",
-      storyline: "旧故事线：红色手机桌面展示",
-      narration: "旧旁白：这台红色手机外观醒目",
+      prompt: "原提示词：展示白色蓝牙耳机连接手机后的降噪体验，镜头从耳机充电盒推到佩戴者侧脸。",
+      storyline: "原故事线：用户戴上白色蓝牙耳机进入通勤降噪状态。",
+      narration: "通勤路上，白色蓝牙耳机自动隔绝环境噪音。",
       shot_description: {
-        text: "旧镜头：红色手机屏幕和外观",
+        text: "原镜头：手拿白色蓝牙耳机靠近手机，随后切到佩戴者在地铁里安静听音乐。",
         mentions: [{ asset_id: "prop-phone", image_url: "https://x/phone.png" }],
       },
       reference_asset_ids: ["prop-phone"],
@@ -490,16 +545,18 @@ test("scenePackagesWithRevisionContract replaces repaired scene metadata without
   );
 
   assert.equal(updated[0], scenes[0]);
-  assert.match(updated[1].storyline, /白色蓝牙耳机/);
-  assert.doesNotMatch(updated[1].storyline, /旧故事线|红色手机桌面展示/);
-  assert.match(updated[1].prompt, /白色蓝牙耳机/);
-  assert.doesNotMatch(updated[1].prompt, /旧提示词/);
-  assert.match(updated[1].shot_description.text, /白色蓝牙耳机/);
+  assert.equal(updated[1].storyline, "原故事线：用户戴上白色蓝牙耳机进入通勤降噪状态。");
+  assert.equal(updated[1].prompt, "原提示词：展示白色蓝牙耳机连接手机后的降噪体验，镜头从耳机充电盒推到佩戴者侧脸。");
+  assert.equal(updated[1].shot_description.text, "原镜头：手拿白色蓝牙耳机靠近手机，随后切到佩戴者在地铁里安静听音乐。");
+  assert.doesNotMatch(updated[1].storyline, /质检修复建议|用户修改\/质检意见|连续性要求/);
+  assert.doesNotMatch(updated[1].shot_description.text, /质检修复建议|用户修改\/质检意见|连续性要求/);
+  assert.match(updated[1].revision_contract, /质检修复建议：重新生成 scene-2/);
+  assert.match(updated[1].revision_contract, /用户修改\/质检意见：请只修复第2个分镜/);
   assert.deepEqual(
     updated[1].shot_description.mentions.map((mention) => mention.asset_id),
     ["character-host", "scene-desk", "prop-product"],
   );
-  assert.equal(updated[1].narration, "");
+  assert.equal(updated[1].narration, "通勤路上，白色蓝牙耳机自动隔绝环境噪音。");
   assert.deepEqual(updated[1].reference_asset_ids, ["character-host", "scene-desk", "prop-product"]);
   assert.deepEqual(updated[1].image_urls, []);
   assert.deepEqual(updated[1].video_urls, []);
@@ -510,6 +567,8 @@ test("scenePackagesWithRevisionContract replaces repaired scene metadata without
 
   const payload = sceneGenerationPayloadFromPackage(updated[1], sampleGlobalAssets(), { edited: true });
   assert.match(payload.prompt, /连续性要求/);
+  assert.match(payload.prompt, /质检修复建议：重新生成 scene-2/);
+  assert.match(payload.prompt, /旁白：通勤路上，白色蓝牙耳机自动隔绝环境噪音。/);
   assert.deepEqual(payload.image_urls, [
     "https://x/global-role.png",
     "https://x/global-scene.png",
@@ -517,7 +576,7 @@ test("scenePackagesWithRevisionContract replaces repaired scene metadata without
   ]);
 });
 
-test("scenePackagesWithRevisionContract also rewrites affected scenes when only user feedback is used", () => {
+test("scenePackagesWithRevisionContract keeps scene-specific storylines when multiple scenes share one QC prompt", () => {
   const scenes = [
     {
       scene_id: "scene-1",
@@ -531,31 +590,53 @@ test("scenePackagesWithRevisionContract also rewrites affected scenes when only 
       scene_id: "scene-2",
       scene_index: 2,
       duration_ms: 10000,
-      prompt: "旧提示词：红色手机",
-      storyline: "旧故事线：红色手机桌面展示",
-      narration: "旧旁白：这台红色手机外观醒目",
+      prompt: "第二段原提示词：展示有线耳机接头插入手机，突出稳定连接。",
+      storyline: "第二段原故事线：用户把有线耳机插入手机并开始听歌。",
+      narration: "插上耳机，即刻进入稳定清晰的聆听状态。",
       shot_description: {
-        text: "旧镜头：红色手机屏幕和外观",
+        text: "第二段原镜头：特写耳机插头与手机接口，随后切用户戴耳机。",
         mentions: [{ asset_id: "prop-phone", image_url: "https://x/phone.png" }],
       },
       reference_asset_ids: ["prop-phone"],
       image_urls: ["https://x/phone.png"],
     },
+    {
+      scene_id: "scene-3",
+      scene_index: 3,
+      duration_ms: 10000,
+      prompt: "第三段原提示词：展示线控麦克风接听电话，强调通话清晰。",
+      storyline: "第三段原故事线：用户按下线控键接听电话，声音清楚稳定。",
+      narration: "线控麦克风让通话更顺畅。",
+      shot_description: {
+        text: "第三段原镜头：手指按下线控按钮，画面切到用户自然通话。",
+        mentions: [],
+      },
+      reference_asset_ids: [],
+      image_urls: [],
+    },
   ];
 
   const updated = scenePackagesWithRevisionContract(
     scenes,
-    new Set(["scene-2"]),
-    "请只修改第2个分镜，把红色手机改回白色电动牙刷，并保持第1和第3分镜风格一致。",
-    undefined,
+    new Set(["scene-2", "scene-3"]),
+    "请结合质检结果修改第2和第3分镜，第1个分镜不要重新生成。",
+    { revision_prompt: "请只重生成第2个分镜、第3个分镜，恢复为原方案要求的产品一致性画面；其他分镜复用原视频，不要重新生成。" },
     sampleGlobalAssets(),
   );
 
   assert.equal(updated[0], scenes[0]);
   assert.notEqual(updated[1], scenes[1]);
-  assert.match(updated[1].prompt, /只修改第2个分镜/);
-  assert.match(updated[1].storyline, /白色电动牙刷/);
-  assert.doesNotMatch(updated[1].storyline, /旧故事线|红色手机桌面展示/);
+  assert.match(updated[1].storyline, /第二段原故事线/);
+  assert.match(updated[2].storyline, /第三段原故事线/);
+  assert.notEqual(updated[1].storyline, updated[2].storyline);
+  assert.equal(updated[1].narration, "插上耳机，即刻进入稳定清晰的聆听状态。");
+  assert.equal(updated[2].narration, "线控麦克风让通话更顺畅。");
+  assert.equal(updated[1].prompt, "第二段原提示词：展示有线耳机接头插入手机，突出稳定连接。");
+  assert.equal(updated[2].prompt, "第三段原提示词：展示线控麦克风接听电话，强调通话清晰。");
+  assert.doesNotMatch(updated[1].shot_description.text, /质检修复建议|用户修改\/质检意见|连续性要求/);
+  assert.doesNotMatch(updated[2].shot_description.text, /质检修复建议|用户修改\/质检意见|连续性要求/);
+  assert.match(updated[1].revision_contract, /质检修复建议/);
+  assert.match(updated[2].revision_contract, /质检修复建议/);
   assert.deepEqual(
     updated[1].shot_description.mentions.map((mention) => mention.asset_id),
     ["character-host", "scene-desk", "prop-product"],
@@ -563,12 +644,37 @@ test("scenePackagesWithRevisionContract also rewrites affected scenes when only 
 
   const payload = sceneGenerationPayloadFromPackage(updated[1], sampleGlobalAssets(), { edited: true });
   assert.match(payload.prompt, /用户修改\/质检意见/);
-  assert.match(payload.prompt, /白色电动牙刷/);
+  assert.match(payload.prompt, /第二段原镜头/);
   assert.deepEqual(payload.image_urls, [
     "https://x/global-role.png",
     "https://x/global-scene.png",
     "https://x/global-prop.png",
   ]);
+});
+
+test("scenePackagesWithoutRevisionContract removes internal generation constraints before persisting results", () => {
+  const scenes = [
+    {
+      scene_id: "scene-1",
+      scene_index: 1,
+      duration_ms: 10000,
+      prompt: "第一段",
+      revision_contract: "上一轮质检合同",
+    },
+    {
+      scene_id: "scene-2",
+      scene_index: 2,
+      duration_ms: 10000,
+      prompt: "第二段",
+    },
+  ];
+
+  const cleaned = scenePackagesWithoutRevisionContract(scenes);
+
+  assert.notEqual(cleaned[0], scenes[0]);
+  assert.equal(cleaned[0].revision_contract, undefined);
+  assert.equal(cleaned[1], scenes[1]);
+  assert.equal(scenes[0].revision_contract, "上一轮质检合同");
 });
 
 test("inferTargetDurationMs reads seconds and minutes from user-facing flow text", () => {

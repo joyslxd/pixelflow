@@ -303,7 +303,8 @@ test("closing the requirement dialog cancels and terminates the pending flow", (
 test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
   assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
-  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\|/, "ChatPanel must disable actions while busy or on older artifacts");
+  assert.match(chatPanelSource, /isLatestActionableFlawAnalysis/, "ChatPanel must keep the latest QC result card actionable after analysis");
+  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableFlawAnalysis &&/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result");
   assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
   assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");
 });
@@ -504,6 +505,19 @@ test("scene package storyboard edits after final video regenerate only dirty sce
   assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*dirtySceneIds\)/, "request builder must receive only dirty scenes for final storyboard edits");
   assert.doesNotMatch(source, /artifact\.type === "video_result"/, "dirty-scene regeneration must work from the original scene package card, not only video_result cards");
   assert.match(workspaceSource, /regeneratedByScene\.get\(scene\.scene_id\) \|\| previousByScene\.get\(scene\.scene_id\)/, "regeneration completion must reuse unchanged scene videos");
+});
+
+test("video QC revisions use scene-package-ready baseline instead of user-edited result packages", () => {
+  const completedScenePackageSource = handleCompletedScenePackageJobSource();
+  const generateSource = handleGenerateVideoFromScenePackagesSource();
+  const revisionSource = handleRegenerateVideoWithRevisionSource();
+
+  assert.match(completedScenePackageSource, /originalVideoScenePackages:\s*videoScenePackages/, "scene package ready card must freeze the original scene contract");
+  assert.match(generateSource, /const originalVideoScenePackages = artifact\.originalVideoScenePackages \|\| latestOriginalVideoScenePackagesForConversation/, "scene video job must recover the frozen baseline before persisting");
+  assert.match(generateSource, /artifact:\s*\{\s*\.\.\.artifact,\s*originalVideoScenePackages/, "scene video job must carry the frozen scene package baseline forward");
+  assert.doesNotMatch(generateSource, /originalVideoScenePackages:\s*artifact\.originalVideoScenePackages\s*\|\|\s*videoScenePackages/, "video result must not freeze a possibly user-edited package as the original baseline");
+  assert.match(revisionSource, /const originalVideoScenePackages = artifact\.originalVideoScenePackages \|\| latestOriginalVideoScenePackagesForConversation/, "QC revision must recover the frozen baseline");
+  assert.match(revisionSource, /originalVideoScenePackages\.scene_packages as ScenePackageRecord\[\]/, "QC revision must restore affected scenes from the frozen baseline");
 });
 
 test("failed scene video retries only resubmit failed scenes and reuse successful scene videos", () => {

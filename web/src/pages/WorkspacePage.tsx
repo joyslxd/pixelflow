@@ -46,6 +46,7 @@ import {
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
+  scenePackagesWithoutRevisionContract,
   syncScenePackageMentionImageUrls,
   updateScenePackageField,
   type GlobalSceneAssetGroup,
@@ -846,6 +847,24 @@ function restoreLatestVideoScenePackagesFromContext(
   });
 }
 
+function latestOriginalVideoScenePackagesForConversation(messages: ChatMessage[], conversationId: string): PrepareScenePackagesResponse | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (messageConversationId(message, conversationId) !== conversationId) continue;
+    const artifact = message.artifact;
+    if (artifact?.type === "video_scene_packages" && artifact.videoScenePackages) {
+      return artifact.originalVideoScenePackages || artifact.videoScenePackages;
+    }
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (messageConversationId(message, conversationId) !== conversationId) continue;
+    const baseline = message.artifact?.originalVideoScenePackages;
+    if (baseline) return baseline;
+  }
+  return undefined;
+}
+
 function normalizeMaterialStoryboardReferences(
   materials: Array<Record<string, unknown>> | undefined,
   latestStoryboardIdsByAsset: Map<string, string>,
@@ -902,6 +921,7 @@ export function WorkspacePage() {
   // 运行中上下文：这些值主要给异步 SSE 回调读取，不需要每次变化都触发 React 重渲染。
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
   const [currentTaskId, setCurrentTaskId] = useState("");
+  const messagesRef = useRef<ChatMessage[]>([]);
   const conversationIdRef = useRef<string>("");
   const routeConversationIdRef = useRef<string>("");
   const taskIdRef = useRef<string>("");
@@ -932,6 +952,10 @@ export function WorkspacePage() {
   const skipRouteRestoreConversationRef = useRef("");
   const unsubRef = useRef<() => void>(() => {});
   routeConversationIdRef.current = conversationId || "";
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const setActiveTaskId = (taskId: string) => {
     taskIdRef.current = taskId;
@@ -995,23 +1019,33 @@ export function WorkspacePage() {
   const appendMessageForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
     if (targetConversationId) {
       const optimisticMessage = { ...message, conversationId: targetConversationId, time: message.time || now() };
-      setMessages((items) =>
-        appendVisibleConversationMessage(items, {
+      setMessages((items) => {
+        const nextItems = appendVisibleConversationMessage(items, {
           activeConversationId: conversationIdRef.current,
           targetConversationId,
           message: optimisticMessage,
-        }),
-      );
+        });
+        messagesRef.current = nextItems;
+        return nextItems;
+      });
       try {
         const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
-        setMessages((items) => replaceMessageById(items, optimisticMessage.id, savedMessage));
+        setMessages((items) => {
+          const nextItems = replaceMessageById(items, optimisticMessage.id, savedMessage);
+          messagesRef.current = nextItems;
+          return nextItems;
+        });
         return savedMessage;
       } catch {
         return optimisticMessage;
       }
     }
     const localMessage = { ...message, time: message.time || now() };
-    setMessages((items) => [...items, localMessage]);
+    setMessages((items) => {
+      const nextItems = [...items, localMessage];
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
     return localMessage;
   };
 
@@ -1879,6 +1913,7 @@ export function WorkspacePage() {
           : (result.message || videoScenePackages.message),
       actionLabel: quotaPaused ? "继续" : "确认",
       videoScenePackages,
+      originalVideoScenePackages: videoScenePackages,
       sceneAssetFailures,
       intent: "video",
       formValues: artifact.formValues,
@@ -2074,6 +2109,7 @@ export function WorkspacePage() {
       description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
       actionLabel: "确认",
       videoScenePackages: updatedPackages,
+      originalVideoScenePackages: storyboardMessage.artifact.originalVideoScenePackages || storyboardMessage.artifact.videoScenePackages,
       sceneAssetFailures: storyboardMessage.artifact.sceneAssetFailures || [],
       intent: "video",
       formValues: storyboardMessage.artifact.formValues,
@@ -2127,6 +2163,7 @@ export function WorkspacePage() {
         : `${nextPackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
       actionLabel: quotaPaused ? "继续" : "确认",
       videoScenePackages: nextPackages,
+      originalVideoScenePackages: artifact.originalVideoScenePackages || videoScenePackages,
       sceneAssetFailures: sceneAssets.failed_assets,
       intent: "video",
       formValues: artifact.formValues,
@@ -2169,6 +2206,7 @@ export function WorkspacePage() {
     const artifact = pendingVideoJob.artifact;
     const videoScenePackages = artifact.videoScenePackages;
     if (!videoScenePackages) return;
+    const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || videoScenePackages;
     if (!generatedSceneVideos.ok) {
       const videoQuotaInsufficient = isQuotaInsufficientPayload(generatedSceneVideos);
       releaseArtifactAction(processedKey);
@@ -2178,6 +2216,7 @@ export function WorkspacePage() {
         description: videoQuotaInsufficient ? quotaMessage(generatedSceneVideos.message || "场景视频生成额度不足。") : (generatedSceneVideos.message || "部分场景视频生成失败，请查看失败场景。"),
         actionLabel: "查看",
         videoScenePackages,
+        originalVideoScenePackages,
         generatedSceneVideos,
         intent: "video",
         formValues: artifact.formValues,
@@ -2215,6 +2254,7 @@ export function WorkspacePage() {
       description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
       actionLabel: "查看",
       videoScenePackages,
+      originalVideoScenePackages,
       generatedSceneVideos,
       mergedVideo,
       intent: "video",
@@ -2267,6 +2307,11 @@ export function WorkspacePage() {
     const targetConversationId = pendingVideoJob.conversation_id;
     const artifact = pendingVideoJob.artifact;
     if (!artifact.videoScenePackages || !artifact.generatedSceneVideos || !artifact.mergedVideo) return;
+    const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || artifact.videoScenePackages;
+    const displayVideoScenePackages = {
+      ...artifact.videoScenePackages,
+      scene_packages: scenePackagesWithoutRevisionContract(artifact.videoScenePackages.scene_packages as ScenePackageRecord[]) as typeof artifact.videoScenePackages.scene_packages,
+    };
     if (!regenerated.ok) {
       releaseArtifactAction(processedKey);
       pushArtifact("视频修改重生成失败：部分受影响场景生成失败，请展开失败场景查看原因。", {
@@ -2274,7 +2319,8 @@ export function WorkspacePage() {
         title: "视频修改结果",
         description: regenerated.message || "受影响场景重生成失败，请查看失败场景。",
         actionLabel: "查看",
-        videoScenePackages: artifact.videoScenePackages,
+        videoScenePackages: displayVideoScenePackages,
+        originalVideoScenePackages,
         videoScenePackageEditedSceneIds: artifact.videoScenePackageEditedSceneIds || pendingVideoJob.affected_scene_ids || [],
         generatedSceneVideos: regenerated,
         mergedVideo: artifact.mergedVideo,
@@ -2323,7 +2369,8 @@ export function WorkspacePage() {
       title: "视频修改结果",
       description: mergedVideo.ok ? "已复用未受影响场景，并合并新版本视频。" : mergedVideo.message,
       actionLabel: "查看",
-      videoScenePackages: artifact.videoScenePackages,
+      videoScenePackages: displayVideoScenePackages,
+      originalVideoScenePackages,
       generatedSceneVideos,
       mergedVideo,
       videoScenePackageEditedSceneIds: [],
@@ -2353,7 +2400,7 @@ export function WorkspacePage() {
         mergedVideo.merged_video_url,
         mergedVideo.task_id || "merged-video-revision",
         generatedSceneVideos,
-        artifact.videoScenePackages.target_duration_ms,
+        displayVideoScenePackages.target_duration_ms,
         mergedVideo.ok,
       );
       setCanvasForConversation(targetConversationId, (c) => ({
@@ -2368,8 +2415,8 @@ export function WorkspacePage() {
       video_revision_feedback: artifact.videoRevisionFeedback,
       video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
       affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
-      global_assets: artifact.videoScenePackages.global_assets,
-      scene_packages: artifact.videoScenePackages.scene_packages,
+      global_assets: displayVideoScenePackages.global_assets,
+      scene_packages: displayVideoScenePackages.scene_packages,
       generated_scene_videos: nextSceneVideos,
       merged_video: mergedVideo,
     }).catch(() => {});
@@ -3541,6 +3588,8 @@ export function WorkspacePage() {
       const mergedVideo = pendingMergedVideo;
       const generatedSceneVideos = pendingGeneratedSceneVideos;
       const videoScenePackages = pendingVideoScenePackages;
+      const originalVideoScenePackages =
+        revisionArtifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, activeConversation) || videoScenePackages;
       const mergedVideoUrl = mergedVideo.merged_video_url;
       videoRevisionArtifactRef.current = null;
       if (!mergedVideoUrl) {
@@ -3558,6 +3607,7 @@ export function WorkspacePage() {
             video_url: scene.video_url,
           })),
           scene_packages: videoScenePackages.scene_packages as unknown as Array<Record<string, unknown>>,
+          original_scene_packages: originalVideoScenePackages.scene_packages as unknown as Array<Record<string, unknown>>,
           plan: revisionArtifact.plan as unknown as Record<string, unknown>,
           form_values: revisionArtifact.formValues || {},
           intake_context: revisionArtifact.intakeContext || {},
@@ -3577,6 +3627,7 @@ export function WorkspacePage() {
           videoFlawAnalysis: flawAnalysis,
           videoRevisionFeedback: text,
           videoScenePackages,
+          originalVideoScenePackages,
           generatedSceneVideos,
           mergedVideo,
           intent: "video",
@@ -4670,6 +4721,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
+    const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || videoScenePackages;
     pushAssistant(
       isFinalStoryboardRegeneration
         ? `已保存分镜修改，正在重生成 ${dirtySceneIds.size} 个已修改分镜视频…`
@@ -4693,7 +4745,7 @@ export function WorkspacePage() {
             kind: "scene_regeneration",
             started_at: new Date().toISOString(),
             request,
-            artifact: { ...artifact, videoScenePackageEditedSceneIds: Array.from(dirtySceneIds) },
+            artifact: { ...artifact, originalVideoScenePackages, videoScenePackageEditedSceneIds: Array.from(dirtySceneIds) },
             affected_scene_ids: Array.from(dirtySceneIds),
           }
         : isFailedSceneRetry
@@ -4704,7 +4756,7 @@ export function WorkspacePage() {
               kind: "scene_failed_retry",
               started_at: new Date().toISOString(),
               request,
-              artifact,
+              artifact: { ...artifact, originalVideoScenePackages },
               affected_scene_ids: Array.from(retrySceneIds),
             }
           : {
@@ -4714,7 +4766,7 @@ export function WorkspacePage() {
               kind: "scene_generation",
               started_at: new Date().toISOString(),
               request,
-              artifact,
+              artifact: { ...artifact, originalVideoScenePackages },
             };
       await persistPendingVideoJob(pendingVideoJob, targetConversationId, isFinalStoryboardRegeneration || isFailedSceneRetry ? "video_regeneration_running" : "video_generation_running", {
         global_assets: videoScenePackages.global_assets,
@@ -4837,7 +4889,13 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    videoRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
+    videoRevisionArtifactRef.current = {
+      conversationId: targetConversationId,
+      artifact: {
+        ...msg.artifact,
+        originalVideoScenePackages: msg.artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId),
+      },
+    };
     pushAssistant("请在输入框填写视频修改意见。我会先做综合质检，再让你选择是否结合质检结果重生成受影响场景。", targetConversationId);
     if (targetConversationId) {
       void api
@@ -4856,6 +4914,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
+    const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || artifact.videoScenePackages;
     const affectedSceneIds = sceneIdsForRevision(
       artifact.videoScenePackages.scene_packages,
       artifact.videoRevisionFeedback,
@@ -4879,11 +4938,13 @@ export function WorkspacePage() {
           artifact.videoRevisionFeedback || "",
           useFlawAnalysis ? artifact.videoFlawAnalysis : undefined,
           artifact.videoScenePackages.global_assets,
+          originalVideoScenePackages.scene_packages as ScenePackageRecord[],
         ) as typeof artifact.videoScenePackages.scene_packages,
       };
       const revisionArtifact: ChatArtifact = {
         ...artifact,
         videoScenePackages: nextVideoScenePackages,
+        originalVideoScenePackages,
         videoScenePackageEditedSceneIds: Array.from(affectedSceneIds),
       };
       const request = sceneVideoRequestFromPackages(nextVideoScenePackages, affectedSceneIds);
