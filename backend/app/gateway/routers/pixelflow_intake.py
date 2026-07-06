@@ -7,18 +7,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
+from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.intake.context import IntakeContext as StandardIntakeContext
 from pixelflow.intake.context import normalize_intake_context
 from pixelflow.intake.forms import CreationIntent, get_form_schema, validate_form
 from pixelflow.intake.industry_profile import resolve_industry_profile
 from pixelflow.intake.llm import IntakeIntent, draft_creative_directions_with_llm, recognize_intent_with_llm
-from pixelflow.memory import with_semantic_memory
+from pixelflow.memory import build_memory_query, with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/intake", tags=["pixelflow-flows"])
 
@@ -90,6 +92,26 @@ class CreativeDirectionsResponse(BaseModel):
     intake_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreativeDirectionsJobStartResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str = "running"
+    message: str = ""
+
+
+class CreativeDirectionsJobStatusResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str
+    result: CreativeDirectionsResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
+_CREATIVE_DIRECTION_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_CREATIVE_DIRECTION_JOBS = 200
+
+
 @router.get("/forms/{intent}")
 async def get_intake_form(intent: CreationIntent) -> dict[str, Any]:
     return get_form_schema(intent).to_dict()
@@ -151,6 +173,44 @@ async def validate_intake_form(body: IntakeValidateRequest) -> IntakeValidationR
 
 @router.post("/directions", response_model=CreativeDirectionsResponse)
 async def create_creative_directions(body: CreativeDirectionsRequest, request: Request) -> CreativeDirectionsResponse:
+    return await _create_creative_directions(body, request)
+
+
+@router.post("/directions/start", response_model=CreativeDirectionsJobStartResponse)
+async def start_creative_directions(body: CreativeDirectionsRequest, request: Request) -> CreativeDirectionsJobStartResponse:
+    _trim_creative_direction_jobs()
+    job_id = uuid.uuid4().hex
+    _CREATIVE_DIRECTION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_creative_direction_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    return CreativeDirectionsJobStartResponse(ok=True, job_id=job_id, status="running", message="创意方向生成任务已启动。")
+
+
+@router.get("/directions/jobs/{job_id}", response_model=CreativeDirectionsJobStatusResponse)
+async def get_creative_directions_job(job_id: str) -> CreativeDirectionsJobStatusResponse:
+    job = _CREATIVE_DIRECTION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Creative directions job not found")
+    result = job.get("result")
+    if isinstance(result, dict):
+        result = CreativeDirectionsResponse(**result)
+    return CreativeDirectionsJobStatusResponse(
+        ok=job.get("status") != "failed",
+        job_id=job_id,
+        status=str(job.get("status") or "running"),
+        result=result if isinstance(result, CreativeDirectionsResponse) else None,
+        error=job.get("error"),
+        message=str(job.get("error") or ""),
+    )
+
+
+async def _create_creative_directions(
+    body: CreativeDirectionsRequest,
+    request: Request | None = None,
+    *,
+    memories: list[Any] | None = None,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> CreativeDirectionsResponse:
     validation = validate_form(body.intent, body.values, body.intake_rounds)
     data = validation.to_dict()
     data["form_schema"] = data.pop("schema")
@@ -169,12 +229,20 @@ async def create_creative_directions(body: CreativeDirectionsRequest, request: R
         product_creative_profile = profile_result.profile
     if body.materials:
         product_creative_profile["materials"] = body.materials
-    user_id, memories = await search_power_mem(
-        request,
-        source_agent="creative_direction_agent",
-        query_values=[context.to_dict(), validation.values, product_creative_profile, body.materials],
-        categories=["preference", "brand", "skill", "experience"],
-    )
+    if memories is None and request is not None:
+        user_id, memories = await search_power_mem(
+            request,
+            source_agent="creative_direction_agent",
+            query_values=[context.to_dict(), validation.values, product_creative_profile, body.materials],
+            categories=["preference", "brand", "skill", "experience"],
+        )
+    elif memories is None:
+        memories = await _search_creative_direction_memories(
+            power_mem,
+            user_id=user_id,
+            query_values=[context.to_dict(), validation.values, product_creative_profile, body.materials],
+        )
+    memories = memories or []
     memory_context, product_creative_profile = with_semantic_memory(
         context.to_dict(),
         memories,
@@ -200,7 +268,7 @@ async def create_creative_directions(body: CreativeDirectionsRequest, request: R
         )
     ]
     record_power_mem_background(
-        power_mem_service(request),
+        power_mem or (power_mem_service(request) if request is not None else None),
         user_id=user_id,
         content=concise_result_summary(
             "创意方向 Agent 生成方向",
@@ -213,6 +281,46 @@ async def create_creative_directions(body: CreativeDirectionsRequest, request: R
         infer=False,
     )
     return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions, intake_context=context_dict)
+
+
+async def _run_creative_direction_job(
+    job_id: str,
+    body: CreativeDirectionsRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> None:
+    try:
+        result = await _create_creative_directions(body, power_mem=power_mem, user_id=user_id)
+        _CREATIVE_DIRECTION_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+    except Exception as exc:
+        _CREATIVE_DIRECTION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+
+
+async def _search_creative_direction_memories(
+    power_mem: Any,
+    *,
+    user_id: str | None,
+    query_values: list[Any],
+) -> list[Any]:
+    if power_mem is None or not hasattr(power_mem, "search"):
+        return []
+    query = build_memory_query(*query_values)
+    if not query:
+        return []
+    return await power_mem.search(
+        user_id=user_id,
+        query=query,
+        categories=["preference", "brand", "skill", "experience"],
+        source_agent=None,
+    )
+
+
+def _trim_creative_direction_jobs() -> None:
+    overflow = len(_CREATIVE_DIRECTION_JOBS) - _MAX_CREATIVE_DIRECTION_JOBS + 1
+    if overflow <= 0:
+        return
+    for job_id in list(_CREATIVE_DIRECTION_JOBS.keys())[:overflow]:
+        _CREATIVE_DIRECTION_JOBS.pop(job_id, None)
 
 
 def _context_for_directions(body: CreativeDirectionsRequest, values: dict[str, Any]) -> StandardIntakeContext:

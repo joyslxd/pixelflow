@@ -552,10 +552,20 @@ test("scene generation completion updates the original scene package card with v
   assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/, "workspace must update the original scene package message after videos are generated");
   assert.match(workspaceSource, /source_message_id:[\s\S]*pendingVideoJob\.source_message_id/, "pending video jobs must keep the original scene package message id");
   assert.match(workspaceSource, /generatedSceneVideos[\s\S]*mergedVideo[\s\S]*videoScenePackageEditedSceneIds:\s*\[\]/, "the original scene package card must receive generated scene videos and merged video");
+  assert.match(workspaceSource, /currentMessage\?\.artifact \|\| savedMessage\.artifact/, "conversation message save responses must not overwrite locally enriched artifacts");
+  assert.match(workspaceSource, /messagesRef\.current = nextItems[\s\S]*return nextItems/, "scene package video-result sync must update the message ref used by later snapshots");
 });
 
 test("final storyboard edits persist and restore the latest scene package context", () => {
   assert.match(workspaceSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
+  assert.match(workspaceSource, /latestScenePackageSnapshotForConversation/, "snapshots must preserve latest scene package restore fields");
+  assert.match(workspaceSource, /latestVideoResultArtifactForConversation/, "restoring after refresh must recover scene videos from the persisted video_result card");
+  assert.match(workspaceSource, /contextGeneratedSceneVideos \|\| latestVideoResultArtifact\?\.generatedSceneVideos/, "restore should fall back to video_result generated scene videos when context is stale");
+  assert.match(workspaceSource, /latestVideoResultArtifact\?\.videoScenePackages\?\.scene_packages/, "restore should fall back to video_result scene packages when context is stale");
+  assert.match(workspaceSource, /messagesRef\.current = snapshot\.messages/, "restored messages must update the ref used by snapshot persistence");
+  assert.match(workspaceSource, /generated_scene_videos:\s*artifact\.generatedSceneVideos\?\.scene_videos/, "snapshot must include generated scene videos from the latest scene package card");
+  assert.match(workspaceSource, /merged_video:\s*artifact\.mergedVideo/, "snapshot must include merged video from the latest scene package card");
+  assert.match(workspaceSource, /\.\.\.scenePackageSnapshot/, "all conversation updates based on makeSnapshot must keep scene video restore fields");
   assert.match(workspaceSource, /message\.artifact\?\.type === "video_scene_packages" && Boolean\(message\.artifact\.videoScenePackages\)/, "restored context must target the latest original scene package card");
   assert.match(workspaceSource, /generated_scene_videos[\s\S]*merged_video/, "restored scene package context must include generated scene videos and merged video");
   assert.match(workspaceSource, /api\s*\.\s*updateConversation\(targetConversationId,[\s\S]*global_assets:[\s\S]*scene_packages:[\s\S]*video_scene_package_edited_scene_ids/, "scene package edits must update conversation context");

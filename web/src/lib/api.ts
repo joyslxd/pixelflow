@@ -10,6 +10,8 @@ const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
 const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
+const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
@@ -146,6 +148,22 @@ export interface CreativeDirectionsResponse {
   validation: IntakeValidationResponse;
   creative_directions: CreativeDirectionResponse[];
   intake_context: Record<string, unknown>;
+}
+
+export interface CreativeDirectionsJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface CreativeDirectionsJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  result: CreativeDirectionsResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface PlanMarkdownResponse {
@@ -663,6 +681,24 @@ function attachmentType(mimeType: string, filename: string): string {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function pollCreativeDirectionsJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<CreativeDirectionsResponse | null> {
+  const deadline = Date.now() + CREATIVE_DIRECTION_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<CreativeDirectionsJobStatusResponse>(`${FLOW_BASE}/intake/directions/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      throw new ApiError(500, status.error || status.message || "创意方向生成失败");
+    }
+    await delay(CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS);
+  }
+  throw new ApiError(408, "创意方向生成轮询超时");
+}
+
 async function pollSceneVideoJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
@@ -970,6 +1006,20 @@ export const api = {
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<CreativeDirectionsResponse>(`${FLOW_BASE}/intake/directions`, { method: "POST", body: JSON.stringify(body) }),
+
+  startCreativeDirectionsJob: (body: {
+    intent: CreationIntent;
+    values: Record<string, unknown>;
+    intake_rounds?: number;
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+  }) => req<CreativeDirectionsJobStartResponse>(`${FLOW_BASE}/intake/directions/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getCreativeDirectionsJob: (jobId: string) =>
+    req<CreativeDirectionsJobStatusResponse>(`${FLOW_BASE}/intake/directions/jobs/${encodeURIComponent(jobId)}`),
+
+  pollCreativeDirectionsJob,
 
   createPlanMarkdown: (body: {
     intent: CreationIntent;

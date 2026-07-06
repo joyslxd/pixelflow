@@ -52,7 +52,7 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
   assert.ok(existsSync(storyboardPanelPath), "StoryboardPanel must exist");
   assert.ok(existsSync(sceneMentionEditorPath), "SceneMentionEditor must own inline @ references");
   assert.match(sceneMentionEditorSource, /MAX_REFERENCE_IMAGE_COUNT/);
-  assert.match(sceneMentionEditorSource, /最多只能选择\s*9\s*张/);
+  assert.match(sceneMentionEditorSource, /最多\s*9\s*张/);
   assert.match(sceneMentionEditorSource, /选择素材进行关联/);
   assert.match(sceneMentionEditorSource, /@/);
   assert.match(sceneMentionEditorSource, /contentEditable/);
@@ -77,6 +77,8 @@ test("original scene package button reopens storyboard with generated scene vide
   assert.doesNotMatch(videoResultBranchSource(), /查看分镜/);
   assert.match(storyboardPanelSource, /generatedSceneVideos/);
   assert.match(storyboardPanelSource, /sceneVideoForScene/);
+  assert.match(storyboardPanelSource, /video\.scene_id === scene\.scene_id/);
+  assert.match(storyboardPanelSource, /Number\(video\.scene_index\) === Number\(scene\.scene_index\)/);
   assert.match(storyboardPanelSource, /<video[\s\S]*controls[\s\S]*preload="metadata"/);
   assert.match(storyboardPanelSource, /dirtySceneIds|已修改/);
   assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/);

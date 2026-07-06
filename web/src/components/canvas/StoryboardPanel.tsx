@@ -108,7 +108,11 @@ function sceneVideoForScene(
   generatedSceneVideos: NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"],
 ) {
   if (!scene) return undefined;
-  return (generatedSceneVideos?.scene_videos || []).find((video) => video.scene_id === scene.scene_id);
+  const sceneVideos = generatedSceneVideos?.scene_videos || [];
+  return (
+    sceneVideos.find((video) => video.scene_id === scene.scene_id) ||
+    sceneVideos.find((video) => Number(video.scene_index) === Number(scene.scene_index))
+  );
 }
 
 export function StoryboardPanel({

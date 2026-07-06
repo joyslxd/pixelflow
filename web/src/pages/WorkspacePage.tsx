@@ -10,6 +10,7 @@ import {
   type ConversationDetailResponse,
   type ConversationMessageResponse,
   type CreativeDirectionResponse,
+  type CreativeDirectionsResponse,
   type ImageEditModelSelection,
   type ImageAssetEditResponse,
   type ImageGenerateResponse,
@@ -183,6 +184,9 @@ interface WorkspaceSnapshot {
   taskId: string;
   messages?: ChatMessage[];
   pendingMaterials: Array<Record<string, unknown>>;
+  flowDraft?: FlowDraft | null;
+  pendingDirectionJob?: PendingDirectionJob | null;
+  pending_direction_job?: PendingDirectionJob | null;
   pendingImageEditRequest?: PendingImageEditRequest | null;
   imageEditConfirmedSelections?: Record<string, ImageEditModelSelection>;
   pendingImageJob?: PendingImageJob | null;
@@ -202,6 +206,8 @@ interface WorkspaceSnapshot {
   briefReadyShown: boolean;
   global_assets?: PrepareScenePackagesResponse["global_assets"];
   scene_packages?: PrepareScenePackagesResponse["scene_packages"];
+  generated_scene_videos?: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"];
+  merged_video?: NonNullable<ChatArtifact["mergedVideo"]>;
   video_scene_package_edited_scene_ids?: string[];
 }
 
@@ -217,6 +223,263 @@ interface PendingDialogContext {
   coreMessage: string;
   materials: Array<Record<string, unknown>>;
   intakeContext?: Record<string, unknown>;
+}
+
+type FlowDraftStage = "intake_analyzed" | "form_pending" | "directions_running" | "directions_ready" | "form_cancelled";
+
+interface FlowDraft {
+  version: 1;
+  stage: FlowDraftStage;
+  intent?: CreationIntent | "video_analysis" | "unknown";
+  coreMessage?: string;
+  materials?: Array<Record<string, unknown>>;
+  intakeIntent?: IntakeIntentResponse;
+  intakeContext?: Record<string, unknown>;
+  formValues?: Record<string, unknown>;
+  form?: GenParamsForm;
+  creativeDirections?: CreativeDirectionResponse[];
+  updatedAt: string;
+}
+
+interface CreativeDirectionsJobRequest {
+  intent: CreationIntent;
+  values: Record<string, unknown>;
+  intake_rounds?: number;
+  product_creative_profile?: Record<string, unknown>;
+  intake_context?: Record<string, unknown>;
+  materials?: Array<Record<string, unknown>>;
+}
+
+interface PendingDirectionJobContext {
+  intent: CreationIntent;
+  formValues: Record<string, unknown>;
+  coreMessage: string;
+  materials?: Array<Record<string, unknown>>;
+  intakeContext?: Record<string, unknown>;
+  form?: GenParamsForm;
+  revisionFeedback?: string;
+}
+
+interface PendingDirectionJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: "creative_directions";
+  started_at: string;
+  request: CreativeDirectionsJobRequest;
+  context: PendingDirectionJobContext;
+}
+
+const DIRECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["type"]>([
+  "plan",
+  "image_prepare",
+  "image_edit_options",
+  "image_result",
+  "video_scene_packages",
+  "video_result",
+  "ppt_outline",
+  "ppt_images",
+  "ppt_file",
+]);
+
+const REQUIREMENT_COLLECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["type"]>([
+  "directions",
+  "brief",
+  "results",
+  "segments",
+  "edit",
+  "qc",
+  "video_flaw_analysis",
+  "video_analysis_result",
+  ...DIRECTION_SUCCESSOR_ARTIFACT_TYPES,
+]);
+
+const REQUIREMENT_COLLECTION_SUCCESSOR_CONTEXT_KEYS = [
+  "creative_directions",
+  "selected_direction",
+  "plan_markdown",
+  "plan_approved",
+  "plan_revision_requested",
+  "image_prepare",
+  "image_result",
+  "image_edit_done",
+  "image_accepted",
+  "image_revision_feedback",
+  "video_scene_packages",
+  "global_assets",
+  "scene_packages",
+  "sceneAssetFailures",
+  "scene_asset_failures",
+  "generated_scene_videos",
+  "merged_video",
+  "video_accepted",
+  "video_revision_requested",
+  "video_revision_feedback",
+  "ppt_summary",
+  "ppt_content_json",
+  "ppt_images",
+  "ppt_file",
+  "ppt_outline_feedback",
+  "ppt_done",
+] as const;
+
+const REQUIREMENT_COLLECTION_PENDING_JOB_KEYS = [
+  "pendingDirectionJob",
+  "pending_direction_job",
+  "pendingImageEditRequest",
+  "pending_image_edit_request",
+  "pendingImageJob",
+  "pending_image_job",
+  "pendingScenePackageJob",
+  "pending_scene_package_job",
+  "pendingVideoJob",
+  "pending_video_job",
+  "pendingPptJob",
+  "pending_ppt_job",
+] as const;
+
+function stableWorkflowValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableWorkflowValue);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, stableWorkflowValue(record[key])]));
+  }
+  return value ?? null;
+}
+
+function stableWorkflowJson(value: unknown): string {
+  return JSON.stringify(stableWorkflowValue(value));
+}
+
+function creativeDirectionIdentity(direction: CreativeDirectionResponse | undefined): string {
+  if (!direction) return "";
+  return stableWorkflowJson({
+    direction_id: direction.direction_id,
+    title: direction.title,
+    description: direction.description,
+  });
+}
+
+function creativeDirectionsFingerprint(directions: CreativeDirectionResponse[] | undefined): string {
+  return stableWorkflowJson((directions || []).map((direction) => creativeDirectionIdentity(direction)));
+}
+
+function selectedDirectionMatchesDirections(
+  selectedDirection: CreativeDirectionResponse | undefined,
+  directions: CreativeDirectionResponse[] | undefined,
+): boolean {
+  const selectedIdentity = creativeDirectionIdentity(selectedDirection);
+  if (!selectedIdentity) return false;
+  return (directions || []).some((direction) => creativeDirectionIdentity(direction) === selectedIdentity);
+}
+
+function isDirectionSuccessorArtifact(artifact: ChatArtifact | undefined): artifact is ChatArtifact {
+  return Boolean(artifact && DIRECTION_SUCCESSOR_ARTIFACT_TYPES.has(artifact.type));
+}
+
+function hasWorkflowValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (value && typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+  return false;
+}
+
+function lastPhasePassedRequirementCollection(lastPhase: string | null | undefined): boolean {
+  const phase = String(lastPhase || "").trim().toLowerCase();
+  if (
+    !phase ||
+    phase === "idle" ||
+    phase === "intake_form_pending" ||
+    phase === "ppt_form_pending" ||
+    phase === "form_cancelled" ||
+    phase === "intake_unknown" ||
+    phase === "image_edit_waiting_source_image" ||
+    phase.endsWith("_form_pending")
+  ) {
+    return false;
+  }
+  return /(directions|plan|image|video|scene|ppt|brief|generation|review|accepted|failed|running|blocked|resume)/.test(phase);
+}
+
+function hasPassedRequirementCollection(
+  messages: ChatMessage[],
+  targetConversationId: string,
+  snapshot: Partial<WorkspaceSnapshot> & Record<string, unknown>,
+  lastPhase: string | null | undefined,
+): boolean {
+  const draftStage = snapshot.flowDraft?.stage;
+  if (draftStage === "directions_running" || draftStage === "directions_ready") return true;
+  if (REQUIREMENT_COLLECTION_PENDING_JOB_KEYS.some((key) => hasWorkflowValue(snapshot[key]))) return true;
+  if (
+    messages.some(
+      (message) =>
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        Boolean(message.artifact && REQUIREMENT_COLLECTION_SUCCESSOR_ARTIFACT_TYPES.has(message.artifact.type)),
+    )
+  ) {
+    return true;
+  }
+  if (REQUIREMENT_COLLECTION_SUCCESSOR_CONTEXT_KEYS.some((key) => hasWorkflowValue(snapshot[key]))) return true;
+  return lastPhasePassedRequirementCollection(lastPhase);
+}
+
+function artifactMatchesDirectionContext(
+  artifact: ChatArtifact | undefined,
+  context: PendingDirectionJobContext,
+): boolean {
+  if (!isDirectionSuccessorArtifact(artifact)) return false;
+  if (artifact.intent !== context.intent) return false;
+  if (stableWorkflowJson(artifact.formValues || {}) !== stableWorkflowJson(context.formValues || {})) return false;
+  const artifactCore = String(artifact.coreMessage || "").trim();
+  const contextCore = String(context.coreMessage || "").trim();
+  return !artifactCore || !contextCore || artifactCore === contextCore;
+}
+
+function hasPostDirectionArtifactForContext(
+  messages: ChatMessage[],
+  targetConversationId: string,
+  context: PendingDirectionJobContext,
+): boolean {
+  return messages.some(
+    (message) =>
+      messageConversationId(message, targetConversationId) === targetConversationId &&
+      artifactMatchesDirectionContext(message.artifact, context),
+  );
+}
+
+function hasPostDirectionArtifactForDirections(
+  messages: ChatMessage[],
+  targetConversationId: string,
+  directions: CreativeDirectionResponse[] | undefined,
+): boolean {
+  return messages.some((message) => {
+    if (messageConversationId(message, targetConversationId) !== targetConversationId) return false;
+    const artifact = message.artifact;
+    return isDirectionSuccessorArtifact(artifact) && selectedDirectionMatchesDirections(artifact.selectedDirection, directions);
+  });
+}
+
+function hasLaterDirectionSuccessor(
+  messages: ChatMessage[],
+  targetConversationId: string,
+  directionMessage: ChatMessage,
+): boolean {
+  const directionMessageIndex = messages.findIndex(
+    (message) =>
+      message.id === directionMessage.id &&
+      messageConversationId(message, targetConversationId) === targetConversationId &&
+      message.artifact?.type === "directions",
+  );
+  if (directionMessageIndex < 0) return true;
+  return messages.slice(directionMessageIndex + 1).some((message) => {
+    if (messageConversationId(message, targetConversationId) !== targetConversationId) return false;
+    const artifact = message.artifact;
+    if (!artifact) return false;
+    if (artifact.type === "directions") return true;
+    return isDirectionSuccessorArtifact(artifact);
+  });
 }
 
 interface PendingImageEditRequest {
@@ -721,6 +984,16 @@ function videoResultsFromGeneratedScenes(
   return [finalVideo, ...sceneVideos].filter((video) => Boolean(video.url));
 }
 
+function latestVideoResultArtifactForConversation(messages: ChatMessage[], conversationId = ""): ChatArtifact | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (conversationId && messageConversationId(message, conversationId) !== conversationId) continue;
+    const artifact = message.artifact;
+    if (artifact?.type === "video_result" && (artifact.generatedSceneVideos || artifact.mergedVideo)) return artifact;
+  }
+  return undefined;
+}
+
 function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
@@ -816,7 +1089,8 @@ function restoreLatestVideoScenePackagesFromContext(
 ): ChatMessage[] {
   const globalAssets = context.global_assets;
   const scenePackages = context.scene_packages;
-  const generatedSceneVideos = Array.isArray(context.generated_scene_videos)
+  const latestVideoResultArtifact = latestVideoResultArtifactForConversation(messages);
+  const contextGeneratedSceneVideos = Array.isArray(context.generated_scene_videos)
     ? {
         ok: true,
         endpoint: "/api/video/reference-mode-video",
@@ -825,13 +1099,13 @@ function restoreLatestVideoScenePackagesFromContext(
         message: "已恢复生成后的分镜视频。",
       }
     : undefined;
+  const generatedSceneVideos = contextGeneratedSceneVideos || latestVideoResultArtifact?.generatedSceneVideos;
   const mergedVideo = context.merged_video && typeof context.merged_video === "object"
     ? context.merged_video as NonNullable<ChatArtifact["mergedVideo"]>
-    : undefined;
+    : latestVideoResultArtifact?.mergedVideo;
   const editedSceneIds = Array.isArray(context.video_scene_package_edited_scene_ids)
     ? context.video_scene_package_edited_scene_ids.map((item) => String(item)).filter(Boolean)
-    : undefined;
-  if (!globalAssets || !Array.isArray(scenePackages)) return messages;
+    : latestVideoResultArtifact?.videoScenePackageEditedSceneIds;
   const latestIndex = [...messages]
     .reverse()
     .findIndex((message) => message.artifact?.type === "video_scene_packages" && Boolean(message.artifact.videoScenePackages));
@@ -846,8 +1120,10 @@ function restoreLatestVideoScenePackagesFromContext(
         ...message.artifact,
         videoScenePackages: {
           ...videoScenePackages,
-          global_assets: globalAssets as typeof videoScenePackages.global_assets,
-          scene_packages: scenePackages as typeof videoScenePackages.scene_packages,
+          global_assets: (globalAssets || latestVideoResultArtifact?.videoScenePackages?.global_assets || videoScenePackages.global_assets) as typeof videoScenePackages.global_assets,
+          scene_packages: (Array.isArray(scenePackages)
+            ? scenePackages
+            : latestVideoResultArtifact?.videoScenePackages?.scene_packages || videoScenePackages.scene_packages) as typeof videoScenePackages.scene_packages,
         },
         generatedSceneVideos: generatedSceneVideos || message.artifact.generatedSceneVideos,
         mergedVideo: mergedVideo || message.artifact.mergedVideo,
@@ -892,6 +1168,25 @@ function latestOriginalVideoScenePackagesForConversation(messages: ChatMessage[]
     if (baseline) return baseline;
   }
   return undefined;
+}
+
+function latestScenePackageSnapshotForConversation(messages: ChatMessage[], conversationId: string): Partial<WorkspaceSnapshot> {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (messageConversationId(message, conversationId) !== conversationId) continue;
+    const artifact = message.artifact;
+    const videoScenePackages = artifact?.videoScenePackages;
+    if (artifact?.type !== "video_scene_packages" && artifact?.type !== "video_result") continue;
+    if (!videoScenePackages) continue;
+    return {
+      global_assets: videoScenePackages.global_assets,
+      scene_packages: videoScenePackages.scene_packages,
+      generated_scene_videos: artifact.generatedSceneVideos?.scene_videos,
+      merged_video: artifact.mergedVideo,
+      video_scene_package_edited_scene_ids: artifact.videoScenePackageEditedSceneIds || [],
+    };
+  }
+  return {};
 }
 
 function normalizeMaterialStoryboardReferences(
@@ -959,6 +1254,9 @@ export function WorkspacePage() {
   const announcedPhasesRef = useRef(new Set<string>());
   const processedArtifactIdsRef = useRef(new Set<string>());
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
+  const flowDraftRef = useRef<FlowDraft | null>(null);
+  const pendingDirectionJobRef = useRef<PendingDirectionJob | null>(null);
+  const activeDirectionJobPollsRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const pendingImageJobRef = useRef<PendingImageJob | null>(null);
@@ -1079,7 +1377,12 @@ export function WorkspacePage() {
       try {
         const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
         setMessages((items) => {
-          const nextItems = replaceMessageById(items, optimisticMessage.id, savedMessage);
+          const currentMessage = items.find((item) => item.id === optimisticMessage.id);
+          const nextItems = replaceMessageById(items, optimisticMessage.id, {
+            ...savedMessage,
+            artifact: currentMessage?.artifact || savedMessage.artifact,
+            materials: currentMessage?.materials || savedMessage.materials,
+          });
           messagesRef.current = nextItems;
           return nextItems;
         });
@@ -1111,6 +1414,56 @@ export function WorkspacePage() {
     const message: ChatMessage = { id: messageId, conversationId: targetConversationId || undefined, role: "assistant", content, time: "", artifact };
     void appendMessageForConversation(message, targetConversationId);
     return message;
+  };
+
+  const makeFlowDraft = (
+    stage: FlowDraftStage,
+    data: Omit<FlowDraft, "version" | "stage" | "updatedAt">,
+  ): FlowDraft => ({
+    version: 1,
+    stage,
+    ...data,
+    updatedAt: new Date().toISOString(),
+  });
+
+  const hasDirectionsArtifactForDraft = (items: ChatMessage[], targetConversationId: string, draft: FlowDraft | null | undefined): boolean => {
+    if (!draft?.creativeDirections?.length) return false;
+    const draftFingerprint = creativeDirectionsFingerprint(draft.creativeDirections);
+    return items.some((message) => {
+      if (messageConversationId(message, targetConversationId) !== targetConversationId) return false;
+      const artifact = message.artifact;
+      if (artifact?.type !== "directions" || artifact.intent !== draft.intent) return false;
+      return Boolean(draftFingerprint && creativeDirectionsFingerprint(artifact.directions) === draftFingerprint);
+    });
+  };
+
+  const shouldAutoSelectDirection = (message: ChatMessage, targetConversationId: string): boolean => {
+    if (!isVisibleConversation(targetConversationId)) return false;
+    if (processedArtifactIdsRef.current.has(processedArtifactKey(message, targetConversationId))) return false;
+    if (hasLaterDirectionSuccessor(messagesRef.current, targetConversationId, message)) return false;
+    return messagesRef.current.some(
+      (item) =>
+        item.id === message.id &&
+        messageConversationId(item, targetConversationId) === targetConversationId &&
+        item.artifact?.type === "directions",
+    );
+  };
+
+  const restoreFormDraft = (draft: FlowDraft, targetConversationId: string) => {
+    if (!isCreationIntent(draft.intent)) return;
+    const materials = draft.materials || [];
+    const formValues = draft.form ? valuesFromForm(draft.form) : draft.formValues || {};
+    setPendingCore(draft.coreMessage || "");
+    setPendingIntent(draft.intent);
+    setPendingFormValues(formValues);
+    setPendingMaterials(materials);
+    pendingDialogContextRef.current = {
+      conversationId: targetConversationId,
+      coreMessage: draft.coreMessage || "",
+      materials,
+      intakeContext: draft.intakeContext || draft.intakeIntent?.intake_context || {},
+    };
+    if (isVisibleConversation(targetConversationId)) setDialogOpen(true);
   };
 
   const recordImageEditConfirmedSelection = (
@@ -1290,8 +1643,11 @@ export function WorkspacePage() {
                 message.artifact?.type === "video_scene_packages" &&
                 Boolean(message.artifact.videoScenePackages),
             )?.index ?? -1;
-      if (targetIndex < 0) return items;
-      return items.map((message, index) => {
+      if (targetIndex < 0) {
+        messagesRef.current = items;
+        return items;
+      }
+      const nextItems = items.map((message, index) => {
         if (index !== targetIndex || !message.artifact?.videoScenePackages) return message;
         return {
           ...message,
@@ -1304,6 +1660,8 @@ export function WorkspacePage() {
           },
         };
       });
+      messagesRef.current = nextItems;
+      return nextItems;
     });
     if (targetConversationId) {
       void api
@@ -1701,6 +2059,7 @@ export function WorkspacePage() {
       intakeContext?: Record<string, unknown>;
     },
     targetConversationId = conversationIdRef.current,
+    options: { autoConfirm?: boolean } = {},
   ) => {
     const message = pushArtifact(`已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未选择将采用推荐方向。`, {
       type: "directions",
@@ -1715,11 +2074,13 @@ export function WorkspacePage() {
       coreMessage: context.coreMessage,
     }, targetConversationId);
     const recommended = directions.find((direction) => direction.recommended) || directions[0];
-    if (recommended) {
+    if ((options.autoConfirm ?? true) && recommended) {
       window.setTimeout(() => {
+        if (!shouldAutoSelectDirection(message, targetConversationId)) return;
         void handleSelectDirection(message, recommended, true);
       }, AUTO_CONFIRM_TIMEOUT_MS);
     }
+    return message;
   };
 
   const pushPlanArtifact = (
@@ -1932,6 +2293,184 @@ export function WorkspacePage() {
     extraContext: Record<string, unknown> = {},
   ) => {
     await persistPendingPptJob(null, targetConversationId, lastPhase, extraContext);
+  };
+
+  const persistPendingDirectionJob = async (
+    pendingDirectionJob: PendingDirectionJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    flowDraft: FlowDraft | null = flowDraftRef.current,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingDirectionJobRef.current = pendingDirectionJob;
+    flowDraftRef.current = flowDraft;
+    if (!targetConversationId) return;
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...makeSnapshot(targetConversationId),
+        ...extraContext,
+        flowDraft,
+        pendingDirectionJob,
+        pending_direction_job: pendingDirectionJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingDirectionJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    flowDraft: FlowDraft | null = flowDraftRef.current,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingDirectionJob(null, targetConversationId, lastPhase, flowDraft, extraContext);
+  };
+
+  const handleCompletedDirectionJob = async (
+    pendingDirectionJob: PendingDirectionJob,
+    directionResult: CreativeDirectionsResponse,
+  ) => {
+    const targetConversationId = pendingDirectionJob.conversation_id;
+    const context = pendingDirectionJob.context;
+    if (!directionResult.validation.is_complete) {
+      pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", targetConversationId);
+      const draft = makeFlowDraft("form_pending", {
+        intent: context.intent,
+        coreMessage: context.coreMessage,
+        materials: context.materials || [],
+        intakeContext: context.intakeContext,
+        formValues: context.formValues,
+        form: context.form,
+      });
+      await clearPendingDirectionJob(targetConversationId, "intake_form_pending", draft, {
+        intent: context.intent,
+        form_values: context.formValues,
+        intake_context: context.intakeContext,
+        materials: context.materials || [],
+      }).catch(() => {});
+      return;
+    }
+    if (hasPostDirectionArtifactForContext(messagesRef.current, targetConversationId, context)) {
+      await clearPendingDirectionJob(targetConversationId, "plan_review", null, {
+        intent: context.intent,
+        form_values: context.formValues,
+        intake_context: context.intakeContext,
+        materials: context.materials || [],
+      }).catch(() => {});
+      return;
+    }
+    const intakeContext = directionResult.intake_context || context.intakeContext || {};
+    const draft = makeFlowDraft("directions_ready", {
+      intent: context.intent,
+      coreMessage: context.coreMessage,
+      materials: context.materials || [],
+      intakeContext,
+      formValues: context.formValues,
+      form: context.form,
+      creativeDirections: directionResult.creative_directions,
+    });
+    if (!hasDirectionsArtifactForDraft(messagesRef.current, targetConversationId, draft)) {
+      pushDirectionsArtifact(directionResult.creative_directions, {
+        intent: context.intent,
+        formValues: context.formValues,
+        materials: context.materials || [],
+        coreMessage: context.coreMessage,
+        intakeContext,
+      }, targetConversationId);
+    }
+    await clearPendingDirectionJob(targetConversationId, context.revisionFeedback ? "creative_directions_revised" : `${context.intent}_directions`, draft, {
+      intent: context.intent,
+      [`${context.intent}_form`]: context.form,
+      creative_directions: directionResult.creative_directions,
+      form_values: context.formValues,
+      intake_context: intakeContext,
+      materials: context.materials || [],
+      revision_feedback: context.revisionFeedback,
+    }).catch(() => {});
+  };
+
+  const resumePendingDirectionJob = async (pendingDirectionJob: PendingDirectionJob) => {
+    const pollKey = `${pendingDirectionJob.conversation_id}:${pendingDirectionJob.job_id}`;
+    if (activeDirectionJobPollsRef.current.has(pollKey)) return;
+    activeDirectionJobPollsRef.current.add(pollKey);
+    let pausedForHiddenConversation = false;
+    const shouldContinuePolling = () => isVisibleConversation(pendingDirectionJob.conversation_id);
+    const stopIfHidden = () => {
+      if (shouldContinuePolling()) return false;
+      pausedForHiddenConversation = true;
+      return true;
+    };
+    setBusyForConversation(pendingDirectionJob.conversation_id, true);
+    try {
+      if (stopIfHidden()) return;
+      const status = await api.getCreativeDirectionsJob(pendingDirectionJob.job_id);
+      if (stopIfHidden()) return;
+      const result =
+        status.status === "completed" && status.result
+          ? status.result
+          : await api.pollCreativeDirectionsJob(pendingDirectionJob.job_id, shouldContinuePolling);
+      if (!result || stopIfHidden()) return;
+      await handleCompletedDirectionJob(pendingDirectionJob, result);
+    } catch (err) {
+      if (stopIfHidden()) return;
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的创意方向生成任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从当前表单手动继续生成方向。"
+          : `继续查询创意方向生成任务失败:${message}`,
+        pendingDirectionJob.conversation_id,
+      );
+      const draft = flowDraftRef.current || makeFlowDraft("form_pending", {
+        intent: pendingDirectionJob.context.intent,
+        coreMessage: pendingDirectionJob.context.coreMessage,
+        materials: pendingDirectionJob.context.materials || [],
+        intakeContext: pendingDirectionJob.context.intakeContext,
+        formValues: pendingDirectionJob.context.formValues,
+        form: pendingDirectionJob.context.form,
+      });
+      await clearPendingDirectionJob(pendingDirectionJob.conversation_id, "direction_job_resume_failed", draft, {
+        direction_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      activeDirectionJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(pendingDirectionJob.conversation_id, false);
+      void pausedForHiddenConversation;
+    }
+  };
+
+  const startDirectionJob = async (
+    targetConversationId: string,
+    request: CreativeDirectionsJobRequest,
+    context: PendingDirectionJobContext,
+    lastPhase = "directions_running",
+    sourceMessageId = "",
+  ) => {
+    const flowDraft = makeFlowDraft("directions_running", {
+      intent: context.intent,
+      coreMessage: context.coreMessage,
+      materials: context.materials || [],
+      intakeContext: context.intakeContext,
+      formValues: context.formValues,
+      form: context.form,
+    });
+    const started = await api.startCreativeDirectionsJob(request);
+    const pendingDirectionJob: PendingDirectionJob = {
+      job_id: started.job_id,
+      conversation_id: targetConversationId,
+      source_message_id: sourceMessageId,
+      kind: "creative_directions",
+      started_at: new Date().toISOString(),
+      request,
+      context,
+    };
+    await persistPendingDirectionJob(pendingDirectionJob, targetConversationId, lastPhase, flowDraft, {
+      intent: context.intent,
+      form_values: context.formValues,
+      intake_context: context.intakeContext,
+      materials: context.materials || [],
+      revision_feedback: context.revisionFeedback,
+    });
+    await resumePendingDirectionJob(pendingDirectionJob);
   };
 
   const scenePackageContext = (
@@ -3091,11 +3630,17 @@ export function WorkspacePage() {
   }
 
   const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
-    if (Array.isArray(snapshot.messages)) setMessages(snapshot.messages);
+    if (Array.isArray(snapshot.messages)) {
+      messagesRef.current = snapshot.messages;
+      setMessages(snapshot.messages);
+    }
     setPendingMaterials(Array.isArray(snapshot.pendingMaterials) ? snapshot.pendingMaterials : []);
+    setDialogOpen(false);
     setPendingFormValues({});
     setPendingCore("");
     pendingDialogContextRef.current = null;
+    flowDraftRef.current = snapshot.flowDraft || null;
+    pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
@@ -3119,36 +3664,45 @@ export function WorkspacePage() {
     if (typeof snapshot.briefReadyShown === "boolean") briefReadyShownRef.current = snapshot.briefReadyShown;
   };
 
-  const makeSnapshot = (snapshotConversationId = currentConversationId): WorkspaceSnapshot => ({
-    taskId: currentTaskId,
-    pendingMaterials,
-    pendingImageEditRequest:
-      pendingImageEditRequestRef.current?.conversationId === snapshotConversationId ? pendingImageEditRequestRef.current : null,
-    imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
-    pendingImageJob:
-      pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
-    pending_image_job:
-      pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
-    pendingScenePackageJob:
-      pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
-    pending_scene_package_job:
-      pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
-    pendingVideoJob:
-      pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
-    pending_video_job:
-      pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
-    pendingPptJob:
-      pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
-    pending_ppt_job:
-      pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
-    ppt_done: isPptDoneForConversation(snapshotConversationId),
-    canvas,
-    canvasOpen,
-    briefConfirmed,
-    lastEventId: lastEventIdRef.current,
-    announcedPhases: Array.from(announcedPhasesRef.current),
-    briefReadyShown: briefReadyShownRef.current,
-  });
+  const makeSnapshot = (snapshotConversationId = currentConversationId): WorkspaceSnapshot => {
+    const scenePackageSnapshot = latestScenePackageSnapshotForConversation(messagesRef.current, snapshotConversationId);
+    return {
+      taskId: currentTaskId,
+      pendingMaterials,
+      flowDraft: flowDraftRef.current,
+      pendingDirectionJob:
+        pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
+      pending_direction_job:
+        pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
+      pendingImageEditRequest:
+        pendingImageEditRequestRef.current?.conversationId === snapshotConversationId ? pendingImageEditRequestRef.current : null,
+      imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
+      pendingImageJob:
+        pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
+      pending_image_job:
+        pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
+      pendingScenePackageJob:
+        pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
+      pending_scene_package_job:
+        pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
+      pendingVideoJob:
+        pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
+      pending_video_job:
+        pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
+      pendingPptJob:
+        pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
+      pending_ppt_job:
+        pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
+      ppt_done: isPptDoneForConversation(snapshotConversationId),
+      canvas,
+      canvasOpen,
+      briefConfirmed,
+      lastEventId: lastEventIdRef.current,
+      announcedPhases: Array.from(announcedPhasesRef.current),
+      briefReadyShown: briefReadyShownRef.current,
+      ...scenePackageSnapshot,
+    };
+  };
 
   const resetWorkspace = () => {
     unsubRef.current();
@@ -3172,6 +3726,8 @@ export function WorkspacePage() {
     announcedPhasesRef.current = new Set();
     processedArtifactIdsRef.current = new Set();
     pendingDialogContextRef.current = null;
+    flowDraftRef.current = null;
+    pendingDirectionJobRef.current = null;
     pendingImageEditRequestRef.current = null;
     imageEditConfirmedSelectionsRef.current = {};
     pendingImageJobRef.current = null;
@@ -3191,6 +3747,8 @@ export function WorkspacePage() {
     const pendingImageEditRequest =
       snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
     const imageEditConfirmedSelections = snapshot.imageEditConfirmedSelections || {};
+    const flowDraft = snapshot.flowDraft || null;
+    const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
@@ -3208,6 +3766,9 @@ export function WorkspacePage() {
       ...snapshot,
       pendingScenePackageJob: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
       pending_scene_package_job: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
+      flowDraft,
+      pendingDirectionJob,
+      pending_direction_job: pendingDirectionJob,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
@@ -3216,6 +3777,37 @@ export function WorkspacePage() {
       imageEditConfirmedSelections,
       messages: normalizedMessages,
     });
+    if (pendingDirectionJob?.job_id && pendingDirectionJob.conversation_id === detail.conversation.conversation_id) {
+      window.setTimeout(() => {
+        void resumePendingDirectionJob(pendingDirectionJob);
+      }, 0);
+    } else if (
+      flowDraft?.stage === "directions_ready" &&
+      flowDraft.creativeDirections?.length &&
+      isCreationIntent(flowDraft.intent) &&
+      !hasPostDirectionArtifactForDirections(normalizedMessages, detail.conversation.conversation_id, flowDraft.creativeDirections) &&
+      !hasDirectionsArtifactForDraft(normalizedMessages, detail.conversation.conversation_id, flowDraft)
+    ) {
+      pushDirectionsArtifact(flowDraft.creativeDirections, {
+        intent: flowDraft.intent,
+        formValues: flowDraft.formValues || (flowDraft.form ? valuesFromForm(flowDraft.form) : {}),
+        materials: flowDraft.materials || [],
+        coreMessage: flowDraft.coreMessage || "",
+        intakeContext: flowDraft.intakeContext,
+      }, detail.conversation.conversation_id, { autoConfirm: false });
+    } else if (
+      flowDraft?.stage === "form_pending" &&
+      !hasPassedRequirementCollection(
+        normalizedMessages,
+        detail.conversation.conversation_id,
+        snapshot as Partial<WorkspaceSnapshot> & Record<string, unknown>,
+        detail.conversation.last_phase,
+      )
+    ) {
+      window.setTimeout(() => {
+        restoreFormDraft(flowDraft, detail.conversation.conversation_id);
+      }, 0);
+    }
     if (pendingImageJob?.job_id && pendingImageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
         void resumePendingImageJob(pendingImageJob);
@@ -3268,6 +3860,10 @@ export function WorkspacePage() {
   const resumeVisiblePendingJobs = () => {
     const activeConversationId = conversationIdRef.current;
     if (!activeConversationId || !pageVisibleRef.current) return;
+    const pendingDirectionJob = pendingDirectionJobRef.current;
+    if (pendingDirectionJob?.job_id && pendingDirectionJob.conversation_id === activeConversationId) {
+      void resumePendingDirectionJob(pendingDirectionJob);
+    }
     const pendingImageJob = pendingImageJobRef.current;
     if (pendingImageJob?.job_id && pendingImageJob.conversation_id === activeConversationId) {
       void resumePendingImageJob(pendingImageJob);
@@ -3318,6 +3914,11 @@ export function WorkspacePage() {
         restoringRef.current = false;
         return;
       }
+      setDialogOpen(false);
+      setPendingCore("");
+      setPendingFormValues({});
+      setPendingMaterials([]);
+      pendingDialogContextRef.current = null;
       unsubRef.current();
       seenEventIdsRef.current = new Set();
       announcedPhasesRef.current = new Set();
@@ -3358,6 +3959,11 @@ export function WorkspacePage() {
       const snapshot: WorkspaceSnapshot = {
         taskId: currentTaskId,
         pendingMaterials,
+        flowDraft: flowDraftRef.current,
+        pendingDirectionJob:
+          pendingDirectionJobRef.current?.conversation_id === currentConversationId ? pendingDirectionJobRef.current : null,
+        pending_direction_job:
+          pendingDirectionJobRef.current?.conversation_id === currentConversationId ? pendingDirectionJobRef.current : null,
         pendingImageEditRequest:
           pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
         imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
@@ -3520,39 +4126,25 @@ export function WorkspacePage() {
       setBusyForConversation(activeConversation, true);
       pushAssistant("已收到修改意见，正在回到采集 Agent 重新生成 3 个创意方向…", activeConversation);
       try {
-        const directionResult = await api.generateCreativeDirections({
-          intent: revisionIntent,
-          values: revisionFormValues,
-          materials: flowMaterials,
-          product_creative_profile: { revision_feedback: text },
-          intake_context: revisionArtifact.intakeContext,
-        });
-        if (!directionResult.validation.is_complete) {
-          pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", activeConversation);
-          setBusyForConversation(activeConversation, false);
-          return;
-        }
-        pushDirectionsArtifact(directionResult.creative_directions, {
-          intent: revisionIntent,
-          formValues: revisionFormValues,
-          materials: flowMaterials,
-          coreMessage: `${revisionArtifact.coreMessage || pendingCore}\n修改意见：${text}`,
-          intakeContext: directionResult.intake_context || revisionArtifact.intakeContext,
-        }, activeConversation);
-        if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
-              last_phase: "creative_directions_revised",
-              context: {
-                ...makeSnapshot(),
-                revision_feedback: text,
-                materials: flowMaterials,
-                intake_context: directionResult.intake_context || revisionArtifact.intakeContext,
-                creative_directions: directionResult.creative_directions,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
+        await startDirectionJob(
+          activeConversation,
+          {
+            intent: revisionIntent,
+            values: revisionFormValues,
+            materials: flowMaterials,
+            product_creative_profile: { revision_feedback: text },
+            intake_context: revisionArtifact.intakeContext,
+          },
+          {
+            intent: revisionIntent,
+            formValues: revisionFormValues,
+            materials: flowMaterials,
+            coreMessage: `${revisionArtifact.coreMessage || pendingCore}\n修改意见：${text}`,
+            intakeContext: revisionArtifact.intakeContext,
+            revisionFeedback: text,
+          },
+          "directions_running",
+        );
       } catch (err) {
         pushAssistant(`重新生成创意方向失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
@@ -3766,6 +4358,15 @@ export function WorkspacePage() {
         return;
       }
       if (intake.intent === "ppt") {
+        const flowDraft = makeFlowDraft("form_pending", {
+          intent: "ppt",
+          coreMessage: text,
+          materials,
+          intakeIntent: intake,
+          intakeContext: intake.intake_context,
+          formValues: initialValuesFromIntake(intake),
+        });
+        flowDraftRef.current = flowDraft;
         if (isVisibleConversation(activeConversation)) {
           setPendingCore(text);
           setPendingIntent("ppt");
@@ -3783,10 +4384,11 @@ export function WorkspacePage() {
           void api
             .updateConversation(activeConversation, {
               last_phase: "ppt_form_pending",
-              context: {
-                ...makeSnapshot(),
-                intent: "ppt",
-                materials,
+            context: {
+              ...makeSnapshot(),
+              flowDraft,
+              intent: "ppt",
+              materials,
                 intake_intent: intake,
                 intake_context: intake.intake_context,
               } as unknown as Record<string, unknown>,
@@ -3829,6 +4431,15 @@ export function WorkspacePage() {
         return;
       }
       if (isCreationIntent(intake.intent)) {
+        const flowDraft = makeFlowDraft("form_pending", {
+          intent: intake.intent,
+          coreMessage: text,
+          materials,
+          intakeIntent: intake,
+          intakeContext: intake.intake_context,
+          formValues: initialValuesFromIntake(intake),
+        });
+        flowDraftRef.current = flowDraft;
         if (isVisibleConversation(activeConversation)) {
           setPendingCore(text);
           setPendingIntent(intake.intent);
@@ -3846,10 +4457,11 @@ export function WorkspacePage() {
           void api
             .updateConversation(activeConversation, {
               last_phase: "intake_form_pending",
-              context: {
-                ...makeSnapshot(),
-                intent: intake.intent,
-                materials,
+            context: {
+              ...makeSnapshot(),
+              flowDraft,
+              intent: intake.intent,
+              materials,
                 intake_intent: intake,
                 intake_context: intake.intake_context,
               } as unknown as Record<string, unknown>,
@@ -4126,41 +4738,25 @@ export function WorkspacePage() {
         setBusyForConversation(targetConversationId, false);
         return;
       }
-      const directionResult = await api.generateCreativeDirections({
-        intent: form.intent,
-        values,
-        materials: flowMaterials,
-        intake_context: flowIntakeContext,
-      });
-      if (!directionResult.validation.is_complete) {
-        pushAssistant(directionResult.validation.message || "表单信息还不完整，请补充后再提交。", targetConversationId);
-        setBusyForConversation(targetConversationId, false);
-        return;
-      }
-      pushDirectionsArtifact(directionResult.creative_directions, {
-        intent: form.intent,
-        formValues: values,
-        materials: flowMaterials,
-        coreMessage: flowCoreMessage,
-        intakeContext: directionResult.intake_context || flowIntakeContext,
-      }, targetConversationId);
       pendingDialogContextRef.current = null;
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: `${form.intent}_directions`,
-            context: {
-              ...makeSnapshot(),
-              [`${form.intent}_form`]: form,
-              creative_directions: directionResult.creative_directions,
-              form_values: values,
-              intake_context: directionResult.intake_context || flowIntakeContext,
-              materials: flowMaterials,
-              intent: form.intent,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      await startDirectionJob(
+        targetConversationId,
+        {
+          intent: form.intent,
+          values,
+          materials: flowMaterials,
+          intake_context: flowIntakeContext,
+        },
+        {
+          intent: form.intent,
+          formValues: values,
+          materials: flowMaterials,
+          coreMessage: flowCoreMessage,
+          intakeContext: flowIntakeContext,
+          form,
+        },
+        "directions_running",
+      );
       setBusyForConversation(targetConversationId, false);
     } catch (err) {
       pushAssistant(`采集处理失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -4177,6 +4773,14 @@ export function WorkspacePage() {
     setPendingFormValues({});
     setPendingMaterials([]);
     pendingDialogContextRef.current = null;
+    const flowDraft = makeFlowDraft("form_cancelled", {
+      intent: cancelledIntent,
+      coreMessage: dialogContext?.coreMessage || pendingCore,
+      materials: dialogContext?.materials || pendingMaterials,
+      intakeContext: dialogContext?.intakeContext,
+      formValues: pendingFormValues,
+    });
+    flowDraftRef.current = flowDraft;
     setBusyForConversation(targetConversationId, false);
     pushAssistant("已取消当前需求表单，流程已终止。", targetConversationId);
     if (targetConversationId) {
@@ -4185,6 +4789,7 @@ export function WorkspacePage() {
           last_phase: "form_cancelled",
           context: {
             ...makeSnapshot(),
+            flowDraft,
             intent: cancelledIntent,
             form_cancelled: true,
           } as unknown as Record<string, unknown>,
@@ -4421,6 +5026,8 @@ export function WorkspacePage() {
   const handleSelectDirection = async (msg: ChatMessage, direction: CreativeDirectionResponse, auto = false) => {
     if (!isCreationIntent(msg.artifact?.intent) || !msg.artifact?.formValues) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (auto && !shouldAutoSelectDirection(msg, targetConversationId)) return;
+    if (hasLaterDirectionSuccessor(messagesRef.current, targetConversationId, msg)) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
@@ -4441,12 +5048,17 @@ export function WorkspacePage() {
         coreMessage: msg.artifact.coreMessage || pendingCore,
         intakeContext: msg.artifact.intakeContext,
       }, targetConversationId);
+      flowDraftRef.current = null;
+      pendingDirectionJobRef.current = null;
       if (targetConversationId) {
         void api
           .updateConversation(targetConversationId, {
             last_phase: "plan_review",
             context: {
               ...makeSnapshot(),
+              flowDraft: null,
+              pendingDirectionJob: null,
+              pending_direction_job: null,
               intent: msg.artifact.intent,
               form_values: msg.artifact.formValues,
               intake_context: msg.artifact.intakeContext,
