@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pixelflow.memory import semantic_memory_text
+
 ImageMethod = Literal["text_to_image", "multi_reference_image_generation", "image_edit", "multi_image_fusion"]
 
 TEXT_TO_IMAGE_ENDPOINT = "/api/picture/text_to_image"
@@ -272,12 +274,14 @@ def _build_prompt(
     industry_type = _context_text_value(intake_context, "industry_type")
     profile = _context_profile(intake_context)
     visual_anchors = _profile_anchor_text(profile)
+    memory_summary = _memory_summary(intake_context, profile)
     parts = [
         f"图片目标：{image_goal}",
         f"产品主体：{product_subject}" if product_subject else "",
         f"原始需求：{source_prompt}" if source_prompt else "",
         f"行业类型：{industry_type}" if industry_type else "",
         f"垂类核心表达：{_text(profile.get('core_message'))}" if _text(profile.get("core_message")) else "",
+        f"长期记忆约束：{memory_summary}" if memory_summary else "",
         f"视觉锚点：{visual_anchors}" if visual_anchors else "",
         f"图片类型：{_text(form_values.get('image_type'), '未指定')}",
         f"图片用途：{_text(form_values.get('image_usage'), '未指定')}",
@@ -376,6 +380,7 @@ def _context_text(
     profile = _context_profile(context)
     parts.append(_text(profile.get("core_message")))
     parts.append(_profile_anchor_text(profile))
+    parts.append(_memory_summary(context, profile))
     return " ".join(part for part in parts if part).lower()
 
 
@@ -476,6 +481,10 @@ def _profile_anchor_text(profile: dict[str, Any]) -> str:
     if isinstance(anchors, list):
         return "、".join(_text(anchor) for anchor in anchors if _text(anchor))
     return _text(anchors)
+
+
+def _memory_summary(intake_context: dict[str, Any], profile: dict[str, Any]) -> str:
+    return semantic_memory_text(profile.get("semantic_memory")) or semantic_memory_text(intake_context.get("semantic_memory"))
 
 
 def _first_text(values: dict[str, Any], *keys: str) -> str:

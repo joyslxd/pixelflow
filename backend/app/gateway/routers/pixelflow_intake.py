@@ -9,14 +9,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.intake.context import IntakeContext as StandardIntakeContext
 from pixelflow.intake.context import normalize_intake_context
 from pixelflow.intake.forms import CreationIntent, get_form_schema, validate_form
 from pixelflow.intake.industry_profile import resolve_industry_profile
 from pixelflow.intake.llm import IntakeIntent, draft_creative_directions_with_llm, recognize_intent_with_llm
+from pixelflow.memory import with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/intake", tags=["pixelflow-flows"])
 
@@ -94,9 +96,49 @@ async def get_intake_form(intent: CreationIntent) -> dict[str, Any]:
 
 
 @router.post("/analyze", response_model=IntentAnalyzeResponse)
-async def analyze_intake_intent(body: IntentAnalyzeRequest) -> IntentAnalyzeResponse:
+async def analyze_intake_intent(body: IntentAnalyzeRequest, request: Request) -> IntentAnalyzeResponse:
     result = await recognize_intent_with_llm(body.prompt, body.materials)
-    return IntentAnalyzeResponse(**result.to_dict())
+    data = result.to_dict()
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="intake_agent",
+        query_values=[body.prompt, body.materials, data.get("values"), data.get("intake_context")],
+        categories=["preference", "brand", "skill"],
+    )
+    if memories:
+        context, profile = with_semantic_memory(data.get("intake_context"), memories)
+        data["intake_context"] = context
+        values = dict(data.get("values") or {})
+        values["semantic_memory_context"] = context.get("semantic_memory")
+        data["values"] = values
+        if profile:
+            context["product_creative_profile"] = profile
+    service = power_mem_service(request)
+    record_power_mem_background(
+        service,
+        user_id=user_id,
+        content=concise_result_summary("采集 Agent 完成意图识别", {"intent": data.get("intent"), "message": data.get("reason"), "ok": True}),
+        category="experience",
+        source_agent="intake_agent",
+        metadata={"source": "intake_analyze", "intent": data.get("intent")},
+        memory_type="experience",
+        infer=False,
+    )
+    if data.get("intake_context"):
+        record_power_mem_background(
+            service,
+            user_id=user_id,
+            content=_brand_memory_summary(data["intake_context"]),
+            category="brand",
+            source_agent="intake_agent",
+            metadata={"source": "intake_analyze", "intent": data.get("intent")},
+            # memory_type 必须和 category 一致：PowerMem 服务端会用 memory_type 覆写
+            # metadata.category，若这里写成 "fact"，brand 记忆会被存成 category=fact，
+            # 之后 creative_directions 用 filters.category=brand 检索时就永远搜不到。
+            memory_type="brand",
+            infer=False,
+        )
+    return IntentAnalyzeResponse(**data)
 
 
 @router.post("/validate", response_model=IntakeValidationResponse)
@@ -108,7 +150,7 @@ async def validate_intake_form(body: IntakeValidateRequest) -> IntakeValidationR
 
 
 @router.post("/directions", response_model=CreativeDirectionsResponse)
-async def create_creative_directions(body: CreativeDirectionsRequest) -> CreativeDirectionsResponse:
+async def create_creative_directions(body: CreativeDirectionsRequest, request: Request) -> CreativeDirectionsResponse:
     validation = validate_form(body.intent, body.values, body.intake_rounds)
     data = validation.to_dict()
     data["form_schema"] = data.pop("schema")
@@ -127,6 +169,17 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
         product_creative_profile = profile_result.profile
     if body.materials:
         product_creative_profile["materials"] = body.materials
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="creative_direction_agent",
+        query_values=[context.to_dict(), validation.values, product_creative_profile, body.materials],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    memory_context, product_creative_profile = with_semantic_memory(
+        context.to_dict(),
+        memories,
+        product_creative_profile=product_creative_profile,
+    )
     context = StandardIntakeContext(
         source_prompt=context.source_prompt,
         intent=context.intent,
@@ -137,6 +190,7 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
         form_values=context.form_values,
         product_creative_profile=product_creative_profile,
     )
+    context_dict = {**context.to_dict(), **{key: value for key, value in memory_context.items() if key == "semantic_memory"}}
     directions = [
         direction.to_dict()
         for direction in await draft_creative_directions_with_llm(
@@ -145,7 +199,20 @@ async def create_creative_directions(body: CreativeDirectionsRequest) -> Creativ
             product_creative_profile,
         )
     ]
-    return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions, intake_context=context.to_dict())
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=user_id,
+        content=concise_result_summary(
+            "创意方向 Agent 生成方向",
+            {"intent": body.intent, "message": f"directions={len(directions)}", "ok": True},
+        ),
+        category="experience",
+        source_agent="creative_direction_agent",
+        metadata={"source": "creative_directions", "intent": body.intent},
+        memory_type="experience",
+        infer=False,
+    )
+    return CreativeDirectionsResponse(validation=validation_response, creative_directions=directions, intake_context=context_dict)
 
 
 def _context_for_directions(body: CreativeDirectionsRequest, values: dict[str, Any]) -> StandardIntakeContext:
@@ -166,3 +233,12 @@ def _context_for_directions(body: CreativeDirectionsRequest, values: dict[str, A
             "requested_output_count": values.get("image_count"),
         },
     )
+
+
+def _brand_memory_summary(intake_context: dict[str, Any]) -> str:
+    subject = str(intake_context.get("product_subject") or "").strip()
+    goal = str(intake_context.get("creation_goal") or "").strip()
+    industry = str(intake_context.get("industry_type") or "").strip()
+    if not any([subject, goal, industry]):
+        return ""
+    return f"用户创作上下文：产品/品牌主体={subject or '未识别'}；创作目标={goal or '未识别'}；行业={industry or 'general'}"

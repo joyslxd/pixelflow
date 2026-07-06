@@ -32,7 +32,15 @@ _MAPPED_ENV_KEYS = {
     "PIXELFLOW_MEDIA_SKILL",
     "PIXELFLOW_MEM0_ENABLED",
     "PIXELFLOW_MYSQL_URL",
+    "PIXELFLOW_POWERMEM_API_KEY",
+    "PIXELFLOW_POWERMEM_BASE_URL",
+    "PIXELFLOW_POWERMEM_FAIL_OPEN",
+    "PIXELFLOW_POWERMEM_SEARCH_LIMIT",
+    "PIXELFLOW_POWERMEM_TIMEOUT_SECONDS",
+    "PIXELFLOW_POWERMEM_WRITE_ENABLED",
     "PIXELFLOW_RENDER_ROOT",
+    "PIXELFLOW_SEMANTIC_MEMORY_ENABLED",
+    "PIXELFLOW_SEMANTIC_MEMORY_PROVIDER",
 }
 
 _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS = {
@@ -74,6 +82,14 @@ gateway:
 pixelflow:
   mysql_url: mysql+asyncmy://user:pwd@localhost:3306/pixelflow
   mem0_enabled: false
+  semantic_memory_enabled: true
+  semantic_memory_provider: powermem
+  powermem_base_url: https://example.test/powermem
+  powermem_api_key: test-powermem-key
+  powermem_timeout_seconds: 3
+  powermem_search_limit: 5
+  powermem_write_enabled: true
+  powermem_fail_open: true
   media_skill: borgrise
   edit_skill: ffmpeg
   draft_root: /tmp/pixelflow-drafts
@@ -121,6 +137,14 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_MYSQL_URL"].startswith("mysql+asyncmy://")
     assert os.environ["PIXELFLOW_MEDIA_SKILL"] == "borgrise"
     assert os.environ["PIXELFLOW_EDIT_SKILL"] == "ffmpeg"
+    assert os.environ["PIXELFLOW_SEMANTIC_MEMORY_ENABLED"] == "true"
+    assert os.environ["PIXELFLOW_SEMANTIC_MEMORY_PROVIDER"] == "powermem"
+    assert os.environ["PIXELFLOW_POWERMEM_BASE_URL"] == "https://example.test/powermem"
+    assert os.environ["PIXELFLOW_POWERMEM_API_KEY"] == "test-powermem-key"
+    assert os.environ["PIXELFLOW_POWERMEM_TIMEOUT_SECONDS"] == "3"
+    assert os.environ["PIXELFLOW_POWERMEM_SEARCH_LIMIT"] == "5"
+    assert os.environ["PIXELFLOW_POWERMEM_WRITE_ENABLED"] == "true"
+    assert os.environ["PIXELFLOW_POWERMEM_FAIL_OPEN"] == "true"
     assert "PIXELFLOW_VIDEO_SKILL" not in os.environ
     assert "PIXELFLOW_DECOMPOSE_SKILL" not in os.environ
     assert os.environ["BORGRISE_BASE_URL"] == "https://example.test/api"

@@ -9,9 +9,11 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
+from pixelflow.memory import semantic_memory_text
 from pixelflow.skills import PptGenerationResult, get_ppt_skill
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
 
@@ -20,6 +22,10 @@ router = APIRouter(prefix="/agent/flows/ppt", tags=["pixelflow-flows"])
 _PPT_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_PPT_JOBS = 100
 _PPT_ATTACHMENT_EXTENSIONS = {".doc", ".docx", ".xls", ".xlsx", ".pdf"}
+# content-app SmartPPT 的 topic 是有长度上限的 DB 列（实测容纳 ≥500 字）。
+# semantic_memory_text 最多拼 900 字，整段塞进 topic 会触发
+# "Data truncation: Data too long for column 'topic'"，因此追加长期记忆时整体上限取 250 字留足余量。
+_PPT_TOPIC_MAX_CHARS = 250
 
 
 class PptJobStartResponse(BaseModel):
@@ -74,33 +80,40 @@ class PptFileJobStartRequest(BaseModel):
 
 
 @router.post("/summary/start", response_model=PptJobStartResponse)
-async def start_ppt_summary(body: PptSummaryJobStartRequest) -> PptJobStartResponse:
+async def start_ppt_summary(body: PptSummaryJobStartRequest, request: Request) -> PptJobStartResponse:
     file_urls = _extract_office_file_urls(body.attachments)
     if not body.ppt_topic.strip():
         raise HTTPException(status_code=422, detail="PPT主题不能为空")
     if not body.ppt_style.strip():
         raise HTTPException(status_code=422, detail="PPT风格不能为空")
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="ppt_summary_agent",
+        query_values=[body.ppt_topic, body.ppt_style, body.attachments],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    body = _with_ppt_memory(body, memories)
     job_id = _create_job("ppt_summary")
-    asyncio.create_task(_run_summary_job(job_id, body, file_urls))
+    asyncio.create_task(_run_summary_job(job_id, body, file_urls, power_mem_service(request), user_id))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始生成 PPT 大纲。")
 
 
 @router.post("/summary/update/start", response_model=PptJobStartResponse)
-async def start_update_ppt_summary(body: PptUpdateSummaryJobStartRequest) -> PptJobStartResponse:
+async def start_update_ppt_summary(body: PptUpdateSummaryJobStartRequest, request: Request) -> PptJobStartResponse:
     job_id = _create_job("ppt_summary_update")
-    asyncio.create_task(_run_summary_update_job(job_id, body))
+    asyncio.create_task(_run_summary_update_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始更新 PPT 大纲。")
 
 
 @router.post("/content-json/start", response_model=PptJobStartResponse)
-async def start_ppt_content_json(body: PptContentJsonJobStartRequest) -> PptJobStartResponse:
+async def start_ppt_content_json(body: PptContentJsonJobStartRequest, request: Request) -> PptJobStartResponse:
     job_id = _create_job("ppt_content_json")
-    asyncio.create_task(_run_content_json_job(job_id, body))
+    asyncio.create_task(_run_content_json_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始将 PPT 大纲转换为页面 JSON。")
 
 
 @router.post("/images/start", response_model=PptJobStartResponse)
-async def start_ppt_images(body: PptImagesJobStartRequest) -> PptJobStartResponse:
+async def start_ppt_images(body: PptImagesJobStartRequest, request: Request) -> PptJobStartResponse:
     pages = _normalize_content_pages(body.content_json)
     if not pages:
         raise HTTPException(status_code=422, detail="PPT页面 JSON 不能为空")
@@ -114,12 +127,12 @@ async def start_ppt_images(body: PptImagesJobStartRequest) -> PptJobStartRespons
             "message": "PPT图片生成中。",
         },
     )
-    asyncio.create_task(_run_images_job(job_id, body.smart_ppt_project_id, pages))
+    asyncio.create_task(_run_images_job(job_id, body.smart_ppt_project_id, pages, power_mem_service(request), await current_user_id(request)))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始生成 PPT 页面图片。")
 
 
 @router.post("/images/regenerate/start", response_model=PptJobStartResponse)
-async def start_regenerate_ppt_image(body: PptRegenerateImageJobStartRequest) -> PptJobStartResponse:
+async def start_regenerate_ppt_image(body: PptRegenerateImageJobStartRequest, request: Request) -> PptJobStartResponse:
     job_id = _create_job("ppt_image_regenerate")
     _set_job_result(
         job_id,
@@ -130,17 +143,17 @@ async def start_regenerate_ppt_image(body: PptRegenerateImageJobStartRequest) ->
             "message": "PPT单页图片重新生成中。",
         },
     )
-    asyncio.create_task(_run_regenerate_image_job(job_id, body))
+    asyncio.create_task(_run_regenerate_image_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始重新生成 PPT 页面图片。")
 
 
 @router.post("/file/start", response_model=PptJobStartResponse)
-async def start_ppt_file(body: PptFileJobStartRequest) -> PptJobStartResponse:
+async def start_ppt_file(body: PptFileJobStartRequest, request: Request) -> PptJobStartResponse:
     file_urls = [url.strip() for url in body.file_urls if url and url.strip()]
     if not file_urls:
         raise HTTPException(status_code=422, detail="请先生成可用的 PPT 页面图片")
     job_id = _create_job("ppt_file")
-    asyncio.create_task(_run_file_job(job_id, body.smart_ppt_project_id, file_urls))
+    asyncio.create_task(_run_file_job(job_id, body.smart_ppt_project_id, file_urls, power_mem_service(request), await current_user_id(request)))
     return PptJobStartResponse(ok=True, job_id=job_id, status="running", message="已开始生成 PPT 附件。")
 
 
@@ -159,7 +172,7 @@ async def get_ppt_job(job_id: str) -> PptJobStatusResponse:
     )
 
 
-async def _run_summary_job(job_id: str, body: PptSummaryJobStartRequest, file_urls: list[str]) -> None:
+async def _run_summary_job(job_id: str, body: PptSummaryJobStartRequest, file_urls: list[str], power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await get_ppt_skill().generate_ppt_summary(
             topic=body.ppt_topic,
@@ -167,24 +180,30 @@ async def _run_summary_job(job_id: str, body: PptSummaryJobStartRequest, file_ur
             file_urls=file_urls,
             smart_ppt_project_id=body.smart_ppt_project_id,
         )
-        _complete_or_pause(job_id, _ppt_result_dict(result, stage="summary"))
+        result_dict = _ppt_result_dict(result, stage="summary")
+        _complete_or_pause(job_id, result_dict)
+        _record_ppt_memory(power_mem, user_id, job_id, "ppt_summary_agent", result_dict)
     except Exception as exc:  # noqa: BLE001 - async job boundary
         _fail_job(job_id, str(exc))
+        _record_ppt_failure(power_mem, user_id, job_id, "ppt_summary_agent", "summary", exc)
 
 
-async def _run_summary_update_job(job_id: str, body: PptUpdateSummaryJobStartRequest) -> None:
+async def _run_summary_update_job(job_id: str, body: PptUpdateSummaryJobStartRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await get_ppt_skill().update_ppt_summary(
             original_outline=body.original_outline,
             modification_opinion=body.modification_opinion,
             smart_ppt_project_id=body.smart_ppt_project_id,
         )
-        _complete_or_pause(job_id, _ppt_result_dict(result, stage="summary_update"))
+        result_dict = _ppt_result_dict(result, stage="summary_update")
+        _complete_or_pause(job_id, result_dict)
+        _record_ppt_memory(power_mem, user_id, job_id, "ppt_summary_agent", result_dict)
     except Exception as exc:  # noqa: BLE001 - async job boundary
         _fail_job(job_id, str(exc))
+        _record_ppt_failure(power_mem, user_id, job_id, "ppt_summary_agent", "summary_update", exc)
 
 
-async def _run_content_json_job(job_id: str, body: PptContentJsonJobStartRequest) -> None:
+async def _run_content_json_job(job_id: str, body: PptContentJsonJobStartRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await get_ppt_skill().generate_ppt_content_json(
             original_outline=body.original_outline,
@@ -194,11 +213,13 @@ async def _run_content_json_job(job_id: str, body: PptContentJsonJobStartRequest
         result_dict = _ppt_result_dict(result, stage="content_json")
         result_dict["pages"] = _normalize_content_pages(result.content_json)
         _complete_or_pause(job_id, result_dict)
+        _record_ppt_memory(power_mem, user_id, job_id, "ppt_content_json_agent", result_dict)
     except Exception as exc:  # noqa: BLE001 - async job boundary
         _fail_job(job_id, str(exc))
+        _record_ppt_failure(power_mem, user_id, job_id, "ppt_content_json_agent", "content_json", exc)
 
 
-async def _run_images_job(job_id: str, smart_ppt_project_id: int, pages: list[dict[str, Any]]) -> None:
+async def _run_images_job(job_id: str, smart_ppt_project_id: int, pages: list[dict[str, Any]], power_mem: Any = None, user_id: str | None = None) -> None:
     async def generate_one(page_index: int, page_json: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         result = await get_ppt_skill().generate_ppt_image(
             json_content=json.dumps(page_json, ensure_ascii=False),
@@ -232,9 +253,10 @@ async def _run_images_job(job_id: str, smart_ppt_project_id: int, pages: list[di
         "quota_insufficient": quota_paused,
     }
     _complete_or_pause(job_id, result)
+    _record_ppt_memory(power_mem, user_id, job_id, "ppt_image_agent", {**result, "stage": "images"})
 
 
-async def _run_regenerate_image_job(job_id: str, body: PptRegenerateImageJobStartRequest) -> None:
+async def _run_regenerate_image_job(job_id: str, body: PptRegenerateImageJobStartRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await get_ppt_skill().generate_ppt_image(
             json_content=json.dumps(body.page_json, ensure_ascii=False),
@@ -248,16 +270,21 @@ async def _run_regenerate_image_job(job_id: str, body: PptRegenerateImageJobStar
             "message": "PPT 单页图片已重新生成。" if result.ok else (result.error or "PPT 单页图片生成失败。"),
         }
         _complete_or_pause(job_id, result_dict)
+        _record_ppt_memory(power_mem, user_id, job_id, "ppt_image_agent", {**result_dict, "stage": "image_regenerate"})
     except Exception as exc:  # noqa: BLE001 - async job boundary
         _fail_job(job_id, str(exc))
+        _record_ppt_failure(power_mem, user_id, job_id, "ppt_image_agent", "image_regenerate", exc)
 
 
-async def _run_file_job(job_id: str, smart_ppt_project_id: int, file_urls: list[str]) -> None:
+async def _run_file_job(job_id: str, smart_ppt_project_id: int, file_urls: list[str], power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await get_ppt_skill().generate_ppt_file(file_urls=file_urls, smart_ppt_project_id=smart_ppt_project_id)
-        _complete_or_pause(job_id, _ppt_result_dict(result, stage="file"))
+        result_dict = _ppt_result_dict(result, stage="file")
+        _complete_or_pause(job_id, result_dict)
+        _record_ppt_memory(power_mem, user_id, job_id, "ppt_file_agent", result_dict)
     except Exception as exc:  # noqa: BLE001 - async job boundary
         _fail_job(job_id, str(exc))
+        _record_ppt_failure(power_mem, user_id, job_id, "ppt_file_agent", "file", exc)
 
 
 def _create_job(kind: str) -> str:
@@ -266,6 +293,66 @@ def _create_job(kind: str) -> str:
     job_id = str(uuid.uuid4())
     _PPT_JOBS[job_id] = {"status": "running", "kind": kind, "result": None, "error": None, "message": ""}
     return job_id
+
+
+def _with_ppt_memory(body: PptSummaryJobStartRequest, memories: list[Any]) -> PptSummaryJobStartRequest:
+    memory_summary = semantic_memory_text(memories)
+    if not memory_summary:
+        return body
+    topic = body.ppt_topic
+    if memory_summary in topic:
+        return body
+    # topic 会原样写入 content-app SmartPPT 的 topic 列（长度有限），不能把整段
+    # semantic_memory_text（最多 900 字）塞进去，否则触发
+    # "Data truncation: Data too long for column 'topic'"。把记忆约束截断到 _PPT_TOPIC_MAX_CHARS
+    # 的整体预算内再追加。
+    prefix = "\n长期记忆约束："
+    budget = _PPT_TOPIC_MAX_CHARS - len(topic) - len(prefix)
+    if budget <= 0:
+        return body
+    suffix = memory_summary[:budget]
+    topic = f"{topic}{prefix}{suffix}"
+    return PptSummaryJobStartRequest(
+        ppt_topic=topic,
+        ppt_style=body.ppt_style,
+        attachments=body.attachments,
+        smart_ppt_project_id=body.smart_ppt_project_id,
+    )
+
+
+def _record_ppt_memory(power_mem: Any, user_id: str | None, job_id: str, source_agent: str, result: dict[str, Any]) -> None:
+    stage = str(result.get("stage") or "unknown")
+    record_power_mem_background(
+        power_mem,
+        user_id=user_id,
+        content=concise_result_summary(f"SmartPPT Agent 完成 {stage} 阶段", result),
+        category="experience",
+        source_agent=source_agent,
+        metadata={
+            "source": f"ppt_{stage}",
+            "job_id": job_id,
+            "stage": stage,
+            "smart_ppt_project_id": result.get("smart_ppt_project_id"),
+            "slide_count": result.get("slide_count"),
+        },
+        memory_type="experience",
+        run_id=job_id,
+        infer=False,
+    )
+
+
+def _record_ppt_failure(power_mem: Any, user_id: str | None, job_id: str, source_agent: str, stage: str, exc: Exception) -> None:
+    record_power_mem_background(
+        power_mem,
+        user_id=user_id,
+        content=f"SmartPPT Agent {stage} 阶段失败；error={str(exc)[:300]}",
+        category="experience",
+        source_agent=source_agent,
+        metadata={"source": f"ppt_{stage}", "job_id": job_id, "stage": stage, "status": "failed"},
+        memory_type="experience",
+        run_id=job_id,
+        infer=False,
+    )
 
 
 def _set_job_result(job_id: str, result: dict[str, Any]) -> None:

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.creative.plan_markdown import CreationIntent, build_plan_markdown
+from pixelflow.memory import with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/planning", tags=["pixelflow-flows"])
 
@@ -58,13 +60,37 @@ class PlanMarkdownResponse(BaseModel):
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
-async def create_plan_markdown(body: PlanMarkdownRequest) -> PlanMarkdownResponse:
+async def create_plan_markdown(body: PlanMarkdownRequest, request: Request) -> PlanMarkdownResponse:
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="planning_agent",
+        query_values=[body.form_values, body.selected_direction, body.product_creative_profile, body.intake_context, body.materials],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    intake_context, product_creative_profile = with_semantic_memory(
+        body.intake_context,
+        memories,
+        product_creative_profile=body.product_creative_profile,
+    )
     result = build_plan_markdown(
         body.intent,
         body.form_values,
         body.selected_direction,
-        body.product_creative_profile,
+        product_creative_profile,
         body.materials,
-        body.intake_context,
+        intake_context,
+    )
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=user_id,
+        content=concise_result_summary(
+            "策划 Agent 生成 plan.md",
+            {"intent": body.intent, "message": f"issues={len(result.consistency_issues)}", "ok": not result.consistency_issues},
+        ),
+        category="experience",
+        source_agent="planning_agent",
+        metadata={"source": "planning_plan", "intent": body.intent, "consistency_issues": result.consistency_issues},
+        memory_type="experience",
+        infer=False,
     )
     return PlanMarkdownResponse(**result.to_dict())

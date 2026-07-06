@@ -145,6 +145,32 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
+| 语义记忆 | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | PowerMemService | 读取用户/品牌长期偏好，记录 Agent 经验/Skill 沉淀 |
+
+## PowerMem 语义记忆
+
+当前第一版已经同时纳入“用户/品牌长期偏好 MVP”和“Agent 经验/Skill 沉淀”。
+
+配置：
+
+- 测试环境 `backend/config.dev.yml`：`pixelflow.powermem_base_url=https://test-video.borgrise.com/powermem`，经 nginx 转发到测试服务器本机 PowerMem。
+- 生产环境 `backend/config.prod.yml`：`pixelflow.powermem_base_url=http://127.0.0.1:18848`，走同机 sidecar。
+- `pixelflow.powermem_api_key` 必须与 PowerMem 服务端 API key 一致；不要把 content-app 用户 `Authorization` 当成 PowerMem key。
+- `pixelflow.powermem_fail_open=true` 时，PowerMem 不可用只记录 warning，主流程继续。
+- `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 30s），因为 record 全部是后台 `asyncio.create_task`，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
+- 网关侧 `record_power_mem` / `record_power_mem_background` 默认 `infer=False`：业务摘要（experience/brand/skill/preference）已经由 Agent 分类，无需 PowerMem 再做 LLM 抽取，且 2~3s 就能写完。需要语义抽取时再显式传 `infer=True`。
+- record 的 `memory_type` 必须和 `category` 一致：PowerMem 服务端会用 `memory_type` 覆写 `metadata.category`，若两者不一致（例如 `category="brand"` 配 `memory_type="fact"`），记忆会落到错误的 category，后续按 `filters.category` 检索时永远搜不到。
+
+统一接入规则：
+
+- 只能通过 `PowerMemService` 和 `app.gateway.pixelflow_memory` helper 读写 PowerMem，不要在业务路由里直接拼 HTTP。
+- 进入关键决策前先检索：采集、创意方向、plan.md、图片 prepare、视频场景包、PPT 大纲、旧任务创建。
+- 阶段完成或失败后写摘要：图片、视频、视频分析、PPT、旧 LangGraph run 都要记录 `experience`。
+- 图片/视频/PPT 等 Skill 调用类 `experience` 会由 `record_power_mem_background()` 自动再沉淀一条 `skill` 记忆；新增流程要继续复用这个 helper。
+- 用户明确偏好、偏好反馈、Brief 修订写 `preference`；采集出的产品/行业上下文写 `brand`；可复用 Skill 经验写 `skill`。
+- PowerMem 只写业务摘要、偏好和经验，不写用户 token、供应商 key、完整异常堆栈、本地部署目录或原始大段 prompt。
+- `pixelflow_user_preferences` 仍是结构化业务偏好 Store，PowerMem 不替代它，只提供语义检索和跨 Agent 经验复用。
+- 以后新增或修改 Agent、流程、Skill 时，必须按同一套逻辑：读 `PowerMemService` 上下文，写阶段摘要，并同步更新 `docs/pixelflow-agent-skill-flow-latest-design.md`。
 
 ## Borgrise/content-app 能力
 
@@ -300,9 +326,11 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 | 采集表单、意图、行业画像 | `backend/pixelflow/intake/` |
 | plan.md 和 Brief 纯逻辑 | `backend/pixelflow/creative/` |
 | 图片/视频生成准备逻辑 | `backend/pixelflow/generate/` |
+| PowerMem 语义记忆 Client 和上下文压缩 | `backend/pixelflow/memory/` |
 | 第三方 API、上传、轮询、错误归一 | `backend/pixelflow/skills/` |
 | 任务、会话、资产持久化 | `backend/pixelflow/tasks/` |
 | 用户偏好 | `backend/pixelflow/preferences/` |
+| PowerMem 运行时 helper | `backend/app/gateway/pixelflow_memory.py` |
 | 前端 API 类型和请求 | `web/src/lib/api.ts`、`web/src/lib/types.ts` |
 | 前端主流程编排 | `web/src/pages/WorkspacePage.tsx` |
 | 前端分镜和 @ 素材编辑 | `web/src/components/canvas/StoryboardPanel.tsx`、`SceneMentionEditor.tsx` |

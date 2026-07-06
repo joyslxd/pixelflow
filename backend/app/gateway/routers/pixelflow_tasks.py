@@ -23,10 +23,12 @@ from pydantic import BaseModel, Field
 
 from app.gateway.content_app_auth import ContentAppAuthError, verify_authorization_header_remote
 from app.gateway.deps import get_checkpointer, get_current_user, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import build_run_config, format_sse, inject_authenticated_user_context, merge_run_context_overrides, normalize_input, normalize_stream_modes
 from deerflow.runtime import END_SENTINEL, ConflictError, DisconnectMode, UnsupportedStrategyError, run_agent, serialize_channel_values
 from pixelflow import make_pixelflow_graph
+from pixelflow.memory import memory_context_payload
 from pixelflow.preferences import UserPreferenceStore, extract_structured_preferences
 from pixelflow.tasks import PixelFlowAssetRecord, PixelFlowTaskRecord, PixelFlowTaskStore
 
@@ -710,10 +712,35 @@ async def _watch_run_to_task(
                     error = run.error if run and run.error else (task.error if task else "PixelFlow run failed")
                     await store.update(task_id, user_id=user_id, status="error", error=error)
                     await store.append_event(task_id, "task_failed", {"run_id": run_id, "error": error}, user_id=user_id)
+                    record_power_mem_background(
+                        power_mem_service(request),
+                        user_id=user_id,
+                        content=f"旧 LangGraph 任务流失败；phase={task.phase if task else ''}；error={str(error)[:300]}",
+                        category="experience",
+                        source_agent="legacy_task_flow",
+                        metadata={"source": "task_run_failed", "task_id": task_id, "run_id": run_id, "asset_count": len(synced_assets)},
+                        memory_type="experience",
+                        run_id=run_id,
+                        infer=False,
+                    )
                     return
                 event = "task_done" if task and task.status == "done" else "run_finished"
                 payload = {"run_id": run_id, "status": task.status, "phase": task.phase} if task else {"run_id": run_id}
                 await store.append_event(task_id, event, payload, user_id=user_id)
+                record_power_mem_background(
+                    power_mem_service(request),
+                    user_id=user_id,
+                    content=concise_result_summary(
+                        "旧 LangGraph 任务流结束",
+                        {"stage": payload.get("phase"), "message": event, "ok": event == "task_done"},
+                    ),
+                    category="experience",
+                    source_agent="legacy_task_flow",
+                    metadata={"source": "task_run_finished", "task_id": task_id, "run_id": run_id, "event": event, "asset_count": len(synced_assets)},
+                    memory_type="experience",
+                    run_id=run_id,
+                    infer=False,
+                )
                 return
             data = getattr(entry, "data", None)
             if isinstance(data, dict):
@@ -771,6 +798,14 @@ async def create_task(body: TaskCreateRequest, request: Request) -> TaskResponse
     preference_snapshot = {}
     if user_id:
         preference_snapshot = (await _preference_store(request).get(user_id)).to_dict()
+    memory_user_id, memories = await search_power_mem(
+        request,
+        source_agent="legacy_task_flow",
+        query_values=[body.product_url, body.product_info, body.video_params.model_dump(), body.creative_direction, body.user_message],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    if memories:
+        preference_snapshot["semantic_memory"] = memory_context_payload(memories)
     initial = _initial_state(task_id, user_id, body, preference_snapshot)
     record = PixelFlowTaskRecord(
         task_id=task_id,
@@ -786,6 +821,17 @@ async def create_task(body: TaskCreateRequest, request: Request) -> TaskResponse
     )
     record = await store.create(record)
     await store.append_event(task_id, "task_created", {"task_id": task_id, "phase": "intake"}, user_id=user_id)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=memory_user_id,
+        content=concise_result_summary("旧任务流创建 PixelFlow 任务", {"stage": "task_created", "message": body.user_message or body.task_type, "ok": True}),
+        category="experience",
+        source_agent="legacy_task_flow",
+        metadata={"source": "task_create", "task_id": task_id, "task_type": body.task_type},
+        memory_type="experience",
+        run_id=task_id,
+        infer=False,
+    )
 
     if body.auto_start:
         run_body = RunCreateRequest(
@@ -921,6 +967,16 @@ async def revise_brief(task_id: str, body: BriefReviseRequest, request: Request)
         await _preference_store(request).update(user_id, pref_patch)
         await _preference_store(request).append_feedback(user_id, body.feedback, task_id=task_id, metadata={"source": "brief_revise"})
         await store.append_event(task_id, "preferences_updated", {"patch": pref_patch}, user_id=user_id)
+        record_power_mem_background(
+            power_mem_service(request),
+            user_id=user_id,
+            content=body.feedback,
+            category="preference",
+            source_agent="legacy_brief_review_agent",
+            metadata={"source": "brief_revise", "task_id": task_id, "preference_patch": pref_patch},
+            memory_type="preference",
+            run_id=task_id,
+        )
     return _response(updated or task)
 
 
