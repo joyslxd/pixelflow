@@ -984,6 +984,28 @@ function videoResultsFromGeneratedScenes(
   return [finalVideo, ...sceneVideos].filter((video) => Boolean(video.url));
 }
 
+function sceneVideoForPackageScene(
+  scene: Pick<PrepareScenePackagesResponse["scene_packages"][number], "scene_id" | "scene_index">,
+  sceneVideos: NonNullable<NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"]>["scene_videos"],
+) {
+  return (
+    sceneVideos.find((video) => video.scene_id === scene.scene_id) ||
+    sceneVideos.find((video) => Number(video.scene_index) === Number(scene.scene_index))
+  );
+}
+
+function canReuseUneditedSceneVideos(
+  videoScenePackages: PrepareScenePackagesResponse,
+  generatedSceneVideos: NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"] | undefined,
+  dirtySceneIds: Set<string>,
+): boolean {
+  const sceneVideos = generatedSceneVideos?.scene_videos || [];
+  if (!sceneVideos.length || dirtySceneIds.size === 0) return false;
+  return videoScenePackages.scene_packages.every((scene) =>
+    dirtySceneIds.has(scene.scene_id) || Boolean(sceneVideoForPackageScene(scene, sceneVideos)),
+  );
+}
+
 function latestVideoResultArtifactForConversation(messages: ChatMessage[], conversationId = ""): ChatArtifact | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -1556,8 +1578,8 @@ export function WorkspacePage() {
     let targetConversationId = "";
     let updatedPackages: PrepareScenePackagesResponse | undefined;
     let editedSceneIdsForContext: string[] = [];
-    setMessages((items) =>
-      items.map((message) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
         const artifact = message.artifact;
         const videoScenePackages = artifact?.videoScenePackages;
         if (message.id !== messageId || !artifact || !videoScenePackages) return message;
@@ -1578,8 +1600,10 @@ export function WorkspacePage() {
             videoScenePackages: updatedPackages,
           },
         };
-      }),
-    );
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
     if (targetConversationId && updatedPackages) {
       void api
         .updateConversation(targetConversationId, {
@@ -2913,6 +2937,7 @@ export function WorkspacePage() {
     const targetConversationId = pendingVideoJob.conversation_id;
     const artifact = pendingVideoJob.artifact;
     if (!artifact.videoScenePackages || !artifact.generatedSceneVideos || !artifact.mergedVideo) return;
+    const previousGeneratedSceneVideos = artifact.generatedSceneVideos;
     const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || artifact.videoScenePackages;
     const displayVideoScenePackages = {
       ...artifact.videoScenePackages,
@@ -2949,10 +2974,11 @@ export function WorkspacePage() {
       return;
     }
 
-    const previousByScene = new Map(artifact.generatedSceneVideos.scene_videos.map((scene) => [scene.scene_id, scene]));
-    const regeneratedByScene = new Map(regenerated.scene_videos.map((scene) => [scene.scene_id, scene]));
     const nextSceneVideos = artifact.videoScenePackages.scene_packages
-      .map((scene) => regeneratedByScene.get(scene.scene_id) || previousByScene.get(scene.scene_id))
+      .map((scene) =>
+        sceneVideoForPackageScene(scene, regenerated.scene_videos) ||
+        sceneVideoForPackageScene(scene, previousGeneratedSceneVideos.scene_videos),
+      )
       .filter((scene): scene is NonNullable<typeof scene> => Boolean(scene));
     const duration = Math.max(1, Math.ceil(artifact.videoScenePackages.target_duration_ms / 1000));
     const mergedVideo = await api.mergeSceneVideos({
@@ -3036,10 +3062,12 @@ export function WorkspacePage() {
     const targetConversationId = pendingVideoJob.conversation_id;
     const artifact = pendingVideoJob.artifact;
     if (!artifact.videoScenePackages || !artifact.generatedSceneVideos) return;
-    const previousByScene = new Map(artifact.generatedSceneVideos.scene_videos.map((scene) => [scene.scene_id, scene]));
-    const retriedByScene = new Map(retried.scene_videos.map((scene) => [scene.scene_id, scene]));
+    const previousGeneratedSceneVideos = artifact.generatedSceneVideos;
     const nextSceneVideos = artifact.videoScenePackages.scene_packages
-      .map((scene) => retriedByScene.get(scene.scene_id) || previousByScene.get(scene.scene_id))
+      .map((scene) =>
+        sceneVideoForPackageScene(scene, retried.scene_videos) ||
+        sceneVideoForPackageScene(scene, previousGeneratedSceneVideos.scene_videos),
+      )
       .filter((scene): scene is NonNullable<typeof scene> => Boolean(scene));
     const generatedSceneVideos = {
       ...retried,
@@ -5395,16 +5423,21 @@ export function WorkspacePage() {
   }
 
   const handleGenerateVideoFromScenePackages = async (msg: ChatMessage) => {
-    const artifact = msg.artifact;
+    const latestMessage =
+      messagesRef.current.find(
+        (message) => message.id === msg.id && message.artifact?.videoScenePackages,
+      ) || msg;
+    const artifact = latestMessage.artifact;
     if (!artifact) return;
     const videoScenePackages = artifact.videoScenePackages;
     if (!videoScenePackages?.ok || videoScenePackages.scene_packages.length === 0) return;
-    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const targetConversationId = messageConversationId(latestMessage, conversationIdRef.current);
     const dirtySceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
     const retrySceneIds = failedSceneIdsFromGeneratedSceneVideos(artifact.generatedSceneVideos);
-    const isFinalStoryboardRegeneration = Boolean(artifact.mergedVideo?.ok && artifact.generatedSceneVideos?.scene_videos.length);
+    const isDirtySceneRegeneration = canReuseUneditedSceneVideos(videoScenePackages, artifact.generatedSceneVideos, dirtySceneIds);
+    const hasGeneratedSceneVideos = Boolean(artifact.generatedSceneVideos?.scene_videos.length);
     const isFailedSceneRetry = Boolean(artifact.generatedSceneVideos && !artifact.generatedSceneVideos.ok && retrySceneIds.size > 0);
-    if (isFinalStoryboardRegeneration && dirtySceneIds.size === 0) {
+    if (hasGeneratedSceneVideos && dirtySceneIds.size === 0) {
       pushAssistant("当前分镜没有检测到修改内容，无需重新生成视频。", targetConversationId);
       return;
     }
@@ -5412,12 +5445,12 @@ export function WorkspacePage() {
       pushAssistant("当前失败结果没有定位到具体分镜，无法只重试异常片段。请重新生成场景包后再试。", targetConversationId);
       return;
     }
-    const processedKey = beginArtifactAction(msg, targetConversationId);
+    const processedKey = beginArtifactAction(latestMessage, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
     const originalVideoScenePackages = artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) || videoScenePackages;
     pushAssistant(
-      isFinalStoryboardRegeneration
+      isDirtySceneRegeneration
         ? `已保存分镜修改，正在重生成 ${dirtySceneIds.size} 个已修改分镜视频…`
         : isFailedSceneRetry
           ? `正在重新生成 ${retrySceneIds.size} 个失败或额度暂停的分镜视频…`
@@ -5425,17 +5458,17 @@ export function WorkspacePage() {
       targetConversationId,
     );
     try {
-      const request = isFinalStoryboardRegeneration
+      const request = isDirtySceneRegeneration
         ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds)
         : isFailedSceneRetry
           ? sceneVideoRequestFromPackages(videoScenePackages, retrySceneIds)
           : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds);
       const started = await api.startSceneVideosJob(request);
-      const pendingVideoJob: PendingVideoJob = isFinalStoryboardRegeneration
+      const pendingVideoJob: PendingVideoJob = isDirtySceneRegeneration
         ? {
             job_id: started.job_id,
             conversation_id: targetConversationId,
-            source_message_id: msg.id,
+            source_message_id: latestMessage.id,
             kind: "scene_regeneration",
             started_at: new Date().toISOString(),
             request,
@@ -5446,7 +5479,7 @@ export function WorkspacePage() {
           ? {
               job_id: started.job_id,
               conversation_id: targetConversationId,
-              source_message_id: msg.id,
+              source_message_id: latestMessage.id,
               kind: "scene_failed_retry",
               started_at: new Date().toISOString(),
               request,
@@ -5456,19 +5489,20 @@ export function WorkspacePage() {
           : {
               job_id: started.job_id,
               conversation_id: targetConversationId,
-              source_message_id: msg.id,
+              source_message_id: latestMessage.id,
               kind: "scene_generation",
               started_at: new Date().toISOString(),
               request,
               artifact: { ...artifact, originalVideoScenePackages },
             };
-      await persistPendingVideoJob(pendingVideoJob, targetConversationId, isFinalStoryboardRegeneration || isFailedSceneRetry ? "video_regeneration_running" : "video_generation_running", {
+      await persistPendingVideoJob(pendingVideoJob, targetConversationId, isDirtySceneRegeneration || isFailedSceneRetry ? "video_regeneration_running" : "video_generation_running", {
         global_assets: videoScenePackages.global_assets,
         intake_context: artifact.intakeContext,
         scene_packages: videoScenePackages.scene_packages,
         generated_scene_videos: artifact.generatedSceneVideos?.scene_videos,
         failed_scenes: artifact.generatedSceneVideos?.failed_scenes,
-        affected_scene_ids: isFinalStoryboardRegeneration ? Array.from(dirtySceneIds) : isFailedSceneRetry ? Array.from(retrySceneIds) : undefined,
+        merged_video: artifact.mergedVideo,
+        affected_scene_ids: isDirtySceneRegeneration ? Array.from(dirtySceneIds) : isFailedSceneRetry ? Array.from(retrySceneIds) : undefined,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);
     } catch (err) {

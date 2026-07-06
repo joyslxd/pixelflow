@@ -520,11 +520,16 @@ test("scene package storyboard edits after final video regenerate only dirty sce
   const source = handleGenerateVideoFromScenePackagesSource();
   assert.match(source, /videoScenePackageEditedSceneIds/, "final storyboard edits must track dirty scene ids");
   assert.match(source, /new Set\(artifact\.videoScenePackageEditedSceneIds/, "dirty scene ids should drive the regeneration subset");
+  assert.match(workspaceSource, /messagesRef\.current = nextItems[\s\S]*return nextItems/, "storyboard edits must update messagesRef before generation reads the artifact");
+  assert.match(source, /const latestMessage =[\s\S]*messagesRef\.current\.find[\s\S]*message\.id === msg\.id[\s\S]*const artifact = latestMessage\.artifact/, "scene generation must reload the latest scene package artifact by message id");
+  assert.match(source, /canReuseUneditedSceneVideos\(videoScenePackages,\s*artifact\.generatedSceneVideos,\s*dirtySceneIds\)/, "dirty-scene regeneration must be based on reusable scene videos instead of only mergedVideo.ok");
+  assert.doesNotMatch(source, /const isFinalStoryboardRegeneration = Boolean\(artifact\.mergedVideo\?\.ok/, "dirty-scene regeneration must not require an already merged final video");
   assert.match(source, /kind:\s*"scene_regeneration"/, "confirmed final storyboard edits must use recoverable scene regeneration jobs");
   assert.match(source, /affected_scene_ids:\s*Array\.from\(dirtySceneIds\)/, "pending regeneration jobs must persist the dirty scene ids");
   assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*dirtySceneIds\)/, "request builder must receive only dirty scenes for final storyboard edits");
+  assert.match(source, /merged_video:\s*artifact\.mergedVideo/, "pending regeneration context must retain the previous merged video when present");
   assert.doesNotMatch(source, /artifact\.type === "video_result"/, "dirty-scene regeneration must work from the original scene package card, not only video_result cards");
-  assert.match(workspaceSource, /regeneratedByScene\.get\(scene\.scene_id\) \|\| previousByScene\.get\(scene\.scene_id\)/, "regeneration completion must reuse unchanged scene videos");
+  assert.match(workspaceSource, /sceneVideoForPackageScene\(scene,\s*regenerated\.scene_videos\)[\s\S]*sceneVideoForPackageScene\(scene,\s*previousGeneratedSceneVideos\.scene_videos\)/, "regeneration completion must reuse unchanged scene videos with scene_index fallback");
 });
 
 test("video QC revisions use scene-package-ready baseline instead of user-edited result packages", () => {
@@ -545,7 +550,7 @@ test("failed scene video retries only resubmit failed scenes and reuse successfu
   assert.match(source, /failedSceneIdsFromGeneratedSceneVideos/, "failed scene ids must be extracted from generatedSceneVideos.failed_scenes");
   assert.match(source, /kind:\s*"scene_failed_retry"/, "retrying failed scene videos must use a distinct recoverable job kind");
   assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*retrySceneIds\)/, "failed scene retry must only submit the failed scene ids");
-  assert.match(workspaceSource, /previousByScene\.get\(scene\.scene_id\)/, "retry completion must reuse previously successful scene videos");
+  assert.match(workspaceSource, /sceneVideoForPackageScene\(scene,\s*retried\.scene_videos\)[\s\S]*sceneVideoForPackageScene\(scene,\s*previousGeneratedSceneVideos\.scene_videos\)/, "retry completion must reuse previously successful scene videos with scene_index fallback");
 });
 
 test("scene generation completion updates the original scene package card with videos", () => {
