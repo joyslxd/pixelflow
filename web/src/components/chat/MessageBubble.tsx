@@ -255,6 +255,7 @@ export function MessageBubble({
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
   const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
+  const pptFileDone = Boolean(msg.artifact?.pptDone);
   const progressText = showProgressLoading ? progressDescription(msg.content) : "";
   const [loadingDots, setLoadingDots] = useState(0);
   const [selectedImageEditModel, setSelectedImageEditModel] = useState("");
@@ -799,7 +800,12 @@ export function MessageBubble({
                 {String(msg.artifact.pptFile.error || msg.artifact.pptFile.message || "PPT 附件生成失败")}
               </div>
             )}
-            {msg.artifact.pptFile.ok ? (
+            {pptFileDone ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
+                <Check size={15} />
+                PPT 流程已结束
+              </div>
+            ) : msg.artifact.pptFile.ok ? (
               <div className="grid gap-2 sm:grid-cols-2">
                 <button
                   type="button"

@@ -193,6 +193,7 @@ interface WorkspaceSnapshot {
   pending_video_job?: PendingVideoJob | null;
   pendingPptJob?: PendingPptJob | null;
   pending_ppt_job?: PendingPptJob | null;
+  ppt_done?: boolean;
   canvas: CanvasState;
   canvasOpen: boolean;
   briefConfirmed: boolean;
@@ -856,6 +857,25 @@ function restoreLatestVideoScenePackagesFromContext(
   });
 }
 
+function markLatestPptFileDoneFromContext(messages: ChatMessage[], context: Partial<Record<string, unknown>>): ChatMessage[] {
+  if (context.ppt_done !== true) return messages;
+  const latestIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message.artifact?.type === "ppt_file" && Boolean(message.artifact.pptFile));
+  if (latestIndex < 0) return messages;
+  const messageIndex = messages.length - 1 - latestIndex;
+  return messages.map((message, index) => {
+    if (index !== messageIndex || !message.artifact) return message;
+    return {
+      ...message,
+      artifact: {
+        ...message.artifact,
+        pptDone: true,
+      },
+    };
+  });
+}
+
 function latestOriginalVideoScenePackagesForConversation(messages: ChatMessage[], conversationId: string): PrepareScenePackagesResponse | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -953,6 +973,7 @@ export function WorkspacePage() {
   const activeVideoJobPollsRef = useRef(new Set<string>());
   const pendingPptJobRef = useRef<PendingPptJob | null>(null);
   const activePptJobPollsRef = useRef(new Set<string>());
+  const pptDoneConversationIdsRef = useRef(new Set<string>());
   const briefReadyShownRef = useRef(false);
   const lastEventIdRef = useRef(0);
   const pageVisibleRef = useRef(true);
@@ -965,6 +986,18 @@ export function WorkspacePage() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  const isPptDoneForConversation = (targetConversationId: string) => {
+    return Boolean(targetConversationId && pptDoneConversationIdsRef.current.has(targetConversationId));
+  };
+
+  const setPptDoneForConversation = (targetConversationId: string, value: boolean) => {
+    if (!targetConversationId) return;
+    const nextIds = new Set(pptDoneConversationIdsRef.current);
+    if (value) nextIds.add(targetConversationId);
+    else nextIds.delete(targetConversationId);
+    pptDoneConversationIdsRef.current = nextIds;
+  };
 
   const setActiveTaskId = (taskId: string) => {
     taskIdRef.current = taskId;
@@ -1141,6 +1174,25 @@ export function WorkspacePage() {
         };
       }),
     );
+  };
+
+  const markPptFileDoneInMessage = (messageId: string, targetConversationId: string) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (message.id !== messageId || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "ppt_file") {
+          return message;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            pptDone: true,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
   };
 
   const updateVideoScenePackagesInMessage = (
@@ -3050,6 +3102,7 @@ export function WorkspacePage() {
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
+    setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
@@ -3088,6 +3141,7 @@ export function WorkspacePage() {
       pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
     pending_ppt_job:
       pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
+    ppt_done: isPptDoneForConversation(snapshotConversationId),
     canvas,
     canvasOpen,
     briefConfirmed,
@@ -3124,6 +3178,7 @@ export function WorkspacePage() {
     pendingScenePackageJobRef.current = null;
     pendingVideoJobRef.current = null;
     pendingPptJobRef.current = null;
+    pptDoneConversationIdsRef.current = new Set();
     planRevisionArtifactRef.current = null;
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
@@ -3147,7 +3202,8 @@ export function WorkspacePage() {
       restoredConversationMessages(undefined, restoredMessagesWithImageEditSelections),
       snapshot as Partial<Record<string, unknown>>,
     );
-    const normalizedMessages = normalizeRestoredMessageReferences(dedupeRestoredScenePackageMessages(contextMessages));
+    const pptAwareMessages = markLatestPptFileDoneFromContext(contextMessages, snapshot as Partial<Record<string, unknown>>);
+    const normalizedMessages = normalizeRestoredMessageReferences(dedupeRestoredScenePackageMessages(pptAwareMessages));
     applySnapshot({
       ...snapshot,
       pendingScenePackageJob: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
@@ -3321,6 +3377,7 @@ export function WorkspacePage() {
           pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
         pending_ppt_job:
           pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
+        ppt_done: isPptDoneForConversation(currentConversationId),
         canvas,
         canvasOpen,
         briefConfirmed,
@@ -4302,11 +4359,14 @@ export function WorkspacePage() {
 
   const handleRegeneratePptFile = async (msg: ChatMessage) => {
     const artifact = msg.artifact;
-    if (!artifact?.pptFile) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (!artifact?.pptFile || artifact.pptDone || isPptDoneForConversation(targetConversationId)) return;
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
     const projectId = pptProjectId(artifact);
     const fileUrls = pptImageFileUrls(artifact);
     if (!projectId || !fileUrls.length) {
+      releaseArtifactAction(processedKey);
       pushAssistant("没有找到可用于重新生成 PPT 附件的页面图片。", targetConversationId);
       return;
     }
@@ -4328,8 +4388,9 @@ export function WorkspacePage() {
         intent: "ppt",
         ppt_images: artifact.pptImages,
       });
-      await resumePendingPptJob(pendingPptJob);
+      await resumePendingPptJob(pendingPptJob, processedKey);
     } catch (err) {
+      releaseArtifactAction(processedKey);
       pushAssistant(`PPT 附件重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
@@ -4338,6 +4399,11 @@ export function WorkspacePage() {
 
   const handleAcceptPptFile = (msg: ChatMessage) => {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (!msg.artifact?.pptFile?.ok || msg.artifact.pptDone || isPptDoneForConversation(targetConversationId)) return;
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    setPptDoneForConversation(targetConversationId, true);
+    markPptFileDoneInMessage(msg.id, targetConversationId);
     pushAssistant("已确认 PPT 附件满意，制作 PPT 流程结束。", targetConversationId);
     void api
       .updateConversation(targetConversationId, {
@@ -4348,7 +4414,8 @@ export function WorkspacePage() {
           ppt_done: true,
         } as unknown as Record<string, unknown>,
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => releaseArtifactAction(processedKey));
   };
 
   const handleSelectDirection = async (msg: ChatMessage, direction: CreativeDirectionResponse, auto = false) => {
