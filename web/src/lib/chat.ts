@@ -75,6 +75,7 @@ export interface ChatMessage {
     pptContentJson?: PptContentJsonResult;
     pptImages?: PptImagesResult;
     pptFile?: PptFileResult;
+    pptDone?: boolean;
     pptStyle?: string;
     smartPptProjectId?: number | null;
   };
