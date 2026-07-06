@@ -745,11 +745,19 @@ function recordTextValue(record: Record<string, unknown> | undefined, key: strin
   return typeof value === "string" ? value.trim() : "";
 }
 
+function displayIndustryType(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || ["general", "other", "unknown"].includes(normalized.toLowerCase()) || ["其他", "其他品类", "其他类目", "未知", "未分类"].includes(normalized)) {
+    return "其他品类";
+  }
+  return normalized;
+}
+
 function initialValuesFromIntake(intake: IntakeIntentResponse): Record<string, unknown> {
   const values = { ...(intake.values || {}) };
   if (intake.intent === "video") {
     const industryType = recordTextValue(intake.intake_context, "industry_type");
-    if (industryType) values.product_category = industryType;
+    if (industryType) values.product_category = displayIndustryType(industryType);
   }
   return values;
 }

@@ -166,7 +166,9 @@ test("video product category is editable text initialized from intake industry t
   assert.match(genParamsDialogSource, /product_category:\s*textValue\(values,\s*"product_category"\)/, "video product category must accept free text");
   assert.match(genParamsDialogSource, /label="产品品类"[\s\S]*<input[\s\S]*value=\{video\.product_category\}/, "video product category must render as an input");
   assert.match(workspaceSource, /function initialValuesFromIntake\(intake: IntakeIntentResponse\)/, "Workspace must adapt intake values before opening the dialog");
-  assert.match(workspaceSource, /values\.product_category = industryType/, "video product category must default to intake_context.industry_type");
+  assert.match(workspaceSource, /function displayIndustryType\(value: string\)/, "Workspace must normalize generic industry labels for display");
+  assert.match(workspaceSource, /return "其他品类"/, "generic industry values must display as other category");
+  assert.match(workspaceSource, /values\.product_category = displayIndustryType\(industryType\)/, "video product category must default to display-safe intake_context.industry_type");
   assert.match(workspaceSource, /setPendingFormValues\(initialValuesFromIntake\(intake\)\)/, "dialog must receive adapted intake initial values");
 });
 
