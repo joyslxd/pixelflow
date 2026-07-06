@@ -240,8 +240,8 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
-  assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 30_000/, "auto-confirm timeout must be 30 seconds");
-  assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 30 seconds");
+  assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 60_000/, "auto-confirm timeout must be 60 seconds");
+  assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 60 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
@@ -313,7 +313,8 @@ test("only the latest artifact card can trigger actions while idle and all actio
   assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
   assert.match(chatPanelSource, /isLatestActionableFlawAnalysis/, "ChatPanel must keep the latest QC result card actionable after analysis");
-  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableFlawAnalysis &&/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result");
+  assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");
+  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableFlawAnalysis &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result and recoverable failure cards");
   assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
   assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");
 });
@@ -334,6 +335,15 @@ test("active assistant progress messages render a loading indicator", () => {
   assert.match(messageBubbleSource, /采集 Agent 判断这是\(\?:图片\|视频\)生成需求[\s\S]*计划文件生成中[\s\S]*采集 Agent\|理解\|表单/, "image and video intake confirmation loading should show plan file generation before generic intake text");
   assert.match(messageBubbleSource, /可编辑场景包\|场景包[\s\S]*视频场景包生成中[\s\S]*plan\\\.md\|计划文件\|创作方案/, "scene package progress should be labeled before generic plan.md progress");
   assert.match(messageBubbleSource, /计划文件/, "plan.md progress should be labeled as plan file generation");
+});
+
+test("completed hidden conversation jobs can clear busy without requiring a refresh", () => {
+  assert.match(workspaceSource, /const isCurrentConversation = \(targetConversationId: string\) =>/, "Workspace must distinguish active conversation from page visibility");
+  assert.match(
+    workspaceSource,
+    /if \(!isCurrentConversation\(targetConversationId\)\) return;[\s\S]*if \(value && !pageVisibleRef\.current\) return;[\s\S]*setBusy\(value\);/,
+    "busy=false must still clear for the active conversation even if the page was hidden during completion",
+  );
 });
 
 test("ppt page regenerate updates the same card and hides regenerate while a page is running", () => {
@@ -377,6 +387,7 @@ test("failed image video and analysis stages expose retry paths", () => {
   assert.match(workspaceSource, /if \(!generatedSceneVideos\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene video failure must let the scene package card retry");
   assert.match(workspaceSource, /if \(!mergedVideo\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "merge failure must release the generating scene package action");
   assert.match(messageBubbleSource, /videoGenerationFailed/, "video generation failure card must render a retry affordance");
+  assert.match(chatPanelSource, /artifact\.mergedVideo && !artifact\.mergedVideo\.ok && Boolean\(artifact\.generatedSceneVideos\?\.scene_videos\.length\)/, "failed merge cards must remain clickable for retry");
   assert.match(messageBubbleSource, /onRetryVideoAnalysis/, "video analysis failure card must render a retry affordance");
 });
 

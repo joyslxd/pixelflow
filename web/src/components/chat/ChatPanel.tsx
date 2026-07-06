@@ -44,6 +44,19 @@ function isProgressMessage(message: ChatMessage): boolean {
   return /正在|生成中|处理中|继续查询|准备|调用|轮询|合并|重生成/.test(message.content);
 }
 
+function hasRecoverableArtifactAction(message: ChatMessage): boolean {
+  const artifact = message.artifact;
+  if (!artifact) return false;
+  if (artifact.imageResult && !artifact.imageResult.ok) return true;
+  if (artifact.videoAnalysis && !artifact.videoAnalysis.ok) return true;
+  if (artifact.sceneAssetFailures?.length) return true;
+  if (artifact.generatedSceneVideos && !artifact.generatedSceneVideos.ok && Boolean(artifact.videoScenePackages)) return true;
+  if (artifact.mergedVideo && !artifact.mergedVideo.ok && Boolean(artifact.generatedSceneVideos?.scene_videos.length)) return true;
+  if (artifact.pptSummary && !artifact.pptSummary.ok) return true;
+  if (artifact.pptFile && !artifact.pptFile.ok) return true;
+  return false;
+}
+
 export function ChatPanel({
   messages,
   onSubmit,
@@ -113,12 +126,13 @@ export function ChatPanel({
             const isSupersededArtifact = Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId);
             const keepScenePackageActions = isLatestVideoScenePackage && m.artifact?.type === "video_scene_packages";
             const isLatestActionableFlawAnalysis = m.id === latestActionableMessageId && m.artifact?.type === "video_flaw_analysis";
+            const keepRecoverableActions = hasRecoverableArtifactAction(m);
             return (
               <MessageBubble
                 key={m.id}
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
-                actionsDisabled={Boolean(busy) || (!isLatestActionableFlawAnalysis && isSupersededArtifact && !keepScenePackageActions)}
+                actionsDisabled={Boolean(busy) || (!isLatestActionableFlawAnalysis && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}

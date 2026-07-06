@@ -77,9 +77,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 默认人工确认规则：
 
-- 创意方向选择：前端 30 秒未选时默认采用推荐方向。
-- plan.md 审核：后端返回 `review_timeout_sec=30`，前端 30 秒未操作默认同意。
-- 图片生成结果、视频生成结果：30 秒未反馈默认满意或无意见。
+- 创意方向选择：前端 60 秒未选时默认采用推荐方向。
+- plan.md 审核：需要用户手动点击同意方案，不做倒计时自动确认。
+- 图片生成结果、视频生成结果：60 秒未反馈默认满意或无意见。
 - 视频场景包确认：当前代码返回 `review_timeout_sec=None`，不做倒计时自动确认。
 - 图片、视频、PPT 的需求表单弹出后，如果用户点击右上角 `X` 关闭，视为取消并终止当前流程；前端需要清空 pending 表单上下文并记录 `form_cancelled`。
 
@@ -211,7 +211,7 @@ SmartPPT接口：
 - 用户明确要求多张图片时，`requested_output_count` 会进入 `intake_context`，最终 `image/generate` 按数量循环调用，默认 1 张，最多 10 张。
 - 图片 plan.md 同意、图片修改重生成、图片编辑参数确认后，前端必须调用 `/agent/flows/image/generate/start` 获取 `job_id`，并立即把 `pendingImageJob` / `pending_image_job` 写入 conversation context。用户离开 iframe、刷新或切回同一历史对话时，只继续查询 `/agent/flows/image/generate/jobs/{job_id}`，不能重新调用 `/start`，避免重复计费；job 404 或过期时只提示用户从最新图片卡片手动重试，不自动重启。
 - `pendingImageJob.kind` 固定为 `image_generation`、`image_regeneration`、`direct_image_edit` 或 `scene_global_asset_edit`；`job_api` 固定为 `generate` 或 `edit_asset`；字段必须包含 `job_id`、`conversation_id`、`source_message_id`、`started_at`、`request`、`artifact`。
-- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate/start`，最终走 `/api/picture/image_edit`。用户确认的模型、尺寸和清晰度必须写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新恢复后继续展示确认过的参数。图片编辑结果成功后保留“满意，结束 / 重新生成”，30 秒未操作默认满意并结束。
+- 采集阶段如果 LLM 或 fallback 识别到 `image_operation=image_edit`，前端不再弹普通图片表单，不再进入创意方向和 plan.md；有原图时先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再调用 `/agent/flows/image/prepare` + `/agent/flows/image/generate/start`，最终走 `/api/picture/image_edit`。用户确认的模型、尺寸和清晰度必须写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新恢复后继续展示确认过的参数。图片编辑结果成功后保留“满意，结束 / 重新生成”，60 秒未操作默认满意并结束。
 - 图片编辑分支会让 LLM 抽取用户指定的 `image_size` 和 `image_quality`；如果所选模型不支持该尺寸或清晰度，前端必须提示，并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有指定，则按所选模型自动选择一组可用参数。图片编辑失败后，“重新生成图片”必须重新打开模型/尺寸/清晰度确认卡，不能直接复用失败参数盲重试。
 - 图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。模型级参数是否合法由前端实时配置和 content-app 生成接口共同兜底。
 - content-app 图片编辑请求体里 `size` 表示比例，如 `9:16`；`imageSize` 表示清晰度，如 `2K/4K/1080p`。PixelFlow 网关需要保持两者分离，不能把 `size` 当清晰度覆盖用户选择。

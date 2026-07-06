@@ -63,7 +63,7 @@ const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
-const AUTO_CONFIRM_TIMEOUT_MS = 30_000;
+const AUTO_CONFIRM_TIMEOUT_MS = 60_000;
 const AUTO_CONFIRM_TIMEOUT_SECONDS = AUTO_CONFIRM_TIMEOUT_MS / 1000;
 const CONTENT_APP_CONVERSATIONS_UPDATED_MESSAGE_TYPE = "PIXELFLOW_CONVERSATIONS_UPDATED";
 const SCENE_GLOBAL_ASSET_DELETE_PROMPT = (assetName: string) => `删除分镜故事板中的内容「${assetName}」。请只删除对应内容，并保持其他内容不变。`;
@@ -976,13 +976,19 @@ export function WorkspacePage() {
     setCurrentConversationId(id);
   };
 
-  const isVisibleConversation = (targetConversationId: string) => {
+  const isCurrentConversation = (targetConversationId: string) => {
     const activeConversationId = conversationIdRef.current || routeConversationIdRef.current;
-    return pageVisibleRef.current && shouldApplyVisibleConversationSideEffect(activeConversationId, targetConversationId);
+    return shouldApplyVisibleConversationSideEffect(activeConversationId, targetConversationId);
+  };
+
+  const isVisibleConversation = (targetConversationId: string) => {
+    return pageVisibleRef.current && isCurrentConversation(targetConversationId);
   };
 
   const setBusyForConversation = (targetConversationId: string, value: boolean) => {
-    if (isVisibleConversation(targetConversationId)) setBusy(value);
+    if (!isCurrentConversation(targetConversationId)) return;
+    if (value && !pageVisibleRef.current) return;
+    setBusy(value);
   };
 
   const setCanvasOpenForConversation = (targetConversationId: string, value: boolean) => {
@@ -4392,7 +4398,7 @@ export function WorkspacePage() {
     }
   };
 
-  const handleApprovePlan = async (msg: ChatMessage, auto = false) => {
+  const handleApprovePlan = async (msg: ChatMessage) => {
     const artifact = msg.artifact;
     if (!artifact?.plan || !artifact.intent || !artifact.formValues || !artifact.selectedDirection) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
@@ -4400,7 +4406,7 @@ export function WorkspacePage() {
     if (!processedKey) return;
     if (artifact.intent === "image") {
       setBusyForConversation(targetConversationId, true);
-      pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未操作，已默认同意图片 plan.md，正在准备图片生成参数…` : "图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
+      pushAssistant("图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
       try {
         const imagePrepare = await api.prepareImageGeneration({
           form_values: artifact.formValues,
@@ -4485,7 +4491,7 @@ export function WorkspacePage() {
       selectedDirection.title,
       selectedDirection.description,
     ]);
-    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未操作，已默认同意视频 plan.md，正在准备可编辑场景包…` : "视频 plan.md 已同意，正在准备可编辑场景包…", targetConversationId);
+    pushAssistant("视频 plan.md 已同意，正在准备可编辑场景包…", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
         form_values: formValues,

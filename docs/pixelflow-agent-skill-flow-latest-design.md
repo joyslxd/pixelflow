@@ -61,9 +61,9 @@ flowchart TD
   PIMG --> PFILE["生成 PPT 附件"]
   PFILE --> PDONE["PPT 文件确认<br/>满意结束 / 重新生成附件"]
   IV --> DIR["生成 3 个创意方向"]
-  DIR --> CHOOSE["用户选择方向<br/>30 秒未选默认推荐"]
+  DIR --> CHOOSE["用户选择方向<br/>60 秒未选默认推荐"]
   CHOOSE --> PLAN["策划 Agent<br/>填充 plan.md"]
-  PLAN --> REVIEW["人工审核 plan.md<br/>30 秒未操作默认同意"]
+  PLAN --> REVIEW["人工审核 plan.md<br/>手动同意后继续"]
   REVIEW -->|"继续修改"| D
   REVIEW -->|"同意 image"| IMG["图片生成 Agent"]
   REVIEW -->|"同意 video"| VP["视频场景包 Agent"]
@@ -385,7 +385,7 @@ sequenceDiagram
 - 如果识别到图片编辑但没有原图，前端提示用户上传需要编辑的图片，并把 `pendingImageEditRequest` 写入对话 context；用户从同一对话上传图片后继续调用 `/api/picture/image_edit`。
 - 如果已有原图，前端先调用 content-app `/api/modelParamConfig/listByCategory/image_generate` 查询图片模型配置，并展示“模型/尺寸/清晰度”确认卡；默认选 `gpt-image-2`。用户确认的模型、尺寸和清晰度会写入对话 context 的 `imageEditConfirmedSelections`，切换对话或刷新后重新进入该对话时仍按用户确认过的参数展示。
 - 采集 Agent 会从用户 prompt 抽取图片编辑尺寸 `image_size` 和清晰度 `image_quality`。如果用户明确指定但所选模型不支持，前端提示不兼容原因并自动落到当前模型可用参数；用户可以重新选择该模型支持的尺寸和清晰度后继续提交。如果未指定，则根据所选模型自动选择一组可用尺寸和清晰度。图片编辑模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时响应为准；Python 侧只做通用清晰度格式校验和缺省值兜底，不再用硬编码模型白名单拦截用户已确认的参数。content-app 请求体中 `size` 表示比例、`imageSize` 表示清晰度，网关需要保持二者分离。
-- 图片编辑成功后，前端展示“满意，结束 / 重新生成”；30 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
+- 图片编辑成功后，前端展示“满意，结束 / 重新生成”；60 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
 - 图片 plan.md 同意、图片修改重生成、直接图片编辑确认后，前端调用 `/agent/flows/image/generate/start` 启动 Python 内存 job，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。恢复同一对话时只查询 `/agent/flows/image/generate/jobs/{job_id}`，不重复调用 `/start`；job 404 或过期时只提示手动重试，避免重复计费。
 - 视频场景包全局素材图片编辑调用 `/agent/flows/image/edit-asset/start`，同样保存 `pendingImageJob`，恢复时只查询 `/agent/flows/image/edit-asset/jobs/{job_id}`。完成后直接替换 `global_assets` 与同 `asset_id` 的 mentions 图片 URL。
@@ -457,7 +457,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   A["用户查看合并视频"] --> B{"是否提出修改意见"}
-  B -->|"否 / 30 秒无反馈"| DONE["流程结束"]
+  B -->|"否 / 60 秒无反馈"| DONE["流程结束"]
   B -->|"是"| C["调用 /agent/flows/video/analyze-flaws<br/>旧入口内部转综合质检"]
   C --> D["返回质检信息、affected_scene_ids、revision_prompt"]
   D --> E{"用户选择修改范围"}
