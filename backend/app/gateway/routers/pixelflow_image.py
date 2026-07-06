@@ -6,10 +6,12 @@ import asyncio
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.generate.image_prepare import ImageMethod, prepare_image_generation
+from pixelflow.memory import with_semantic_memory
 from pixelflow.skills import get_image_skill
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
 
@@ -118,29 +120,57 @@ class ImageAssetEditJobStatusResponse(BaseModel):
 
 
 @router.post("/prepare", response_model=ImagePrepareResponse)
-async def prepare_image(body: ImagePrepareRequest) -> ImagePrepareResponse:
+async def prepare_image(body: ImagePrepareRequest, request: Request) -> ImagePrepareResponse:
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="image_prepare_agent",
+        query_values=[body.form_values, body.plan_markdown, body.selected_direction, body.materials, body.revision_feedback, body.intake_context],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    intake_context, _profile = with_semantic_memory(body.intake_context, memories)
     result = prepare_image_generation(
         body.form_values,
         body.plan_markdown,
         body.selected_direction,
         body.materials,
         body.revision_feedback,
-        body.intake_context,
+        intake_context,
+    )
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=user_id,
+        content=concise_result_summary("图片准备 Agent 选择生成接口", {"method": result.method, "endpoint": result.endpoint, "message": result.message, "ok": result.ok}),
+        category="experience",
+        source_agent="image_prepare_agent",
+        metadata={"source": "image_prepare", "method": result.method, "endpoint": result.endpoint},
+        memory_type="experience",
+        infer=False,
     )
     return ImagePrepareResponse(**result.to_dict())
 
 
 @router.post("/generate", response_model=ImageGenerateResponse)
-async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
-    return await _generate_image_response(body)
+async def generate_image(body: ImageGenerateRequest, request: Request) -> ImageGenerateResponse:
+    result = await _generate_image_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("图片生成 Agent 完成同步生成", result.model_dump()),
+        category="experience",
+        source_agent="image_generation_agent",
+        metadata={"source": "image_generate", "method": body.method, "image_count": len(result.images)},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/generate/start", response_model=ImageGenerateJobStartResponse)
-async def start_generate_image(body: ImageGenerateRequest) -> ImageGenerateJobStartResponse:
+async def start_generate_image(body: ImageGenerateRequest, request: Request) -> ImageGenerateJobStartResponse:
     _trim_image_generation_jobs()
     job_id = uuid.uuid4().hex
     _IMAGE_GENERATION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_image_generation_job(job_id, body))
+    asyncio.create_task(_run_image_generation_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return ImageGenerateJobStartResponse(ok=True, job_id=job_id, status="running", message="图片生成任务已启动。")
 
 
@@ -215,16 +245,27 @@ async def _generate_image_response(body: ImageGenerateRequest) -> ImageGenerateR
 
 
 @router.post("/edit-asset", response_model=ImageAssetEditResponse)
-async def edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
-    return await _edit_image_asset_response(body)
+async def edit_image_asset(body: ImageAssetEditRequest, request: Request) -> ImageAssetEditResponse:
+    result = await _edit_image_asset_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("素材图片编辑 Agent 完成同步编辑", result.model_dump()),
+        category="experience",
+        source_agent="scene_global_asset_edit_agent",
+        metadata={"source": "image_edit_asset", "asset_id": body.asset_id, "asset_group": body.asset_group},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/edit-asset/start", response_model=ImageAssetEditJobStartResponse)
-async def start_edit_image_asset(body: ImageAssetEditRequest) -> ImageAssetEditJobStartResponse:
+async def start_edit_image_asset(body: ImageAssetEditRequest, request: Request) -> ImageAssetEditJobStartResponse:
     _trim_image_asset_edit_jobs()
     job_id = uuid.uuid4().hex
     _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_image_asset_edit_job(job_id, body))
+    asyncio.create_task(_run_image_asset_edit_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return ImageAssetEditJobStartResponse(ok=True, job_id=job_id, status="running", message="素材图片编辑任务已启动。")
 
 
@@ -291,7 +332,7 @@ async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetE
     )
 
 
-async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest) -> None:
+async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _generate_image_response(body)
         _IMAGE_GENERATION_JOBS[job_id] = {
@@ -299,11 +340,33 @@ async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest) -> 
             "result": result,
             "error": None,
         }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("图片生成 Agent 完成异步生成", result.model_dump()),
+            category="experience",
+            source_agent="image_generation_agent",
+            metadata={"source": "image_generate_job", "job_id": job_id, "method": body.method, "image_count": len(result.images)},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _IMAGE_GENERATION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=f"图片生成 Agent 异步生成失败；method={body.method}；error={str(exc)[:300]}",
+            category="experience",
+            source_agent="image_generation_agent",
+            metadata={"source": "image_generate_job", "job_id": job_id, "method": body.method, "status": "failed"},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
 
 
-async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest) -> None:
+async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _edit_image_asset_response(body)
         _IMAGE_ASSET_EDIT_JOBS[job_id] = {
@@ -311,8 +374,30 @@ async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest) ->
             "result": result,
             "error": None,
         }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("素材图片编辑 Agent 完成异步编辑", result.model_dump()),
+            category="experience",
+            source_agent="scene_global_asset_edit_agent",
+            metadata={"source": "image_edit_asset_job", "job_id": job_id, "asset_id": body.asset_id, "asset_group": body.asset_group},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=f"素材图片编辑 Agent 异步编辑失败；asset_id={body.asset_id}；error={str(exc)[:300]}",
+            category="experience",
+            source_agent="scene_global_asset_edit_agent",
+            metadata={"source": "image_edit_asset_job", "job_id": job_id, "asset_id": body.asset_id, "status": "failed"},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
 
 
 def _trim_image_generation_jobs() -> None:

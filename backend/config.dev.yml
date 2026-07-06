@@ -25,6 +25,26 @@ pixelflow:
   mysql_url: ""
   # 是否启用 mem0 记忆能力；当前默认关闭，避免本地缺少外部依赖时报错。
   mem0_enabled: false
+  # 语义记忆能力；当前第一版使用 PowerMem HTTP sidecar。
+  semantic_memory_enabled: true
+  semantic_memory_provider: "powermem"
+  # 测试环境经 nginx /powermem/ 反向代理到测试服务器本机 127.0.0.1:18848。
+  powermem_base_url: "https://test-video.borgrise.com/powermem"
+  # PowerMem API Key；必须和 PowerMem 服务端 POWERMEM_AUTH_ENABLED/POWERMEM_API_KEYS 保持一致。
+  powermem_api_key: "Lnzw114qV0ibwmUFyKIDcW8BhBm0rxtZ7r8p72G3G6xhxn_KTaAPAHNs5pzY1tbc"
+  # 单次 PowerMem HTTP 超时，单位秒；只用于 search/health 等「同步在请求路径上」的调用，
+  # 失败开放、不阻塞主创作流程。record 写入不共用这个值，避免被 3s 误杀。
+  powermem_timeout_seconds: 3
+  # record 写入专用超时，单位秒。record 全部走后台 asyncio.create_task，不在用户请求路径上，
+  # 因此可以给得更宽松：infer=true 时服务端要做 DeepSeek LLM 抽取（实测约 36s），
+  # infer=false 也要给 nginx/网络留余量。默认 30s。
+  powermem_record_timeout_seconds: 30
+  # 每个 Agent 阶段默认取回的语义记忆条数。
+  powermem_search_limit: 5
+  # 是否允许 PixelFlow 写入 PowerMem；排查时可临时关闭只读。
+  powermem_write_enabled: true
+  # true 表示 PowerMem 不可用时主流程继续，仅记录 warning。
+  powermem_fail_open: true
   # 媒体生成/理解供应商；当前仅支持 borgrise。
   # 目前图片生成、视频生成、参考视频拆解都走 Borgrise/content-app 接口。
   # 后续如果图片、视频、拆解需要拆成不同供应商，再新增 image_skill/video_skill/decompose_skill 等细分配置。
@@ -171,4 +191,3 @@ third_party:
 environment:
   # 自定义环境变量字典；key 必须是环境变量名，value 会转成字符串。
   variables: {}
-

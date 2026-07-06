@@ -84,6 +84,55 @@ def test_video_router_prepares_scene_packages():
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
 
 
+def test_video_prepare_scene_packages_records_power_mem_experience(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    async def fake_prepare_video_scene_packages_with_llm(**_kwargs):
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": 30_000,
+            "global_assets": {"characters": [], "scenes": [], "props": []},
+            "scene_packages": [{"scene_id": "scene-1", "scene_index": 1, "duration_ms": 8000, "prompt": "第一幕"}],
+        }
+
+    class FakePowerMemService:
+        def __init__(self):
+            self.records = []
+
+        async def search(self, **_kwargs):
+            return []
+
+        async def record(self, **kwargs):
+            self.records.append(kwargs)
+            return True
+
+    service = FakePowerMemService()
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_power_mem_service = service
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/prepare-scene-packages",
+            json={
+                "form_values": {"product_info": "耳机"},
+                "plan_markdown": "耳机场景",
+                "selected_direction": {"title": "通勤"},
+                "target_duration_ms": 30_000,
+            },
+        )
+
+    assert response.status_code == 200
+    assert service.records[0]["category"] == "experience"
+    assert service.records[0]["source_agent"] == "video_scene_package_agent"
+    assert "场景包" in service.records[0]["content"]
+
+
 def test_video_router_starts_prepare_scene_package_job_and_polls_result(monkeypatch):
     import time
 

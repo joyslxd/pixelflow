@@ -12,3 +12,5 @@ docs/*
 
 # Local Codex helper logs.
 **/.codex-*.log
+
+.claude/

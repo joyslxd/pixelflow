@@ -32,6 +32,49 @@ def test_pixelflow_ppt_router_prefix_and_paths():
     assert "/agent/flows/ppt/jobs/{job_id}" in paths
 
 
+def test_with_ppt_memory_truncates_topic_to_safe_length():
+    """长期记忆拼进 topic 时必须截断，否则 content-app SmartPPT 的 topic 列会 Data truncation。"""
+    from app.gateway.routers import pixelflow_ppt
+    from pixelflow.memory import SemanticMemoryItem
+
+    # 构造 5 条长记忆，semantic_memory_text 拼出来远超 _PPT_TOPIC_MAX_CHARS。
+    memories = [
+        SemanticMemoryItem(memory_id=f"m{i}", content=f"用户偏好风格倾向偏好第{i}条" * 20)
+        for i in range(5)
+    ]
+    body = pixelflow_ppt.PptSummaryJobStartRequest(
+        ppt_topic="保温杯",
+        ppt_style="简约",
+        attachments=[{"name": "a.pdf", "url": "https://x/a.pdf"}],
+    )
+
+    merged = pixelflow_ppt._with_ppt_memory(body, memories)
+
+    assert merged.ppt_topic.startswith("保温杯\n长期记忆约束：")
+    assert len(merged.ppt_topic) <= pixelflow_ppt._PPT_TOPIC_MAX_CHARS
+    assert merged.ppt_style == "简约"
+    assert merged.attachments == body.attachments
+
+
+def test_with_ppt_memory_noop_without_memories():
+    from app.gateway.routers import pixelflow_ppt
+
+    body = pixelflow_ppt.PptSummaryJobStartRequest(ppt_topic="保温杯", ppt_style="简约")
+    merged = pixelflow_ppt._with_ppt_memory(body, [])
+    assert merged is body or merged.ppt_topic == "保温杯"
+
+
+def test_with_ppt_memory_skips_when_topic_already_long():
+    """用户自己传的 topic 已接近上限时，不再追加记忆，避免溢出。"""
+    from app.gateway.routers import pixelflow_ppt
+    from pixelflow.memory import SemanticMemoryItem
+
+    memories = [SemanticMemoryItem(memory_id="m1", content="偏好真实摄影风格")]
+    body = pixelflow_ppt.PptSummaryJobStartRequest(ppt_topic="x" * pixelflow_ppt._PPT_TOPIC_MAX_CHARS, ppt_style="简约")
+    merged = pixelflow_ppt._with_ppt_memory(body, memories)
+    assert merged.ppt_topic == body.ppt_topic
+
+
 def test_ppt_router_generates_summary_as_async_job(monkeypatch):
     from app.gateway.routers import pixelflow_ppt
     from pixelflow.skills import PptGenerationResult

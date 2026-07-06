@@ -24,6 +24,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
 | 视频修改循环 | 可用 | 支持综合质检、按受影响场景重生并重新合并 |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
+| PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
 | 旧 LangGraph 任务流 | 保留 | `/agent/flows` 旧任务、SSE、资产接口仍存在，用于兼容 |
 
@@ -35,6 +36,7 @@ flowchart LR
   GW --> PF["PixelFlow 业务层<br/>intake / creative / generate / skills"]
   PF --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
   PF --> Store["Task / Conversation Store"]
+  PF --> PM["PowerMem HTTP sidecar<br/>semantic memory"]
   PF --> Skill["Skill Protocol"]
   Skill --> Borgrise["content-app / Borgrise API"]
   FE --> Upload["content-app /api/upload"]
@@ -50,6 +52,7 @@ pixelflow/
 │   │   ├── intake/                  # 意图识别、表单、垂类画像、采集上下文
 │   │   ├── creative/                # plan.md 填充、Brief/策划逻辑
 │   │   ├── generate/                # 图片参数准备、视频场景包
+│   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
@@ -98,6 +101,7 @@ flowchart TD
 - 所有 `/agent` 请求必须携带 content-app `Authorization: Bearer <token>`。
 - Skill 调用 content-app/Borgrise 计费接口时必须透传入口请求的 Authorization。
 - 不允许把用户 token、用户名、密码写死到配置、代码或测试脚本里。
+- PowerMem 只保存业务摘要、偏好、品牌上下文和 Agent 经验，不写入用户 token、供应商密钥、原始异常堆栈或本地部署目录。
 - content-app 返回额度不足、余额不足、HTTP 402 等信息时，当前生成必须立即暂停并保存可恢复上下文。
 - 前端展示 Agent 进度时只能展示业务摘要，不能暴露原始 prompt、思维链、供应商密钥或完整内部堆栈。
 
@@ -147,6 +151,24 @@ flowchart TD
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+## PowerMem 语义记忆
+
+PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
+
+| 类型 | 记录来源 | 使用位置 |
+| --- | --- | --- |
+| 用户/品牌长期偏好 MVP | `/agent/users/{user_id}/preferences`、偏好反馈、Brief 修订、采集到的产品/行业上下文 | 采集分析、创意方向、plan.md、图片 prepare、视频场景包、PPT 大纲 |
+| Agent 经验/Skill 沉淀 | 图片、视频、视频分析、PPT、旧 LangGraph 任务流的阶段完成/失败摘要 | 后续 Agent 检索 `preference`、`brand`、`skill`、`experience` 分类记忆作为上下文 |
+
+接入边界：
+
+- 统一入口是 `backend/pixelflow/memory/PowerMemService`，路由侧只通过 `app.gateway.pixelflow_memory` helper 读写。
+- 测试环境 `backend/config.dev.yml` 的 `pixelflow.powermem_base_url` 走 nginx：`https://test-video.borgrise.com/powermem`。
+- 生产环境 `backend/config.prod.yml` 的 `pixelflow.powermem_base_url` 走本机 sidecar：`http://127.0.0.1:18848`。
+- PowerMem 不替代 `pixelflow_user_preferences` 结构化偏好表；结构化默认值、负向规则仍在业务 Store，PowerMem 负责语义检索和跨 Agent 经验复用。
+- 图片/视频/PPT 等 Skill 调用类经验会自动双写 `experience` 与 `skill`，便于后续流程复用接口选择和失败处理经验。
+- 后续新增或修改 Agent/流程时，必须复用 `PowerMemService`：进入决策前先检索相关记忆，阶段完成/失败后写入业务摘要。
 
 ## content-app/Borgrise 接口
 
@@ -348,6 +370,7 @@ http://localhost:5273/auth-token
 | --- | --- |
 | `gateway.*` | FastAPI host、port、docs、CORS |
 | `pixelflow.*` | MySQL、media_skill、edit_skill、输出目录 |
+| `pixelflow.semantic_memory_*` / `pixelflow.powermem_*` | PowerMem 语义记忆开关、base_url、API key、search 超时（`powermem_timeout_seconds`）、record 专用超时（`powermem_record_timeout_seconds`）、检索数量、失败开放策略 |
 | `borgrise.*` | content-app/Borgrise base_url、auth verify、轮询超时、重试次数 |
 | `models` | LLM 配置，当前主模型是 `deepseek-v4-pro` |
 | `database` | DeerFlow checkpointer 和平台持久化 |
@@ -371,6 +394,7 @@ cd backend
 uv run pytest tests/test_intake_llm.py tests/test_intake_forms.py tests/test_industry_profile.py -q
 uv run pytest tests/test_creative_plan_markdown.py tests/test_image_prepare.py -q
 uv run pytest tests/test_pixelflow_image_router.py tests/test_video_scene_packages.py tests/test_pixelflow_video_router.py -q
+uv run pytest tests/test_powermem_service.py tests/test_pixelflow_preferences.py -q
 uv run pytest tests/test_borgrise_poll.py tests/test_borgrise_authorization_passthrough.py tests/test_borgrise_quota_detection.py -q
 uv run ruff check .
 ```

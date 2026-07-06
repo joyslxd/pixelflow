@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from pixelflow.memory import semantic_memory_text
+
 CreationIntent = Literal["video", "image"]
 
 PLAN_TEMPLATE_PATH = (
@@ -104,6 +106,7 @@ def _build_video_plan(
     direction_description = _text(selected_direction.get("description"), "围绕产品卖点组织完整创作方案。")
     visual_anchor = _visual_anchor(selected_direction, product_creative_profile)
     material_summary = _material_summary(materials)
+    memory_summary = _memory_summary(product_creative_profile, intake_context)
     duration_seconds = _infer_duration_seconds(form_values, selected_direction, product_creative_profile, materials)
     shot_ranges = _shot_ranges(duration_seconds)
     return f"""# {product}｜{direction_title}
@@ -130,6 +133,7 @@ def _build_video_plan(
 - **爆点机制**：前三秒抛出真实痛点；中段放大使用压力；产品在解决节点首次露出；用结果证明降低犹豫；结尾引导 {goal}
 - **人群**：{audience}｜A3 兴趣到 A4 转化
 - **依据**：表单品类为 {category}，创意方向为「{direction_title}」，素材基础为 {material_summary}
+- **长期记忆约束**：{memory_summary or "暂无可用长期记忆，本次按表单和创意方向执行"}
 - **转化逻辑链**：冲突起点 -> 问题升级 -> 产品介入 -> 效果证明 -> 用户信任并执行 {goal}
 - **产品剧情检验**：通过 -- 去掉 {product} 后，剧情无法完成反转和转化收口
 - **系列延展性**：可系列化；可延展到通勤场景、家庭场景、直播间预热场景
@@ -212,6 +216,7 @@ def _build_video_plan(
 - 转化话术：想要更快解决这个问题，现在就去了解 {product}
 - 转化画面：产品图、行动入口、关键卖点和使用结果同屏
 - 注意事项：避免夸大承诺，避免虚假优惠，避免绝对化违规词
+- 长期记忆注意事项：{memory_summary or "暂无"}
 
 ---
 
@@ -291,6 +296,7 @@ def _build_image_plan(
     direction_description = _text(selected_direction.get("description"), "围绕图片目标组织完整创作方案。")
     visual_anchor = _visual_anchor(selected_direction, product_creative_profile)
     material_summary = _material_summary(materials)
+    memory_summary = _memory_summary(product_creative_profile, intake_context)
     return f"""# {image_goal}｜{direction_title}
 
 ## 一、选题方向
@@ -316,6 +322,7 @@ def _build_image_plan(
 - **爆点机制**：用主体焦点吸引视线；用风格和构图制造记忆；用信息层级服务 {usage}
 - **人群**：{usage} 触达用户｜A1 认知到 A3 兴趣
 - **依据**：图片类型为 {image_type}，图片风格为 {style}，素材基础为 {material_summary}
+- **长期记忆约束**：{memory_summary or "暂无可用长期记忆，本次按表单和创意方向执行"}
 - **转化逻辑链**：画面吸引 -> 信息识别 -> 风格建立 -> 信任形成 -> 用户继续点击或停留
 - **产品剧情检验**：通过 -- 去掉主体后，图片无法表达 {image_goal}
 - **系列延展性**：可系列化；可延展到封面图、详情页配图、活动视觉
@@ -381,6 +388,7 @@ def _build_image_plan(
 - 转化话术：围绕图片目标添加短标题或行动提示
 - 转化画面：主体、关键信息和视觉锚点统一呈现
 - 注意事项：避免夸大承诺，避免虚假优惠，避免绝对化违规词
+- 长期记忆注意事项：{memory_summary or "暂无"}
 
 ---
 
@@ -426,6 +434,13 @@ def _visual_anchor(selected_direction: dict[str, Any], product_creative_profile:
     if isinstance(anchors, list) and anchors:
         return "、".join(_text(anchor) for anchor in anchors[:3] if _text(anchor)) or "产品质感、真实使用、转化动作"
     return "产品质感、真实使用、转化动作"
+
+
+def _memory_summary(product_creative_profile: dict[str, Any], intake_context: dict[str, Any]) -> str:
+    profile_summary = semantic_memory_text(product_creative_profile.get("semantic_memory"))
+    if profile_summary:
+        return profile_summary
+    return semantic_memory_text(intake_context.get("semantic_memory"))
 
 
 def _material_summary(materials: list[dict[str, Any]]) -> str:

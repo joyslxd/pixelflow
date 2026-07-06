@@ -605,16 +605,23 @@ def craft_image_prompt(product_description: str, scene: str = "studio") -> str:
 
 def extract_task_id(result: dict) -> str | None:
     """从多种响应字段风格中提取 task ID。"""
-    data = result.get("data", result)
+    # 注意：result.get("data", result) 在 "data": null（键存在但值为 None）时会返回 None，
+    # 之后 data.get(...) 会抛 'NoneType' object has no attribute 'get'。
+    # content-app SmartPPT 在附件解析失败等场景会返回 data: null，这里必须兜底。
+    data = result.get("data")
+    data = data if isinstance(data, dict) else result
     return data.get("taskId") or data.get("task_id") or result.get("task_id") or result.get("taskId")
 
 
 def extract_video_url(result: dict) -> str | None:
     """从轮询/API 响应的多种结构中提取视频 URL。"""
-    final_data = result.get("data", result)
+    final_data = result.get("data")
+    final_data = final_data if isinstance(final_data, dict) else result
+    result_obj = final_data.get("result")
+    result_obj = result_obj if isinstance(result_obj, dict) else {}
     return (
-        final_data.get("result", {}).get("video_url")
-        or final_data.get("result", {}).get("url")
+        result_obj.get("video_url")
+        or result_obj.get("url")
         or final_data.get("video_url")
         or final_data.get("url")
     )
@@ -932,6 +939,14 @@ def _smart_ppt_error(endpoint: str, result: dict | None, *, task_id: str | None 
 
 def _submit_and_poll_smart_ppt(endpoint: str, request_data: dict) -> tuple[dict, dict] | dict:
     result = make_request(endpoint, request_data)
+    if not isinstance(result, dict):
+        # content-app SmartPPT 偶发返回空/非字典（例如附件解析失败、网关兜底），
+        # 不能直接 result.get()，否则会抛 'NoneType' object has no attribute 'get'，
+        # 让上层只看到崩溃而不是可读错误。这里归一成结构化错误。
+        return _smart_ppt_error(
+            endpoint,
+            {"message": "SmartPPT 提交返回空响应或非 JSON 结果", "response": result},
+        )
     if result.get("error") or result.get("success") is False:
         return _smart_ppt_error(endpoint, result)
     task_id = extract_task_id(result)

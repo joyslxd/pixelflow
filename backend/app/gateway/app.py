@@ -86,7 +86,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("LangGraph runtime initialised")
 
         from deerflow.persistence.engine import get_session_factory
+        from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
+
+        app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
+        logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:
@@ -115,6 +119,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_preference_mysql_engine is not None:
                 await pixelflow_preference_mysql_engine.dispose()
                 logger.info("PixelFlow MySQL preference store closed")
+            pixelflow_power_mem_service = getattr(app.state, "pixelflow_power_mem_service", None)
+            if pixelflow_power_mem_service is not None:
+                await pixelflow_power_mem_service.aclose()
+                logger.info("PixelFlow semantic memory closed")
 
     logger.info("Shutting down API Gateway")
 

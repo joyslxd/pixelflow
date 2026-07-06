@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-06-30
+更新时间：2026-07-05
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -12,6 +12,7 @@ PixelFlow 不是一个自由闲聊 Agent，而是一个围绕“电商图片/视
 - 采集阶段用 LLM 理解意图、主体、行业、数量、素材含义。
 - 所有需要用户确认的节点都能落到前端对话里，并且能保存和恢复。
 - 图片、视频、视频分析、PPT制作最终都通过 content-app/Borgrise 能力落地。
+- 用户/品牌长期偏好和 Agent 经验沉淀通过 PowerMem HTTP sidecar 作为语义记忆被读取和记录。
 - 额度不足、业务失败、网络异常要可解释；额度不足后用户充值回来仍能从当前对话继续。
 - 新增 Python 接口必须以 `/agent` 开头，前端直接上传附件到 content-app `/api/upload`。
 
@@ -22,6 +23,7 @@ flowchart LR
   FE["Web 前端<br/>WorkspacePage + Canvas"] --> GW["FastAPI Gateway<br/>/agent/* Controller"]
   GW --> Flow["PixelFlow 业务 Service<br/>intake / creative / generate / skills"]
   Flow --> Store["Task/Conversation Store<br/>Memory / SQL / MySQL"]
+  Flow --> PM["PowerMem HTTP sidecar<br/>preference / brand / skill / experience"]
   Flow --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
   Flow --> Skill["Skill Protocol<br/>Image / Video / Decompose / Flaw / SmartPPT"]
   Skill --> Borgrise["content-app/Borgrise API"]
@@ -38,6 +40,7 @@ flowchart LR
 | Skill Protocol | `backend/pixelflow/skills/base.py` | Java interface | 第三方能力稳定接口 |
 | Skill Impl | `backend/pixelflow/skills/borgrise/` | Feign/HTTP Client | content-app/Borgrise 调用、轮询、错误归一 |
 | Store | `backend/pixelflow/tasks/` | Repository/DAO | 任务、会话、消息、资产、上下文 |
+| Semantic Memory | `backend/pixelflow/memory/` + `app/gateway/pixelflow_memory.py` | 独立 Memory Client / Service | PowerMem 检索与写入，失败开放 |
 | DeerFlow Harness | `backend/packages/harness/deerflow/` | 平台基础设施 | thread/run、checkpointer、sandbox、skills |
 
 ## 3. 当前前端主流程
@@ -92,6 +95,7 @@ flowchart TD
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
+| 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
 
 ## 5. Skill 清单
 
@@ -252,6 +256,60 @@ PPT 异步规则：
 - PPT 页面图片处于 `running` 时不展示重新生成按钮；已生成或失败后才允许单页重试。单页重试必须原位更新该页小格子，不能追加新的整组 PPT 图片卡片；只要存在 running 或 failed 页面，“开始生成PPT附件”按钮必须隐藏。
 - PPT 轮询超时默认 2 小时：`BORGRISE_PPT_POLL_TIMEOUT=7200`。
 - content-app 返回额度不足时，job 状态为 `quota_paused`，前端提示充值后回到同一对话继续。
+
+### 5.7 PowerMem 语义记忆 Service
+
+PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python SDK 到业务流程里，而是通过统一的 `PowerMemService` 调用 PowerMem REST API。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| `PowerMemService` | `backend/pixelflow/memory/service.py` | 封装 `POST /api/v1/memories`、`POST /api/v1/memories/search`、`GET /api/v1/system/health`、`X-API-Key` |
+| Memory context helpers | `backend/pixelflow/memory/context.py` | 把检索结果压缩成 `semantic_memory` 上下文和短文本 |
+| Gateway helper | `backend/app/gateway/pixelflow_memory.py` | 从 `app.state` 取服务、解析当前用户、后台写入阶段摘要 |
+| Runtime singleton | `backend/app/gateway/app.py` | 启动时创建 `app.state.pixelflow_power_mem_service`，关闭时释放 HTTP client |
+
+记忆分类：
+
+| category | 记录内容 | 典型 memory_type |
+| --- | --- | --- |
+| `preference` | 用户明确偏好、默认参数、负向规则、Brief 修订反馈 | `preference` |
+| `brand` | 采集阶段识别出的产品/品牌主体、创作目标、行业上下文 | `fact` |
+| `skill` | 后续可人工或自动沉淀的 Skill 使用经验 | `skill` |
+| `experience` | Agent 阶段完成/失败摘要、选择的接口、失败类型、生成数量 | `experience` |
+
+读取点：
+
+| 阶段 | 读取方式 | 使用位置 |
+| --- | --- | --- |
+| 采集意图识别 | 用用户提示词、附件、抽取字段检索 `preference/brand/skill` | 写入 `intake_context.semantic_memory` 和 `values.semantic_memory_context` |
+| 创意方向 | 用表单、行业画像、素材检索 `preference/brand/skill/experience` | 写入 `product_creative_profile.semantic_memory`，进入创意方向 LLM prompt |
+| plan.md | 用表单、创意方向、行业画像、素材检索 | plan.md 增加“长期记忆约束”和注意事项 |
+| 图片 prepare | 用表单、plan、素材、修改意见检索 | 图片 prompt 增加“长期记忆约束”，参与比例/上下文判断 |
+| 视频场景包 | 用表单、plan、素材、场景上下文检索 | 场景包 LLM prompt 和 plan 摘要追加长期记忆约束 |
+| PPT 大纲 | 用 PPT 主题、风格、附件检索 | SmartPPT 大纲 topic 追加长期记忆约束 |
+| 旧 LangGraph 任务流 | 创建任务时检索 | 写入初始 state 的 `user_preferences.semantic_memory` |
+
+写入点：
+
+| 阶段 | 写入内容 |
+| --- | --- |
+| 用户偏好 API | `PUT /agent/users/{user_id}/preferences` 和 `/feedback` 写入 `preference` |
+| 旧 Brief 修订 | 用户 feedback 写入 `preference`，结构化偏好仍写原业务 Store |
+| 采集/创意方向/plan.md | 写入阶段完成摘要到 `experience`，采集出的产品/行业上下文写入 `brand` |
+| 图片 | prepare、同步生成、异步生成、全局素材图片编辑完成/失败写入 `experience` |
+| 视频 | 视频分析、场景包、参考图、场景视频、直接视频、合并、质检完成/失败写入 `experience` |
+| PPT | 大纲、更新大纲、页面 JSON、页面图片、单页重生、PPT 文件完成/失败写入 `experience` |
+| 旧 LangGraph 任务流 | 创建、run 完成、run 失败写入 `experience` |
+
+图片、视频、PPT 等 Skill 调用类阶段通过 `record_power_mem_background()` 先写 `experience`，再自动双写一条 `skill` 记忆，方便后续 Agent 检索可复用的接口选择、失败类型和参数经验。
+
+约束：
+
+- PowerMem 失败开放：不可用、超时或 5xx 时记录 warning，主流程继续。
+- 不写 content-app `Authorization`、用户密码、供应商密钥、完整异常堆栈、本地部署目录。
+- PowerMem 的 `agent_id` 固定为 `pixelflow`，具体来源 Agent 放到 metadata 的 `source_agent`，让用户长期偏好可以跨 Agent 共享。
+- `pixelflow_user_preferences` 仍是结构化业务偏好表；PowerMem 负责语义检索和跨流程经验复用，不替代业务 Store。
+- 后续新增或修改 Agent/流程时，必须复用 `PowerMemService`：进入关键决策前先检索相关记忆，阶段完成/失败后写业务摘要，不允许在路由里直接拼 PowerMem HTTP 调用。
 
 ## 6. 视频场景包数据合同
 
@@ -566,6 +624,14 @@ flowchart TD
 | --- | --- |
 | `models[0].name=deepseek-v4-pro` | 当前采集、行业画像、创意方向、场景包使用的大模型 |
 | `pixelflow.media_skill=borgrise` | 图片/视频/视频分析供应商 |
+| `pixelflow.semantic_memory_enabled=true` | 启用 PowerMem 语义记忆 |
+| `pixelflow.semantic_memory_provider=powermem` | 当前语义记忆 Provider |
+| `pixelflow.powermem_base_url` | PowerMem HTTP 地址；dev 为 `https://test-video.borgrise.com/powermem`，prod 为 `http://127.0.0.1:18848` |
+| `pixelflow.powermem_api_key` | 调用 PowerMem 的 `X-API-Key`，必须与 PowerMem 服务端 API key 一致 |
+| `pixelflow.powermem_timeout_seconds=3` | 单次 PowerMem HTTP 超时 |
+| `pixelflow.powermem_search_limit=5` | 默认检索记忆条数 |
+| `pixelflow.powermem_write_enabled=true` | 是否允许写入 PowerMem，排查时可临时关闭只读 |
+| `pixelflow.powermem_fail_open=true` | PowerMem 不可用时主流程继续 |
 | `borgrise.base_url` | content-app/Borgrise API 根地址 |
 | `borgrise.video_poll_timeout=3600` | 视频轮询默认 1 小时 |
 | `borgrise.image_poll_timeout=600` | 图片轮询默认 10 分钟 |
@@ -587,6 +653,7 @@ flowchart TD
 | 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx`、`scenePackages.ts` |
 | 视频接口 | `pixelflow_video.py`、`run_generation.py`、`api.ts` |
 | PPT接口 | `pixelflow_ppt.py`、`run_generation.py`、`api.ts`、`GenParamsDialog.tsx`、`MessageBubble.tsx` |
+| 语义记忆/PowerMem | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py`、`config.dev.yml`、`config.prod.yml` |
 | 对话隔离 | `pixelflow_conversations.py`、`tasks/store.py`、`WorkspacePage.tsx` |
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
 | 文档 | `README.md`、`AGENTS.md`、`CONTENT_APP_API_CALLS.md`、本文件 |

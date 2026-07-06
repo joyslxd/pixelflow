@@ -156,3 +156,43 @@ def test_planning_router_expands_collection_payload():
     assert data["output_type"] == "video"
     assert "AuroraFit智能健康戒指" in data["plan_markdown"]
     assert "90 秒" in data["plan_markdown"]
+
+
+def test_planning_router_uses_power_mem_context_in_plan():
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.memory import SemanticMemoryItem
+
+    class FakePowerMemService:
+        async def search(self, **_kwargs):
+            return [
+                SemanticMemoryItem(
+                    memory_id="m1",
+                    content="品牌长期偏好：真实摄影，高级感，不要价格文字。",
+                    score=0.91,
+                    metadata={"category": "preference"},
+                )
+            ]
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_power_mem_service = FakePowerMemService()
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan",
+            json={
+                "intent": "image",
+                "form_values": {
+                    "image_goal": "书包宣传图",
+                    "image_type": "海报/封面图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "自动适配",
+                },
+                "selected_direction": {"title": "通学收纳主视觉", "description": "突出书包容量。"},
+                "intake_context": {"source_prompt": "做书包宣传图", "product_subject": "书包"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert "品牌长期偏好：真实摄影，高级感，不要价格文字。" in response.json()["plan_markdown"]

@@ -8,10 +8,12 @@ import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
+from pixelflow.memory import semantic_memory_text, with_semantic_memory
 from pixelflow.qc import VideoQCRequest, review_video_quality
 from pixelflow.qc import VideoQCResponse as CoreVideoQCResponse
 from pixelflow.skills import (
@@ -83,6 +85,7 @@ class PrepareScenePackagesRequest(BaseModel):
     selected_direction: dict[str, Any] = Field(default_factory=dict)
     materials: list[dict[str, Any]] = Field(default_factory=list)
     target_duration_ms: int = 30_000
+    intake_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class PrepareScenePackagesResponse(BaseModel):
@@ -335,12 +338,32 @@ class GenerateDirectVideoJobStatusResponse(BaseModel):
 
 
 @router.post("/prepare-scene-packages", response_model=PrepareScenePackagesResponse)
-async def prepare_scene_packages(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
-    return await _prepare_scene_packages_response(body)
+async def prepare_scene_packages(body: PrepareScenePackagesRequest, request: Request) -> PrepareScenePackagesResponse:
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="video_scene_package_agent",
+        query_values=[body.form_values, body.plan_markdown, body.selected_direction, body.materials, body.intake_context],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    result = await _prepare_scene_packages_response(_with_video_memory(body, memories))
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=user_id,
+        content=concise_result_summary(
+            "视频场景包 Agent 生成可编辑场景包",
+            {"stage": "prepare_scene_packages", "message": f"scenes={len(result.scene_packages)} assets={_asset_count(result.global_assets)}", "ok": result.ok},
+        ),
+        category="experience",
+        source_agent="video_scene_package_agent",
+        metadata={"source": "video_prepare_scene_packages", "scene_count": len(result.scene_packages), "asset_count": _asset_count(result.global_assets)},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/prepare-scene-packages/start", response_model=PrepareScenePackagesJobStartResponse)
-async def start_prepare_scene_packages(body: PrepareScenePackagesRequest) -> PrepareScenePackagesJobStartResponse:
+async def start_prepare_scene_packages(body: PrepareScenePackagesRequest, request: Request) -> PrepareScenePackagesJobStartResponse:
     _trim_scene_package_jobs()
     job_id = uuid.uuid4().hex
     _SCENE_PACKAGE_JOBS[job_id] = {
@@ -349,7 +372,13 @@ async def start_prepare_scene_packages(body: PrepareScenePackagesRequest) -> Pre
         "result": None,
         "error": None,
     }
-    asyncio.create_task(_run_prepare_scene_package_job(job_id, body))
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="video_scene_package_agent",
+        query_values=[body.form_values, body.plan_markdown, body.selected_direction, body.materials, body.intake_context],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    asyncio.create_task(_run_prepare_scene_package_job(job_id, _with_video_memory(body, memories), power_mem_service(request), user_id))
     return PrepareScenePackagesJobStartResponse(
         ok=True,
         job_id=job_id,
@@ -397,7 +426,22 @@ async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) ->
 
 
 @router.post("/analyze-storyboards", response_model=AnalyzeStoryboardsResponse)
-async def analyze_storyboards(body: AnalyzeStoryboardsRequest) -> AnalyzeStoryboardsResponse:
+async def analyze_storyboards(body: AnalyzeStoryboardsRequest, request: Request) -> AnalyzeStoryboardsResponse:
+    result = await _analyze_storyboards_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频分析 Agent 完成 storyboard 拆解", {"stage": "analyze_storyboards", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient}),
+        category="experience",
+        source_agent="video_analysis_agent",
+        metadata={"source": "video_analyze_storyboards", "mode": result.mode, "video_count": len(result.video_urls)},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
+
+
+async def _analyze_storyboards_response(body: AnalyzeStoryboardsRequest) -> AnalyzeStoryboardsResponse:
     video_urls = _dedupe_urls(body.video_urls)
     extraction_raw: dict[str, Any] = {}
     if not video_urls:
@@ -461,12 +505,23 @@ async def analyze_storyboards(body: AnalyzeStoryboardsRequest) -> AnalyzeStorybo
 
 
 @router.post("/generate-scene-assets", response_model=GenerateSceneAssetsResponse)
-async def generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsResponse:
-    return await _generate_scene_assets_response(body)
+async def generate_scene_assets(body: GenerateSceneAssetsRequest, request: Request) -> GenerateSceneAssetsResponse:
+    result = await _generate_scene_assets_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频素材图 Agent 生成场景参考图", {"stage": "generate_scene_assets", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient}),
+        category="experience",
+        source_agent="video_scene_asset_agent",
+        metadata={"source": "video_generate_scene_assets", "failed_count": len(result.failed_assets)},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/generate-scene-assets/start", response_model=GenerateSceneAssetsJobStartResponse)
-async def start_generate_scene_assets(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsJobStartResponse:
+async def start_generate_scene_assets(body: GenerateSceneAssetsRequest, request: Request) -> GenerateSceneAssetsJobStartResponse:
     if not body.scene_packages:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
     _trim_scene_asset_jobs()
@@ -477,7 +532,7 @@ async def start_generate_scene_assets(body: GenerateSceneAssetsRequest) -> Gener
         "result": None,
         "error": None,
     }
-    asyncio.create_task(_run_scene_asset_job(job_id, body))
+    asyncio.create_task(_run_scene_asset_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return GenerateSceneAssetsJobStartResponse(
         ok=True,
         job_id=job_id,
@@ -691,16 +746,27 @@ async def _generate_direct_video_response(body: GenerateDirectVideoRequest) -> G
 
 
 @router.post("/generate-direct", response_model=GenerateDirectVideoResponse)
-async def generate_direct_video(body: GenerateDirectVideoRequest) -> GenerateDirectVideoResponse:
-    return await _generate_direct_video_response(body)
+async def generate_direct_video(body: GenerateDirectVideoRequest, request: Request) -> GenerateDirectVideoResponse:
+    result = await _generate_direct_video_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("直接视频生成 Agent 完成同步生成", result.model_dump()),
+        category="experience",
+        source_agent="direct_video_generation_agent",
+        metadata={"source": "video_generate_direct", "mode": body.mode},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/generate-direct/start", response_model=GenerateDirectVideoJobStartResponse)
-async def start_generate_direct_video(body: GenerateDirectVideoRequest) -> GenerateDirectVideoJobStartResponse:
+async def start_generate_direct_video(body: GenerateDirectVideoRequest, request: Request) -> GenerateDirectVideoJobStartResponse:
     _trim_direct_video_jobs()
     job_id = uuid.uuid4().hex
     _DIRECT_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_direct_video_job(job_id, body))
+    asyncio.create_task(_run_direct_video_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return GenerateDirectVideoJobStartResponse(ok=True, job_id=job_id, status="running", message="直接视频生成任务已启动。")
 
 
@@ -836,18 +902,29 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
 
 
 @router.post("/generate-scenes", response_model=GenerateSceneVideosResponse)
-async def generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
-    return await _generate_scene_videos_response(body)
+async def generate_scene_videos(body: GenerateSceneVideosRequest, request: Request) -> GenerateSceneVideosResponse:
+    result = await _generate_scene_videos_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("场景视频生成 Agent 完成同步生成", {"stage": "generate_scenes", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient}),
+        category="experience",
+        source_agent="scene_video_generation_agent",
+        metadata={"source": "video_generate_scenes", "scene_count": len(body.scenes), "failed_count": len(result.failed_scenes)},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
 
 
 @router.post("/generate-scenes/start", response_model=GenerateSceneVideosJobStartResponse)
-async def start_generate_scene_videos(body: GenerateSceneVideosRequest) -> GenerateSceneVideosJobStartResponse:
+async def start_generate_scene_videos(body: GenerateSceneVideosRequest, request: Request) -> GenerateSceneVideosJobStartResponse:
     if not body.scenes:
         raise HTTPException(status_code=400, detail="scenes不能为空")
     _trim_scene_video_jobs()
     job_id = uuid.uuid4().hex
     _SCENE_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_scene_video_job(job_id, body))
+    asyncio.create_task(_run_scene_video_job(job_id, body, power_mem_service(request), await current_user_id(request)))
     return GenerateSceneVideosJobStartResponse(ok=True, job_id=job_id, status="running", message="场景视频生成任务已启动。")
 
 
@@ -875,23 +952,47 @@ async def get_generate_scene_video_job(job_id: str) -> GenerateSceneVideosJobSta
     )
 
 
-async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest) -> None:
+async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _generate_scene_videos_response(body)
         _SCENE_VIDEO_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("场景视频生成 Agent 完成异步生成", {"stage": "generate_scenes", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient}),
+            category="experience",
+            source_agent="scene_video_generation_agent",
+            metadata={"source": "video_generate_scenes_job", "job_id": job_id, "scene_count": len(body.scenes), "failed_count": len(result.failed_scenes)},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _SCENE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _record_video_job_failure(power_mem, user_id, job_id, "scene_video_generation_agent", "video_generate_scenes_job", exc)
 
 
-async def _run_direct_video_job(job_id: str, body: GenerateDirectVideoRequest) -> None:
+async def _run_direct_video_job(job_id: str, body: GenerateDirectVideoRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _generate_direct_video_response(body)
         _DIRECT_VIDEO_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("直接视频生成 Agent 完成异步生成", result.model_dump()),
+            category="experience",
+            source_agent="direct_video_generation_agent",
+            metadata={"source": "video_generate_direct_job", "job_id": job_id, "mode": body.mode},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _DIRECT_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _record_video_job_failure(power_mem, user_id, job_id, "direct_video_generation_agent", "video_generate_direct_job", exc)
 
 
-async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackagesRequest) -> None:
+async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackagesRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         _SCENE_PACKAGE_JOBS[job_id] = {
             "status": "running",
@@ -912,6 +1013,17 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
                 ),
                 "error": None,
             }
+            record_power_mem_background(
+                power_mem,
+                user_id=user_id,
+                content=concise_result_summary("视频场景包 Agent 异步生成结束", {"stage": "prepare_scene_packages", "message": video_scene_packages.message, "ok": False}),
+                category="experience",
+                source_agent="video_scene_package_agent",
+                metadata={"source": "video_prepare_scene_packages_job", "job_id": job_id, "scene_count": len(video_scene_packages.scene_packages)},
+                memory_type="experience",
+                run_id=job_id,
+                infer=False,
+            )
             return
 
         _SCENE_PACKAGE_JOBS[job_id] = {
@@ -953,6 +1065,25 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
             ),
             "error": None,
         }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "视频场景包 Agent 异步生成场景包和参考图",
+                {"stage": "completed", "message": scene_assets.message or scene_packages_for_review.message, "ok": scene_packages_for_review.ok and not quota_insufficient, "quota_insufficient": quota_insufficient},
+            ),
+            category="experience",
+            source_agent="video_scene_package_agent",
+            metadata={
+                "source": "video_prepare_scene_packages_job",
+                "job_id": job_id,
+                "scene_count": len(scene_packages_for_review.scene_packages),
+                "asset_failure_count": len(scene_assets.failed_assets),
+            },
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _SCENE_PACKAGE_JOBS[job_id] = {
             "status": "failed",
@@ -960,9 +1091,10 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
             "result": None,
             "error": str(exc),
         }
+        _record_video_job_failure(power_mem, user_id, job_id, "video_scene_package_agent", "video_prepare_scene_packages_job", exc)
 
 
-async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest) -> None:
+async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _generate_scene_assets_response(body)
         _SCENE_ASSET_JOBS[job_id] = {
@@ -971,6 +1103,17 @@ async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest) ->
             "result": result,
             "error": None,
         }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("视频素材图 Agent 完成异步参考图生成", {"stage": "generate_scene_assets", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient}),
+            category="experience",
+            source_agent="video_scene_asset_agent",
+            metadata={"source": "video_generate_scene_assets_job", "job_id": job_id, "failed_count": len(result.failed_assets)},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
         _SCENE_ASSET_JOBS[job_id] = {
             "status": "failed",
@@ -978,6 +1121,7 @@ async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest) ->
             "result": None,
             "error": str(exc),
         }
+        _record_video_job_failure(power_mem, user_id, job_id, "video_scene_asset_agent", "video_generate_scene_assets_job", exc)
 
 
 def _trim_scene_video_jobs() -> None:
@@ -1201,14 +1345,63 @@ def _direct_video_endpoint(mode: str, raw: dict[str, Any]) -> str:
     }.get(mode, "/api/video/reference-mode-video")
 
 
+def _with_video_memory(body: PrepareScenePackagesRequest, memories: list[Any]) -> PrepareScenePackagesRequest:
+    intake_context, profile = with_semantic_memory(body.intake_context, memories)
+    selected_direction = dict(body.selected_direction)
+    memory_summary = semantic_memory_text(intake_context.get("semantic_memory"))
+    if memory_summary:
+        selected_direction["semantic_memory"] = intake_context["semantic_memory"]
+        selected_direction.setdefault("product_creative_profile", profile)
+    plan_markdown = body.plan_markdown
+    if memory_summary and memory_summary not in plan_markdown:
+        plan_markdown = f"{plan_markdown}\n\n长期记忆约束：{memory_summary}".strip()
+    return PrepareScenePackagesRequest(
+        form_values=body.form_values,
+        plan_markdown=plan_markdown,
+        selected_direction=selected_direction,
+        materials=body.materials,
+        target_duration_ms=body.target_duration_ms,
+        intake_context=intake_context,
+    )
+
+
+def _asset_count(global_assets: dict[str, Any]) -> int:
+    return (
+        len(_list_of_dicts(global_assets.get("characters")))
+        + len(_list_of_dicts(global_assets.get("scenes")))
+        + len(_list_of_dicts(global_assets.get("props")))
+    )
+
+
+def _record_video_job_failure(
+    power_mem: Any,
+    user_id: str | None,
+    job_id: str,
+    source_agent: str,
+    source: str,
+    exc: Exception,
+) -> None:
+    record_power_mem_background(
+        power_mem,
+        user_id=user_id,
+        content=f"视频 Agent job 失败；source={source}；error={str(exc)[:300]}",
+        category="experience",
+        source_agent=source_agent,
+        metadata={"source": source, "job_id": job_id, "status": "failed"},
+        memory_type="experience",
+        run_id=job_id,
+        infer=False,
+    )
+
+
 @router.post("/merge", response_model=MergeSceneVideosResponse)
-async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosResponse:
+async def merge_scene_videos(body: MergeSceneVideosRequest, request: Request) -> MergeSceneVideosResponse:
     ordered_scenes = sorted(body.scene_videos, key=lambda scene: scene.scene_index if scene.scene_index is not None else 0)
     video_urls = [scene.video_url for scene in ordered_scenes if scene.video_url]
     if not video_urls:
         raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
     if len(video_urls) == 1:
-        return MergeSceneVideosResponse(
+        response = MergeSceneVideosResponse(
             ok=True,
             endpoint="/api/video/merge",
             merged_video_url=video_urls[0],
@@ -1216,6 +1409,17 @@ async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosR
             message="只有一个场景视频，已直接作为合成视频返回。",
             raw={"passthrough": True, "reason": "single_scene"},
         )
+        record_power_mem_background(
+            power_mem_service(request),
+            user_id=await current_user_id(request),
+            content=concise_result_summary("视频合并 Agent 单分镜直返", response.model_dump()),
+            category="experience",
+            source_agent="video_merge_agent",
+            metadata={"source": "video_merge", "scene_count": len(video_urls), "passthrough": True},
+            memory_type="experience",
+            infer=False,
+        )
+        return response
 
     result = await get_video_skill().merge_videos(
         video_urls=video_urls,
@@ -1228,7 +1432,7 @@ async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosR
     message = "视频合并完成。" if result.ok else (result.error or "视频合并失败。")
     if quota_insufficient:
         message = quota_resume_message(result.error)
-    return MergeSceneVideosResponse(
+    response = MergeSceneVideosResponse(
         ok=result.ok,
         endpoint=endpoint if isinstance(endpoint, str) and endpoint else "/api/video/merge",
         merged_video_url=result.url,
@@ -1239,6 +1443,18 @@ async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosR
         quota_insufficient=quota_insufficient,
         raw=result.raw,
     )
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频合并 Agent 完成合并", response.model_dump()),
+        category="experience",
+        source_agent="video_merge_agent",
+        metadata={"source": "video_merge", "scene_count": len(video_urls), "task_id": result.task_id},
+        memory_type="experience",
+        run_id=result.task_id,
+        infer=False,
+    )
+    return response
 
 
 def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message: str = "视频质检完成。") -> VideoQualityReviewResponse:
@@ -1306,7 +1522,7 @@ def _filter_issues_to_scene_ids(issues: list[dict[str, Any]], scene_ids: list[st
 
 
 @router.post("/quality-review", response_model=VideoQualityReviewResponse)
-async def quality_review(body: VideoQualityReviewRequest) -> VideoQualityReviewResponse:
+async def quality_review(body: VideoQualityReviewRequest, request: Request) -> VideoQualityReviewResponse:
     brief = {
         **body.brief,
         "plan": body.plan,
@@ -1331,11 +1547,23 @@ async def quality_review(body: VideoQualityReviewRequest) -> VideoQualityReviewR
         ),
         skill=get_video_quality_review_skill(),
     )
-    return _quality_response_from_core(result)
+    response = _quality_response_from_core(result)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频质检 Agent 完成质量评审", {"stage": "quality_review", "message": response.message, "ok": response.ok, "quota_insufficient": response.quota_insufficient}),
+        category="experience",
+        source_agent="video_quality_review_agent",
+        metadata={"source": "video_quality_review", "passed": response.passed, "score": response.score, "issue_count": len(response.issues)},
+        memory_type="experience",
+        run_id=response.task_id,
+        infer=False,
+    )
+    return response
 
 
 @router.post("/analyze-flaws", response_model=VideoFlawAnalysisResponse)
-async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalysisResponse:
+async def analyze_video_flaws(body: VideoFlawAnalysisRequest, request: Request) -> VideoFlawAnalysisResponse:
     result = await review_video_quality(
         VideoQCRequest(
             merged_video_url=body.merged_video_url,
@@ -1378,7 +1606,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
         allowed = set(scoped_scene_ids)
         scene_labels = "、".join(f"第{scene.scene_index}个分镜" for scene in body.scene_videos if scene.scene_id in allowed) or "指定分镜"
         revision_prompt = f"请只重生成{scene_labels}，恢复为原方案要求的产品一致性画面；其他分镜复用原视频，不要重新生成。"
-    return VideoFlawAnalysisResponse(
+    response = VideoFlawAnalysisResponse(
         ok=result.ok,
         endpoint=endpoint if isinstance(endpoint, str) and endpoint else "/api/creative/analyze_video_flaws",
         task_id=result.task_id,
@@ -1397,6 +1625,18 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
         quota_insufficient=quota_insufficient,
         raw=result.raw,
     )
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频穿帮分析 Agent 完成局部质检", {"stage": "analyze_flaws", "message": response.message, "ok": response.ok, "quota_insufficient": response.quota_insufficient}),
+        category="experience",
+        source_agent="video_flaw_analysis_agent",
+        metadata={"source": "video_analyze_flaws", "passed": response.passed, "score": response.score, "affected_scene_count": len(response.affected_scene_ids)},
+        memory_type="experience",
+        run_id=response.task_id,
+        infer=False,
+    )
+    return response
 
 
 def _clone_mapping(value: dict[str, Any]) -> dict[str, Any]:
