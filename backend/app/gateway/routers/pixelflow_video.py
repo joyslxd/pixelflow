@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import re
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -35,6 +34,8 @@ _MAX_SCENE_PACKAGE_JOBS = 100
 _SCENE_ASSET_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_ASSET_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
+_SCENE_VIDEO_MAX_CONCURRENCY = 100
+_SCENE_VIDEO_MAX_ATTEMPTS = 3
 _SEEDANCE_MIN_SINGLE_CALL_DURATION = 5
 _SEEDANCE_MAX_SINGLE_CALL_DURATION = 10
 
@@ -214,6 +215,7 @@ class VideoFlawAnalysisRequest(BaseModel):
     merged_video_url: str
     scene_videos: list[SceneVideo]
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    original_scene_packages: list[dict[str, Any]] = Field(default_factory=list)
     plan: dict[str, Any] = Field(default_factory=dict)
     form_values: dict[str, Any] = Field(default_factory=dict)
     intake_context: dict[str, Any] = Field(default_factory=dict)
@@ -226,6 +228,7 @@ class VideoQualityReviewRequest(BaseModel):
     merged_video_url: str = ""
     scene_videos: list[SceneVideo] = Field(default_factory=list)
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    original_scene_packages: list[dict[str, Any]] = Field(default_factory=list)
     brief: dict[str, Any] = Field(default_factory=dict)
     plan: dict[str, Any] = Field(default_factory=dict)
     form_values: dict[str, Any] = Field(default_factory=dict)
@@ -250,6 +253,8 @@ class VideoFlawAnalysisResponse(BaseModel):
     flaw_analysis_markdown: str = ""
     issues: list[dict[str, Any]] = Field(default_factory=list)
     affected_scene_ids: list[str] = Field(default_factory=list)
+    target_scene_ids: list[str] = Field(default_factory=list)
+    excluded_scene_ids: list[str] = Field(default_factory=list)
     revision_prompt: str = ""
     check_results: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
@@ -728,8 +733,9 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         raise HTTPException(status_code=400, detail="scenes不能为空")
 
     skill = get_video_skill()
+    semaphore = asyncio.Semaphore(max(1, min(_SCENE_VIDEO_MAX_CONCURRENCY, len(body.scenes))))
 
-    async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
+    async def run_scene_once(scene: SceneGenerationItem, attempt: int) -> GeneratedSceneVideo | dict[str, Any]:
         image_urls = _scene_reference_image_urls(scene)
         if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
             return {
@@ -737,6 +743,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "scene_index": scene.scene_index,
                 "error": f"最多只能选择9张参考图，当前选择了{len(image_urls)}张。",
                 "image_count": len(image_urls),
+                "attempts": attempt,
             }
         mode = _select_scene_video_mode(scene, image_urls)
         prompt = _build_scene_video_prompt(scene)
@@ -765,6 +772,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "error": result.error or "场景视频生成失败",
                 "quota_insufficient": quota_insufficient,
                 "raw": result.raw,
+                "attempts": attempt,
             }
         return GeneratedSceneVideo(
             scene_id=scene.scene_id,
@@ -777,31 +785,53 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
             raw=result.raw,
         )
 
-    results: list[GeneratedSceneVideo | dict[str, Any]] = []
-    for scene in sorted(body.scenes, key=lambda item: item.scene_index):
-        item = await run_scene(scene)
-        results.append(item)
-        if isinstance(item, dict) and is_quota_insufficient(item):
-            scene_videos = sorted((result for result in results if isinstance(result, GeneratedSceneVideo)), key=lambda result: result.scene_index)
-            failed_scenes = [result for result in results if isinstance(result, dict)]
-            return GenerateSceneVideosResponse(
-                ok=False,
-                scene_videos=scene_videos,
-                failed_scenes=failed_scenes,
-                quota_insufficient=True,
-                message=quota_resume_message(str(item.get("error") or "")),
-            )
+    async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
+        async with semaphore:
+            last_failure: dict[str, Any] | None = None
+            for attempt in range(1, _SCENE_VIDEO_MAX_ATTEMPTS + 1):
+                try:
+                    item = await run_scene_once(scene, attempt)
+                except Exception as exc:  # noqa: BLE001 - per-scene vendor failures must not abort sibling scenes.
+                    last_failure = {
+                        "scene_id": scene.scene_id,
+                        "scene_index": scene.scene_index,
+                        "error": str(exc) or exc.__class__.__name__,
+                        "attempts": attempt,
+                    }
+                    continue
+                if isinstance(item, GeneratedSceneVideo):
+                    return item
+                last_failure = item
+                if is_quota_insufficient(item):
+                    return item
+            return last_failure or {
+                "scene_id": scene.scene_id,
+                "scene_index": scene.scene_index,
+                "error": "场景视频生成失败",
+                "attempts": _SCENE_VIDEO_MAX_ATTEMPTS,
+            }
+
+    results = await asyncio.gather(*(run_scene(scene) for scene in sorted(body.scenes, key=lambda item: item.scene_index)))
     scene_videos = sorted((item for item in results if isinstance(item, GeneratedSceneVideo)), key=lambda item: item.scene_index)
     failed_scenes = [item for item in results if isinstance(item, dict)]
     quota_insufficient = any(is_quota_insufficient(item) for item in failed_scenes)
     endpoints = {scene.endpoint for scene in scene_videos}
+    if failed_scenes and quota_insufficient:
+        non_quota_failed = [item for item in failed_scenes if not is_quota_insufficient(item)]
+        message = quota_resume_message("场景视频生成额度不足")
+        if non_quota_failed:
+            message = f"{message} 另有 {len(non_quota_failed)} 个分镜生成异常，请展开 failed_scenes 查看原因。"
+    elif failed_scenes:
+        message = "部分场景视频生成失败，请查看 failed_scenes。"
+    else:
+        message = "场景视频生成完成。"
     return GenerateSceneVideosResponse(
         ok=not failed_scenes,
         endpoint=next(iter(endpoints)) if len(endpoints) == 1 else "/api/video/mixed",
         scene_videos=scene_videos,
         failed_scenes=failed_scenes,
         quota_insufficient=quota_insufficient,
-        message="场景视频生成完成。" if not failed_scenes else (quota_resume_message() if quota_insufficient else "部分场景视频生成失败，请查看 failed_scenes。"),
+        message=message,
     )
 
 
@@ -1175,8 +1205,17 @@ def _direct_video_endpoint(mode: str, raw: dict[str, Any]) -> str:
 async def merge_scene_videos(body: MergeSceneVideosRequest) -> MergeSceneVideosResponse:
     ordered_scenes = sorted(body.scene_videos, key=lambda scene: scene.scene_index if scene.scene_index is not None else 0)
     video_urls = [scene.video_url for scene in ordered_scenes if scene.video_url]
-    if len(video_urls) < 2:
-        raise HTTPException(status_code=400, detail="至少需要2个场景视频才能合并")
+    if not video_urls:
+        raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
+    if len(video_urls) == 1:
+        return MergeSceneVideosResponse(
+            ok=True,
+            endpoint="/api/video/merge",
+            merged_video_url=video_urls[0],
+            scene_videos=ordered_scenes,
+            message="只有一个场景视频，已直接作为合成视频返回。",
+            raw={"passthrough": True, "reason": "single_scene"},
+        )
 
     result = await get_video_skill().merge_videos(
         video_urls=video_urls,
@@ -1217,6 +1256,8 @@ def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message:
         flaw_analysis_markdown=result.flaw_analysis_markdown,
         issues=[issue.model_dump() for issue in result.issues],
         affected_scene_ids=result.affected_scene_ids,
+        target_scene_ids=result.target_scene_ids,
+        excluded_scene_ids=result.excluded_scene_ids,
         revision_prompt=result.revision_prompt,
         check_results=[item.model_dump() for item in result.check_results],
         error=result.error,
@@ -1257,31 +1298,6 @@ def _legacy_flaw_affected_scene_ids(issues: list[dict[str, Any]], fallback: list
     return scene_ids or fallback
 
 
-def _scene_ids_by_explicit_feedback_scope(feedback: str | None, scene_packages: list[dict[str, Any]], scene_videos: list[SceneVideo]) -> list[str]:
-    text = (feedback or "").strip()
-    if not text or not any(keyword in text for keyword in ("只修复", "只修改", "仅修复", "仅修改", "不要重新生成", "没有问题")):
-        return []
-    scene_by_index: dict[int, str] = {}
-    for scene in scene_packages:
-        try:
-            scene_index = int(scene.get("scene_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        if scene_index and scene.get("scene_id"):
-            scene_by_index[scene_index] = str(scene["scene_id"])
-    for scene in scene_videos:
-        scene_by_index.setdefault(scene.scene_index, scene.scene_id)
-
-    scoped_ids: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(r"(?:只|仅)\s*(?:修复|修改)\s*第\s*(\d+)\s*(?:个)?\s*分镜", text):
-        scene_id = scene_by_index.get(int(match.group(1)))
-        if scene_id and scene_id not in seen:
-            seen.add(scene_id)
-            scoped_ids.append(scene_id)
-    return scoped_ids
-
-
 def _filter_issues_to_scene_ids(issues: list[dict[str, Any]], scene_ids: list[str]) -> list[dict[str, Any]]:
     if not scene_ids:
         return issues
@@ -1303,6 +1319,7 @@ async def quality_review(body: VideoQualityReviewRequest) -> VideoQualityReviewR
             merged_video_url=body.merged_video_url,
             scene_videos=[scene.model_dump() for scene in body.scene_videos],
             scene_packages=body.scene_packages,
+            original_scene_packages=body.original_scene_packages,
             brief=brief,
             materials=body.materials,
             platform=body.platform,
@@ -1324,6 +1341,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
             merged_video_url=body.merged_video_url,
             scene_videos=[scene.model_dump() for scene in body.scene_videos],
             scene_packages=body.scene_packages,
+            original_scene_packages=body.original_scene_packages,
             brief={
                 "plan": body.plan,
                 "form_values": body.form_values,
@@ -1342,7 +1360,7 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
     if quota_insufficient:
         message = quota_resume_message(result.error)
     legacy_issues = _legacy_flaw_issues(result)
-    scoped_scene_ids = _scene_ids_by_explicit_feedback_scope(body.user_feedback, body.scene_packages, body.scene_videos)
+    scoped_scene_ids = result.target_scene_ids
     if scoped_scene_ids:
         legacy_issues = _filter_issues_to_scene_ids(legacy_issues, scoped_scene_ids)
         if not legacy_issues:
@@ -1370,6 +1388,8 @@ async def analyze_video_flaws(body: VideoFlawAnalysisRequest) -> VideoFlawAnalys
         flaw_analysis_markdown=result.flaw_analysis_markdown,
         issues=legacy_issues,
         affected_scene_ids=affected_scene_ids,
+        target_scene_ids=scoped_scene_ids,
+        excluded_scene_ids=result.excluded_scene_ids,
         revision_prompt=revision_prompt,
         check_results=[item.model_dump() for item in result.check_results],
         error=result.error,

@@ -50,6 +50,83 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert {mention["type"] for mention in first_scene["shot_description"]["mentions"]} == {"character", "scene", "prop"}
 
 
+def test_prepare_video_scene_packages_uses_second_ranges_in_shot_description():
+    result = prepare_video_scene_packages(
+        form_values={
+            "product_info": "男士通勤背包",
+            "product_category": "服饰鞋包",
+            "target_audience": "25-35 岁通勤男性",
+            "conversion_goal": "直接购买",
+        },
+        plan_markdown="## 一、选题方向\n展示背包通勤、收纳和防泼水卖点。",
+        selected_direction={"title": "通勤效率感", "description": "用早高峰场景展示背包卖点"},
+        target_duration_ms=10_000,
+    )
+
+    shot_text = result["scene_packages"][0]["shot_description"]["text"]
+    assert "ms" not in shot_text
+    assert ".000" not in shot_text
+    assert "0-10秒" in shot_text
+
+
+def test_prepare_video_scene_packages_with_llm_normalizes_millisecond_ranges():
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeModel:
+        def invoke(self, _prompt):
+            global_assets = {
+                "characters": [
+                    {"asset_id": "character-presenter", "name": "主讲人", "description": "稳定讲解者", "three_view_prompt": "主讲人正面侧面背面人物三视图"},
+                    {"asset_id": "character-user", "name": "通勤用户", "description": "目标用户", "three_view_prompt": "通勤用户正面侧面背面人物三视图"},
+                ],
+                "scenes": [{"asset_id": "scene-office", "name": "办公室", "description": "现代办公室", "image_prompt": "办公室场景图"}],
+                "props": [{"asset_id": "prop-product", "name": "男士通勤背包", "description": "背包", "image_prompt": "背包道具图"}],
+                "visual_style": {"asset_id": "style-main", "name": "真实摄影", "description": "真实广告风格"},
+            }
+            scenes = [
+                {
+                    "title": f"LLM 场景 {index}",
+                    "storyline": f"LLM 故事线 {index}",
+                    "prompt": f"LLM 分镜提示词 {index}",
+                    "narration": f"LLM 旁白 {index}",
+                    "shot_description": {
+                        "text": (
+                            "0-1000ms: 特写镜头, "
+                            "2000-3000ms: 切至 @scene-office, "
+                            "00:03.000-00:04.000: 固定画面, 角色:@character-presenter 展示 @prop-product。"
+                        ),
+                    },
+                    "reference_asset_ids": ["character-presenter", "scene-office", "prop-product"],
+                }
+                for index in range(1, 4)
+            ]
+            return FakeMessage(__import__("json").dumps({"global_assets": global_assets, "scene_packages": scenes}, ensure_ascii=False))
+
+    result = __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={
+                "product_info": "男士通勤背包",
+                "product_category": "服饰鞋包",
+                "target_audience": "25-35 岁通勤男性",
+                "conversion_goal": "直接购买",
+            },
+            plan_markdown="## 一、选题方向\n展示背包通勤、收纳和防泼水卖点。",
+            selected_direction={"title": "通勤效率感", "description": "用早高峰场景展示背包卖点"},
+            target_duration_ms=30_000,
+            model_factory=lambda *_args, **_kwargs: FakeModel(),
+        )
+    )
+
+    shot_text = result["scene_packages"][0]["shot_description"]["text"]
+    assert "ms" not in shot_text
+    assert ".000" not in shot_text
+    assert "0-1秒: 特写镜头" in shot_text
+    assert "2-3秒: 切至 @scene-office" in shot_text
+    assert "3-4秒: 固定画面" in shot_text
+
+
 def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video():
     class FakeMessage:
         def __init__(self, content: str) -> None:

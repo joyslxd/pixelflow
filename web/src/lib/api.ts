@@ -439,6 +439,8 @@ export interface VideoFlawAnalysisResponse {
   flaw_analysis_markdown: string;
   issues: Array<Record<string, unknown>>;
   affected_scene_ids: string[];
+  target_scene_ids?: string[];
+  excluded_scene_ids?: string[];
   revision_prompt: string;
   error: string | null;
   message: string;
@@ -1145,6 +1147,7 @@ export const api = {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
+    original_scene_packages?: Array<Record<string, unknown>>;
     plan?: Record<string, unknown>;
     form_values?: Record<string, unknown>;
     intake_context?: Record<string, unknown>;

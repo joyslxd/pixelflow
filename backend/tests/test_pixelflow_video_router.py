@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -446,22 +447,29 @@ def test_video_router_rejects_more_than_nine_mention_reference_images(monkeypatc
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
-def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch):
+def test_video_router_generates_scene_videos_in_parallel_and_aggregates_quota_once(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
 
     calls: list[str] = []
+    active = 0
+    max_active = 0
 
     class FakeVideoSkill:
         async def reference_mode_video(self, **kwargs):
+            nonlocal active, max_active
             calls.append(kwargs["prompt"])
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
             if kwargs["prompt"].startswith("第一幕"):
                 return GenerationResult(
                     ok=False,
                     error="用户没有有效的额度",
                     raw={"quota_insufficient": True, "message": "用户没有有效的额度"},
                 )
-            return GenerationResult(ok=True, task_id="should-not-run", url="https://x/should-not-run.mp4")
+            return GenerationResult(ok=True, task_id="scene-2-task", url="https://x/scene-2.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
 
     monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
 
@@ -495,8 +503,115 @@ def test_video_router_stops_scene_video_generation_on_quota_failure(monkeypatch)
     data = response.json()
     assert data["ok"] is False
     assert data["quota_insufficient"] is True
-    assert data["scene_videos"] == []
-    assert len(calls) == 1
+    assert data["message"].count("额度") <= 1
+    assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-2"]
+    assert [scene["scene_id"] for scene in data["failed_scenes"]] == ["scene-1"]
+    assert sorted(calls) == ["第一幕展示白色耳机", "第二幕展示降噪场景"]
+    assert max_active > 1
+
+
+def test_video_router_caps_single_scene_video_job_concurrency_at_100_and_queues_extra_scenes(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    active = 0
+    max_active = 0
+    calls: list[str] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(kwargs["prompt"])
+            await asyncio.sleep(0.03)
+            active -= 1
+            return GenerationResult(
+                ok=True,
+                task_id=f"{kwargs['prompt']}-task",
+                url=f"https://x/{kwargs['prompt']}.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    scenes = [
+        {
+            "scene_id": f"scene-{index}",
+            "scene_index": index,
+            "duration_ms": 5000,
+            "prompt": f"scene-{index}",
+            "generation_mode": "text_to_video",
+        }
+        for index in range(1, 106)
+    ]
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/generate-scenes", json={"scenes": scenes})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert len(data["scene_videos"]) == 105
+    assert len(calls) == 105
+    assert max_active == 100
+
+
+def test_video_router_retries_scene_video_exceptions_three_times_without_blocking_other_scenes(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    attempts: dict[str, int] = {}
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            prompt = kwargs["prompt"]
+            attempts[prompt] = attempts.get(prompt, 0) + 1
+            await asyncio.sleep(0.01)
+            if prompt.startswith("第一幕"):
+                raise RuntimeError("供应商连接超时")
+            return GenerationResult(ok=True, task_id="scene-2-task", url="https://x/scene-2.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕展示白色耳机",
+                        "image_urls": ["https://x/role.png"],
+                    },
+                    {
+                        "scene_id": "scene-2",
+                        "scene_index": 2,
+                        "duration_ms": 8000,
+                        "prompt": "第二幕展示降噪场景",
+                        "image_urls": ["https://x/scene.png"],
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert [scene["scene_id"] for scene in data["scene_videos"]] == ["scene-2"]
+    assert data["failed_scenes"][0]["scene_id"] == "scene-1"
+    assert data["failed_scenes"][0]["attempts"] == 3
+    assert "供应商连接超时" in data["failed_scenes"][0]["error"]
+    assert attempts["第一幕展示白色耳机"] == 3
+    assert attempts["第二幕展示降噪场景"] == 1
 
 
 def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch):
@@ -751,6 +866,37 @@ def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):
     assert data["merged_video_url"] == "https://x/merged.mp4"
 
 
+def test_video_router_returns_single_scene_video_as_merged_video_without_calling_merge(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    class FakeVideoSkill:
+        async def merge_videos(self, **_kwargs):
+            raise AssertionError("single-scene video should not call content-app merge")
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/merge",
+            json={
+                "scene_videos": [
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                ],
+                "duration": 8,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["merged_video_url"] == "https://x/scene-1.mp4"
+    assert data["scene_videos"] == [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}]
+    assert data["raw"]["passthrough"] is True
+
+
 def test_video_router_generates_direct_video_modes(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
@@ -921,7 +1067,17 @@ def test_video_router_analyzes_flaws(monkeypatch):
 
 def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkeypatch):
     from app.gateway.routers import pixelflow_video
+    from pixelflow.qc.revision_scope import RevisionScopeResult
     from pixelflow.skills import VideoQualityReviewResult
+
+    async def fake_resolve_revision_scope(**_kwargs):
+        return RevisionScopeResult(
+            target_scene_ids=["scene-2"],
+            excluded_scene_ids=["scene-1", "scene-3"],
+            action="fix_specific",
+            confidence="high",
+            llm_used=True,
+        )
 
     class FakeVideoQualitySkill:
         async def review_video_quality(self, **kwargs):
@@ -947,6 +1103,7 @@ def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkey
                 },
             )
 
+    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
     monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
 
     app = make_authed_test_app(user_factory=_stable_user)
@@ -977,6 +1134,83 @@ def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkey
     assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2"]
     assert "第2个分镜" in data["revision_prompt"]
     assert "全部" not in data["revision_prompt"]
+
+
+def test_video_router_analyze_flaws_returns_llm_scope_without_changing_legacy_issue_schema(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.qc.revision_scope import RevisionScopeResult
+    from pixelflow.skills import VideoQualityReviewResult
+
+    async def fake_resolve_revision_scope(**kwargs):
+        assert kwargs["feedback"] == "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。"
+        return RevisionScopeResult(
+            target_scene_ids=["scene-2", "scene-3"],
+            excluded_scene_ids=["scene-1"],
+            action="fix_specific",
+            confidence="high",
+            llm_used=True,
+        )
+
+    class FakeVideoQualitySkill:
+        async def review_video_quality(self, **kwargs):
+            return VideoQualityReviewResult(
+                ok=True,
+                task_id="flaw-task-scope",
+                summary_markdown="多个分镜可能需要处理",
+                flaw_analysis_markdown="多个分镜可能需要处理",
+                issues=[
+                    {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
+                ],
+                affected_scene_ids=["scene-1", "scene-2", "scene-3"],
+                revision_prompt="修复全部分镜",
+                raw={
+                    "endpoint": "/api/creative/analyze_video_flaws",
+                    "issues": [
+                        {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
+                        {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
+                        {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
+                    ],
+                },
+            )
+
+    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
+    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/analyze-flaws",
+            json={
+                "merged_video_url": "https://x/merged.mp4",
+                "scene_videos": [
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
+                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
+                ],
+                "scene_packages": [
+                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "蓝牙耳机开场"},
+                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "蓝牙耳机降噪证明"},
+                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "蓝牙耳机续航收口"},
+                ],
+                "user_feedback": "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["target_scene_ids"] == ["scene-2", "scene-3"]
+    assert data["excluded_scene_ids"] == ["scene-1"]
+    assert data["affected_scene_ids"] == ["scene-2", "scene-3"]
+    assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2", "scene-3"]
+    assert data["issues"][0] == {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"}
+    assert "code" not in data["issues"][0]
+    assert "severity" not in data["issues"][0]
+    assert "第2个分镜" in data["revision_prompt"]
+    assert "第3个分镜" in data["revision_prompt"]
 
 
 def test_video_router_reviews_video_quality(monkeypatch):
