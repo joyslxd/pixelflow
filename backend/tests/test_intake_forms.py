@@ -11,7 +11,9 @@ def test_video_form_schema_matches_required_screenshot_fields():
     assert schema.output_type == "video"
     assert [field.id for field in schema.fields] == ["product_info", "product_category", "target_audience", "conversion_goal"]
     assert schema.fields[0].placeholder == "苹果什么什么PRO"
-    assert schema.fields[1].options == ["美妆护肤", "食品饮料", "数码3C", "服饰鞋包", "家居日用", "保健养生", "其他品类"]
+    assert schema.fields[1].type == "text"
+    assert schema.fields[1].placeholder == "例如：服饰鞋包、运动鞋、数码3C"
+    assert schema.fields[1].options == []
     assert schema.fields[3].options == ["直接购买", "品牌曝光", "种草引流", "引流直播间"]
     assert all(field.required for field in schema.fields)
     assert all(field.source == "system" for field in schema.fields)

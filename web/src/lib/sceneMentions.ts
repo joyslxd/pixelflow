@@ -48,7 +48,7 @@ export function normalizeShotMentions(
       asset_id: assetId || key,
       type: mentionType(record, candidate),
       name: stringValue(record.name) || stringValue(record.label) || candidate?.name || assetId || key,
-      image_url: imageUrl || candidate?.image_url,
+      image_url: candidate?.image_url || imageUrl,
     });
     if (mentions.length >= MAX_REFERENCE_IMAGE_COUNT) break;
   }
@@ -105,6 +105,10 @@ function mentionType(record: Record<string, unknown>, candidate: SceneMentionCan
 }
 
 function imageUrlFromRecord(record: Record<string, unknown>): string {
+  for (const key of ["images", "image_urls", "imageUrls", "three_view_images", "threeViewImages"]) {
+    const values = stringArray(record[key]);
+    if (values[0]) return values[0];
+  }
   const direct =
     stringValue(record.image_url) ||
     stringValue(record.imageUrl) ||
@@ -112,12 +116,7 @@ function imageUrlFromRecord(record: Record<string, unknown>): string {
     stringValue(record.download_url) ||
     stringValue(record.downloadUrl) ||
     stringValue(record.src);
-  if (direct) return direct;
-  for (const key of ["images", "image_urls", "imageUrls", "three_view_images", "threeViewImages"]) {
-    const values = stringArray(record[key]);
-    if (values[0]) return values[0];
-  }
-  return "";
+  return direct;
 }
 
 function stringArray(value: unknown): string[] {

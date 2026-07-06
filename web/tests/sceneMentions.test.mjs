@@ -29,6 +29,44 @@ test("buildMentionCandidates returns only character scene and prop image candida
   );
 });
 
+test("buildMentionCandidates uses generated asset images before stale direct urls", () => {
+  const candidates = buildMentionCandidates({
+    characters: [
+      {
+        asset_id: "character-host",
+        name: "Host",
+        image_url: "https://x/stale-role.png",
+        three_view_images: ["https://x/generated-role.png"],
+      },
+    ],
+    scenes: [
+      {
+        asset_id: "scene-room",
+        name: "Room",
+        url: "https://x/stale-room.png",
+        images: ["https://x/generated-room.png"],
+      },
+    ],
+    props: [
+      {
+        asset_id: "prop-product",
+        name: "Product",
+        image_url: "https://x/stale-product.png",
+        images: ["https://x/generated-product.png"],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    candidates.map((item) => [item.asset_id, item.image_url]),
+    [
+      ["character-host", "https://x/generated-role.png"],
+      ["scene-room", "https://x/generated-room.png"],
+      ["prop-product", "https://x/generated-product.png"],
+    ],
+  );
+});
+
 test("normalizeShotMentions migrates legacy reference ids and caps at nine image mentions", () => {
   const manyAssets = {
     characters: Array.from({ length: 11 }, (_item, index) => ({
@@ -43,6 +81,39 @@ test("normalizeShotMentions migrates legacy reference ids and caps at nine image
   assert.equal(mentions.length, 9);
   assert.equal(mentions[0].asset_id, "character-0");
   assert.equal(mentions[0].image_url, "https://x/role-0.png");
+});
+
+test("normalizeShotMentions refreshes existing mentions from matching generated assets", () => {
+  const mentions = normalizeShotMentions(
+    {
+      mentions: [
+        {
+          asset_id: "prop-product",
+          name: "Product",
+          image_url: "https://x/stale-product.png",
+        },
+      ],
+    },
+    [],
+    {
+      props: [
+        {
+          asset_id: "prop-product",
+          name: "Product",
+          images: ["https://x/generated-product.png"],
+        },
+      ],
+    },
+  );
+
+  assert.deepEqual(mentions, [
+    {
+      asset_id: "prop-product",
+      type: "prop",
+      name: "Product",
+      image_url: "https://x/generated-product.png",
+    },
+  ]);
 });
 
 test("upsertShotMention updates shot description text mentions without duplicating images", () => {

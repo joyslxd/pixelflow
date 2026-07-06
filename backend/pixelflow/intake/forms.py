@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 
 CreationIntent = Literal["video", "image", "ppt"]
 
-VIDEO_CATEGORIES = ["美妆护肤", "食品饮料", "数码3C", "服饰鞋包", "家居日用", "保健养生", "其他品类"]
 VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"]
 IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"]
 IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"]
@@ -122,7 +121,7 @@ def get_form_schema(intent: CreationIntent) -> FormSchema:
             output_type="video",
             fields=[
                 FormField(id="product_info", label="请提供你要投放的产品信息", type="text", placeholder="苹果什么什么PRO"),
-                FormField(id="product_category", label="产品品类", type="radio_group", options=VIDEO_CATEGORIES),
+                FormField(id="product_category", label="产品品类", type="text", placeholder="例如：服饰鞋包、运动鞋、数码3C"),
                 FormField(id="target_audience", label="目标人群", type="text", placeholder="25-35"),
                 FormField(id="conversion_goal", label="转化目标", type="radio_group", options=VIDEO_GOALS),
             ],

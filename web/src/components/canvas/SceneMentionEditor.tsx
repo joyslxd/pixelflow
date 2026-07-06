@@ -27,15 +27,19 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
   const lastDomKeyRef = useRef("");
   const [activeQuery, setActiveQuery] = useState<ActiveMentionQuery | null>(null);
   const mentions = useMemo(() => normalizeShotMentions({ ...shotDescription, text }, [], undefined), [shotDescription, text]);
-  const canAddMore = mentions.length < MAX_REFERENCE_IMAGE_COUNT;
+  const mentionedAssetIds = useMemo(() => new Set(mentions.map((mention) => mention.asset_id)), [mentions]);
+  const canAddNewReference = mentions.length < MAX_REFERENCE_IMAGE_COUNT;
   const filteredCandidates = useMemo(() => {
     const keyword = (activeQuery?.text || "").replace(/^@/, "").trim().toLowerCase();
-    return candidates.filter((candidate) => {
-      if (mentions.some((mention) => mention.asset_id === candidate.asset_id)) return false;
-      if (!keyword) return true;
-      return [candidate.name, candidate.asset_id, candidate.type].some((value) => value.toLowerCase().includes(keyword));
-    });
-  }, [activeQuery?.text, candidates, mentions]);
+    return candidates
+      .filter((candidate) => {
+        if (!keyword) return true;
+        return [candidate.name, candidate.asset_id, candidate.type].some((value) => value.toLowerCase().includes(keyword));
+      })
+      .sort((a, b) => Number(mentionedAssetIds.has(b.asset_id)) - Number(mentionedAssetIds.has(a.asset_id)));
+  }, [activeQuery?.text, candidates, mentionedAssetIds]);
+  const canSelectCandidate = (candidate: SceneMentionCandidate) => canAddNewReference || mentionedAssetIds.has(candidate.asset_id);
+  const firstSelectableCandidate = filteredCandidates.find(canSelectCandidate);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -73,9 +77,9 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
       setActiveQuery(null);
       return;
     }
-    if ((event.key === "Enter" || event.key === "Tab") && filteredCandidates[0]) {
+    if ((event.key === "Enter" || event.key === "Tab") && firstSelectableCandidate) {
       event.preventDefault();
-      selectCandidate(filteredCandidates[0]);
+      selectCandidate(firstSelectableCandidate);
     }
   };
 
@@ -86,7 +90,7 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
   };
 
   const selectCandidate = (candidate: SceneMentionCandidate) => {
-    if (!canAddMore) return;
+    if (!canSelectCandidate(candidate)) return;
     const editor = editorRef.current;
     if (!editor) return;
     editor.focus();
@@ -135,38 +139,41 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
         >
           <div className="border-b border-line px-3 py-2 text-[12px] text-ink-soft">
             选择素材进行关联
-            {!canAddMore ? <span className="ml-2 text-amber">最多只能选择 9 张图片</span> : null}
+            {!canAddNewReference ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
           </div>
           <div className="max-h-56 overflow-y-auto p-1.5">
-            {filteredCandidates.slice(0, 8).map((candidate) => (
-              <button
-                key={candidate.asset_id}
-                type="button"
-                disabled={!canAddMore}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => selectCandidate(candidate)}
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {candidate.image_url ? (
-                  <img src={candidate.image_url} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
-                ) : (
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas text-ink-soft">
-                    <ImageIcon size={15} />
+            {filteredCandidates.slice(0, 8).map((candidate) => {
+              const selectable = canSelectCandidate(candidate);
+              return (
+                <button
+                  key={candidate.asset_id}
+                  type="button"
+                  disabled={!selectable}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectCandidate(candidate)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {candidate.image_url ? (
+                    <img src={candidate.image_url} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
+                  ) : (
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas text-ink-soft">
+                      <ImageIcon size={15} />
+                    </span>
+                  )}
+                  <span className="min-w-0">
+                    <span className="block truncate text-[13px] font-medium text-ink">@{candidate.name}</span>
+                    <span className="block truncate text-[11px] text-ink-soft">{candidate.asset_id}</span>
                   </span>
-                )}
-                <span className="min-w-0">
-                  <span className="block truncate text-[13px] font-medium text-ink">@{candidate.name}</span>
-                  <span className="block truncate text-[11px] text-ink-soft">{candidate.asset_id}</span>
-                </span>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         </div>
       ) : null}
 
       <div className="text-[12px] text-ink-soft">
         已关联 {mentions.length}/{MAX_REFERENCE_IMAGE_COUNT}
-        {mentions.length >= MAX_REFERENCE_IMAGE_COUNT ? <span className="ml-2 text-amber">最多只能选择 9 张图片</span> : null}
+        {mentions.length >= MAX_REFERENCE_IMAGE_COUNT ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
       </div>
     </div>
   );

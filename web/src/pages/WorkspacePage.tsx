@@ -469,6 +469,15 @@ function recordTextValue(record: Record<string, unknown> | undefined, key: strin
   return typeof value === "string" ? value.trim() : "";
 }
 
+function initialValuesFromIntake(intake: IntakeIntentResponse): Record<string, unknown> {
+  const values = { ...(intake.values || {}) };
+  if (intake.intent === "video") {
+    const industryType = recordTextValue(intake.intake_context, "industry_type");
+    if (industryType) values.product_category = industryType;
+  }
+  return values;
+}
+
 function looksLikeImageEditPrompt(prompt: string): boolean {
   const text = prompt.trim();
   if (!text) return false;
@@ -3522,7 +3531,7 @@ export function WorkspacePage() {
         if (isVisibleConversation(activeConversation)) {
           setPendingCore(text);
           setPendingIntent("ppt");
-          setPendingFormValues(intake.values || {});
+          setPendingFormValues(initialValuesFromIntake(intake));
           setPendingMaterials(materials);
           pendingDialogContextRef.current = {
             conversationId: activeConversation,
@@ -3585,7 +3594,7 @@ export function WorkspacePage() {
         if (isVisibleConversation(activeConversation)) {
           setPendingCore(text);
           setPendingIntent(intake.intent);
-          setPendingFormValues(intake.values || {});
+          setPendingFormValues(initialValuesFromIntake(intake));
           setPendingMaterials(materials);
           pendingDialogContextRef.current = {
             conversationId: activeConversation,

@@ -161,6 +161,15 @@ test("image requirement form only exposes approved image size choices", () => {
   assert.equal(match[1].includes("4:5"), false);
 });
 
+test("video product category is editable text initialized from intake industry type", () => {
+  assert.equal(genParamsDialogSource.includes("const VIDEO_CATEGORIES"), false, "video product category must not use fixed radio choices");
+  assert.match(genParamsDialogSource, /product_category:\s*textValue\(values,\s*"product_category"\)/, "video product category must accept free text");
+  assert.match(genParamsDialogSource, /label="产品品类"[\s\S]*<input[\s\S]*value=\{video\.product_category\}/, "video product category must render as an input");
+  assert.match(workspaceSource, /function initialValuesFromIntake\(intake: IntakeIntentResponse\)/, "Workspace must adapt intake values before opening the dialog");
+  assert.match(workspaceSource, /values\.product_category = industryType/, "video product category must default to intake_context.industry_type");
+  assert.match(workspaceSource, /setPendingFormValues\(initialValuesFromIntake\(intake\)\)/, "dialog must receive adapted intake initial values");
+});
+
 test("ppt intent opens a ppt requirement form instead of image video planning", () => {
   assert.match(genParamsDialogSource, /export type CreationIntent = "video" \| "image" \| "ppt"/, "CreationIntent must include ppt");
   assert.match(genParamsDialogSource, /PPT生成需求收集/, "GenParamsDialog must render a PPT form");

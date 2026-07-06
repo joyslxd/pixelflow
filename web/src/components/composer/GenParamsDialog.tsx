@@ -44,7 +44,6 @@ interface GenParamsDialogProps {
   onCancel: () => void;
 }
 
-const VIDEO_CATEGORIES = ["美妆护肤", "食品饮料", "数码3C", "服饰鞋包", "家居日用", "保健养生", "其他品类"];
 const VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"];
 
 const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"];
@@ -77,7 +76,7 @@ function videoInitialValues(initialCoreMessage: string | undefined, values: Reco
   return {
     intent: "video",
     product_info: textValue(values, "product_info", initialCoreMessage ?? ""),
-    product_category: optionValue(values, "product_category", VIDEO_CATEGORIES, "数码3C"),
+    product_category: textValue(values, "product_category"),
     target_audience: textValue(values, "target_audience"),
     conversion_goal: optionValue(values, "conversion_goal", VIDEO_GOALS, "引流直播间"),
   };
@@ -213,7 +212,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
   const isVideo = intent === "video";
   const isPpt = intent === "ppt";
   const canConfirm = isVideo
-    ? Boolean(video.product_info.trim() && video.product_category && video.target_audience.trim() && video.conversion_goal)
+    ? Boolean(video.product_info.trim() && video.product_category.trim() && video.target_audience.trim() && video.conversion_goal)
     : isPpt
       ? Boolean(ppt.ppt_topic.trim() && ppt.ppt_style && ppt.attachments.length > 0 && !uploading)
       : Boolean(image.image_goal.trim() && image.image_type && image.image_usage && image.image_style && image.image_size);
@@ -303,7 +302,12 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                   />
                 </FieldBlock>
                 <FieldBlock index={2} label="产品品类">
-                  <PillGroup options={VIDEO_CATEGORIES} value={video.product_category} onChange={(v) => setVideo((p) => ({ ...p, product_category: v }))} />
+                  <input
+                    className={inputCls}
+                    value={video.product_category}
+                    onChange={(e) => setVideo((p) => ({ ...p, product_category: e.target.value }))}
+                    placeholder="例如：服饰鞋包、运动鞋、数码3C"
+                  />
                 </FieldBlock>
                 <FieldBlock index={3} label="目标人群">
                   <input
