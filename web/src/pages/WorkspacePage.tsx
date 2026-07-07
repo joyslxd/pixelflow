@@ -43,6 +43,7 @@ import {
   shouldApplyVisibleConversationSideEffect,
 } from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
+import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
   applyGlobalSceneAssetImageEdit,
   deleteGlobalSceneAssetReference,
@@ -199,13 +200,18 @@ interface WorkspaceSnapshot {
   imageEditConfirmedSelections?: Record<string, ImageEditModelSelection>;
   pendingImageJob?: PendingImageJob | null;
   pending_image_job?: PendingImageJob | null;
+  pendingImageRevision?: PendingConversationArtifact | null;
+  pending_image_revision?: PendingConversationArtifact | null;
   pendingScenePackageJob?: PendingScenePackageJob | null;
   pending_scene_package_job?: PendingScenePackageJob | null;
   pendingVideoJob?: PendingVideoJob | null;
   pending_video_job?: PendingVideoJob | null;
+  pendingVideoRevision?: PendingConversationArtifact | null;
+  pending_video_revision?: PendingConversationArtifact | null;
   pendingPptJob?: PendingPptJob | null;
   pending_ppt_job?: PendingPptJob | null;
   ppt_done?: boolean;
+  image_accepted?: boolean;
   video_accepted?: boolean;
   canvas: CanvasState;
   canvasOpen: boolean;
@@ -1094,6 +1100,16 @@ function latestVideoResultArtifactForConversation(messages: ChatMessage[], conve
   return undefined;
 }
 
+function latestImageResultArtifactForConversation(messages: ChatMessage[], conversationId = ""): ChatArtifact | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (conversationId && messageConversationId(message, conversationId) !== conversationId) continue;
+    const artifact = message.artifact;
+    if (artifact?.type === "image_result" && artifact.imageResult) return artifact;
+  }
+  return undefined;
+}
+
 function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
@@ -1281,6 +1297,25 @@ function markLatestPptFileDoneFromContext(messages: ChatMessage[], context: Part
       artifact: {
         ...message.artifact,
         pptDone: true,
+      },
+    };
+  });
+}
+
+function markLatestImageResultAcceptedFromContext(messages: ChatMessage[], context: Partial<Record<string, unknown>>): ChatMessage[] {
+  if (context.image_accepted !== true) return messages;
+  const latestIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message.artifact?.type === "image_result" && Boolean(message.artifact.imageResult && canAcceptImageResult(message.artifact.imageResult)));
+  if (latestIndex < 0) return messages;
+  const messageIndex = messages.length - 1 - latestIndex;
+  return messages.map((message, index) => {
+    if (index !== messageIndex || !message.artifact) return message;
+    return {
+      ...message,
+      artifact: {
+        ...message.artifact,
+        imageAccepted: true,
       },
     };
   });
@@ -1504,6 +1539,88 @@ export function WorkspacePage() {
 
   const releaseArtifactAction = (key: string) => {
     if (key) processedArtifactIdsRef.current.delete(key);
+  };
+
+  const markImageResultAccepted = (messageId: string, targetConversationId: string) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (message.id !== messageId || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "image_result") {
+          return message;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            imageAccepted: true,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+  };
+
+  const markVideoResultAccepted = (messageId: string, targetConversationId: string) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (message.id !== messageId || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "video_result") {
+          return message;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            videoAccepted: true,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+  };
+
+  const hasPendingImageRevisionForResult = (msg: ChatMessage, targetConversationId: string): boolean => {
+    const pendingRevision = imageRevisionArtifactRef.current;
+    if (pendingRevision?.conversationId !== targetConversationId || !pendingRevision.artifact.imageResult || !msg.artifact?.imageResult) {
+      return false;
+    }
+    const pendingImage = pendingRevision.artifact.imageResult;
+    const currentImage = msg.artifact.imageResult;
+    return Boolean(
+      (pendingImage.task_id && pendingImage.task_id === currentImage.task_id) ||
+        (pendingImage.images[0]?.url && pendingImage.images[0]?.url === currentImage.images[0]?.url),
+    );
+  };
+
+  const shouldAutoAcceptImageResult = (msg: ChatMessage, targetConversationId: string): boolean => {
+    if (!msg.artifact?.imageResult || !canAcceptImageResult(msg.artifact.imageResult) || msg.artifact.imageAccepted) return false;
+    if (hasPendingImageRevisionForResult(msg, targetConversationId)) return false;
+    return messagesRef.current.some((message) => {
+      if (message.id !== msg.id || messageConversationId(message, targetConversationId) !== targetConversationId) return false;
+      return message.artifact?.type === "image_result" && Boolean(message.artifact.imageResult && canAcceptImageResult(message.artifact.imageResult)) && !message.artifact.imageAccepted;
+    });
+  };
+
+  const hasPendingVideoRevisionForResult = (msg: ChatMessage, targetConversationId: string): boolean => {
+    const pendingRevision = videoRevisionArtifactRef.current;
+    if (pendingRevision?.conversationId !== targetConversationId || !pendingRevision.artifact.mergedVideo || !msg.artifact?.mergedVideo) {
+      return false;
+    }
+    const pendingMerged = pendingRevision.artifact.mergedVideo;
+    const currentMerged = msg.artifact.mergedVideo;
+    return Boolean(
+      (pendingMerged.task_id && pendingMerged.task_id === currentMerged.task_id) ||
+        (pendingMerged.merged_video_url && pendingMerged.merged_video_url === currentMerged.merged_video_url),
+    );
+  };
+
+  const shouldAutoAcceptVideoResult = (msg: ChatMessage, targetConversationId: string): boolean => {
+    if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return false;
+    if (hasPendingVideoRevisionForResult(msg, targetConversationId)) return false;
+    return messagesRef.current.some((message) => {
+      if (message.id !== msg.id || messageConversationId(message, targetConversationId) !== targetConversationId) return false;
+      return message.artifact?.type === "video_result" && Boolean(message.artifact.mergedVideo?.ok) && !message.artifact.videoAccepted;
+    });
   };
 
   const persistChatMessage = async (conversation: string, message: ChatMessage): Promise<ChatMessage> => {
@@ -3203,6 +3320,9 @@ export function WorkspacePage() {
     if (pendingImageJob.kind === "direct_image_edit") {
       pendingImageEditRequestRef.current = null;
     }
+    const imageReviewStartedAt = Date.now();
+    const imageReviewRequestedAt = new Date(imageReviewStartedAt).toISOString();
+    const imageReviewExpiresAt = reviewExpiresAt(imageReviewStartedAt, AUTO_CONFIRM_TIMEOUT_MS);
     const imageResultMessage = pushArtifact(imageResult.ok ? imageResultSuccessContentForJob(pendingImageJob) : imageResultFailureContentForJob(pendingImageJob), {
       type: "image_result",
       title: imageResultTitleForJob(pendingImageJob),
@@ -3221,10 +3341,14 @@ export function WorkspacePage() {
       materials: artifact.materials || [],
       selectedDirection: artifact.selectedDirection,
       plan: artifact.plan,
+      reviewRequestedAt: imageResult.ok ? imageReviewRequestedAt : undefined,
+      reviewExpiresAt: canAcceptImageResult(imageResult) ? imageReviewExpiresAt : undefined,
     }, targetConversationId);
     if (canAcceptImageResult(imageResult)) {
       window.setTimeout(() => {
-        void handleAcceptImageResult(imageResultMessage, true);
+        if (shouldAutoAcceptImageResult(imageResultMessage, targetConversationId)) {
+          void handleAcceptImageResult(imageResultMessage, true);
+        }
       }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     await clearPendingImageJob(targetConversationId, imageResultLastPhaseForJob(pendingImageJob, imageResult), {
@@ -3454,7 +3578,10 @@ export function WorkspacePage() {
       videoScenePackages;
     const isRegeneration = pendingVideoJob.merge_purpose === "regeneration";
     const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-    pushArtifact(
+    const videoReviewStartedAt = Date.now();
+    const videoReviewRequestedAt = new Date(videoReviewStartedAt).toISOString();
+    const videoReviewExpiresAt = reviewExpiresAt(videoReviewStartedAt, AUTO_CONFIRM_TIMEOUT_MS);
+    const videoResultMessage = pushArtifact(
       mergedVideo.ok
         ? isRegeneration
           ? "视频已按修改意见重新生成，请查看新版本。"
@@ -3484,6 +3611,8 @@ export function WorkspacePage() {
         materials: artifact.materials || [],
         selectedDirection: artifact.selectedDirection,
         plan: artifact.plan,
+        reviewRequestedAt: mergedVideo.ok ? videoReviewRequestedAt : undefined,
+        reviewExpiresAt: mergedVideo.ok ? videoReviewExpiresAt : undefined,
       },
       targetConversationId,
     );
@@ -3495,6 +3624,11 @@ export function WorkspacePage() {
         generatedSceneVideos,
         mergedVideo,
       );
+      window.setTimeout(() => {
+        if (shouldAutoAcceptVideoResult(videoResultMessage, targetConversationId)) {
+          void handleAcceptVideoResult(videoResultMessage, true);
+        }
+      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     if (!mergedVideo.ok) releaseArtifactAction(processedKey);
     if (mergedVideo.merged_video_url) {
@@ -4293,8 +4427,10 @@ export function WorkspacePage() {
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
+    imageRevisionArtifactRef.current = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
+    videoRevisionArtifactRef.current = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
     setReferencedMaterials([]);
@@ -4338,6 +4474,10 @@ export function WorkspacePage() {
         pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
       pending_image_job:
         pendingImageJobRef.current?.conversation_id === snapshotConversationId ? pendingImageJobRef.current : null,
+      pendingImageRevision:
+        imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
+      pending_image_revision:
+        imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
       pendingScenePackageJob:
         pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
       pending_scene_package_job:
@@ -4346,11 +4486,16 @@ export function WorkspacePage() {
         pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
       pending_video_job:
         pendingVideoJobRef.current?.conversation_id === snapshotConversationId ? pendingVideoJobRef.current : null,
+      pendingVideoRevision:
+        videoRevisionArtifactRef.current?.conversationId === snapshotConversationId ? videoRevisionArtifactRef.current : null,
+      pending_video_revision:
+        videoRevisionArtifactRef.current?.conversationId === snapshotConversationId ? videoRevisionArtifactRef.current : null,
       pendingPptJob:
         pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
       pending_ppt_job:
         pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
       ppt_done: isPptDoneForConversation(snapshotConversationId),
+      image_accepted: latestImageResultArtifactForConversation(messagesRef.current, snapshotConversationId)?.imageAccepted === true,
       video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, snapshotConversationId)?.videoAccepted === true,
       canvas,
       canvasOpen,
@@ -4412,6 +4557,8 @@ export function WorkspacePage() {
     const pendingIntakeJob = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
+    const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
+    const pendingVideoRevision = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     const restoredMessages = detail.messages
@@ -4423,7 +4570,8 @@ export function WorkspacePage() {
       snapshot as Partial<Record<string, unknown>>,
     );
     const pptAwareMessages = markLatestPptFileDoneFromContext(contextMessages, snapshot as Partial<Record<string, unknown>>);
-    const videoAwareMessages = markLatestVideoResultAcceptedFromContext(pptAwareMessages, snapshot as Partial<Record<string, unknown>>);
+    const imageAwareMessages = markLatestImageResultAcceptedFromContext(pptAwareMessages, snapshot as Partial<Record<string, unknown>>);
+    const videoAwareMessages = markLatestVideoResultAcceptedFromContext(imageAwareMessages, snapshot as Partial<Record<string, unknown>>);
     const normalizedMessages = normalizeRestoredMessageReferences(
       dedupeRestoredScenePackageMessages(restorePendingMessageJobMessage(videoAwareMessages, pendingMessageJob)),
     );
@@ -4441,6 +4589,10 @@ export function WorkspacePage() {
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
+      pendingImageRevision,
+      pending_image_revision: pendingImageRevision,
+      pendingVideoRevision,
+      pending_video_revision: pendingVideoRevision,
       pendingPptJob,
       pending_ppt_job: pendingPptJob,
       imageEditConfirmedSelections,
@@ -4666,6 +4818,10 @@ export function WorkspacePage() {
           pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
         pending_image_job:
           pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
+        pendingImageRevision:
+          imageRevisionArtifactRef.current?.conversationId === currentConversationId ? imageRevisionArtifactRef.current : null,
+        pending_image_revision:
+          imageRevisionArtifactRef.current?.conversationId === currentConversationId ? imageRevisionArtifactRef.current : null,
         pendingScenePackageJob:
           pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
         pending_scene_package_job:
@@ -4674,11 +4830,16 @@ export function WorkspacePage() {
           pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
         pending_video_job:
           pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
+        pendingVideoRevision:
+          videoRevisionArtifactRef.current?.conversationId === currentConversationId ? videoRevisionArtifactRef.current : null,
+        pending_video_revision:
+          videoRevisionArtifactRef.current?.conversationId === currentConversationId ? videoRevisionArtifactRef.current : null,
         pendingPptJob:
           pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
         pending_ppt_job:
           pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
         ppt_done: isPptDoneForConversation(currentConversationId),
+        image_accepted: latestImageResultArtifactForConversation(messagesRef.current, currentConversationId)?.imageAccepted === true,
         video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, currentConversationId)?.videoAccepted === true,
         canvas,
         canvasOpen,
@@ -5931,9 +6092,12 @@ export function WorkspacePage() {
   async function handleAcceptImageResult(msg: ChatMessage, auto = false) {
     if (!msg.artifact?.imageResult || !canAcceptImageResult(msg.artifact.imageResult)) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (auto && !shouldAutoAcceptImageResult(msg, targetConversationId)) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未收到图片修改意见，已默认满意并结束流程。` : "已确认图片满意，流程结束。", targetConversationId);
+    imageRevisionArtifactRef.current = null;
+    markImageResultAccepted(msg.id, targetConversationId);
+    pushAssistant(auto ? timeoutReviewMessage("image", AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认图片满意，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -5947,6 +6111,10 @@ export function WorkspacePage() {
   function handleReviseImageResult(msg: ChatMessage) {
     if (!msg.artifact?.imageResult || !canAcceptImageResult(msg.artifact.imageResult)) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (isReviewExpired(msg.artifact.reviewExpiresAt)) {
+      void handleAcceptImageResult(msg, true);
+      return;
+    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     imageRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
@@ -6091,33 +6259,20 @@ export function WorkspacePage() {
     }
   };
 
-  async function handleAcceptVideoResult(msg: ChatMessage) {
+  async function handleAcceptVideoResult(msg: ChatMessage, auto = false) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (auto && !shouldAutoAcceptVideoResult(msg, targetConversationId)) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    setMessages((items) => {
-      const nextItems = items.map((message) => {
-        if (message.id !== msg.id || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "video_result") {
-          return message;
-        }
-        return {
-          ...message,
-          artifact: {
-            ...message.artifact,
-            videoAccepted: true,
-          },
-        };
-      });
-      messagesRef.current = nextItems;
-      return nextItems;
-    });
-    pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
+    videoRevisionArtifactRef.current = null;
+    markVideoResultAccepted(msg.id, targetConversationId);
+    pushAssistant(auto ? timeoutReviewMessage("video", AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认视频无修改意见，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
           last_phase: "video_accepted",
-          context: { ...makeSnapshot(), video_accepted: true } as unknown as Record<string, unknown>,
+          context: { ...makeSnapshot(), video_accepted: true, pendingVideoRevision: null, pending_video_revision: null } as unknown as Record<string, unknown>,
         })
         .catch(() => {});
     }
@@ -6126,6 +6281,10 @@ export function WorkspacePage() {
   function handleReviseVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (isReviewExpired(msg.artifact.reviewExpiresAt)) {
+      void handleAcceptVideoResult(msg, true);
+      return;
+    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     videoRevisionArtifactRef.current = {
@@ -6140,7 +6299,11 @@ export function WorkspacePage() {
       void api
         .updateConversation(targetConversationId, {
           last_phase: "video_revision_requested",
-          context: { ...makeSnapshot(), video_revision_requested: true } as unknown as Record<string, unknown>,
+          context: {
+            ...makeSnapshot(),
+            video_revision_requested: true,
+            video_revision_requested_at: new Date().toISOString(),
+          } as unknown as Record<string, unknown>,
         })
         .catch(() => {});
     }
@@ -6266,6 +6429,30 @@ export function WorkspacePage() {
       selectedVideo: video,
     }));
   };
+
+  useEffect(() => {
+    if (restoringRef.current || !currentConversationId || !pageVisibleRef.current) return;
+    const visibleMessages = [...messages].reverse();
+    const expiredVideoResult = visibleMessages.find((message) => {
+      if (messageConversationId(message, currentConversationId) !== currentConversationId) return false;
+      if (message.artifact?.type !== "video_result" || !message.artifact.mergedVideo?.ok || message.artifact.videoAccepted) return false;
+      if (hasPendingVideoRevisionForResult(message, currentConversationId)) return false;
+      return isReviewExpired(message.artifact.reviewExpiresAt);
+    });
+    if (expiredVideoResult) {
+      void handleAcceptVideoResult(expiredVideoResult, true);
+      return;
+    }
+    const expiredImageResult = visibleMessages.find((message) => {
+      if (messageConversationId(message, currentConversationId) !== currentConversationId) return false;
+      if (message.artifact?.type !== "image_result" || !message.artifact.imageResult || message.artifact.imageAccepted) return false;
+      if (hasPendingImageRevisionForResult(message, currentConversationId)) return false;
+      return canAcceptImageResult(message.artifact.imageResult) && isReviewExpired(message.artifact.reviewExpiresAt);
+    });
+    if (expiredImageResult) {
+      void handleAcceptImageResult(expiredImageResult, true);
+    }
+  }, [messages, currentConversationId]);
 
   const selectedStoryboardMessage = selectedStoryboardMessageId
     ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.videoScenePackages)

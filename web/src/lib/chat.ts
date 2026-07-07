@@ -57,6 +57,7 @@ export interface ChatMessage {
     plan?: PlanMarkdownResponse;
     imagePrepare?: ImagePrepareResponse;
     imageResult?: ImageGenerateResponse;
+    imageAccepted?: boolean;
     imageEditRequest?: Record<string, unknown>;
     imageEditModelConfigs?: ImageModelParamConfig[];
     imageEditRequestedParams?: Record<string, unknown>;
@@ -72,6 +73,8 @@ export interface ChatMessage {
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;
     videoAccepted?: boolean;
+    reviewRequestedAt?: string;
+    reviewExpiresAt?: string;
     pptSummary?: PptSummaryResult;
     pptContentJson?: PptContentJsonResult;
     pptImages?: PptImagesResult;

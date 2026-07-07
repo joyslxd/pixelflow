@@ -249,6 +249,7 @@ export function MessageBubble({
   const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
   const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
   const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
+  const imageAccepted = Boolean(msg.artifact?.imageAccepted);
   const videoAccepted = Boolean(msg.artifact?.videoAccepted);
   const mergedVideoResult = mergedVideoResultForMessage(msg);
   const sceneVideoResults = sceneVideoResultsForMessage(msg);
@@ -885,7 +886,12 @@ export function MessageBubble({
                 {imageQuotaPaused ? "充值后继续生成" : "重新生成图片"}
               </button>
             )}
-            {canAcceptImageResult(msg.artifact.imageResult) && (
+            {canAcceptImageResult(msg.artifact.imageResult) && imageAccepted ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
+                <Check size={15} />
+                图片流程已结束
+              </div>
+            ) : canAcceptImageResult(msg.artifact.imageResult) ? (
               <div className="grid gap-2 sm:grid-cols-2">
                 <button
                   type="button"
@@ -904,7 +910,7 @@ export function MessageBubble({
                   重新生成
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         ) : msg.artifact?.type === "video_analysis_result" && msg.artifact.videoAnalysis ? (
           <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
