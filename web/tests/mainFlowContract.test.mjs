@@ -445,7 +445,13 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   assert.notEqual(pollIndex, -1, "global asset edit must poll the persisted job");
   assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "global asset edit job id must be persisted before polling starts");
   assert.match(source, /kind:\s*"scene_global_asset_edit"/, "global asset edit must record its pending job kind");
+  assert.match(source, /materials:\s*uploadedReferences/, "global asset edit must pass uploaded reference materials to the backend");
   assert.equal(source.includes("api.editImageAsset"), false, "global asset edit must not synchronously wait on image editing");
+  assert.match(
+    workspaceSource.slice(workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async")),
+    /syncGlobalSceneAssetEditAcrossConversation/,
+    "global asset edit completion must sync edited images back into all scene package cards",
+  );
 });
 
 test("scene video jobs persist their id before polling so conversations can recover", () => {

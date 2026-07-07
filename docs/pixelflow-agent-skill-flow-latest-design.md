@@ -76,7 +76,7 @@ flowchart TD
   SB --> SV["并行生成每段场景视频"]
   SV --> MERGE["按 scene_index 合并视频"]
   MERGE --> VR["视频结果确认<br/>无意见结束 / 修改循环"]
-  VR -->|"提出修改"| QC["视频综合质检 Skill"]
+  VR -->|"提出修改"| QC["QAAgent QC 质检 Skill"]
   QC --> SB
   VA --> DONE["返回 storyboard 分析结果"]
   IR --> DONE
@@ -166,8 +166,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 | EditVideoSkill | `run_generation.py` | `/api/video/edit-video` | 编辑视频 |
 | ExtendVideoSkill | `run_generation.py` | `/api/video/extend-video` | 延伸视频 |
 | VideoMergeSkill | `run_generation.py` | `/api/video/merge` | 合并视频 |
-| VideoQualityReviewSkill | `backend/pixelflow/qc/video_review.py` + `run_generation.py` | `/api/creative/analyze_video_flaws` | 综合质检：方案一致性、分镜覆盖、产品一致性/穿帮、播放稳定性、手机端需求 |
-| VideoFlawAnalysisSkill | `run_generation.py` | `/api/creative/analyze_video_flaws` | 旧穿帮分析兼容入口 |
+| VideoQualityReviewSkill | `backend/pixelflow/qc/video_review.py` + `run_generation.py` | `/api/creative/video_quality_review` | QAAgent QC 质检：画面缺陷、商品清晰与露出、Prompt 跑偏、字幕正确性、Brief 一致性、黑屏/卡顿和约束合规 |
 
 视频生成总规则：
 
@@ -177,7 +176,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
 - 镜头描述 `shot_description.text` 是一整段文本，时间范围统一使用秒级表达，例如 `0-10秒`、`10-15秒`；后端会归一化 LLM 返回的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
 - 场景视频 job 内部并行调用 content-app 视频接口，当前最大并发数为 100。并行只是提升同一批分镜的生成效率，整体阶段仍必须等所有分镜都成功、失败或额度暂停后，才进入汇总、重试或合并判断。
-- 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。
+- 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。合并失败时 job 必须返回 `status=failed`，并保留 `result.error`、`result.message`、`result.raw.details` 中的 content-app 原始错误，前端据此展示“视频合并失败”。
 - 单个分镜出现普通异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
 - 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。该流程走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`，成功后直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片编辑 prompt 处理，不重新走 intake。
@@ -524,7 +523,7 @@ sequenceDiagram
 flowchart TD
   A["用户查看合并视频"] --> B{"是否提出修改意见"}
   B -->|"点击无意见，结束"| DONE["流程结束"]
-  B -->|"是"| C["调用 /agent/flows/video/analyze-flaws<br/>旧入口内部转综合质检"]
+  B -->|"是"| C["调用 /agent/flows/video/quality-review/start<br/>轮询 jobs/{job_id}<br/>QAAgent QC 质检"]
   C --> D["返回质检信息、affected_scene_ids、revision_prompt"]
   D --> E{"用户选择修改范围"}
   E -->|"只按用户意见"| F["定位用户意见涉及场景"]
@@ -541,10 +540,10 @@ flowchart TD
 - 只重生受影响场景，未受影响场景直接复用。
 - 合并仍按 `scene_index` 排序。
 - 新旧场景视频和最新合并视频都要返回前端。
-- `/agent/flows/video/quality-review` 是综合质检直连接口；`/agent/flows/video/analyze-flaws` 为旧前端兼容入口，内部转调综合质检并保持旧 response schema。
-- 综合质检由 deterministic QC 和 semantic QC 合并：deterministic QC 覆盖片段完整性、黑屏/冻结、分辨率和画幅；semantic QC 覆盖方案一致性、分镜覆盖和产品一致性/穿帮。
-- 旧 `analyze-flaws` 只向旧调用方返回产品一致性/穿帮类 issues，避免播放稳定性或手机端规格问题破坏旧 schema 预期。
-- 如果综合质检失败，应允许用户只按自己的修改意见继续。
+- `/agent/flows/video/quality-review/start` + `/agent/flows/video/quality-review/jobs/{job_id}` 是前端视频 QC 主入口；同步 `/agent/flows/video/quality-review` 仅保留兼容，前端所有修改意见后的质检都应走异步 job，避免浏览器或网关长连接超时。
+- QC 结论只来自 `VideoQualityReviewSkill -> content-app /api/creative/video_quality_review`，不再执行本地 deterministic QC、semantic QC、ffmpeg/ffprobe 检查或二次视频拆解。
+- content-app 在调用模型前会对长视频生成完整时序的低码率质检预览再转 base64，避免 300 秒级成片超过模型网关请求体限制；如果 content-app 返回失败或模型网关错误，PixelFlow QC job 必须返回 `status=failed` 并保留 `result.error`、`result.message`、`result.raw.details`，前端展示“视频质检失败”。
+- 如果 QAAgent QC 失败，应允许用户只按自己的修改意见继续。
 
 ## 10. 失败、重试与额度不足
 

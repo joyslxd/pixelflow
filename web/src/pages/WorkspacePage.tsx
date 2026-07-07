@@ -44,15 +44,16 @@ import {
 } from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
+  applyGlobalSceneAssetImageEdit,
   deleteGlobalSceneAssetReference,
+  globalAssetsContainAsset,
   inferTargetDurationMs,
-  replaceGlobalSceneAssetImage,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
   scenePackagesWithoutRevisionContract,
-  syncScenePackageMentionImageUrls,
   updateScenePackageField,
+  uploadedReferenceMaterials,
   type GlobalSceneAssetGroup,
   type SceneGlobalAssetReference,
   type ScenePackagePatch,
@@ -334,7 +335,7 @@ const REQUIREMENT_COLLECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["ty
   "segments",
   "edit",
   "qc",
-  "video_flaw_analysis",
+  "video_quality_review",
   "video_analysis_result",
   ...DIRECTION_SUCCESSOR_ARTIFACT_TYPES,
 ]);
@@ -556,6 +557,8 @@ interface ImageAssetEditJobRequest {
   asset_group: string;
   source_image_url: string;
   prompt: string;
+  materials?: Array<Record<string, unknown>>;
+  reference_image_urls?: string[];
   ratio?: string;
   size?: string;
   model?: string | null;
@@ -629,7 +632,7 @@ interface PendingVideoJob {
   request: SceneVideosJobRequest | MergeSceneVideosJobRequest;
   artifact: ChatArtifact;
   affected_scene_ids?: string[];
-  use_flaw_analysis?: boolean;
+  use_quality_review?: boolean;
   merge_purpose?: "generation" | "regeneration";
 }
 
@@ -1010,7 +1013,9 @@ function isGlobalSceneAssetGroup(value: string): value is GlobalSceneAssetGroup 
 }
 
 function editedImageUrl(result: ImageAssetEditResponse): string {
-  return result.edited_image.url || result.edited_image.download_url || "";
+  const image = result.edited_image;
+  if (!image || typeof image !== "object") return "";
+  return String(image.url || image.download_url || "");
 }
 
 function isQuotaInsufficientPayload(value: unknown): boolean {
@@ -1853,8 +1858,8 @@ export function WorkspacePage() {
     updater: (videoScenePackages: PrepareScenePackagesResponse) => PrepareScenePackagesResponse,
   ): PrepareScenePackagesResponse | undefined => {
     let updatedPackages: PrepareScenePackagesResponse | undefined;
-    setMessages((items) =>
-      items.map((message) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
         const artifact = message.artifact;
         const videoScenePackages = artifact?.videoScenePackages;
         if (message.id !== messageId || !artifact || !videoScenePackages) return message;
@@ -1866,9 +1871,71 @@ export function WorkspacePage() {
             videoScenePackages: updatedPackages,
           },
         };
-      }),
-    );
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
     return updatedPackages;
+  };
+
+  const syncGlobalSceneAssetEditAcrossConversation = (
+    targetConversationId: string,
+    input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
+    preferredMessageId?: string,
+  ): PrepareScenePackagesResponse | undefined => {
+    let latestPackages: PrepareScenePackagesResponse | undefined;
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (messageConversationId(message, targetConversationId) !== targetConversationId) return message;
+        const artifact = message.artifact;
+        const videoScenePackages = artifact?.videoScenePackages;
+        if (!artifact || !videoScenePackages) return message;
+        if (!globalAssetsContainAsset(videoScenePackages.global_assets, input.assetId)) return message;
+        const patched = applyGlobalSceneAssetImageEdit(
+          videoScenePackages.global_assets,
+          videoScenePackages.scene_packages as ScenePackageRecord[],
+          input,
+        );
+        const updatedPackages: PrepareScenePackagesResponse = {
+          ...videoScenePackages,
+          global_assets: patched.global_assets,
+          scene_packages: patched.scene_packages as typeof videoScenePackages.scene_packages,
+        };
+        if (message.id === preferredMessageId || !latestPackages) {
+          latestPackages = updatedPackages;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...artifact,
+            videoScenePackages: updatedPackages,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+    return latestPackages;
+  };
+
+  const persistScenePackageSnapshot = (
+    targetConversationId: string,
+    packages: PrepareScenePackagesResponse,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    if (!targetConversationId) return;
+    void api
+      .updateConversation(targetConversationId, {
+        last_phase: lastPhase,
+        context: {
+          ...makeSnapshot(targetConversationId),
+          global_assets: packages.global_assets,
+          scene_packages: packages.scene_packages,
+          ...extraContext,
+        } as unknown as Record<string, unknown>,
+      })
+      .catch(() => {});
   };
 
   const updateOriginalScenePackageMessageWithVideoResult = (
@@ -1993,6 +2060,7 @@ export function WorkspacePage() {
     reference: SceneGlobalAssetReference,
     prompt: string,
     targetConversationId: string,
+    materials: Array<Record<string, unknown>> = [],
   ): Promise<boolean> => {
     const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
     if (!storyboardMessage?.artifact?.videoScenePackages) {
@@ -2004,9 +2072,15 @@ export function WorkspacePage() {
       return true;
     }
 
+    const uploadedReferences = uploadedReferenceMaterials(materials);
     setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(`正在调用图片编辑接口修改「${reference.name}」…`, targetConversationId);
+    pushAssistant(
+      uploadedReferences.length > 0
+        ? `正在根据 ${uploadedReferences.length} 张参考图更新「${reference.name}」…`
+        : `正在调用图片编辑接口修改「${reference.name}」…`,
+      targetConversationId,
+    );
     try {
       const request: ImageAssetEditJobRequest = {
         asset_id: reference.asset_id,
@@ -2014,6 +2088,7 @@ export function WorkspacePage() {
         asset_group: reference.asset_group,
         source_image_url: reference.source_image_url,
         prompt,
+        materials: uploadedReferences,
       };
       const started = await api.startImageAssetEditJob(request);
       const pendingImageJob: PendingImageJob = {
@@ -3213,19 +3288,27 @@ export function WorkspacePage() {
       return;
     }
 
-    const updatedPackages = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: replaceGlobalSceneAssetImage(storyboardMessage.artifact.videoScenePackages.global_assets, {
+    const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
+      targetConversationId,
+      {
         assetId: reference.asset_id,
         assetGroup: reference.asset_group,
         editedImageUrl: nextUrl,
-      }),
-      scene_packages: syncScenePackageMentionImageUrls(storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[], {
-        assetId: reference.asset_id,
-        editedImageUrl: nextUrl,
-      }) as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
-    };
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+      },
+      storyboardMessage.id,
+    );
+    if (!updatedPackages) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("素材图片编辑完成，但未能写回场景包，请刷新后重试。", targetConversationId);
+      await clearPendingImageJob(targetConversationId, "scene_global_asset_edit_failed", {
+        scene_global_asset_edit: editResult,
+      }).catch(() => {});
+      return;
+    }
+
+    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_edited", {
+      scene_global_asset_edit: editResult,
+    });
 
     const updatedScenePackageMessageId = uid();
     pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
@@ -3438,7 +3521,7 @@ export function WorkspacePage() {
             : "video_merge_failed",
       {
         video_revision_feedback: artifact.videoRevisionFeedback,
-        video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
+        video_revision_use_quality_review: pendingVideoJob.use_quality_review,
         affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
         global_assets: videoScenePackages.global_assets,
         intake_context: artifact.intakeContext,
@@ -3588,7 +3671,7 @@ export function WorkspacePage() {
       }, targetConversationId);
       await clearPendingVideoJob(targetConversationId, isQuotaInsufficientPayload(regenerated) ? "video_regeneration_quota_paused" : "video_regeneration_failed", {
         video_revision_feedback: artifact.videoRevisionFeedback,
-        video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
+        video_revision_use_quality_review: pendingVideoJob.use_quality_review,
         affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
         global_assets: artifact.videoScenePackages.global_assets,
         scene_packages: artifact.videoScenePackages.scene_packages,
@@ -4688,7 +4771,7 @@ export function WorkspacePage() {
       if (sceneGlobalAssetReference.scene_global_asset_action === "delete") {
         await handleDeleteReferencedGlobalAsset(sceneGlobalAssetReference, activeConversation);
       } else {
-        await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+        await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation, materials);
       }
       return;
     }
@@ -4809,7 +4892,8 @@ export function WorkspacePage() {
         return;
       }
       imageRevisionArtifactRef.current = null;
-      await handleEditReferencedGlobalAsset(pendingSceneGlobalAssetReference, text, activeConversation);
+      const flowMaterials = mergeMaterials(pendingImageRevisionArtifact?.materials || [], materials);
+      await handleEditReferencedGlobalAsset(pendingSceneGlobalAssetReference, text, activeConversation, flowMaterials);
       return;
     }
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {
@@ -4906,9 +4990,9 @@ export function WorkspacePage() {
         return;
       }
       setBusyForConversation(activeConversation, true);
-      pushAssistant("已收到视频修改意见，正在调用视频综合质检 Skill…", activeConversation);
+      pushAssistant("已收到视频修改意见，正在调用 QAAgent QC 质检 Skill…", activeConversation);
       try {
-        const flawAnalysis = await api.analyzeVideoFlaws({
+        const qualityReview = await api.reviewVideoQuality({
           merged_video_url: mergedVideoUrl,
           scene_videos: generatedSceneVideos.scene_videos.map((scene) => ({
             scene_id: scene.scene_id,
@@ -4924,16 +5008,16 @@ export function WorkspacePage() {
           materials: flowMaterials,
           user_feedback: text,
         });
-        const affectedSceneIds = new Set(flawAnalysis.affected_scene_ids || []);
+        const affectedSceneIds = new Set(qualityReview.affected_scene_ids || []);
         const affectedSceneLabel = formatSceneIndexesForMessage(videoScenePackages.scene_packages, affectedSceneIds);
-        pushArtifact(flawAnalysis.ok ? "视频综合质检已完成，请选择本轮修改策略。" : "视频综合质检失败，可选择只按用户意见继续修改。", {
-          type: "video_flaw_analysis",
-          title: "视频综合质检",
-          description: flawAnalysis.ok
+        pushArtifact(qualityReview.ok ? "QAAgent QC 质检已完成，请选择本轮修改策略。" : "QAAgent QC 质检失败，可选择只按用户意见继续修改。", {
+          type: "video_quality_review",
+          title: "QAAgent QC 质检",
+          description: qualityReview.ok
             ? `质检定位：${affectedSceneLabel}。`
-            : flawAnalysis.message,
+            : qualityReview.message,
           actionLabel: "选择",
-          videoFlawAnalysis: flawAnalysis,
+          videoQualityReview: qualityReview,
           videoRevisionFeedback: text,
           videoScenePackages,
           originalVideoScenePackages,
@@ -4949,19 +5033,19 @@ export function WorkspacePage() {
         if (activeConversation) {
           void api
             .updateConversation(activeConversation, {
-              last_phase: flawAnalysis.ok ? "video_flaw_analysis_ready" : "video_flaw_analysis_failed",
+              last_phase: qualityReview.ok ? "video_quality_review_ready" : "video_quality_review_failed",
               context: {
                 ...makeSnapshot(),
                 video_revision_feedback: text,
                 intake_context: revisionArtifact.intakeContext,
                 materials: flowMaterials,
-                video_flaw_analysis: flawAnalysis,
+                video_quality_review: qualityReview,
               } as unknown as Record<string, unknown>,
             })
             .catch(() => {});
         }
       } catch (err) {
-        pushAssistant(`视频综合质检失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
+        pushAssistant(`QAAgent QC 质检失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
       } finally {
         setBusyForConversation(activeConversation, false);
       }
@@ -6051,7 +6135,7 @@ export function WorkspacePage() {
         originalVideoScenePackages: msg.artifact.originalVideoScenePackages || latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId),
       },
     };
-    pushAssistant("请在输入框填写视频修改意见。我会先做综合质检，再让你选择是否结合质检结果重生成受影响场景。", targetConversationId);
+    pushAssistant("请在输入框填写视频修改意见。我会先做 QAAgent QC 质检，再让你选择是否结合质检结果重生成受影响场景。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -6062,7 +6146,7 @@ export function WorkspacePage() {
     }
   }
 
-  async function handleRegenerateVideoWithRevision(msg: ChatMessage, useFlawAnalysis: boolean) {
+  async function handleRegenerateVideoWithRevision(msg: ChatMessage, useQualityReview: boolean) {
     const artifact = msg.artifact;
     if (!artifact?.videoScenePackages || !artifact.generatedSceneVideos || !artifact.mergedVideo || !artifact.videoRevisionFeedback) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
@@ -6073,12 +6157,12 @@ export function WorkspacePage() {
     const affectedSceneIds = sceneIdsForRevision(
       artifact.videoScenePackages.scene_packages,
       artifact.videoRevisionFeedback,
-      artifact.videoFlawAnalysis,
-      useFlawAnalysis,
+      artifact.videoQualityReview,
+      useQualityReview,
     );
     if (affectedSceneIds.size === 0) {
       releaseArtifactAction(processedKey);
-      pushAssistant("综合质检没有定位到具体分镜。为了避免误把整条视频重做，请在修改意见里明确写出要修改的分镜，例如“只修改第2个分镜”。", targetConversationId);
+      pushAssistant("QAAgent QC 质检没有定位到具体分镜。为了避免误把整条视频重做，请在修改意见里明确写出要修改的分镜，例如“只修改第2个分镜”。", targetConversationId);
       setBusyForConversation(targetConversationId, false);
       return;
     }
@@ -6091,7 +6175,7 @@ export function WorkspacePage() {
           artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
           affectedSceneIds,
           artifact.videoRevisionFeedback || "",
-          useFlawAnalysis ? artifact.videoFlawAnalysis : undefined,
+          useQualityReview ? artifact.videoQualityReview : undefined,
           artifact.videoScenePackages.global_assets,
           originalVideoScenePackages.scene_packages as ScenePackageRecord[],
         ) as typeof artifact.videoScenePackages.scene_packages,
@@ -6113,11 +6197,11 @@ export function WorkspacePage() {
         request,
         artifact: revisionArtifact,
         affected_scene_ids: Array.from(affectedSceneIds),
-        use_flaw_analysis: useFlawAnalysis,
+        use_quality_review: useQualityReview,
       };
       await persistPendingVideoJob(pendingVideoJob, targetConversationId, "video_regeneration_running", {
         video_revision_feedback: artifact.videoRevisionFeedback,
-        video_revision_use_flaw_analysis: useFlawAnalysis,
+        video_revision_use_quality_review: useQualityReview,
         affected_scene_ids: Array.from(affectedSceneIds),
         global_assets: nextVideoScenePackages.global_assets,
         scene_packages: nextVideoScenePackages.scene_packages,

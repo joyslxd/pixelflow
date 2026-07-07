@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any
+from urllib.error import HTTPError
 
 from pixelflow.skills.borgrise import run_generation
 from pixelflow.skills.borgrise import skill as borgrise_skill
@@ -99,3 +101,58 @@ def test_borgrise_merge_uses_long_request_timeout(monkeypatch):
     assert result["video_url"] == "https://x/merged.mp4"
     assert captured["endpoint"] == "/video/merge"
     assert captured["request_timeout"] == run_generation.VIDEO_MERGE_REQUEST_TIMEOUT
+
+
+def test_make_request_forwards_request_timeout(monkeypatch):
+    """make_request 包装层要把调用方的读超时透传给底层实现。"""
+    captured: dict[str, Any] = {}
+
+    def fake_impl(endpoint: str, data: Any = None, *args, **kwargs):
+        captured.update({"endpoint": endpoint, "data": data, "request_timeout": kwargs.get("request_timeout")})
+        return {"ok": True}
+
+    monkeypatch.setattr(run_generation, "_make_request_impl", fake_impl)
+
+    result = run_generation.make_request("/video/merge", {"videoUrls": ["https://x/1.mp4"]}, request_timeout=123)
+
+    assert result == {"ok": True}
+    assert captured["endpoint"] == "/video/merge"
+    assert captured["request_timeout"] == 123
+
+
+def test_make_request_extracts_json_http_error_message(monkeypatch):
+    """content-app 返回 JSON 失败体时，要透出 message 字段给前端排查。"""
+
+    monkeypatch.setattr(run_generation, "_apply_auth_header", lambda headers: headers)
+
+    def fake_urlopen(*_args, **_kwargs):
+        body = '{"status":"FAILED","message":"视频合并失败: 下载分镜视频超时","data":{"stage":"download"}}'.encode()
+        raise HTTPError("https://test-video.borgrise.com/api/video/merge", 500, "Internal Server Error", {}, BytesIO(body))
+
+    monkeypatch.setattr(run_generation.urllib.request, "urlopen", fake_urlopen)
+
+    result = run_generation.make_request("/video/merge", {"videoUrls": ["https://x/1.mp4", "https://x/2.mp4"]})
+
+    assert result["error"] is True
+    assert result["status_code"] == 500
+    assert result["message"] == "视频合并失败: 下载分镜视频超时"
+    assert result["details"]["data"]["stage"] == "download"
+
+
+def test_video_create_uses_extended_request_timeout(monkeypatch):
+    """视频创建任务在高并发下可能超过普通 30 秒，避免超时后重复创建任务。"""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(run_generation, "get_headers", lambda *args, **kwargs: {})
+
+    def fake_make_request(endpoint: str, data: Any = None, *args, **kwargs):
+        captured.update({"endpoint": endpoint, "data": data, "request_timeout": kwargs.get("request_timeout")})
+        return {"data": {"taskId": "task-1"}}
+
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+
+    result = run_generation.text_to_video("生成商品短视频", auto_poll=False)
+
+    assert result["task_id"] == "task-1"
+    assert captured["endpoint"] == "/video/text-to-video"
+    assert captured["request_timeout"] == run_generation.VIDEO_CREATE_REQUEST_TIMEOUT

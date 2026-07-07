@@ -5,9 +5,11 @@ const moduleUrl = process.env.SCENE_PACKAGES_TEST_MODULE;
 assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scenePackages module");
 
 const {
+  applyGlobalSceneAssetImageEdit,
   collectSceneImageUrls,
   deleteGlobalSceneAssetReference,
   durationMsForSubmit,
+  globalAssetsContainAsset,
   inferTargetDurationMs,
   MAX_REFERENCE_IMAGE_COUNT,
   MAX_SCENE_DURATION_MS,
@@ -20,6 +22,7 @@ const {
   syncScenePackageMentionImageUrls,
   updateScenePackageAssetField,
   updateScenePackageField,
+  uploadedReferenceMaterials,
 } = await import(moduleUrl);
 
 function sampleScenes() {
@@ -273,6 +276,37 @@ test("replaceGlobalSceneAssetImage replaces scene and prop first image", () => {
 
   assert.equal(propUpdated.scenes[0].images[0], "https://x/global-scene-new.png");
   assert.equal(propUpdated.props[0].images[0], "https://x/global-prop-new.png");
+});
+
+test("applyGlobalSceneAssetImageEdit updates global asset image and mention urls together", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    shot_description: {
+      ...scene.shot_description,
+      mentions: [
+        { asset_id: "scene-desk", image_url: "https://x/global-scene.png" },
+        { asset_id: "prop-product", image_url: "https://x/global-prop.png" },
+      ],
+    },
+  };
+  const assets = sampleGlobalAssets();
+
+  const updated = applyGlobalSceneAssetImageEdit(assets, [sceneWithMentions], {
+    assetId: "scene-desk",
+    assetGroup: "scenes",
+    editedImageUrl: "https://x/global-scene-edited.png",
+  });
+
+  assert.equal(updated.global_assets.scenes[0].images[0], "https://x/global-scene-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/global-scene-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-prop.png");
+});
+
+test("globalAssetsContainAsset detects asset ids across groups", () => {
+  const assets = sampleGlobalAssets();
+  assert.equal(globalAssetsContainAsset(assets, "scene-desk"), true);
+  assert.equal(globalAssetsContainAsset(assets, "missing-asset"), false);
 });
 
 test("syncScenePackageMentionImageUrls updates mention image urls by asset id", () => {
@@ -687,4 +721,17 @@ test("durationMsForSubmit converts empty edit values to a valid minimum duration
   assert.equal(durationMsForSubmit(""), 4000);
   assert.equal(durationMsForSubmit(1), 4000);
   assert.equal(durationMsForSubmit(22000), 15000);
+});
+
+test("uploadedReferenceMaterials keeps user uploads and excludes scene global asset references", () => {
+  const materials = [
+    { url: "https://x/fila1.jpg", mediaType: "image" },
+    { url: "https://x/fila2.jpg", mediaType: "image" },
+    { url: "https://x/old-prop.png", source: "scene_global_asset", asset_id: "prop-product" },
+    { url: "https://x/ref.mp4", mediaType: "video" },
+  ];
+  const uploaded = uploadedReferenceMaterials(materials);
+  assert.equal(uploaded.length, 2);
+  assert.equal(uploaded[0].url, "https://x/fila1.jpg");
+  assert.equal(uploaded[1].url, "https://x/fila2.jpg");
 });

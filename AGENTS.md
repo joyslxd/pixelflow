@@ -116,8 +116,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频 | `GET /agent/flows/video/generate-direct/jobs/{job_id}` | 轮询直接视频生成结果 |
 | 视频 | `POST /agent/flows/video/merge/start` | 启动可恢复视频合并异步任务 |
 | 视频 | `GET /agent/flows/video/merge/jobs/{job_id}` | 轮询视频合并结果 |
-| 视频 | `POST /agent/flows/video/quality-review` | 视频综合质检 |
-| 视频 | `POST /agent/flows/video/analyze-flaws` | 旧视频穿帮分析兼容入口，内部转调综合质检 |
+| 视频 | `POST /agent/flows/video/quality-review` | 视频 QAAgent QC 质检 |
+| 视频 | `POST /agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
+| 视频 | `GET /agent/flows/video/quality-review/jobs/{job_id}` | 轮询视频 QAAgent QC 质检结果 |
 | PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -146,7 +147,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill | 使用项目内模板生成 plan.md |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`qc/video_review.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill、VideoFlawAnalysisSkill | 生成场景包、资产图、场景视频、合并、综合质检和修改循环；旧穿帮入口保持兼容 |
+| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`qc/video_review.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
@@ -212,7 +213,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | `extract_media_links` | `/api/creative/extractMediaLinks` |
 | `decompose_video_to_storyboard` | `/api/creative/decompose_video_to_storyboard` |
 | `batch_decompose_video_to_storyboard` | `/api/creative/batch_decompose_video_to_storyboard` |
-| `analyze_video_flaws` | `/api/creative/analyze_video_flaws` |
+| `review_video_quality` | `/api/creative/video_quality_review` |
 
 SmartPPT接口：
 
@@ -273,7 +274,7 @@ SmartPPT接口：
 - 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。最终视频卡片不再展示“查看分镜”。
 - 场景视频和合并视频生成完成后，前端会把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。用户继续点击原来的“查看分镜”时仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
 - 场景视频 job 内部按 `scene_index` 排序后并行调用 content-app 视频接口，当前最大并发数为 100；必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge/start` 启动可恢复视频合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，不能按完成先后顺序合并；如果只有 1 个分镜，merge job 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
-- 多个分镜的视频合并由 Python merge job 调用 content-app `/api/video/merge`。content-app 该接口本身是同步等待下载、ffmpeg 合并和上传完成，不走 `/api/task/{taskId}/status` 轮询；PixelFlow 前端不能直接长连接等待，只能保存 `pendingVideoJob.kind="video_merge"` 并轮询 Python job。后端必须使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制 content-app 读等待，默认 1 小时，不能复用普通 HTTP 30 秒超时。
+- 多个分镜的视频合并由 Python merge job 调用 content-app `/api/video/merge`。content-app 该接口本身是同步等待下载、ffmpeg 合并和上传完成，不走 `/api/task/{taskId}/status` 轮询；PixelFlow 前端不能直接长连接等待，只能保存 `pendingVideoJob.kind="video_merge"` 并轮询 Python job。后端必须使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制 content-app 读等待，默认 1 小时，不能复用普通 HTTP 30 秒超时。若 content-app 返回业务失败或网络异常，Python job 必须标记 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端不能把失败合并展示成“合并完成”。
 - 场景视频并行生成时，每个分镜最多尝试 3 次；普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
 - 场景视频失败或额度暂停后，前端再次点击同一场景包的“确认并生成视频”时，只把 `generatedSceneVideos.failed_scenes` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`，已成功的分镜视频从 `generatedSceneVideos.scene_videos` 复用；补齐后再按 `scene_index` 合并完整视频。
 - 用户在原场景包的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge/start` 合并新版最终视频，并再次回填原场景包卡片。
@@ -287,6 +288,7 @@ SmartPPT接口：
 - 否则 `pixelflow_video.py` 根据图片、视频、音频素材和提示词选择 `text_to_video`、`image_to_video`、`two_image_to_video`、`reference_mode_video`、`edit_video` 或 `extend_video`。
 - 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞；job 内部可以并行生成多个分镜视频，但对前端仍表现为一个可恢复 job。
 - 场景视频生成和视频修改重生成启动后，前端必须把 `job_id`、原始请求、来源 artifact 和 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时只继续查询 `/agent/flows/video/generate-scenes/jobs/{job_id}`，不能重新调用 `/start`，避免重复生成和重复计费。
+- 视频 QAAgent QC 必须走 `/agent/flows/video/quality-review/start` 和 `/agent/flows/video/quality-review/jobs/{job_id}`；如果 content-app 返回业务失败或模型网关错误，Python job 状态必须是 `failed`，并保留 `result.error/message/raw.details`，前端展示“视频质检失败”而不是“质检完成”。content-app 侧会对长视频生成低码率质检预览再送入模型，避免 300 秒级成片直接 base64 后超过模型请求体限制。
 
 ## PPT流程要点
 

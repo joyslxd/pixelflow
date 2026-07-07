@@ -14,7 +14,7 @@ import type {
   PptFileResult,
   PptImagesResult,
   PptSummaryResult,
-  VideoFlawAnalysisResponse,
+  VideoQualityReviewResponse,
 } from "./api";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
 
@@ -38,7 +38,7 @@ export interface ChatMessage {
       | "image_edit_options"
       | "image_result"
       | "video_scene_packages"
-      | "video_flaw_analysis"
+      | "video_quality_review"
       | "video_analysis_result"
       | "video_result"
       | "ppt_outline"
@@ -68,7 +68,7 @@ export interface ChatMessage {
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;
     videoScenePackageEditedSceneIds?: string[];
-    videoFlawAnalysis?: VideoFlawAnalysisResponse;
+    videoQualityReview?: VideoQualityReviewResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;
     videoAccepted?: boolean;

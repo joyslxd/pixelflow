@@ -58,7 +58,7 @@ export interface ScenePackagePatch {
   generation_mode?: string | null;
 }
 
-export interface SceneFlawLike {
+export interface SceneQualityReviewLike {
   affected_scene_ids?: unknown;
   target_scene_ids?: unknown;
   excluded_scene_ids?: unknown;
@@ -106,6 +106,64 @@ export function updateScenePackageAssetField<T extends ScenePackageRecord>(
       [collection]: items.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item)),
     };
   });
+}
+
+function materialImageUrl(material: Record<string, unknown>): string {
+  return String(
+    material.url ||
+      material.image_url ||
+      material.imageUrl ||
+      material.artifact_url ||
+      material.artifactUrl ||
+      "",
+  ).trim();
+}
+
+export function uploadedReferenceMaterials(materials: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const uploaded: Array<Record<string, unknown>> = [];
+  for (const material of materials) {
+    if (material.source === "scene_global_asset") continue;
+    const url = materialImageUrl(material);
+    if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+    const kind = String(material.type || material.kind || material.media_type || material.mediaType || "").toLowerCase();
+    if (
+      kind === "" ||
+      kind === "image" ||
+      kind === "picture" ||
+      kind === "reference_image" ||
+      kind.startsWith("image") ||
+      /\.(png|jpe?g|webp|gif)$/i.test((url.split("?")[0] || ""))
+    ) {
+      uploaded.push(material);
+    }
+  }
+  return uploaded.slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+export function globalAssetsContainAsset(globalAssets: GlobalSceneAssets | undefined, assetId: string): boolean {
+  if (!globalAssets || !assetId) return false;
+  for (const group of ["characters", "scenes", "props"] as const) {
+    const records = globalAssets[group];
+    if (!Array.isArray(records)) continue;
+    if (records.some((record) => stringValue(record.asset_id) === assetId || stringValue(record.id) === assetId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function applyGlobalSceneAssetImageEdit<T extends GlobalSceneAssets, S extends ScenePackageRecord[]>(
+  globalAssets: T,
+  scenePackages: S,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
+): { global_assets: T; scene_packages: S } {
+  return {
+    global_assets: replaceGlobalSceneAssetImage(globalAssets, input) as T,
+    scene_packages: syncScenePackageMentionImageUrls(scenePackages, {
+      assetId: input.assetId,
+      editedImageUrl: input.editedImageUrl,
+    }) as S,
+  };
 }
 
 export function replaceGlobalSceneAssetImage<T extends GlobalSceneAssets>(
@@ -218,14 +276,14 @@ export function sceneGenerationPayloadFromPackage(
 export function sceneIdsForRevision(
   scenes: Array<Pick<ScenePackageRecord, "scene_id" | "scene_index">>,
   feedback: string,
-  flawAnalysis: SceneFlawLike | undefined,
-  useFlawAnalysis: boolean,
+  qualityReview: SceneQualityReviewLike | undefined,
+  useQualityReview: boolean,
 ): Set<string> {
   const ids = new Set<string>();
-  if (useFlawAnalysis) {
-    stringArray(flawAnalysis?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
+  if (useQualityReview) {
+    stringArray(qualityReview?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
     if (ids.size > 0) return ids;
-    stringArray(flawAnalysis?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
+    stringArray(qualityReview?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
     return ids;
   }
   const normalizedFeedback = feedback.trim();
@@ -254,11 +312,11 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
   scenes: T[],
   affectedSceneIds: Set<string>,
   feedback: string,
-  flawAnalysis: SceneFlawLike | undefined,
+  qualityReview: SceneQualityReviewLike | undefined,
   globalAssets?: GlobalSceneAssets,
   baselineScenes?: ScenePackageRecord[],
 ): T[] {
-  const revisionPrompt = flawAnalysis?.revision_prompt?.trim();
+  const revisionPrompt = qualityReview?.revision_prompt?.trim();
   const feedbackText = feedback.trim();
   if (!revisionPrompt && !feedbackText) return scenes;
   const continuityReferences = revisionContinuityReferences(globalAssets);

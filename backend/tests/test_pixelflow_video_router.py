@@ -39,7 +39,8 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/merge/start" in paths
     assert "/agent/flows/video/merge/jobs/{job_id}" in paths
     assert "/agent/flows/video/quality-review" in paths
-    assert "/agent/flows/video/analyze-flaws" in paths
+    assert "/agent/flows/video/quality-review/start" in paths
+    assert "/agent/flows/video/quality-review/jobs/{job_id}" in paths
     assert "/agent/flows/video/analyze-storyboards" in paths
 
 
@@ -1024,6 +1025,64 @@ def test_video_router_starts_merge_job_and_polls_result(monkeypatch):
     assert status["result"]["merged_video_url"] == "https://x/merged-async.mp4"
 
 
+def test_video_router_marks_failed_merge_job_and_preserves_vendor_error(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    class FakeVideoSkill:
+        async def merge_videos(self, **kwargs):
+            assert kwargs["video_urls"] == ["https://x/scene-1.mp4", "https://x/scene-2.mp4"]
+            await asyncio.sleep(0.01)
+            return GenerationResult(
+                ok=False,
+                error="视频合并失败: 下载分镜视频超时",
+                raw={
+                    "endpoint": "/api/video/merge",
+                    "status_code": 500,
+                    "message": "视频合并失败: 下载分镜视频超时",
+                },
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/merge/start",
+            json={
+                "scene_videos": [
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
+                ],
+                "duration": 16,
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/merge/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "failed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "failed"
+    assert status["ok"] is False
+    assert status["error"] == "视频合并失败: 下载分镜视频超时"
+    assert status["message"] == "视频合并失败: 下载分镜视频超时"
+    assert status["result"]["ok"] is False
+    assert status["result"]["message"] == "视频合并失败: 下载分镜视频超时"
+    assert status["result"]["raw"]["status_code"] == 500
+
+
 def test_video_router_returns_single_scene_video_as_merged_video_without_calling_merge(monkeypatch):
     from app.gateway.routers import pixelflow_video
 
@@ -1163,214 +1222,6 @@ def test_video_router_starts_direct_video_job_and_polls_result(monkeypatch):
     assert status["result"]["video_url"] == "https://x/text.mp4"
 
 
-def test_video_router_analyzes_flaws(monkeypatch):
-    from app.gateway.routers import pixelflow_video
-    from pixelflow.skills import VideoQualityReviewResult
-
-    class FakeVideoQualitySkill:
-        async def review_video_quality(self, **kwargs):
-            assert kwargs["merged_video_url"] == "https://x/merged.mp4"
-            assert kwargs["scene_videos"] == [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}]
-            assert kwargs["scene_packages"] == [{"scene_id": "scene-1", "storyline": "白色耳机展示"}]
-            assert kwargs["user_feedback"] == "耳机颜色不一致"
-            assert kwargs["checks"] == ["product_consistency"]
-            return VideoQualityReviewResult(
-                ok=True,
-                task_id="flaw-task-1",
-                summary_markdown="scene-1 存在颜色穿帮",
-                flaw_analysis_markdown="scene-1 存在颜色穿帮",
-                issues=[
-                    {"scene_id": "scene-1", "current": "黑色", "expected": "白色", "category": "product_consistency"},
-                    {"scene_id": "scene-2", "message": "黑屏", "category": "playback_stability"},
-                ],
-                affected_scene_ids=["scene-1"],
-                revision_prompt="保持白色耳机",
-                raw={
-                    "endpoint": "/api/creative/analyze_video_flaws",
-                    "issues": [
-                        {"scene_id": "scene-1", "current": "黑色", "expected": "白色", "category": "product_consistency"},
-                        {"scene_id": "scene-2", "message": "黑屏", "category": "playback_stability"},
-                    ],
-                },
-            )
-
-    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_video.router)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/agent/flows/video/analyze-flaws",
-            json={
-                "merged_video_url": "https://x/merged.mp4",
-                "scene_videos": [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
-                "scene_packages": [{"scene_id": "scene-1", "storyline": "白色耳机展示"}],
-                "user_feedback": "耳机颜色不一致",
-            },
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["ok"] is True
-    assert data["task_id"] == "flaw-task-1"
-    assert data["endpoint"] == "/api/creative/analyze_video_flaws"
-    assert data["affected_scene_ids"] == ["scene-1"]
-    assert data["issues"] == [{"scene_id": "scene-1", "current": "黑色", "expected": "白色", "category": "product_consistency"}]
-    assert "code" not in data["issues"][0]
-    assert "severity" not in data["issues"][0]
-    assert data["passed"] is False
-    assert "check_results" in data
-
-
-def test_video_router_analyze_flaws_respects_explicit_only_scene_feedback(monkeypatch):
-    from app.gateway.routers import pixelflow_video
-    from pixelflow.qc.revision_scope import RevisionScopeResult
-    from pixelflow.skills import VideoQualityReviewResult
-
-    async def fake_resolve_revision_scope(**_kwargs):
-        return RevisionScopeResult(
-            target_scene_ids=["scene-2"],
-            excluded_scene_ids=["scene-1", "scene-3"],
-            action="fix_specific",
-            confidence="high",
-            llm_used=True,
-        )
-
-    class FakeVideoQualitySkill:
-        async def review_video_quality(self, **kwargs):
-            return VideoQualityReviewResult(
-                ok=True,
-                task_id="flaw-task-only-scene-2",
-                summary_markdown="多个分镜可能需要处理",
-                flaw_analysis_markdown="多个分镜可能需要处理",
-                issues=[
-                    {"scene_id": "scene-1", "message": "第1个分镜也被供应商误判", "category": "product_consistency"},
-                    {"scene_id": "scene-2", "message": "第2个分镜出现红色手机", "category": "product_consistency"},
-                    {"scene_id": "scene-3", "message": "第3个分镜也被供应商误判", "category": "product_consistency"},
-                ],
-                affected_scene_ids=["scene-1", "scene-2", "scene-3"],
-                revision_prompt="修复全部分镜",
-                raw={
-                    "endpoint": "/api/creative/analyze_video_flaws",
-                    "issues": [
-                        {"scene_id": "scene-1", "message": "第1个分镜也被供应商误判", "category": "product_consistency"},
-                        {"scene_id": "scene-2", "message": "第2个分镜出现红色手机", "category": "product_consistency"},
-                        {"scene_id": "scene-3", "message": "第3个分镜也被供应商误判", "category": "product_consistency"},
-                    ],
-                },
-            )
-
-    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
-    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_video.router)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/agent/flows/video/analyze-flaws",
-            json={
-                "merged_video_url": "https://x/merged.mp4",
-                "scene_videos": [
-                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
-                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
-                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
-                ],
-                "scene_packages": [
-                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "保温杯开场"},
-                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "保温杯卖点证明"},
-                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "保温杯收口"},
-                ],
-                "user_feedback": "第2个分镜画面出现红色手机，和保温杯产品无关。请只修复第2个分镜。第1个分镜和第3个分镜没有问题，不要重新生成。",
-            },
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["affected_scene_ids"] == ["scene-2"]
-    assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2"]
-    assert "第2个分镜" in data["revision_prompt"]
-    assert "全部" not in data["revision_prompt"]
-
-
-def test_video_router_analyze_flaws_returns_llm_scope_without_changing_legacy_issue_schema(monkeypatch):
-    from app.gateway.routers import pixelflow_video
-    from pixelflow.qc.revision_scope import RevisionScopeResult
-    from pixelflow.skills import VideoQualityReviewResult
-
-    async def fake_resolve_revision_scope(**kwargs):
-        assert kwargs["feedback"] == "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。"
-        return RevisionScopeResult(
-            target_scene_ids=["scene-2", "scene-3"],
-            excluded_scene_ids=["scene-1"],
-            action="fix_specific",
-            confidence="high",
-            llm_used=True,
-        )
-
-    class FakeVideoQualitySkill:
-        async def review_video_quality(self, **kwargs):
-            return VideoQualityReviewResult(
-                ok=True,
-                task_id="flaw-task-scope",
-                summary_markdown="多个分镜可能需要处理",
-                flaw_analysis_markdown="多个分镜可能需要处理",
-                issues=[
-                    {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
-                    {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
-                    {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
-                ],
-                affected_scene_ids=["scene-1", "scene-2", "scene-3"],
-                revision_prompt="修复全部分镜",
-                raw={
-                    "endpoint": "/api/creative/analyze_video_flaws",
-                    "issues": [
-                        {"scene_id": "scene-1", "current": "误判", "expected": "蓝牙耳机", "category": "product_consistency"},
-                        {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"},
-                        {"scene_id": "scene-3", "current": "保温杯", "expected": "蓝牙耳机", "category": "product_consistency"},
-                    ],
-                },
-            )
-
-    monkeypatch.setattr("pixelflow.qc.video_review.resolve_revision_scope", fake_resolve_revision_scope)
-    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_video.router)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/agent/flows/video/analyze-flaws",
-            json={
-                "merged_video_url": "https://x/merged.mp4",
-                "scene_videos": [
-                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
-                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
-                    {"scene_id": "scene-3", "scene_index": 3, "video_url": "https://x/scene-3.mp4"},
-                ],
-                "scene_packages": [
-                    {"scene_id": "scene-1", "scene_index": 1, "storyline": "蓝牙耳机开场"},
-                    {"scene_id": "scene-2", "scene_index": 2, "storyline": "蓝牙耳机降噪证明"},
-                    {"scene_id": "scene-3", "scene_index": 3, "storyline": "蓝牙耳机续航收口"},
-                ],
-                "user_feedback": "第2个分镜和第3个分镜内容错误，第1个分镜没有问题，不要重新生成。",
-            },
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["target_scene_ids"] == ["scene-2", "scene-3"]
-    assert data["excluded_scene_ids"] == ["scene-1"]
-    assert data["affected_scene_ids"] == ["scene-2", "scene-3"]
-    assert [issue["scene_id"] for issue in data["issues"]] == ["scene-2", "scene-3"]
-    assert data["issues"][0] == {"scene_id": "scene-2", "current": "红色手机", "expected": "蓝牙耳机", "category": "product_consistency"}
-    assert "code" not in data["issues"][0]
-    assert "severity" not in data["issues"][0]
-    assert "第2个分镜" in data["revision_prompt"]
-    assert "第3个分镜" in data["revision_prompt"]
-
-
 def test_video_router_reviews_video_quality(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import VideoQualityReviewResult
@@ -1399,7 +1250,8 @@ def test_video_router_reviews_video_quality(monkeypatch):
                 ],
                 affected_scene_ids=["scene-1"],
                 revision_prompt="重生成 scene-1",
-                raw={"endpoint": "/api/creative/analyze_video_flaws"},
+                quality_report_markdown="检测到黑屏",
+                raw={"endpoint": "/api/creative/video_quality_review"},
             )
 
     monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
@@ -1427,9 +1279,117 @@ def test_video_router_reviews_video_quality(monkeypatch):
     assert data["passed"] is False
     assert data["task_id"] == "qc-task-1"
     assert data["summary_markdown"] == "检测到黑屏"
-    assert data["flaw_analysis_markdown"] == "检测到黑屏"
+    assert data["quality_report_markdown"] == "检测到黑屏"
     assert data["affected_scene_ids"] == ["scene-1"]
     assert any(item["item"] == "播放稳定性" and item["status"] == "fail" for item in data["check_results"])
+
+
+def test_video_router_starts_quality_review_job_and_polls_result(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import VideoQualityReviewResult
+
+    class FakeVideoQualitySkill:
+        async def review_video_quality(self, **kwargs):
+            await asyncio.sleep(0.01)
+            assert kwargs["merged_video_url"] == "https://x/merged.mp4"
+            return VideoQualityReviewResult(
+                ok=True,
+                task_id="qc-job-task-1",
+                summary_markdown="QAAgent QC 已完成",
+                quality_report_markdown="QAAgent QC 已完成",
+                raw={"endpoint": "/api/creative/video_quality_review"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/quality-review/start",
+            json={
+                "merged_video_url": "https://x/merged.mp4",
+                "scene_videos": [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["status"] == "running"
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            poll_response = client.get(f"/agent/flows/video/quality-review/jobs/{started['job_id']}")
+            assert poll_response.status_code == 200
+            status = poll_response.json()
+            if status["status"] == "completed":
+                break
+            import time
+
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["task_id"] == "qc-job-task-1"
+
+
+def test_video_router_marks_failed_quality_review_job_and_preserves_result(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import VideoQualityReviewResult
+
+    class FakeVideoQualitySkill:
+        async def review_video_quality(self, **_kwargs):
+            await asyncio.sleep(0.01)
+            return VideoQualityReviewResult(
+                ok=False,
+                task_id="qc-job-task-failed",
+                error="request body exceeds 50 MB: request body too large",
+                summary_markdown="request body exceeds 50 MB: request body too large",
+                quality_report_markdown="request body exceeds 50 MB: request body too large",
+                raw={
+                    "status": "FAILED",
+                    "message": "request body exceeds 50 MB: request body too large",
+                    "details": {"code": "read_request_body_failed"},
+                },
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_quality_review_skill", lambda: FakeVideoQualitySkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/quality-review/start",
+            json={
+                "merged_video_url": "https://x/merged.mp4",
+                "scene_videos": [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            poll_response = client.get(f"/agent/flows/video/quality-review/jobs/{started['job_id']}")
+            assert poll_response.status_code == 200
+            status = poll_response.json()
+            if status["status"] == "failed":
+                break
+            import time
+
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["ok"] is False
+    assert status["status"] == "failed"
+    assert "request body exceeds 50 MB" in status["error"]
+    assert status["result"]["ok"] is False
+    assert status["result"]["task_id"] == "qc-job-task-failed"
+    assert status["result"]["raw"]["details"]["code"] == "read_request_body_failed"
 
 
 def test_video_router_analyzes_single_storyboard_from_extracted_link(monkeypatch):

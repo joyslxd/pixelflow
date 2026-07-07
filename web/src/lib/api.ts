@@ -10,6 +10,8 @@ const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const VIDEO_MERGE_JOB_POLL_INTERVAL_MS = 3000;
 const VIDEO_MERGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const VIDEO_QUALITY_REVIEW_JOB_POLL_INTERVAL_MS = 3000;
+const VIDEO_QUALITY_REVIEW_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
 const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const INTAKE_ANALYZE_JOB_POLL_INTERVAL_MS = 3000;
@@ -516,20 +518,40 @@ export interface GenerateDirectVideoJobStatusResponse {
   message: string;
 }
 
-export interface VideoFlawAnalysisResponse {
+export interface VideoQualityReviewResponse {
   ok: boolean;
   endpoint: string;
   task_id: string | null;
-  flaw_analysis_markdown: string;
+  passed: boolean;
+  score: number;
+  summary_markdown: string;
+  quality_report_markdown: string;
   issues: Array<Record<string, unknown>>;
   affected_scene_ids: string[];
   target_scene_ids?: string[];
   excluded_scene_ids?: string[];
   revision_prompt: string;
+  check_results: Array<Record<string, unknown>>;
   error: string | null;
   message: string;
   quota_insufficient?: boolean;
   raw: Record<string, unknown>;
+}
+
+export interface VideoQualityReviewJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface VideoQualityReviewJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  result: VideoQualityReviewResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface AnalyzeStoryboardsResponse {
@@ -854,6 +876,7 @@ async function pollMergeSceneVideoJob(
     if (!shouldContinue()) return null;
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
     if (status.status === "failed") {
+      if (status.result) return status.result;
       return {
         ok: false,
         endpoint: "/api/video/merge",
@@ -875,6 +898,59 @@ async function pollMergeSceneVideoJob(
     scene_videos: [],
     error: "视频合并轮询超时",
     message: "视频合并轮询超时",
+    raw: {},
+  };
+}
+
+async function pollVideoQualityReviewJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<VideoQualityReviewResponse | null> {
+  const deadline = Date.now() + VIDEO_QUALITY_REVIEW_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<VideoQualityReviewJobStatusResponse>(`${FLOW_BASE}/video/quality-review/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      if (status.result) return status.result;
+      return {
+        ok: false,
+        endpoint: "/api/creative/video_quality_review",
+        task_id: null,
+        passed: false,
+        score: 0,
+        summary_markdown: "",
+        quality_report_markdown: "",
+        issues: [],
+        affected_scene_ids: [],
+        target_scene_ids: [],
+        excluded_scene_ids: [],
+        revision_prompt: "",
+        check_results: [],
+        error: status.error || status.message || "视频质检失败",
+        message: status.error || status.message || "视频质检失败",
+        raw: {},
+      };
+    }
+    await delay(VIDEO_QUALITY_REVIEW_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    endpoint: "/api/creative/video_quality_review",
+    task_id: null,
+    passed: false,
+    score: 0,
+    summary_markdown: "",
+    quality_report_markdown: "",
+    issues: [],
+    affected_scene_ids: [],
+    target_scene_ids: [],
+    excluded_scene_ids: [],
+    revision_prompt: "",
+    check_results: [],
+    error: "视频质检轮询超时",
+    message: "视频质检轮询超时",
     raw: {},
   };
 }
@@ -1252,6 +1328,8 @@ export const api = {
     asset_group: string;
     source_image_url: string;
     prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
     ratio?: string;
     size?: string;
     model?: string | null;
@@ -1263,6 +1341,8 @@ export const api = {
     asset_group: string;
     source_image_url: string;
     prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
     ratio?: string;
     size?: string;
     model?: string | null;
@@ -1402,7 +1482,7 @@ export const api = {
 
   pollMergeSceneVideoJob,
 
-  analyzeVideoFlaws: (body: {
+  reviewVideoQuality: async (body: {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
@@ -1413,7 +1493,46 @@ export const api = {
     selected_direction?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     user_feedback?: string | null;
-  }) => req<VideoFlawAnalysisResponse>(`${FLOW_BASE}/video/analyze-flaws`, { method: "POST", body: JSON.stringify(body) }),
+  }) => {
+    const started = await api.startVideoQualityReviewJob(body);
+    const result = await pollVideoQualityReviewJob(started.job_id);
+    return result ?? {
+      ok: false,
+      endpoint: "/api/creative/video_quality_review",
+      task_id: null,
+      passed: false,
+      score: 0,
+      summary_markdown: "",
+      quality_report_markdown: "",
+      issues: [],
+      affected_scene_ids: [],
+      target_scene_ids: [],
+      excluded_scene_ids: [],
+      revision_prompt: "",
+      check_results: [],
+      error: "视频质检轮询已中断",
+      message: "视频质检轮询已中断",
+      raw: {},
+    };
+  },
+
+  startVideoQualityReviewJob: (body: {
+    merged_video_url: string;
+    scene_videos: SceneVideoPayload[];
+    scene_packages?: Array<Record<string, unknown>>;
+    original_scene_packages?: Array<Record<string, unknown>>;
+    plan?: Record<string, unknown>;
+    form_values?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    selected_direction?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+    user_feedback?: string | null;
+  }) => req<VideoQualityReviewJobStartResponse>(`${FLOW_BASE}/video/quality-review/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getVideoQualityReviewJob: (jobId: string) =>
+    req<VideoQualityReviewJobStatusResponse>(`${FLOW_BASE}/video/quality-review/jobs/${encodeURIComponent(jobId)}`),
+
+  pollVideoQualityReviewJob,
 
   analyzeStoryboards: (body: {
     prompt?: string;

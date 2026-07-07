@@ -26,7 +26,6 @@ from pixelflow.skills.base import (
     MediaLinkExtractionResult,
     PptGenerationResult,
     StoryboardResult,
-    VideoFlawAnalysisResult,
     VideoQualityReviewResult,
 )
 from pixelflow.skills.borgrise import run_generation
@@ -91,28 +90,8 @@ def _to_image_result(raw: dict[str, Any]) -> ImageGenerationResult:
     return ImageGenerationResult(ok=True, images=images, task_id=task_id, raw=raw)
 
 
-def _to_flaw_analysis_result(raw: dict[str, Any]) -> VideoFlawAnalysisResult:
-    """把 ``run_generation`` 的穿帮分析原始 dict 映射成统一结果。"""
-    if not raw or raw.get("error") or raw.get("success") is False:
-        return VideoFlawAnalysisResult(
-            ok=False,
-            task_id=raw.get("task_id") if raw else None,
-            error=(raw.get("message") if raw else "empty response") or "video flaw analysis failed",
-            raw=raw or {},
-        )
-    return VideoFlawAnalysisResult(
-        ok=True,
-        task_id=raw.get("task_id"),
-        flaw_analysis_markdown=str(raw.get("flaw_analysis_markdown") or ""),
-        issues=[issue for issue in raw.get("issues", []) if isinstance(issue, dict)],
-        affected_scene_ids=[str(scene_id) for scene_id in raw.get("affected_scene_ids", []) if scene_id],
-        revision_prompt=str(raw.get("revision_prompt") or ""),
-        raw=raw,
-    )
-
-
 def _to_quality_review_result(raw: dict[str, Any]) -> VideoQualityReviewResult:
-    """把 ``run_generation`` 的综合质检原始 dict 映射成统一结果。"""
+    """把 ``run_generation`` 的 QAAgent QC 原始 dict 映射成统一结果。"""
     if not raw or raw.get("error") or raw.get("success") is False:
         return VideoQualityReviewResult(
             ok=False,
@@ -120,12 +99,12 @@ def _to_quality_review_result(raw: dict[str, Any]) -> VideoQualityReviewResult:
             error=(raw.get("message") if raw else "empty response") or "video quality review failed",
             raw=raw or {},
         )
-    summary = str(raw.get("summary_markdown") or raw.get("flaw_analysis_markdown") or "")
+    summary = str(raw.get("summary_markdown") or raw.get("quality_report_markdown") or "")
     return VideoQualityReviewResult(
         ok=True,
         task_id=raw.get("task_id"),
         summary_markdown=summary,
-        flaw_analysis_markdown=str(raw.get("flaw_analysis_markdown") or summary),
+        quality_report_markdown=str(raw.get("quality_report_markdown") or summary),
         issues=[issue for issue in raw.get("issues", []) if isinstance(issue, dict)],
         affected_scene_ids=[str(scene_id) for scene_id in raw.get("affected_scene_ids", []) if scene_id],
         revision_prompt=str(raw.get("revision_prompt") or ""),
@@ -307,22 +286,12 @@ async def _run_image(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> ImageG
     return _to_image_result(raw)
 
 
-async def _run_flaw_analysis(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> VideoFlawAnalysisResult:
-    """在线程中运行阻塞穿帮分析调用，并归一化失败。"""
-    try:
-        raw = await asyncio.to_thread(fn, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
-        logger.exception("borgrise video flaw analysis %s failed", getattr(fn, "__name__", "call"))
-        return VideoFlawAnalysisResult(ok=False, error=str(exc))
-    return _to_flaw_analysis_result(raw)
-
-
 async def _run_quality_review(fn: Callable[..., dict[str, Any]], **kwargs: Any) -> VideoQualityReviewResult:
-    """在线程中运行阻塞综合质检调用，并归一化失败。"""
+    """在线程中运行阻塞 QAAgent QC 调用，并归一化失败。"""
     try:
         raw = await asyncio.to_thread(fn, **kwargs)
     except Exception as exc:  # noqa: BLE001 - boundary: normalize all vendor errors
-        logger.exception("borgrise video quality review %s failed", getattr(fn, "__name__", "call"))
+        logger.exception("borgrise video QC review %s failed", getattr(fn, "__name__", "call"))
         return VideoQualityReviewResult(ok=False, error=str(exc))
     return _to_quality_review_result(raw)
 
@@ -617,26 +586,6 @@ class BorgriseSkill:
             pieces.extend(_collect_material_strings(material))
         return await _run_media_links(run_generation.extract_media_links, text="\n".join(piece for piece in pieces if piece))
 
-    async def analyze_video_flaws(
-        self,
-        merged_video_url: str,
-        scene_videos: list[dict[str, Any]],
-        scene_packages: list[dict[str, Any]] | None = None,
-        brief: dict[str, Any] | None = None,
-        materials: list[dict[str, Any]] | None = None,
-        user_feedback: str | None = None,
-    ) -> VideoFlawAnalysisResult:
-        """分析合并视频和场景视频中的穿帮问题。"""
-        return await _run_flaw_analysis(
-            run_generation.analyze_video_flaws,
-            merged_video_url=merged_video_url,
-            scene_videos=scene_videos,
-            scene_packages=scene_packages or [],
-            brief=brief or {},
-            materials=materials or [],
-            user_feedback=user_feedback,
-        )
-
     async def review_video_quality(
         self,
         merged_video_url: str,
@@ -650,9 +599,9 @@ class BorgriseSkill:
         ratio: str | None = None,
         size: str | None = None,
     ) -> VideoQualityReviewResult:
-        """分析合并视频和场景视频中的综合质检问题。"""
+        """调用 content-app QAAgent QC 分析合并视频和场景视频。"""
         return await _run_quality_review(
-            run_generation.analyze_video_flaws,
+            run_generation.review_video_quality,
             merged_video_url=merged_video_url,
             scene_videos=scene_videos,
             scene_packages=scene_packages or [],

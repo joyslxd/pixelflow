@@ -31,6 +31,21 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _to_datetime(value: datetime | str | None) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _dt(value: datetime | str | None) -> str:
     return coerce_iso(value)
 
@@ -46,10 +61,10 @@ def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
     if not cursor or "|" not in cursor:
         return None
     raw_created_at, conversation_id = cursor.rsplit("|", 1)
-    try:
-        return datetime.fromisoformat(raw_created_at), conversation_id
-    except ValueError:
+    created_at = _to_datetime(raw_created_at)
+    if created_at is None:
         return None
+    return created_at, conversation_id
 
 
 def _conversation_cursor(record: PixelFlowConversationRecord) -> str:
@@ -468,6 +483,8 @@ class SQLPixelFlowTaskStore:
 
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord:
         async with self._sf() as session:
+            created_at = _to_datetime(record.created_at) or _now()
+            updated_at = _to_datetime(record.updated_at) or created_at
             row = PixelFlowConversationRow(
                 conversation_id=record.conversation_id,
                 user_id=record.user_id,
@@ -475,6 +492,8 @@ class SQLPixelFlowTaskStore:
                 current_task_id=record.current_task_id,
                 last_phase=record.last_phase,
                 context_json=_conversation_context(record.context),
+                created_at=created_at,
+                updated_at=updated_at,
             )
             session.add(row)
             await session.commit()

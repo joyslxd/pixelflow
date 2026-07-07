@@ -65,6 +65,7 @@ SAFE_MAX_LONG_VIDEO_DURATION = 30
 # 轮询配置
 POLL_INTERVAL = 5  # 秒
 VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # 视频生成默认最多等 1 小时。
+VIDEO_CREATE_REQUEST_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_CREATE_REQUEST_TIMEOUT", "120"))  # 创建视频任务在高并发下可能超过普通 30 秒。
 VIDEO_MERGE_REQUEST_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT", "3600"))  # 视频合并是同步接口，默认最多等 1 小时。
 IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # 图片生成默认最多等 10 分钟。
 VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "900"))  # 视频分析/拆解默认最多等 15 分钟。
@@ -352,13 +353,15 @@ def _send_request(url: str, body: bytes | None, headers: dict[str, str], method:
         return {
             "error": True,
             "status_code": e.code,
-            "message": error_body
+            "message": _extract_error_message(parsed, error_body),
+            "details": parsed or error_body,
         }
 
 
 def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
                   custom_headers: dict[str, str] | None = None,
-                  _retry_on_token_expired: bool = True) -> dict:
+                  _retry_on_token_expired: bool = True,
+                  request_timeout: int = 30) -> dict:
     """``_make_request_impl`` 的薄包装：只加内部调试用的 trace 记录。
 
     trace 记录只在当前请求带了 conversation_id 上下文时才生效（见
@@ -370,6 +373,7 @@ def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
     result = _make_request_impl(
         endpoint, data, method=method, custom_headers=custom_headers,
         _retry_on_token_expired=_retry_on_token_expired,
+        request_timeout=request_timeout,
     )
     record_trace_event_background(
         "vendor_call",
@@ -1196,7 +1200,7 @@ def image_to_video(image_url: str, prompt: str | None = None,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/image-to-video", request_data, custom_headers=headers)
+    result = make_request("/video/image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1274,7 +1278,7 @@ def two_image_to_video(first_frame_image_url: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/two-image-to-video", request_data, custom_headers=headers)
+    result = make_request("/video/two-image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1348,7 +1352,7 @@ def text_to_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/text-to-video", request_data, custom_headers=headers)
+    result = make_request("/video/text-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1436,7 +1440,7 @@ def reference_mode_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/reference-mode-video", request_data, custom_headers=headers)
+    result = make_request("/video/reference-mode-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1514,7 +1518,7 @@ def edit_video(ref_video: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/edit-video", request_data, custom_headers=headers)
+    result = make_request("/video/edit-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1699,7 +1703,7 @@ def extend_video(video_url: str, duration: int = 10,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/extend-video", request_data, custom_headers=headers)
+    result = make_request("/video/extend-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1896,7 +1900,7 @@ def batch_decompose_video_to_storyboard(
     }
 
 
-def analyze_video_flaws(
+def review_video_quality(
         merged_video_url: str,
         scene_videos: list[dict],
         scene_packages: list[dict] | None = None,
@@ -1910,7 +1914,7 @@ def analyze_video_flaws(
         generation_dialog_id: int | None = None,
         parent_generation_dialog_id: int | None = None,
 ) -> dict:
-    """调用 content-app 视频穿帮分析接口并轮询任务结果。"""
+    """调用 content-app 视频 QAAgent QC 质检接口并轮询任务结果。"""
     if not merged_video_url:
         return {"error": True, "message": "merged_video_url is required"}
     if not scene_videos:
@@ -1938,7 +1942,7 @@ def analyze_video_flaws(
         request_data["parentGenerationDialogId"] = parent_generation_dialog_id
 
     headers = get_headers(model="gemini-3-flash-preview", bill_type=1, duration=1, size="all")
-    result = make_request("/creative/analyze_video_flaws", request_data, custom_headers=headers)
+    result = make_request("/creative/video_quality_review", request_data, custom_headers=headers)
     if result.get("error"):
         return result
 
@@ -1959,13 +1963,29 @@ def analyze_video_flaws(
         "success": bool(poll_result.get("success", result.get("success", True))),
         "task_id": task_id,
         "status": final_dict.get("status", poll_result.get("status", "COMPLETED")),
-        "endpoint": "/api/creative/analyze_video_flaws",
-        "flaw_analysis_markdown": (
-            result_data.get("flaw_analysis_markdown")
-            or result_data.get("flawAnalysisMarkdown")
-            or final_dict.get("flaw_analysis_markdown", "")
+        "endpoint": "/api/creative/video_quality_review",
+        "summary_markdown": (
+            result_data.get("summary_markdown")
+            or result_data.get("summaryMarkdown")
+            or result_data.get("quality_report_markdown")
+            or result_data.get("qualityReportMarkdown")
+            or final_dict.get("summary_markdown", "")
+        ),
+        "quality_report_markdown": (
+            result_data.get("quality_report_markdown")
+            or result_data.get("qualityReportMarkdown")
+            or result_data.get("summary_markdown")
+            or result_data.get("summaryMarkdown")
+            or final_dict.get("quality_report_markdown", "")
         ),
         "issues": result_data.get("issues") or final_dict.get("issues", []),
+        "check_results": (
+            result_data.get("check_results")
+            or result_data.get("checkResults")
+            or final_dict.get("check_results", [])
+        ),
+        "passed": result_data.get("passed", final_dict.get("passed")),
+        "score": result_data.get("score", final_dict.get("score")),
         "affected_scene_ids": (
             result_data.get("affected_scene_ids")
             or result_data.get("affectedSceneIds")

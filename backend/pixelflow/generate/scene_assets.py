@@ -42,6 +42,32 @@ class ImageSkill(Protocol):
     ) -> Any: ...
 
 
+def collect_uploaded_reference_image_urls(materials: list[dict[str, Any]] | None) -> list[str]:
+    """从用户上传 materials 收集参考图 URL，排除 scene_global_asset 引用。"""
+    urls: list[str] = []
+    for material in filter_image_materials(materials or []):
+        if _is_generated_scene_asset(material):
+            continue
+        url = str(material.get("url") or "").strip()
+        if _is_reference_image_url(url) and url not in urls:
+            urls.append(url)
+    return urls[:MAX_REFERENCE_IMAGES]
+
+
+def global_asset_edit_ratio(asset_group: str) -> str:
+    if asset_group == "scenes":
+        return "9:16"
+    return "1:1"
+
+
+def enhance_global_asset_edit_prompt(prompt: str, asset_group: str) -> str:
+    if asset_group == "scenes":
+        return enhance_scene_reference_prompt(prompt)
+    if asset_group == "props":
+        return enhance_prop_reference_prompt(prompt)
+    return prompt.strip()
+
+
 def collect_prop_reference_image_urls(
     materials: list[dict[str, Any]] | None,
     scene_packages: list[dict[str, Any]] | None,

@@ -17,8 +17,6 @@ from pixelflow.skills.base import (
     StoryboardResult,
     VideoDecomposeSkill,
     VideoEditSkill,
-    VideoFlawAnalysisResult,
-    VideoFlawAnalysisSkill,
     VideoGenerationSkill,
     VideoQualityReviewResult,
     VideoQualityReviewSkill,
@@ -27,7 +25,6 @@ from pixelflow.skills.base import (
     get_ppt_skill,
     get_video_decompose_skill,
     get_video_edit_skill,
-    get_video_flaw_analysis_skill,
     get_video_quality_review_skill,
     get_video_skill,
 )
@@ -45,8 +42,6 @@ __all__ = [
     "StoryboardResult",
     "VideoDecomposeSkill",
     "VideoEditSkill",
-    "VideoFlawAnalysisResult",
-    "VideoFlawAnalysisSkill",
     "VideoGenerationSkill",
     "VideoQualityReviewResult",
     "VideoQualityReviewSkill",
@@ -55,7 +50,6 @@ __all__ = [
     "get_ppt_skill",
     "get_video_decompose_skill",
     "get_video_edit_skill",
-    "get_video_flaw_analysis_skill",
     "get_video_quality_review_skill",
     "get_video_skill",
 ]
