@@ -273,7 +273,7 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 | category | 记录内容 | 典型 memory_type |
 | --- | --- | --- |
 | `preference` | 用户明确偏好、默认参数、负向规则、Brief 修订反馈 | `preference` |
-| `brand` | 采集阶段识别出的产品/品牌主体、创作目标、行业上下文 | `fact` |
+| `brand` | 采集阶段识别出的产品/品牌主体、创作目标、行业上下文 | `brand` |
 | `skill` | 后续可人工或自动沉淀的 Skill 使用经验 | `skill` |
 | `experience` | Agent 阶段完成/失败摘要、选择的接口、失败类型、生成数量 | `experience` |
 
@@ -306,6 +306,8 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 约束：
 
 - PowerMem 失败开放：不可用、超时或 5xx 时记录 warning，主流程继续。
+- `powermem_timeout_seconds` 只用于 search/health 同步读请求，默认 3 秒；record 写入走 `powermem_record_timeout_seconds`，默认 30 秒。
+- 网关侧 `record_power_mem()` / `record_power_mem_background()` 默认 `infer=False`，包括用户偏好、品牌上下文、阶段经验和 Skill 经验。若后续某个场景确实需要 PowerMem 服务端 LLM 抽取，必须显式传 `infer=True`，并把 record timeout 调整到覆盖抽取耗时。
 - 不写 content-app `Authorization`、用户密码、供应商密钥、完整异常堆栈、本地部署目录。
 - PowerMem 的 `agent_id` 固定为 `pixelflow`，具体来源 Agent 放到 metadata 的 `source_agent`，让用户长期偏好可以跨 Agent 共享。
 - `pixelflow_user_preferences` 仍是结构化业务偏好表；PowerMem 负责语义检索和跨流程经验复用，不替代业务 Store。
@@ -634,7 +636,8 @@ flowchart TD
 | `pixelflow.semantic_memory_provider=powermem` | 当前语义记忆 Provider |
 | `pixelflow.powermem_base_url` | PowerMem HTTP 地址；dev 为 `https://test-video.borgrise.com/powermem`，prod 为 `http://127.0.0.1:18848` |
 | `pixelflow.powermem_api_key` | 调用 PowerMem 的 `X-API-Key`，必须与 PowerMem 服务端 API key 一致 |
-| `pixelflow.powermem_timeout_seconds=3` | 单次 PowerMem HTTP 超时 |
+| `pixelflow.powermem_timeout_seconds=3` | search/health 同步读请求超时 |
+| `pixelflow.powermem_record_timeout_seconds=30` | record 写入专用超时；写入由后台任务执行，不阻塞主流程 |
 | `pixelflow.powermem_search_limit=5` | 默认检索记忆条数 |
 | `pixelflow.powermem_write_enabled=true` | 是否允许写入 PowerMem，排查时可临时关闭只读 |
 | `pixelflow.powermem_fail_open=true` | PowerMem 不可用时主流程继续 |

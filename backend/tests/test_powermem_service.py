@@ -169,6 +169,7 @@ def test_load_power_mem_config_from_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PIXELFLOW_POWERMEM_BASE_URL", "https://test-video.borgrise.com/powermem")
     monkeypatch.setenv("PIXELFLOW_POWERMEM_API_KEY", "secret")
     monkeypatch.setenv("PIXELFLOW_POWERMEM_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS", "42")
     monkeypatch.setenv("PIXELFLOW_POWERMEM_SEARCH_LIMIT", "7")
     monkeypatch.setenv("PIXELFLOW_POWERMEM_WRITE_ENABLED", "false")
     monkeypatch.setenv("PIXELFLOW_POWERMEM_FAIL_OPEN", "false")
@@ -180,6 +181,7 @@ def test_load_power_mem_config_from_env(monkeypatch: pytest.MonkeyPatch):
     assert config.base_url == "https://test-video.borgrise.com/powermem"
     assert config.api_key == "secret"
     assert config.timeout_seconds == 5
+    assert config.record_timeout_seconds == 42
     assert config.search_limit == 7
     assert config.write_enabled is False
     assert config.fail_open is False
