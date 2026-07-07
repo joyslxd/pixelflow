@@ -74,6 +74,8 @@ borgrise:
   skip_ssl_verify: false
   # 视频生成轮询超时时间，单位秒；视频生成可能较慢，默认最多等 1 小时。
   video_poll_timeout: 3600
+  # 视频合并接口是 content-app 同步合并并上传，长视频合并可能超过普通 HTTP 读超时，默认最多等 1 小时。
+  video_merge_request_timeout: 3600
   # 图片生成轮询超时时间，单位秒；图片通常比视频快，默认最多等 10 分钟。
   image_poll_timeout: 600
   # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 15 分钟。

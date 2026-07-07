@@ -177,7 +177,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
 - 镜头描述 `shot_description.text` 是一整段文本，时间范围统一使用秒级表达，例如 `0-10秒`、`10-15秒`；后端会归一化 LLM 返回的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
 - 场景视频 job 内部并行调用 content-app 视频接口，当前最大并发数为 100。并行只是提升同一批分镜的生成效率，整体阶段仍必须等所有分镜都成功、失败或额度暂停后，才进入汇总、重试或合并判断。
-- 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。
+- 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。
 - 单个分镜出现普通异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
 - 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。该流程走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`，成功后直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片编辑 prompt 处理，不重新走 intake。
@@ -477,15 +477,18 @@ sequenceDiagram
   VA->>BG: "按片段调用视频接口"
   FE->>VA: "轮询 jobs/{job_id}"
   VA-->>FE: "scene_videos"
-  FE->>VA: "merge"
+  FE->>VA: "merge/start"
+  FE->>FE: "保存 pendingVideoJob(kind=video_merge)"
   VA->>BG: "按 scene_index 合并"
   BG-->>VA: "merged_video_url"
+  FE->>VA: "轮询 merge/jobs/{job_id}"
   VA-->>FE: "合并视频 + 场景视频"
   FE->>FE: "回填分镜视频到原场景包卡片"
   U->>FE: "在原场景包点击查看分镜并修改部分分镜"
   FE->>VA: "仅 dirty scenes generate-scenes/start"
   VA-->>FE: "新分镜视频 + 复用旧分镜视频"
-  FE->>VA: "merge"
+  FE->>VA: "merge/start"
+  FE->>VA: "轮询 merge/jobs/{job_id}"
   VA-->>FE: "新版合并视频"
 ```
 
@@ -507,7 +510,7 @@ sequenceDiagram
 - 场景视频和合并视频生成完成后，前端把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。
 - 用户点击原场景包卡片里的“查看分镜”复用 `StoryboardPanel`，但右侧镜头预览优先播放 `generatedSceneVideos.scene_videos` 中对应分镜视频；没有视频时才展示参考图。
 - 用户修改故事线、镜头描述、旁白或 @参考图时，前端把对应 `scene_id` 写入 `videoScenePackageEditedSceneIds`。
-- 再次点击“确认并生成视频”时，只把 `videoScenePackageEditedSceneIds` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`；生成完成后用新分镜视频覆盖旧分镜视频，未修改分镜直接复用旧视频，再调用 `/agent/flows/video/merge` 生成新版最终视频，并再次回填原场景包卡片。
+- 再次点击“确认并生成视频”时，只把 `videoScenePackageEditedSceneIds` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`；生成完成后用新分镜视频覆盖旧分镜视频，未修改分镜直接复用旧视频，再调用 `/agent/flows/video/merge/start` 生成新版最终视频，并通过 `/agent/flows/video/merge/jobs/{job_id}` 恢复轮询，再次回填原场景包卡片。
 - 如果上一批场景视频存在 `failed_scenes`，再次点击“确认并生成视频”时只提交失败或额度暂停分镜；生成成功的旧分镜视频继续复用，失败分镜补齐后再按 `scene_index` 合并完整视频。
 
 ## 9. 视频修改循环
@@ -637,6 +640,7 @@ flowchart TD
 | `pixelflow.powermem_fail_open=true` | PowerMem 不可用时主流程继续 |
 | `borgrise.base_url` | content-app/Borgrise API 根地址 |
 | `borgrise.video_poll_timeout=3600` | 视频轮询默认 1 小时 |
+| `borgrise.video_merge_request_timeout=3600` | 视频合并同步接口读等待默认 1 小时 |
 | `borgrise.image_poll_timeout=600` | 图片轮询默认 10 分钟 |
 | `borgrise.video_analysis_poll_timeout=900` | 视频分析轮询默认 15 分钟 |
 | `BORGRISE_PPT_POLL_TIMEOUT=7200` | SmartPPT 每一步轮询默认 2 小时 |

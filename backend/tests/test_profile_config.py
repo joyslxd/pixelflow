@@ -20,6 +20,7 @@ _MAPPED_ENV_KEYS = {
     "BORGRISE_SKIP_SSL_VERIFY",
     "BORGRISE_VERIFY_TIMEOUT_SECONDS",
     "BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT",
+    "BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT",
     "BORGRISE_VIDEO_POLL_TIMEOUT",
     "DEER_FLOW_CONFIG_PATH",
     "GATEWAY_CORS_ORIGINS",
@@ -102,6 +103,7 @@ borgrise:
   project_id: "42"
   skip_ssl_verify: true
   video_poll_timeout: 3600
+  video_merge_request_timeout: 3600
   image_poll_timeout: 600
   video_analysis_poll_timeout: 900
   max_retries: 7
@@ -156,6 +158,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert "BORGRISE_PROJECT_ID" not in os.environ
     assert os.environ["BORGRISE_SKIP_SSL_VERIFY"] == "true"
     assert os.environ["BORGRISE_VIDEO_POLL_TIMEOUT"] == "3600"
+    assert os.environ["BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT"] == "3600"
     assert os.environ["BORGRISE_IMAGE_POLL_TIMEOUT"] == "600"
     assert os.environ["BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT"] == "900"
     assert "BORGRISE_POLL_TIMEOUT" not in os.environ

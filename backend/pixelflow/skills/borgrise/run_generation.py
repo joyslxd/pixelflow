@@ -65,6 +65,7 @@ SAFE_MAX_LONG_VIDEO_DURATION = 30
 # 轮询配置
 POLL_INTERVAL = 5  # 秒
 VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # 视频生成默认最多等 1 小时。
+VIDEO_MERGE_REQUEST_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT", "3600"))  # 视频合并是同步接口，默认最多等 1 小时。
 IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # 图片生成默认最多等 10 分钟。
 VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "900"))  # 视频分析/拆解默认最多等 15 分钟。
 PPT_POLL_TIMEOUT = int(os.environ.get("BORGRISE_PPT_POLL_TIMEOUT", "7200"))  # 智能 PPT 默认最多等 2 小时。
@@ -335,10 +336,10 @@ def _apply_auth_header(headers: dict[str, str]) -> dict[str, str]:
     return updated
 
 
-def _send_request(url: str, body: bytes | None, headers: dict[str, str], method: str) -> dict:
+def _send_request(url: str, body: bytes | None, headers: dict[str, str], method: str, *, timeout: int = 30) -> dict:
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
             result = json.loads(response.read().decode("utf-8"))
             if is_quota_insufficient(result):
                 return _quota_error_response(result, status_code=getattr(response, "status", None))
@@ -357,7 +358,8 @@ def _send_request(url: str, body: bytes | None, headers: dict[str, str], method:
 
 def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
                   custom_headers: dict[str, str] | None = None,
-                  _retry_on_token_expired: bool = True) -> dict:
+                  _retry_on_token_expired: bool = True,
+                  request_timeout: int = 30) -> dict:
     """向 Borgrise API 发起 HTTP 请求，并对临时错误重试。
 
     会重试：
@@ -387,7 +389,7 @@ def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
     last_error: dict | None = None
     for attempt in range(MAX_REQUEST_RETRIES):
         try:
-            result = _send_request(url, body, headers, method)
+            result = _send_request(url, body, headers, method, timeout=request_timeout)
             if _retry_on_token_expired and _looks_token_expired(result):
                 return {"error": True, "status_code": 401, "message": "content-app Authorization 已过期，请重新登录后重试", "details": result}
             result = _normalize_quota_error(result)
@@ -1726,7 +1728,12 @@ def merge_videos(video_urls: list[str],
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/merge", request_data, custom_headers=headers)
+    result = make_request(
+        "/video/merge",
+        request_data,
+        custom_headers=headers,
+        request_timeout=VIDEO_MERGE_REQUEST_TIMEOUT,
+    )
 
     if result.get("error"):
         return result

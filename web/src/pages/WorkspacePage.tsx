@@ -17,6 +17,7 @@ import {
   type ImageModelParamConfig,
   type ImagePrepareResponse,
   type IntakeIntentResponse,
+  type MergeSceneVideosResponse,
   type PlanMarkdownResponse,
   type PptFileResult,
   type PptImagesResult,
@@ -28,6 +29,7 @@ import {
   type PrepareScenePackagesJobResult,
   type PrepareScenePackagesResponse,
   type SceneGenerationPayload,
+  type SceneVideoPayload,
   type TaskEvent,
 } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
@@ -554,7 +556,7 @@ interface PendingScenePackageJob {
   artifact: ChatArtifact;
 }
 
-type PendingVideoJobKind = "scene_generation" | "scene_regeneration" | "scene_failed_retry";
+type PendingVideoJobKind = "scene_generation" | "scene_regeneration" | "scene_failed_retry" | "video_merge";
 
 interface SceneVideosJobRequest {
   scenes: SceneGenerationPayload[];
@@ -564,16 +566,23 @@ interface SceneVideosJobRequest {
   sound?: string;
 }
 
+interface MergeSceneVideosJobRequest {
+  scene_videos: SceneVideoPayload[];
+  duration?: number;
+  size?: string;
+}
+
 interface PendingVideoJob {
   job_id: string;
   conversation_id: string;
   source_message_id: string;
   kind: PendingVideoJobKind;
   started_at: string;
-  request: SceneVideosJobRequest;
+  request: SceneVideosJobRequest | MergeSceneVideosJobRequest;
   artifact: ChatArtifact;
   affected_scene_ids?: string[];
   use_flaw_analysis?: boolean;
+  merge_purpose?: "generation" | "regeneration";
 }
 
 type PendingPptJobKind =
@@ -2835,6 +2844,169 @@ export function WorkspacePage() {
     sound: "on",
   });
 
+  const mergeRequestFromSceneVideos = (
+    sceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"],
+    targetDurationMs?: number,
+  ): MergeSceneVideosJobRequest => ({
+    scene_videos: sceneVideos.map((scene) => ({
+      scene_id: scene.scene_id,
+      scene_index: scene.scene_index,
+      video_url: scene.video_url,
+    })),
+    duration: Math.max(1, Math.ceil((targetDurationMs || 1000) / 1000)),
+    size: "1080p",
+  });
+
+  const handleCompletedVideoMergeJob = async (
+    pendingVideoJob: PendingVideoJob,
+    mergedVideo: MergeSceneVideosResponse,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingVideoJob.conversation_id;
+    const artifact = pendingVideoJob.artifact;
+    const videoScenePackages = artifact.videoScenePackages;
+    const generatedSceneVideos = artifact.generatedSceneVideos;
+    if (!videoScenePackages || !generatedSceneVideos) return;
+    const originalVideoScenePackages =
+      artifact.originalVideoScenePackages ||
+      latestOriginalVideoScenePackagesForConversation(messagesRef.current, targetConversationId) ||
+      videoScenePackages;
+    const isRegeneration = pendingVideoJob.merge_purpose === "regeneration";
+    const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
+    const videoResultMessage = pushArtifact(
+      mergedVideo.ok
+        ? isRegeneration
+          ? "视频已按修改意见重新生成，请查看新版本。"
+          : "视频生成完成，请查看合并视频和场景视频。"
+        : isRegeneration
+          ? "视频重新合并失败，请查看错误信息。"
+          : "视频合并失败，请查看错误信息。",
+      {
+        type: "video_result",
+        title: isRegeneration ? "视频修改结果" : "视频生成结果",
+        description: mergedVideo.ok
+          ? isRegeneration
+            ? "已复用未受影响场景，并合并新版本视频。"
+            : "合并视频和每个场景视频已返回。"
+          : mergeQuotaInsufficient
+            ? quotaMessage(mergedVideo.message || "视频合并额度不足。")
+            : mergedVideo.message,
+        actionLabel: "查看",
+        videoScenePackages,
+        originalVideoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+        videoScenePackageEditedSceneIds: [],
+        intent: "video",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+      },
+      targetConversationId,
+    );
+    if (mergedVideo.ok) {
+      updateOriginalScenePackageMessageWithVideoResult(
+        pendingVideoJob.source_message_id,
+        targetConversationId,
+        videoScenePackages,
+        generatedSceneVideos,
+        mergedVideo,
+      );
+    }
+    if (!mergedVideo.ok) releaseArtifactAction(processedKey);
+    if (mergedVideo.ok) {
+      window.setTimeout(() => {
+        void handleAcceptVideoResult(videoResultMessage, true);
+      }, AUTO_CONFIRM_TIMEOUT_MS);
+    }
+    if (mergedVideo.merged_video_url) {
+      const results = videoResultsFromGeneratedScenes(
+        mergedVideo.merged_video_url,
+        mergedVideo.task_id,
+        generatedSceneVideos,
+        videoScenePackages.target_duration_ms,
+        mergedVideo.ok,
+      );
+      setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results, selectedVideo: null }));
+      setCanvasOpenForConversation(targetConversationId, true);
+    }
+    await clearPendingVideoJob(
+      targetConversationId,
+      mergedVideo.ok
+        ? isRegeneration
+          ? "video_regenerated"
+          : "video_generated"
+        : mergeQuotaInsufficient
+          ? "video_merge_quota_paused"
+          : isRegeneration
+            ? "video_regeneration_merge_failed"
+            : "video_merge_failed",
+      {
+        video_revision_feedback: artifact.videoRevisionFeedback,
+        video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
+        affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
+        global_assets: videoScenePackages.global_assets,
+        intake_context: artifact.intakeContext,
+        scene_packages: videoScenePackages.scene_packages,
+        generated_scene_videos: generatedSceneVideos.scene_videos,
+        merged_video: mergedVideo,
+      },
+    ).catch(() => {});
+  };
+
+  const startAndResumeVideoMergeJob = async ({
+    targetConversationId,
+    sourceMessageId,
+    artifact,
+    videoScenePackages,
+    generatedSceneVideos,
+    originalVideoScenePackages,
+    processedKey,
+    mergePurpose = "generation",
+    affectedSceneIds = [],
+  }: {
+    targetConversationId: string;
+    sourceMessageId: string;
+    artifact: ChatArtifact;
+    videoScenePackages: PrepareScenePackagesResponse;
+    generatedSceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>;
+    originalVideoScenePackages?: PrepareScenePackagesResponse;
+    processedKey: string;
+    mergePurpose?: "generation" | "regeneration";
+    affectedSceneIds?: string[];
+  }) => {
+    const request = mergeRequestFromSceneVideos(generatedSceneVideos.scene_videos, videoScenePackages.target_duration_ms);
+    const started = await api.startMergeSceneVideosJob(request);
+    const pendingVideoJob: PendingVideoJob = {
+      job_id: started.job_id,
+      conversation_id: targetConversationId,
+      source_message_id: sourceMessageId,
+      kind: "video_merge",
+      started_at: new Date().toISOString(),
+      request,
+      artifact: {
+        ...artifact,
+        videoScenePackages,
+        originalVideoScenePackages,
+        generatedSceneVideos,
+        videoScenePackageEditedSceneIds: [],
+      },
+      affected_scene_ids: affectedSceneIds,
+      merge_purpose: mergePurpose,
+    };
+    await persistPendingVideoJob(pendingVideoJob, targetConversationId, mergePurpose === "regeneration" ? "video_regeneration_merge_running" : "video_merge_running", {
+      affected_scene_ids: affectedSceneIds,
+      global_assets: videoScenePackages.global_assets,
+      intake_context: artifact.intakeContext,
+      scene_packages: videoScenePackages.scene_packages,
+      generated_scene_videos: generatedSceneVideos.scene_videos,
+      merged_video: artifact.mergedVideo,
+    });
+    await resumePendingVideoJob(pendingVideoJob, processedKey);
+  };
+
   const handleCompletedSceneGenerationJob = async (
     pendingVideoJob: PendingVideoJob,
     generatedSceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>,
@@ -2875,66 +3047,16 @@ export function WorkspacePage() {
     }
 
     pushAssistant("场景视频已生成，正在按场景顺序合并完整视频…", targetConversationId);
-    const duration = Math.max(1, Math.ceil(videoScenePackages.target_duration_ms / 1000));
-    const mergedVideo = await api.mergeSceneVideos({
-      scene_videos: generatedSceneVideos.scene_videos.map((scene) => ({
-        scene_id: scene.scene_id,
-        scene_index: scene.scene_index,
-        video_url: scene.video_url,
-      })),
-      duration,
-      size: "1080p",
-    });
-    const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-    const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频生成完成，请查看合并视频和场景视频。" : "视频合并失败，请查看错误信息。", {
-      type: "video_result",
-      title: "视频生成结果",
-      description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
-      actionLabel: "查看",
+    await startAndResumeVideoMergeJob({
+      targetConversationId,
+      sourceMessageId: pendingVideoJob.source_message_id,
+      artifact,
       videoScenePackages,
-      originalVideoScenePackages,
       generatedSceneVideos,
-      mergedVideo,
-      intent: "video",
-      formValues: artifact.formValues,
-      intakeContext: artifact.intakeContext,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-    }, targetConversationId);
-    if (mergedVideo.ok) {
-      updateOriginalScenePackageMessageWithVideoResult(
-        pendingVideoJob.source_message_id,
-        targetConversationId,
-        videoScenePackages,
-        generatedSceneVideos,
-        mergedVideo,
-      );
-    }
-    if (!mergedVideo.ok) releaseArtifactAction(processedKey);
-    if (mergedVideo.ok) {
-      window.setTimeout(() => {
-        void handleAcceptVideoResult(videoResultMessage, true);
-      }, AUTO_CONFIRM_TIMEOUT_MS);
-    }
-    if (mergedVideo.merged_video_url) {
-      const results = videoResultsFromGeneratedScenes(
-        mergedVideo.merged_video_url,
-        mergedVideo.task_id,
-        generatedSceneVideos,
-        videoScenePackages.target_duration_ms,
-        mergedVideo.ok,
-      );
-      setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results, selectedVideo: null }));
-      setCanvasOpenForConversation(targetConversationId, true);
-    }
-    await clearPendingVideoJob(targetConversationId, mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed", {
-      global_assets: videoScenePackages.global_assets,
-      intake_context: artifact.intakeContext,
-      scene_packages: videoScenePackages.scene_packages,
-      generated_scene_videos: generatedSceneVideos.scene_videos,
-      merged_video: mergedVideo,
-    }).catch(() => {});
+      originalVideoScenePackages,
+      processedKey,
+      mergePurpose: "generation",
+    });
   };
 
   const handleCompletedSceneRegenerationJob = async (
@@ -2988,78 +3110,28 @@ export function WorkspacePage() {
         sceneVideoForPackageScene(scene, previousGeneratedSceneVideos.scene_videos),
       )
       .filter((scene): scene is NonNullable<typeof scene> => Boolean(scene));
-    const duration = Math.max(1, Math.ceil(artifact.videoScenePackages.target_duration_ms / 1000));
-    const mergedVideo = await api.mergeSceneVideos({
-      scene_videos: nextSceneVideos.map((scene) => ({
-        scene_id: scene.scene_id,
-        scene_index: scene.scene_index,
-        video_url: scene.video_url,
-      })),
-      duration,
-      size: "1080p",
-    });
     const generatedSceneVideos = {
       ...artifact.generatedSceneVideos,
       ok: regenerated.ok,
       scene_videos: nextSceneVideos,
       message: "已按修改意见更新受影响场景。",
     };
-    const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频已按修改意见重新生成，请查看新版本。" : "视频重新合并失败，请查看错误信息。", {
-      type: "video_result",
-      title: "视频修改结果",
-      description: mergedVideo.ok ? "已复用未受影响场景，并合并新版本视频。" : mergedVideo.message,
-      actionLabel: "查看",
+    await startAndResumeVideoMergeJob({
+      targetConversationId,
+      sourceMessageId: pendingVideoJob.source_message_id,
+      artifact: {
+        ...artifact,
+        videoScenePackages: displayVideoScenePackages,
+        generatedSceneVideos,
+        videoScenePackageEditedSceneIds: [],
+      },
       videoScenePackages: displayVideoScenePackages,
-      originalVideoScenePackages,
       generatedSceneVideos,
-      mergedVideo,
-      videoScenePackageEditedSceneIds: [],
-      intent: "video",
-      formValues: artifact.formValues,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-    }, targetConversationId);
-    if (mergedVideo.ok) {
-      updateOriginalScenePackageMessageWithVideoResult(
-        pendingVideoJob.source_message_id,
-        targetConversationId,
-        artifact.videoScenePackages,
-        generatedSceneVideos,
-        mergedVideo,
-      );
-    }
-    if (!mergedVideo.ok) releaseArtifactAction(processedKey);
-    if (mergedVideo.ok) {
-      window.setTimeout(() => {
-        void handleAcceptVideoResult(videoResultMessage, true);
-      }, AUTO_CONFIRM_TIMEOUT_MS);
-    }
-    if (mergedVideo.merged_video_url) {
-      const results = videoResultsFromGeneratedScenes(
-        mergedVideo.merged_video_url,
-        mergedVideo.task_id || "merged-video-revision",
-        generatedSceneVideos,
-        displayVideoScenePackages.target_duration_ms,
-        mergedVideo.ok,
-      );
-      setCanvasForConversation(targetConversationId, (c) => ({
-        ...c,
-        phase: mergedVideo.ok ? "done" : c.phase,
-        results,
-        selectedVideo: null,
-      }));
-      setCanvasOpenForConversation(targetConversationId, true);
-    }
-    await clearPendingVideoJob(targetConversationId, mergedVideo.ok ? "video_regenerated" : "video_regeneration_merge_failed", {
-      video_revision_feedback: artifact.videoRevisionFeedback,
-      video_revision_use_flaw_analysis: pendingVideoJob.use_flaw_analysis,
-      affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
-      global_assets: displayVideoScenePackages.global_assets,
-      scene_packages: displayVideoScenePackages.scene_packages,
-      generated_scene_videos: nextSceneVideos,
-      merged_video: mergedVideo,
-    }).catch(() => {});
+      originalVideoScenePackages,
+      processedKey,
+      mergePurpose: "regeneration",
+      affectedSceneIds: pendingVideoJob.affected_scene_ids || [],
+    });
   };
 
   const handleCompletedFailedSceneRetryJob = async (
@@ -3113,66 +3185,17 @@ export function WorkspacePage() {
     }
 
     pushAssistant("失败分镜已补齐，正在按场景顺序合并完整视频…", targetConversationId);
-    const duration = Math.max(1, Math.ceil(artifact.videoScenePackages.target_duration_ms / 1000));
-    const mergedVideo = await api.mergeSceneVideos({
-      scene_videos: nextSceneVideos.map((scene) => ({
-        scene_id: scene.scene_id,
-        scene_index: scene.scene_index,
-        video_url: scene.video_url,
-      })),
-      duration,
-      size: "1080p",
-    });
-    const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-    const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频生成完成，请查看合并视频和场景视频。" : "视频合并失败，请查看错误信息。", {
-      type: "video_result",
-      title: "视频生成结果",
-      description: mergedVideo.ok ? "已复用此前成功分镜，并合并完整视频。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
-      actionLabel: "查看",
+    await startAndResumeVideoMergeJob({
+      targetConversationId,
+      sourceMessageId: pendingVideoJob.source_message_id,
+      artifact: { ...artifact, generatedSceneVideos },
       videoScenePackages: artifact.videoScenePackages,
       generatedSceneVideos,
-      mergedVideo,
-      intent: "video",
-      formValues: artifact.formValues,
-      intakeContext: artifact.intakeContext,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-    }, targetConversationId);
-    if (mergedVideo.ok) {
-      updateOriginalScenePackageMessageWithVideoResult(
-        pendingVideoJob.source_message_id,
-        targetConversationId,
-        artifact.videoScenePackages,
-        generatedSceneVideos,
-        mergedVideo,
-      );
-    }
-    if (!mergedVideo.ok) releaseArtifactAction(processedKey);
-    if (mergedVideo.ok) {
-      window.setTimeout(() => {
-        void handleAcceptVideoResult(videoResultMessage, true);
-      }, AUTO_CONFIRM_TIMEOUT_MS);
-    }
-    if (mergedVideo.merged_video_url) {
-      const results = videoResultsFromGeneratedScenes(
-        mergedVideo.merged_video_url,
-        mergedVideo.task_id,
-        generatedSceneVideos,
-        artifact.videoScenePackages.target_duration_ms,
-        mergedVideo.ok,
-      );
-      setCanvasForConversation(targetConversationId, (c) => ({ ...c, phase: mergedVideo.ok ? "done" : c.phase, results, selectedVideo: null }));
-      setCanvasOpenForConversation(targetConversationId, true);
-    }
-    await clearPendingVideoJob(targetConversationId, mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed", {
-      affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
-      global_assets: artifact.videoScenePackages.global_assets,
-      intake_context: artifact.intakeContext,
-      scene_packages: artifact.videoScenePackages.scene_packages,
-      generated_scene_videos: nextSceneVideos,
-      merged_video: mergedVideo,
-    }).catch(() => {});
+      originalVideoScenePackages: artifact.originalVideoScenePackages,
+      processedKey,
+      mergePurpose: "generation",
+      affectedSceneIds: pendingVideoJob.affected_scene_ids || [],
+    });
   };
 
   const resumePendingVideoJob = async (pendingVideoJob: PendingVideoJob, processedKey = "") => {
@@ -3189,6 +3212,17 @@ export function WorkspacePage() {
     setBusyForConversation(pendingVideoJob.conversation_id, true);
     try {
       if (stopIfHidden()) return;
+      if (pendingVideoJob.kind === "video_merge") {
+        const status = await api.getMergeSceneVideosJob(pendingVideoJob.job_id);
+        if (stopIfHidden()) return;
+        const mergedVideo =
+          status.status === "completed" && status.result
+            ? status.result
+            : await api.pollMergeSceneVideoJob(pendingVideoJob.job_id, shouldContinuePolling);
+        if (!mergedVideo || stopIfHidden()) return;
+        await handleCompletedVideoMergeJob(pendingVideoJob, mergedVideo, processedKey);
+        return;
+      }
       const status = await api.getSceneVideosJob(pendingVideoJob.job_id);
       if (stopIfHidden()) return;
       const generatedSceneVideos =
@@ -5532,70 +5566,16 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     pushAssistant("正在继续合并已生成的场景视频…", targetConversationId);
     try {
-      const duration = Math.max(1, Math.ceil(videoScenePackages.target_duration_ms / 1000));
-      const mergedVideo = await api.mergeSceneVideos({
-        scene_videos: generatedSceneVideos.scene_videos.map((scene) => ({
-          scene_id: scene.scene_id,
-          scene_index: scene.scene_index,
-          video_url: scene.video_url,
-        })),
-        duration,
-        size: "1080p",
-      });
-      const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-      if (!mergedVideo.ok) releaseArtifactAction(processedKey);
-      const videoResultMessage = pushArtifact(mergedVideo.ok ? "视频合并完成，请查看完整视频。" : "视频合并失败，请查看错误信息。", {
-        type: "video_result",
-        title: "视频生成结果",
-        description: mergedVideo.ok ? "合并视频和每个场景视频已返回。" : mergeQuotaInsufficient ? quotaMessage(mergedVideo.message || "视频合并额度不足。") : mergedVideo.message,
-        actionLabel: "查看",
+      await startAndResumeVideoMergeJob({
+        targetConversationId,
+        sourceMessageId: msg.id,
+        artifact: { ...msg.artifact, videoScenePackages, generatedSceneVideos } as ChatArtifact,
         videoScenePackages,
         generatedSceneVideos,
-        mergedVideo,
-        intent: "video",
-        formValues: msg.artifact?.formValues,
-        materials: msg.artifact?.materials || [],
-        selectedDirection: msg.artifact?.selectedDirection,
-        plan: msg.artifact?.plan,
-      }, targetConversationId);
-      if (mergedVideo.ok) {
-        updateOriginalScenePackageMessageWithVideoResult(
-          msg.id,
-          targetConversationId,
-          videoScenePackages,
-          generatedSceneVideos,
-          mergedVideo,
-        );
-      }
-      if (mergedVideo.ok) {
-        window.setTimeout(() => {
-          void handleAcceptVideoResult(videoResultMessage, true);
-        }, AUTO_CONFIRM_TIMEOUT_MS);
-      }
-      if (mergedVideo.merged_video_url) {
-        const results = videoResultsFromGeneratedScenes(
-          mergedVideo.merged_video_url,
-          mergedVideo.task_id,
-          generatedSceneVideos,
-          msg.artifact?.videoScenePackages?.target_duration_ms,
-          mergedVideo.ok,
-        );
-        setCanvasForConversation(targetConversationId, (c) => ({
-          ...c,
-          phase: mergedVideo.ok ? "done" : c.phase,
-          results,
-          selectedVideo: null,
-        }));
-        setCanvasOpenForConversation(targetConversationId, true);
-      }
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: mergedVideo.ok ? "video_generated" : mergeQuotaInsufficient ? "video_merge_quota_paused" : "video_merge_failed",
-            context: { ...makeSnapshot(), generated_scene_videos: generatedSceneVideos.scene_videos, merged_video: mergedVideo } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+        originalVideoScenePackages: msg.artifact?.originalVideoScenePackages,
+        processedKey,
+        mergePurpose: "generation",
+      });
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`视频继续合并失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);

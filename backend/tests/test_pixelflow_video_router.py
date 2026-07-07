@@ -36,6 +36,8 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/generate-direct/start" in paths
     assert "/agent/flows/video/generate-direct/jobs/{job_id}" in paths
     assert "/agent/flows/video/merge" in paths
+    assert "/agent/flows/video/merge/start" in paths
+    assert "/agent/flows/video/merge/jobs/{job_id}" in paths
     assert "/agent/flows/video/quality-review" in paths
     assert "/agent/flows/video/analyze-flaws" in paths
     assert "/agent/flows/video/analyze-storyboards" in paths
@@ -913,6 +915,60 @@ def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):
     assert data["ok"] is True
     assert data["endpoint"] == "/api/video/merge"
     assert data["merged_video_url"] == "https://x/merged.mp4"
+
+
+def test_video_router_starts_merge_job_and_polls_result(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    class FakeVideoSkill:
+        async def merge_videos(self, **kwargs):
+            assert kwargs["video_urls"] == ["https://x/scene-1.mp4", "https://x/scene-2.mp4"]
+            await asyncio.sleep(0.01)
+            return GenerationResult(
+                ok=True,
+                task_id="merge-task-async",
+                url="https://x/merged-async.mp4",
+                raw={"endpoint": "/api/video/merge"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/merge/start",
+            json={
+                "scene_videos": [
+                    {"scene_id": "scene-2", "scene_index": 2, "video_url": "https://x/scene-2.mp4"},
+                    {"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"},
+                ],
+                "duration": 16,
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["status"] in {"queued", "running"}
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/merge/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["ok"] is True
+    assert status["result"]["merged_video_url"] == "https://x/merged-async.mp4"
 
 
 def test_video_router_returns_single_scene_video_as_merged_video_without_calling_merge(monkeypatch):

@@ -261,7 +261,7 @@ def build_headers() -> dict[str, str]:
 - 不要在 PixelFlow 配置 content-app 的 token 签名密钥；token 真伪统一交给 content-app `/api/auth/verify` 判断。
 - `borgrise.remote_verify_enabled` 默认开启，除非本地离线调试才临时关闭；它只控制 `/api/auth/verify` 登录态校验。
 - `borgrise.verify_timeout_seconds` 只控制登录态实时校验，默认 10 秒；它不是生成任务轮询超时。
-- Borgrise 异步任务轮询必须按业务类型选择配置：视频生成用 `borgrise.video_poll_timeout`，默认 1 小时；图片生成用 `borgrise.image_poll_timeout`，默认 10 分钟；视频分析/参考视频拆解用 `borgrise.video_analysis_poll_timeout`，默认 20 分钟。
+- Borgrise 异步任务轮询必须按业务类型选择配置：视频生成用 `borgrise.video_poll_timeout`，默认 1 小时；图片生成用 `borgrise.image_poll_timeout`，默认 10 分钟；视频分析/参考视频拆解用 `borgrise.video_analysis_poll_timeout`，默认 15 分钟；视频合并是 content-app 同步接口，用 `borgrise.video_merge_request_timeout` 控制读等待，默认 1 小时。
 - `pixelflow.media_skill` 是图片生成、视频生成、参考视频拆解共用的媒体供应商开关；当前仅支持 `borgrise`，对应外部 Client 参数写在 `borgrise.*`。
 - `pixelflow.edit_skill` 是剪辑/渲染开关，和媒体供应商不是同一类能力；当前支持 `jianying` 和 `ffmpeg`。
 - 新增配置项必须写中文注释，说明用途、默认值和影响范围。
