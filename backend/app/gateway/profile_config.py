@@ -76,6 +76,7 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("borgrise", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",
     ("borgrise", "skip_ssl_verify"): "BORGRISE_SKIP_SSL_VERIFY",
     ("borgrise", "video_poll_timeout"): "BORGRISE_VIDEO_POLL_TIMEOUT",
+    ("borgrise", "video_merge_request_timeout"): "BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT",
     ("borgrise", "image_poll_timeout"): "BORGRISE_IMAGE_POLL_TIMEOUT",
     ("borgrise", "video_analysis_poll_timeout"): "BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT",
     ("borgrise", "max_retries"): "BORGRISE_MAX_RETRIES",

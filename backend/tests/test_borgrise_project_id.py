@@ -80,3 +80,22 @@ def test_borgrise_request_bodies_do_not_send_project_id(monkeypatch):
 
     assert bodies
     assert not any(_contains_project_id(body) for body in bodies)
+
+
+def test_borgrise_merge_uses_long_request_timeout(monkeypatch):
+    """长视频合并会同步等待 content-app 完成，不能复用普通 30 秒读超时。"""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(run_generation, "get_headers", lambda *args, **kwargs: {})
+
+    def fake_make_request(endpoint: str, data: Any = None, *args, **kwargs):
+        captured.update({"endpoint": endpoint, "data": data, "request_timeout": kwargs.get("request_timeout")})
+        return {"data": {"url": "https://x/merged.mp4"}}
+
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+
+    result = run_generation.merge_videos(["https://x/1.mp4", "https://x/2.mp4"])
+
+    assert result["video_url"] == "https://x/merged.mp4"
+    assert captured["endpoint"] == "/video/merge"
+    assert captured["request_timeout"] == run_generation.VIDEO_MERGE_REQUEST_TIMEOUT

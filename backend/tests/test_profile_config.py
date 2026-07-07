@@ -20,6 +20,7 @@ _MAPPED_ENV_KEYS = {
     "BORGRISE_SKIP_SSL_VERIFY",
     "BORGRISE_VERIFY_TIMEOUT_SECONDS",
     "BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT",
+    "BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT",
     "BORGRISE_VIDEO_POLL_TIMEOUT",
     "DEER_FLOW_CONFIG_PATH",
     "GATEWAY_CORS_ORIGINS",
@@ -35,6 +36,7 @@ _MAPPED_ENV_KEYS = {
     "PIXELFLOW_POWERMEM_API_KEY",
     "PIXELFLOW_POWERMEM_BASE_URL",
     "PIXELFLOW_POWERMEM_FAIL_OPEN",
+    "PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS",
     "PIXELFLOW_POWERMEM_SEARCH_LIMIT",
     "PIXELFLOW_POWERMEM_TIMEOUT_SECONDS",
     "PIXELFLOW_POWERMEM_WRITE_ENABLED",
@@ -87,6 +89,7 @@ pixelflow:
   powermem_base_url: https://example.test/powermem
   powermem_api_key: test-powermem-key
   powermem_timeout_seconds: 3
+  powermem_record_timeout_seconds: 30
   powermem_search_limit: 5
   powermem_write_enabled: true
   powermem_fail_open: true
@@ -102,6 +105,7 @@ borgrise:
   project_id: "42"
   skip_ssl_verify: true
   video_poll_timeout: 3600
+  video_merge_request_timeout: 3600
   image_poll_timeout: 600
   video_analysis_poll_timeout: 900
   max_retries: 7
@@ -142,6 +146,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_POWERMEM_BASE_URL"] == "https://example.test/powermem"
     assert os.environ["PIXELFLOW_POWERMEM_API_KEY"] == "test-powermem-key"
     assert os.environ["PIXELFLOW_POWERMEM_TIMEOUT_SECONDS"] == "3"
+    assert os.environ["PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS"] == "30"
     assert os.environ["PIXELFLOW_POWERMEM_SEARCH_LIMIT"] == "5"
     assert os.environ["PIXELFLOW_POWERMEM_WRITE_ENABLED"] == "true"
     assert os.environ["PIXELFLOW_POWERMEM_FAIL_OPEN"] == "true"
@@ -156,6 +161,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert "BORGRISE_PROJECT_ID" not in os.environ
     assert os.environ["BORGRISE_SKIP_SSL_VERIFY"] == "true"
     assert os.environ["BORGRISE_VIDEO_POLL_TIMEOUT"] == "3600"
+    assert os.environ["BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT"] == "3600"
     assert os.environ["BORGRISE_IMAGE_POLL_TIMEOUT"] == "600"
     assert os.environ["BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT"] == "900"
     assert "BORGRISE_POLL_TIMEOUT" not in os.environ

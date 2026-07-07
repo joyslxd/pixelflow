@@ -41,6 +41,14 @@ function handleGenerateVideoFromScenePackagesSource() {
   return workspaceSource.slice(start, end);
 }
 
+function startAndResumeVideoMergeJobSource() {
+  const start = workspaceSource.indexOf("const startAndResumeVideoMergeJob = async");
+  const end = workspaceSource.indexOf("const handleCompletedSceneGenerationJob = async", start);
+  assert.notEqual(start, -1, "startAndResumeVideoMergeJob must exist");
+  assert.notEqual(end, -1, "handleCompletedSceneGenerationJob must follow video merge helper");
+  return workspaceSource.slice(start, end);
+}
+
 function handleRegenerateVideoWithRevisionSource() {
   const start = workspaceSource.indexOf("async function handleRegenerateVideoWithRevision");
   const end = workspaceSource.indexOf("const handleApprove = async", start);
@@ -458,6 +466,31 @@ test("scene video jobs persist their id before polling so conversations can reco
   assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "job id must be persisted before polling starts");
   assert.match(source, /kind:\s*"scene_generation"/, "first-time scene generation must record its pending job kind");
   assert.equal(source.includes("api.generateSceneVideos"), false, "WorkspacePage must not use the start+poll convenience wrapper for scene jobs");
+});
+
+test("video merge uses start and polling instead of a long synchronous request", () => {
+  assert.match(apiSource, /startMergeSceneVideosJob:/, "API client must expose a start-only video merge job call");
+  assert.match(apiSource, /getMergeSceneVideosJob:/, "API client must expose a query-only video merge job call");
+  assert.match(apiSource, /pollMergeSceneVideoJob,/, "API client must expose polling for existing video merge jobs");
+  assert.match(apiSource, /const started = await api\.startMergeSceneVideosJob\(body\)/, "mergeSceneVideos must start a backend merge job first");
+  assert.match(apiSource, /return pollMergeSceneVideoJob\(started\.job_id\)/, "mergeSceneVideos must poll the merge job result");
+  assert.doesNotMatch(apiSource, /mergeSceneVideos:[\s\S]*?req<MergeSceneVideosResponse>\(`\$\{FLOW_BASE\}\/video\/merge`/, "mergeSceneVideos must not wait on synchronous /video/merge");
+});
+
+test("video merge jobs are persisted before polling so conversations can recover", () => {
+  assert.match(workspaceSource, /type PendingVideoJobKind =[\s\S]*"video_merge"/, "pending video jobs must include video_merge");
+  assert.match(workspaceSource, /api\.getMergeSceneVideosJob\(pendingVideoJob\.job_id\)/, "resumePendingVideoJob must query existing merge jobs");
+  assert.match(workspaceSource, /api\.pollMergeSceneVideoJob\(pendingVideoJob\.job_id,\s*shouldContinuePolling\)/, "resumePendingVideoJob must poll existing merge jobs");
+  assert.match(workspaceSource, /handleCompletedVideoMergeJob\(pendingVideoJob,\s*mergedVideo,\s*processedKey\)/, "merge job completion must use the shared video result handler");
+
+  const source = startAndResumeVideoMergeJobSource();
+  const startIndex = source.indexOf("api.startMergeSceneVideosJob(request)");
+  const persistIndex = source.indexOf("await persistPendingVideoJob(pendingVideoJob");
+  const pollIndex = source.indexOf("await resumePendingVideoJob(pendingVideoJob, processedKey)");
+  assert.notEqual(startIndex, -1, "scene completion must start a backend merge job explicitly");
+  assert.notEqual(persistIndex, -1, "scene completion must persist the merge job id");
+  assert.notEqual(pollIndex, -1, "scene completion must poll the persisted merge job");
+  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "merge job id must be persisted before polling starts");
 });
 
 test("scene package jobs persist their id before polling so conversations can recover", () => {

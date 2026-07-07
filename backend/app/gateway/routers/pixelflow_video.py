@@ -30,6 +30,8 @@ router = APIRouter(prefix="/agent/flows/video", tags=["pixelflow-flows"])
 
 _SCENE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_VIDEO_JOBS = 100
+_MERGE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_MERGE_VIDEO_JOBS = 100
 _DIRECT_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_DIRECT_VIDEO_JOBS = 100
 _SCENE_PACKAGE_JOBS: dict[str, dict[str, Any]] = {}
@@ -214,6 +216,22 @@ class MergeSceneVideosResponse(BaseModel):
     message: str = ""
     quota_insufficient: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class MergeSceneVideosJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class MergeSceneVideosJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: MergeSceneVideosResponse | None = None
+    error: str | None = None
+    message: str = ""
 
 
 class VideoFlawAnalysisRequest(BaseModel):
@@ -1086,6 +1104,13 @@ def _trim_scene_video_jobs() -> None:
         _SCENE_VIDEO_JOBS.pop(job_id, None)
 
 
+def _trim_merge_video_jobs() -> None:
+    if len(_MERGE_VIDEO_JOBS) < _MAX_MERGE_VIDEO_JOBS:
+        return
+    for job_id in list(_MERGE_VIDEO_JOBS.keys())[: len(_MERGE_VIDEO_JOBS) - _MAX_MERGE_VIDEO_JOBS + 1]:
+        _MERGE_VIDEO_JOBS.pop(job_id, None)
+
+
 def _trim_direct_video_jobs() -> None:
     if len(_DIRECT_VIDEO_JOBS) < _MAX_DIRECT_VIDEO_JOBS:
         return
@@ -1351,12 +1376,72 @@ def _record_video_job_failure(
 
 @router.post("/merge", response_model=MergeSceneVideosResponse)
 async def merge_scene_videos(body: MergeSceneVideosRequest, request: Request) -> MergeSceneVideosResponse:
+    response = await _merge_scene_videos_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("视频合并 Agent 同步合并", response.model_dump()),
+        category="experience",
+        source_agent="video_merge_agent",
+        metadata={
+            "source": "video_merge",
+            "scene_count": len(response.scene_videos),
+            "task_id": response.task_id,
+            "passthrough": bool(response.raw.get("passthrough")),
+        },
+        memory_type="experience",
+        run_id=response.task_id,
+        infer=False,
+    )
+    return response
+
+
+@router.post("/merge/start", response_model=MergeSceneVideosJobStartResponse)
+async def start_merge_scene_videos(body: MergeSceneVideosRequest, request: Request) -> MergeSceneVideosJobStartResponse:
+    if not any(scene.video_url for scene in body.scene_videos):
+        raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
+    _trim_merge_video_jobs()
+    job_id = uuid.uuid4().hex
+    _MERGE_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_merge_video_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    return MergeSceneVideosJobStartResponse(ok=True, job_id=job_id, status="running", message="视频合并任务已启动。")
+
+
+@router.get("/merge/jobs/{job_id}", response_model=MergeSceneVideosJobStatusResponse)
+async def get_merge_scene_video_job(job_id: str) -> MergeSceneVideosJobStatusResponse:
+    job = _MERGE_VIDEO_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频合并任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, MergeSceneVideosResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = MergeSceneVideosResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return MergeSceneVideosJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=(
+            "视频合并完成。"
+            if status == "completed"
+            else ("视频合并额度不足，已暂停。" if status == "quota_paused" else ("视频合并失败。" if status == "failed" else "视频合并中。"))
+        ),
+    )
+
+
+async def _merge_scene_videos_response(body: MergeSceneVideosRequest) -> MergeSceneVideosResponse:
     ordered_scenes = sorted(body.scene_videos, key=lambda scene: scene.scene_index if scene.scene_index is not None else 0)
     video_urls = [scene.video_url for scene in ordered_scenes if scene.video_url]
     if not video_urls:
         raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
     if len(video_urls) == 1:
-        response = MergeSceneVideosResponse(
+        return MergeSceneVideosResponse(
             ok=True,
             endpoint="/api/video/merge",
             merged_video_url=video_urls[0],
@@ -1364,17 +1449,6 @@ async def merge_scene_videos(body: MergeSceneVideosRequest, request: Request) ->
             message="只有一个场景视频，已直接作为合成视频返回。",
             raw={"passthrough": True, "reason": "single_scene"},
         )
-        record_power_mem_background(
-            power_mem_service(request),
-            user_id=await current_user_id(request),
-            content=concise_result_summary("视频合并 Agent 单分镜直返", response.model_dump()),
-            category="experience",
-            source_agent="video_merge_agent",
-            metadata={"source": "video_merge", "scene_count": len(video_urls), "passthrough": True},
-            memory_type="experience",
-            infer=False,
-        )
-        return response
 
     result = await get_video_skill().merge_videos(
         video_urls=video_urls,
@@ -1398,18 +1472,37 @@ async def merge_scene_videos(body: MergeSceneVideosRequest, request: Request) ->
         quota_insufficient=quota_insufficient,
         raw=result.raw,
     )
-    record_power_mem_background(
-        power_mem_service(request),
-        user_id=await current_user_id(request),
-        content=concise_result_summary("视频合并 Agent 完成合并", response.model_dump()),
-        category="experience",
-        source_agent="video_merge_agent",
-        metadata={"source": "video_merge", "scene_count": len(video_urls), "task_id": result.task_id},
-        memory_type="experience",
-        run_id=result.task_id,
-        infer=False,
-    )
     return response
+
+
+async def _run_merge_video_job(job_id: str, body: MergeSceneVideosRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+    try:
+        result = await _merge_scene_videos_response(body)
+        _MERGE_VIDEO_JOBS[job_id] = {
+            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "result": result,
+            "error": None,
+        }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("视频合并 Agent 完成异步合并", result.model_dump()),
+            category="experience",
+            source_agent="video_merge_agent",
+            metadata={
+                "source": "video_merge_job",
+                "job_id": job_id,
+                "scene_count": len(result.scene_videos),
+                "task_id": result.task_id,
+                "passthrough": bool(result.raw.get("passthrough")),
+            },
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _MERGE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _record_video_job_failure(power_mem, user_id, job_id, "video_merge_agent", "video_merge_job", exc)
 
 
 def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message: str = "视频质检完成。") -> VideoQualityReviewResponse:

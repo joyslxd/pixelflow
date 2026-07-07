@@ -8,6 +8,8 @@ const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const VIDEO_MERGE_JOB_POLL_INTERVAL_MS = 3000;
+const VIDEO_MERGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
 const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
@@ -426,6 +428,22 @@ export interface MergeSceneVideosResponse {
   raw: Record<string, unknown>;
 }
 
+export interface MergeSceneVideosJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface MergeSceneVideosJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  result: MergeSceneVideosResponse | null;
+  error: string | null;
+  message: string;
+}
+
 export type DirectVideoMode =
   | "text_to_video"
   | "image_to_video"
@@ -747,6 +765,42 @@ async function pollSceneVideoJob(
     scene_videos: [],
     failed_scenes: [{ error: "场景视频生成轮询超时" }],
     message: "场景视频生成轮询超时",
+  };
+}
+
+async function pollMergeSceneVideoJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<MergeSceneVideosResponse | null> {
+  const deadline = Date.now() + VIDEO_MERGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<MergeSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/merge/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        endpoint: "/api/video/merge",
+        merged_video_url: null,
+        task_id: null,
+        scene_videos: [],
+        error: status.error || status.message || "视频合并失败",
+        message: status.error || status.message || "视频合并失败",
+        raw: {},
+      };
+    }
+    await delay(VIDEO_MERGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    endpoint: "/api/video/merge",
+    merged_video_url: null,
+    task_id: null,
+    scene_videos: [],
+    error: "视频合并轮询超时",
+    message: "视频合并轮询超时",
+    raw: {},
   };
 }
 
@@ -1213,12 +1267,31 @@ export const api = {
     return pollDirectVideoJob(started.job_id);
   },
 
-  mergeSceneVideos: (body: {
+  mergeSceneVideos: async (body: {
     scene_videos: SceneVideoPayload[];
     duration?: number;
     size?: string;
     model?: string | null;
-  }) => req<MergeSceneVideosResponse>(`${FLOW_BASE}/video/merge`, { method: "POST", body: JSON.stringify(body) }),
+  }) => {
+    const started = await api.startMergeSceneVideosJob(body);
+    return pollMergeSceneVideoJob(started.job_id);
+  },
+
+  startMergeSceneVideosJob: (body: {
+    scene_videos: SceneVideoPayload[];
+    duration?: number;
+    size?: string;
+    model?: string | null;
+  }) =>
+    req<MergeSceneVideosJobStartResponse>(`${FLOW_BASE}/video/merge/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getMergeSceneVideosJob: (jobId: string) =>
+    req<MergeSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/merge/jobs/${encodeURIComponent(jobId)}`),
+
+  pollMergeSceneVideoJob,
 
   analyzeVideoFlaws: (body: {
     merged_video_url: string;
