@@ -168,10 +168,11 @@ PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
 - 测试环境 `backend/config.dev.yml` 的 `pixelflow.powermem_base_url` 走 nginx：`https://test-video.borgrise.com/powermem`。
 - 生产环境 `backend/config.prod.yml` 的 `pixelflow.powermem_base_url` 走本机 sidecar：`http://127.0.0.1:18848`。
 - PowerMem 不替代 `pixelflow_user_preferences` 结构化偏好表；结构化默认值、负向规则仍在业务 Store，PowerMem 负责语义检索和跨 Agent 经验复用。
-- `powermem_timeout_seconds` 只用于 search/health 这类同步读请求，当前默认 3 秒；record 写入统一走 `powermem_record_timeout_seconds`，当前默认 30 秒。
-- 网关侧 `record_power_mem()` / `record_power_mem_background()` 默认 `infer=False`，包括 `preference`、`brand`、`experience`、`skill`。只有未来明确需要 PowerMem 服务端再做 LLM 抽取时才显式传 `infer=True`，并需要按实测把 record timeout 调大到覆盖抽取耗时。
+- `powermem_timeout_seconds` 只用于 search/health 这类同步读请求，当前默认 3 秒；record 写入统一走 `powermem_record_timeout_seconds`，当前默认 60 秒。
+- 网关侧 `record_power_mem()` / `record_power_mem_background()` 默认按 category 决定 infer：`preference` 默认 `infer=True`，用于用户中文偏好的服务端抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，避免阶段摘要被重复 LLM 抽取。
+- 当前 `infer=True` 场景是用户偏好类：偏好 API 更新、偏好反馈、旧 Brief 修订反馈。若 PowerMem 返回 `success=true` 但 `data=[]`，`PowerMemService` 会自动用 `infer=False` 补写一次同一条偏好，避免服务端 LLM 额度不足或抽取空结果导致偏好完全丢失。
 - 图片/视频/PPT 等 Skill 调用类经验会自动双写 `experience` 与 `skill`，便于后续流程复用接口选择和失败处理经验。
-- 后续新增或修改 Agent/流程时，必须复用 `PowerMemService`：进入决策前先检索相关记忆，阶段完成/失败后写入业务摘要。
+- 后续新增或修改 Agent/流程时，必须复用 `PowerMemService`：进入决策前先检索相关记忆，阶段完成/失败后写入业务摘要；只要涉及用户长期偏好、默认规则、负向要求、品牌口吻或风格偏好，就要写 `category=preference` 并走默认 `infer=True`。
 
 ## content-app/Borgrise 接口
 

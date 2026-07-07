@@ -33,6 +33,32 @@ async def test_record_power_mem_defaults_to_infer_false():
 
 
 @pytest.mark.asyncio
+async def test_record_power_mem_defaults_to_infer_true_for_preference():
+    """用户偏好需要让 PowerMem 侧抽取语义，便于中文偏好进入向量检索。"""
+
+    class FakePowerMemService:
+        def __init__(self):
+            self.records = []
+
+        async def record(self, **kwargs):
+            self.records.append(kwargs)
+            return True
+
+    service = FakePowerMemService()
+    ok = await record_power_mem(
+        service,
+        user_id="u1",
+        content="以后默认真实摄影风格，不要价格文字",
+        category="preference",
+        source_agent="preference_api",
+        memory_type="preference",
+    )
+
+    assert ok is True
+    assert service.records[0]["infer"] is True
+
+
+@pytest.mark.asyncio
 async def test_record_power_mem_background_defaults_to_infer_false():
     class FakePowerMemService:
         def __init__(self):
@@ -54,6 +80,31 @@ async def test_record_power_mem_background_defaults_to_infer_false():
     await asyncio.sleep(0)
 
     assert service.records[0]["infer"] is False
+
+
+@pytest.mark.asyncio
+async def test_record_power_mem_background_defaults_to_infer_true_for_preference():
+    class FakePowerMemService:
+        def __init__(self):
+            self.records = []
+
+        async def record(self, **kwargs):
+            self.records.append(kwargs)
+            return True
+
+    service = FakePowerMemService()
+    record_power_mem_background(
+        service,
+        user_id="u1",
+        content="以后默认真实摄影风格，不要价格文字",
+        category="preference",
+        source_agent="preference_api",
+        memory_type="preference",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert service.records[0]["infer"] is True
 
 
 @pytest.mark.asyncio

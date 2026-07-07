@@ -92,5 +92,5 @@ def test_preferences_feedback_records_power_mem_and_returns_status():
     assert service.records[0]["category"] == "preference"
     assert service.records[0]["memory_type"] == "preference"
     assert service.records[0]["source_agent"] == "preference_api"
-    assert service.records[0]["infer"] is False
+    assert service.records[0]["infer"] is True
     assert "真实摄影" in service.records[0]["content"]

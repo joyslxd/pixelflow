@@ -98,6 +98,48 @@ async def test_powermem_service_records_memory_payload():
 
 
 @pytest.mark.asyncio
+async def test_powermem_service_falls_back_when_preference_infer_creates_no_memory():
+    payloads: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/memories"
+        payload = json.loads(request.content.decode("utf-8"))
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [],
+                    "message": "No memories were created (likely duplicates detected or no facts extracted)",
+                },
+            )
+        return httpx.Response(200, json={"success": True, "data": [{"memory_id": "fallback-1"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret"),
+        http_client=client,
+    )
+
+    ok = await service.record(
+        user_id="u1",
+        content="以后默认真实摄影风格，不要价格文字",
+        category="preference",
+        source_agent="preference_api",
+        metadata={"source": "preferences_feedback"},
+        memory_type="preference",
+        infer=True,
+    )
+
+    assert ok is True
+    assert [payload["infer"] for payload in payloads] == [True, False]
+    assert payloads[1]["metadata"]["infer_fallback"] is True
+    assert payloads[1]["metadata"]["infer_fallback_reason"] == "empty_infer_result"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_powermem_service_record_uses_record_timeout_and_search_uses_search_timeout():
     """record 写入走独立的 record_timeout_seconds（给后台 LLM 抽取留时间），
     search/health 仍用短的 timeout_seconds（不阻塞用户请求路径）。"""

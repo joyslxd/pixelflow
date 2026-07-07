@@ -158,8 +158,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - 生产环境 `backend/config.prod.yml`：`pixelflow.powermem_base_url=http://127.0.0.1:18848`，走同机 sidecar。
 - `pixelflow.powermem_api_key` 必须与 PowerMem 服务端 API key 一致；不要把 content-app 用户 `Authorization` 当成 PowerMem key。
 - `pixelflow.powermem_fail_open=true` 时，PowerMem 不可用只记录 warning，主流程继续。
-- `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 30s），因为 record 全部是后台 `asyncio.create_task`，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
-- 网关侧 `record_power_mem` / `record_power_mem_background` 默认 `infer=False`：业务摘要（experience/brand/skill/preference）已经由 Agent 分类，无需 PowerMem 再做 LLM 抽取，且 2~3s 就能写完。需要语义抽取时再显式传 `infer=True`。
+- `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 60s），因为 record 全部是后台 `asyncio.create_task`，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
+- 网关侧 `record_power_mem` / `record_power_mem_background` 默认按 category 决定 infer：`preference` 默认 `infer=True`，让用户中文偏好进入 PowerMem 服务端语义抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，这些业务摘要已经由 Agent 分类，不再让 PowerMem 做二次 LLM 抽取。调用方显式传 `infer=True/False` 时以显式值为准。
+- `preference` 且 `infer=True` 时，如果 PowerMem 服务端返回 `success=true` 但 `data=[]`（常见于 LLM 抽取失败、额度不足被服务端吞成空结果，或未抽出 facts），`PowerMemService.record()` 会自动用同一内容再写一次 `infer=False`，metadata 增加 `infer_fallback=true` 和 `infer_fallback_reason=empty_infer_result`，保证用户偏好至少可以直接入库并被检索。
 - record 的 `memory_type` 必须和 `category` 一致：PowerMem 服务端会用 `memory_type` 覆写 `metadata.category`，若两者不一致（例如 `category="brand"` 配 `memory_type="fact"`），记忆会落到错误的 category，后续按 `filters.category` 检索时永远搜不到。
 
 统一接入规则：
@@ -168,7 +169,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - 进入关键决策前先检索：采集、创意方向、plan.md、图片 prepare、视频场景包、PPT 大纲、旧任务创建。
 - 阶段完成或失败后写摘要：图片、视频、视频分析、PPT、旧 LangGraph run 都要记录 `experience`。
 - 图片/视频/PPT 等 Skill 调用类 `experience` 会由 `record_power_mem_background()` 自动再沉淀一条 `skill` 记忆；新增流程要继续复用这个 helper。
-- 用户明确偏好、偏好反馈、Brief 修订写 `preference`；采集出的产品/行业上下文写 `brand`；可复用 Skill 经验写 `skill`。
+- 用户明确偏好、偏好反馈、Brief 修订写 `preference`，默认 `infer=True`；采集出的产品/行业上下文写 `brand`，默认 `infer=False`；可复用 Skill 经验写 `skill`，默认 `infer=False`。
+- 当前 `infer=True` 写入场景只有用户偏好类：`PUT /agent/users/{user_id}/preferences` 的结构化偏好更新、`POST /agent/users/{user_id}/preferences/feedback` 的用户反馈、旧 LangGraph `/agent/flows/{task_id}/brief/revise` 的 Brief 修改意见。以后新增流程、修改现有流程或新增功能时，只要用户明确表达了长期偏好、默认生成规则、负向要求、品牌口吻偏好、风格偏好或可跨对话复用的个人选择，就必须写 `category=preference` 并使用默认 `infer=True`；是否应该调用 PowerMem 由后续 agent 在需求实现时主动判断。
 - PowerMem 只写业务摘要、偏好和经验，不写用户 token、供应商 key、完整异常堆栈、本地部署目录或原始大段 prompt。
 - `pixelflow_user_preferences` 仍是结构化业务偏好 Store，PowerMem 不替代它，只提供语义检索和跨 Agent 经验复用。
 - 以后新增或修改 Agent、流程、Skill 时，必须按同一套逻辑：读 `PowerMemService` 上下文，写阶段摘要，并同步更新 `docs/pixelflow-agent-skill-flow-latest-design.md`。

@@ -36,9 +36,9 @@ pixelflow:
   # 失败开放、不阻塞主创作流程。record 写入不共用这个值，避免被 3s 误杀。
   powermem_timeout_seconds: 3
   # record 写入专用超时，单位秒。record 全部走后台 asyncio.create_task，不在用户请求路径上，
-  # 因此可以给得更宽松：infer=true 时服务端要做 DeepSeek LLM 抽取（实测约 36s），
-  # infer=false 也要给 nginx/网络留余量。默认 30s。
-  powermem_record_timeout_seconds: 30
+  # 因此可以给得更宽松：preference 类记录会用 infer=true，服务端要做 DeepSeek LLM 抽取（实测约 36s）。
+  # 默认 60s，避免中文偏好抽取被中途打断。
+  powermem_record_timeout_seconds: 60
   # 每个 Agent 阶段默认取回的语义记忆条数。
   powermem_search_limit: 5
   # 是否允许 PixelFlow 写入 PowerMem；排查时可临时关闭只读。

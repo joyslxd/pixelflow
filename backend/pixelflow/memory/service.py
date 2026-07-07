@@ -54,9 +54,9 @@ class PowerMemConfig:
     # 不能让 PowerMem 抖动拖慢用户主流程。
     timeout_seconds: float = 3.0
     # 用于 record 写入：record 全部走后台 asyncio.create_task，不在用户请求路径上，
-    # 可以给得更宽松。infer=true 的写入服务端要做 LLM 抽取（~数十秒），infer=false
-    # 也要留足 nginx/网络的余量，因此独立配置，避免和 search 共用 3s 被误杀。
-    record_timeout_seconds: float = 30.0
+    # 可以给得更宽松。preference 类记录会使用 infer=true，服务端要做 LLM 抽取（~数十秒），
+    # 因此独立配置，避免和 search 共用 3s 被误杀。
+    record_timeout_seconds: float = 60.0
     search_limit: int = 5
     write_enabled: bool = True
     fail_open: bool = True
@@ -90,7 +90,7 @@ def load_power_mem_config_from_env() -> PowerMemConfig:
         base_url=os.getenv("PIXELFLOW_POWERMEM_BASE_URL", "").strip(),
         api_key=os.getenv("PIXELFLOW_POWERMEM_API_KEY", "").strip(),
         timeout_seconds=_float_env("PIXELFLOW_POWERMEM_TIMEOUT_SECONDS", 3.0),
-        record_timeout_seconds=_float_env("PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS", 30.0),
+        record_timeout_seconds=_float_env("PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS", 60.0),
         search_limit=_int_env("PIXELFLOW_POWERMEM_SEARCH_LIMIT", 5),
         write_enabled=_bool_env(os.getenv("PIXELFLOW_POWERMEM_WRITE_ENABLED"), default=True),
         fail_open=_bool_env(os.getenv("PIXELFLOW_POWERMEM_FAIL_OPEN"), default=True),
@@ -233,7 +233,22 @@ class PowerMemService:
             payload["run_id"] = run_id
         try:
             response = await self._request("POST", "/memories", json=payload, timeout=self.config.record_timeout_seconds)
-            return bool(response.get("success", True)) if isinstance(response, dict) else True
+            if _should_retry_record_without_infer(response, category=category, infer=infer):
+                fallback_payload = _fallback_payload_without_infer(payload)
+                logger.warning(
+                    "PowerMem preference infer returned no memories; retrying with infer=false "
+                    "source_agent=%s category=%s",
+                    source_agent,
+                    category,
+                )
+                fallback_response = await self._request(
+                    "POST",
+                    "/memories",
+                    json=fallback_payload,
+                    timeout=self.config.record_timeout_seconds,
+                )
+                return _record_response_succeeded(fallback_response)
+            return _record_response_succeeded(response)
         except Exception as exc:
             if self.config.fail_open:
                 _log_fail_open("PowerMem record failed", exc)
@@ -337,6 +352,37 @@ def _parse_search_items(response: Any) -> list[SemanticMemoryItem]:
             )
         )
     return items
+
+
+def _record_response_succeeded(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return True
+    return bool(response.get("success", True))
+
+
+def _should_retry_record_without_infer(response: Any, *, category: str, infer: bool) -> bool:
+    return infer and category == "preference" and _record_response_succeeded(response) and _response_has_empty_data(response)
+
+
+def _response_has_empty_data(response: Any) -> bool:
+    if not isinstance(response, dict) or "data" not in response:
+        return False
+    data = response.get("data")
+    if data is None:
+        return True
+    if isinstance(data, (list, tuple, set, dict, str, bytes)):
+        return len(data) == 0
+    return False
+
+
+def _fallback_payload_without_infer(payload: dict[str, Any]) -> dict[str, Any]:
+    fallback_payload = dict(payload)
+    fallback_payload["infer"] = False
+    metadata = dict(fallback_payload.get("metadata") if isinstance(fallback_payload.get("metadata"), dict) else {})
+    metadata["infer_fallback"] = True
+    metadata["infer_fallback_reason"] = "empty_infer_result"
+    fallback_payload["metadata"] = metadata
+    return fallback_payload
 
 
 def _dedupe_and_sort(items: list[SemanticMemoryItem]) -> list[SemanticMemoryItem]:

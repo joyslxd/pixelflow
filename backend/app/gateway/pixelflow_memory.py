@@ -64,7 +64,7 @@ async def record_power_mem(
     metadata: dict[str, Any] | None = None,
     memory_type: str | None = None,
     run_id: str | None = None,
-    infer: bool = False,
+    infer: bool | None = None,
 ) -> bool:
     if service is None:
         return False
@@ -78,7 +78,7 @@ async def record_power_mem(
         metadata=metadata or {},
         memory_type=memory_type,
         run_id=run_id,
-        infer=infer,
+        infer=_resolve_power_mem_infer(category, infer),
     )
 
 
@@ -92,7 +92,7 @@ def record_power_mem_background(
     metadata: dict[str, Any] | None = None,
     memory_type: str | None = None,
     run_id: str | None = None,
-    infer: bool = False,
+    infer: bool | None = None,
 ) -> None:
     if service is None or not content.strip():
         return
@@ -150,3 +150,9 @@ def _should_record_skill_memory(category: str, metadata: dict[str, Any] | None) 
     if source.startswith(_SKILL_MEMORY_SOURCE_PREFIXES):
         return True
     return any(key in metadata for key in ("endpoint", "method", "mode"))
+
+
+def _resolve_power_mem_infer(category: str, infer: bool | None) -> bool:
+    if infer is not None:
+        return infer
+    return category == "preference"

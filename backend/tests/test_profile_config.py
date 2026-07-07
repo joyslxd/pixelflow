@@ -89,7 +89,7 @@ pixelflow:
   powermem_base_url: https://example.test/powermem
   powermem_api_key: test-powermem-key
   powermem_timeout_seconds: 3
-  powermem_record_timeout_seconds: 30
+  powermem_record_timeout_seconds: 60
   powermem_search_limit: 5
   powermem_write_enabled: true
   powermem_fail_open: true
@@ -146,7 +146,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_POWERMEM_BASE_URL"] == "https://example.test/powermem"
     assert os.environ["PIXELFLOW_POWERMEM_API_KEY"] == "test-powermem-key"
     assert os.environ["PIXELFLOW_POWERMEM_TIMEOUT_SECONDS"] == "3"
-    assert os.environ["PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS"] == "30"
+    assert os.environ["PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS"] == "60"
     assert os.environ["PIXELFLOW_POWERMEM_SEARCH_LIMIT"] == "5"
     assert os.environ["PIXELFLOW_POWERMEM_WRITE_ENABLED"] == "true"
     assert os.environ["PIXELFLOW_POWERMEM_FAIL_OPEN"] == "true"
