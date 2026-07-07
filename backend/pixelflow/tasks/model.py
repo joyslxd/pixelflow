@@ -9,9 +9,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import JSON, DateTime, Index, Integer, String, Text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
+
+
+def _timestamp_type() -> DateTime:
+    """Use microsecond precision on MySQL so rapid conversation creation keeps order."""
+    return DateTime(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql")
 
 
 class PixelFlowTaskRow(Base):
@@ -35,8 +41,8 @@ class PixelFlowTaskRow(Base):
     result_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (Index("ix_pixelflow_tasks_user_updated", "user_id", "updated_at"),)
 
@@ -49,7 +55,7 @@ class PixelFlowTaskEventRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     event: Mapped[str] = mapped_column(String(64), nullable=False)
     data_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), index=True)
 
     __table_args__ = (Index("ix_pixelflow_events_task_id_id", "task_id", "id"),)
 
@@ -68,7 +74,7 @@ class PixelFlowConversationTraceEventRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     event: Mapped[str] = mapped_column(String(64), nullable=False)
     data_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), index=True)
 
     __table_args__ = (Index("ix_pixelflow_trace_conversation_id_id", "conversation_id", "id"),)
 
@@ -79,8 +85,8 @@ class PixelFlowSessionContextRow(Base):
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     context_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
 
     __table_args__ = (Index("ix_pixelflow_session_user_updated", "user_id", "updated_at"),)
 
@@ -94,10 +100,13 @@ class PixelFlowConversationRow(Base):
     current_task_id: Mapped[str | None] = mapped_column(String(64), index=True)
     last_phase: Mapped[str] = mapped_column(String(32), default="idle", index=True)
     context_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
 
-    __table_args__ = (Index("ix_pixelflow_conversations_user_updated", "user_id", "updated_at", "conversation_id"),)
+    __table_args__ = (
+        Index("ix_pixelflow_conversations_user_updated", "user_id", "updated_at", "conversation_id"),
+        Index("ix_pixelflow_conversations_user_created", "user_id", "created_at", "conversation_id"),
+    )
 
 
 class PixelFlowConversationMessageRow(Base):
@@ -109,7 +118,7 @@ class PixelFlowConversationMessageRow(Base):
     role: Mapped[str] = mapped_column(String(24), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), index=True)
 
     __table_args__ = (Index("ix_pixelflow_conversation_messages_conversation_created", "conversation_id", "created_at"),)
 
@@ -130,7 +139,7 @@ class PixelFlowAssetRow(Base):
     vendor_task_id: Mapped[str | None] = mapped_column(String(128), index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (Index("ix_pixelflow_assets_task_type", "task_id", "asset_type"),)

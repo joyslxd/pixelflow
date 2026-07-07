@@ -202,6 +202,50 @@ async def test_memory_conversation_store_sorts_by_created_at_not_updated_at():
 
 
 @pytest.mark.asyncio
+async def test_sql_conversation_store_sorts_by_created_at_not_updated_at(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False))
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+
+        await store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="newer",
+                user_id="u1",
+                title="更晚创建",
+                created_at=(base + timedelta(hours=1)).isoformat(),
+                updated_at=(base + timedelta(hours=1)).isoformat(),
+            )
+        )
+        await store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="older",
+                user_id="u1",
+                title="更早创建",
+                created_at=base.isoformat(),
+                updated_at=(base + timedelta(hours=2)).isoformat(),
+            )
+        )
+
+        first_page, next_cursor = await store.list_conversations(user_id="u1", limit=1)
+        second_page, final_cursor = await store.list_conversations(user_id="u1", limit=1, cursor=next_cursor)
+
+        assert [record.conversation_id for record in first_page] == ["newer"]
+        assert [record.conversation_id for record in second_page] == ["older"]
+        assert final_cursor is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sql_conversation_store_emits_timezone_aware_timestamps(tmp_path):
     import re
 
