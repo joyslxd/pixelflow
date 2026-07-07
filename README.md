@@ -148,6 +148,7 @@ flowchart TD
 | 对话 | GET | `/agent/conversations?page_size=5` | 最近对话分页 |
 | 对话 | GET | `/agent/conversations/{conversation_id}` | 对话详情 |
 | 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息 |
+| 对话 | GET | `/agent/conversations/{conversation_id}/trace` | 内部调试专用：查看该对话的 LLM/供应商调用 trace，需要 content-app `ROLE_ADMIN` |
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
@@ -354,6 +355,14 @@ http://localhost:5273/auth-token
 ```
 
 把 content-app token 保存到 `localStorage.Authorization`。正式集成优先由 content-app 宿主注入 `window.__CONTENT_APP_AUTHORIZATION__`。
+
+### 对话 Trace（内部调试专用）
+
+当前主用的 v2 对话工作流（intake/creative/image/video/ppt）会把每次 LLM 调用（`pixelflow/intake/llm.py`）和每次 content-app/Borgrise 供应商调用（`run_generation.make_request`）记一条 trace 事件，按 `conversation_id` 关联，存在 `pixelflow_conversation_trace_events` 表：
+
+- 前端在调用生成类接口时，通过 `web/src/lib/api.ts` 的 `setActiveConversationId` 让后续请求自动带上 `X-Conversation-Id` 请求头；`AuthMiddleware` 读取该请求头写入 ContextVar，业务代码只在这个 ContextVar 存在时才记录 trace，不影响没有 conversation_id 的旧流程。
+- 查看入口是 `GET /agent/conversations/{conversation_id}/trace`，前端页面在 `http://localhost:5273/agentfrontend/#/trace/<对话ID>`（hash 路由，`web/src/pages/TracePage.tsx`）；对话 ID 可以从工作台地址栏 `#/c/<对话ID>` 里复制。
+- 这个接口和页面只服务内部排查，会展示原始 prompt、供应商请求/响应；调用方必须是 content-app `ROLE_ADMIN`（`content_app_auth.is_admin_user` 实时调用 content-app `GET /api/user/me` 校验角色），非管理员会收到 403。旧 LangGraph 任务流的 `pixelflow_task_events`/`run_events` 是完全独立的另一套 trace，不受这个功能影响。
 
 ## 配置
 

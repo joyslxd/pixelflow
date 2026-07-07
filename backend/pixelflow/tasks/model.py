@@ -54,6 +54,25 @@ class PixelFlowTaskEventRow(Base):
     __table_args__ = (Index("ix_pixelflow_events_task_id_id", "task_id", "id"),)
 
 
+class PixelFlowConversationTraceEventRow(Base):
+    """内部调试用：v2 对话工作流（intake/creative/image/video/ppt）的 trace 事件。
+
+    跟 ``PixelFlowTaskEventRow`` 结构一致，但按 ``conversation_id`` 索引，
+    因为当前 v2 工作流不经过旧 LangGraph 任务流的 ``task_id``/``run_id``。
+    """
+
+    __tablename__ = "pixelflow_conversation_trace_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+    __table_args__ = (Index("ix_pixelflow_trace_conversation_id_id", "conversation_id", "id"),)
+
+
 class PixelFlowSessionContextRow(Base):
     __tablename__ = "pixelflow_session_contexts"
 

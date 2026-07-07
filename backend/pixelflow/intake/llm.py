@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -157,12 +158,37 @@ def _default_model_factory(model_name: str, *, attach_tracing: bool = False) -> 
 
 
 def _invoke_json_model(prompt: str, model_name: str, model_factory: ModelFactory) -> Any:
+    from pixelflow.tracing import record_trace_event_background
+
     try:
         model = model_factory(model_name, attach_tracing=False)
     except TypeError:
         model = model_factory(model_name)
-    response = model.invoke(prompt)
-    return _parse_json_payload(getattr(response, "content", response))
+    started_at = time.monotonic()
+    try:
+        response = model.invoke(prompt)
+    except Exception as exc:
+        record_trace_event_background(
+            "llm_call",
+            {
+                "model": model_name,
+                "prompt": prompt,
+                "error": str(exc),
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+            },
+        )
+        raise
+    content = getattr(response, "content", response)
+    record_trace_event_background(
+        "llm_call",
+        {
+            "model": model_name,
+            "prompt": prompt,
+            "response": str(content or ""),
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+        },
+    )
+    return _parse_json_payload(content)
 
 
 def _parse_json_payload(content: Any) -> Any:

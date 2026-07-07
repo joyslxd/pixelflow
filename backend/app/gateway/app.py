@@ -108,6 +108,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
 
+        from pixelflow.tracing import configure_trace_sink
+
+        conversation_trace_store = app.state.pixelflow_task_store
+
+        async def _write_conversation_trace_event(conversation_id: str, event: str, data: dict, user_id: str | None) -> None:
+            await conversation_trace_store.append_trace_event(conversation_id, event, data, user_id=user_id)
+
+        configure_trace_sink(_write_conversation_trace_event)
+
         try:
             yield
         finally:
@@ -123,6 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_power_mem_service is not None:
                 await pixelflow_power_mem_service.aclose()
                 logger.info("PixelFlow semantic memory closed")
+            configure_trace_sink(None)
 
     logger.info("Shutting down API Gateway")
 

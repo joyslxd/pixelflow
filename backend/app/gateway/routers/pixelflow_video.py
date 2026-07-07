@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
+from pixelflow.generate.scene_assets import generate_scene_assets as run_generate_scene_assets
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
 from pixelflow.memory import semantic_memory_text, with_semantic_memory
 from pixelflow.qc import VideoQCRequest, review_video_quality
@@ -101,6 +102,7 @@ class PrepareScenePackagesResponse(BaseModel):
 class GenerateSceneAssetsRequest(BaseModel):
     global_assets: dict[str, Any] = Field(default_factory=dict)
     scene_packages: list[dict[str, Any]]
+    materials: list[dict[str, Any]] = Field(default_factory=list)
     image_size: str = "1080p"
     model: str | None = None
 
@@ -572,82 +574,34 @@ async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> G
     if not body.scene_packages:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
 
-    image_skill = get_image_skill()
-    enriched = [_clone_mapping(scene) for scene in body.scene_packages]
-    global_assets = _clone_mapping(body.global_assets) if body.global_assets else {}
-    failed_assets: list[dict[str, Any]] = []
-
-    async def generate_asset(prompt: str, ratio: str, context: dict[str, Any]) -> tuple[list[str], bool]:
-        result = await image_skill.text_to_image(
-            prompt=prompt,
-            ratio=ratio,
-            size=body.image_size,
-            model=body.model,
-            num_images=1,
+    result = await run_generate_scene_assets(
+        image_skill=get_image_skill(),
+        global_assets=_clone_mapping(body.global_assets) if body.global_assets else {},
+        scene_packages=[_clone_mapping(scene) for scene in body.scene_packages],
+        materials=body.materials,
+        image_size=body.image_size,
+        model=body.model,
+        quota_checker=is_quota_insufficient,
+    )
+    if result.get("quota_insufficient"):
+        return GenerateSceneAssetsResponse(
+            ok=False,
+            endpoint=str(result.get("endpoint") or "/api/picture/text_to_image"),
+            global_assets=result.get("global_assets") or {},
+            scene_packages=result.get("scene_packages") or [],
+            failed_assets=result.get("failed_assets") or [],
+            quota_insufficient=True,
+            message=quota_resume_message(
+                (result.get("failed_assets") or [{}])[-1].get("error") if result.get("failed_assets") else None
+            ),
         )
-        if not result.ok:
-            quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
-            failed_assets.append({
-                **context,
-                "error": result.error or "图片生成失败",
-                "quota_insufficient": quota_insufficient,
-                "raw": result.raw,
-            })
-            return [], quota_insufficient
-        urls = [str(image.get("url") or image.get("download_url")) for image in result.images if image.get("url") or image.get("download_url")]
-        if not urls:
-            failed_assets.append({**context, "error": "图片生成结果没有URL", "raw": result.raw})
-        return urls, False
-
-    asset_jobs: list[tuple[dict[str, Any], str, str, str, dict[str, Any]]] = []
-    if global_assets:
-        for character in _list_of_dicts(global_assets.get("characters")):
-            prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
-            if prompt:
-                asset_jobs.append((character, "three_view_images", prompt, "1:1", {"asset_id": character.get("asset_id"), "asset_type": "character"}))
-        for scene_image in _list_of_dicts(global_assets.get("scenes")):
-            prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
-            if prompt:
-                asset_jobs.append((scene_image, "images", prompt, "9:16", {"asset_id": scene_image.get("asset_id"), "asset_type": "scene_image"}))
-        for prop_image in _list_of_dicts(global_assets.get("props")):
-            prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
-            if prompt:
-                asset_jobs.append((prop_image, "images", prompt, "1:1", {"asset_id": prop_image.get("asset_id"), "asset_type": "prop_image"}))
-    else:
-        for scene in enriched:
-            scene_id = str(scene.get("scene_id") or "")
-            for character in _list_of_dicts(scene.get("characters")):
-                prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
-                if prompt:
-                    asset_jobs.append((character, "three_view_images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "character"}))
-            for scene_image in _list_of_dicts(scene.get("scene_images")):
-                prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
-                if prompt:
-                    asset_jobs.append((scene_image, "images", prompt, "9:16", {"scene_id": scene_id, "asset_type": "scene_image"}))
-            for prop_image in _list_of_dicts(scene.get("prop_images")):
-                prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
-                if prompt:
-                    asset_jobs.append((prop_image, "images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "prop_image"}))
-
-    for target, field_name, prompt, ratio, context in asset_jobs:
-        urls, quota_insufficient = await generate_asset(prompt, ratio, context)
-        target[field_name] = urls
-        if quota_insufficient:
-            return GenerateSceneAssetsResponse(
-                ok=False,
-                global_assets=global_assets,
-                scene_packages=enriched,
-                failed_assets=failed_assets,
-                quota_insufficient=True,
-                message=quota_resume_message(failed_assets[-1].get("error") if failed_assets else None),
-            )
-
     return GenerateSceneAssetsResponse(
-        ok=not failed_assets,
-        global_assets=global_assets,
-        scene_packages=enriched,
-        failed_assets=failed_assets,
-        message="场景资产图生成完成。" if not failed_assets else "部分场景资产图生成失败，请查看 failed_assets。",
+        ok=bool(result.get("ok")),
+        endpoint=str(result.get("endpoint") or "/api/picture/text_to_image"),
+        global_assets=result.get("global_assets") or {},
+        scene_packages=result.get("scene_packages") or [],
+        failed_assets=result.get("failed_assets") or [],
+        message="场景资产图生成完成。" if result.get("ok") else "部分场景资产图生成失败，请查看 failed_assets。",
     )
 
 
@@ -1041,6 +995,7 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
             GenerateSceneAssetsRequest(
                 global_assets=video_scene_packages.global_assets,
                 scene_packages=video_scene_packages.scene_packages,
+                materials=body.materials,
                 image_size="1080p",
             )
         )

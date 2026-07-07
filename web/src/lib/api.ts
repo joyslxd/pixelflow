@@ -112,6 +112,18 @@ export interface ConversationDetailResponse {
   messages: ConversationMessageResponse[];
 }
 
+export interface ConversationTraceEvent {
+  id: number;
+  conversation_id: string;
+  event: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ConversationTraceResponse {
+  items: ConversationTraceEvent[];
+}
+
 export interface IntakeValidationResponse {
   intent: CreationIntent;
   schema: Record<string, unknown>;
@@ -588,12 +600,21 @@ export async function waitForAuthorizationHeader(timeoutMs = AUTHORIZATION_WAIT_
   });
 }
 
+// 当前活跃对话 id；只用来给内部调试用的 trace 埋点在请求头上带 X-Conversation-Id，
+// 不影响业务请求本身。由 WorkspacePage 在切换/创建对话时调用 setActiveConversationId 维护。
+let activeConversationIdForTrace: string | null = null;
+
+export function setActiveConversationId(conversationId: string | null): void {
+  activeConversationIdForTrace = conversationId;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   // 统一请求模板：自动带 content-app Authorization，并把非 2xx 响应转换成 ApiError。
   // 可以把它类比成前端侧的后端 Client 拦截器。
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...authHeadersFromAuthorization(await waitForAuthorizationHeader()),
+    ...(activeConversationIdForTrace ? { "X-Conversation-Id": activeConversationIdForTrace } : {}),
     ...(init?.headers as Record<string, string>),
   };
   const res = await fetch(`${AGENT_API_PREFIX}${path}`, { ...init, headers });
@@ -995,6 +1016,10 @@ export const api = {
 
   resumeConversation: (conversationId: string) => req<ConversationDetailResponse>(`/conversations/${encodeURIComponent(conversationId)}/resume`, { method: "POST" }),
 
+  // 内部调试专用：需要 content-app ROLE_ADMIN，普通用户调用会 403。
+  fetchConversationTrace: (conversationId: string) =>
+    req<ConversationTraceResponse>(`/conversations/${encodeURIComponent(conversationId)}/trace`),
+
   analyzeIntakeIntent: (body: { prompt: string; materials?: Array<Record<string, unknown>> }) =>
     req<IntakeIntentResponse>(`${FLOW_BASE}/intake/analyze`, { method: "POST", body: JSON.stringify(body) }),
 
@@ -1113,6 +1138,7 @@ export const api = {
   generateSceneAssets: (body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
+    materials?: Array<Record<string, unknown>>;
     image_size?: string;
     model?: string | null;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
@@ -1120,6 +1146,7 @@ export const api = {
   startSceneAssetsJob: (body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
+    materials?: Array<Record<string, unknown>>;
     image_size?: string;
     model?: string | null;
   }) =>
