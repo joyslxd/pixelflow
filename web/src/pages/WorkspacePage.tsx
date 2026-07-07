@@ -44,15 +44,16 @@ import {
 } from "@/lib/conversationRouting";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import {
+  applyGlobalSceneAssetImageEdit,
   deleteGlobalSceneAssetReference,
+  globalAssetsContainAsset,
   inferTargetDurationMs,
-  replaceGlobalSceneAssetImage,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
   scenePackagesWithoutRevisionContract,
-  syncScenePackageMentionImageUrls,
   updateScenePackageField,
+  uploadedReferenceMaterials,
   type GlobalSceneAssetGroup,
   type SceneGlobalAssetReference,
   type ScenePackagePatch,
@@ -556,6 +557,8 @@ interface ImageAssetEditJobRequest {
   asset_group: string;
   source_image_url: string;
   prompt: string;
+  materials?: Array<Record<string, unknown>>;
+  reference_image_urls?: string[];
   ratio?: string;
   size?: string;
   model?: string | null;
@@ -1002,7 +1005,9 @@ function isGlobalSceneAssetGroup(value: string): value is GlobalSceneAssetGroup 
 }
 
 function editedImageUrl(result: ImageAssetEditResponse): string {
-  return result.edited_image.url || result.edited_image.download_url || "";
+  const image = result.edited_image;
+  if (!image || typeof image !== "object") return "";
+  return String(image.url || image.download_url || "");
 }
 
 function isQuotaInsufficientPayload(value: unknown): boolean {
@@ -1845,8 +1850,8 @@ export function WorkspacePage() {
     updater: (videoScenePackages: PrepareScenePackagesResponse) => PrepareScenePackagesResponse,
   ): PrepareScenePackagesResponse | undefined => {
     let updatedPackages: PrepareScenePackagesResponse | undefined;
-    setMessages((items) =>
-      items.map((message) => {
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
         const artifact = message.artifact;
         const videoScenePackages = artifact?.videoScenePackages;
         if (message.id !== messageId || !artifact || !videoScenePackages) return message;
@@ -1858,9 +1863,71 @@ export function WorkspacePage() {
             videoScenePackages: updatedPackages,
           },
         };
-      }),
-    );
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
     return updatedPackages;
+  };
+
+  const syncGlobalSceneAssetEditAcrossConversation = (
+    targetConversationId: string,
+    input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
+    preferredMessageId?: string,
+  ): PrepareScenePackagesResponse | undefined => {
+    let latestPackages: PrepareScenePackagesResponse | undefined;
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (messageConversationId(message, targetConversationId) !== targetConversationId) return message;
+        const artifact = message.artifact;
+        const videoScenePackages = artifact?.videoScenePackages;
+        if (!artifact || !videoScenePackages) return message;
+        if (!globalAssetsContainAsset(videoScenePackages.global_assets, input.assetId)) return message;
+        const patched = applyGlobalSceneAssetImageEdit(
+          videoScenePackages.global_assets,
+          videoScenePackages.scene_packages as ScenePackageRecord[],
+          input,
+        );
+        const updatedPackages: PrepareScenePackagesResponse = {
+          ...videoScenePackages,
+          global_assets: patched.global_assets,
+          scene_packages: patched.scene_packages as typeof videoScenePackages.scene_packages,
+        };
+        if (message.id === preferredMessageId || !latestPackages) {
+          latestPackages = updatedPackages;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...artifact,
+            videoScenePackages: updatedPackages,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+    return latestPackages;
+  };
+
+  const persistScenePackageSnapshot = (
+    targetConversationId: string,
+    packages: PrepareScenePackagesResponse,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    if (!targetConversationId) return;
+    void api
+      .updateConversation(targetConversationId, {
+        last_phase: lastPhase,
+        context: {
+          ...makeSnapshot(targetConversationId),
+          global_assets: packages.global_assets,
+          scene_packages: packages.scene_packages,
+          ...extraContext,
+        } as unknown as Record<string, unknown>,
+      })
+      .catch(() => {});
   };
 
   const updateOriginalScenePackageMessageWithVideoResult = (
@@ -1985,6 +2052,7 @@ export function WorkspacePage() {
     reference: SceneGlobalAssetReference,
     prompt: string,
     targetConversationId: string,
+    materials: Array<Record<string, unknown>> = [],
   ): Promise<boolean> => {
     const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
     if (!storyboardMessage?.artifact?.videoScenePackages) {
@@ -1996,9 +2064,15 @@ export function WorkspacePage() {
       return true;
     }
 
+    const uploadedReferences = uploadedReferenceMaterials(materials);
     setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(`正在调用图片编辑接口修改「${reference.name}」…`, targetConversationId);
+    pushAssistant(
+      uploadedReferences.length > 0
+        ? `正在根据 ${uploadedReferences.length} 张参考图更新「${reference.name}」…`
+        : `正在调用图片编辑接口修改「${reference.name}」…`,
+      targetConversationId,
+    );
     try {
       const request: ImageAssetEditJobRequest = {
         asset_id: reference.asset_id,
@@ -2006,6 +2080,7 @@ export function WorkspacePage() {
         asset_group: reference.asset_group,
         source_image_url: reference.source_image_url,
         prompt,
+        materials: uploadedReferences,
       };
       const started = await api.startImageAssetEditJob(request);
       const pendingImageJob: PendingImageJob = {
@@ -3205,19 +3280,27 @@ export function WorkspacePage() {
       return;
     }
 
-    const updatedPackages = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: replaceGlobalSceneAssetImage(storyboardMessage.artifact.videoScenePackages.global_assets, {
+    const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
+      targetConversationId,
+      {
         assetId: reference.asset_id,
         assetGroup: reference.asset_group,
         editedImageUrl: nextUrl,
-      }),
-      scene_packages: syncScenePackageMentionImageUrls(storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[], {
-        assetId: reference.asset_id,
-        editedImageUrl: nextUrl,
-      }) as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
-    };
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+      },
+      storyboardMessage.id,
+    );
+    if (!updatedPackages) {
+      releaseArtifactAction(processedKey);
+      pushAssistant("素材图片编辑完成，但未能写回场景包，请刷新后重试。", targetConversationId);
+      await clearPendingImageJob(targetConversationId, "scene_global_asset_edit_failed", {
+        scene_global_asset_edit: editResult,
+      }).catch(() => {});
+      return;
+    }
+
+    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_edited", {
+      scene_global_asset_edit: editResult,
+    });
 
     const updatedScenePackageMessageId = uid();
     pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
@@ -4680,7 +4763,7 @@ export function WorkspacePage() {
       if (sceneGlobalAssetReference.scene_global_asset_action === "delete") {
         await handleDeleteReferencedGlobalAsset(sceneGlobalAssetReference, activeConversation);
       } else {
-        await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation);
+        await handleEditReferencedGlobalAsset(sceneGlobalAssetReference, text, activeConversation, materials);
       }
       return;
     }
@@ -4801,7 +4884,8 @@ export function WorkspacePage() {
         return;
       }
       imageRevisionArtifactRef.current = null;
-      await handleEditReferencedGlobalAsset(pendingSceneGlobalAssetReference, text, activeConversation);
+      const flowMaterials = mergeMaterials(pendingImageRevisionArtifact?.materials || [], materials);
+      await handleEditReferencedGlobalAsset(pendingSceneGlobalAssetReference, text, activeConversation, flowMaterials);
       return;
     }
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {

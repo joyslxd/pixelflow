@@ -11,6 +11,13 @@ from pydantic import BaseModel, Field
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.generate.image_prepare import ImageMethod, prepare_image_generation
+from pixelflow.generate.scene_assets import (
+    REFERENCE_IMAGE_MODEL,
+    REFERENCE_IMAGE_QUALITY,
+    collect_uploaded_reference_image_urls,
+    enhance_global_asset_edit_prompt,
+    global_asset_edit_ratio,
+)
 from pixelflow.memory import with_semantic_memory
 from pixelflow.skills import get_image_skill
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
@@ -85,9 +92,11 @@ class ImageAssetEditRequest(BaseModel):
     asset_group: str
     source_image_url: str
     prompt: str
+    materials: list[dict[str, Any]] = Field(default_factory=list)
+    reference_image_urls: list[str] = Field(default_factory=list)
     ratio: str = "1:1"
-    size: str = "4K"
-    model: str | None = "gpt-image-2"
+    size: str = REFERENCE_IMAGE_QUALITY
+    model: str | None = REFERENCE_IMAGE_MODEL
 
 
 class ImageAssetEditResponse(BaseModel):
@@ -293,6 +302,26 @@ async def get_edit_image_asset_job(job_id: str) -> ImageAssetEditJobStatusRespon
     )
 
 
+def _collect_global_asset_edit_reference_urls(body: ImageAssetEditRequest) -> list[str]:
+    urls = collect_uploaded_reference_image_urls(body.materials)
+    for url in body.reference_image_urls or []:
+        normalized = str(url).strip()
+        if normalized.startswith(("http://", "https://")) and normalized not in urls:
+            urls.append(normalized)
+    return urls[:9]
+
+
+def _global_asset_image_edit_kwargs(body: ImageAssetEditRequest, *, source_image_url: str, prompt: str) -> dict[str, Any]:
+    return {
+        "image_url": source_image_url,
+        "prompt": prompt,
+        "model": _optional_str(body.model) or REFERENCE_IMAGE_MODEL,
+        "ratio": body.ratio or "1:1",
+        "size": body.size or REFERENCE_IMAGE_QUALITY,
+        "max_images": 1,
+    }
+
+
 async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
     source_image_url = body.source_image_url.strip()
     prompt = body.prompt.strip()
@@ -301,14 +330,31 @@ async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetE
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt不能为空")
 
-    result = await get_image_skill().image_edit(
-        image_url=source_image_url,
-        prompt=prompt,
-        model=_optional_str(body.model),
-        ratio=body.ratio or "1:1",
-        size=body.size or "4K",
-        max_images=1,
-    )
+    reference_urls = _collect_global_asset_edit_reference_urls(body)
+    skill = get_image_skill()
+    method: ImageMethod = "image_edit"
+    if reference_urls:
+        method = "multi_reference_image_generation"
+        ratio = body.ratio if body.ratio not in {"", "1:1"} else global_asset_edit_ratio(body.asset_group)
+        result = await skill.reference_image(
+            reference_images=reference_urls,
+            prompt=enhance_global_asset_edit_prompt(prompt, body.asset_group),
+            model=REFERENCE_IMAGE_MODEL,
+            ratio=ratio,
+            size=REFERENCE_IMAGE_QUALITY,
+            max_images=1,
+        )
+        quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+        if not result.ok and not quota_insufficient:
+            method = "image_edit"
+            result = await skill.image_edit(
+                **_global_asset_image_edit_kwargs(body, source_image_url=source_image_url, prompt=prompt),
+            )
+    else:
+        result = await skill.image_edit(
+            **_global_asset_image_edit_kwargs(body, source_image_url=source_image_url, prompt=prompt),
+        )
+
     quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
     edited_image = result.images[0] if result.images else {}
     edited_url = _optional_str(edited_image.get("url") or edited_image.get("download_url")) if edited_image else None
@@ -321,7 +367,8 @@ async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetE
         message = result.error or "图片编辑结果没有URL。"
     return ImageAssetEditResponse(
         ok=ok,
-        endpoint=_endpoint_for("image_edit", result.raw),
+        method=method,
+        endpoint=_endpoint_for(method, result.raw),
         source_image_url=source_image_url,
         edited_image=edited_image,
         asset_id=body.asset_id,

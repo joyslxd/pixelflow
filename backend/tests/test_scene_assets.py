@@ -6,9 +6,12 @@ from typing import Any
 
 from pixelflow.generate.scene_assets import (
     collect_prop_reference_image_urls,
+    collect_uploaded_reference_image_urls,
+    enhance_global_asset_edit_prompt,
     enhance_prop_reference_prompt,
     enhance_scene_reference_prompt,
     generate_scene_assets,
+    global_asset_edit_ratio,
     resolve_scene_asset_endpoint,
 )
 from pixelflow.skills import ImageGenerationResult
@@ -25,6 +28,25 @@ def test_collect_prop_reference_image_urls_from_materials_and_scene_packages():
         scene_packages=[{"image_urls": ["https://x/scene-ref.png", "https://x/product.png"]}],
     )
     assert urls == ["https://x/product.png", "https://x/artifact.png", "https://x/scene-ref.png"]
+
+
+def test_collect_uploaded_reference_image_urls_excludes_scene_global_asset():
+    urls = collect_uploaded_reference_image_urls(
+        [
+            {"url": "https://x/fila1.jpg", "mediaType": "image"},
+            {"url": "https://x/fila2.jpg", "mediaType": "image"},
+            {"url": "https://x/old-prop.png", "source": "scene_global_asset"},
+        ]
+    )
+    assert urls == ["https://x/fila1.jpg", "https://x/fila2.jpg"]
+
+
+def test_global_asset_edit_ratio_and_prompt():
+    assert global_asset_edit_ratio("scenes") == "9:16"
+    assert global_asset_edit_ratio("props") == "1:1"
+    assert "参考图" in enhance_global_asset_edit_prompt("更新为新的鞋子", "props")
+    assert "场景风格" in enhance_global_asset_edit_prompt("更新场景", "scenes")
+    assert enhance_global_asset_edit_prompt("改三视图", "characters") == "改三视图"
 
 
 def test_enhance_prop_reference_prompt_appends_suffix_once():
