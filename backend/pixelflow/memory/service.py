@@ -167,20 +167,25 @@ class PowerMemService:
         category_values = [category for category in (categories or []) if category]
         try:
             if len(category_values) > 1:
-                result_groups = await asyncio.gather(
-                    *(
-                        self._search_once(
-                            user_id=user_id,
-                            query=query,
-                            category=category,
-                            source_agent=source_agent,
-                            run_id=run_id,
-                            limit=search_limit,
+                items: list[SemanticMemoryItem] = []
+                for category in category_values:
+                    try:
+                        items.extend(
+                            await self._search_once(
+                                user_id=user_id,
+                                query=query,
+                                category=category,
+                                source_agent=source_agent,
+                                run_id=run_id,
+                                limit=search_limit,
+                            )
                         )
-                        for category in category_values
-                    )
-                )
-                return _dedupe_and_sort([item for group in result_groups for item in group])[:search_limit]
+                    except Exception as exc:
+                        if self.config.fail_open:
+                            _log_fail_open(f"PowerMem search failed for category={category}", exc)
+                            continue
+                        raise
+                return _dedupe_and_sort(items)[:search_limit]
             category = category_values[0] if category_values else None
             return await self._search_once(
                 user_id=user_id,
@@ -299,7 +304,11 @@ class PowerMemService:
         # 单次请求级超时覆盖 client 默认超时：record 用 record_timeout_seconds，
         # search/health 用 timeout_seconds。
         request_timeout = timeout if timeout is not None else self.config.timeout_seconds
-        response = await client.request(method, self._url(path), headers=headers, json=json, timeout=request_timeout)
+        # PowerMem's OceanBase-backed test deployment can reject overlapping
+        # operations from the same client process with OB_SESSION_ENTRY_EXIST.
+        # Keep the client fail-open but serialize requests inside this service.
+        async with self._lock:
+            response = await client.request(method, self._url(path), headers=headers, json=json, timeout=request_timeout)
         response.raise_for_status()
         if response.content:
             return response.json()

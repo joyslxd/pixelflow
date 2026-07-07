@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -54,6 +55,64 @@ async def test_powermem_service_searches_with_api_key_and_category_filter():
 
 
 @pytest.mark.asyncio
+async def test_powermem_service_searches_categories_sequentially_and_keeps_partial_results():
+    active_requests = 0
+    max_active_requests = 0
+    seen_categories: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active_requests, max_active_requests
+        payload = json.loads(request.content.decode("utf-8"))
+        category = str(payload.get("filters", {}).get("category") or "")
+        seen_categories.append(category)
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        await asyncio.sleep(0.01)
+        active_requests -= 1
+        if category == "brand":
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "success": False,
+                    "error": {
+                        "code": "SEARCH_FAILED",
+                        "message": "Search failed: connect failed OB_SESSION_ENTRY_EXIST(4661)",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "memory_id": f"{category}-1",
+                            "content": f"{category} memory",
+                            "score": 0.8,
+                            "metadata": {"category": category},
+                        }
+                    ]
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="偏好", categories=["preference", "brand", "skill"])
+
+    assert seen_categories == ["preference", "brand", "skill"]
+    assert max_active_requests == 1
+    assert [item.memory_id for item in results] == ["preference-1", "skill-1"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_powermem_service_records_memory_payload():
     payloads: list[dict] = []
 
@@ -94,6 +153,34 @@ async def test_powermem_service_records_memory_payload():
             "infer": True,
         }
     ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_serializes_parallel_record_requests():
+    active_requests = 0
+    max_active_requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active_requests, max_active_requests
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        await asyncio.sleep(0.01)
+        active_requests -= 1
+        return httpx.Response(200, json={"success": True, "data": [{"memory_id": "1"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret"),
+        http_client=client,
+    )
+
+    await asyncio.gather(
+        service.record(user_id="u1", content="偏好 A", category="preference"),
+        service.record(user_id="u1", content="偏好 B", category="preference"),
+    )
+
+    assert max_active_requests == 1
     await client.aclose()
 
 
