@@ -7,6 +7,7 @@ import os
 import stat
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,7 @@ DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
 IMAGE_EXTENSIONS = {".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 class UploadResponse(BaseModel):
@@ -203,6 +205,12 @@ def _is_image_upload(file: UploadFile, filename: str) -> bool:
 
 async def _upload_image_to_borgrise(file_path: os.PathLike[str] | str) -> str:
     """Upload an image to Borgrise/TOS and return the public URL."""
+    if BACKEND_ENV_PATH.exists():
+        load_dotenv(BACKEND_ENV_PATH, override=True)
+    run_generation.API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
+    run_generation.BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
+    run_generation.BORGRISE_PASSWORD = os.environ.get("BORGRISE_PASSWORD", "")
+    run_generation.BASE_URL = os.environ.get("BORGRISE_BASE_URL", run_generation.BASE_URL)
     result = await asyncio.to_thread(run_generation.upload_file, str(file_path))
     if result.get("error"):
         raise RuntimeError(result.get("message") or "Borgrise upload failed")

@@ -109,6 +109,24 @@ def test_upload_files_does_not_upload_non_images_to_borgrise(tmp_path):
     upload_mock.assert_not_awaited()
 
 
+def test_upload_image_to_borgrise_refreshes_cached_token(monkeypatch, tmp_path):
+    image_path = tmp_path / "product.jpg"
+    image_path.write_bytes(b"jpg-bytes")
+    monkeypatch.setenv("BORGRISE_API_TOKEN", "fresh-token")
+    monkeypatch.setattr(uploads, "BACKEND_ENV_PATH", tmp_path / "missing.env")
+    monkeypatch.setattr(uploads.run_generation, "API_TOKEN", "stale-token")
+
+    def fake_upload(file_path: str) -> dict[str, str | bool]:
+        assert file_path == str(image_path)
+        assert uploads.run_generation.API_TOKEN == "fresh-token"
+        return {"success": True, "url": "https://tos.example.com/product.webp"}
+
+    with patch.object(uploads.run_generation, "upload_file", side_effect=fake_upload):
+        public_url = asyncio.run(uploads._upload_image_to_borgrise(image_path))
+
+    assert public_url == "https://tos.example.com/product.webp"
+
+
 def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
