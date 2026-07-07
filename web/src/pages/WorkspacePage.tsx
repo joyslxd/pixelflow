@@ -751,11 +751,19 @@ function formatSceneIndexesForMessage(
 
 function failedSceneIdsFromGeneratedSceneVideos(
   generatedSceneVideos: ChatArtifact["generatedSceneVideos"] | undefined,
+  scenes: Array<Pick<PrepareScenePackagesResponse["scene_packages"][number], "scene_id" | "scene_index">> = [],
 ): Set<string> {
   const sceneIds = new Set<string>();
+  const sceneIdByIndex = new Map(scenes.map((scene) => [Number(scene.scene_index), scene.scene_id]));
   for (const failedScene of generatedSceneVideos?.failed_scenes || []) {
     const sceneId = String(failedScene.scene_id || failedScene.sceneId || "");
-    if (sceneId) sceneIds.add(sceneId);
+    if (sceneId) {
+      sceneIds.add(sceneId);
+      continue;
+    }
+    const sceneIndex = Number(failedScene.scene_index || failedScene.sceneIndex);
+    const sceneIdFromIndex = Number.isFinite(sceneIndex) ? sceneIdByIndex.get(sceneIndex) : "";
+    if (sceneIdFromIndex) sceneIds.add(sceneIdFromIndex);
   }
   return sceneIds;
 }
@@ -5890,11 +5898,11 @@ export function WorkspacePage() {
     if (!videoScenePackages?.ok || videoScenePackages.scene_packages.length === 0) return;
     const targetConversationId = messageConversationId(latestMessage, conversationIdRef.current);
     const dirtySceneIds = new Set(artifact.videoScenePackageEditedSceneIds || []);
-    const retrySceneIds = failedSceneIdsFromGeneratedSceneVideos(artifact.generatedSceneVideos);
+    const retrySceneIds = failedSceneIdsFromGeneratedSceneVideos(artifact.generatedSceneVideos, videoScenePackages.scene_packages);
     const isDirtySceneRegeneration = canReuseUneditedSceneVideos(videoScenePackages, artifact.generatedSceneVideos, dirtySceneIds);
     const hasGeneratedSceneVideos = Boolean(artifact.generatedSceneVideos?.scene_videos.length);
     const isFailedSceneRetry = Boolean(artifact.generatedSceneVideos && !artifact.generatedSceneVideos.ok && retrySceneIds.size > 0);
-    if (hasGeneratedSceneVideos && dirtySceneIds.size === 0) {
+    if (hasGeneratedSceneVideos && dirtySceneIds.size === 0 && !isFailedSceneRetry) {
       pushAssistant("当前分镜没有检测到修改内容，无需重新生成视频。", targetConversationId);
       return;
     }
