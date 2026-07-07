@@ -185,6 +185,50 @@ async def test_powermem_service_serializes_parallel_record_requests():
 
 
 @pytest.mark.asyncio
+async def test_powermem_service_search_is_not_blocked_by_slow_background_record():
+    record_started = asyncio.Event()
+    release_record = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/memories/search"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "results": [
+                            {
+                                "memory_id": "search-1",
+                                "content": "search result",
+                                "score": 0.9,
+                                "metadata": {},
+                            }
+                        ]
+                    },
+                },
+            )
+        record_started.set()
+        await release_record.wait()
+        return httpx.Response(200, json={"success": True, "data": [{"memory_id": "record-1"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret"),
+        http_client=client,
+    )
+
+    record_task = asyncio.create_task(service.record(user_id="u1", content="用户偏好真实摄影", category="preference"))
+    await asyncio.wait_for(record_started.wait(), timeout=1)
+
+    results = await asyncio.wait_for(service.search(user_id="u1", query="真实摄影", categories=["preference"]), timeout=0.2)
+
+    release_record.set()
+    assert [item.memory_id for item in results] == ["search-1"]
+    assert await record_task is True
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_powermem_service_falls_back_when_preference_infer_creates_no_memory():
     payloads: list[dict] = []
 
