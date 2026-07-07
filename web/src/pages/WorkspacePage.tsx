@@ -487,7 +487,14 @@ export function WorkspacePage() {
         />
       )}
       {dialogOpen && (
-        <GenParamsDialog key={pendingCore} open initialCoreMessage={pendingCore} onConfirm={handleConfirmParams} onCancel={() => setDialogOpen(false)} />
+        <GenParamsDialog
+          key={pendingCore}
+          open
+          initialCoreMessage={pendingCore}
+          uploadThreadId={currentTaskId || taskIdRef.current}
+          onConfirm={handleConfirmParams}
+          onCancel={() => setDialogOpen(false)}
+        />
       )}
     </div>
   );

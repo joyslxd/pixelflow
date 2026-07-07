@@ -5,6 +5,7 @@ export interface TaskResponse {
   status: string;
   phase: string;
   thread_id: string;
+  run_id: string | null;
   product_info: Record<string, unknown>;
   video_params: Record<string, unknown>;
   reference_videos: Array<Record<string, unknown>>;
@@ -47,8 +48,39 @@ export interface CreateTaskBody {
 
 export interface TaskEvent {
   id: number;
+  task_id?: string;
   event: string; // task_created | phase_change | brief_ready | task_done | ...
   data: Record<string, unknown>;
+  created_at?: string;
+}
+
+export interface RunResponse {
+  run_id: string;
+  thread_id: string;
+  assistant_id: string | null;
+  status: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  llm_call_count: number;
+  message_count: number;
+}
+
+export interface RunEvent {
+  id?: number;
+  thread_id: string;
+  run_id: string;
+  user_id?: string | null;
+  event_type: string;
+  category: string;
+  content: unknown;
+  event_metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  seq: number;
+  created_at: string;
 }
 
 export interface SessionContextResponse {
@@ -56,6 +88,25 @@ export interface SessionContextResponse {
   user_id: string | null;
   context: Record<string, unknown>;
   updated_at: string;
+}
+
+export interface UploadFileInfo {
+  filename: string;
+  size: string;
+  path: string;
+  virtual_path: string;
+  artifact_url: string;
+  public_url?: string;
+  tos_url?: string;
+  borgrise_url?: string;
+  original_filename?: string;
+}
+
+export interface UploadResponse {
+  success: boolean;
+  files: UploadFileInfo[];
+  message: string;
+  skipped_files: string[];
 }
 
 function csrfToken(): string {
@@ -80,6 +131,18 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
+}
+
+async function uploadReq<T>(path: string, form: FormData): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = csrfToken();
+  if (token) headers["X-CSRF-Token"] = token;
+  const res = await fetch(`/api${path}`, { method: "POST", credentials: "include", body: form, headers });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(res.status, `${res.status} ${path}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
 }
 
 /** 认证:本地 session(cookie) + CSRF。 */
@@ -107,10 +170,20 @@ export const auth = {
 };
 
 export const api = {
+  listTasks: (limit = 50) => req<TaskResponse[]>(`/tasks?limit=${limit}`),
+
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>("/tasks", { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),
 
   getTask: (id: string) => req<TaskResponse>(`/tasks/${id}`),
+
+  listRuns: (threadId: string) => req<RunResponse[]>(`/threads/${encodeURIComponent(threadId)}/runs`),
+
+  listRunEvents: (threadId: string, runId: string, eventTypes?: string, limit = 500) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (eventTypes) params.set("event_types", eventTypes);
+    return req<RunEvent[]>(`/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events?${params.toString()}`);
+  },
 
   getResult: (id: string) =>
     req<{ task_id: string; status: string; phase: string; result: Record<string, unknown>; error: string | null }>(`/tasks/${id}/result`),
@@ -134,8 +207,16 @@ export const api = {
   getSessionContext: (taskId?: string) =>
     req<SessionContextResponse | null>(`/tasks/session/context${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
 
+  listSessionContexts: (limit = 50) => req<SessionContextResponse[]>(`/tasks/session/contexts?limit=${limit}`),
+
   saveSessionContext: (taskId: string, context: Record<string, unknown>) =>
     req<SessionContextResponse>("/tasks/session/context", { method: "PUT", body: JSON.stringify({ task_id: taskId, context }) }),
+
+  uploadThreadFiles: (threadId: string, files: File[]) => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    return uploadReq<UploadResponse>(`/threads/${encodeURIComponent(threadId)}/uploads`, form);
+  },
 };
 
 /**
