@@ -22,7 +22,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
-| 视频修改循环 | 可用 | 支持综合质检、按受影响场景重生并重新合并 |
+| 视频修改循环 | 可用 | 支持 QAAgent QC 质检、按受影响场景重生并重新合并 |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
@@ -138,8 +138,9 @@ flowchart TD
 | 视频 | GET | `/agent/flows/video/generate-direct/jobs/{job_id}` | 查询直接视频生成结果 |
 | 视频 | POST | `/agent/flows/video/merge/start` | 启动可恢复视频合并 job |
 | 视频 | GET | `/agent/flows/video/merge/jobs/{job_id}` | 查询视频合并结果 |
-| 视频 | POST | `/agent/flows/video/quality-review` | 视频综合质检，覆盖方案一致性、分镜覆盖、产品一致性/穿帮、播放稳定性和手机端需求 |
-| 视频 | POST | `/agent/flows/video/analyze-flaws` | 兼容旧前端的视频穿帮分析入口，内部转调综合质检并只返回产品一致性问题 |
+| 视频 | POST | `/agent/flows/video/quality-review` | 视频 QAAgent QC 质检，覆盖画面缺陷、商品露出、Prompt 跑偏、字幕、Brief 一致性、黑屏/卡顿和约束合规 |
+| 视频 | POST | `/agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
+| 视频 | GET | `/agent/flows/video/quality-review/jobs/{job_id}` | 查询视频 QAAgent QC 质检结果 |
 | PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -211,7 +212,7 @@ PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
 | 文本抽取媒体链接 | `/api/creative/extractMediaLinks` |
 | 单视频拆解 | `/api/creative/decompose_video_to_storyboard` |
 | 多视频拆解 | `/api/creative/batch_decompose_video_to_storyboard` |
-| 视频综合质检 / 旧穿帮分析 | `/api/creative/analyze_video_flaws` |
+| 视频 QAAgent QC 质检 | `/api/creative/video_quality_review` |
 
 SmartPPT：
 
@@ -245,7 +246,8 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时配置为准，Python 侧不再用硬编码模型白名单拦截用户已确认的参数。content-app 图片编辑请求里 `size` 表示比例，`imageSize` 表示清晰度，网关会保持两者分离。图片编辑失败后，重新生成会先回到模型、尺寸和清晰度确认卡，避免继续复用失败参数。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
 - 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。生成结果会同步回填到原 `video_scene_packages` 卡片；用户继续点击原来的“查看分镜”时，右侧 `StoryboardPanel` 的镜头预览优先展示已生成的分镜视频。用户只修改某几个分镜后再次确认生成时，仅重生成这些已修改分镜，未修改分镜复用旧视频，再按分镜顺序重新合并并回填原场景包。
-- 场景视频生成 job 内部会并行生成分镜视频，当前最多 100 个分镜同时调用 content-app；所有分镜都结束后再统一判断。全部成功时按 `scene_index` 合并；前端通过 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，并把 `pendingVideoJob.kind="video_merge"` 写入对话上下文，用户切走或刷新后只恢复轮询已有 job；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`；多个分镜合并时 content-app 会同步完成下载、ffmpeg 合并和上传，PixelFlow 使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并接口读等待，默认 1 小时；部分异常时返回 `failed_scenes` 和每个失败原因，重试只提交失败分镜；部分额度不足时整批只提示一次额度不足，充值后同样只重试额度暂停或异常分镜。
+- 场景视频生成 job 内部会并行生成分镜视频，当前最多 100 个分镜同时调用 content-app；所有分镜都结束后再统一判断。全部成功时按 `scene_index` 合并；前端通过 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，并把 `pendingVideoJob.kind="video_merge"` 写入对话上下文，用户切走或刷新后只恢复轮询已有 job；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`；多个分镜合并时 content-app 会同步完成下载、ffmpeg 合并和上传，PixelFlow 使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并接口读等待，默认 1 小时；合并异常时 job 返回 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端据此展示“视频合并失败”而不是“合并完成”；部分异常时返回 `failed_scenes` 和每个失败原因，重试只提交失败分镜；部分额度不足时整批只提示一次额度不足，充值后同样只重试额度暂停或异常分镜。
+- 视频 QAAgent QC 通过 `/agent/flows/video/quality-review/start` 启动异步 job，再轮询 `/agent/flows/video/quality-review/jobs/{job_id}`，避免浏览器或网关长连接超时。QC 失败时 job 返回 `status=failed` 并保留 content-app 原始错误；content-app 会把长视频压成完整时序的低码率质检预览再送入模型，避免 300 秒级成片直接 base64 后超过模型请求体限制。
 - 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 连续完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即把 `pendingScenePackageJob` / `pending_scene_package_job` 写入 conversation context；用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/jobs/{job_id}`，不会重复启动生成。参考图失败或额度不足时，job 返回已生成场景包和 `sceneAssetFailures`，前端展示可继续的场景包卡片。
 - 场景包卡片上的“继续生成参考图/重新生成参考图”调用 `/agent/flows/video/generate-scene-assets/start`，同样保存 `pendingScenePackageJob` 并恢复轮询；网关重启导致 job 404 时只提示手动重试，不自动重启，避免重复计费。
 - 场景视频生成、视频修改重生成和视频合并都会先调用对应 `/start` 取得 `job_id`，并把 `pendingVideoJob` / `pending_video_job` 写入当前 conversation context；用户离开再返回同一对话时，前端只继续查询 `/jobs/{job_id}`，不会重复启动生成或合并。

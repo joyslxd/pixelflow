@@ -24,7 +24,7 @@ interface MessageBubbleProps {
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
   onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
-  onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
+  onRegenerateVideoWithRevision?: (msg: ChatMessage, useQualityReview: boolean) => void;
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
@@ -155,7 +155,7 @@ function progressDescription(content: string): string {
   if (/PPT 附件/.test(content)) return "生成 PPT 附件";
   if (/图片编辑|编辑图片/.test(content)) return "编辑图片";
   if (/生成图片|图片生成/.test(content)) return "生成图片";
-  if (/视频分析|媒体链接|穿帮分析|综合质检/.test(content)) return "分析视频内容";
+  if (/视频分析|媒体链接|QAAgent QC|质检/.test(content)) return "分析视频内容";
   if (/采集 Agent 判断这是(?:图片|视频)生成需求/.test(content)) return "计划文件生成中";
   if (/采集 Agent|理解|表单/.test(content)) return "理解需求并补全参数";
   if (/plan\.md|计划文件|创作方案/.test(content)) return "生成计划文件";
@@ -975,7 +975,7 @@ export function MessageBubble({
               </button>
             )}
           </div>
-        ) : msg.artifact?.type === "video_flaw_analysis" && msg.artifact.videoFlawAnalysis ? (
+        ) : msg.artifact?.type === "video_quality_review" && msg.artifact.videoQualityReview ? (
           <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
             <div className="flex items-start gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
@@ -985,30 +985,30 @@ export function MessageBubble({
                 <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
                 <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
               </span>
-              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", msg.artifact.videoFlawAnalysis.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
-                {msg.artifact.videoFlawAnalysis.ok ? "已分析" : "失败"}
+              <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", msg.artifact.videoQualityReview.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber")}>
+                {msg.artifact.videoQualityReview.ok ? "已分析" : "失败"}
               </span>
             </div>
-            {msg.artifact.videoFlawAnalysis.flaw_analysis_markdown && (
+            {msg.artifact.videoQualityReview.quality_report_markdown && (
               <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap rounded-xl bg-canvas p-3 text-[12px] leading-relaxed text-ink">
-                {msg.artifact.videoFlawAnalysis.flaw_analysis_markdown}
+                {msg.artifact.videoQualityReview.quality_report_markdown}
               </pre>
             )}
-            {msg.artifact.videoFlawAnalysis.affected_scene_ids.length > 0 && (
+            {msg.artifact.videoQualityReview.affected_scene_ids.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
-                {msg.artifact.videoFlawAnalysis.affected_scene_ids.map((sceneId) => (
+                {msg.artifact.videoQualityReview.affected_scene_ids.map((sceneId) => (
                   <span key={sceneId} className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] text-accent">
                     {sceneId}
                   </span>
                 ))}
               </div>
             )}
-            {msg.artifact.videoFlawAnalysis.issues.length > 0 && (
+            {msg.artifact.videoQualityReview.issues.length > 0 && (
               <div className="space-y-2">
-                {msg.artifact.videoFlawAnalysis.issues.slice(0, 4).map((issue, index) => (
+                {msg.artifact.videoQualityReview.issues.slice(0, 4).map((issue, index) => (
                   <div key={`${String(issue.scene_id || index)}-${index}`} className="rounded-xl border border-line bg-canvas p-2 text-[12px] text-ink-soft">
                     <span className="font-medium text-ink">{String(issue.scene_id || `问题 ${index + 1}`)}</span>
-                    <span className="ml-2">{String(issue.current || issue.description || "")}</span>
+                    <span className="ml-2">{String(issue.observed || issue.message || issue.description || "")}</span>
                     {issue.expected ? <span className="ml-2 text-ink">应为：{String(issue.expected)}</span> : null}
                   </div>
                 ))}

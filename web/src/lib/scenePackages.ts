@@ -58,7 +58,7 @@ export interface ScenePackagePatch {
   generation_mode?: string | null;
 }
 
-export interface SceneFlawLike {
+export interface SceneQualityReviewLike {
   affected_scene_ids?: unknown;
   target_scene_ids?: unknown;
   excluded_scene_ids?: unknown;
@@ -276,14 +276,14 @@ export function sceneGenerationPayloadFromPackage(
 export function sceneIdsForRevision(
   scenes: Array<Pick<ScenePackageRecord, "scene_id" | "scene_index">>,
   feedback: string,
-  flawAnalysis: SceneFlawLike | undefined,
-  useFlawAnalysis: boolean,
+  qualityReview: SceneQualityReviewLike | undefined,
+  useQualityReview: boolean,
 ): Set<string> {
   const ids = new Set<string>();
-  if (useFlawAnalysis) {
-    stringArray(flawAnalysis?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
+  if (useQualityReview) {
+    stringArray(qualityReview?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
     if (ids.size > 0) return ids;
-    stringArray(flawAnalysis?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
+    stringArray(qualityReview?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
     return ids;
   }
   const normalizedFeedback = feedback.trim();
@@ -312,11 +312,11 @@ export function scenePackagesWithRevisionContract<T extends ScenePackageRecord>(
   scenes: T[],
   affectedSceneIds: Set<string>,
   feedback: string,
-  flawAnalysis: SceneFlawLike | undefined,
+  qualityReview: SceneQualityReviewLike | undefined,
   globalAssets?: GlobalSceneAssets,
   baselineScenes?: ScenePackageRecord[],
 ): T[] {
-  const revisionPrompt = flawAnalysis?.revision_prompt?.trim();
+  const revisionPrompt = qualityReview?.revision_prompt?.trim();
   const feedbackText = feedback.trim();
   if (!revisionPrompt && !feedbackText) return scenes;
   const continuityReferences = revisionContinuityReferences(globalAssets);

@@ -64,68 +64,33 @@ def test_borgrise_merge_videos_maps_merged_url(monkeypatch):
     assert result.url == "https://x/merged.mp4"
 
 
-def test_borgrise_video_flaw_analysis_maps_structured_result(monkeypatch):
-    def fake_analyze_video_flaws(**kwargs):
-        assert kwargs["merged_video_url"] == "https://x/merged.mp4"
-        assert kwargs["scene_videos"] == [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}]
-        assert kwargs["scene_packages"] == [{"scene_id": "scene-1", "storyline": "白色耳机展示"}]
-        assert kwargs["user_feedback"] == "耳机颜色不一致"
-        return {
-            "success": True,
-            "task_id": "flaw-task-1",
-            "endpoint": "/api/creative/analyze_video_flaws",
-            "flaw_analysis_markdown": "scene-1 存在颜色穿帮",
-            "issues": [{"scene_id": "scene-1", "current": "黑色", "expected": "白色"}],
-            "affected_scene_ids": ["scene-1"],
-            "revision_prompt": "保持白色耳机",
-        }
-
-    monkeypatch.setattr(run_generation, "analyze_video_flaws", fake_analyze_video_flaws)
-
-    result = asyncio.run(
-        BorgriseSkill().analyze_video_flaws(
-            merged_video_url="https://x/merged.mp4",
-            scene_videos=[{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
-            scene_packages=[{"scene_id": "scene-1", "storyline": "白色耳机展示"}],
-            user_feedback="耳机颜色不一致",
-        )
-    )
-
-    assert result.ok is True
-    assert result.task_id == "flaw-task-1"
-    assert result.flaw_analysis_markdown == "scene-1 存在颜色穿帮"
-    assert result.issues == [{"scene_id": "scene-1", "current": "黑色", "expected": "白色"}]
-    assert result.affected_scene_ids == ["scene-1"]
-    assert result.revision_prompt == "保持白色耳机"
-
-
 def test_borgrise_video_quality_review_passes_quality_context(monkeypatch):
-    def fake_analyze_video_flaws(**kwargs):
+    def fake_review_video_quality(**kwargs):
         assert kwargs["merged_video_url"] == "https://x/merged.mp4"
         assert kwargs["scene_videos"] == [{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}]
         assert kwargs["scene_packages"] == [{"scene_id": "scene-1", "storyline": "白色耳机展示"}]
-        assert kwargs["checks"] == ["plan_consistency", "mobile_requirements"]
+        assert kwargs["checks"] == ["brief_alignment", "playback_stability"]
         assert kwargs["platform"] == "douyin"
         assert kwargs["ratio"] == "9:16"
         assert kwargs["size"] == "1080x1920"
         return {
             "success": True,
             "task_id": "qc-task-1",
-            "endpoint": "/api/creative/analyze_video_flaws",
-            "summary_markdown": "综合质检通过",
+            "endpoint": "/api/creative/video_quality_review",
+            "summary_markdown": "QAAgent QC 通过",
             "issues": [],
             "affected_scene_ids": [],
             "revision_prompt": "",
         }
 
-    monkeypatch.setattr(run_generation, "analyze_video_flaws", fake_analyze_video_flaws)
+    monkeypatch.setattr(run_generation, "review_video_quality", fake_review_video_quality, raising=False)
 
     result = asyncio.run(
         BorgriseSkill().review_video_quality(
             merged_video_url="https://x/merged.mp4",
             scene_videos=[{"scene_id": "scene-1", "scene_index": 1, "video_url": "https://x/scene-1.mp4"}],
             scene_packages=[{"scene_id": "scene-1", "storyline": "白色耳机展示"}],
-            checks=["plan_consistency", "mobile_requirements"],
+            checks=["brief_alignment", "playback_stability"],
             platform="douyin",
             ratio="9:16",
             size="1080x1920",
@@ -134,19 +99,19 @@ def test_borgrise_video_quality_review_passes_quality_context(monkeypatch):
 
     assert result.ok is True
     assert result.task_id == "qc-task-1"
-    assert result.summary_markdown == "综合质检通过"
+    assert result.summary_markdown == "QAAgent QC 通过"
     assert result.issues == []
 
 
 def test_borgrise_video_quality_review_treats_success_false_as_failure(monkeypatch):
-    def fake_analyze_video_flaws(**kwargs):
+    def fake_review_video_quality(**kwargs):
         return {
             "success": False,
             "message": "供应商业务失败",
-            "endpoint": "/api/creative/analyze_video_flaws",
+            "endpoint": "/api/creative/video_quality_review",
         }
 
-    monkeypatch.setattr(run_generation, "analyze_video_flaws", fake_analyze_video_flaws)
+    monkeypatch.setattr(run_generation, "review_video_quality", fake_review_video_quality, raising=False)
 
     result = asyncio.run(
         BorgriseSkill().review_video_quality(

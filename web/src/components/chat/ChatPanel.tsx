@@ -24,7 +24,7 @@ interface ChatPanelProps {
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
   onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
-  onRegenerateVideoWithRevision?: (msg: ChatMessage, useFlawAnalysis: boolean) => void;
+  onRegenerateVideoWithRevision?: (msg: ChatMessage, useQualityReview: boolean) => void;
   onRetryImageResult?: (msg: ChatMessage) => void;
   onRetrySceneAssets?: (msg: ChatMessage) => void;
   onRetryVideoMerge?: (msg: ChatMessage) => void;
@@ -125,14 +125,14 @@ export function ChatPanel({
             const isLatestVideoScenePackage = m.id === latestVideoScenePackageMessageId;
             const isSupersededArtifact = Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId);
             const keepScenePackageActions = isLatestVideoScenePackage && m.artifact?.type === "video_scene_packages";
-            const isLatestActionableFlawAnalysis = m.id === latestActionableMessageId && m.artifact?.type === "video_flaw_analysis";
+            const isLatestActionableQualityReview = m.id === latestActionableMessageId && m.artifact?.type === "video_quality_review";
             const keepRecoverableActions = hasRecoverableArtifactAction(m);
             return (
               <MessageBubble
                 key={m.id}
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
-                actionsDisabled={Boolean(busy) || (!isLatestActionableFlawAnalysis && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
+                actionsDisabled={Boolean(busy) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}

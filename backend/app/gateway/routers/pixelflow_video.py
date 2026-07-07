@@ -32,6 +32,8 @@ _SCENE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_VIDEO_JOBS = 100
 _MERGE_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_MERGE_VIDEO_JOBS = 100
+_QUALITY_REVIEW_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_QUALITY_REVIEW_JOBS = 100
 _DIRECT_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_DIRECT_VIDEO_JOBS = 100
 _SCENE_PACKAGE_JOBS: dict[str, dict[str, Any]] = {}
@@ -234,19 +236,6 @@ class MergeSceneVideosJobStatusResponse(BaseModel):
     message: str = ""
 
 
-class VideoFlawAnalysisRequest(BaseModel):
-    merged_video_url: str
-    scene_videos: list[SceneVideo]
-    scene_packages: list[dict[str, Any]] = Field(default_factory=list)
-    original_scene_packages: list[dict[str, Any]] = Field(default_factory=list)
-    plan: dict[str, Any] = Field(default_factory=dict)
-    form_values: dict[str, Any] = Field(default_factory=dict)
-    intake_context: dict[str, Any] = Field(default_factory=dict)
-    selected_direction: dict[str, Any] = Field(default_factory=dict)
-    materials: list[dict[str, Any]] = Field(default_factory=list)
-    user_feedback: str | None = None
-
-
 class VideoQualityReviewRequest(BaseModel):
     merged_video_url: str = ""
     scene_videos: list[SceneVideo] = Field(default_factory=list)
@@ -266,14 +255,14 @@ class VideoQualityReviewRequest(BaseModel):
     checks: list[str] = Field(default_factory=list)
 
 
-class VideoFlawAnalysisResponse(BaseModel):
+class VideoQualityReviewResponse(BaseModel):
     ok: bool
-    endpoint: str = "/api/creative/analyze_video_flaws"
+    endpoint: str = "/api/creative/video_quality_review"
     task_id: str | None = None
     passed: bool = True
     score: float = 1.0
     summary_markdown: str = ""
-    flaw_analysis_markdown: str = ""
+    quality_report_markdown: str = ""
     issues: list[dict[str, Any]] = Field(default_factory=list)
     affected_scene_ids: list[str] = Field(default_factory=list)
     target_scene_ids: list[str] = Field(default_factory=list)
@@ -286,8 +275,20 @@ class VideoFlawAnalysisResponse(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
-class VideoQualityReviewResponse(VideoFlawAnalysisResponse):
-    pass
+class VideoQualityReviewJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class VideoQualityReviewJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: VideoQualityReviewResponse | None = None
+    error: str | None = None
+    message: str = ""
 
 
 class AnalyzeStoryboardsRequest(BaseModel):
@@ -1111,6 +1112,13 @@ def _trim_merge_video_jobs() -> None:
         _MERGE_VIDEO_JOBS.pop(job_id, None)
 
 
+def _trim_quality_review_jobs() -> None:
+    if len(_QUALITY_REVIEW_JOBS) < _MAX_QUALITY_REVIEW_JOBS:
+        return
+    for job_id in list(_QUALITY_REVIEW_JOBS.keys())[: len(_QUALITY_REVIEW_JOBS) - _MAX_QUALITY_REVIEW_JOBS + 1]:
+        _QUALITY_REVIEW_JOBS.pop(job_id, None)
+
+
 def _trim_direct_video_jobs() -> None:
     if len(_DIRECT_VIDEO_JOBS) < _MAX_DIRECT_VIDEO_JOBS:
         return
@@ -1374,6 +1382,32 @@ def _record_video_job_failure(
     )
 
 
+def _merge_video_job_status(result: MergeSceneVideosResponse) -> str:
+    if result.quota_insufficient:
+        return "quota_paused"
+    return "completed" if result.ok else "failed"
+
+
+def _merge_video_job_error(result: MergeSceneVideosResponse | None, error: Any = None) -> str | None:
+    if result and not result.ok and not result.quota_insufficient:
+        return result.error or result.message or "视频合并失败。"
+    if error:
+        return str(error)
+    return None
+
+
+def _merge_video_job_message(status: str, result: MergeSceneVideosResponse | None, error: Any = None) -> str:
+    if result and result.message:
+        return result.message
+    if status == "completed":
+        return "视频合并完成。"
+    if status == "quota_paused":
+        return "视频合并额度不足，已暂停。"
+    if status == "failed":
+        return str(error or "视频合并失败。")
+    return "视频合并中。"
+
+
 @router.post("/merge", response_model=MergeSceneVideosResponse)
 async def merge_scene_videos(body: MergeSceneVideosRequest, request: Request) -> MergeSceneVideosResponse:
     response = await _merge_scene_videos_response(body)
@@ -1427,11 +1461,7 @@ async def get_merge_scene_video_job(job_id: str) -> MergeSceneVideosJobStatusRes
         status=status,
         result=result_payload,
         error=str(error) if error else None,
-        message=(
-            "视频合并完成。"
-            if status == "completed"
-            else ("视频合并额度不足，已暂停。" if status == "quota_paused" else ("视频合并失败。" if status == "failed" else "视频合并中。"))
-        ),
+        message=_merge_video_job_message(status, result_payload, error),
     )
 
 
@@ -1478,20 +1508,23 @@ async def _merge_scene_videos_response(body: MergeSceneVideosRequest) -> MergeSc
 async def _run_merge_video_job(job_id: str, body: MergeSceneVideosRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
         result = await _merge_scene_videos_response(body)
+        status = _merge_video_job_status(result)
+        error = _merge_video_job_error(result)
         _MERGE_VIDEO_JOBS[job_id] = {
-            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "status": status,
             "result": result,
-            "error": None,
+            "error": error,
         }
         record_power_mem_background(
             power_mem,
             user_id=user_id,
-            content=concise_result_summary("视频合并 Agent 完成异步合并", result.model_dump()),
+            content=concise_result_summary("视频合并 Agent 异步合并结束", result.model_dump()),
             category="experience",
             source_agent="video_merge_agent",
             metadata={
                 "source": "video_merge_job",
                 "job_id": job_id,
+                "status": status,
                 "scene_count": len(result.scene_videos),
                 "task_id": result.task_id,
                 "passthrough": bool(result.raw.get("passthrough")),
@@ -1517,7 +1550,7 @@ def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message:
         passed=result.passed,
         score=result.score,
         summary_markdown=result.summary_markdown,
-        flaw_analysis_markdown=result.flaw_analysis_markdown,
+        quality_report_markdown=result.quality_report_markdown,
         issues=[issue.model_dump() for issue in result.issues],
         affected_scene_ids=result.affected_scene_ids,
         target_scene_ids=result.target_scene_ids,
@@ -1531,46 +1564,7 @@ def _quality_response_from_core(result: CoreVideoQCResponse, *, success_message:
     )
 
 
-def _is_product_consistency_issue(issue: dict[str, Any]) -> bool:
-    category = str(issue.get("category") or "")
-    if category:
-        return category == "product_consistency"
-    code = str(issue.get("code") or "")
-    return code in {"product_consistency", "flaw", "visual_flaw"} or not code
-
-
-def _legacy_flaw_issues(result: CoreVideoQCResponse) -> list[dict[str, Any]]:
-    raw_issues = result.raw.get("issues") if isinstance(result.raw, dict) else None
-    if isinstance(raw_issues, list):
-        return [issue for issue in raw_issues if isinstance(issue, dict) and _is_product_consistency_issue(issue)]
-    return [
-        issue.model_dump()
-        for issue in result.issues
-        if issue.category == "product_consistency"
-    ]
-
-
-def _legacy_flaw_affected_scene_ids(issues: list[dict[str, Any]], fallback: list[str]) -> list[str]:
-    scene_ids: list[str] = []
-    seen: set[str] = set()
-    for issue in issues:
-        scene_id = issue.get("scene_id")
-        if not scene_id or str(scene_id) in seen:
-            continue
-        seen.add(str(scene_id))
-        scene_ids.append(str(scene_id))
-    return scene_ids or fallback
-
-
-def _filter_issues_to_scene_ids(issues: list[dict[str, Any]], scene_ids: list[str]) -> list[dict[str, Any]]:
-    if not scene_ids:
-        return issues
-    allowed = set(scene_ids)
-    return [issue for issue in issues if str(issue.get("scene_id") or "") in allowed]
-
-
-@router.post("/quality-review", response_model=VideoQualityReviewResponse)
-async def quality_review(body: VideoQualityReviewRequest, request: Request) -> VideoQualityReviewResponse:
+async def _quality_review_response(body: VideoQualityReviewRequest) -> VideoQualityReviewResponse:
     brief = {
         **body.brief,
         "plan": body.plan,
@@ -1595,7 +1589,103 @@ async def quality_review(body: VideoQualityReviewRequest, request: Request) -> V
         ),
         skill=get_video_quality_review_skill(),
     )
-    response = _quality_response_from_core(result)
+    return _quality_response_from_core(result)
+
+
+def _quality_review_job_message(status: str, result: VideoQualityReviewResponse | None, error: Any) -> str:
+    if status == "completed":
+        return result.message if result and result.message else "视频质检完成。"
+    if status == "quota_paused":
+        return result.message if result and result.message else "视频质检额度不足，已暂停。"
+    if status == "failed":
+        return str(error or (result.message if result and result.message else None) or "视频质检失败。")
+    return "视频质检中。"
+
+
+def _quality_review_job_status(result: VideoQualityReviewResponse) -> str:
+    if result.quota_insufficient:
+        return "quota_paused"
+    return "completed" if result.ok else "failed"
+
+
+def _quality_review_job_error(result: VideoQualityReviewResponse, fallback: Any = None) -> str | None:
+    if result.ok and not result.quota_insufficient:
+        return None
+    return str(result.error or result.message or fallback or "视频质检失败。")
+
+
+@router.post("/quality-review/start", response_model=VideoQualityReviewJobStartResponse)
+async def start_quality_review(body: VideoQualityReviewRequest, request: Request) -> VideoQualityReviewJobStartResponse:
+    if not body.merged_video_url:
+        raise HTTPException(status_code=400, detail="merged_video_url不能为空")
+    _trim_quality_review_jobs()
+    job_id = uuid.uuid4().hex
+    _QUALITY_REVIEW_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_quality_review_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    return VideoQualityReviewJobStartResponse(ok=True, job_id=job_id, status="running", message="视频质检任务已启动。")
+
+
+@router.get("/quality-review/jobs/{job_id}", response_model=VideoQualityReviewJobStatusResponse)
+async def get_quality_review_job(job_id: str) -> VideoQualityReviewJobStatusResponse:
+    job = _QUALITY_REVIEW_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频质检任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, VideoQualityReviewResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = VideoQualityReviewResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return VideoQualityReviewJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_quality_review_job_message(status, result_payload, error),
+    )
+
+
+async def _run_quality_review_job(job_id: str, body: VideoQualityReviewRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+    try:
+        result = await _quality_review_response(body)
+        status = _quality_review_job_status(result)
+        _QUALITY_REVIEW_JOBS[job_id] = {
+            "status": status,
+            "result": result,
+            "error": _quality_review_job_error(result),
+        }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "视频质检 Agent 完成异步质量评审",
+                {"stage": "quality_review", "message": result.message, "ok": result.ok, "quota_insufficient": result.quota_insufficient},
+            ),
+            category="experience",
+            source_agent="video_quality_review_agent",
+            metadata={
+                "source": "video_quality_review_job",
+                "job_id": job_id,
+                "passed": result.passed,
+                "score": result.score,
+                "issue_count": len(result.issues),
+            },
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _QUALITY_REVIEW_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _record_video_job_failure(power_mem, user_id, job_id, "video_quality_review_agent", "video_quality_review_job", exc)
+
+
+@router.post("/quality-review", response_model=VideoQualityReviewResponse)
+async def quality_review(body: VideoQualityReviewRequest, request: Request) -> VideoQualityReviewResponse:
+    response = await _quality_review_response(body)
     record_power_mem_background(
         power_mem_service(request),
         user_id=await current_user_id(request),
@@ -1603,83 +1693,6 @@ async def quality_review(body: VideoQualityReviewRequest, request: Request) -> V
         category="experience",
         source_agent="video_quality_review_agent",
         metadata={"source": "video_quality_review", "passed": response.passed, "score": response.score, "issue_count": len(response.issues)},
-        memory_type="experience",
-        run_id=response.task_id,
-        infer=False,
-    )
-    return response
-
-
-@router.post("/analyze-flaws", response_model=VideoFlawAnalysisResponse)
-async def analyze_video_flaws(body: VideoFlawAnalysisRequest, request: Request) -> VideoFlawAnalysisResponse:
-    result = await review_video_quality(
-        VideoQCRequest(
-            merged_video_url=body.merged_video_url,
-            scene_videos=[scene.model_dump() for scene in body.scene_videos],
-            scene_packages=body.scene_packages,
-            original_scene_packages=body.original_scene_packages,
-            brief={
-                "plan": body.plan,
-                "form_values": body.form_values,
-                "intake_context": body.intake_context,
-                "selected_direction": body.selected_direction,
-            },
-            materials=body.materials,
-            user_feedback=body.user_feedback or "",
-            checks=["product_consistency"],
-        ),
-        skill=get_video_quality_review_skill(),
-    )
-    endpoint = result.endpoint
-    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
-    message = "视频穿帮分析完成。" if result.ok else (result.error or "视频穿帮分析失败。")
-    if quota_insufficient:
-        message = quota_resume_message(result.error)
-    legacy_issues = _legacy_flaw_issues(result)
-    scoped_scene_ids = result.target_scene_ids
-    if scoped_scene_ids:
-        legacy_issues = _filter_issues_to_scene_ids(legacy_issues, scoped_scene_ids)
-        if not legacy_issues:
-            legacy_issues = [
-                {
-                    "scene_id": scene_id,
-                    "category": "product_consistency",
-                    "message": "用户意见明确要求只修复该分镜",
-                }
-                for scene_id in scoped_scene_ids
-            ]
-    affected_scene_ids = scoped_scene_ids or _legacy_flaw_affected_scene_ids(legacy_issues, result.affected_scene_ids)
-    revision_prompt = result.revision_prompt
-    if scoped_scene_ids:
-        allowed = set(scoped_scene_ids)
-        scene_labels = "、".join(f"第{scene.scene_index}个分镜" for scene in body.scene_videos if scene.scene_id in allowed) or "指定分镜"
-        revision_prompt = f"请只重生成{scene_labels}，恢复为原方案要求的产品一致性画面；其他分镜复用原视频，不要重新生成。"
-    response = VideoFlawAnalysisResponse(
-        ok=result.ok,
-        endpoint=endpoint if isinstance(endpoint, str) and endpoint else "/api/creative/analyze_video_flaws",
-        task_id=result.task_id,
-        passed=result.passed,
-        score=result.score,
-        summary_markdown=result.summary_markdown,
-        flaw_analysis_markdown=result.flaw_analysis_markdown,
-        issues=legacy_issues,
-        affected_scene_ids=affected_scene_ids,
-        target_scene_ids=scoped_scene_ids,
-        excluded_scene_ids=result.excluded_scene_ids,
-        revision_prompt=revision_prompt,
-        check_results=[item.model_dump() for item in result.check_results],
-        error=result.error,
-        message=message,
-        quota_insufficient=quota_insufficient,
-        raw=result.raw,
-    )
-    record_power_mem_background(
-        power_mem_service(request),
-        user_id=await current_user_id(request),
-        content=concise_result_summary("视频穿帮分析 Agent 完成局部质检", {"stage": "analyze_flaws", "message": response.message, "ok": response.ok, "quota_insufficient": response.quota_insufficient}),
-        category="experience",
-        source_agent="video_flaw_analysis_agent",
-        metadata={"source": "video_analyze_flaws", "passed": response.passed, "score": response.score, "affected_scene_count": len(response.affected_scene_ids)},
         memory_type="experience",
         run_id=response.task_id,
         infer=False,

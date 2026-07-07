@@ -140,7 +140,7 @@ def _normalize_severity(value: Any) -> Literal["major", "minor", "info"]:
 
 def _scene_semantic_prompt(global_contract_text: str, items: list[SceneSemanticInput]) -> str:
     scenes_json = json.dumps(items, ensure_ascii=False, indent=2)
-    return f"""你是 PixelFlow 视频综合质检的逐分镜语义审查模块。
+    return f"""你是 PixelFlow 视频质量检查的逐分镜语义审查模块。
 请根据“原始全局方案合同”和每个分镜的“分镜合同/实际视频拆解文本”，判断每个分镜是否真的生成对了。
 
 原始全局方案合同：
