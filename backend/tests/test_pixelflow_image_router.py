@@ -541,9 +541,9 @@ def test_image_router_edits_scene_global_asset(monkeypatch):
             assert kwargs == {
                 "image_url": "https://x/role.png",
                 "prompt": "把衣服改成白色",
-                "model": "gpt-image-2",
+                "model": "seeddream-5.0",
                 "ratio": "1:1",
-                "size": "4K",
+                "size": "2K",
                 "max_images": 1,
             }
             return ImageGenerationResult(
@@ -579,6 +579,56 @@ def test_image_router_edits_scene_global_asset(monkeypatch):
     assert data["edited_image"]["url"] == "https://x/role-white.png"
     assert data["asset_id"] == "character-host"
     assert data["asset_group"] == "characters"
+
+
+def test_image_router_edit_asset_uses_uploaded_reference_materials(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **_kwargs):
+            raise AssertionError("image_edit should not be called when uploaded reference materials exist")
+
+        async def reference_image(self, **kwargs):
+            assert kwargs["reference_images"] == ["https://x/fila1.jpg", "https://x/fila2.jpg"]
+            assert kwargs["model"] == "seeddream-5.0"
+            assert kwargs["size"] == "2K"
+            assert "参考图" in kwargs["prompt"]
+            return ImageGenerationResult(
+                ok=True,
+                task_id="edit-asset-ref-task-1",
+                images=[{"asset_id": "edit-asset-ref-task-1-0", "url": "https://x/new-shoe.png"}],
+                raw={"endpoint": "/api/picture/multi_reference_image_generation"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/edit-asset",
+            json={
+                "asset_id": "prop-product",
+                "asset_name": "运动鞋",
+                "asset_group": "props",
+                "source_image_url": "https://x/old-prop.png",
+                "prompt": "更新为新的鞋子",
+                "materials": [
+                    {"url": "https://x/fila1.jpg", "mediaType": "image"},
+                    {"url": "https://x/fila2.jpg", "mediaType": "image"},
+                    {"url": "https://x/old-prop.png", "source": "scene_global_asset"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["method"] == "multi_reference_image_generation"
+    assert data["endpoint"] == "/api/picture/multi_reference_image_generation"
+    assert data["edited_image"]["url"] == "https://x/new-shoe.png"
 
 
 def test_image_router_starts_edit_asset_job_and_polls_result(monkeypatch):

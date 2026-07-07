@@ -1143,6 +1143,8 @@ export const api = {
     asset_group: string;
     source_image_url: string;
     prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
     ratio?: string;
     size?: string;
     model?: string | null;
@@ -1154,6 +1156,8 @@ export const api = {
     asset_group: string;
     source_image_url: string;
     prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
     ratio?: string;
     size?: string;
     model?: string | null;

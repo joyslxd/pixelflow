@@ -108,6 +108,64 @@ export function updateScenePackageAssetField<T extends ScenePackageRecord>(
   });
 }
 
+function materialImageUrl(material: Record<string, unknown>): string {
+  return String(
+    material.url ||
+      material.image_url ||
+      material.imageUrl ||
+      material.artifact_url ||
+      material.artifactUrl ||
+      "",
+  ).trim();
+}
+
+export function uploadedReferenceMaterials(materials: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const uploaded: Array<Record<string, unknown>> = [];
+  for (const material of materials) {
+    if (material.source === "scene_global_asset") continue;
+    const url = materialImageUrl(material);
+    if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+    const kind = String(material.type || material.kind || material.media_type || material.mediaType || "").toLowerCase();
+    if (
+      kind === "" ||
+      kind === "image" ||
+      kind === "picture" ||
+      kind === "reference_image" ||
+      kind.startsWith("image") ||
+      /\.(png|jpe?g|webp|gif)$/i.test((url.split("?")[0] || ""))
+    ) {
+      uploaded.push(material);
+    }
+  }
+  return uploaded.slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+export function globalAssetsContainAsset(globalAssets: GlobalSceneAssets | undefined, assetId: string): boolean {
+  if (!globalAssets || !assetId) return false;
+  for (const group of ["characters", "scenes", "props"] as const) {
+    const records = globalAssets[group];
+    if (!Array.isArray(records)) continue;
+    if (records.some((record) => stringValue(record.asset_id) === assetId || stringValue(record.id) === assetId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function applyGlobalSceneAssetImageEdit<T extends GlobalSceneAssets, S extends ScenePackageRecord[]>(
+  globalAssets: T,
+  scenePackages: S,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
+): { global_assets: T; scene_packages: S } {
+  return {
+    global_assets: replaceGlobalSceneAssetImage(globalAssets, input) as T,
+    scene_packages: syncScenePackageMentionImageUrls(scenePackages, {
+      assetId: input.assetId,
+      editedImageUrl: input.editedImageUrl,
+    }) as S,
+  };
+}
+
 export function replaceGlobalSceneAssetImage<T extends GlobalSceneAssets>(
   globalAssets: T,
   input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
