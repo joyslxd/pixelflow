@@ -12,6 +12,10 @@ const VIDEO_MERGE_JOB_POLL_INTERVAL_MS = 3000;
 const VIDEO_MERGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
 const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+const INTAKE_ANALYZE_JOB_POLL_INTERVAL_MS = 3000;
+const INTAKE_ANALYZE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+const CONVERSATION_MESSAGE_JOB_POLL_INTERVAL_MS = 1000;
+const CONVERSATION_MESSAGE_JOB_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
 const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
@@ -104,6 +108,22 @@ export interface ConversationMessageResponse {
   created_at: string;
 }
 
+export interface ConversationMessageJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface ConversationMessageJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  result: ConversationMessageResponse | null;
+  error: string | null;
+  message: string;
+}
+
 export interface ConversationListResponse {
   items: ConversationSummaryResponse[];
   next_cursor: string | null;
@@ -147,6 +167,22 @@ export interface IntakeIntentResponse {
   llm_used: boolean;
   model_name: string;
   error: string | null;
+}
+
+export interface IntakeAnalyzeJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface IntakeAnalyzeJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  result: IntakeIntentResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface CreativeDirectionResponse {
@@ -720,6 +756,45 @@ function attachmentType(mimeType: string, filename: string): string {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function pollConversationMessageJob(
+  conversationId: string,
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ConversationMessageResponse | null> {
+  const deadline = Date.now() + CONVERSATION_MESSAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<ConversationMessageJobStatusResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      throw new ApiError(500, status.error || status.message || "对话消息保存失败");
+    }
+    await delay(CONVERSATION_MESSAGE_JOB_POLL_INTERVAL_MS);
+  }
+  throw new ApiError(408, "对话消息保存轮询超时");
+}
+
+async function pollIntakeAnalyzeJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<IntakeIntentResponse | null> {
+  const deadline = Date.now() + INTAKE_ANALYZE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<IntakeAnalyzeJobStatusResponse>(`${FLOW_BASE}/intake/analyze/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      throw new ApiError(500, status.error || status.message || "采集 Agent 意图识别失败");
+    }
+    await delay(INTAKE_ANALYZE_JOB_POLL_INTERVAL_MS);
+  }
+  throw new ApiError(408, "采集 Agent 意图识别轮询超时");
+}
+
 async function pollCreativeDirectionsJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
@@ -1078,6 +1153,22 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  startConversationMessageJob: (
+    conversationId: string,
+    body: { role: "user" | "assistant" | "system"; content: string; payload?: Record<string, unknown> },
+  ) =>
+    req<ConversationMessageJobStartResponse>(`/conversations/${encodeURIComponent(conversationId)}/messages/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getConversationMessageJob: (conversationId: string, jobId: string) =>
+    req<ConversationMessageJobStatusResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/jobs/${encodeURIComponent(jobId)}`,
+    ),
+
+  pollConversationMessageJob,
+
   resumeConversation: (conversationId: string) => req<ConversationDetailResponse>(`/conversations/${encodeURIComponent(conversationId)}/resume`, { method: "POST" }),
 
   // 内部调试专用：需要 content-app ROLE_ADMIN，普通用户调用会 403。
@@ -1086,6 +1177,14 @@ export const api = {
 
   analyzeIntakeIntent: (body: { prompt: string; materials?: Array<Record<string, unknown>> }) =>
     req<IntakeIntentResponse>(`${FLOW_BASE}/intake/analyze`, { method: "POST", body: JSON.stringify(body) }),
+
+  startIntakeAnalyzeJob: (body: { prompt: string; materials?: Array<Record<string, unknown>> }) =>
+    req<IntakeAnalyzeJobStartResponse>(`${FLOW_BASE}/intake/analyze/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getIntakeAnalyzeJob: (jobId: string) =>
+    req<IntakeAnalyzeJobStatusResponse>(`${FLOW_BASE}/intake/analyze/jobs/${encodeURIComponent(jobId)}`),
+
+  pollIntakeAnalyzeJob,
 
   generateCreativeDirections: (body: {
     intent: CreationIntent;

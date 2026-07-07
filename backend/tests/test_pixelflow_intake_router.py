@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,8 @@ def test_pixelflow_intake_router_prefix_and_paths():
     assert pixelflow_intake.router.prefix == "/agent/flows/intake"
     assert "/agent/flows/intake/forms/{intent}" in paths
     assert "/agent/flows/intake/analyze" in paths
+    assert "/agent/flows/intake/analyze/start" in paths
+    assert "/agent/flows/intake/analyze/jobs/{job_id}" in paths
     assert "/agent/flows/intake/validate" in paths
     assert "/agent/flows/intake/directions" in paths
 
@@ -137,6 +140,64 @@ def test_intake_router_analyzes_intent_with_llm(monkeypatch):
     assert data["llm_used"] is True
     assert data["model_name"] == "deepseek-v4-pro"
     assert data["intake_context"]["intent"] == "video_analysis"
+
+
+def test_intake_router_analyze_job_returns_pollable_result(monkeypatch):
+    from app.gateway.routers import pixelflow_intake
+    from pixelflow.intake.llm import IntentRecognitionResult
+
+    async def fake_recognize_intent_with_llm(prompt, materials=None):
+        assert prompt == "帮我做一张书包海报"
+        assert materials == [{"url": "https://x/bag.png"}]
+        return IntentRecognitionResult(
+            intent="image",
+            confidence=0.93,
+            reason="用户要求生成图片",
+            values={"image_goal": "书包海报"},
+            intake_context={
+                "source_prompt": prompt,
+                "intent": "image",
+                "product_subject": "书包",
+                "creation_goal": "书包海报",
+                "industry_type": "服饰鞋包",
+                "requested_output_count": 1,
+                "form_values": {"image_goal": "书包海报"},
+                "product_creative_profile": {},
+            },
+            llm_used=True,
+            model_name="deepseek-v4-pro",
+        )
+
+    monkeypatch.setattr(pixelflow_intake, "recognize_intent_with_llm", fake_recognize_intent_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_intake.router)
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/agent/flows/intake/analyze/start",
+            json={
+                "prompt": "帮我做一张书包海报",
+                "materials": [{"url": "https://x/bag.png"}],
+            },
+        )
+        assert started.status_code == 200
+        job_id = started.json()["job_id"]
+        assert job_id
+
+        status = None
+        for _ in range(20):
+            status = client.get(f"/agent/flows/intake/analyze/jobs/{job_id}")
+            assert status.status_code == 200
+            if status.json()["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+    assert status is not None
+    data = status.json()
+    assert data["status"] == "completed"
+    assert data["result"]["intent"] == "image"
+    assert data["result"]["intake_context"]["product_subject"] == "书包"
 
 
 def test_intake_router_analyze_returns_complete_backpack_context(monkeypatch):

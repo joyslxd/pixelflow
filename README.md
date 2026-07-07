@@ -111,7 +111,9 @@ flowchart TD
 
 | 模块 | 方法 | 路径 | 说明 |
 | --- | --- | --- | --- |
-| 采集 | POST | `/agent/flows/intake/analyze` | LLM 意图识别 |
+| 采集 | POST | `/agent/flows/intake/analyze` | LLM 意图识别，兼容旧同步调用 |
+| 采集 | POST | `/agent/flows/intake/analyze/start` | 启动可恢复意图识别 job |
+| 采集 | GET | `/agent/flows/intake/analyze/jobs/{job_id}` | 查询意图识别 job |
 | 采集 | GET | `/agent/flows/intake/forms/{intent}` | 表单 schema |
 | 采集 | POST | `/agent/flows/intake/validate` | 表单完整性校验 |
 | 采集 | POST | `/agent/flows/intake/directions` | 生成 3 个创意方向 |
@@ -148,7 +150,10 @@ flowchart TD
 | 对话 | POST | `/agent/conversations` | 新建对话 |
 | 对话 | GET | `/agent/conversations?page_size=5` | 最近对话分页 |
 | 对话 | GET | `/agent/conversations/{conversation_id}` | 对话详情 |
-| 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息 |
+| 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息，兼容旧同步调用 |
+| 对话 | POST | `/agent/conversations/{conversation_id}/messages/start` | 启动可恢复消息保存 job |
+| 对话 | GET | `/agent/conversations/{conversation_id}/messages/jobs/{job_id}` | 查询消息保存 job |
+| 对话 | PATCH | `/agent/conversations/{conversation_id}/messages/{message_id}` | 更新对话消息内容或 payload |
 | 对话 | GET | `/agent/conversations/{conversation_id}/trace` | 内部调试专用：查看该对话的 LLM/供应商调用 trace，需要 content-app `ROLE_ADMIN` |
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
@@ -234,6 +239,7 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 每个视频场景片段最多 9 张参考图。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
+- 新需求入口使用可恢复 job：用户消息保存走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存完成后采集意图识别走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并写入 `pendingIntakeJob` / `pending_intake_job`。用户切到历史对话、创作页、iframe 外或刷新后只轮询已有 job，不重复追加用户消息、不重复启动采集流程；旧 `/messages` 和 `/intake/analyze` 同步接口仅做兼容。
 - 普通图片流程里，如果采集 Agent 识别到用户是在编辑上传图片，前端会跳过普通图片表单、创意方向和 plan.md。缺原图时会把等待上传状态写入对话，用户上传图片后可继续；有原图时先调用 `/api/modelParamConfig/listByCategory/image_generate` 展示图片编辑模型、尺寸和清晰度确认卡，默认选 `gpt-image-2`，确认后再复用 `/agent/flows/image/prepare` + `/agent/flows/image/generate/start` 调用 `/api/picture/image_edit`。用户确认过的模型、尺寸和清晰度会写入对话 context，切换对话或刷新后仍能恢复展示。图片编辑成功后同样展示“满意，结束 / 重新生成”，60 秒未操作默认满意并结束。
 - 图片 plan.md 同意、图片修改重生成、直接图片编辑和全局素材图片编辑都会先拿到 Python `job_id`，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/agent/flows/image/generate/jobs/{job_id}` 或 `/agent/flows/image/edit-asset/jobs/{job_id}`，不会重复启动生成；网关重启导致 job 404 时只提示手动重试，不自动重启，避免重复计费。
 - 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时配置为准，Python 侧不再用硬编码模型白名单拦截用户已确认的参数。content-app 图片编辑请求里 `size` 表示比例，`imageSize` 表示清晰度，网关会保持两者分离。图片编辑失败后，重新生成会先回到模型、尺寸和清晰度确认卡，避免继续复用失败参数。

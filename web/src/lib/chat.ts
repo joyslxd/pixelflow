@@ -71,6 +71,7 @@ export interface ChatMessage {
     videoFlawAnalysis?: VideoFlawAnalysisResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
     videoRevisionFeedback?: string;
+    videoAccepted?: boolean;
     pptSummary?: PptSummaryResult;
     pptContentJson?: PptContentJsonResult;
     pptImages?: PptImagesResult;

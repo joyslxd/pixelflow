@@ -249,6 +249,7 @@ export function MessageBubble({
   const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
   const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
   const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
+  const videoAccepted = Boolean(msg.artifact?.videoAccepted);
   const mergedVideoResult = mergedVideoResultForMessage(msg);
   const sceneVideoResults = sceneVideoResultsForMessage(msg);
   const videoResults = [mergedVideoResult, ...sceneVideoResults].filter((result): result is VideoResult => Boolean(result));
@@ -1118,7 +1119,12 @@ export function MessageBubble({
                 {mergeQuotaPaused ? "继续合并视频" : "重新合并视频"}
               </button>
             ) : null}
-            {msg.artifact.mergedVideo?.ok && (
+            {msg.artifact.mergedVideo?.ok && videoAccepted ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
+                <Check size={15} />
+                视频流程已结束
+              </div>
+            ) : msg.artifact.mergedVideo?.ok ? (
               <div className="grid gap-2 sm:grid-cols-2">
                 <button
                   type="button"
@@ -1137,7 +1143,7 @@ export function MessageBubble({
                   提出修改意见
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         ) : msg.artifact ? (
           <button

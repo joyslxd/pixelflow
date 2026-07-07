@@ -66,6 +66,22 @@ class IntentAnalyzeResponse(BaseModel):
     error: str | None = None
 
 
+class IntentAnalyzeJobStartResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str = "running"
+    message: str = ""
+
+
+class IntentAnalyzeJobStatusResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str
+    result: IntentAnalyzeResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
 class IntakeValidationResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -108,6 +124,8 @@ class CreativeDirectionsJobStatusResponse(BaseModel):
     message: str = ""
 
 
+_INTAKE_ANALYZE_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_INTAKE_ANALYZE_JOBS = 200
 _CREATIVE_DIRECTION_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_CREATIVE_DIRECTION_JOBS = 200
 
@@ -119,14 +137,66 @@ async def get_intake_form(intent: CreationIntent) -> dict[str, Any]:
 
 @router.post("/analyze", response_model=IntentAnalyzeResponse)
 async def analyze_intake_intent(body: IntentAnalyzeRequest, request: Request) -> IntentAnalyzeResponse:
+    return await _analyze_intake_intent(body, request)
+
+
+@router.post("/analyze/start", response_model=IntentAnalyzeJobStartResponse)
+async def start_analyze_intake_intent(body: IntentAnalyzeRequest, request: Request) -> IntentAnalyzeJobStartResponse:
+    _trim_intake_analyze_jobs()
+    user_id = await current_user_id(request)
+    job_id = uuid.uuid4().hex
+    _INTAKE_ANALYZE_JOBS[job_id] = {"status": "running", "result": None, "error": None, "user_id": user_id}
+    asyncio.create_task(_run_intake_analyze_job(job_id, body, power_mem_service(request), user_id))
+    return IntentAnalyzeJobStartResponse(ok=True, job_id=job_id, status="running", message="采集 Agent 意图识别任务已启动。")
+
+
+@router.get("/analyze/jobs/{job_id}", response_model=IntentAnalyzeJobStatusResponse)
+async def get_analyze_intake_intent_job(job_id: str, request: Request) -> IntentAnalyzeJobStatusResponse:
+    job = _INTAKE_ANALYZE_JOBS.get(job_id)
+    user_id = await current_user_id(request)
+    if job is None or job.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Intake analyze job not found")
+    result = job.get("result")
+    if isinstance(result, IntentAnalyzeResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = IntentAnalyzeResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return IntentAnalyzeJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_intake_analyze_job_message(status),
+    )
+
+
+async def _analyze_intake_intent(
+    body: IntentAnalyzeRequest,
+    request: Request | None = None,
+    *,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> IntentAnalyzeResponse:
     result = await recognize_intent_with_llm(body.prompt, body.materials)
     data = result.to_dict()
-    user_id, memories = await search_power_mem(
-        request,
-        source_agent="intake_agent",
-        query_values=[body.prompt, body.materials, data.get("values"), data.get("intake_context")],
-        categories=["preference", "brand", "skill"],
-    )
+    if request is not None:
+        user_id, memories = await search_power_mem(
+            request,
+            source_agent="intake_agent",
+            query_values=[body.prompt, body.materials, data.get("values"), data.get("intake_context")],
+            categories=["preference", "brand", "skill"],
+        )
+    else:
+        memories = await _search_intake_memories(
+            power_mem,
+            user_id=user_id,
+            query_values=[body.prompt, body.materials, data.get("values"), data.get("intake_context")],
+        )
     if memories:
         context, profile = with_semantic_memory(data.get("intake_context"), memories)
         data["intake_context"] = context
@@ -135,7 +205,7 @@ async def analyze_intake_intent(body: IntentAnalyzeRequest, request: Request) ->
         data["values"] = values
         if profile:
             context["product_creative_profile"] = profile
-    service = power_mem_service(request)
+    service = power_mem or (power_mem_service(request) if request is not None else None)
     record_power_mem_background(
         service,
         user_id=user_id,
@@ -296,6 +366,60 @@ async def _run_creative_direction_job(
         _CREATIVE_DIRECTION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
 
 
+async def _run_intake_analyze_job(
+    job_id: str,
+    body: IntentAnalyzeRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> None:
+    try:
+        result = await _analyze_intake_intent(body, power_mem=power_mem, user_id=user_id)
+        _INTAKE_ANALYZE_JOBS[job_id] = {"status": "completed", "result": result, "error": None, "user_id": user_id}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("采集 Agent 完成异步意图识别", result.model_dump()),
+            category="experience",
+            source_agent="intake_agent",
+            metadata={"source": "intake_analyze_job", "job_id": job_id, "intent": result.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _INTAKE_ANALYZE_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc), "user_id": user_id}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=f"采集 Agent 异步意图识别失败；error={str(exc)[:300]}",
+            category="experience",
+            source_agent="intake_agent",
+            metadata={"source": "intake_analyze_job", "job_id": job_id, "status": "failed"},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+
+
+async def _search_intake_memories(
+    power_mem: Any,
+    *,
+    user_id: str | None,
+    query_values: list[Any],
+) -> list[Any]:
+    if power_mem is None or not hasattr(power_mem, "search"):
+        return []
+    query = build_memory_query(*query_values)
+    if not query:
+        return []
+    return await power_mem.search(
+        user_id=user_id,
+        query=query,
+        categories=["preference", "brand", "skill"],
+        source_agent=None,
+    )
+
+
 async def _search_creative_direction_memories(
     power_mem: Any,
     *,
@@ -315,12 +439,28 @@ async def _search_creative_direction_memories(
     )
 
 
+def _trim_intake_analyze_jobs() -> None:
+    overflow = len(_INTAKE_ANALYZE_JOBS) - _MAX_INTAKE_ANALYZE_JOBS + 1
+    if overflow <= 0:
+        return
+    for job_id in list(_INTAKE_ANALYZE_JOBS.keys())[:overflow]:
+        _INTAKE_ANALYZE_JOBS.pop(job_id, None)
+
+
 def _trim_creative_direction_jobs() -> None:
     overflow = len(_CREATIVE_DIRECTION_JOBS) - _MAX_CREATIVE_DIRECTION_JOBS + 1
     if overflow <= 0:
         return
     for job_id in list(_CREATIVE_DIRECTION_JOBS.keys())[:overflow]:
         _CREATIVE_DIRECTION_JOBS.pop(job_id, None)
+
+
+def _intake_analyze_job_message(status: str) -> str:
+    if status == "completed":
+        return "采集 Agent 意图识别完成。"
+    if status == "failed":
+        return "采集 Agent 意图识别失败。"
+    return "采集 Agent 正在识别意图。"
 
 
 def _context_for_directions(body: CreativeDirectionsRequest, values: dict[str, Any]) -> StandardIntakeContext:

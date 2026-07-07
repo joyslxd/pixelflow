@@ -188,6 +188,10 @@ interface WorkspaceSnapshot {
   messages?: ChatMessage[];
   pendingMaterials: Array<Record<string, unknown>>;
   flowDraft?: FlowDraft | null;
+  pendingMessageJob?: PendingMessageJob | null;
+  pending_message_job?: PendingMessageJob | null;
+  pendingIntakeJob?: PendingIntakeJob | null;
+  pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
   pending_direction_job?: PendingDirectionJob | null;
   pendingImageEditRequest?: PendingImageEditRequest | null;
@@ -201,6 +205,7 @@ interface WorkspaceSnapshot {
   pendingPptJob?: PendingPptJob | null;
   pending_ppt_job?: PendingPptJob | null;
   ppt_done?: boolean;
+  video_accepted?: boolean;
   canvas: CanvasState;
   canvasOpen: boolean;
   briefConfirmed: boolean;
@@ -242,6 +247,43 @@ interface FlowDraft {
   form?: GenParamsForm;
   creativeDirections?: CreativeDirectionResponse[];
   updatedAt: string;
+}
+
+interface ConversationMessageJobRequest {
+  role: "user" | "assistant" | "system";
+  content: string;
+  payload?: Record<string, unknown>;
+}
+
+interface PendingMessageJobContinuation {
+  type: "handle_send";
+  content: string;
+  materials: Array<Record<string, unknown>>;
+}
+
+interface PendingMessageJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: "conversation_message";
+  started_at: string;
+  request: ConversationMessageJobRequest;
+  message: ChatMessage;
+  continue_after_save?: PendingMessageJobContinuation;
+}
+
+interface IntakeAnalyzeJobRequest {
+  prompt: string;
+  materials?: Array<Record<string, unknown>>;
+}
+
+interface PendingIntakeJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: "intake_analyze";
+  started_at: string;
+  request: IntakeAnalyzeJobRequest;
 }
 
 interface CreativeDirectionsJobRequest {
@@ -327,6 +369,10 @@ const REQUIREMENT_COLLECTION_SUCCESSOR_CONTEXT_KEYS = [
 ] as const;
 
 const REQUIREMENT_COLLECTION_PENDING_JOB_KEYS = [
+  "pendingMessageJob",
+  "pending_message_job",
+  "pendingIntakeJob",
+  "pending_intake_job",
   "pendingDirectionJob",
   "pending_direction_job",
   "pendingImageEditRequest",
@@ -1039,6 +1085,18 @@ function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
 
+function isTransientFetchAbort(err: unknown): boolean {
+  const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name || "") : "";
+  const message = err instanceof Error ? err.message : String(err || "");
+  return (
+    name === "AbortError" ||
+    message === "Failed to fetch" ||
+    message.includes("NetworkError") ||
+    message.includes("Load failed") ||
+    message.includes("The user aborted a request")
+  );
+}
+
 function processedArtifactKey(message: Pick<ChatMessage, "id">, conversationId: string): string {
   return `${conversationId || "local"}:${message.id}`;
 }
@@ -1093,6 +1151,28 @@ function messageFromResponse(message: ConversationMessageResponse, conversationI
     time: formatClockTime(message.created_at),
     artifact,
   };
+}
+
+function hasMaterializedMessageJob(messages: ChatMessage[], job: PendingMessageJob | null | undefined): boolean {
+  if (!job?.source_message_id) return false;
+  const clientMessageId = typeof job.request.payload?.client_message_id === "string" ? job.request.payload.client_message_id : "";
+  return messages.some((message) => {
+    if (messageConversationId(message, job.conversation_id) !== job.conversation_id) return false;
+    return message.id === job.source_message_id || Boolean(clientMessageId && message.id === clientMessageId);
+  });
+}
+
+function restorePendingMessageJobMessage(messages: ChatMessage[], job: PendingMessageJob | null | undefined): ChatMessage[] {
+  if (!job?.message || hasMaterializedMessageJob(messages, job)) return messages;
+  return [
+    ...messages,
+    {
+      ...job.message,
+      id: job.source_message_id,
+      conversationId: job.conversation_id,
+      time: job.message.time || now(),
+    },
+  ];
 }
 
 function normalizeRestoredMessageReferences(messages: ChatMessage[]): ChatMessage[] {
@@ -1188,6 +1268,25 @@ function markLatestPptFileDoneFromContext(messages: ChatMessage[], context: Part
       artifact: {
         ...message.artifact,
         pptDone: true,
+      },
+    };
+  });
+}
+
+function markLatestVideoResultAcceptedFromContext(messages: ChatMessage[], context: Partial<Record<string, unknown>>): ChatMessage[] {
+  if (context.video_accepted !== true) return messages;
+  const latestIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message.artifact?.type === "video_result" && Boolean(message.artifact.mergedVideo?.ok));
+  if (latestIndex < 0) return messages;
+  const messageIndex = messages.length - 1 - latestIndex;
+  return messages.map((message, index) => {
+    if (index !== messageIndex || !message.artifact) return message;
+    return {
+      ...message,
+      artifact: {
+        ...message.artifact,
+        videoAccepted: true,
       },
     };
   });
@@ -1296,6 +1395,10 @@ export function WorkspacePage() {
   const processedArtifactIdsRef = useRef(new Set<string>());
   const pendingDialogContextRef = useRef<PendingDialogContext | null>(null);
   const flowDraftRef = useRef<FlowDraft | null>(null);
+  const pendingMessageJobRef = useRef<PendingMessageJob | null>(null);
+  const activeMessageJobPollsRef = useRef(new Set<string>());
+  const pendingIntakeJobRef = useRef<PendingIntakeJob | null>(null);
+  const activeIntakeJobPollsRef = useRef(new Set<string>());
   const pendingDirectionJobRef = useRef<PendingDirectionJob | null>(null);
   const activeDirectionJobPollsRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
@@ -1391,11 +1494,14 @@ export function WorkspacePage() {
   };
 
   const persistChatMessage = async (conversation: string, message: ChatMessage): Promise<ChatMessage> => {
-    const saved = await api.appendConversationMessage(conversation, {
+    const request: ConversationMessageJobRequest = {
       role: message.role,
       content: message.content,
       payload: { artifact: message.artifact, materials: message.materials || [], client_message_id: message.id },
-    });
+    };
+    const started = await api.startConversationMessageJob(conversation, request);
+    const saved = await api.pollConversationMessageJob(conversation, started.job_id);
+    if (!saved) throw new Error("对话消息保存已暂停");
     return {
       ...message,
       id: message.id,
@@ -1404,30 +1510,49 @@ export function WorkspacePage() {
     };
   };
 
-  const appendMessageForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
-    if (targetConversationId) {
-      const optimisticMessage = { ...message, conversationId: targetConversationId, time: message.time || now() };
-      setMessages((items) => {
+  const replaceOptimisticMessage = (optimisticMessageId: string, savedMessage: ChatMessage, targetConversationId: string) => {
+    setMessages((items) => {
+      const currentMessage = items.find((item) => item.id === optimisticMessageId);
+      if (!currentMessage) {
         const nextItems = appendVisibleConversationMessage(items, {
           activeConversationId: conversationIdRef.current,
           targetConversationId,
-          message: optimisticMessage,
+          message: { ...savedMessage, conversationId: targetConversationId },
         });
         messagesRef.current = nextItems;
         return nextItems;
+      }
+      const nextItems = replaceMessageById(items, optimisticMessageId, {
+        ...savedMessage,
+        artifact: currentMessage?.artifact || savedMessage.artifact,
+        materials: currentMessage?.materials || savedMessage.materials,
+        conversationId: targetConversationId,
       });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+  };
+
+  const appendOptimisticMessageForConversation = (message: ChatMessage, targetConversationId: string): ChatMessage => {
+    const optimisticMessage = { ...message, conversationId: targetConversationId, time: message.time || now() };
+    setMessages((items) => {
+      const nextItems = appendVisibleConversationMessage(items, {
+        activeConversationId: conversationIdRef.current,
+        targetConversationId,
+        message: optimisticMessage,
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+    return optimisticMessage;
+  };
+
+  const appendMessageForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
+    if (targetConversationId) {
+      const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
       try {
         const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
-        setMessages((items) => {
-          const currentMessage = items.find((item) => item.id === optimisticMessage.id);
-          const nextItems = replaceMessageById(items, optimisticMessage.id, {
-            ...savedMessage,
-            artifact: currentMessage?.artifact || savedMessage.artifact,
-            materials: currentMessage?.materials || savedMessage.materials,
-          });
-          messagesRef.current = nextItems;
-          return nextItems;
-        });
+        replaceOptimisticMessage(optimisticMessage.id, savedMessage, targetConversationId);
         return savedMessage;
       } catch {
         return optimisticMessage;
@@ -1440,6 +1565,40 @@ export function WorkspacePage() {
       return nextItems;
     });
     return localMessage;
+  };
+
+  const startConversationMessageJobForConversation = async (
+    message: ChatMessage,
+    targetConversationId: string,
+    continuation?: PendingMessageJobContinuation,
+  ): Promise<PendingMessageJob | null> => {
+    if (!targetConversationId) {
+      appendOptimisticMessageForConversation(message, targetConversationId);
+      return null;
+    }
+    const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
+    const request: ConversationMessageJobRequest = {
+      role: optimisticMessage.role,
+      content: optimisticMessage.content,
+      payload: {
+        artifact: optimisticMessage.artifact,
+        materials: optimisticMessage.materials || [],
+        client_message_id: optimisticMessage.id,
+      },
+    };
+    const started = await api.startConversationMessageJob(targetConversationId, request);
+    const pendingMessageJob: PendingMessageJob = {
+      job_id: started.job_id,
+      conversation_id: targetConversationId,
+      source_message_id: optimisticMessage.id,
+      kind: "conversation_message",
+      started_at: new Date().toISOString(),
+      request,
+      message: optimisticMessage,
+      continue_after_save: continuation,
+    };
+    await persistPendingMessageJob(pendingMessageJob, targetConversationId, "message_save_running");
+    return pendingMessageJob;
   };
 
   const pushAssistant = (content: string, targetConversationId = conversationIdRef.current) => {
@@ -2256,6 +2415,60 @@ export function WorkspacePage() {
       smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptFile.smart_ppt_project_id),
     }, targetConversationId);
 
+  const persistPendingMessageJob = async (
+    pendingMessageJob: PendingMessageJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingMessageJobRef.current = pendingMessageJob;
+    if (!targetConversationId) return;
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...makeSnapshot(targetConversationId),
+        ...extraContext,
+        pendingMessageJob,
+        pending_message_job: pendingMessageJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingMessageJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingMessageJob(null, targetConversationId, lastPhase, extraContext);
+  };
+
+  const persistPendingIntakeJob = async (
+    pendingIntakeJob: PendingIntakeJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingIntakeJobRef.current = pendingIntakeJob;
+    if (!targetConversationId) return;
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...makeSnapshot(targetConversationId),
+        ...extraContext,
+        pendingIntakeJob,
+        pending_intake_job: pendingIntakeJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingIntakeJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingIntakeJob(null, targetConversationId, lastPhase, extraContext);
+  };
+
   const persistPendingImageJob = async (
     pendingImageJob: PendingImageJob | null,
     targetConversationId: string,
@@ -2543,6 +2756,252 @@ export function WorkspacePage() {
       revision_feedback: context.revisionFeedback,
     });
     await resumePendingDirectionJob(pendingDirectionJob);
+  };
+
+  const handleCompletedIntakeJob = async (pendingIntakeJob: PendingIntakeJob, intake: IntakeIntentResponse) => {
+    const targetConversationId = pendingIntakeJob.conversation_id;
+    const text = pendingIntakeJob.request.prompt;
+    const materials = pendingIntakeJob.request.materials || [];
+    if (intake.intent === "video_analysis") {
+      pushAssistant("已识别为视频分析/拆解需求，正在识别媒体链接并调用视频分析 Skill…", targetConversationId);
+      const videoAnalysis = await api.analyzeStoryboards({ prompt: text, materials });
+      pushArtifact(videoAnalysis.ok ? "视频分析已完成，结果如下。" : "视频分析未完成，请查看原因后补充视频链接。", {
+        type: "video_analysis_result",
+        title: videoAnalysis.mode === "batch" ? "批量视频分析" : "视频分析",
+        description: videoAnalysis.ok
+          ? `${videoAnalysis.video_urls.length} 个视频，调用 ${videoAnalysis.endpoint}`
+          : videoAnalysis.message,
+        actionLabel: "查看",
+        intent: "video_analysis",
+        coreMessage: text,
+        materials,
+        videoAnalysis,
+      }, targetConversationId);
+      await clearPendingIntakeJob(targetConversationId, videoAnalysis.ok ? "video_analysis_done" : "video_analysis_failed", {
+        intent: "video_analysis",
+        materials,
+        intake_intent: intake,
+        video_analysis: videoAnalysis,
+      }).catch(() => {});
+      return;
+    }
+    if (intake.intent === "ppt") {
+      const flowDraft = makeFlowDraft("form_pending", {
+        intent: "ppt",
+        coreMessage: text,
+        materials,
+        intakeIntent: intake,
+        intakeContext: intake.intake_context,
+        formValues: initialValuesFromIntake(intake),
+      });
+      flowDraftRef.current = flowDraft;
+      if (isVisibleConversation(targetConversationId)) {
+        setPendingCore(text);
+        setPendingIntent("ppt");
+        setPendingFormValues(initialValuesFromIntake(intake));
+        setPendingMaterials(materials);
+        pendingDialogContextRef.current = {
+          conversationId: targetConversationId,
+          coreMessage: text,
+          materials,
+          intakeContext: intake.intake_context,
+        };
+      }
+      pushAssistant("采集 Agent 判断这是PPT制作需求，已把能识别的信息自动填进表单。请补充确认并上传 Word、Excel 或 PDF 附件。", targetConversationId);
+      await clearPendingIntakeJob(targetConversationId, "ppt_form_pending", {
+        flowDraft,
+        intent: "ppt",
+        materials,
+        intake_intent: intake,
+        intake_context: intake.intake_context,
+      }).catch(() => {});
+      if (isVisibleConversation(targetConversationId)) setDialogOpen(true);
+      return;
+    }
+    if (intake.intent === "image" && isImageEditIntake(intake, text)) {
+      const imageEditRequest: PendingImageEditRequest = {
+        conversationId: targetConversationId,
+        prompt: text,
+        formValues: intake.values || {},
+        intakeContext: intake.intake_context || {},
+        materials,
+      };
+      if (!hasImageMaterial(materials)) {
+        pendingImageEditRequestRef.current = imageEditRequest;
+        pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会先让你确认图片编辑模型和参数。", targetConversationId);
+        await clearPendingIntakeJob(targetConversationId, "image_edit_waiting_source_image", {
+          intent: "image",
+          materials,
+          intake_intent: intake,
+          intake_context: intake.intake_context,
+          pendingImageEditRequest: imageEditRequest,
+          pending_image_edit_request: imageEditRequest,
+        }).catch(() => {});
+        return;
+      }
+      await clearPendingIntakeJob(targetConversationId, "image_edit_options_pending", {
+        intent: "image",
+        materials,
+        intake_intent: intake,
+        intake_context: intake.intake_context,
+      }).catch(() => {});
+      await showImageEditOptions(imageEditRequest);
+      return;
+    }
+    if (isCreationIntent(intake.intent)) {
+      const flowDraft = makeFlowDraft("form_pending", {
+        intent: intake.intent,
+        coreMessage: text,
+        materials,
+        intakeIntent: intake,
+        intakeContext: intake.intake_context,
+        formValues: initialValuesFromIntake(intake),
+      });
+      flowDraftRef.current = flowDraft;
+      if (isVisibleConversation(targetConversationId)) {
+        setPendingCore(text);
+        setPendingIntent(intake.intent);
+        setPendingFormValues(initialValuesFromIntake(intake));
+        setPendingMaterials(materials);
+        pendingDialogContextRef.current = {
+          conversationId: targetConversationId,
+          coreMessage: text,
+          materials,
+          intakeContext: intake.intake_context,
+        };
+      }
+      pushAssistant(`采集 Agent 判断这是${intake.intent === "video" ? "视频生成" : "图片生成"}需求，已把能识别的信息自动填进表单。请补充确认。`, targetConversationId);
+      await clearPendingIntakeJob(targetConversationId, "intake_form_pending", {
+        flowDraft,
+        intent: intake.intent,
+        materials,
+        intake_intent: intake,
+        intake_context: intake.intake_context,
+      }).catch(() => {});
+      if (isVisibleConversation(targetConversationId)) setDialogOpen(true);
+      return;
+    }
+    pushAssistant(intake.reason || "我可以帮你生成图片、生成电商带货短视频，或分析已有视频。请再描述一下需求。", targetConversationId);
+    await clearPendingIntakeJob(targetConversationId, "intake_unknown", {
+      intake_intent: intake,
+    }).catch(() => {});
+  };
+
+  const resumePendingIntakeJob = async (pendingIntakeJob: PendingIntakeJob) => {
+    const pollKey = `${pendingIntakeJob.conversation_id}:${pendingIntakeJob.job_id}`;
+    if (activeIntakeJobPollsRef.current.has(pollKey)) return;
+    activeIntakeJobPollsRef.current.add(pollKey);
+    const shouldContinuePolling = () => isVisibleConversation(pendingIntakeJob.conversation_id);
+    const stopIfHidden = () => !shouldContinuePolling();
+    setBusyForConversation(pendingIntakeJob.conversation_id, true);
+    try {
+      if (stopIfHidden()) return;
+      const status = await api.getIntakeAnalyzeJob(pendingIntakeJob.job_id);
+      if (stopIfHidden()) return;
+      const result =
+        status.status === "completed" && status.result
+          ? status.result
+          : await api.pollIntakeAnalyzeJob(pendingIntakeJob.job_id, shouldContinuePolling);
+      if (!result || stopIfHidden()) return;
+      await handleCompletedIntakeJob(pendingIntakeJob, result);
+    } catch (err) {
+      if (stopIfHidden()) return;
+      if (isTransientFetchAbort(err)) return;
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的采集意图识别任务不存在或已过期。为避免重复推进流程，我没有自动重启任务，请重新发送需求。"
+          : `继续查询采集意图识别任务失败:${message}`,
+        pendingIntakeJob.conversation_id,
+      );
+      await clearPendingIntakeJob(pendingIntakeJob.conversation_id, "intake_job_resume_failed", {
+        intake_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      activeIntakeJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(pendingIntakeJob.conversation_id, false);
+    }
+  };
+
+  const startIntakeAnalyzeJob = async (
+    targetConversationId: string,
+    request: IntakeAnalyzeJobRequest,
+    sourceMessageId = "",
+    autoResume = true,
+  ): Promise<PendingIntakeJob> => {
+    const started = await api.startIntakeAnalyzeJob(request);
+    const pendingIntakeJob: PendingIntakeJob = {
+      job_id: started.job_id,
+      conversation_id: targetConversationId,
+      source_message_id: sourceMessageId,
+      kind: "intake_analyze",
+      started_at: new Date().toISOString(),
+      request,
+    };
+    await persistPendingIntakeJob(pendingIntakeJob, targetConversationId, "intake_analyze_running", {
+      materials: request.materials || [],
+      intake_prompt: request.prompt,
+    });
+    if (autoResume) await resumePendingIntakeJob(pendingIntakeJob);
+    return pendingIntakeJob;
+  };
+
+  const resumePendingMessageJob = async (pendingMessageJob: PendingMessageJob) => {
+    const pollKey = `${pendingMessageJob.conversation_id}:${pendingMessageJob.job_id}`;
+    if (activeMessageJobPollsRef.current.has(pollKey)) return;
+    activeMessageJobPollsRef.current.add(pollKey);
+    const shouldContinuePolling = () => isVisibleConversation(pendingMessageJob.conversation_id);
+    const stopIfHidden = () => !shouldContinuePolling();
+    setBusyForConversation(pendingMessageJob.conversation_id, true);
+    try {
+      if (stopIfHidden()) return;
+      const status = await api.getConversationMessageJob(pendingMessageJob.conversation_id, pendingMessageJob.job_id);
+      if (stopIfHidden()) return;
+      const saved =
+        status.status === "completed" && status.result
+          ? status.result
+          : await api.pollConversationMessageJob(pendingMessageJob.conversation_id, pendingMessageJob.job_id, shouldContinuePolling);
+      if (!saved || stopIfHidden()) return;
+      const savedMessage = messageFromResponse(saved, pendingMessageJob.conversation_id);
+      if (savedMessage) replaceOptimisticMessage(pendingMessageJob.source_message_id, savedMessage, pendingMessageJob.conversation_id);
+      let nextIntakeJob =
+        pendingIntakeJobRef.current?.conversation_id === pendingMessageJob.conversation_id &&
+        pendingIntakeJobRef.current.source_message_id === pendingMessageJob.source_message_id
+          ? pendingIntakeJobRef.current
+          : null;
+      if (pendingMessageJob.continue_after_save?.type === "handle_send" && !nextIntakeJob) {
+        pushAssistant("正在调用采集 Agent 识别意图，并抽取可自动填充的表单字段…", pendingMessageJob.conversation_id);
+        nextIntakeJob = await startIntakeAnalyzeJob(
+          pendingMessageJob.conversation_id,
+          {
+            prompt: pendingMessageJob.continue_after_save.content,
+            materials: pendingMessageJob.continue_after_save.materials,
+          },
+          pendingMessageJob.source_message_id,
+          false,
+        );
+      }
+      await clearPendingMessageJob(pendingMessageJob.conversation_id, nextIntakeJob ? "intake_analyze_running" : "message_saved", {
+        user_message_saved: true,
+      }).catch(() => {});
+      if (nextIntakeJob) await resumePendingIntakeJob(nextIntakeJob);
+    } catch (err) {
+      if (stopIfHidden()) return;
+      if (isTransientFetchAbort(err)) return;
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的对话消息保存任务不存在或已过期。请确认历史对话里是否已保存该消息，必要时重新发送。"
+          : `继续查询对话消息保存任务失败:${message}`,
+        pendingMessageJob.conversation_id,
+      );
+      await clearPendingMessageJob(pendingMessageJob.conversation_id, "message_job_resume_failed", {
+        message_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      activeMessageJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(pendingMessageJob.conversation_id, false);
+    }
   };
 
   const scenePackageContext = (
@@ -2904,7 +3363,7 @@ export function WorkspacePage() {
       videoScenePackages;
     const isRegeneration = pendingVideoJob.merge_purpose === "regeneration";
     const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-    const videoResultMessage = pushArtifact(
+    pushArtifact(
       mergedVideo.ok
         ? isRegeneration
           ? "视频已按修改意见重新生成，请查看新版本。"
@@ -2947,11 +3406,6 @@ export function WorkspacePage() {
       );
     }
     if (!mergedVideo.ok) releaseArtifactAction(processedKey);
-    if (mergedVideo.ok) {
-      window.setTimeout(() => {
-        void handleAcceptVideoResult(videoResultMessage, true);
-      }, AUTO_CONFIRM_TIMEOUT_MS);
-    }
     if (mergedVideo.merged_video_url) {
       const results = videoResultsFromGeneratedScenes(
         mergedVideo.merged_video_url,
@@ -2983,6 +3437,7 @@ export function WorkspacePage() {
         scene_packages: videoScenePackages.scene_packages,
         generated_scene_videos: generatedSceneVideos.scene_videos,
         merged_video: mergedVideo,
+        video_accepted: false,
       },
     ).catch(() => {});
   };
@@ -3741,6 +4196,8 @@ export function WorkspacePage() {
     setPendingCore("");
     pendingDialogContextRef.current = null;
     flowDraftRef.current = snapshot.flowDraft || null;
+    pendingMessageJobRef.current = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
+    pendingIntakeJobRef.current = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
@@ -3771,6 +4228,14 @@ export function WorkspacePage() {
       taskId: currentTaskId,
       pendingMaterials,
       flowDraft: flowDraftRef.current,
+      pendingMessageJob:
+        pendingMessageJobRef.current?.conversation_id === snapshotConversationId ? pendingMessageJobRef.current : null,
+      pending_message_job:
+        pendingMessageJobRef.current?.conversation_id === snapshotConversationId ? pendingMessageJobRef.current : null,
+      pendingIntakeJob:
+        pendingIntakeJobRef.current?.conversation_id === snapshotConversationId ? pendingIntakeJobRef.current : null,
+      pending_intake_job:
+        pendingIntakeJobRef.current?.conversation_id === snapshotConversationId ? pendingIntakeJobRef.current : null,
       pendingDirectionJob:
         pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
       pending_direction_job:
@@ -3795,6 +4260,7 @@ export function WorkspacePage() {
       pending_ppt_job:
         pendingPptJobRef.current?.conversation_id === snapshotConversationId ? pendingPptJobRef.current : null,
       ppt_done: isPptDoneForConversation(snapshotConversationId),
+      video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, snapshotConversationId)?.videoAccepted === true,
       canvas,
       canvasOpen,
       briefConfirmed,
@@ -3828,6 +4294,8 @@ export function WorkspacePage() {
     processedArtifactIdsRef.current = new Set();
     pendingDialogContextRef.current = null;
     flowDraftRef.current = null;
+    pendingMessageJobRef.current = null;
+    pendingIntakeJobRef.current = null;
     pendingDirectionJobRef.current = null;
     pendingImageEditRequestRef.current = null;
     imageEditConfirmedSelectionsRef.current = {};
@@ -3849,6 +4317,8 @@ export function WorkspacePage() {
       snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
     const imageEditConfirmedSelections = snapshot.imageEditConfirmedSelections || {};
     const flowDraft = snapshot.flowDraft || null;
+    const pendingMessageJob = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
+    const pendingIntakeJob = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
@@ -3862,12 +4332,19 @@ export function WorkspacePage() {
       snapshot as Partial<Record<string, unknown>>,
     );
     const pptAwareMessages = markLatestPptFileDoneFromContext(contextMessages, snapshot as Partial<Record<string, unknown>>);
-    const normalizedMessages = normalizeRestoredMessageReferences(dedupeRestoredScenePackageMessages(pptAwareMessages));
+    const videoAwareMessages = markLatestVideoResultAcceptedFromContext(pptAwareMessages, snapshot as Partial<Record<string, unknown>>);
+    const normalizedMessages = normalizeRestoredMessageReferences(
+      dedupeRestoredScenePackageMessages(restorePendingMessageJobMessage(videoAwareMessages, pendingMessageJob)),
+    );
     applySnapshot({
       ...snapshot,
       pendingScenePackageJob: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
       pending_scene_package_job: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
       flowDraft,
+      pendingMessageJob,
+      pending_message_job: pendingMessageJob,
+      pendingIntakeJob,
+      pending_intake_job: pendingIntakeJob,
       pendingDirectionJob,
       pending_direction_job: pendingDirectionJob,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
@@ -3878,6 +4355,15 @@ export function WorkspacePage() {
       imageEditConfirmedSelections,
       messages: normalizedMessages,
     });
+    if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
+      window.setTimeout(() => {
+        void resumePendingMessageJob(pendingMessageJob);
+      }, 0);
+    } else if (pendingIntakeJob?.job_id && pendingIntakeJob.conversation_id === detail.conversation.conversation_id) {
+      window.setTimeout(() => {
+        void resumePendingIntakeJob(pendingIntakeJob);
+      }, 0);
+    }
     if (pendingDirectionJob?.job_id && pendingDirectionJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
         void resumePendingDirectionJob(pendingDirectionJob);
@@ -3961,6 +4447,15 @@ export function WorkspacePage() {
   const resumeVisiblePendingJobs = () => {
     const activeConversationId = conversationIdRef.current;
     if (!activeConversationId || !pageVisibleRef.current) return;
+    const pendingMessageJob = pendingMessageJobRef.current;
+    if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === activeConversationId) {
+      void resumePendingMessageJob(pendingMessageJob);
+      return;
+    }
+    const pendingIntakeJob = pendingIntakeJobRef.current;
+    if (pendingIntakeJob?.job_id && pendingIntakeJob.conversation_id === activeConversationId) {
+      void resumePendingIntakeJob(pendingIntakeJob);
+    }
     const pendingDirectionJob = pendingDirectionJobRef.current;
     if (pendingDirectionJob?.job_id && pendingDirectionJob.conversation_id === activeConversationId) {
       void resumePendingDirectionJob(pendingDirectionJob);
@@ -4061,6 +4556,14 @@ export function WorkspacePage() {
         taskId: currentTaskId,
         pendingMaterials,
         flowDraft: flowDraftRef.current,
+        pendingMessageJob:
+          pendingMessageJobRef.current?.conversation_id === currentConversationId ? pendingMessageJobRef.current : null,
+        pending_message_job:
+          pendingMessageJobRef.current?.conversation_id === currentConversationId ? pendingMessageJobRef.current : null,
+        pendingIntakeJob:
+          pendingIntakeJobRef.current?.conversation_id === currentConversationId ? pendingIntakeJobRef.current : null,
+        pending_intake_job:
+          pendingIntakeJobRef.current?.conversation_id === currentConversationId ? pendingIntakeJobRef.current : null,
         pendingDirectionJob:
           pendingDirectionJobRef.current?.conversation_id === currentConversationId ? pendingDirectionJobRef.current : null,
         pending_direction_job:
@@ -4085,6 +4588,7 @@ export function WorkspacePage() {
         pending_ppt_job:
           pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
         ppt_done: isPptDoneForConversation(currentConversationId),
+        video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, currentConversationId)?.videoAccepted === true,
         canvas,
         canvasOpen,
         briefConfirmed,
@@ -4127,12 +4631,44 @@ export function WorkspacePage() {
     return { content: input.content, materials: Array.isArray(input.materials) ? input.materials : [] };
   };
 
+  const shouldUseRecoverableIntakeEntry = (
+    text: string,
+    materials: Array<Record<string, unknown>>,
+    activeConversation: string,
+  ): boolean => {
+    if (sceneGlobalAssetReferenceFromMaterials(materials)) return false;
+    if (pendingImageEditRequestRef.current?.conversationId === activeConversation && !looksLikeImageEditPrompt(text)) return false;
+    if (pptOutlineRevisionArtifactRef.current?.conversationId === activeConversation && pptOutlineRevisionArtifactRef.current.artifact?.pptSummary) return false;
+    if (planRevisionArtifactRef.current?.conversationId === activeConversation && planRevisionArtifactRef.current.artifact.intent && planRevisionArtifactRef.current.artifact.formValues) return false;
+    if (imageRevisionArtifactRef.current?.conversationId === activeConversation && imageRevisionArtifactRef.current.artifact?.imageResult) return false;
+    const pendingVideoRevisionArtifact = videoRevisionArtifactRef.current?.artifact;
+    if (
+      videoRevisionArtifactRef.current?.conversationId === activeConversation &&
+      pendingVideoRevisionArtifact?.mergedVideo &&
+      pendingVideoRevisionArtifact?.generatedSceneVideos &&
+      pendingVideoRevisionArtifact?.videoScenePackages
+    ) {
+      return false;
+    }
+    return true;
+  };
+
   const handleSend = async (input: string | AgentUserMessagePayload) => {
     const { content: text, materials = [] } = normalizeSendInput(input);
     let activeConversation = conversationIdRef.current;
     const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
       activeConversation = await ensureConversation(text);
+      if (shouldUseRecoverableIntakeEntry(text, materials, activeConversation)) {
+        const pendingMessageJob = await startConversationMessageJobForConversation(message, activeConversation, {
+          type: "handle_send",
+          content: text,
+          materials,
+        });
+        if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+        if (pendingMessageJob) await resumePendingMessageJob(pendingMessageJob);
+        return;
+      }
       await appendMessageForConversation(message, activeConversation);
       if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
     } catch (err) {
@@ -4426,167 +4962,14 @@ export function WorkspacePage() {
     setBusyForConversation(activeConversation, true);
     pushAssistant("正在调用采集 Agent 识别意图，并抽取可自动填充的表单字段…", activeConversation);
     try {
-      const intake = await api.analyzeIntakeIntent({ prompt: text, materials });
-      if (intake.intent === "video_analysis") {
-        pushAssistant("已识别为视频分析/拆解需求，正在识别媒体链接并调用视频分析 Skill…", activeConversation);
-        const videoAnalysis = await api.analyzeStoryboards({ prompt: text, materials });
-        pushArtifact(videoAnalysis.ok ? "视频分析已完成，结果如下。" : "视频分析未完成，请查看原因后补充视频链接。", {
-          type: "video_analysis_result",
-          title: videoAnalysis.mode === "batch" ? "批量视频分析" : "视频分析",
-          description: videoAnalysis.ok
-            ? `${videoAnalysis.video_urls.length} 个视频，调用 ${videoAnalysis.endpoint}`
-            : videoAnalysis.message,
-          actionLabel: "查看",
-          intent: "video_analysis",
-          coreMessage: text,
-          materials,
-          videoAnalysis,
-        }, activeConversation);
-        if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
-              last_phase: videoAnalysis.ok ? "video_analysis_done" : "video_analysis_failed",
-              context: {
-                ...makeSnapshot(),
-                intent: "video_analysis",
-                materials,
-                intake_intent: intake,
-                video_analysis: videoAnalysis,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
-        return;
-      }
-      if (intake.intent === "ppt") {
-        const flowDraft = makeFlowDraft("form_pending", {
-          intent: "ppt",
-          coreMessage: text,
-          materials,
-          intakeIntent: intake,
-          intakeContext: intake.intake_context,
-          formValues: initialValuesFromIntake(intake),
-        });
-        flowDraftRef.current = flowDraft;
-        if (isVisibleConversation(activeConversation)) {
-          setPendingCore(text);
-          setPendingIntent("ppt");
-          setPendingFormValues(initialValuesFromIntake(intake));
-          setPendingMaterials(materials);
-          pendingDialogContextRef.current = {
-            conversationId: activeConversation,
-            coreMessage: text,
-            materials,
-            intakeContext: intake.intake_context,
-          };
-        }
-        pushAssistant("采集 Agent 判断这是PPT制作需求，已把能识别的信息自动填进表单。请补充确认并上传 Word、Excel 或 PDF 附件。", activeConversation);
-        if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
-              last_phase: "ppt_form_pending",
-            context: {
-              ...makeSnapshot(),
-              flowDraft,
-              intent: "ppt",
-              materials,
-                intake_intent: intake,
-                intake_context: intake.intake_context,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
-        if (isVisibleConversation(activeConversation)) setDialogOpen(true);
-        return;
-      }
-      if (intake.intent === "image" && isImageEditIntake(intake, text)) {
-        const imageEditRequest: PendingImageEditRequest = {
-          conversationId: activeConversation,
-          prompt: text,
-          formValues: intake.values || {},
-          intakeContext: intake.intake_context || {},
-          materials,
-        };
-        if (!hasImageMaterial(materials)) {
-          pendingImageEditRequestRef.current = imageEditRequest;
-          pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会先让你确认图片编辑模型和参数。", activeConversation);
-          if (activeConversation) {
-            void api
-              .updateConversation(activeConversation, {
-                last_phase: "image_edit_waiting_source_image",
-                context: {
-                  ...makeSnapshot(),
-                  intent: "image",
-                  materials,
-                  intake_intent: intake,
-                  intake_context: intake.intake_context,
-                  pendingImageEditRequest: imageEditRequest,
-                  pending_image_edit_request: imageEditRequest,
-                } as unknown as Record<string, unknown>,
-              })
-              .catch(() => {});
-          }
-          return;
-        }
-        await showImageEditOptions(imageEditRequest);
-        return;
-      }
-      if (isCreationIntent(intake.intent)) {
-        const flowDraft = makeFlowDraft("form_pending", {
-          intent: intake.intent,
-          coreMessage: text,
-          materials,
-          intakeIntent: intake,
-          intakeContext: intake.intake_context,
-          formValues: initialValuesFromIntake(intake),
-        });
-        flowDraftRef.current = flowDraft;
-        if (isVisibleConversation(activeConversation)) {
-          setPendingCore(text);
-          setPendingIntent(intake.intent);
-          setPendingFormValues(initialValuesFromIntake(intake));
-          setPendingMaterials(materials);
-          pendingDialogContextRef.current = {
-            conversationId: activeConversation,
-            coreMessage: text,
-            materials,
-            intakeContext: intake.intake_context,
-          };
-        }
-        pushAssistant(`采集 Agent 判断这是${intake.intent === "video" ? "视频生成" : "图片生成"}需求，已把能识别的信息自动填进表单。请补充确认。`, activeConversation);
-        if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
-              last_phase: "intake_form_pending",
-            context: {
-              ...makeSnapshot(),
-              flowDraft,
-              intent: intake.intent,
-              materials,
-                intake_intent: intake,
-                intake_context: intake.intake_context,
-              } as unknown as Record<string, unknown>,
-            })
-            .catch(() => {});
-        }
-        if (isVisibleConversation(activeConversation)) setDialogOpen(true);
-        return;
-      }
-      pushAssistant(intake.reason || "我可以帮你生成图片、生成电商带货短视频，或分析已有视频。请再描述一下需求。", activeConversation);
-      if (activeConversation) {
-        void api
-          .updateConversation(activeConversation, {
-            last_phase: "intake_unknown",
-            context: {
-              ...makeSnapshot(),
-              intake_intent: intake,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      const pendingIntakeJob = await startIntakeAnalyzeJob(
+        activeConversation,
+        { prompt: text, materials },
+        message.id,
+      );
+      void pendingIntakeJob;
     } catch (err) {
       pushAssistant(`采集 Agent 意图识别失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
-    } finally {
       setBusyForConversation(activeConversation, false);
     }
   };
@@ -5616,12 +5999,28 @@ export function WorkspacePage() {
     }
   };
 
-  async function handleAcceptVideoResult(msg: ChatMessage, auto = false) {
+  async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未收到视频修改意见，已默认无意见并结束流程。` : "已确认视频无修改意见，流程结束。", targetConversationId);
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (message.id !== msg.id || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "video_result") {
+          return message;
+        }
+        return {
+          ...message,
+          artifact: {
+            ...message.artifact,
+            videoAccepted: true,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+    pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -5633,7 +6032,7 @@ export function WorkspacePage() {
   }
 
   function handleReviseVideoResult(msg: ChatMessage) {
-    if (!msg.artifact?.mergedVideo?.ok) return;
+    if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
