@@ -7,6 +7,7 @@ import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { AuthGate } from "@/components/auth/AuthGate";
 import { WorkspacePage } from "@/pages/WorkspacePage";
+import { TracePage } from "@/pages/TracePage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -22,6 +23,7 @@ const router = createBrowserRouter([
     ),
     children: [
       { index: true, element: <WorkspacePage /> },
+      { path: "trace", element: <TracePage /> },
       { path: "c/:taskId", element: <WorkspacePage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],

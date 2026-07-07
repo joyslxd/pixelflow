@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 export interface GenParamsForm {
   productName: string;
   imageUrl: string;
+  imageArtifactUrl?: string;
   coreMessage: string;
   creativeStyle: string;
   platform: string;
@@ -19,7 +20,9 @@ interface GenParamsDialogProps {
   open: boolean;
   /** 来自用户消息的初始创意诉求 */
   initialCoreMessage?: string;
+  initialForm?: Partial<GenParamsForm>;
   uploadThreadId?: string;
+  onDraftChange?: (form: GenParamsForm) => void;
   onConfirm: (form: GenParamsForm) => void;
   onCancel: () => void;
 }
@@ -35,8 +38,8 @@ function Label({ children }: { children: React.ReactNode }) {
 const inputCls =
   "w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-soft/60 focus:border-accent/40";
 
-export function GenParamsDialog({ open, initialCoreMessage, uploadThreadId, onConfirm, onCancel }: GenParamsDialogProps) {
-  const [f, setF] = useState<GenParamsForm>({
+function createInitialForm(initialCoreMessage?: string, initialForm?: Partial<GenParamsForm>): GenParamsForm {
+  return {
     productName: "",
     imageUrl: "",
     coreMessage: initialCoreMessage ?? "",
@@ -47,6 +50,13 @@ export function GenParamsDialog({ open, initialCoreMessage, uploadThreadId, onCo
     durationSec: 15,
     count: 1,
     sound: true,
+    ...initialForm,
+  };
+}
+
+export function GenParamsDialog({ open, initialCoreMessage, initialForm, uploadThreadId, onDraftChange, onConfirm, onCancel }: GenParamsDialogProps) {
+  const [f, setF] = useState<GenParamsForm>({
+    ...createInitialForm(initialCoreMessage, initialForm),
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewObjectUrlRef = useRef<string>("");
@@ -62,6 +72,10 @@ export function GenParamsDialog({ open, initialCoreMessage, uploadThreadId, onCo
     },
     [],
   );
+
+  useEffect(() => {
+    onDraftChange?.(f);
+  }, [f, onDraftChange]);
 
   const setLocalPreview = (file: File) => {
     if (previewObjectUrlRef.current) URL.revokeObjectURL(previewObjectUrlRef.current);
@@ -88,7 +102,7 @@ export function GenParamsDialog({ open, initialCoreMessage, uploadThreadId, onCo
       const fileInfo = uploaded.files[0];
       const publicUrl = fileInfo?.tos_url || fileInfo?.public_url || fileInfo?.borgrise_url;
       if (!publicUrl) throw new Error(uploaded.message || "上传未返回可访问的图片 URL");
-      set("imageUrl", publicUrl);
+      setF((p) => ({ ...p, imageUrl: publicUrl, imageArtifactUrl: fileInfo?.artifact_url || "" }));
       setPreviewUrl(publicUrl);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : String(err));
@@ -151,7 +165,7 @@ export function GenParamsDialog({ open, initialCoreMessage, uploadThreadId, onCo
                   className={inputCls}
                   value={f.imageUrl}
                   onChange={(e) => {
-                    set("imageUrl", e.target.value);
+                    setF((p) => ({ ...p, imageUrl: e.target.value, imageArtifactUrl: "" }));
                     setPreviewUrl("");
                     setUploadError("");
                   }}

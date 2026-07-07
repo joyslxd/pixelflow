@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Literal
+
+from langchain_core.messages import BaseMessage
 
 from deerflow.models import create_chat_model
 
@@ -39,6 +42,9 @@ _SYSTEM_PROMPT = """你是资深电商短视频导演与分镜策划。根据给
 只输出符合 schema 的结构化数据，不要额外解释。"""
 
 
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
 def _build_human_prompt(
     *,
     product_info: dict[str, Any],
@@ -56,6 +62,52 @@ def _build_human_prompt(
     if reference_analysis:
         parts.append(f"【参考视频分析结果】\n{json.dumps(reference_analysis, ensure_ascii=False, indent=2)}")
     return "\n\n".join(parts)
+
+
+def _message_text(message: BaseMessage | Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    fenced = _JSON_FENCE_RE.search(text)
+    candidate = fenced.group(1) if fenced else text
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(candidate[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("Brief response JSON must be an object")
+    return parsed
+
+
+async def _brief_generate_via_json_text(model: Any, human: str) -> Brief:
+    schema = Brief.model_json_schema()
+    prompt = (
+        f"{human}\n\n"
+        "请严格只输出一个 JSON object，不要输出 Markdown、解释文字或代码块。\n"
+        "JSON 必须符合以下 schema，字段名必须完全一致：\n"
+        f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
+    )
+    response = await model.ainvoke([("system", _SYSTEM_PROMPT), ("human", prompt)])
+    data = _extract_json_object(_message_text(response))
+    return Brief.model_validate(data)
 
 
 async def brief_generate(
@@ -81,7 +133,14 @@ async def brief_generate(
         creative_mode=creative_mode,
     )
     logger.info("[pixelflow] brief_generate mode=%s", creative_mode)
-    brief = await structured.ainvoke([("system", _SYSTEM_PROMPT), ("human", human)])
+    try:
+        brief = await structured.ainvoke([("system", _SYSTEM_PROMPT), ("human", human)])
+    except Exception as exc:
+        message = str(exc)
+        if "json_schema" not in message and "response_format" not in message:
+            raise
+        logger.warning("[pixelflow] structured brief output unsupported, falling back to JSON text parsing: %s", message)
+        brief = await _brief_generate_via_json_text(model, human)
     # Backfill the output params from video_params so downstream nodes are exact.
     brief.platform = video_params.get("platform", brief.platform)
     brief.duration_sec = int(video_params.get("duration_sec", brief.duration_sec))

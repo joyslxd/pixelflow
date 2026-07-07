@@ -9,11 +9,17 @@ loop — is fully wired so the graph runs end-to-end with stub logic.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
+import mimetypes
+import re
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from langgraph.types import interrupt
 
+from deerflow.uploads.manager import get_uploads_dir
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
 from pixelflow.generate import build_segment_prompt, plan_segments
@@ -32,6 +38,36 @@ MAX_INTAKE_ROUNDS = 3
 # 多段并行 + concat 承接(plan_segments),EDIT 再裁回精确时长。
 SEEDANCE_MIN_DURATION = 4
 SEEDANCE_MAX_DURATION = 10
+_UPLOAD_ARTIFACT_RE = re.compile(r"^/api/threads/([^/]+)/artifacts/mnt/user-data/uploads/([^?#]+)")
+
+
+def _resolve_seed_image_url(image_url: str) -> str:
+    """Convert local upload artifact URLs into Ark-compatible data URLs.
+
+    Ark runs server-side and cannot fetch a local relative URL such as
+    ``/api/threads/.../artifacts/...`` from the developer machine.  When the
+    product image came from the built-in upload API, read the uploaded file and
+    inline it as a data URL; public HTTPS URLs pass through unchanged.
+    """
+    raw = str(image_url or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith("data:image/"):
+        return raw
+    path = urlparse(raw).path if raw.startswith(("http://", "https://")) else raw
+    match = _UPLOAD_ARTIFACT_RE.match(path)
+    if not match:
+        return raw
+    thread_id, filename = match.groups()
+    safe_name = Path(unquote(filename)).name
+    file_path = get_uploads_dir(thread_id) / safe_name
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Uploaded product image not found: {safe_name}")
+    mime = mimetypes.guess_type(file_path.name)[0] or "image/png"
+    if not mime.startswith("image/"):
+        raise ValueError(f"Uploaded product asset is not an image: {safe_name}")
+    encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
@@ -268,10 +304,16 @@ async def generate_node(state: TaskState) -> TaskState:
     segments = plan_segments(shots, SEEDANCE_MAX_DURATION)
     logger.info("[pixelflow] generate task_id=%s shots=%d segments=%d", task_id, len(shots), len(segments))
 
-    image_url = product_info.get("main_image_url")
+    image_url = product_info.get("main_image_artifact_url") or product_info.get("main_image_url")
     if not image_url:
         assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": "无可用图源：商品缺少 main_image_url"} for s in segments]
         return {"phase": Phase.GENERATE.value, "generated_assets": assets, "generation_ready": False, "error": "无可用图源：商品缺少 main_image_url"}
+    try:
+        image_url = _resolve_seed_image_url(str(image_url))
+    except Exception as exc:  # noqa: BLE001 - normalize local asset failures into task errors
+        error = f"商品图片不可用：{exc}"
+        assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": error} for s in segments]
+        return {"phase": Phase.GENERATE.value, "generated_assets": assets, "generation_ready": False, "error": error}
 
     skill = get_video_skill()
     assets = await asyncio.gather(*(_generate_segment(skill, s, image_url=image_url, global_visual=global_visual, ratio=ratio) for s in segments))

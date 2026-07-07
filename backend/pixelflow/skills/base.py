@@ -60,6 +60,22 @@ class StoryboardResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ImageGenerationResult:
+    """Normalized result of one image-generation call.
+
+    ``urls`` preserves multi-image outputs. ``url`` is the first image for
+    callers that only need a single asset.
+    """
+
+    ok: bool
+    urls: list[str] = field(default_factory=list)
+    url: str | None = None
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VideoGenerationSkill(Protocol):
     """Capability the GENERATE phase needs: produce/extend video clips.
 
@@ -107,6 +123,31 @@ class VideoDecomposeSkill(Protocol):
     async def decompose_video_to_storyboard(self, video_url: str) -> StoryboardResult: ...
 
 
+class ImageGenerationSkill(Protocol):
+    """Capability the image-generation phases need."""
+
+    async def text_to_image(
+        self,
+        prompt: str,
+        *,
+        size: str = "2K",
+        ratio: str = "1:1",
+        num_images: int = 1,
+        model: str | None = None,
+    ) -> ImageGenerationResult: ...
+
+    async def image_to_image(
+        self,
+        image_urls: list[str],
+        prompt: str,
+        *,
+        size: str = "2K",
+        ratio: str = "1:1",
+        num_images: int = 1,
+        model: str | None = None,
+    ) -> ImageGenerationResult: ...
+
+
 def get_video_skill() -> VideoGenerationSkill:
     """Return the configured video-generation skill.
 
@@ -114,11 +155,15 @@ def get_video_skill() -> VideoGenerationSkill:
     in-process Borgrise skill; ``PIXELFLOW_VIDEO_SKILL`` is reserved for
     selecting alternative implementations (e.g. a sandbox-executed skill in P1).
     """
-    impl = os.environ.get("PIXELFLOW_VIDEO_SKILL", "borgrise")
+    impl = os.environ.get("PIXELFLOW_VIDEO_SKILL", "borgrise").strip().lower()
     if impl == "borgrise":
         from pixelflow.skills.borgrise import BorgriseSkill
 
         return BorgriseSkill()
+    if impl in {"seedance", "ark_seedance", "ark-seedance"}:
+        from pixelflow.skills.ark_seed import SeedanceSkill
+
+        return SeedanceSkill()
     raise ValueError(f"Unknown video skill implementation: {impl!r}")
 
 
@@ -128,7 +173,7 @@ def get_video_edit_skill() -> VideoEditSkill:
     Default is the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL=ffmpeg``
     selects the headless FFmpeg renderer that produces a finished mp4.
     """
-    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying")
+    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying").strip().lower()
     if impl == "jianying":
         from pixelflow.skills.jianying import JianYingEditSkill
 
@@ -142,9 +187,19 @@ def get_video_edit_skill() -> VideoEditSkill:
 
 def get_video_decompose_skill() -> VideoDecomposeSkill:
     """Return the configured reference-video decompose skill (the INTAKE-phase swap point)."""
-    impl = os.environ.get("PIXELFLOW_DECOMPOSE_SKILL", "borgrise")
+    impl = os.environ.get("PIXELFLOW_DECOMPOSE_SKILL", "borgrise").strip().lower()
     if impl == "borgrise":
         from pixelflow.skills.borgrise import BorgriseSkill
 
         return BorgriseSkill()
     raise ValueError(f"Unknown video decompose skill implementation: {impl!r}")
+
+
+def get_image_skill() -> ImageGenerationSkill:
+    """Return the configured image-generation skill."""
+    impl = os.environ.get("PIXELFLOW_IMAGE_SKILL", "seedream").strip().lower()
+    if impl in {"seedream", "ark_seedream", "ark-seedream"}:
+        from pixelflow.skills.ark_seed import SeedreamSkill
+
+        return SeedreamSkill()
+    raise ValueError(f"Unknown image skill implementation: {impl!r}")

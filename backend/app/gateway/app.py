@@ -2,6 +2,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +157,19 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        load_dotenv = None
+
+    if load_dotenv is not None:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+            mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "")
+            if "<host>" in mysql_url or "<user>" in mysql_url or "<password>" in mysql_url:
+                os.environ.pop("PIXELFLOW_MYSQL_URL", None)
 
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap

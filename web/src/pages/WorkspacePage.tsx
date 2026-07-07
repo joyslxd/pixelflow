@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
 import { GenParamsDialog, type GenParamsForm } from "@/components/composer/GenParamsDialog";
@@ -7,7 +8,7 @@ import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { TaskPhase, VideoResult } from "@/lib/types";
 
 let seq = 0;
-const uid = () => `m${++seq}`;
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `m${Date.now()}-${++seq}`);
 const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 
 const VIDEO_HINTS = ["视频", "短视频", "成片", "带货", "种草", "分镜", "广告", "拍", "生成", "seedance"];
@@ -17,6 +18,7 @@ const PHASE_MSG: Record<string, string> = {
   intake: "正在理解商品与需求…",
   creative: "正在策划分镜 Brief…",
   brief_review: "Brief 已就绪,请在右侧确认或修改。",
+  storyboard_review: "视频场景包已准备好,请确认后生成视频。",
   generate: "正在生成分镜片段…",
   edit: "正在剪辑合成…",
   segment_review: "分镜片段已生成,请在画布确认。",
@@ -47,6 +49,20 @@ const REVIEW_ARTIFACT: Partial<Record<TaskPhase, NonNullable<ChatMessage["artifa
   },
 };
 
+const BRIEF_ARTIFACT: NonNullable<ChatMessage["artifact"]> = {
+  type: "brief",
+  title: "视频 Brief",
+  description: "分镜、旁白与投放参数",
+  actionLabel: "查看",
+};
+
+const STORYBOARD_ARTIFACT: NonNullable<ChatMessage["artifact"]> = {
+  type: "storyboard",
+  title: "视频场景包",
+  description: "查看分镜、镜头描述、旁白和参考图",
+  actionLabel: "查看分镜",
+};
+
 function sizeFor(ratio: string, resolution: string): string {
   const r = resolution === "720p" ? 720 : 1080;
   if (ratio === "16:9") return `${Math.round((r * 16) / 9)}x${r}`;
@@ -56,19 +72,44 @@ function sizeFor(ratio: string, resolution: string): string {
 
 function toBrief(raw: Record<string, unknown>): Brief {
   const shots = Array.isArray(raw.shots) ? (raw.shots as Record<string, unknown>[]) : [];
+  const globalVisual = raw.global_visual && typeof raw.global_visual === "object" ? (raw.global_visual as Record<string, unknown>) : {};
   return {
     title: String(raw.brief_id ?? "视频 Brief"),
     platform: String(raw.platform ?? ""),
     durationSec: Number(raw.duration_sec ?? 0),
     ratio: String(raw.ratio ?? "9:16"),
+    size: String(raw.size ?? ""),
+    globalVisual: {
+      subjectType: String(globalVisual.subject_type ?? ""),
+      environment: String(globalVisual.environment ?? ""),
+      lighting: String(globalVisual.lighting ?? ""),
+      characterStyle: String(globalVisual.character_style ?? ""),
+      overallStyle: String(globalVisual.overall_style ?? ""),
+      forbiddenElements: String(globalVisual.forbidden_elements ?? ""),
+    },
     shots: shots.map(
       (s, i): BriefShot => ({
         shotId: String(s.shot_id ?? `s${i}`),
         timeRange: String(s.time_range ?? ""),
         sceneType: String(s.scene_type ?? ""),
         durationSec: Number(s.duration ?? 0),
+        shotType: String(s.shot_type ?? ""),
+        cameraMovement: String(s.camera_movement ?? ""),
+        visualDescription: String(s.visual_description ?? ""),
+        generationPrompt: String(s.generation_prompt ?? ""),
         narration: String(s.narration_text ?? ""),
         onscreen: String(s.onscreen_text ?? ""),
+        assetStrategy: String(s.asset_strategy ?? ""),
+        transitionIn: String(s.transition_in ?? ""),
+        transitionOut: String(s.transition_out ?? ""),
+        audio:
+          s.audio && typeof s.audio === "object"
+            ? {
+                bgmVibe: String((s.audio as Record<string, unknown>).bgm_vibe ?? ""),
+                sfx: String((s.audio as Record<string, unknown>).sfx ?? ""),
+                ttsVoice: String((s.audio as Record<string, unknown>).tts_voice ?? ""),
+              }
+            : undefined,
       }),
     ),
   };
@@ -76,12 +117,25 @@ function toBrief(raw: Record<string, unknown>): Brief {
 
 const EMPTY_CANVAS: CanvasState = { phase: "idle", results: [] };
 const SESSION_KEY = "pixelflow.workspace.session.v1";
+const createSessionId = () => `chat-${uid()}`;
+
+function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
+  const seen = new Set<string>();
+  return items.map((message) => {
+    const id = message.id && !seen.has(message.id) ? message.id : uid();
+    seen.add(id);
+    return { ...message, id };
+  });
+}
 
 interface WorkspaceSnapshot {
   taskId: string;
   messages: ChatMessage[];
   canvas: CanvasState;
   canvasOpen: boolean;
+  dialogOpen: boolean;
+  pendingCore: string;
+  dialogDraft: GenParamsForm | null;
   briefConfirmed: boolean;
   lastEventId: number;
   announcedPhases: string[];
@@ -89,11 +143,14 @@ interface WorkspaceSnapshot {
 }
 
 export function WorkspacePage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
+  const [dialogDraft, setDialogDraft] = useState<GenParamsForm | null>(null);
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentTaskId, setCurrentTaskId] = useState("");
@@ -104,7 +161,9 @@ export function WorkspacePage() {
   const briefReadyShownRef = useRef(false);
   const lastEventIdRef = useRef(0);
   const restoredRef = useRef(false);
+  const skipNextRestoreRef = useRef(false);
   const saveTimerRef = useRef<number | undefined>(undefined);
+  const replyTimersRef = useRef<number[]>([]);
   const unsubRef = useRef<() => void>(() => {});
 
   const setActiveTaskId = (taskId: string) => {
@@ -112,11 +171,61 @@ export function WorkspacePage() {
     setCurrentTaskId(taskId);
   };
 
+  const resetWorkspace = () => {
+    unsubRef.current();
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    replyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    replyTimersRef.current = [];
+    taskIdRef.current = "";
+    briefConfirmedRef.current = false;
+    seenEventIdsRef.current = new Set();
+    announcedPhasesRef.current = new Set();
+    briefReadyShownRef.current = false;
+    lastEventIdRef.current = 0;
+    setCurrentTaskId("");
+    setMessages([]);
+    setCanvas(EMPTY_CANVAS);
+    setCanvasOpen(false);
+    setDialogOpen(false);
+    setPendingCore("");
+    setDialogDraft(null);
+    setBusy(false);
+    setBriefConfirmed(false);
+    localStorage.removeItem(SESSION_KEY);
+  };
+
   const pushAssistant = (content: string) =>
     setMessages((m) => [...m, { id: uid(), role: "assistant", content, time: now() }]);
 
   const pushArtifact = (content: string, artifact: NonNullable<ChatMessage["artifact"]>) =>
     setMessages((m) => [...m, { id: uid(), role: "assistant", content, time: now(), artifact }]);
+
+  const pushBriefArtifact = (content = "Brief 已生成。点击下方素材卡打开画布查看和确认。") => {
+    briefReadyShownRef.current = true;
+    setMessages((m) => {
+      if (m.some((message) => message.artifact?.type === "brief")) return m;
+      return [...m, { id: uid(), role: "assistant", content, time: now(), artifact: BRIEF_ARTIFACT }];
+    });
+  };
+
+  const pushStoryboardArtifact = (thumbnails: string[] = []) => {
+    setMessages((m) => {
+      if (m.some((message) => message.artifact?.type === "storyboard")) return m;
+      return [
+        ...m,
+        {
+          id: uid(),
+          role: "assistant",
+          content: "视频场景包已准备好，请确认后生成视频。",
+          time: now(),
+          artifact: {
+            ...STORYBOARD_ARTIFACT,
+            thumbnails,
+          },
+        },
+      ];
+    });
+  };
 
   const pushReviewArtifact = (phase: TaskPhase) => {
     const artifact = REVIEW_ARTIFACT[phase];
@@ -137,8 +246,10 @@ export function WorkspacePage() {
       setBriefConfirmed(confirmed);
       setCanvas((c) => ({
         ...c,
-        phase: phase || c.phase,
+        phase: c.phase === "storyboard_review" && phase === "brief_review" && c.brief ? "storyboard_review" : phase || c.phase,
         brief: task.brief && Object.keys(task.brief).length > 0 ? toBrief(task.brief) : c.brief,
+        productName: typeof task.product_info?.product_name === "string" ? task.product_info.product_name : c.productName,
+        productImageUrl: typeof task.product_info?.main_image_url === "string" ? task.product_info.main_image_url : c.productImageUrl,
       }));
 
       if (["segment_review", "edit_review", "qc_review"].includes(task.phase)) {
@@ -152,11 +263,13 @@ export function WorkspacePage() {
       }
 
       if (task.phase === "brief_review") {
-        setCanvasOpen(true);
         if (!announcedPhasesRef.current.has("brief_review")) {
           announcedPhasesRef.current.add("brief_review");
-          pushAssistant(PHASE_MSG.brief_review);
+          pushBriefArtifact("Brief 已就绪,请打开素材卡确认后再生成视频。");
+        } else {
+          pushBriefArtifact("Brief 已就绪,请打开素材卡确认后再生成视频。");
         }
+        setBusy(false);
         return;
       }
 
@@ -175,9 +288,12 @@ export function WorkspacePage() {
   }
 
   const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
-    if (Array.isArray(snapshot.messages)) setMessages(snapshot.messages);
+    if (Array.isArray(snapshot.messages)) setMessages(normalizeMessages(snapshot.messages));
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
+    if (typeof snapshot.dialogOpen === "boolean") setDialogOpen(snapshot.dialogOpen);
+    if (typeof snapshot.pendingCore === "string") setPendingCore(snapshot.pendingCore);
+    if (snapshot.dialogDraft && typeof snapshot.dialogDraft === "object") setDialogDraft(snapshot.dialogDraft);
     if (typeof snapshot.briefConfirmed === "boolean") {
       setBriefConfirmed(snapshot.briefConfirmed);
       briefConfirmedRef.current = snapshot.briefConfirmed;
@@ -194,9 +310,23 @@ export function WorkspacePage() {
   useEffect(() => {
     let cancelled = false;
     const restore = async () => {
+      const fresh = new URLSearchParams(location.search).get("new") === "1";
+      if (fresh) {
+        resetWorkspace();
+        restoredRef.current = true;
+        skipNextRestoreRef.current = true;
+        navigate("/", { replace: true });
+        return;
+      }
+      if (skipNextRestoreRef.current) {
+        skipNextRestoreRef.current = false;
+        restoredRef.current = true;
+        return;
+      }
       let snapshot: Partial<WorkspaceSnapshot> | null = null;
+      const sessionId = new URLSearchParams(location.search).get("session");
       try {
-        const server = await api.getSessionContext();
+        const server = await api.getSessionContext(sessionId || undefined);
         if (server?.context) snapshot = server.context as Partial<WorkspaceSnapshot>;
       } catch {
         /* fall back to local snapshot */
@@ -204,7 +334,8 @@ export function WorkspacePage() {
       if (!snapshot) {
         try {
           const raw = localStorage.getItem(SESSION_KEY);
-          snapshot = raw ? (JSON.parse(raw) as Partial<WorkspaceSnapshot>) : null;
+          const localSnapshot = raw ? (JSON.parse(raw) as Partial<WorkspaceSnapshot>) : null;
+          if (localSnapshot && (!sessionId || localSnapshot.taskId === sessionId)) snapshot = localSnapshot;
         } catch {
           localStorage.removeItem(SESSION_KEY);
         }
@@ -223,17 +354,27 @@ export function WorkspacePage() {
     return () => {
       cancelled = true;
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      replyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      replyTimersRef.current = [];
     };
-  }, []);
+  }, [location.search, navigate]);
 
   useEffect(() => {
     try {
     if (!restoredRef.current) return;
+    const safeMessages = normalizeMessages(messages);
+    if (safeMessages.some((message, index) => message.id !== messages[index]?.id)) {
+      setMessages(safeMessages);
+      return;
+    }
     const snapshot: WorkspaceSnapshot = {
       taskId: currentTaskId,
-      messages,
+      messages: safeMessages,
       canvas,
       canvasOpen,
+      dialogOpen,
+      pendingCore,
+      dialogDraft,
       briefConfirmed,
       lastEventId: lastEventIdRef.current,
       announcedPhases: Array.from(announcedPhasesRef.current),
@@ -249,18 +390,22 @@ export function WorkspacePage() {
     } catch {
       /* ignore persistence errors in the UI path */
     }
-  }, [messages, canvas, canvasOpen, briefConfirmed, currentTaskId]);
+  }, [messages, canvas, canvasOpen, dialogOpen, pendingCore, dialogDraft, briefConfirmed, currentTaskId]);
 
   const handleSend = (text: string) => {
+    if (!taskIdRef.current) setActiveTaskId(createSessionId());
     setMessages((m) => [...m, { id: uid(), role: "user", content: text, time: now() }]);
     if (looksLikeVideoIntent(text)) {
       setPendingCore(text);
-      setTimeout(() => {
+      setDialogDraft(null);
+      const timer = window.setTimeout(() => {
         pushAssistant("好的,帮你做带货短视频。请补充商品与参数 👇");
         setDialogOpen(true);
       }, 300);
+      replyTimersRef.current.push(timer);
     } else {
-      setTimeout(() => pushAssistant("我可以帮你生成电商带货短视频。描述一下商品和你想要的效果?"), 300);
+      const timer = window.setTimeout(() => pushAssistant("我可以帮你生成电商带货短视频。描述一下商品和你想要的效果?"), 300);
+      replyTimersRef.current.push(timer);
     }
   };
 
@@ -287,16 +432,10 @@ export function WorkspacePage() {
         }
         break;
       case "brief_ready":
-        if (briefConfirmedRef.current || briefReadyShownRef.current) return;
-        briefReadyShownRef.current = true;
+        if (briefConfirmedRef.current) return;
         setCanvas((c) => ({ ...c, phase: "brief_review", brief: toBrief((e.data.brief as Record<string, unknown>) || {}) }));
         setBusy(false);
-        pushArtifact("Brief 已生成。点击下方素材卡打开画布查看和确认。", {
-          type: "brief",
-          title: "视频 Brief",
-          description: "分镜、旁白与投放参数",
-          actionLabel: "查看",
-        });
+        pushBriefArtifact();
         break;
       case "task_done":
         await loadResults();
@@ -359,8 +498,13 @@ export function WorkspacePage() {
       setBriefConfirmed(confirmed);
       setCanvas((c) => ({
         ...c,
-        phase: (task.phase as TaskPhase) || c.phase,
+        phase:
+          c.phase === "storyboard_review" && task.phase === "brief_review" && c.brief
+            ? "storyboard_review"
+            : (task.phase as TaskPhase) || c.phase,
         brief: task.brief && Object.keys(task.brief).length > 0 ? toBrief(task.brief) : c.brief,
+        productName: typeof task.product_info?.product_name === "string" ? task.product_info.product_name : c.productName,
+        productImageUrl: typeof task.product_info?.main_image_url === "string" ? task.product_info.main_image_url : c.productImageUrl,
       }));
       if (task.status === "done") {
         await loadResults("done");
@@ -376,7 +520,7 @@ export function WorkspacePage() {
       }
       if (task.phase === "brief_review") {
         setBusy(false);
-        pushAssistant("Brief 已就绪,请打开素材卡确认后再生成视频。");
+        pushBriefArtifact("Brief 已就绪,请打开素材卡确认后再生成视频。");
       }
       if (task.status === "error") {
         setBusy(false);
@@ -391,11 +535,16 @@ export function WorkspacePage() {
   // 弹窗确认 → 真实建任务 + 订阅 SSE。
   const handleConfirmParams = async (form: GenParamsForm) => {
     setDialogOpen(false);
+    setDialogDraft(null);
     setBusy(true);
     pushAssistant(`已收到「${form.productName}」,正在创建任务…`);
     try {
       const task = await api.createTask({
-        product_info: { product_name: form.productName, main_image_url: form.imageUrl },
+        product_info: {
+          product_name: form.productName,
+          main_image_url: form.imageUrl,
+          ...(form.imageArtifactUrl ? { main_image_artifact_url: form.imageArtifactUrl } : {}),
+        },
         video_params: { platform: form.platform, duration_sec: form.durationSec, ratio: form.ratio, size: sizeFor(form.ratio, form.resolution) },
         creative_direction: { core_message: form.coreMessage, creative_style: form.creativeStyle },
         user_message: form.coreMessage,
@@ -408,7 +557,13 @@ export function WorkspacePage() {
       lastEventIdRef.current = 0;
       announcedPhasesRef.current = new Set();
       briefReadyShownRef.current = false;
-      setCanvas({ phase: (task.phase as TaskPhase) || "intake", results: [] });
+      setCanvas({
+        phase: (task.phase as TaskPhase) || "intake",
+        productName: form.productName,
+        productImageUrl: form.imageUrl,
+        results: [],
+      });
+      navigate(`/?session=${encodeURIComponent(task.task_id)}`, { replace: true });
       unsubRef.current();
       unsubRef.current = subscribeTaskEvents(task.task_id, onEvent);
     } catch (err) {
@@ -417,11 +572,20 @@ export function WorkspacePage() {
     }
   };
 
-  const handleApprove = async () => {
-    pushAssistant("Brief 已确认,开始生成…");
-    setBusy(true);
+  const handleApprove = () => {
+    const thumbnails = canvas.productImageUrl && canvas.brief ? canvas.brief.shots.map(() => canvas.productImageUrl as string) : [];
+    pushAssistant("Brief 已确认,正在准备可编辑分镜场景包…");
     briefConfirmedRef.current = true;
     setBriefConfirmed(true);
+    setCanvas((c) => ({ ...c, phase: "storyboard_review" }));
+    setCanvasOpen(true);
+    setBusy(false);
+    pushStoryboardArtifact(thumbnails);
+  };
+
+  const handleConfirmStoryboard = async () => {
+    pushAssistant("分镜场景包已确认,开始生成视频…");
+    setBusy(true);
     try {
       await api.confirmBrief(taskIdRef.current, true);
       setCanvas((c) => ({ ...c, phase: "generate" }));
@@ -466,6 +630,7 @@ export function WorkspacePage() {
           if (!msg.artifact) return;
           setCanvasOpen(true);
           if (msg.artifact.type === "brief") setCanvas((c) => ({ ...c, phase: "brief_review" }));
+          if (msg.artifact.type === "storyboard") setCanvas((c) => ({ ...c, phase: "storyboard_review" }));
           if (msg.artifact.type === "results") setCanvas((c) => ({ ...c, phase: "done" }));
           if (msg.artifact.type === "segments") setCanvas((c) => ({ ...c, phase: "segment_review" }));
           if (msg.artifact.type === "edit") setCanvas((c) => ({ ...c, phase: "edit_review" }));
@@ -480,6 +645,7 @@ export function WorkspacePage() {
         <CanvasPanel
           state={canvas}
           onApprove={handleApprove}
+          onConfirmStoryboard={handleConfirmStoryboard}
           onRevise={handleRevise}
           onConfirmStage={handleConfirmStage}
           onClose={() => setCanvasOpen(false)}
@@ -491,9 +657,14 @@ export function WorkspacePage() {
           key={pendingCore}
           open
           initialCoreMessage={pendingCore}
+          initialForm={dialogDraft ?? undefined}
           uploadThreadId={currentTaskId || taskIdRef.current}
+          onDraftChange={setDialogDraft}
           onConfirm={handleConfirmParams}
-          onCancel={() => setDialogOpen(false)}
+          onCancel={() => {
+            setDialogOpen(false);
+            setDialogDraft(null);
+          }}
         />
       )}
     </div>

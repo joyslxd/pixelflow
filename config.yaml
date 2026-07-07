@@ -1,0 +1,27 @@
+log_level: info
+
+models:
+  - name: default
+    display_name: Ark Code Latest
+    use: langchain_openai:ChatOpenAI
+    model: ark-code-latest
+    api_key: $ARK_PLAN_API_KEY
+    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+agents_api:
+  enabled: true
+
+database:
+  backend: sqlite
+
+checkpointer:
+  type: sqlite
+  connection_string: data/checkpoints.db
+
+run_events:
+  backend: db
+  max_trace_content: 10240
+  track_token_usage: true
