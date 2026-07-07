@@ -2,8 +2,8 @@ import { useState } from "react";
 import { auth } from "@/lib/api";
 
 export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
-  const [email, setEmail] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("admin@example.com");
+  const [password, setPassword] = useState("PixelFlow@123456");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 

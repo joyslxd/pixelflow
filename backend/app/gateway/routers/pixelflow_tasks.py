@@ -18,10 +18,10 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_checkpointer, get_current_user, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_current_user, get_run_context, get_run_event_store, get_run_manager, get_stream_bridge
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import build_run_config, format_sse, inject_authenticated_user_context, merge_run_context_overrides, normalize_input, normalize_stream_modes
-from deerflow.runtime import END_SENTINEL, ConflictError, DisconnectMode, UnsupportedStrategyError, run_agent, serialize_channel_values
+from deerflow.runtime import END_SENTINEL, ConflictError, DisconnectMode, UnsupportedStrategyError, run_agent, serialize_channel_values, serialize_lc_object
 from pixelflow import make_pixelflow_graph
 from pixelflow.preferences import UserPreferenceStore, extract_structured_preferences
 from pixelflow.tasks import PixelFlowAssetRecord, PixelFlowTaskRecord, PixelFlowTaskStore
@@ -244,10 +244,29 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         if checkpoint_tuple is None:
             return
         checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-        state = serialize_channel_values(checkpoint.get("channel_values", {}))
+        channel_values = checkpoint.get("channel_values", {}) or {}
+        state = serialize_channel_values(channel_values)
+        interrupt_payload = _latest_interrupt_payload(channel_values)
     except Exception:
         logger.debug("Unable to sync PixelFlow task %s from checkpoint", task_id, exc_info=True)
         return
+    if interrupt_payload:
+        action = interrupt_payload.get("action")
+        if action == "confirm_brief" and interrupt_payload.get("brief"):
+            state["phase"] = "brief_review"
+            state["brief"] = interrupt_payload["brief"]
+        elif action == "confirm_segments":
+            state["phase"] = "segment_review"
+        elif action == "confirm_edit":
+            state["phase"] = "edit_review"
+            if interrupt_payload.get("final_video_url"):
+                state["final_video_url"] = interrupt_payload["final_video_url"]
+            if interrupt_payload.get("draft_path"):
+                state["draft_path"] = interrupt_payload["draft_path"]
+        elif action == "confirm_qc":
+            state["phase"] = "qc_review"
+            if interrupt_payload.get("qc_report"):
+                state["qc_report"] = interrupt_payload["qc_report"]
     phase = str(state.get("phase") or task.phase)
     result = {
         "generated_assets": state.get("generated_assets") or [],
@@ -311,6 +330,19 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         )
 
 
+def _latest_interrupt_payload(channel_values: dict[str, Any]) -> dict[str, Any]:
+    raw = channel_values.get("__interrupt__")
+    if raw is None:
+        return {}
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    for item in reversed(items):
+        value = getattr(item, "value", item)
+        payload = serialize_lc_object(value)
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
 async def _watch_run_to_task(
     task_id: str,
     user_id: str | None,
@@ -322,6 +354,7 @@ async def _watch_run_to_task(
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     store = _task_store(request)
+    event_store = get_run_event_store(request)
     last_phase = None
     brief_emitted = False
     suppressed_phases = suppress_replay_phases or set()
@@ -335,7 +368,19 @@ async def _watch_run_to_task(
                     error = run.error if run and run.error else (task.error if task else "PixelFlow run failed")
                     await store.update(task_id, user_id=user_id, status="error", error=error)
                     await store.append_event(task_id, "task_failed", {"run_id": run_id, "error": error}, user_id=user_id)
+                    if task:
+                        await event_store.put(
+                            thread_id=task.thread_id,
+                            run_id=run_id,
+                            event_type="pixelflow.task_failed",
+                            category="trace",
+                            content={"task_id": task_id, "error": error},
+                            metadata={"source": "pixelflow_task_watcher"},
+                        )
                     return
+                if task and task.phase == "brief_review" and task.brief and not brief_emitted:
+                    brief_emitted = True
+                    await store.append_event(task_id, "brief_ready", {"brief": task.brief}, user_id=user_id)
                 event = "task_done" if task and task.status == "done" else "run_finished"
                 payload = {"run_id": run_id, "status": task.status, "phase": task.phase} if task else {"run_id": run_id}
                 await store.append_event(task_id, event, payload, user_id=user_id)
@@ -358,6 +403,16 @@ async def _watch_run_to_task(
         logger.warning("PixelFlow task watcher failed task_id=%s run_id=%s", task_id, run_id, exc_info=True)
         await store.update(task_id, user_id=user_id, status="error", error=str(exc))
         await store.append_event(task_id, "task_failed", {"error": str(exc)}, user_id=user_id)
+        task = await store.get(task_id, user_id=user_id)
+        if task:
+            await event_store.put(
+                thread_id=task.thread_id,
+                run_id=run_id,
+                event_type="pixelflow.task_failed",
+                category="trace",
+                content={"task_id": task_id, "error": str(exc)},
+                metadata={"source": "pixelflow_task_watcher"},
+            )
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
@@ -417,12 +472,17 @@ async def get_session_context(request: Request, task_id: str | None = Query(defa
     return SessionContextResponse(**row) if row else None
 
 
+@router.get("/session/contexts", response_model=list[SessionContextResponse])
+async def list_session_contexts(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> list[SessionContextResponse]:
+    user_id = await get_current_user(request)
+    rows = await _task_store(request).list_session_contexts(user_id=user_id, limit=limit)
+    return [SessionContextResponse(**row) for row in rows]
+
+
 @router.put("/session/context", response_model=SessionContextResponse)
 async def save_session_context(body: SessionContextRequest, request: Request) -> SessionContextResponse:
     user_id = await get_current_user(request)
     store = _task_store(request)
-    if await store.get(body.task_id, user_id=user_id) is None:
-        raise HTTPException(status_code=404, detail=f"PixelFlow task {body.task_id} not found")
     row = await store.upsert_session_context(body.task_id, body.context, user_id=user_id)
     return SessionContextResponse(**row)
 

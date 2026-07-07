@@ -31,7 +31,7 @@ export function ChatPanel({ messages, onSubmit, onOpenArtifact, busy }: ChatPane
             </p>
           </div>
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} msg={m} onOpenArtifact={onOpenArtifact} />)
+          messages.map((m, index) => <MessageBubble key={`${m.id}-${index}`} msg={m} onOpenArtifact={onOpenArtifact} />)
         )}
         <div ref={endRef} />
       </div>

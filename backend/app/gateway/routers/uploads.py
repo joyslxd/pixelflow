@@ -1,9 +1,13 @@
 """Upload router for handling file uploads."""
 
+import asyncio
 import logging
+import mimetypes
 import os
 import stat
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
@@ -28,6 +32,7 @@ from deerflow.uploads.manager import (
     upload_virtual_path,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from pixelflow.skills.borgrise import run_generation
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,8 @@ UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
+IMAGE_EXTENSIONS = {".apng", ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 class UploadResponse(BaseModel):
@@ -186,6 +193,33 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
         return False
 
 
+def _is_image_upload(file: UploadFile, filename: str) -> bool:
+    content_type = (getattr(file, "content_type", None) or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    guessed_type, _ = mimetypes.guess_type(filename)
+    if guessed_type and guessed_type.lower().startswith("image/"):
+        return True
+    return Path(filename).suffix.lower() in IMAGE_EXTENSIONS
+
+
+async def _upload_image_to_borgrise(file_path: os.PathLike[str] | str) -> str:
+    """Upload an image to Borgrise/TOS and return the public URL."""
+    if BACKEND_ENV_PATH.exists():
+        load_dotenv(BACKEND_ENV_PATH, override=True)
+    run_generation.API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
+    run_generation.BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
+    run_generation.BORGRISE_PASSWORD = os.environ.get("BORGRISE_PASSWORD", "")
+    run_generation.BASE_URL = os.environ.get("BORGRISE_BASE_URL", run_generation.BASE_URL)
+    result = await asyncio.to_thread(run_generation.upload_file, str(file_path))
+    if result.get("error"):
+        raise RuntimeError(result.get("message") or "Borgrise upload failed")
+    uploaded_url = result.get("url")
+    if not isinstance(uploaded_url, str) or not uploaded_url.strip():
+        raise RuntimeError("Borgrise upload returned no public URL")
+    return uploaded_url
+
+
 @router.post("", response_model=UploadResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
@@ -261,6 +295,11 @@ async def upload_files(
                 "virtual_path": virtual_path,
                 "artifact_url": upload_artifact_url(thread_id, safe_filename),
             }
+            if _is_image_upload(file, safe_filename):
+                public_url = await _upload_image_to_borgrise(file_path)
+                file_info["public_url"] = public_url
+                file_info["tos_url"] = public_url
+                file_info["borgrise_url"] = public_url
             if safe_filename != original_filename:
                 file_info["original_filename"] = original_filename
 

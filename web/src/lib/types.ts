@@ -4,6 +4,7 @@ export type TaskPhase =
   | "intake"
   | "creative"
   | "brief_review"
+  | "storyboard_review"
   | "generate"
   | "segment_review"
   | "edit"

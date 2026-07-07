@@ -111,12 +111,18 @@ uv run pytest tests/ -k pixelflow  # 跑 PixelFlow 相关测试
 |---|---|---|
 | `PIXELFLOW_MYSQL_URL` | 空 | 业务数据 MySQL 连接串;不设则回退 SQL/内存存储 |
 | `PIXELFLOW_VIDEO_SKILL` | `borgrise` | 视频生成实现 |
+| `PIXELFLOW_IMAGE_SKILL` | `seedream` | 图片生成实现 |
 | `PIXELFLOW_EDIT_SKILL` | `jianying` | 剪辑实现:`jianying`(剪映草稿)或 `ffmpeg`(直出 mp4) |
 | `PIXELFLOW_DECOMPOSE_SKILL` | `borgrise` | 参考视频拆解实现 |
 | `PIXELFLOW_DRAFT_ROOT` | 系统临时目录 | 剪映草稿输出根目录 |
 | `PIXELFLOW_RENDER_ROOT` | 系统临时目录 | FFmpeg 成片输出根目录 |
 | `PIXELFLOW_CAPTION_FONT` | 空 | 字体文件路径;设置后 FFmpeg 渲染才烧录花字 |
 | `BORGRISE_API_TOKEN` | 空 | Borgrise 生成所需 |
+| `ARK_PLAN_API_KEY` | 空 | 火山方舟 Agent Plan 凭据;媒体生成未设置 `ARK_API_KEY` 时也会回退使用它 |
+| `ARK_API_KEY` / `VOLCENGINE_ARK_API_KEY` | 空 | 火山方舟 Seedance/Seedream 调用凭据 |
+| `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/plan/v3` | 火山方舟 Plan OpenAPI base URL |
+| `ARK_SEEDANCE_MODEL` | `doubao-seedance-2.0` | Seedance 模型名;可选 `doubao-seedance-2.0-fast`、`doubao-seedance-2.0-mini`、`doubao-seedance-1.5-pro` |
+| `ARK_SEEDREAM_MODEL` | `doubao-seedream-5.0-lite` | Seedream 图片模型名 |
 
 > 剪映草稿生成依赖 `pyJianYingDraft`(及原生 `pymediainfo`),未安装时 EDIT 阶段会优雅降级:草稿生成失败记入 `edit_notes`,流水线继续推进。
 
