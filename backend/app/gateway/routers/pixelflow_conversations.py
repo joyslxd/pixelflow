@@ -13,6 +13,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
 from pixelflow.tasks import PixelFlowConversationMessageRecord, PixelFlowConversationRecord, PixelFlowTaskStore
 
@@ -68,6 +69,18 @@ class ConversationListResponse(BaseModel):
 class ConversationDetailResponse(BaseModel):
     conversation: ConversationResponse
     messages: list[ConversationMessageResponse] = Field(default_factory=list)
+
+
+class ConversationTraceEventResponse(BaseModel):
+    id: int
+    conversation_id: str
+    event: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class ConversationTraceResponse(BaseModel):
+    items: list[ConversationTraceEventResponse] = Field(default_factory=list)
 
 
 def _task_store(request: Request) -> PixelFlowTaskStore:
@@ -177,3 +190,21 @@ async def resume_conversation(conversation_id: str, request: Request) -> Convers
         raise HTTPException(status_code=404, detail="Conversation not found")
     await store.update_conversation(conversation_id, user_id=user_id, context=conversation.context)
     return await _conversation_detail(store, conversation_id, user_id=user_id)
+
+
+@router.get("/{conversation_id}/trace", response_model=ConversationTraceResponse)
+async def get_conversation_trace(conversation_id: str, request: Request) -> ConversationTraceResponse:
+    """内部调试专用：返回某个对话的 vendor_call/llm_call trace 时间线。
+
+    只有 content-app ``ROLE_ADMIN`` 用户能调用；面向内部排查，会包含原始
+    prompt 和供应商请求/响应，不能在普通用户可见的 UI 里展示。
+    """
+    authorization = request.headers.get("Authorization")
+    if not await is_admin_user(authorization):
+        raise HTTPException(status_code=403, detail="仅管理员可查看对话 trace")
+
+    store = _task_store(request)
+    if await store.get_conversation(conversation_id, user_id=None) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    events = await store.list_trace_events(conversation_id, user_id=None)
+    return ConversationTraceResponse(items=[ConversationTraceEventResponse(**event) for event in events])

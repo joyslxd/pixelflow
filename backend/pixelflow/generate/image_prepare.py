@@ -297,10 +297,20 @@ def _build_prompt(
     return "\n".join(part for part in parts if part.strip())[:3000]
 
 
-def _image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def filter_image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
     images: list[dict[str, Any]] = []
     for material in materials:
-        url = _first_text(material, "url", "image_url", "imageUrl", "download_url", "downloadUrl", "src")
+        url = _first_text(
+            material,
+            "url",
+            "image_url",
+            "imageUrl",
+            "download_url",
+            "downloadUrl",
+            "artifact_url",
+            "artifactUrl",
+            "src",
+        )
         kind = _first_text(material, "type", "kind", "media_type", "mediaType", "mime_type", "mimeType").lower()
         if url and (
             kind in {"", "image", "picture", "reference_image"}
@@ -311,6 +321,10 @@ def _image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
             normalized["url"] = url
             images.append(normalized)
     return images
+
+
+def _image_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return filter_image_materials(materials)
 
 
 def _resolve_ratio(

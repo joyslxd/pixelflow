@@ -65,7 +65,7 @@ PixelFlow 前端所有后端请求都通过 `src/lib/api.ts` 统一调用。这�
 本地不经过 content-app 前端时，打开：
 
 ```text
-http://localhost:5273/auth-token
+http://localhost:5273/agentfrontend/#/auth-token
 ```
 
 粘贴 content-app 登录 token 后点击“保存并验证”。页面会把 token 保存到 `localStorage.Authorization`，并调用 `/agent/auth/me` 验证当前用户。验证通过后，回到工作台即可正常调用 `/agent/flows`、SSE 和资产接口。

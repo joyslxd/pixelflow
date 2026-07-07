@@ -5,6 +5,8 @@ import { createHashRouter, Navigate, RouterProvider } from "react-router-dom";
 
 import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
+import { AuthTokenPage } from "@/pages/AuthTokenPage";
+import { TracePage } from "@/pages/TracePage";
 import { WorkspacePage } from "@/pages/WorkspacePage";
 import { setupContentAppAuthorizationListener } from "@/lib/authStorage";
 
@@ -21,6 +23,8 @@ const router = createHashRouter([
     children: [
       { index: true, element: <WorkspacePage /> },
       { path: "c/:conversationId", element: <WorkspacePage /> },
+      { path: "auth-token", element: <AuthTokenPage /> },
+      { path: "trace/:conversationId", element: <TracePage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

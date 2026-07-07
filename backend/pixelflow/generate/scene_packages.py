@@ -1046,7 +1046,7 @@ def _summarize_plan(plan_markdown: str) -> str:
 def _extract_material_image_urls(materials: list[dict[str, Any]]) -> list[str]:
     urls: list[str] = []
     for material in materials:
-        for key in ("url", "image_url", "imageUrl", "download_url", "downloadUrl"):
+        for key in ("url", "image_url", "imageUrl", "download_url", "downloadUrl", "artifact_url", "artifactUrl"):
             value = material.get(key)
             if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in urls:
                 urls.append(value)

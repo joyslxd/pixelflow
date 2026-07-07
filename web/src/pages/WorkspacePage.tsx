@@ -6,6 +6,7 @@ import { StoryboardPanel } from "@/components/canvas/StoryboardPanel";
 import { GenParamsDialog, type CreationIntent, type GenParamsForm } from "@/components/composer/GenParamsDialog";
 import {
   api,
+  setActiveConversationId as setActiveConversationIdForTrace,
   subscribeTaskEvents,
   type ConversationDetailResponse,
   type ConversationMessageResponse,
@@ -542,6 +543,7 @@ interface PrepareScenePackagesJobRequest {
 interface SceneAssetsJobRequest {
   global_assets?: Record<string, unknown>;
   scene_packages: PrepareScenePackagesResponse["scene_packages"];
+  materials?: Array<Record<string, unknown>>;
   image_size?: string;
   model?: string | null;
 }
@@ -1344,6 +1346,7 @@ export function WorkspacePage() {
   const setActiveConversationId = (id: string) => {
     conversationIdRef.current = id;
     setCurrentConversationId(id);
+    setActiveConversationIdForTrace(id || null);
   };
 
   const isCurrentConversation = (targetConversationId: string) => {
@@ -5290,6 +5293,7 @@ export function WorkspacePage() {
       const request: SceneAssetsJobRequest = {
         global_assets: videoScenePackages.global_assets,
         scene_packages: videoScenePackages.scene_packages,
+        materials: artifact.materials || [],
         image_size: "1080p",
       };
       const started = await api.startSceneAssetsJob(request);

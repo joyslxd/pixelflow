@@ -358,6 +358,47 @@ def _send_request(url: str, body: bytes | None, headers: dict[str, str], method:
 
 def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
                   custom_headers: dict[str, str] | None = None,
+                  _retry_on_token_expired: bool = True) -> dict:
+    """``_make_request_impl`` 的薄包装：只加内部调试用的 trace 记录。
+
+    trace 记录只在当前请求带了 conversation_id 上下文时才生效（见
+    ``pixelflow.tracing.conversation_trace``），旧流程/CLI 调用不受影响。
+    """
+    from pixelflow.tracing import record_trace_event_background
+
+    started_at = time.monotonic()
+    result = _make_request_impl(
+        endpoint, data, method=method, custom_headers=custom_headers,
+        _retry_on_token_expired=_retry_on_token_expired,
+    )
+    record_trace_event_background(
+        "vendor_call",
+        {
+            "endpoint": endpoint,
+            "method": method,
+            "request": _trace_truncate(data),
+            "response": _trace_truncate(result),
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "error": bool(isinstance(result, dict) and result.get("error")),
+        },
+    )
+    return result
+
+
+def _trace_truncate(value: Any, *, max_chars: int = 4000) -> Any:
+    """裁剪超长字符串，避免 base64 图片/大段响应把 trace 表撑爆。"""
+    if isinstance(value, str):
+        return value if len(value) <= max_chars else f"{value[:max_chars]}...(截断)"
+    if isinstance(value, dict):
+        return {k: _trace_truncate(v, max_chars=max_chars) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_trace_truncate(v, max_chars=max_chars) for v in value[:50]]
+    return value
+
+
+def _make_request_impl(endpoint: str, data: dict | None = None, method: str = "POST",
+                        custom_headers: dict[str, str] | None = None,
+                        _retry_on_token_expired: bool = True) -> dict:
                   _retry_on_token_expired: bool = True,
                   request_timeout: int = 30) -> dict:
     """向 Borgrise API 发起 HTTP 请求，并对临时错误重试。

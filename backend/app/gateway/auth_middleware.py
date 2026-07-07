@@ -21,6 +21,7 @@ from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.content_app_auth_context import reset_current_content_app_auth, set_current_content_app_auth
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from pixelflow.tracing import set_conversation_id_context
 
 # 永远不需要认证的路径前缀。
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
@@ -95,9 +96,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
         user_token = set_current_user(user)
         content_app_token = set_current_content_app_auth(authorization, username=getattr(user, "username", str(user.id)))
+        # 内部调试用 trace：前端在生成类请求上带的 X-Conversation-Id，
+        # 供 pixelflow.tracing.record_trace_event_background 关联 vendor_call/llm_call。
+        set_conversation_id_context(request.headers.get("X-Conversation-Id"))
         try:
             return await call_next(request)
         finally:
             if content_app_token is not None:
                 reset_current_content_app_auth(content_app_token)
             reset_current_user(user_token)
+            set_conversation_id_context(None)

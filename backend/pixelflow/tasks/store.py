@@ -20,6 +20,7 @@ from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
     PixelFlowConversationRow,
+    PixelFlowConversationTraceEventRow,
     PixelFlowSessionContextRow,
     PixelFlowTaskEventRow,
     PixelFlowTaskRow,
@@ -208,6 +209,10 @@ class PixelFlowTaskStore(Protocol):
     async def list_conversation_messages(
         self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
     ) -> list[PixelFlowConversationMessageRecord]: ...
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]: ...
 
 
 def _row_to_record(row: PixelFlowTaskRow) -> PixelFlowTaskRecord:
@@ -365,6 +370,31 @@ class SQLPixelFlowTaskStore:
                 stmt = stmt.where(PixelFlowTaskEventRow.id > after_id)
             rows = (await session.execute(stmt)).scalars().all()
             return [_event_to_dict(r) for r in rows]
+
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        async with self._sf() as session:
+            row = PixelFlowConversationTraceEventRow(conversation_id=conversation_id, user_id=user_id, event=event, data_json=data)
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _trace_event_to_dict(row)
+
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        async with self._sf() as session:
+            stmt = (
+                select(PixelFlowConversationTraceEventRow)
+                .where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id)
+                .order_by(PixelFlowConversationTraceEventRow.id.asc())
+                .limit(limit)
+            )
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationTraceEventRow.user_id == user_id)
+            if after_id is not None:
+                stmt = stmt.where(PixelFlowConversationTraceEventRow.id > after_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_trace_event_to_dict(r) for r in rows]
 
     async def upsert_asset(self, asset: PixelFlowAssetRecord) -> PixelFlowAssetRecord:
         async with self._sf() as session:
@@ -543,6 +573,16 @@ def _event_to_dict(row: PixelFlowTaskEventRow) -> dict[str, Any]:
     return {"id": row.id, "task_id": row.task_id, "event": row.event, "data": row.data_json or {}, "created_at": _dt(row.created_at)}
 
 
+def _trace_event_to_dict(row: PixelFlowConversationTraceEventRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "event": row.event,
+        "data": row.data_json or {},
+        "created_at": _dt(row.created_at),
+    }
+
+
 class MemoryPixelFlowTaskStore:
     def __init__(self):
         self._tasks: dict[str, PixelFlowTaskRecord] = {}
@@ -551,7 +591,9 @@ class MemoryPixelFlowTaskStore:
         self._contexts: dict[str, dict[str, Any]] = {}
         self._conversations: dict[str, PixelFlowConversationRecord] = {}
         self._conversation_messages: dict[str, list[PixelFlowConversationMessageRecord]] = {}
+        self._trace_events: dict[str, list[dict[str, Any]]] = {}
         self._next_event_id = 1
+        self._next_trace_event_id = 1
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         stamp = _dt(_now())
@@ -588,6 +630,20 @@ class MemoryPixelFlowTaskStore:
 
     async def list_events(self, task_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
         rows = list(self._events.get(task_id, []))
+        if after_id is not None:
+            rows = [r for r in rows if r["id"] > after_id]
+        return rows[:limit]
+
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        row = {"id": self._next_trace_event_id, "conversation_id": conversation_id, "event": event, "data": data, "created_at": _dt(_now())}
+        self._next_trace_event_id += 1
+        self._trace_events.setdefault(conversation_id, []).append(row)
+        return row
+
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        rows = list(self._trace_events.get(conversation_id, []))
         if after_id is not None:
             rows = [r for r in rows if r["id"] > after_id]
         return rows[:limit]

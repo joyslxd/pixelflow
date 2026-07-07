@@ -60,6 +60,7 @@ class ContentAppAuthConfig:
     base_url: str = DEFAULT_BORGRISE_BASE_URL
     remote_verify_enabled: bool = True
     verify_timeout_seconds: float = 10.0
+    skip_ssl_verify: bool = False
 
     @property
     def auth_verify_endpoint(self) -> str:
@@ -73,6 +74,14 @@ class ContentAppAuthConfig:
         if not base_url.endswith("/api"):
             base_url = f"{base_url}/api"
         return f"{base_url}/auth/verify"
+
+    @property
+    def user_me_endpoint(self) -> str:
+        """返回 content-app 当前用户信息接口地址（含 roles），拼接规则同上。"""
+        base_url = self.base_url.strip().rstrip("/") or DEFAULT_BORGRISE_BASE_URL.rstrip("/")
+        if not base_url.endswith("/api"):
+            base_url = f"{base_url}/api"
+        return f"{base_url}/user/me"
 
 
 class ContentAppAuthError(Exception):
@@ -109,6 +118,7 @@ def get_content_app_auth_config() -> ContentAppAuthConfig:
         base_url=base_url,
         remote_verify_enabled=_bool_env(os.getenv("BORGRISE_REMOTE_VERIFY_ENABLED"), default=True),
         verify_timeout_seconds=verify_timeout_seconds,
+        skip_ssl_verify=_bool_env(os.getenv("BORGRISE_SKIP_SSL_VERIFY"), default=False),
     )
 
 
@@ -190,14 +200,27 @@ async def verify_authorization_header_remote(
             headers={CONTENT_APP_AUTHORIZATION_HEADER: authorization},
         )
 
-    try:
-        if http_client is not None:
-            response = await _post(http_client)
-        else:
-            async with httpx.AsyncClient(timeout=config.verify_timeout_seconds) as client:
-                response = await _post(client)
-    except httpx.HTTPError as exc:
-        raise ContentAppAuthError(status_code=503, code="auth_service_unavailable", message="content-app 认证服务暂不可用") from exc
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(2):
+        try:
+            if http_client is not None:
+                response = await _post(http_client)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=config.verify_timeout_seconds,
+                    verify=not config.skip_ssl_verify,
+                ) as client:
+                    response = await _post(client)
+            last_error = None
+            break
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt == 0:
+                logger.warning("content-app auth verify failed (attempt %s), retrying: %s", attempt + 1, exc)
+                continue
+    if last_error is not None:
+        logger.error("content-app auth verify unavailable: %s", last_error)
+        raise ContentAppAuthError(status_code=503, code="auth_service_unavailable", message="content-app 认证服务暂不可用") from last_error
 
     try:
         payload: Any = response.json()
@@ -218,6 +241,55 @@ async def verify_authorization_header_remote(
 
     if not valid:
         raise ContentAppAuthError(status_code=401, code="token_invalid", message="content-app 认为当前认证令牌无效")
+
+
+async def is_admin_user(
+    authorization: str | None,
+    *,
+    config: ContentAppAuthConfig | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """调用 content-app ``GET /api/user/me``，判断当前用户是否带 ``ROLE_ADMIN``。
+
+    只给内部调试类接口（例如对话 trace 查看）做权限门禁使用；不缓存结果，
+    每次请求都实时问 content-app，跟 ``verify_authorization_header_remote``
+    的“禁用立即生效”原则保持一致。查询失败一律当作非管理员处理（fail closed）。
+    """
+    if not authorization:
+        return False
+    config = config or get_content_app_auth_config()
+
+    async def _get(client: httpx.AsyncClient) -> httpx.Response:
+        return await client.get(
+            config.user_me_endpoint,
+            headers={CONTENT_APP_AUTHORIZATION_HEADER: authorization},
+        )
+
+    try:
+        if http_client is not None:
+            response = await _get(http_client)
+        else:
+            async with httpx.AsyncClient(
+                timeout=config.verify_timeout_seconds,
+                verify=not config.skip_ssl_verify,
+            ) as client:
+                response = await _get(client)
+    except httpx.HTTPError:
+        logger.warning("content-app /user/me unavailable while checking admin role", exc_info=True)
+        return False
+
+    if response.status_code >= 400:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+
+    user = payload.get("user") if isinstance(payload, dict) else None
+    roles = user.get("roles") if isinstance(user, dict) else None
+    if not isinstance(roles, list):
+        return False
+    return any(isinstance(role, dict) and role.get("name") == "ROLE_ADMIN" for role in roles)
 
 
 async def authenticate_authorization_header(

@@ -217,6 +217,9 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
                 return ImageGenerationResult(ok=True, images=[{"url": "https://x/prop.png"}], raw={"endpoint": "/api/picture/text_to_image"})
             raise AssertionError(f"unexpected prompt: {prompt}")
 
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called without materials")
+
     monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
 
     app = make_authed_test_app(user_factory=_stable_user)
@@ -238,7 +241,7 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
                         "scene_index": 1,
                         "reference_asset_ids": ["character-presenter", "scene-desk", "prop-product"],
                     }
-                ]
+                ],
             },
         )
 
@@ -249,6 +252,56 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
     assert data["global_assets"]["characters"][0]["three_view_images"] == ["https://x/role.png"]
     assert data["global_assets"]["scenes"][0]["images"] == ["https://x/scene.png"]
     assert data["global_assets"]["props"][0]["images"] == ["https://x/prop.png"]
+
+
+def test_video_router_generates_prop_assets_with_reference_images(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            prompt = kwargs["prompt"]
+            if "角色三视图" in prompt:
+                return ImageGenerationResult(ok=True, images=[{"url": "https://x/role.png"}], raw={})
+            if "场景图" in prompt:
+                return ImageGenerationResult(ok=True, images=[{"url": "https://x/scene.png"}], raw={})
+            raise AssertionError(f"unexpected text_to_image prompt: {prompt}")
+
+        async def reference_image(self, **kwargs):
+            assert kwargs["reference_images"] == ["https://x/product.png"]
+            assert kwargs["model"] == "seeddream-5.0"
+            assert kwargs["size"] == "2K"
+            assert "参考图" in kwargs["prompt"]
+            return ImageGenerationResult(
+                ok=True,
+                images=[{"url": "https://x/prop-ref.png"}],
+                raw={"endpoint": "/api/picture/multi_reference_image_generation"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scene-assets",
+            json={
+                "materials": [{"url": "https://x/product.png", "mediaType": "image"}],
+                "global_assets": {
+                    "characters": [{"asset_id": "character-presenter", "name": "讲解者", "three_view_prompt": "讲解者角色三视图"}],
+                    "scenes": [{"asset_id": "scene-desk", "description": "桌面场景", "image_prompt": "桌面场景图"}],
+                    "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
+                },
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["endpoint"] == "/api/picture/mixed"
+    assert data["global_assets"]["props"][0]["images"] == ["https://x/prop-ref.png"]
 
 
 def test_video_router_stops_scene_asset_generation_on_quota_failure(monkeypatch):
