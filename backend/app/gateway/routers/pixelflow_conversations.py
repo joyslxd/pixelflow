@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, Literal
 
@@ -17,6 +18,9 @@ from app.gateway.deps import get_current_user
 from pixelflow.tasks import PixelFlowConversationMessageRecord, PixelFlowConversationRecord, PixelFlowTaskStore
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
+
+_CONVERSATION_MESSAGE_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_CONVERSATION_MESSAGE_JOBS = 300
 
 
 class ConversationCreateRequest(BaseModel):
@@ -58,6 +62,22 @@ class ConversationMessageResponse(BaseModel):
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
+
+
+class ConversationMessageJobStartResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str = "running"
+    message: str = ""
+
+
+class ConversationMessageJobStatusResponse(BaseModel):
+    ok: bool = True
+    job_id: str
+    status: str
+    result: ConversationMessageResponse | None = None
+    error: str | None = None
+    message: str = ""
 
 
 class ConversationListResponse(BaseModel):
@@ -153,6 +173,79 @@ async def append_conversation_message(
 ) -> ConversationMessageResponse:
     user_id = await get_current_user(request)
     store = _task_store(request)
+    return await _append_conversation_message(store, conversation_id, body, user_id=user_id)
+
+
+@router.post("/{conversation_id}/messages/start", response_model=ConversationMessageJobStartResponse)
+async def start_append_conversation_message(
+    conversation_id: str,
+    body: ConversationMessageCreateRequest,
+    request: Request,
+) -> ConversationMessageJobStartResponse:
+    _trim_conversation_message_jobs()
+    user_id = await get_current_user(request)
+    store = _task_store(request)
+    if await store.get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    job_id = uuid.uuid4().hex
+    _CONVERSATION_MESSAGE_JOBS[job_id] = {
+        "status": "running",
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "result": None,
+        "error": None,
+    }
+    asyncio.create_task(_run_append_conversation_message_job(job_id, store, conversation_id, body, user_id))
+    return ConversationMessageJobStartResponse(ok=True, job_id=job_id, status="running", message="对话消息保存任务已启动。")
+
+
+@router.get("/{conversation_id}/messages/jobs/{job_id}", response_model=ConversationMessageJobStatusResponse)
+async def get_append_conversation_message_job(
+    conversation_id: str,
+    job_id: str,
+    request: Request,
+) -> ConversationMessageJobStatusResponse:
+    user_id = await get_current_user(request)
+    job = _CONVERSATION_MESSAGE_JOBS.get(job_id)
+    if job is None or job.get("conversation_id") != conversation_id or job.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Conversation message job not found")
+    result = job.get("result")
+    if isinstance(result, ConversationMessageResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = ConversationMessageResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return ConversationMessageJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_conversation_message_job_message(status),
+    )
+
+
+@router.post("/{conversation_id}/resume", response_model=ConversationDetailResponse)
+async def resume_conversation(conversation_id: str, request: Request) -> ConversationDetailResponse:
+    user_id = await get_current_user(request)
+    store = _task_store(request)
+    conversation = await store.get_conversation(conversation_id, user_id=user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await store.update_conversation(conversation_id, user_id=user_id, context=conversation.context)
+    return await _conversation_detail(store, conversation_id, user_id=user_id)
+
+
+async def _append_conversation_message(
+    store: PixelFlowTaskStore,
+    conversation_id: str,
+    body: ConversationMessageCreateRequest,
+    *,
+    user_id: str | None,
+) -> ConversationMessageResponse:
     if await store.get_conversation(conversation_id, user_id=user_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     message = await store.append_conversation_message(
@@ -168,12 +261,43 @@ async def append_conversation_message(
     return _message_response(message)
 
 
-@router.post("/{conversation_id}/resume", response_model=ConversationDetailResponse)
-async def resume_conversation(conversation_id: str, request: Request) -> ConversationDetailResponse:
-    user_id = await get_current_user(request)
-    store = _task_store(request)
-    conversation = await store.get_conversation(conversation_id, user_id=user_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    await store.update_conversation(conversation_id, user_id=user_id, context=conversation.context)
-    return await _conversation_detail(store, conversation_id, user_id=user_id)
+async def _run_append_conversation_message_job(
+    job_id: str,
+    store: PixelFlowTaskStore,
+    conversation_id: str,
+    body: ConversationMessageCreateRequest,
+    user_id: str | None,
+) -> None:
+    try:
+        result = await _append_conversation_message(store, conversation_id, body, user_id=user_id)
+        _CONVERSATION_MESSAGE_JOBS[job_id] = {
+            "status": "completed",
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "result": result,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _CONVERSATION_MESSAGE_JOBS[job_id] = {
+            "status": "failed",
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "result": None,
+            "error": str(exc),
+        }
+
+
+def _trim_conversation_message_jobs() -> None:
+    overflow = len(_CONVERSATION_MESSAGE_JOBS) - _MAX_CONVERSATION_MESSAGE_JOBS + 1
+    if overflow <= 0:
+        return
+    for job_id in list(_CONVERSATION_MESSAGE_JOBS.keys())[:overflow]:
+        _CONVERSATION_MESSAGE_JOBS.pop(job_id, None)
+
+
+def _conversation_message_job_message(status: str) -> str:
+    if status == "completed":
+        return "对话消息已保存。"
+    if status == "failed":
+        return "对话消息保存失败。"
+    return "对话消息保存中。"

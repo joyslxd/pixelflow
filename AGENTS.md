@@ -79,7 +79,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 - 创意方向选择：前端 60 秒未选时默认采用推荐方向。
 - plan.md 审核：需要用户手动点击同意方案，不做倒计时自动确认。
-- 图片生成结果、视频生成结果：60 秒未反馈默认满意或无意见。
+- 图片生成结果：60 秒未反馈默认满意并结束；视频生成结果不再自动确认，必须用户手动点击“无意见，结束”才结束。
 - 视频场景包确认：当前代码返回 `review_timeout_sec=None`，不做倒计时自动确认。
 - 图片、视频、PPT 的需求表单弹出后，如果用户点击右上角 `X` 关闭，视为取消并终止当前流程；前端需要清空 pending 表单上下文并记录 `form_cancelled`。
 
@@ -90,6 +90,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 模块 | 路径 | 说明 |
 | --- | --- | --- |
 | 采集 | `POST /agent/flows/intake/analyze` | LLM 识别 intent、主体、行业、目标、数量 |
+| 采集 | `POST /agent/flows/intake/analyze/start` | 启动可恢复意图识别 job |
+| 采集 | `GET /agent/flows/intake/analyze/jobs/{job_id}` | 查询意图识别 job |
 | 采集 | `GET /agent/flows/intake/forms/{intent}` | 获取图片、视频或PPT表单 schema |
 | 采集 | `POST /agent/flows/intake/validate` | 表单完整性校验，最多 3 轮 |
 | 采集 | `POST /agent/flows/intake/directions` | 生成 3 个创意方向 |
@@ -127,6 +129,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 对话 | `GET /agent/conversations?page_size=5` | 最近对话列表，按创建时间倒序分页 |
 | 对话 | `GET /agent/conversations/{conversation_id}` | 进入历史对话并恢复消息 |
 | 对话 | `POST /agent/conversations/{conversation_id}/messages` | 保存用户/助手消息 |
+| 对话 | `POST /agent/conversations/{conversation_id}/messages/start` | 启动可恢复消息保存 job |
+| 对话 | `GET /agent/conversations/{conversation_id}/messages/jobs/{job_id}` | 查询消息保存 job |
 | 偏好 | `GET/PUT /agent/users/{user_id}/preferences` | 用户偏好 |
 | 旧任务流 | `/agent/flows`、`/agent/flows/{task_id}/events` 等 | LangGraph 任务、SSE、资产查询 |
 
@@ -301,9 +305,13 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 
 - 新建对话必须新建 `conversation_id`，不能复用旧对话。
 - 用户消息、Agent 消息、artifact、当前上下文都要保存到 `pixelflow_conversations` / `pixelflow_conversation_messages`。
+- 新需求入口的用户消息保存必须走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存 job 完成后再启动采集 job。切换页面、离开 iframe 或刷新恢复时只查询已有 job，不重新追加同一条用户消息。
+- 新需求入口的采集意图识别必须走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并把 `pendingIntakeJob` / `pending_intake_job` 写入 conversation context；恢复时只轮询已有 job，不重新调用 `/start`，避免重复推进流程。`/agent/flows/intake/analyze` 和 `/agent/conversations/{conversation_id}/messages` 只保留兼容旧调用。
 - 最近对话默认 5 条，继续下拉按 cursor 分页；SQL store 按 `created_at desc, conversation_id desc` 排序。
 - 前端切换对话后，异步回调必须写回原来的 `conversation_id`，不能写到当前可见对话。
 - 进入历史对话时应恢复 `context`，允许从原先的表单、plan、场景包、额度不足暂停点继续。
+- 进入历史对话时如果发现 `pendingMessageJob` / `pending_message_job`，应先恢复并轮询已有消息保存 job；完成后按 job 中的 continuation 启动或恢复采集 job。
+- 进入历史对话时如果发现 `pendingIntakeJob` / `pending_intake_job`，应恢复并轮询已有采集意图识别 job；job 404 或过期只提示用户重新发送需求，不自动重启任务。
 - 进入历史对话时如果发现 `pendingScenePackageJob` / `pending_scene_package_job`，应静默轮询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐场景包结果卡，404 或过期只提示手动重试，不自动重启任务。
 - 进入历史对话时如果发现 `pendingVideoJob` / `pending_video_job`，应恢复并轮询已有视频 job；如果 job 404 或过期，只提示用户手动重新生成，不自动重启任务。
 - 进入历史对话时如果发现 `pendingImageJob` / `pending_image_job`，应静默轮询已有图片生成或全局素材编辑 job；如果 job 404 或过期，只提示用户从最新图片卡片手动重试，不自动重新启动，避免重复计费。
