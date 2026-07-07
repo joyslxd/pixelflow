@@ -118,6 +118,48 @@ async def test_memory_conversation_store_paginates_and_restores_context():
 
 
 @pytest.mark.asyncio
+async def test_memory_conversation_store_updates_message_by_client_message_id():
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(PixelFlowConversationRecord(conversation_id="c-ppt", user_id="u1", title="PPT"))
+    await store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id="server-message-id",
+            conversation_id="c-ppt",
+            user_id="u1",
+            role="assistant",
+            content="PPT 图片生成中。",
+            payload={
+                "client_message_id": "client-message-id",
+                "artifact": {
+                    "type": "ppt_images",
+                    "pptImages": {"pages": [{"page_index": 1, "status": "running", "image_url": None}]},
+                },
+            },
+        )
+    )
+
+    updated = await store.update_conversation_message(
+        "c-ppt",
+        "client-message-id",
+        user_id="u1",
+        content="PPT 图片已生成。",
+        payload={
+            "client_message_id": "client-message-id",
+            "artifact": {
+                "type": "ppt_images",
+                "pptImages": {"pages": [{"page_index": 1, "status": "completed", "image_url": "https://cdn.example/p1.png"}]},
+            },
+        },
+    )
+
+    assert updated is not None
+    assert updated.message_id == "server-message-id"
+    assert updated.content == "PPT 图片已生成。"
+    assert updated.payload["artifact"]["pptImages"]["pages"][0]["image_url"] == "https://cdn.example/p1.png"
+    assert await store.update_conversation_message("c-ppt", "client-message-id", user_id="other", content="x") is None
+
+
+@pytest.mark.asyncio
 async def test_memory_conversation_store_sorts_by_created_at_not_updated_at():
     from datetime import UTC, datetime, timedelta
 
@@ -195,6 +237,59 @@ async def test_sql_conversation_store_emits_timezone_aware_timestamps(tmp_path):
         assert tz_suffix.search(restored.updated_at)
         listed_messages = await store.list_conversation_messages("c-tz", user_id="u1")
         assert tz_suffix.search(listed_messages[0].created_at)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_conversation_store_updates_message_by_client_message_id(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False))
+        await store.create_conversation(PixelFlowConversationRecord(conversation_id="c-ppt-sql", user_id="u1", title="PPT"))
+        await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id="server-message-id",
+                conversation_id="c-ppt-sql",
+                user_id="u1",
+                role="assistant",
+                content="PPT 图片生成中。",
+                payload={
+                    "client_message_id": "client-message-id",
+                    "artifact": {
+                        "type": "ppt_images",
+                        "pptImages": {"pages": [{"page_index": 1, "status": "running", "image_url": None}]},
+                    },
+                },
+            )
+        )
+
+        updated = await store.update_conversation_message(
+            "c-ppt-sql",
+            "client-message-id",
+            user_id="u1",
+            content="PPT 图片已生成。",
+            payload={
+                "client_message_id": "client-message-id",
+                "artifact": {
+                    "type": "ppt_images",
+                    "pptImages": {"pages": [{"page_index": 1, "status": "completed", "image_url": "https://cdn.example/p1.png"}]},
+                },
+            },
+        )
+
+        assert updated is not None
+        assert updated.message_id == "server-message-id"
+        messages = await store.list_conversation_messages("c-ppt-sql", user_id="u1")
+        assert messages[0].content == "PPT 图片已生成。"
+        assert messages[0].payload["artifact"]["pptImages"]["pages"][0]["image_url"] == "https://cdn.example/p1.png"
+        assert await store.update_conversation_message("c-ppt-sql", "client-message-id", user_id="other", content="x") is None
     finally:
         await engine.dispose()
 

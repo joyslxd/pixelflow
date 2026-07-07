@@ -1068,6 +1068,16 @@ export const api = {
     body: { role: "user" | "assistant" | "system"; content: string; payload?: Record<string, unknown> },
   ) => req<ConversationMessageResponse>(`/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body: JSON.stringify(body) }),
 
+  updateConversationMessage: (
+    conversationId: string,
+    messageId: string,
+    body: { content?: string; payload?: Record<string, unknown> },
+  ) =>
+    req<ConversationMessageResponse>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
   resumeConversation: (conversationId: string) => req<ConversationDetailResponse>(`/conversations/${encodeURIComponent(conversationId)}/resume`, { method: "POST" }),
 
   // 内部调试专用：需要 content-app ROLE_ADMIN，普通用户调用会 403。

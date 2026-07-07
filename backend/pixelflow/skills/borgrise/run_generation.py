@@ -398,9 +398,8 @@ def _trace_truncate(value: Any, *, max_chars: int = 4000) -> Any:
 
 def _make_request_impl(endpoint: str, data: dict | None = None, method: str = "POST",
                         custom_headers: dict[str, str] | None = None,
-                        _retry_on_token_expired: bool = True) -> dict:
-                  _retry_on_token_expired: bool = True,
-                  request_timeout: int = 30) -> dict:
+                        _retry_on_token_expired: bool = True,
+                        request_timeout: int = 30) -> dict:
     """向 Borgrise API 发起 HTTP 请求，并对临时错误重试。
 
     会重试：

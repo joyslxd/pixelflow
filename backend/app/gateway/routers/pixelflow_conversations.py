@@ -40,6 +40,11 @@ class ConversationMessageCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConversationMessageUpdateRequest(BaseModel):
+    content: str | None = None
+    payload: dict[str, Any] | None = None
+
+
 class ConversationResponse(BaseModel):
     conversation_id: str
     user_id: str | None = None
@@ -179,6 +184,28 @@ async def append_conversation_message(
         )
     )
     return _message_response(message)
+
+
+@router.patch("/{conversation_id}/messages/{message_id}", response_model=ConversationMessageResponse)
+async def update_conversation_message(
+    conversation_id: str,
+    message_id: str,
+    body: ConversationMessageUpdateRequest,
+    request: Request,
+) -> ConversationMessageResponse:
+    user_id = await get_current_user(request)
+    store = _task_store(request)
+    if await store.get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    updated = await store.update_conversation_message(
+        conversation_id,
+        message_id,
+        user_id=user_id,
+        **body.model_dump(exclude_unset=True),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Conversation message not found")
+    return _message_response(updated)
 
 
 @router.post("/{conversation_id}/resume", response_model=ConversationDetailResponse)

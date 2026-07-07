@@ -1547,28 +1547,71 @@ export function WorkspacePage() {
     }
   };
 
+  const buildPptImagesMessageContent = (pptImages: PptImagesResult) =>
+    pptImages.ok ? "PPT 页面图片已生成，请确认后生成 PPT 附件。" : "PPT 页面图片生成中，请查看每页状态。";
+
+  const buildPptImagesArtifact = (
+    pptImages: PptImagesResult,
+    sourceArtifact: ChatArtifact,
+    pptContentJson?: PptContentJsonResult,
+  ): ChatArtifact => ({
+    ...sourceArtifact,
+    type: "ppt_images",
+    title: "PPT页面图片",
+    description: String(pptImages.message || `${pptImages.pages.length} 页 PPT 图片`),
+    actionLabel: "生成附件",
+    intent: "ppt",
+    materials: sourceArtifact.materials || [],
+    pptContentJson: pptContentJson || sourceArtifact.pptContentJson,
+    pptImages,
+    smartPptProjectId:
+      pptProjectId(sourceArtifact) ?? numericValue(pptImages.smart_ppt_project_id) ?? numericValue(pptContentJson?.smart_ppt_project_id),
+  });
+
   const updatePptImagesArtifactInMessage = (
     messageId: string,
     targetConversationId: string,
     pptImages: PptImagesResult,
+    sourceArtifact?: ChatArtifact,
+    pptContentJson?: PptContentJsonResult,
   ) => {
-    if (!isVisibleConversation(targetConversationId)) return;
-    setMessages((items) =>
-      items.map((message) => {
-        const artifact = message.artifact;
-        if (message.id !== messageId || !artifact || artifact.type !== "ppt_images") return message;
-        return {
-          ...message,
-          content: pptImages.ok ? "PPT 页面图片已生成，请确认后生成 PPT 附件。" : "PPT 页面图片生成中，请查看每页状态。",
-          artifact: {
-            ...artifact,
-            description: String(pptImages.message || `${pptImages.pages.length} 页 PPT 图片`),
-            pptImages,
-            smartPptProjectId: pptProjectId(artifact) ?? numericValue(pptImages.smart_ppt_project_id),
-          },
-        };
-      }),
+    const visibleMessage = messagesRef.current.find(
+      (message) =>
+        message.id === messageId &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        message.artifact?.type === "ppt_images",
     );
+    const baseArtifact = visibleMessage?.artifact || sourceArtifact;
+    if (!baseArtifact) return;
+
+    const content = buildPptImagesMessageContent(pptImages);
+    const artifact = buildPptImagesArtifact(pptImages, baseArtifact, pptContentJson);
+    if (isVisibleConversation(targetConversationId)) {
+      setMessages((items) => {
+        const nextItems = items.map((message) => {
+          if (message.id !== messageId || messageConversationId(message, targetConversationId) !== targetConversationId || message.artifact?.type !== "ppt_images") {
+            return message;
+          }
+          return {
+            ...message,
+            content,
+            artifact,
+          };
+        });
+        messagesRef.current = nextItems;
+        return nextItems;
+      });
+    }
+    void api
+      .updateConversationMessage(targetConversationId, messageId, {
+        content,
+        payload: {
+          artifact,
+          materials: artifact.materials || [],
+          client_message_id: messageId,
+        } as unknown as Record<string, unknown>,
+      })
+      .catch(() => {});
   };
 
   const markPptFileDoneInMessage = (messageId: string, targetConversationId: string) => {
@@ -2188,22 +2231,7 @@ export function WorkspacePage() {
     sourceArtifact: ChatArtifact,
     targetConversationId = conversationIdRef.current,
   ) =>
-    pushArtifact(pptImages.ok ? "PPT 页面图片已生成，请确认后生成 PPT 附件。" : "PPT 页面图片生成未完成，请查看每页状态。", {
-      type: "ppt_images",
-      title: "PPT页面图片",
-      description: String(pptImages.message || `${pptImages.pages.length} 页 PPT 图片`),
-      actionLabel: "生成附件",
-      intent: "ppt",
-      formValues: sourceArtifact.formValues,
-      intakeContext: sourceArtifact.intakeContext,
-      materials: sourceArtifact.materials || [],
-      coreMessage: sourceArtifact.coreMessage,
-      pptSummary: sourceArtifact.pptSummary,
-      pptContentJson,
-      pptImages,
-      pptStyle: sourceArtifact.pptStyle,
-      smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptImages.smart_ppt_project_id),
-    }, targetConversationId);
+    pushArtifact(buildPptImagesMessageContent(pptImages), buildPptImagesArtifact(pptImages, sourceArtifact, pptContentJson), targetConversationId);
 
   const pushPptFileArtifact = (
     pptFile: PptFileResult,
@@ -3506,7 +3534,7 @@ export function WorkspacePage() {
   ) => {
     const targetConversationId = pendingPptJob.conversation_id;
     const imageMessageId = pendingPptJob.image_message_id || findLatestPptImagesMessageId(targetConversationId);
-    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, pptImages);
+    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, pptImages, pendingPptJob.artifact);
     if (!pptImages.ok) releaseArtifactAction(processedKey);
     await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, pptImages.ok), {
       intent: "ppt",
@@ -3551,7 +3579,7 @@ export function WorkspacePage() {
       quota_insufficient: Boolean(result.quota_insufficient),
     };
     const imageMessageId = pendingPptJob.image_message_id || findLatestPptImagesMessageId(targetConversationId);
-    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, nextImages);
+    if (imageMessageId) updatePptImagesArtifactInMessage(imageMessageId, targetConversationId, nextImages, sourceArtifact);
     await clearPendingPptJob(targetConversationId, completedPptLastPhase(pendingPptJob, nextImages.ok), {
       intent: "ppt",
       ppt_content_json: sourceArtifact.pptContentJson,
@@ -3602,7 +3630,7 @@ export function WorkspacePage() {
         const result = await pollPptJobResult<PptImagesResult>(pendingPptJob, (status) => {
           const partialImages = status.result as PptImagesResult | null;
           if (partialImages?.pages && imageMessageId) {
-            updatePptImagesArtifactInMessage(imageMessageId, pendingPptJob.conversation_id, partialImages);
+            updatePptImagesArtifactInMessage(imageMessageId, pendingPptJob.conversation_id, partialImages, pendingPptJob.artifact);
           }
         }, shouldContinuePolling);
         if (!result || stopIfHidden()) return;
@@ -4948,7 +4976,7 @@ export function WorkspacePage() {
       message: `第 ${pageIndex} 页 PPT 图片重新生成中。`,
       quota_insufficient: false,
     };
-    updatePptImagesArtifactInMessage(msg.id, targetConversationId, runningImages);
+    updatePptImagesArtifactInMessage(msg.id, targetConversationId, runningImages, artifact);
     setBusyForConversation(targetConversationId, true);
     pushAssistant(`正在重新生成第 ${pageIndex} 页 PPT 图片…`, targetConversationId);
     try {
@@ -4989,7 +5017,7 @@ export function WorkspacePage() {
         ),
         message: `第 ${pageIndex} 页 PPT 图片重新生成失败。`,
       };
-      updatePptImagesArtifactInMessage(msg.id, targetConversationId, failedImages);
+      updatePptImagesArtifactInMessage(msg.id, targetConversationId, failedImages, artifact);
       pushAssistant(`PPT 页面图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
