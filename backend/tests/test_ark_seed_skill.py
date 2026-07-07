@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from pixelflow.skills import get_image_skill, get_video_skill
@@ -162,3 +163,73 @@ def test_ark_plan_base_url_prefers_plan_key(monkeypatch):
     client = ArkSeedClient()
 
     assert client.api_key == "plan-key"
+
+
+def test_ark_client_reuses_http_client_between_requests(monkeypatch):
+    created_clients = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHttpClient:
+        is_closed = False
+
+        def __init__(self, timeout):
+            self.timeout = timeout
+            self.requests = []
+            created_clients.append(self)
+
+        def request(self, method, url, headers=None, json=None):
+            self.requests.append((method, url, headers, json))
+            return FakeResponse()
+
+        def close(self):
+            self.is_closed = True
+
+    monkeypatch.setenv("ARK_PLAN_API_KEY", "plan-key")
+    monkeypatch.setattr(httpx, "Client", FakeHttpClient)
+
+    client = ArkSeedClient()
+    client.get_video_task("task-1")
+    client.get_video_task("task-2")
+
+    assert len(created_clients) == 1
+    assert len(created_clients[0].requests) == 2
+
+
+def test_ark_client_rebuilds_http_client_after_transport_error(monkeypatch):
+    created_clients = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHttpClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+            self.is_closed = False
+            self.calls = 0
+            created_clients.append(self)
+
+        def request(self, method, url, headers=None, json=None):
+            self.calls += 1
+            if len(created_clients) == 1:
+                raise httpx.ConnectTimeout("_ssl.c:993: The handshake operation timed out")
+            return FakeResponse()
+
+        def close(self):
+            self.is_closed = True
+
+    monkeypatch.setenv("ARK_PLAN_API_KEY", "plan-key")
+    monkeypatch.setenv("ARK_MAX_RETRIES", "1")
+    monkeypatch.setattr(httpx, "Client", FakeHttpClient)
+
+    client = ArkSeedClient()
+    assert client.get_video_task("task-1") == {"ok": True}
+    assert len(created_clients) == 2
+    assert created_clients[0].is_closed is True

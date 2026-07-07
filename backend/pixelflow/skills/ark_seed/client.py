@@ -35,9 +35,11 @@ class ArkSeedClient:
         self.base_url = (base_url or os.environ.get("ARK_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.api_key = api_key or self._resolve_api_key(self.base_url)
         self.timeout = timeout or float(os.environ.get("ARK_REQUEST_TIMEOUT", "60"))
+        self.connect_timeout = float(os.environ.get("ARK_CONNECT_TIMEOUT", str(self.timeout)))
         self.poll_interval = poll_interval or float(os.environ.get("ARK_POLL_INTERVAL", "5"))
         self.poll_timeout = poll_timeout or float(os.environ.get("ARK_POLL_TIMEOUT", "600"))
         self.max_retries = int(os.environ.get("ARK_MAX_RETRIES", "2"))
+        self._client: httpx.Client | None = None
 
     @staticmethod
     def _resolve_api_key(base_url: str) -> str:
@@ -50,13 +52,18 @@ class ArkSeedClient:
             raise ArkSeedClientError("ARK_API_KEY, VOLCENGINE_ARK_API_KEY, or ARK_PLAN_API_KEY is required")
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
+    def _http_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            timeout = httpx.Timeout(self.timeout, connect=self.connect_timeout)
+            self._client = httpx.Client(timeout=timeout)
+        return self._client
+
     def _request(self, method: str, path: str, *, json: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                with httpx.Client(timeout=self.timeout) as client:
-                    response = client.request(method, url, headers=self._headers(), json=json)
+                response = self._http_client().request(method, url, headers=self._headers(), json=json)
                 try:
                     payload = response.json()
                 except ValueError as exc:
@@ -70,10 +77,18 @@ class ArkSeedClient:
                 return payload
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
+                if self._client is not None:
+                    self._client.close()
+                    self._client = None
                 if attempt >= self.max_retries:
                     break
                 time.sleep(min(2**attempt, 5))
         raise ArkSeedClientError(str(last_error) if last_error else "Ark request failed")
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     def create_video_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/contents/generations/tasks", json=payload)
