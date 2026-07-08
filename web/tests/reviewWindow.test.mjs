@@ -15,7 +15,7 @@ test("isReviewExpired only expires after the deadline", () => {
   assert.equal(isReviewExpired("", Date.UTC(2026, 0, 1, 0, 1, 0)), false);
 });
 
-test("timeoutReviewMessage names the ended flow", () => {
-  assert.match(timeoutReviewMessage("video", 60), /视频修改意见/);
-  assert.match(timeoutReviewMessage("image", 60), /图片修改意见/);
+test("timeoutReviewMessage names the image flow", () => {
+  assert.match(timeoutReviewMessage(60), /图片修改意见/);
+  assert.doesNotMatch(timeoutReviewMessage(60), /视频修改意见/);
 });

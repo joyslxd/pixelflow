@@ -280,6 +280,13 @@ test("image edit options load content-app model configs and submit selected mode
   assert.equal(messageBubbleSource.includes("disabled={Boolean(imageEditUnsupportedReason)}"), false, "unsupported requested params must not block submit after choosing supported values");
 });
 
+test("video results require explicit user confirmation", () => {
+  assert.doesNotMatch(workspaceSource, /handleAcceptVideoResult\([^)]*,\s*true\)/, "video result cards must not auto-accept after a timeout");
+  assert.doesNotMatch(workspaceSource, /timeoutReviewMessage\("video"/, "video flow must not emit timeout auto-finish messages");
+  assert.match(messageBubbleSource, /无意见，结束/, "video result cards must still expose manual accept");
+  assert.match(messageBubbleSource, /提出修改意见/, "video result cards must still expose manual revision");
+});
+
 test("confirmed image edit options survive conversation restore", () => {
   const optionsStart = workspaceSource.indexOf("const showImageEditOptions = async");
   const executeStart = workspaceSource.indexOf("const executeDirectImageEdit = async");

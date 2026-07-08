@@ -1655,28 +1655,6 @@ export function WorkspacePage() {
     });
   };
 
-  const hasPendingVideoRevisionForResult = (msg: ChatMessage, targetConversationId: string): boolean => {
-    const pendingRevision = videoRevisionArtifactRef.current;
-    if (pendingRevision?.conversationId !== targetConversationId || !pendingRevision.artifact.mergedVideo || !msg.artifact?.mergedVideo) {
-      return false;
-    }
-    const pendingMerged = pendingRevision.artifact.mergedVideo;
-    const currentMerged = msg.artifact.mergedVideo;
-    return Boolean(
-      (pendingMerged.task_id && pendingMerged.task_id === currentMerged.task_id) ||
-        (pendingMerged.merged_video_url && pendingMerged.merged_video_url === currentMerged.merged_video_url),
-    );
-  };
-
-  const shouldAutoAcceptVideoResult = (msg: ChatMessage, targetConversationId: string): boolean => {
-    if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return false;
-    if (hasPendingVideoRevisionForResult(msg, targetConversationId)) return false;
-    return messagesRef.current.some((message) => {
-      if (message.id !== msg.id || messageConversationId(message, targetConversationId) !== targetConversationId) return false;
-      return message.artifact?.type === "video_result" && Boolean(message.artifact.mergedVideo?.ok) && !message.artifact.videoAccepted;
-    });
-  };
-
   const persistChatMessage = async (conversation: string, message: ChatMessage): Promise<ChatMessage> => {
     const request: ConversationMessageJobRequest = {
       role: message.role,
@@ -3686,10 +3664,8 @@ export function WorkspacePage() {
       videoScenePackages;
     const isRegeneration = pendingVideoJob.merge_purpose === "regeneration";
     const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
-    const videoReviewStartedAt = Date.now();
-    const videoReviewRequestedAt = new Date(videoReviewStartedAt).toISOString();
-    const videoReviewExpiresAt = reviewExpiresAt(videoReviewStartedAt, AUTO_CONFIRM_TIMEOUT_MS);
-    const videoResultMessage = pushArtifact(
+    const videoReviewRequestedAt = new Date().toISOString();
+    pushArtifact(
       mergedVideo.ok
         ? isRegeneration
           ? "视频已按修改意见重新生成，请查看新版本。"
@@ -3720,7 +3696,6 @@ export function WorkspacePage() {
         selectedDirection: artifact.selectedDirection,
         plan: artifact.plan,
         reviewRequestedAt: mergedVideo.ok ? videoReviewRequestedAt : undefined,
-        reviewExpiresAt: mergedVideo.ok ? videoReviewExpiresAt : undefined,
       },
       targetConversationId,
     );
@@ -3732,11 +3707,6 @@ export function WorkspacePage() {
         generatedSceneVideos,
         mergedVideo,
       );
-      window.setTimeout(() => {
-        if (shouldAutoAcceptVideoResult(videoResultMessage, targetConversationId)) {
-          void handleAcceptVideoResult(videoResultMessage, true);
-        }
-      }, AUTO_CONFIRM_TIMEOUT_MS);
     }
     if (!mergedVideo.ok) releaseArtifactAction(processedKey);
     if (mergedVideo.merged_video_url) {
@@ -6214,7 +6184,7 @@ export function WorkspacePage() {
     if (!processedKey) return;
     imageRevisionArtifactRef.current = null;
     markImageResultAccepted(msg.id, targetConversationId);
-    pushAssistant(auto ? timeoutReviewMessage("image", AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认图片满意，流程结束。", targetConversationId);
+    pushAssistant(auto ? timeoutReviewMessage(AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认图片满意，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -6376,15 +6346,14 @@ export function WorkspacePage() {
     }
   };
 
-  async function handleAcceptVideoResult(msg: ChatMessage, auto = false) {
+  async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    if (auto && !shouldAutoAcceptVideoResult(msg, targetConversationId)) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     videoRevisionArtifactRef.current = null;
     markVideoResultAccepted(msg.id, targetConversationId);
-    pushAssistant(auto ? timeoutReviewMessage("video", AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认视频无修改意见，流程结束。", targetConversationId);
+    pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
@@ -6398,10 +6367,6 @@ export function WorkspacePage() {
   function handleReviseVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    if (isReviewExpired(msg.artifact.reviewExpiresAt)) {
-      void handleAcceptVideoResult(msg, true);
-      return;
-    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     videoRevisionArtifactRef.current = {
@@ -6550,16 +6515,6 @@ export function WorkspacePage() {
   useEffect(() => {
     if (restoringRef.current || !currentConversationId || !pageVisibleRef.current) return;
     const visibleMessages = [...messages].reverse();
-    const expiredVideoResult = visibleMessages.find((message) => {
-      if (messageConversationId(message, currentConversationId) !== currentConversationId) return false;
-      if (message.artifact?.type !== "video_result" || !message.artifact.mergedVideo?.ok || message.artifact.videoAccepted) return false;
-      if (hasPendingVideoRevisionForResult(message, currentConversationId)) return false;
-      return isReviewExpired(message.artifact.reviewExpiresAt);
-    });
-    if (expiredVideoResult) {
-      void handleAcceptVideoResult(expiredVideoResult, true);
-      return;
-    }
     const expiredImageResult = visibleMessages.find((message) => {
       if (messageConversationId(message, currentConversationId) !== currentConversationId) return false;
       if (message.artifact?.type !== "image_result" || !message.artifact.imageResult || message.artifact.imageAccepted) return false;
