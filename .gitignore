@@ -14,3 +14,5 @@ docs/*
 **/.codex-*.log
 
 .claude/
+
+.understand-anything/
