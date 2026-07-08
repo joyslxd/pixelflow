@@ -240,6 +240,22 @@ export function WorkspacePage() {
     pushArtifact(PHASE_MSG[phase] || "请在画布确认。", artifact);
   };
 
+  const pushDoneArtifact = (results: VideoResult[], qcReport?: CanvasState["qcReport"]) => {
+    const key = "done:artifact";
+    if (announcedPhasesRef.current.has(key)) return;
+    announcedPhasesRef.current.add(key);
+    const passed = qcReport?.passed;
+    const verdict = passed == null ? "质检已完成" : passed ? "质检通过" : "质检未通过";
+    const finalCount = results.filter((result) => result.assetType === "final_video").length;
+    const description = finalCount > 0 ? `${verdict} · ${finalCount} 条成片` : `${verdict} · ${results.length} 条片段素材`;
+    pushArtifact("任务已完成，点击下方结果卡打开画布查看质检报告和视频结果。", {
+      type: "results",
+      title: "任务完成",
+      description,
+      actionLabel: "打开",
+    });
+  };
+
   const handleReviewChatIntent = (text: string, phase: string): boolean => {
     const reviewStage = {
       segment_review: "segments",
@@ -496,7 +512,9 @@ export function WorkspacePage() {
     if (!id) return;
     try {
       const [assets, taskResult] = await Promise.all([api.listAssets(id), api.getResult(id).catch(() => null)]);
-      const videos = assets.filter((a) => a.asset_type === "final_video" || a.asset_type === "generated_video");
+      const finalVideos = assets.filter((a) => a.asset_type === "final_video");
+      const generatedVideos = assets.filter((a) => a.asset_type === "generated_video");
+      const videos = finalVideos.length > 0 ? finalVideos : generatedVideos;
       const results: VideoResult[] = videos.map((a, i) => ({
         id: a.asset_id || `r${i}`,
         url: a.asset_type === "final_video" ? api.assetContentUrl(id, a.asset_id) : a.url,
@@ -504,19 +522,15 @@ export function WorkspacePage() {
         status: a.status === "ready" ? "success" : a.status === "error" ? "failed" : "pending",
       }));
       const qcReport = taskResult?.result?.qc_report;
+      const nextQcReport = qcReport && typeof qcReport === "object" ? (qcReport as CanvasState["qcReport"]) : undefined;
       setCanvas((c) => ({
         ...c,
         phase: nextPhase,
         results,
-        qcReport: qcReport && typeof qcReport === "object" ? c.qcReport || (qcReport as CanvasState["qcReport"]) : c.qcReport,
+        qcReport: nextQcReport || c.qcReport,
       }));
       if (nextPhase === "done") {
-        pushArtifact("生成完成,素材已就绪。点击下方素材卡打开画布查看。", {
-          type: "results",
-          title: "生成素材",
-          description: `${results.length} 条视频结果`,
-          actionLabel: "打开",
-        });
+        pushDoneArtifact(results, nextQcReport);
       }
     } catch {
       pushAssistant("结果拉取失败,请稍后在历史中查看。");
