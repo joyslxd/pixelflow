@@ -14,8 +14,9 @@ import logging
 import math
 import mimetypes
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from langgraph.types import interrupt
 
@@ -38,6 +39,7 @@ MAX_INTAKE_ROUNDS = 3
 # 多段并行 + concat 承接(plan_segments),EDIT 再裁回精确时长。
 SEEDANCE_MIN_DURATION = 4
 SEEDANCE_MAX_DURATION = 10
+SIGNED_MEDIA_REFRESH_MARGIN = timedelta(minutes=15)
 _UPLOAD_ARTIFACT_RE = re.compile(r"^/api/threads/([^/]+)/artifacts/mnt/user-data/uploads/([^?#]+)")
 
 
@@ -278,6 +280,61 @@ async def _generate_segment(skill, segment: dict, *, image_url: str, global_visu
     }
 
 
+def _signed_media_url_needs_refresh(url: str, *, now: datetime | None = None) -> bool:
+    """Return True when an Ark/TOS signed URL is expired or close to expiring."""
+    parsed = urlparse(str(url or ""))
+    query = parse_qs(parsed.query)
+    signed_at = (query.get("X-Tos-Date") or [None])[0]
+    expires_raw = (query.get("X-Tos-Expires") or [None])[0]
+    if not signed_at or not expires_raw:
+        return False
+    try:
+        issued_at = datetime.strptime(signed_at, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+        expires_in = int(expires_raw)
+    except (TypeError, ValueError):
+        return False
+    now = now or datetime.now(UTC)
+    refresh_at = issued_at + timedelta(seconds=expires_in) - SIGNED_MEDIA_REFRESH_MARGIN
+    return now >= refresh_at
+
+
+async def _refresh_generated_asset_urls(assets: list[dict], task_id: str | None) -> list[dict]:
+    """Refresh expiring generated video URLs before EDIT downloads them."""
+    refreshed = [dict(asset or {}) for asset in assets]
+    candidates = [
+        asset
+        for asset in refreshed
+        if asset.get("ok") and asset.get("url") and asset.get("task_id") and _signed_media_url_needs_refresh(str(asset.get("url")))
+    ]
+    if not candidates:
+        return refreshed
+
+    skill = get_video_skill()
+    poll_video_task = getattr(skill, "poll_video_task", None)
+    if not callable(poll_video_task):
+        logger.warning("[pixelflow] edit cannot refresh signed media urls task_id=%s skill=%s", task_id, type(skill).__name__)
+        return refreshed
+
+    async def _refresh_one(asset: dict) -> None:
+        generation_task_id = str(asset.get("task_id") or "")
+        result = await poll_video_task(generation_task_id)
+        if result.ok and result.url:
+            asset["url"] = result.url
+            asset["url_refreshed"] = True
+            asset.pop("url_refresh_error", None)
+            return
+        asset["url_refresh_error"] = result.error or "Ark did not return a refreshed video url"
+        logger.warning(
+            "[pixelflow] edit failed to refresh signed media url task_id=%s generation_task_id=%s error=%s",
+            task_id,
+            generation_task_id,
+            asset["url_refresh_error"],
+        )
+
+    await asyncio.gather(*(_refresh_one(asset) for asset in candidates))
+    return refreshed
+
+
 async def generate_node(state: TaskState) -> TaskState:
     """生成: segment-based generation via the video-generation skill.
 
@@ -342,7 +399,7 @@ async def edit_node(state: TaskState) -> TaskState:
     """
     task_id = state.get("task_id")
     brief = state.get("brief") or {}
-    assets = state.get("generated_assets") or []
+    assets = await _refresh_generated_asset_urls(state.get("generated_assets") or [], task_id)
     timeline, notes = build_timeline(brief, assets)
     logger.info("[pixelflow] edit task_id=%s clips=%d skipped=%d", task_id, len(timeline.clips), len(notes))
 
@@ -364,6 +421,7 @@ async def edit_node(state: TaskState) -> TaskState:
 
     return {
         "phase": Phase.EDIT_REVIEW.value,
+        "generated_assets": assets,
         "timeline": timeline.model_dump(),
         "draft_path": draft_path,
         "final_video_url": final_video_url,
