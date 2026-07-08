@@ -13,6 +13,10 @@ const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minu
 
 const VIDEO_HINTS = ["视频", "短视频", "成片", "带货", "种草", "分镜", "广告", "拍", "生成", "seedance"];
 const looksLikeVideoIntent = (t: string) => VIDEO_HINTS.some((k) => t.includes(k));
+const REVIEW_CONTINUE_HINTS = ["确认", "继续", "下一步", "开始", "进入", "质检", "剪辑", "通过"];
+const REVIEW_REJECT_HINTS = ["重来", "重新生成", "重新剪辑", "不通过", "退回", "修改"];
+const looksLikeReviewContinue = (t: string) => REVIEW_CONTINUE_HINTS.some((k) => t.includes(k));
+const looksLikeReviewReject = (t: string) => REVIEW_REJECT_HINTS.some((k) => t.includes(k));
 
 const PHASE_MSG: Record<string, string> = {
   intake: "正在理解商品与需求…",
@@ -236,6 +240,38 @@ export function WorkspacePage() {
     pushArtifact(PHASE_MSG[phase] || "请在画布确认。", artifact);
   };
 
+  const handleReviewChatIntent = (text: string, phase: string): boolean => {
+    const reviewStage = {
+      segment_review: "segments",
+      edit_review: "edit",
+      qc_review: "qc",
+    } as const;
+    const stage = reviewStage[phase as keyof typeof reviewStage];
+    if (!stage || !taskIdRef.current) return false;
+
+    if (phase === "qc_review" && (text.includes("质检") || text.includes("结果") || text.includes("报告"))) {
+      setCanvasOpen(true);
+      void loadResults("qc_review");
+      pushAssistant("质检结果已在右侧画布展示，可以在那里确认通过或退回重生成。");
+      return true;
+    }
+
+    if (looksLikeReviewReject(text)) {
+      void handleConfirmStage(stage, false);
+      return true;
+    }
+
+    if (looksLikeReviewContinue(text)) {
+      void handleConfirmStage(stage, true);
+      return true;
+    }
+
+    setCanvasOpen(true);
+    void loadResults(phase as TaskPhase);
+    pushAssistant(PHASE_MSG[phase] || "当前步骤需要先在右侧画布确认。");
+    return true;
+  };
+
   async function reconcileTaskFromServer(taskId: string) {
     try {
       const task = await api.getTask(taskId);
@@ -395,6 +431,7 @@ export function WorkspacePage() {
   const handleSend = (text: string) => {
     if (!taskIdRef.current) setActiveTaskId(createSessionId());
     setMessages((m) => [...m, { id: uid(), role: "user", content: text, time: now() }]);
+    if (handleReviewChatIntent(text, canvas.phase)) return;
     if (looksLikeVideoIntent(text)) {
       setPendingCore(text);
       setDialogDraft(null);
