@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pixelflow.qc import qc_check
+from pixelflow.qc import QCItem, qc_check
 
 
 def _brief(duration_sec=30, tolerance="+2s"):
@@ -26,7 +26,18 @@ def test_full_coverage_on_target_passes():
     assert result.passed
     assert _status(result, "片段完整性") == "pass"
     assert _status(result, "时长达标") == "pass"
-    assert 0 < result.score <= 1.0  # 含 P0 占位 warn(产品一致性等),非满分
+    assert 0 < result.score <= 1.0  # 含无视觉模型占位 warn(产品一致性等),非满分
+
+
+def test_product_consistency_item_can_come_from_vlm():
+    result = qc_check(
+        _brief(),
+        _assets(2),
+        _timeline(2, 30.0),
+        product_consistency_item=QCItem(item="产品一致性/变形", status="pass", message="视觉模型判定一致"),
+    )
+
+    assert _status(result, "产品一致性/变形") == "pass"
 
 
 def test_missing_clip_fails_and_scores_partial():

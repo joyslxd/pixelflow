@@ -16,6 +16,7 @@ import httpx
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 DEFAULT_SEEDANCE_MODEL = "doubao-seedance-2.0"
 DEFAULT_SEEDREAM_MODEL = "doubao-seedream-5.0-lite"
+DEFAULT_VISION_QC_MODEL = "doubao-seed-2.0-lite"
 
 
 class ArkSeedClientError(RuntimeError):
@@ -112,6 +113,9 @@ class ArkSeedClient:
 
     def generate_images(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/images/generations", json=payload)
+
+    def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/chat/completions", json=payload)
 
 
 def extract_urls(value: Any) -> list[str]:

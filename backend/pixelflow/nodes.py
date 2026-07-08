@@ -25,7 +25,7 @@ from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
 from pixelflow.generate import build_segment_prompt, plan_segments
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract, summarize_storyboards
-from pixelflow.qc import qc_check
+from pixelflow.qc import product_consistency_check, qc_check
 from pixelflow.skills import get_video_decompose_skill, get_video_edit_skill, get_video_skill
 from pixelflow.state import Phase, TaskState
 
@@ -439,11 +439,32 @@ async def qc_node(state: TaskState) -> TaskState:
     """
     task_id = state.get("task_id")
     attempts = state.get("qc_attempts", 0) + 1
+    brief = state.get("brief") or {}
+    timeline = state.get("timeline") or {}
+    final_video_url = state.get("final_video_url") or ""
+    product_info = state.get("product_info") or {}
+    product_image_url = ""
+    if final_video_url:
+        raw_image_url = product_info.get("main_image_artifact_url") or product_info.get("main_image_url")
+        if raw_image_url:
+            try:
+                product_image_url = _resolve_seed_image_url(str(raw_image_url))
+            except Exception as exc:  # noqa: BLE001 - visual QC is optional
+                logger.warning("[pixelflow] qc product image resolve failed task_id=%s error=%s", task_id, exc)
+    product_consistency = None
+    if product_image_url and final_video_url:
+        product_consistency = await product_consistency_check(
+            product_image_url=product_image_url,
+            final_video_url=final_video_url,
+            brief=brief,
+            video_duration=float(timeline.get("total_duration") or 0.0),
+        )
     result = qc_check(
-        state.get("brief") or {},
+        brief,
         state.get("generated_assets") or [],
-        state.get("timeline") or {},
-        state.get("final_video_url") or "",
+        timeline,
+        final_video_url,
+        product_consistency_item=product_consistency,
     )
     logger.info("[pixelflow] qc task_id=%s attempt=%d passed=%s score=%.2f", task_id, attempts, result.passed, result.score)
     return {

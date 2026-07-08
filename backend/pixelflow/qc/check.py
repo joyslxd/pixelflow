@@ -68,7 +68,7 @@ def _has_black_frames(path: str) -> bool | None:
     return "black_start:" in proc.stderr
 
 
-def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_video_url: str = "") -> QCResult:
+def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_video_url: str = "", product_consistency_item: QCItem | None = None) -> QCResult:
     """Evaluate the produced output. Coverage compares the assembled clips against
     the segments GENERATE attempted (``generated_assets``), since generation is now
     per-segment, not per-shot."""
@@ -126,10 +126,11 @@ def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_vi
         checks.append(QCItem(item="黑屏/空帧检测", status="warn", message="暂无本地成片，无法自动检测黑屏"))
 
     checks.append(
-        QCItem(
+        product_consistency_item
+        or QCItem(
             item="产品一致性/变形",
             status="warn",
-            message="当前 P0 未接入视觉语义模型，无法自动判断产品是否变形、颜色/结构是否跑偏；请人工复核，P1 接入 VLM 后自动判定",
+            message="未配置视觉语义模型，无法自动判断产品是否变形、颜色/结构是否跑偏；请人工复核",
         )
     )
 
