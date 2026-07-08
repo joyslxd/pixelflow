@@ -682,7 +682,10 @@ export function WorkspacePage() {
           setCanvasOpen(true);
           if (msg.artifact.type === "brief") setCanvas((c) => ({ ...c, phase: "brief_review" }));
           if (msg.artifact.type === "storyboard") setCanvas((c) => ({ ...c, phase: "storyboard_review" }));
-          if (msg.artifact.type === "results") setCanvas((c) => ({ ...c, phase: "done" }));
+          if (msg.artifact.type === "results") {
+            setCanvas((c) => ({ ...c, phase: "done" }));
+            void loadResults("done");
+          }
           if (msg.artifact.type === "segments") setCanvas((c) => ({ ...c, phase: "segment_review" }));
           if (msg.artifact.type === "edit") setCanvas((c) => ({ ...c, phase: "edit_review" }));
           if (msg.artifact.type === "qc") setCanvas((c) => ({ ...c, phase: "qc_review" }));
