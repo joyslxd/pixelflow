@@ -170,10 +170,11 @@ def get_video_skill() -> VideoGenerationSkill:
 def get_video_edit_skill() -> VideoEditSkill:
     """Return the configured video-edit skill (the EDIT-phase swap point).
 
-    Default is the 剪映-draft skill (pyJianYingDraft); ``PIXELFLOW_EDIT_SKILL=ffmpeg``
-    selects the headless FFmpeg renderer that produces a finished mp4.
+    Default is the headless FFmpeg renderer so the pipeline produces a finished
+    delivery mp4. Set ``PIXELFLOW_EDIT_SKILL=jianying`` when an editable 剪映
+    draft is required instead.
     """
-    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying").strip().lower()
+    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "ffmpeg").strip().lower()
     if impl == "jianying":
         from pixelflow.skills.jianying import JianYingEditSkill
 

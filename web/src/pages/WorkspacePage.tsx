@@ -511,6 +511,9 @@ export function WorkspacePage() {
     const id = taskIdRef.current;
     if (!id) return;
     try {
+      if (["segment_review", "edit_review", "qc_review", "done"].includes(nextPhase)) {
+        setCanvasOpen(true);
+      }
       const [assets, taskResult] = await Promise.all([api.listAssets(id), api.getResult(id).catch(() => null)]);
       const finalVideos = assets.filter((a) => a.asset_type === "final_video");
       const generatedVideos = assets.filter((a) => a.asset_type === "generated_video");
