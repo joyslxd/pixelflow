@@ -303,6 +303,52 @@ test("applyGlobalSceneAssetImageEdit updates global asset image and mention urls
   assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-prop.png");
 });
 
+test("applyGlobalSceneAssetImageEdit updates character first three-view image and mention urls", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    shot_description: {
+      ...scene.shot_description,
+      mentions: [
+        { asset_id: "character-host", image_url: "https://x/global-role.png" },
+        { asset_id: "scene-desk", image_url: "https://x/global-scene.png" },
+      ],
+    },
+  };
+  const updated = applyGlobalSceneAssetImageEdit(sampleGlobalAssets(), [sceneWithMentions], {
+    assetId: "character-host",
+    assetGroup: "characters",
+    editedImageUrl: "https://x/global-role-edited.png",
+  });
+
+  assert.equal(updated.global_assets.characters[0].three_view_images[0], "https://x/global-role-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/global-role-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-scene.png");
+});
+
+test("applyGlobalSceneAssetImageEdit updates prop first image and mention urls", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    shot_description: {
+      ...scene.shot_description,
+      mentions: [
+        { asset_id: "prop-product", image_url: "https://x/global-prop.png" },
+        { asset_id: "character-host", image_url: "https://x/global-role.png" },
+      ],
+    },
+  };
+  const updated = applyGlobalSceneAssetImageEdit(sampleGlobalAssets(), [sceneWithMentions], {
+    assetId: "prop-product",
+    assetGroup: "props",
+    editedImageUrl: "https://x/global-prop-edited.png",
+  });
+
+  assert.equal(updated.global_assets.props[0].images[0], "https://x/global-prop-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/global-prop-edited.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-role.png");
+});
+
 test("globalAssetsContainAsset detects asset ids across groups", () => {
   const assets = sampleGlobalAssets();
   assert.equal(globalAssetsContainAsset(assets, "scene-desk"), true);
@@ -726,12 +772,18 @@ test("durationMsForSubmit converts empty edit values to a valid minimum duration
 test("uploadedReferenceMaterials keeps user uploads and excludes scene global asset references", () => {
   const materials = [
     { url: "https://x/fila1.jpg", mediaType: "image" },
-    { url: "https://x/fila2.jpg", mediaType: "image" },
+    { download_url: "https://x/fila2.webp", mimeType: "image/webp" },
+    { path: "https://x/fila3.png", type: "file" },
+    { src: "https://x/fila4.gif", kind: "asset" },
     { url: "https://x/old-prop.png", source: "scene_global_asset", asset_id: "prop-product" },
     { url: "https://x/ref.mp4", mediaType: "video" },
+    { url: "https://x/file.pdf", type: "application/pdf" },
+    { url: "https://x/no-extension", type: "file" },
   ];
   const uploaded = uploadedReferenceMaterials(materials);
-  assert.equal(uploaded.length, 2);
+  assert.equal(uploaded.length, 4);
   assert.equal(uploaded[0].url, "https://x/fila1.jpg");
-  assert.equal(uploaded[1].url, "https://x/fila2.jpg");
+  assert.equal(uploaded[1].download_url, "https://x/fila2.webp");
+  assert.equal(uploaded[2].path, "https://x/fila3.png");
+  assert.equal(uploaded[3].src, "https://x/fila4.gif");
 });

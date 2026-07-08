@@ -113,6 +113,10 @@ function materialImageUrl(material: Record<string, unknown>): string {
     material.url ||
       material.image_url ||
       material.imageUrl ||
+      material.download_url ||
+      material.downloadUrl ||
+      material.path ||
+      material.src ||
       material.artifact_url ||
       material.artifactUrl ||
       "",
@@ -125,12 +129,12 @@ export function uploadedReferenceMaterials(materials: Array<Record<string, unkno
     if (material.source === "scene_global_asset") continue;
     const url = materialImageUrl(material);
     if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
-    const kind = String(material.type || material.kind || material.media_type || material.mediaType || "").toLowerCase();
+    const kind = String(material.type || material.kind || material.media_type || material.mediaType || material.mime_type || material.mimeType || "").toLowerCase();
     if (
-      kind === "" ||
       kind === "image" ||
       kind === "picture" ||
       kind === "reference_image" ||
+      kind.startsWith("image/") ||
       kind.startsWith("image") ||
       /\.(png|jpe?g|webp|gif)$/i.test((url.split("?")[0] || ""))
     ) {

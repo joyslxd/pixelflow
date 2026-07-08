@@ -89,6 +89,22 @@ function handleEditReferencedGlobalAssetSource() {
   return workspaceSource.slice(start, end);
 }
 
+function findStoryboardMessageForGlobalAssetSource() {
+  const start = workspaceSource.indexOf("const findStoryboardMessageForGlobalAsset = (");
+  const end = workspaceSource.indexOf("const handleUpdateVideoScenePackage", start);
+  assert.notEqual(start, -1, "findStoryboardMessageForGlobalAsset must exist");
+  assert.notEqual(end, -1, "handleUpdateVideoScenePackage must follow storyboard lookup");
+  return workspaceSource.slice(start, end);
+}
+
+function handleCompletedImageAssetEditJobSource() {
+  const start = workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async");
+  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
+  assert.notEqual(start, -1, "handleCompletedImageAssetEditJob must exist");
+  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow image asset edit completion");
+  return workspaceSource.slice(start, end);
+}
+
 test("new conversation stores the user message before agent replies", () => {
   const source = handleSendSource();
   const appendIndex = source.indexOf("await appendMessageForConversation(message, activeConversation)");
@@ -437,21 +453,26 @@ test("restored conversations resume existing image jobs without starting duplica
 
 test("scene global asset image editing uses recoverable image edit jobs", () => {
   const source = handleEditReferencedGlobalAssetSource();
+  const lookupSource = findStoryboardMessageForGlobalAssetSource();
+  const completionSource = handleCompletedImageAssetEditJobSource();
   const startIndex = source.indexOf("api.startImageAssetEditJob(request)");
+  const fusionStartIndex = source.indexOf("api.startImageAssetFusionJob(request)");
   const persistIndex = source.indexOf("await persistPendingImageJob(pendingImageJob");
   const pollIndex = source.indexOf("await resumePendingImageJob(pendingImageJob)");
   assert.notEqual(startIndex, -1, "global asset edit must start an image edit job explicitly");
+  assert.notEqual(fusionStartIndex, -1, "global asset fusion must start a separate fusion job when uploaded images exist");
   assert.notEqual(persistIndex, -1, "global asset edit must persist the job id");
   assert.notEqual(pollIndex, -1, "global asset edit must poll the persisted job");
-  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "global asset edit job id must be persisted before polling starts");
-  assert.match(source, /kind:\s*"scene_global_asset_edit"/, "global asset edit must record its pending job kind");
-  assert.match(source, /materials:\s*uploadedReferences/, "global asset edit must pass uploaded reference materials to the backend");
+  assert.ok(startIndex < persistIndex && fusionStartIndex < persistIndex && persistIndex < pollIndex, "global asset job id must be persisted before polling starts");
+  assert.match(source, /kind:\s*shouldFuseAsset \? "scene_global_asset_fusion" : "scene_global_asset_edit"/, "uploaded image materials must route to the fusion pending job kind");
+  assert.match(source, /job_api:\s*shouldFuseAsset \? "fuse_asset" : "edit_asset"/, "uploaded image materials must route to the fusion job API");
+  assert.match(source, /materials:\s*uploadedReferences/, "global asset jobs must pass uploaded image materials to the backend");
   assert.equal(source.includes("api.editImageAsset"), false, "global asset edit must not synchronously wait on image editing");
-  assert.match(
-    workspaceSource.slice(workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async")),
-    /syncGlobalSceneAssetEditAcrossConversation/,
-    "global asset edit completion must sync edited images back into all scene package cards",
-  );
+  assert.match(lookupSource, /const currentMessages = messagesRef\.current/, "global asset lookup must use the latest restored message ref");
+  assert.match(lookupSource, /preferredMessageIds/, "global asset lookup must prefer persisted source message ids");
+  assert.match(completionSource, /pendingImageJob\.artifact\?\.videoScenePackages/, "completion must fall back to the persisted job artifact");
+  assert.match(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "global asset edit completion must sync edited images back into all scene package cards");
+  assert.match(completionSource, /baseVideoScenePackages/, "completion must be able to patch the fallback scene package snapshot");
 });
 
 test("scene video jobs persist their id before polling so conversations can recover", () => {

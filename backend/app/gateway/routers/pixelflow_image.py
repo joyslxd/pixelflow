@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -28,6 +29,8 @@ _IMAGE_GENERATION_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_IMAGE_GENERATION_JOBS = 100
 _IMAGE_ASSET_EDIT_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_IMAGE_ASSET_EDIT_JOBS = 100
+_IMAGE_ASSET_FUSION_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_IMAGE_ASSET_FUSION_JOBS = 100
 
 
 class ImagePrepareRequest(BaseModel):
@@ -124,6 +127,48 @@ class ImageAssetEditJobStatusResponse(BaseModel):
     job_id: str
     status: str
     result: ImageAssetEditResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
+class ImageAssetFusionRequest(BaseModel):
+    asset_id: str
+    asset_name: str = ""
+    asset_group: str
+    source_image_url: str
+    prompt: str
+    materials: list[dict[str, Any]] = Field(default_factory=list)
+    reference_image_urls: list[str] = Field(default_factory=list)
+    ratio: str = "1:1"
+    size: str = REFERENCE_IMAGE_QUALITY
+    model: str | None = REFERENCE_IMAGE_MODEL
+
+
+class ImageAssetFusionResponse(BaseModel):
+    ok: bool
+    method: ImageMethod = "multi_image_fusion"
+    endpoint: str = "/api/picture/multi_image_fusion"
+    source_image_url: str
+    fused_image: dict[str, Any] = Field(default_factory=dict)
+    asset_id: str
+    asset_group: str
+    message: str = ""
+    quota_insufficient: bool = False
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImageAssetFusionJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class ImageAssetFusionJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: ImageAssetFusionResponse | None = None
     error: str | None = None
     message: str = ""
 
@@ -302,6 +347,55 @@ async def get_edit_image_asset_job(job_id: str) -> ImageAssetEditJobStatusRespon
     )
 
 
+@router.post("/fuse-asset", response_model=ImageAssetFusionResponse)
+async def fuse_image_asset(body: ImageAssetFusionRequest, request: Request) -> ImageAssetFusionResponse:
+    result = await _fuse_image_asset_response(body)
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=await current_user_id(request),
+        content=concise_result_summary("素材图片融合 Agent 完成同步融合", result.model_dump()),
+        category="experience",
+        source_agent="scene_global_asset_fusion_agent",
+        metadata={"source": "image_fuse_asset", "asset_id": body.asset_id, "asset_group": body.asset_group},
+        memory_type="experience",
+        infer=False,
+    )
+    return result
+
+
+@router.post("/fuse-asset/start", response_model=ImageAssetFusionJobStartResponse)
+async def start_fuse_image_asset(body: ImageAssetFusionRequest, request: Request) -> ImageAssetFusionJobStartResponse:
+    _trim_image_asset_fusion_jobs()
+    job_id = uuid.uuid4().hex
+    _IMAGE_ASSET_FUSION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
+    asyncio.create_task(_run_image_asset_fusion_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    return ImageAssetFusionJobStartResponse(ok=True, job_id=job_id, status="running", message="素材图片融合任务已启动。")
+
+
+@router.get("/fuse-asset/jobs/{job_id}", response_model=ImageAssetFusionJobStatusResponse)
+async def get_fuse_image_asset_job(job_id: str) -> ImageAssetFusionJobStatusResponse:
+    job = _IMAGE_ASSET_FUSION_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="素材图片融合任务不存在或已过期")
+    result = job.get("result")
+    if isinstance(result, ImageAssetFusionResponse):
+        result_payload = result
+    elif isinstance(result, dict):
+        result_payload = ImageAssetFusionResponse(**result)
+    else:
+        result_payload = None
+    status = str(job.get("status") or "running")
+    error = job.get("error")
+    return ImageAssetFusionJobStatusResponse(
+        ok=status != "failed",
+        job_id=job_id,
+        status=status,
+        result=result_payload,
+        error=str(error) if error else None,
+        message=_image_job_message(status, "素材图片融合"),
+    )
+
+
 def _collect_global_asset_edit_reference_urls(body: ImageAssetEditRequest) -> list[str]:
     urls = collect_uploaded_reference_image_urls(body.materials)
     for url in body.reference_image_urls or []:
@@ -320,6 +414,61 @@ def _global_asset_image_edit_kwargs(body: ImageAssetEditRequest, *, source_image
         "size": body.size or REFERENCE_IMAGE_QUALITY,
         "max_images": 1,
     }
+
+
+def _collect_global_asset_fusion_image_urls(body: ImageAssetFusionRequest, *, source_image_url: str) -> list[str]:
+    urls: list[str] = []
+
+    def append(url: str) -> None:
+        normalized = url.strip()
+        if normalized.startswith(("http://", "https://")) and normalized not in urls:
+            urls.append(normalized)
+
+    append(source_image_url)
+    for material in body.materials or []:
+        url = _material_image_url(material)
+        if url and _is_valid_uploaded_image_material(material, url):
+            append(url)
+    for url in body.reference_image_urls or []:
+        normalized = str(url).strip()
+        if _is_valid_image_url_suffix(normalized):
+            append(normalized)
+    return urls[:9]
+
+
+def _material_image_url(material: dict[str, Any]) -> str:
+    for key in ("url", "image_url", "imageUrl", "download_url", "downloadUrl", "path", "src", "artifact_url", "artifactUrl"):
+        value = material.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _is_valid_uploaded_image_material(material: dict[str, Any], url: str) -> bool:
+    if not url.startswith(("http://", "https://")):
+        return False
+    kind = _first_material_text(material, "type", "kind", "media_type", "mediaType", "mime_type", "mimeType").lower()
+    return (
+        kind in {"image", "picture", "reference_image"}
+        or kind.startswith("image/")
+        or kind.startswith("image")
+        or _is_valid_image_url_suffix(url)
+    )
+
+
+def _first_material_text(material: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = material.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _is_valid_image_url_suffix(url: str) -> bool:
+    if not url.startswith(("http://", "https://")):
+        return False
+    path = urlparse(url).path.lower()
+    return path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
 
 
 async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetEditResponse:
@@ -371,6 +520,53 @@ async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetE
         endpoint=_endpoint_for(method, result.raw),
         source_image_url=source_image_url,
         edited_image=edited_image,
+        asset_id=body.asset_id,
+        asset_group=body.asset_group,
+        message=message,
+        quota_insufficient=quota_insufficient,
+        raw=result.raw,
+    )
+
+
+async def _fuse_image_asset_response(body: ImageAssetFusionRequest) -> ImageAssetFusionResponse:
+    source_image_url = body.source_image_url.strip()
+    prompt = body.prompt.strip()
+    if not source_image_url:
+        raise HTTPException(status_code=400, detail="source_image_url不能为空")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt不能为空")
+
+    image_urls = _collect_global_asset_fusion_image_urls(body, source_image_url=source_image_url)
+    if len(image_urls) < 2:
+        raise HTTPException(status_code=400, detail="素材图片融合至少需要引用素材图和 1 张有效上传图片")
+
+    skill = get_image_skill()
+    ratio = body.ratio if body.ratio not in {"", "1:1"} else global_asset_edit_ratio(body.asset_group)
+    result = await skill.multi_image_fusion(
+        image_urls=image_urls,
+        prompt=enhance_global_asset_edit_prompt(prompt, body.asset_group),
+        model=_optional_str(body.model) or REFERENCE_IMAGE_MODEL,
+        ratio=ratio,
+        size=body.size or REFERENCE_IMAGE_QUALITY,
+        num_images=1,
+    )
+
+    quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
+    fused_image = result.images[0] if result.images else {}
+    fused_url = _optional_str(fused_image.get("url") or fused_image.get("download_url")) if fused_image else None
+    ok = result.ok and bool(fused_url)
+    if ok:
+        message = "素材图片融合完成。"
+    elif quota_insufficient:
+        message = quota_resume_message(result.error)
+    else:
+        message = result.error or "图片融合结果没有URL。"
+    return ImageAssetFusionResponse(
+        ok=ok,
+        method="multi_image_fusion",
+        endpoint=_endpoint_for("multi_image_fusion", result.raw),
+        source_image_url=source_image_url,
+        fused_image=fused_image,
         asset_id=body.asset_id,
         asset_group=body.asset_group,
         message=message,
@@ -447,6 +643,40 @@ async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest, po
         )
 
 
+async def _run_image_asset_fusion_job(job_id: str, body: ImageAssetFusionRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+    try:
+        result = await _fuse_image_asset_response(body)
+        _IMAGE_ASSET_FUSION_JOBS[job_id] = {
+            "status": "quota_paused" if result.quota_insufficient else "completed",
+            "result": result,
+            "error": None,
+        }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary("素材图片融合 Agent 完成异步融合", result.model_dump()),
+            category="experience",
+            source_agent="scene_global_asset_fusion_agent",
+            metadata={"source": "image_fuse_asset_job", "job_id": job_id, "asset_id": body.asset_id, "asset_group": body.asset_group},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
+        _IMAGE_ASSET_FUSION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=f"素材图片融合 Agent 异步融合失败：asset_id={body.asset_id}，error={str(exc)[:300]}",
+            category="experience",
+            source_agent="scene_global_asset_fusion_agent",
+            metadata={"source": "image_fuse_asset_job", "job_id": job_id, "asset_id": body.asset_id, "status": "failed"},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+
+
 def _trim_image_generation_jobs() -> None:
     if len(_IMAGE_GENERATION_JOBS) < _MAX_IMAGE_GENERATION_JOBS:
         return
@@ -459,6 +689,13 @@ def _trim_image_asset_edit_jobs() -> None:
         return
     for job_id in list(_IMAGE_ASSET_EDIT_JOBS.keys())[: len(_IMAGE_ASSET_EDIT_JOBS) - _MAX_IMAGE_ASSET_EDIT_JOBS + 1]:
         _IMAGE_ASSET_EDIT_JOBS.pop(job_id, None)
+
+
+def _trim_image_asset_fusion_jobs() -> None:
+    if len(_IMAGE_ASSET_FUSION_JOBS) < _MAX_IMAGE_ASSET_FUSION_JOBS:
+        return
+    for job_id in list(_IMAGE_ASSET_FUSION_JOBS.keys())[: len(_IMAGE_ASSET_FUSION_JOBS) - _MAX_IMAGE_ASSET_FUSION_JOBS + 1]:
+        _IMAGE_ASSET_FUSION_JOBS.pop(job_id, None)
 
 
 def _image_job_message(status: str, label: str) -> str:

@@ -21,6 +21,9 @@ def test_pixelflow_image_router_prefix_and_paths():
     assert "/agent/flows/image/edit-asset" in paths
     assert "/agent/flows/image/edit-asset/start" in paths
     assert "/agent/flows/image/edit-asset/jobs/{job_id}" in paths
+    assert "/agent/flows/image/fuse-asset" in paths
+    assert "/agent/flows/image/fuse-asset/start" in paths
+    assert "/agent/flows/image/fuse-asset/jobs/{job_id}" in paths
 
 
 def _stable_user() -> User:
@@ -629,6 +632,137 @@ def test_image_router_edit_asset_uses_uploaded_reference_materials(monkeypatch):
     assert data["method"] == "multi_reference_image_generation"
     assert data["endpoint"] == "/api/picture/multi_reference_image_generation"
     assert data["edited_image"]["url"] == "https://x/new-shoe.png"
+
+
+def test_image_router_fuse_asset_uses_source_and_uploaded_image(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def image_edit(self, **_kwargs):
+            raise AssertionError("image_edit should not be called by fuse-asset")
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called by fuse-asset")
+
+        async def multi_image_fusion(self, **kwargs):
+            assert kwargs["image_urls"] == ["https://x/old-prop.png", "https://x/uploaded.png"]
+            assert "融合成新商品图" in kwargs["prompt"]
+            assert kwargs["model"] == "seeddream-5.0"
+            assert kwargs["ratio"] == "1:1"
+            assert kwargs["size"] == "2K"
+            assert kwargs["num_images"] == 1
+            return ImageGenerationResult(
+                ok=True,
+                task_id="fuse-asset-task-1",
+                images=[{"asset_id": "fuse-asset-task-1-0", "url": "https://x/fused.png"}],
+                raw={"endpoint": "/api/picture/multi_image_fusion"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/fuse-asset",
+            json={
+                "asset_id": "prop-product",
+                "asset_name": "商品",
+                "asset_group": "props",
+                "source_image_url": "https://x/old-prop.png",
+                "prompt": "融合成新商品图",
+                "materials": [
+                    {"url": "https://x/uploaded.png", "mediaType": "image"},
+                    {"url": "https://x/ref.mp4", "mediaType": "video"},
+                    {"url": "https://x/old-prop.png", "source": "scene_global_asset"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["method"] == "multi_image_fusion"
+    assert data["endpoint"] == "/api/picture/multi_image_fusion"
+    assert data["fused_image"]["url"] == "https://x/fused.png"
+
+
+def test_image_router_fuse_asset_requires_valid_uploaded_image(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+
+    class FakeImageSkill:
+        async def multi_image_fusion(self, **_kwargs):
+            raise AssertionError("multi_image_fusion should not be called without a valid uploaded image")
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/fuse-asset",
+            json={
+                "asset_id": "prop-product",
+                "asset_group": "props",
+                "source_image_url": "https://x/old-prop.png",
+                "prompt": "融合成新商品图",
+                "materials": [
+                    {"url": "https://x/ref.mp4", "mediaType": "video"},
+                    {"url": "https://x/file.pdf", "type": "application/pdf"},
+                    {"url": "https://x/no-extension", "type": "file"},
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+
+
+def test_image_router_fuse_asset_job_marks_quota_paused(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+    from pixelflow.skills import ImageGenerationResult
+
+    class FakeImageSkill:
+        async def multi_image_fusion(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="额度不足，剩余额度 0，需要 1",
+                raw={"quota_insufficient": True, "message": "额度不足，剩余额度 0，需要 1"},
+            )
+
+    monkeypatch.setattr(pixelflow_image, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/image/fuse-asset/start",
+            json={
+                "asset_id": "prop-product",
+                "asset_group": "props",
+                "source_image_url": "https://x/old-prop.png",
+                "prompt": "融合成新商品图",
+                "materials": [{"url": "https://x/uploaded.png", "mediaType": "image"}],
+            },
+        )
+        started = start_response.json()
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/image/fuse-asset/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "quota_paused":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "quota_paused"
+    assert status["result"]["ok"] is False
+    assert status["result"]["quota_insufficient"] is True
 
 
 def test_image_router_starts_edit_asset_job_and_polls_result(monkeypatch):

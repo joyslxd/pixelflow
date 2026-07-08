@@ -268,10 +268,23 @@ export interface ImageGenerateJobStatusResponse {
 
 export interface ImageAssetEditResponse {
   ok: boolean;
-  method: "image_edit";
+  method: "image_edit" | "multi_reference_image_generation";
   endpoint: string;
   source_image_url: string;
   edited_image: { asset_id?: string; url?: string; download_url?: string };
+  asset_id: string;
+  asset_group: string;
+  message: string;
+  quota_insufficient?: boolean;
+  raw: Record<string, unknown>;
+}
+
+export interface ImageAssetFusionResponse {
+  ok: boolean;
+  method: "multi_image_fusion";
+  endpoint: string;
+  source_image_url: string;
+  fused_image: { asset_id?: string; url?: string; download_url?: string };
   asset_id: string;
   asset_group: string;
   message: string;
@@ -291,6 +304,22 @@ export interface ImageAssetEditJobStatusResponse {
   job_id: string;
   status: "running" | "completed" | "failed" | "quota_paused" | string;
   result: ImageAssetEditResponse | null;
+  error: string | null;
+  message: string;
+}
+
+export interface ImageAssetFusionJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface ImageAssetFusionJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | "quota_paused" | string;
+  result: ImageAssetFusionResponse | null;
   error: string | null;
   message: string;
 }
@@ -1031,6 +1060,46 @@ async function pollImageAssetEditJob(
   };
 }
 
+async function pollImageAssetFusionJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ImageAssetFusionResponse | null> {
+  const deadline = Date.now() + IMAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<ImageAssetFusionJobStatusResponse>(`${FLOW_BASE}/image/fuse-asset/jobs/${encodeURIComponent(jobId)}`);
+    if (!shouldContinue()) return null;
+    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        method: "multi_image_fusion",
+        endpoint: "/api/picture/multi_image_fusion",
+        source_image_url: "",
+        fused_image: {},
+        asset_id: "",
+        asset_group: "",
+        message: status.error || status.message || "素材图片融合失败",
+        quota_insufficient: false,
+        raw: {},
+      };
+    }
+    await delay(IMAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    method: "multi_image_fusion",
+    endpoint: "/api/picture/multi_image_fusion",
+    source_image_url: "",
+    fused_image: {},
+    asset_id: "",
+    asset_group: "",
+    message: "素材图片融合轮询超时",
+    quota_insufficient: false,
+    raw: {},
+  };
+}
+
 async function pollPrepareScenePackagesJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
@@ -1352,6 +1421,37 @@ export const api = {
     req<ImageAssetEditJobStatusResponse>(`${FLOW_BASE}/image/edit-asset/jobs/${encodeURIComponent(jobId)}`),
 
   pollImageAssetEditJob,
+
+  fuseImageAsset: (body: {
+    asset_id: string;
+    asset_name?: string;
+    asset_group: string;
+    source_image_url: string;
+    prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+  }) => req<ImageAssetFusionResponse>(`${FLOW_BASE}/image/fuse-asset`, { method: "POST", body: JSON.stringify(body) }),
+
+  startImageAssetFusionJob: (body: {
+    asset_id: string;
+    asset_name?: string;
+    asset_group: string;
+    source_image_url: string;
+    prompt: string;
+    materials?: Array<Record<string, unknown>>;
+    reference_image_urls?: string[];
+    ratio?: string;
+    size?: string;
+    model?: string | null;
+  }) => req<ImageAssetFusionJobStartResponse>(`${FLOW_BASE}/image/fuse-asset/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getImageAssetFusionJob: (jobId: string) =>
+    req<ImageAssetFusionJobStatusResponse>(`${FLOW_BASE}/image/fuse-asset/jobs/${encodeURIComponent(jobId)}`),
+
+  pollImageAssetFusionJob,
 
   prepareVideoScenePackages: (body: {
     form_values: Record<string, unknown>;

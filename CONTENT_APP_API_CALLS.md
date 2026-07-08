@@ -66,6 +66,7 @@
 | `/api/picture/text_to_image` | `POST` | `run_generation.text_to_image()` | 文生图。 | `ImageController.textToImage()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
 | `/api/picture/multi_reference_image_generation` | `POST` | `run_generation.reference_image()` | 多参考图生图。 | `ImageController.multiReferenceImageGeneration()` | 生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。 |
 | `/api/picture/image_edit` | `POST` | `run_generation.image_edit()` | 对已有图片按 prompt 编辑。 | `ImageController.imageEdit()` | 请求体包含 `image_url`、`prompt`、`model`、`width`、`height`、`imageSize`、`size`、`max_images`、`num`；主 PixelFlow 图片流程的直接图片编辑分支、plan 后图片编辑分支和视频场景包全局素材编辑都会复用；生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。模型、比例和清晰度的可选项由 `/api/modelParamConfig/listByCategory/image_generate` 提供，Python 侧不再维护模型级清晰度白名单，避免前端可选但网关旧规则提前拦截。 |
+| `/api/picture/multi_image_fusion` | `POST` | `run_generation.multi_image_fusion()`，由 `pixelflow_image.fuse_image_asset()` 和普通图片多图融合生成触发 | 多图融合成一张图片。 | `ImageController.multiImageFusion()` | 视频场景包全局素材引用后，如果同一条用户消息含有效上传图片，前端调用 `/agent/flows/image/fuse-asset/start`，Python 将 `source_image_url` 作为第一张图并追加有效上传图片，最多 9 张；生成后通过 `/api/task/{taskId}/status` 轮询结果，图片默认最多等 10 分钟。 |
 | `/api/picture/batch_text_to_image` | `POST` | `run_generation.batch_text_to_image()` | 批量文生图。 | `ImageController.batchTextToImage()` | 可能返回多个 task id；每个图片任务默认最多等 10 分钟。 |
 
 ## 当前已知注意点
