@@ -3,6 +3,8 @@ import type {
   CreationIntent,
   CreativeDirectionResponse,
   GenerateSceneVideosResponse,
+  ImageAssetEditResponse,
+  ImageAssetFusionResponse,
   ImageEditModelSelection,
   ImageGenerateResponse,
   ImageModelParamConfig,
@@ -17,6 +19,24 @@ import type {
   VideoQualityReviewResponse,
 } from "./api";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "./types";
+
+export interface SceneGlobalAssetEditReview {
+  asset_id: string;
+  asset_group: "characters" | "scenes" | "props";
+  asset_name?: string;
+  original_image_url: string;
+  source_image_url: string;
+  edited_image_url: string;
+  source_message_id: string;
+  storyboard_message_id?: string;
+  videoScenePackages: PrepareScenePackagesResponse;
+  originalVideoScenePackages?: PrepareScenePackagesResponse;
+  editResult?: ImageAssetEditResponse | ImageAssetFusionResponse;
+  request?: Record<string, unknown>;
+  selection?: ImageEditModelSelection;
+  prompt?: string;
+  is_fusion?: boolean;
+}
 
 export interface ChatMessage {
   id: string;
@@ -63,6 +83,7 @@ export interface ChatMessage {
     imageEditRequestedParams?: Record<string, unknown>;
     imageEditConfirmedSelection?: ImageEditModelSelection;
     imageRevisionFeedback?: string;
+    sceneGlobalAssetEditReview?: SceneGlobalAssetEditReview;
     videoScenePackages?: PrepareScenePackagesResponse;
     originalVideoScenePackages?: PrepareScenePackagesResponse;
     sceneAssetFailures?: Array<Record<string, unknown>>;

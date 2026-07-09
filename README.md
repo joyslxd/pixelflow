@@ -342,7 +342,7 @@ npm run build-prod
 变量含义：
 
 - `VITE_API_TARGET`：Vite dev server 将 `/agent` 代理到的目标。development/production 分别指向测试/正式 content-app 域名；test 固定指向本机后端 `http://127.0.0.1:8001`。
-- `VITE_CONTENT_APP_TARGET`：Vite dev server 将 `/api/upload` 代理到的 content-app 目标，通常应与当前环境的 content-app 域名一致。
+- `VITE_CONTENT_APP_TARGET`：Vite dev server 将所有 `/api/...` 请求代理到的 content-app 目标，通常应与当前环境的 content-app 域名一致。
 
 ## 鉴权与调试
 

@@ -6,14 +6,18 @@ assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scen
 
 const {
   applyGlobalSceneAssetImageEdit,
+  aspectRatioValue,
   collectSceneImageUrls,
+  defaultGlobalSceneAssetRatio,
   deleteGlobalSceneAssetReference,
   durationMsForSubmit,
   globalAssetsContainAsset,
+  globalSceneAssetRatioFromMetadata,
   inferTargetDurationMs,
   MAX_REFERENCE_IMAGE_COUNT,
   MAX_SCENE_DURATION_MS,
   MIN_SCENE_DURATION_MS,
+  nearestSupportedAspectRatio,
   replaceGlobalSceneAssetImage,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
@@ -347,6 +351,15 @@ test("applyGlobalSceneAssetImageEdit updates prop first image and mention urls",
   assert.equal(updated.global_assets.props[0].images[0], "https://x/global-prop-edited.png");
   assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/global-prop-edited.png");
   assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-role.png");
+});
+
+test("global scene asset edit ratio prefers metadata before fallback", () => {
+  assert.equal(defaultGlobalSceneAssetRatio("scenes"), "9:16");
+  assert.equal(defaultGlobalSceneAssetRatio("props"), "1:1");
+  assert.equal(aspectRatioValue("16:9"), 16 / 9);
+  assert.equal(globalSceneAssetRatioFromMetadata({ aspectRatio: "4:3" }, ["1:1", "4:3", "16:9"]), "4:3");
+  assert.equal(globalSceneAssetRatioFromMetadata({ width: 1200, height: 800 }, ["1:1", "4:3", "16:9"]), "4:3");
+  assert.equal(nearestSupportedAspectRatio(1080, 1920, ["1:1", "16:9", "9:16"], "1:1"), "9:16");
 });
 
 test("globalAssetsContainAsset detects asset ids across groups", () => {

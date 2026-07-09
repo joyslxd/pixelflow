@@ -14,6 +14,7 @@ interface ChatPanelProps {
   composerPrefillRequest?: { id: string; content: string } | null;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
+  onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
@@ -65,6 +66,7 @@ export function ChatPanel({
   composerPrefillRequest,
   onOpenArtifact,
   onSelectDirection,
+  onRegenerateDirections,
   onApprovePlan,
   onRevisePlan,
   onGenerateImage,
@@ -136,6 +138,7 @@ export function ChatPanel({
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}
+                onRegenerateDirections={onRegenerateDirections}
                 onApprovePlan={onApprovePlan}
                 onRevisePlan={onRevisePlan}
                 onGenerateImage={onGenerateImage}

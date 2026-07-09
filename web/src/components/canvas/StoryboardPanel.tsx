@@ -180,6 +180,7 @@ export function StoryboardPanel({
     const id = assetId(record, fallback);
     const name = assetName(record, id);
     setPreviewAsset({
+      ...record,
       source: "scene_global_asset",
       asset_id: id,
       asset_group: group,

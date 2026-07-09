@@ -83,6 +83,73 @@ export function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
+export function defaultGlobalSceneAssetRatio(assetGroup: GlobalSceneAssetGroup | string): string {
+  return assetGroup === "scenes" ? "9:16" : "1:1";
+}
+
+export function aspectRatioValue(label: string): number | null {
+  const match = label.trim().match(/^(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return width / height;
+}
+
+export function nearestSupportedAspectRatio(
+  width: number,
+  height: number,
+  supportedRatios: string[] = [],
+  fallback = "1:1",
+): string {
+  const target = width > 0 && height > 0 ? width / height : aspectRatioValue(fallback);
+  const candidates = uniqueAspectRatios(supportedRatios).filter((ratio) => aspectRatioValue(ratio));
+  if (!target || candidates.length === 0) return fallback;
+  return candidates.reduce((best, candidate) => {
+    const bestValue = aspectRatioValue(best) || target;
+    const candidateValue = aspectRatioValue(candidate) || target;
+    const bestDistance = Math.abs(Math.log(bestValue / target));
+    const candidateDistance = Math.abs(Math.log(candidateValue / target));
+    return candidateDistance < bestDistance ? candidate : best;
+  }, candidates[0]);
+}
+
+export function globalSceneAssetRatioFromMetadata(
+  asset: Record<string, unknown> | null | undefined,
+  supportedRatios: string[] = [],
+): string | null {
+  if (!asset) return null;
+  const explicit = firstString(asset, "ratio", "aspectRatio", "aspect_ratio", "image_ratio", "imageRatio");
+  if (explicit) {
+    const normalized = explicit.replace(/\s+/g, "");
+    if (aspectRatioValue(normalized)) {
+      return supportedRatios.length > 0
+        ? nearestSupportedAspectRatioFromLabel(normalized, supportedRatios, supportedRatios[0])
+        : normalized;
+    }
+  }
+  const width = firstNumber(asset, "width", "image_width", "imageWidth", "naturalWidth", "natural_width");
+  const height = firstNumber(asset, "height", "image_height", "imageHeight", "naturalHeight", "natural_height");
+  if (width && height) {
+    return nearestSupportedAspectRatio(width, height, supportedRatios, supportedRatios[0] || "1:1");
+  }
+  return null;
+}
+
+export function inferGlobalSceneAssetRatioFromMetadata(
+  asset: Record<string, unknown> | null | undefined,
+  assetGroup: GlobalSceneAssetGroup | string,
+  supportedRatios: string[] = [],
+): string {
+  const fallback = defaultGlobalSceneAssetRatio(assetGroup);
+  const fromMetadata = globalSceneAssetRatioFromMetadata(asset, supportedRatios);
+  if (fromMetadata) return fromMetadata;
+  if (supportedRatios.length > 0 && !supportedRatios.includes(fallback)) {
+    return nearestSupportedAspectRatioFromLabel(fallback, supportedRatios, supportedRatios[0]);
+  }
+  return fallback;
+}
+
 export function updateScenePackageField<T extends ScenePackageRecord>(scenes: T[], sceneId: string, patch: ScenePackagePatch): T[] {
   return scenes.map((scene) => {
     if (scene.scene_id !== sceneId) return scene;
@@ -620,6 +687,33 @@ function findGlobalAsset(globalAssets: GlobalSceneAssets, assetId: string): Reco
     if (match) return match;
   }
   return undefined;
+}
+
+function nearestSupportedAspectRatioFromLabel(label: string, supportedRatios: string[], fallback: string): string {
+  const value = aspectRatioValue(label);
+  if (!value) return fallback;
+  return nearestSupportedAspectRatio(value, 1, supportedRatios, fallback);
+}
+
+function uniqueAspectRatios(values: string[]): string[] {
+  return Array.from(new Set(values.map((item) => item.trim()).filter((item) => Boolean(item) && Boolean(aspectRatioValue(item)))));
+}
+
+function firstString(record: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstNumber(record: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const value = record[key];
+    const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return null;
 }
 
 function stringValue(value: unknown): string {

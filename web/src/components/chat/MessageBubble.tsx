@@ -1,5 +1,5 @@
-import { useEffect, useState, type MouseEvent } from "react";
-import { Check, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
+import { Check, ChevronDown, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
@@ -14,6 +14,7 @@ interface MessageBubbleProps {
   showProgressLoading?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
+  onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
@@ -146,7 +147,7 @@ function pptPagesReady(msg: ChatMessage): boolean {
 
 function progressDescription(content: string): string {
   if (/场景视频|分镜视频/.test(content)) return "场景视频生成中";
-  if (/可编辑场景包|场景包/.test(content)) return "视频场景包生成中";
+  if (/可编辑视频资产|可编辑场景包|场景包/.test(content)) return "可编辑视频资产生成中...";
   if (/三视图|场景图|道具图|参考图/.test(content)) return "生成角色、场景与道具参考图";
   if (/合并/.test(content)) return "合并完整视频";
   if (/PPT 大纲|SmartPPT.*大纲/.test(content)) return "生成 PPT 大纲";
@@ -167,6 +168,10 @@ function progressDescription(content: string): string {
 function imageModelType(config: ImageModelParamConfig): string {
   const record = config as unknown as Record<string, unknown>;
   return stringValue(record.modelType) || stringValue(record.model_type) || stringValue(record.model);
+}
+
+function imageModelLabel(model: string): string {
+  return model === "gpt-image-2" ? "image-2" : model;
 }
 
 function imageModelParamConfig(config?: ImageModelParamConfig): Record<string, unknown> {
@@ -202,6 +207,7 @@ export function MessageBubble({
   showProgressLoading,
   onOpenArtifact,
   onSelectDirection,
+  onRegenerateDirections,
   onApprovePlan,
   onRevisePlan,
   onGenerateImage,
@@ -250,6 +256,7 @@ export function MessageBubble({
   const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
   const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
   const imageAccepted = Boolean(msg.artifact?.imageAccepted);
+  const sceneGlobalAssetEditReview = Boolean(msg.artifact?.sceneGlobalAssetEditReview);
   const videoAccepted = Boolean(msg.artifact?.videoAccepted);
   const mergedVideoResult = mergedVideoResultForMessage(msg);
   const sceneVideoResults = sceneVideoResultsForMessage(msg);
@@ -263,6 +270,9 @@ export function MessageBubble({
   const [selectedImageEditModel, setSelectedImageEditModel] = useState("");
   const [selectedImageEditRatio, setSelectedImageEditRatio] = useState("");
   const [selectedImageEditSize, setSelectedImageEditSize] = useState("");
+  const [imageEditModelMenuOpen, setImageEditModelMenuOpen] = useState(false);
+  const [imageEditModelMenuFocusIndex, setImageEditModelMenuFocusIndex] = useState(0);
+  const imageEditModelMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!hasRunningPptPage) {
@@ -277,6 +287,8 @@ export function MessageBubble({
 
   useEffect(() => {
     if (msg.artifact?.type !== "image_edit_options") return;
+    setImageEditModelMenuOpen(false);
+    setImageEditModelMenuFocusIndex(0);
     const confirmedModel = confirmedImageEditSelection?.model && imageEditModelNames.includes(confirmedImageEditSelection.model) ? confirmedImageEditSelection.model : "";
     const preferredModel = confirmedModel || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
     const preferredConfig = imageEditModelConfigs.find((config) => imageModelType(config) === preferredModel) || imageEditModelConfigs[0];
@@ -298,9 +310,28 @@ export function MessageBubble({
     );
   }, [msg.id, imageEditConfigSignature, requestedImageEditRatio, requestedImageEditSize, confirmedImageEditSelection?.model, confirmedImageEditSelection?.ratio, confirmedImageEditSelection?.size]);
 
+  useEffect(() => {
+    if (!imageEditModelMenuOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && imageEditModelMenuRef.current?.contains(target)) return;
+      setImageEditModelMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImageEditModelMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [imageEditModelMenuOpen]);
+
   const currentImageEditModel = selectedImageEditModel || confirmedImageEditSelection?.model || (imageEditModelNames.includes("gpt-image-2") ? "gpt-image-2" : imageEditModelNames[0] || "gpt-image-2");
   const currentImageEditConfig = imageEditModelConfigs.find((config) => imageModelType(config) === currentImageEditModel) || imageEditModelConfigs[0];
   const currentImageEditOptions = imageModelOptions(currentImageEditConfig);
+  const imageEditModelChoices = imageEditModelNames.length > 0 ? imageEditModelNames : ["gpt-image-2"];
   const imageEditRatioSupported = !requestedImageEditRatio || currentImageEditOptions.ratios.includes(requestedImageEditRatio);
   const imageEditSizeSupported = !requestedImageEditSize || currentImageEditOptions.sizes.includes(requestedImageEditSize);
   const effectiveImageEditRatio = selectedImageEditRatio || (imageEditRatioSupported ? requestedImageEditRatio : "") || currentImageEditOptions.ratios[0] || "1:1";
@@ -310,6 +341,68 @@ export function MessageBubble({
     requestedImageEditSize && !imageEditSizeSupported ? `当前模型不支持需求清晰度 ${requestedImageEditSize}，已改用 ${effectiveImageEditSize}` : "",
   ].filter(Boolean).join("，");
   const imageEditSubmitDisabled = !currentImageEditModel || !effectiveImageEditRatio || !effectiveImageEditSize;
+  const imageEditModelListboxId = `image-edit-model-listbox-${msg.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const currentImageEditModelIndex = Math.max(0, imageEditModelChoices.indexOf(currentImageEditModel));
+  const clampImageEditModelMenuFocusIndex = (index: number) => Math.min(Math.max(index, 0), imageEditModelChoices.length - 1);
+  const openImageEditModelMenu = (focusIndex = currentImageEditModelIndex) => {
+    setImageEditModelMenuFocusIndex(clampImageEditModelMenuFocusIndex(focusIndex));
+    setImageEditModelMenuOpen(true);
+  };
+  const closeImageEditModelMenu = () => setImageEditModelMenuOpen(false);
+  const moveImageEditModelMenuFocus = (direction: number) => {
+    setImageEditModelMenuFocusIndex((index) => (index + direction + imageEditModelChoices.length) % imageEditModelChoices.length);
+  };
+  const selectImageEditModel = (nextModel: string) => {
+    const nextConfig = imageEditModelConfigs.find((config) => imageModelType(config) === nextModel);
+    const options = imageModelOptions(nextConfig);
+    setSelectedImageEditModel(nextModel);
+    setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
+    setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
+    setImageEditModelMenuFocusIndex(clampImageEditModelMenuFocusIndex(imageEditModelChoices.indexOf(nextModel)));
+    closeImageEditModelMenu();
+  };
+  const handleImageEditModelMenuKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (!imageEditModelMenuOpen) {
+        openImageEditModelMenu(currentImageEditModelIndex);
+      } else {
+        moveImageEditModelMenuFocus(1);
+      }
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!imageEditModelMenuOpen) {
+        openImageEditModelMenu(currentImageEditModelIndex);
+      } else {
+        moveImageEditModelMenuFocus(-1);
+      }
+      return;
+    }
+    if (event.key === "Home" && imageEditModelMenuOpen) {
+      event.preventDefault();
+      setImageEditModelMenuFocusIndex(0);
+      return;
+    }
+    if (event.key === "End" && imageEditModelMenuOpen) {
+      event.preventDefault();
+      setImageEditModelMenuFocusIndex(imageEditModelChoices.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (!imageEditModelMenuOpen) {
+        openImageEditModelMenu(currentImageEditModelIndex);
+      } else {
+        selectImageEditModel(imageEditModelChoices[imageEditModelMenuFocusIndex] || currentImageEditModel);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      closeImageEditModelMenu();
+    }
+  };
 
   const blockDisabledAction = (event: MouseEvent<HTMLDivElement>) => {
     if (!actionsDisabled) return;
@@ -373,8 +466,21 @@ export function MessageBubble({
         >
         {msg.artifact?.type === "directions" && msg.artifact.directions ? (
           <div className="mt-2 w-full max-w-[520px] space-y-2 rounded-2xl border border-accent/20 bg-accent-soft/50 p-3">
-            <div className="text-[13px] font-semibold text-ink">{msg.artifact.title}</div>
-            <div className="text-[12px] text-ink-soft">{msg.artifact.description}</div>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-ink">{msg.artifact.title}</div>
+                <div className="mt-1 text-[12px] text-ink-soft">{msg.artifact.description}</div>
+              </div>
+              <button
+                type="button"
+                title="重新生成创意方向"
+                onClick={() => onRegenerateDirections?.(msg)}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12px] font-medium text-ink hover:bg-canvas"
+              >
+                <RefreshCw size={14} />
+                重新生成
+              </button>
+            </div>
             <div className="space-y-2">
               {msg.artifact.directions.map((direction) => (
                 <div key={direction.direction_id} className="rounded-xl border border-line bg-white/80 p-3">
@@ -460,27 +566,70 @@ export function MessageBubble({
                 <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
               </span>
             </div>
-            <label className="block space-y-1.5 text-[12px] text-ink-soft">
+            <div ref={imageEditModelMenuRef} className="relative space-y-1.5 text-[12px] text-ink-soft">
               <span className="font-medium text-ink">模型</span>
-              <select
-                value={currentImageEditModel}
-                onChange={(event) => {
-                  const nextModel = event.target.value;
-                  const nextConfig = imageEditModelConfigs.find((config) => imageModelType(config) === nextModel);
-                  const options = imageModelOptions(nextConfig);
-                  setSelectedImageEditModel(nextModel);
-                  setSelectedImageEditRatio(requestedImageEditRatio && options.ratios.includes(requestedImageEditRatio) ? requestedImageEditRatio : options.ratios[0] || "1:1");
-                  setSelectedImageEditSize(requestedImageEditSize && options.sizes.includes(requestedImageEditSize) ? requestedImageEditSize : options.sizes[0] || "4K");
-                }}
-                className="h-10 w-full rounded-xl border border-line bg-white px-3 text-[13px] text-ink outline-none focus:border-accent"
+              <button
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={imageEditModelMenuOpen}
+                aria-controls={imageEditModelListboxId}
+                aria-activedescendant={imageEditModelMenuOpen ? `${imageEditModelListboxId}-option-${imageEditModelMenuFocusIndex}` : undefined}
+                onClick={() => (imageEditModelMenuOpen ? closeImageEditModelMenu() : openImageEditModelMenu(currentImageEditModelIndex))}
+                onKeyDown={handleImageEditModelMenuKeyDown}
+                className={cn(
+                  "flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border bg-white px-3 py-2 text-left outline-none transition-all duration-200",
+                  imageEditModelMenuOpen ? "border-accent shadow-[0_10px_28px_rgba(31,111,235,0.12)]" : "border-line hover:border-accent/50 hover:bg-canvas focus:border-accent focus:ring-2 focus:ring-accent/10",
+                )}
               >
-                {(imageEditModelNames.length > 0 ? imageEditModelNames : ["gpt-image-2"]).map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold text-ink">{imageModelLabel(currentImageEditModel)}</span>
+                  <span className="mt-0.5 block truncate text-[11px] text-ink-soft">
+                    支持 {currentImageEditOptions.ratios.length} 个尺寸 · {currentImageEditOptions.sizes.length} 个清晰度
+                  </span>
+                </span>
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+                  <ChevronDown size={17} className={cn("transition-transform duration-200", imageEditModelMenuOpen ? "rotate-180" : "rotate-0")} />
+                </span>
+              </button>
+              <div
+                id={imageEditModelListboxId}
+                role="listbox"
+                aria-label="图片编辑模型"
+                className={cn(
+                  "absolute left-0 right-0 top-[calc(100%+8px)] z-30 origin-top overflow-hidden rounded-xl border border-line bg-white shadow-[0_18px_45px_rgba(15,23,42,0.16)] transition-all duration-200 ease-out",
+                  imageEditModelMenuOpen ? "max-h-72 translate-y-0 scale-100 opacity-100" : "pointer-events-none max-h-0 -translate-y-1 scale-95 opacity-0",
+                )}
+              >
+                <div className="max-h-72 overflow-y-auto p-1.5">
+                  {imageEditModelChoices.map((model, index) => {
+                    const active = currentImageEditModel === model;
+                    const highlighted = imageEditModelMenuFocusIndex === index;
+                    return (
+                      <button
+                        key={model}
+                        id={`${imageEditModelListboxId}-option-${index}`}
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        onMouseEnter={() => setImageEditModelMenuFocusIndex(index)}
+                        onClick={() => selectImageEditModel(model)}
+                        className={cn(
+                          "group flex min-h-10 w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-[13px] font-semibold outline-none transition-all duration-150",
+                          active
+                            ? "bg-accent-soft text-accent shadow-[inset_0_0_0_1px_rgba(31,111,235,0.16)]"
+                            : highlighted
+                              ? "translate-x-0.5 bg-canvas text-accent"
+                              : "text-ink hover:translate-x-0.5 hover:bg-canvas hover:text-accent",
+                        )}
+                      >
+                        <span className="min-w-0 truncate">{imageModelLabel(model)}</span>
+                        <Check size={15} className={cn("shrink-0 transition-all duration-150", active ? "scale-100 opacity-100" : "scale-75 opacity-0")} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[12px]">
@@ -537,7 +686,7 @@ export function MessageBubble({
               </div>
             ) : (
               <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] leading-relaxed text-ink-soft">
-                将使用 {currentImageEditModel}，尺寸 {effectiveImageEditRatio}，清晰度 {effectiveImageEditSize}。
+                将使用 {imageModelLabel(currentImageEditModel)}，尺寸 {effectiveImageEditRatio}，清晰度 {effectiveImageEditSize}。
               </div>
             )}
             <button
@@ -856,6 +1005,11 @@ export function MessageBubble({
                 {msg.artifact.imageResult.error}
               </div>
             )}
+            {sceneGlobalAssetEditReview && (
+              <div className="rounded-xl border border-accent/20 bg-accent-soft/50 p-2 text-[12px] leading-relaxed text-ink">
+                这是场景包素材候选图，点击确认后才会替换回场景包。
+              </div>
+            )}
             {msg.artifact.imageResult.images.length > 0 && (
               <div className="grid gap-3 sm:grid-cols-2">
                 {msg.artifact.imageResult.images.map((image, index) => (
@@ -867,7 +1021,7 @@ export function MessageBubble({
                     className="overflow-hidden rounded-xl border border-line bg-canvas"
                   >
                     {image.url ? (
-                      <img src={image.url} alt={`生成图片 ${index + 1}`} className="aspect-square w-full object-cover" />
+                      <img src={image.url} alt={`生成图片 ${index + 1}`} className="mx-auto block max-h-[420px] max-w-full object-contain" />
                     ) : (
                       <div className="flex aspect-square items-center justify-center text-[12px] text-ink-soft">无图片 URL</div>
                     )}
@@ -886,7 +1040,31 @@ export function MessageBubble({
                 {imageQuotaPaused ? "充值后继续生成" : "重新生成图片"}
               </button>
             )}
-            {canAcceptImageResult(msg.artifact.imageResult) && imageAccepted ? (
+            {sceneGlobalAssetEditReview && canAcceptImageResult(msg.artifact.imageResult) && imageAccepted ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
+                <Check size={15} />
+                素材已替换到场景包
+              </div>
+            ) : sceneGlobalAssetEditReview && canAcceptImageResult(msg.artifact.imageResult) ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => onAcceptImageResult?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                >
+                  <Check size={15} />
+                  确认并替换素材
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onReviseImageResult?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <Pencil size={15} />
+                  重新编辑
+                </button>
+              </div>
+            ) : canAcceptImageResult(msg.artifact.imageResult) && imageAccepted ? (
               <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
                 <Check size={15} />
                 图片流程已结束

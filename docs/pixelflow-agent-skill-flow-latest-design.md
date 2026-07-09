@@ -64,8 +64,9 @@ flowchart TD
   PIMG --> PFILE["生成 PPT 附件"]
   PFILE --> PDONE["PPT 文件确认<br/>满意结束 / 重新生成附件"]
   IV --> DIR["生成 3 个创意方向"]
-  DIR --> CHOOSE["用户选择方向<br/>60 秒未选默认推荐"]
-  CHOOSE --> PLAN["策划 Agent<br/>填充 plan.md"]
+  DIR --> CHOOSE["用户手动选择方向<br/>可重新生成"]
+  CHOOSE -->|"不满意，重新生成"| DIR
+  CHOOSE -->|"选择方向"| PLAN["策划 Agent<br/>填充 plan.md"]
   PLAN --> REVIEW["人工审核 plan.md<br/>手动同意后继续"]
   REVIEW -->|"继续修改"| D
   REVIEW -->|"同意 image"| IMG["图片生成 Agent"]
@@ -89,7 +90,7 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py` | 用户提示词、附件 materials、历史上下文 | intent、表单值、行业类型、数量、创意方向 | LLM 用 `deepseek-v4-pro`，失败时有规则 fallback |
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | 表单、创意方向、行业画像、素材、intake_context | plan.md、模板路径、一致性问题 | 读取项目内 plan.md 模板，不直接调用 LLM |
-| 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改意见、重试指令 | 前端负责确认状态和对话持久化；创意方向、图片结果保留超时默认，视频结果手动结束 |
+| 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改意见、重试指令 | 前端负责确认状态和对话持久化；创意方向可重新生成但必须手动选择，图片结果保留超时默认，视频结果手动结束 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py` | plan.md、表单、创意方向、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 主流程是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
@@ -180,7 +181,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。合并失败时 job 必须返回 `status=failed`，并保留 `result.error`、`result.message`、`result.raw.details` 中的 content-app 原始错误，前端据此展示“视频合并失败”。
 - 单个分镜出现普通异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
-- 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`；如果同一条消息里存在有效上传图片素材，前端改走 `/agent/flows/image/fuse-asset`，后端调用 `MultiImageFusionSkill` 把引用素材图和上传图片融合成新图。两条链路成功后都会直接替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`。如果用户在该图片编辑/融合结果卡片点击“重新生成”，下一条输入继续作为同一全局素材的图片更新 prompt 处理，不重新走 intake。
+- 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`；如果同一条消息里存在有效上传图片素材，前端改走 `/agent/flows/image/fuse-asset`，后端调用 `MultiImageFusionSkill` 把引用素材图和上传图片融合成新图。进入 job 前前端会先展示图片编辑模型/比例/清晰度确认卡，默认模型 `gpt-image-2`，比例优先保持原素材比例。两条链路成功后只展示候选新图，必须用户点击确认后才替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`；点击重新编辑会基于当前候选图继续弹参数确认卡，不重新走 intake。
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
@@ -451,7 +452,7 @@ sequenceDiagram
 - 图片编辑成功后，前端展示“满意，结束 / 重新生成”；60 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
 - 图片 plan.md 同意、图片修改重生成、直接图片编辑确认后，前端调用 `/agent/flows/image/generate/start` 启动 Python 内存 job，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。恢复同一对话时只查询 `/agent/flows/image/generate/jobs/{job_id}`，不重复调用 `/start`；job 404 或过期时只提示手动重试，避免重复计费。
-- 视频场景包全局素材图片更新由前端分流：没有有效上传图片时调用 `/agent/flows/image/edit-asset/start`；用户上传素材中存在有效图片格式时调用 `/agent/flows/image/fuse-asset/start`。两者都保存 `pendingImageJob`，恢复时只查询对应的 `/edit-asset/jobs/{job_id}` 或 `/fuse-asset/jobs/{job_id}`。完成后直接替换 `global_assets` 与同 `asset_id` 的 mentions 图片 URL。
+- 视频场景包全局素材图片更新由前端分流：没有有效上传图片时调用 `/agent/flows/image/edit-asset/start`；用户上传素材中存在有效图片格式时调用 `/agent/flows/image/fuse-asset/start`。启动前先复用图片编辑参数确认卡，默认模型 `gpt-image-2`，尺寸默认保持原素材比例，清晰度按模型可用项选择。两者都保存 `pendingImageJob`，恢复时只查询对应的 `/edit-asset/jobs/{job_id}` 或 `/fuse-asset/jobs/{job_id}`。job 完成后先生成 `image_result.sceneGlobalAssetEditReview` 候选图卡片，不自动替换；用户确认后才替换 `global_assets` 与同 `asset_id` 的 mentions 图片 URL，且该确认不做 60 秒自动同意。
 - `pendingImageJob.kind` 为 `image_generation`、`image_regeneration`、`direct_image_edit`、`scene_global_asset_edit` 或 `scene_global_asset_fusion`；`job_api` 为 `generate`、`edit_asset` 或 `fuse_asset`；字段包含 `job_id`、`conversation_id`、`source_message_id`、`started_at`、`request`、`artifact`。
 
 ## 8. 视频流程
@@ -598,7 +599,8 @@ flowchart TD
 - 新需求入口的用户消息保存使用 `/agent/conversations/{conversation_id}/messages/start` + `/agent/conversations/{conversation_id}/messages/jobs/{job_id}`，前端保存 `pendingMessageJob` / `pending_message_job`。消息保存 job 完成后再启动采集意图识别；返回历史对话、离开 iframe 或刷新后只继续查询已有 job，不重复追加同一条用户消息。`/messages` 同步接口仅保留兼容旧调用。
 - 采集意图识别使用 `/agent/flows/intake/analyze/start` + `/agent/flows/intake/analyze/jobs/{job_id}`，前端保存 `pendingIntakeJob` / `pending_intake_job`。恢复时只轮询已有 job，不重复调用 `/start`；job 404 或过期时只提示用户重新发送需求，不自动重启。`/intake/analyze` 同步接口仅保留兼容旧调用。
 - 采集/表单/创意方向阶段使用 `conversation.context.flowDraft` 做轻量 checkpoint：`form_pending` 恢复表单和已抽取字段，`directions_ready` 恢复 3 个创意方向卡片，`form_cancelled` 不再继续流程。
-- `directions_ready` 恢复出的方向卡只用于展示，不重新挂 60 秒自动选择；如果同一对话中已经存在后续 plan、图片、视频或 PPT artifact，应清空方向 checkpoint，避免切换对话后重复推进。
+- `directions_ready` 恢复出的方向卡只用于展示和手动选择，不做自动选择；如果同一对话中已经存在后续 plan、图片、视频或 PPT artifact，应清空方向 checkpoint，避免切换对话后重复推进。
+- 创意方向卡片提供“重新生成”入口：如果用户对 3 个方向都不满意，前端复用 `/agent/flows/intake/directions/start` 启动新的方向 job，并把上一轮方向摘要写入 `product_creative_profile.previous_creative_directions`，提示采集 Agent 避开旧方向；job completed 后即使返回内容和上一轮一致，也要追加新的方向确认卡，避免任务 completed 但前端没有新方案确认。旧方向卡片保留为历史预览，不再允许继续选择。
 - 创意方向生成使用 `/agent/flows/intake/directions/start` + `/agent/flows/intake/directions/jobs/{job_id}`，前端保存 `pendingDirectionJob` / `pending_direction_job`；返回历史对话或 iframe 恢复时只轮询已有 job，不重复调用 `/start`，job 404 或过期时只提示从表单手动继续。
 - 如果 context 中存在 `pendingMessageJob` / `pending_message_job`，进入历史对话后前端优先恢复并轮询已有消息保存 job；完成后按 job 中的 continuation 启动或恢复采集 job。
 - 如果 context 中存在 `pendingIntakeJob` / `pending_intake_job`，进入历史对话后前端继续查询已有采集意图识别 job，不重新调用 `/start`。

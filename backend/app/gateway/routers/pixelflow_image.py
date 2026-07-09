@@ -11,9 +11,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
-from pixelflow.generate.image_prepare import ImageMethod, prepare_image_generation
+from pixelflow.generate.image_prepare import IMAGE_EDIT_MODEL, ImageMethod, prepare_image_generation
 from pixelflow.generate.scene_assets import (
-    REFERENCE_IMAGE_MODEL,
     REFERENCE_IMAGE_QUALITY,
     collect_uploaded_reference_image_urls,
     enhance_global_asset_edit_prompt,
@@ -99,7 +98,7 @@ class ImageAssetEditRequest(BaseModel):
     reference_image_urls: list[str] = Field(default_factory=list)
     ratio: str = "1:1"
     size: str = REFERENCE_IMAGE_QUALITY
-    model: str | None = REFERENCE_IMAGE_MODEL
+    model: str | None = IMAGE_EDIT_MODEL
 
 
 class ImageAssetEditResponse(BaseModel):
@@ -141,7 +140,7 @@ class ImageAssetFusionRequest(BaseModel):
     reference_image_urls: list[str] = Field(default_factory=list)
     ratio: str = "1:1"
     size: str = REFERENCE_IMAGE_QUALITY
-    model: str | None = REFERENCE_IMAGE_MODEL
+    model: str | None = IMAGE_EDIT_MODEL
 
 
 class ImageAssetFusionResponse(BaseModel):
@@ -409,7 +408,7 @@ def _global_asset_image_edit_kwargs(body: ImageAssetEditRequest, *, source_image
     return {
         "image_url": source_image_url,
         "prompt": prompt,
-        "model": _optional_str(body.model) or REFERENCE_IMAGE_MODEL,
+        "model": _optional_str(body.model) or IMAGE_EDIT_MODEL,
         "ratio": body.ratio or "1:1",
         "size": body.size or REFERENCE_IMAGE_QUALITY,
         "max_images": 1,
@@ -484,13 +483,13 @@ async def _edit_image_asset_response(body: ImageAssetEditRequest) -> ImageAssetE
     method: ImageMethod = "image_edit"
     if reference_urls:
         method = "multi_reference_image_generation"
-        ratio = body.ratio if body.ratio not in {"", "1:1"} else global_asset_edit_ratio(body.asset_group)
+        ratio = body.ratio or global_asset_edit_ratio(body.asset_group)
         result = await skill.reference_image(
             reference_images=reference_urls,
             prompt=enhance_global_asset_edit_prompt(prompt, body.asset_group),
-            model=REFERENCE_IMAGE_MODEL,
+            model=_optional_str(body.model) or IMAGE_EDIT_MODEL,
             ratio=ratio,
-            size=REFERENCE_IMAGE_QUALITY,
+            size=body.size or REFERENCE_IMAGE_QUALITY,
             max_images=1,
         )
         quota_insufficient = is_quota_insufficient(result.raw) or is_quota_insufficient(result.error)
@@ -541,11 +540,11 @@ async def _fuse_image_asset_response(body: ImageAssetFusionRequest) -> ImageAsse
         raise HTTPException(status_code=400, detail="素材图片融合至少需要引用素材图和 1 张有效上传图片")
 
     skill = get_image_skill()
-    ratio = body.ratio if body.ratio not in {"", "1:1"} else global_asset_edit_ratio(body.asset_group)
+    ratio = body.ratio or global_asset_edit_ratio(body.asset_group)
     result = await skill.multi_image_fusion(
         image_urls=image_urls,
         prompt=enhance_global_asset_edit_prompt(prompt, body.asset_group),
-        model=_optional_str(body.model) or REFERENCE_IMAGE_MODEL,
+        model=_optional_str(body.model) or IMAGE_EDIT_MODEL,
         ratio=ratio,
         size=body.size or REFERENCE_IMAGE_QUALITY,
         num_images=1,

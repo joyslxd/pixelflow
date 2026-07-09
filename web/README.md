@@ -28,7 +28,7 @@ Vite 配置会从当前 `web/` 目录读取环境文件：
 支持的变量：
 
 - `VITE_API_TARGET`：开发服务器把 `/agent` 代理到的目标。
-- `VITE_CONTENT_APP_TARGET`：开发服务器把 `/api/upload` 代理到的目标。
+- `VITE_CONTENT_APP_TARGET`：开发服务器把所有 `/api/...` 请求代理到的 content-app 目标。
 
 当前 development 默认走测试 content-app。如果要联调本机 PixelFlow 后端：
 

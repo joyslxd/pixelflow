@@ -48,8 +48,12 @@ import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/re
 import {
   applyGlobalSceneAssetImageEdit,
   DEFAULT_TARGET_DURATION_MS,
+  defaultGlobalSceneAssetRatio,
   deleteGlobalSceneAssetReference,
   globalAssetsContainAsset,
+  globalSceneAssetRatioFromMetadata,
+  inferGlobalSceneAssetRatioFromMetadata,
+  nearestSupportedAspectRatio,
   inferTargetDurationMs,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
@@ -64,6 +68,7 @@ import {
 } from "@/lib/scenePackages";
 import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
+import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -547,6 +552,9 @@ interface PendingImageEditRequest {
   intakeContext: Record<string, unknown>;
   materials: Array<Record<string, unknown>>;
   selection?: ImageEditModelSelection;
+  mode?: "direct_image_edit" | "scene_global_asset_edit" | "scene_global_asset_fusion";
+  sceneGlobalAssetReference?: SceneGlobalAssetReference;
+  storyboardMessageId?: string;
 }
 
 type PendingImageJobKind = "image_generation" | "image_regeneration" | "direct_image_edit" | "scene_global_asset_edit" | "scene_global_asset_fusion";
@@ -816,6 +824,58 @@ function isImageMaterial(item: Record<string, unknown>): boolean {
 
 function hasImageMaterial(materials: Array<Record<string, unknown>>): boolean {
   return materials.some(isImageMaterial);
+}
+
+function uniqueStringArray(value: unknown): string[] {
+  return Array.from(new Set((Array.isArray(value) ? value : []).filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)));
+}
+
+function imageModelType(config: ImageModelParamConfig): string {
+  const record = config as unknown as Record<string, unknown>;
+  return recordTextValue(record, "modelType") || recordTextValue(record, "model_type") || recordTextValue(record, "model");
+}
+
+function imageModelParamConfig(config?: ImageModelParamConfig): Record<string, unknown> {
+  const record = (config || {}) as unknown as Record<string, unknown>;
+  const raw = record.paramConfig || record.param_config || {};
+  return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+}
+
+function imageModelOptions(config?: ImageModelParamConfig): { ratios: string[]; sizes: string[] } {
+  const params = imageModelParamConfig(config);
+  const ratios = uniqueStringArray(params.aspectRatioList || params.aspect_ratio_list);
+  const sizes = uniqueStringArray(params.sizeList || params.size_list);
+  return {
+    ratios: ratios.length > 0 ? ratios : ["1:1", "9:16", "16:9"],
+    sizes: sizes.length > 0 ? sizes : ["4K"],
+  };
+}
+
+function preferredImageEditConfig(configs: ImageModelParamConfig[], preferredModel = "gpt-image-2"): ImageModelParamConfig {
+  return configs.find((config) => imageModelType(config) === preferredModel) || configs[0] || DEFAULT_IMAGE_EDIT_MODEL_CONFIG;
+}
+
+function globalSceneAssetRecord(
+  packages: PrepareScenePackagesResponse | undefined,
+  reference: SceneGlobalAssetReference,
+): Record<string, unknown> | undefined {
+  const groupRecords = packages?.global_assets?.[reference.asset_group];
+  if (!Array.isArray(groupRecords)) return undefined;
+  return groupRecords.find((record) => String(record.asset_id || record.id || "") === reference.asset_id);
+}
+
+function imageNaturalSize(url: string): Promise<{ width: number; height: number } | null> {
+  if (!url || typeof window === "undefined") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      resolve(width > 0 && height > 0 ? { width, height } : null);
+    };
+    image.onerror = () => resolve(null);
+    image.src = url;
+  });
 }
 
 function recordTextValue(record: Record<string, unknown> | undefined, key: string): string {
@@ -1800,18 +1860,6 @@ export function WorkspacePage() {
     });
   };
 
-  const shouldAutoSelectDirection = (message: ChatMessage, targetConversationId: string): boolean => {
-    if (!isVisibleConversation(targetConversationId)) return false;
-    if (processedArtifactIdsRef.current.has(processedArtifactKey(message, targetConversationId))) return false;
-    if (hasLaterDirectionSuccessor(messagesRef.current, targetConversationId, message)) return false;
-    return messagesRef.current.some(
-      (item) =>
-        item.id === message.id &&
-        messageConversationId(item, targetConversationId) === targetConversationId &&
-        item.artifact?.type === "directions",
-    );
-  };
-
   const restoreFormDraft = (draft: FlowDraft, targetConversationId: string) => {
     if (!isCreationIntent(draft.intent)) return;
     const materials = draft.materials || [];
@@ -2234,42 +2282,159 @@ export function WorkspacePage() {
     setReferencedMaterials((items) => items.filter((item) => sceneGlobalAssetMaterialKey(item) !== key));
   };
 
-  const handleEditReferencedGlobalAsset = async (
+  const sceneGlobalAssetEditRatio = async (
+    reference: SceneGlobalAssetReference,
+    videoScenePackages: PrepareScenePackagesResponse,
+    modelConfigs: ImageModelParamConfig[],
+  ): Promise<string> => {
+    const options = imageModelOptions(preferredImageEditConfig(modelConfigs));
+    const assetRecord = globalSceneAssetRecord(videoScenePackages, reference) || reference;
+    const metadataRatio = globalSceneAssetRatioFromMetadata(assetRecord, options.ratios);
+    if (metadataRatio) return metadataRatio;
+    const fallbackRatio = inferGlobalSceneAssetRatioFromMetadata(assetRecord, reference.asset_group, options.ratios);
+    const naturalSize = await imageNaturalSize(reference.source_image_url);
+    if (naturalSize) return nearestSupportedAspectRatio(naturalSize.width, naturalSize.height, options.ratios, fallbackRatio);
+    return fallbackRatio;
+  };
+
+  const pushSceneGlobalAssetEditOptions = async (
     reference: SceneGlobalAssetReference,
     prompt: string,
     targetConversationId: string,
     materials: Array<Record<string, unknown>> = [],
   ): Promise<boolean> => {
     const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
-    if (!storyboardMessage?.artifact?.videoScenePackages) {
+    const videoScenePackages = storyboardMessage?.artifact?.videoScenePackages;
+    if (!storyboardMessage?.artifact || !videoScenePackages) {
       pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再编辑。", targetConversationId);
       return true;
     }
-    if (!prompt.trim()) {
+    const cleanPrompt = prompt.trim();
+    if (!cleanPrompt) {
       pushAssistant("已引用素材，请在输入框里写清楚要怎么修改这张图片。", targetConversationId);
       return true;
     }
 
     const uploadedReferences = uploadedReferenceMaterials(materials);
-    const shouldFuseAsset = uploadedReferences.length >= 1;
+    const mode = uploadedReferences.length >= 1 ? "scene_global_asset_fusion" : "scene_global_asset_edit";
     setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("已引用场景包素材，正在读取可用图片模型和参数配置…", targetConversationId);
+    let modelConfigs: ImageModelParamConfig[] = [];
+    try {
+      modelConfigs = await api.listImageGenerateModelConfigs();
+    } catch (err) {
+      modelConfigs = [DEFAULT_IMAGE_EDIT_MODEL_CONFIG];
+      pushAssistant(`图片模型配置读取失败，已使用默认模型 image-2。${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+
+    const normalizedConfigs = modelConfigs.length > 0 ? modelConfigs : [DEFAULT_IMAGE_EDIT_MODEL_CONFIG];
+    const preferredConfig = preferredImageEditConfig(normalizedConfigs);
+    const options = imageModelOptions(preferredConfig);
+    const selection: ImageEditModelSelection = {
+      model: imageModelType(preferredConfig) || "gpt-image-2",
+      ratio: await sceneGlobalAssetEditRatio(reference, videoScenePackages, normalizedConfigs),
+      size: options.sizes[0] || "4K",
+    };
+    const request: PendingImageEditRequest = {
+      conversationId: targetConversationId,
+      prompt: cleanPrompt,
+      formValues: {
+        image_goal: reference.name,
+        image_operation: "image_edit",
+        image_model: selection.model,
+        image_size: selection.ratio,
+        image_quality: selection.size,
+      },
+      intakeContext: {
+        image_operation: "image_edit",
+        image_model: selection.model,
+        image_size: selection.ratio,
+        image_quality: selection.size,
+        scene_global_asset_reference: reference,
+      },
+      materials: uploadedReferences,
+      selection,
+      mode,
+      sceneGlobalAssetReference: reference,
+      storyboardMessageId: storyboardMessage.id,
+    };
+    pendingImageEditRequestRef.current = request;
+    pushArtifact("全局素材图片编辑参数已准备好，请确认后开始编辑。", {
+      type: "image_edit_options",
+      title: mode === "scene_global_asset_fusion" ? "全局素材融合参数确认" : "全局素材编辑参数确认",
+      description: "选择图片编辑模型、原图比例和清晰度。编辑结果成功后，需要你确认才会替换场景包素材。",
+      actionLabel: "确认",
+      intent: "image",
+      formValues: request.formValues,
+      intakeContext: request.intakeContext,
+      materials: [{ ...reference, source_image_url: reference.source_image_url, url: reference.source_image_url }, ...uploadedReferences],
+      imageEditRequest: request as unknown as Record<string, unknown>,
+      imageEditModelConfigs: normalizedConfigs,
+      imageEditRequestedParams: {
+        ratio: selection.ratio,
+        size: selection.size,
+      },
+    }, targetConversationId);
+    if (targetConversationId) {
+      void api
+        .updateConversation(targetConversationId, {
+          last_phase: "scene_global_asset_edit_model_pending",
+          context: {
+            ...makeSnapshot(),
+            pendingImageEditRequest: request,
+            pending_image_edit_request: request,
+            scene_global_asset_reference: reference,
+            scene_global_asset_edit_prompt: cleanPrompt,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
+    }
+    return true;
+  };
+
+  const handleEditReferencedGlobalAsset = async (
+    reference: SceneGlobalAssetReference,
+    prompt: string,
+    targetConversationId: string,
+    materials: Array<Record<string, unknown>> = [],
+  ): Promise<boolean> => {
+    return pushSceneGlobalAssetEditOptions(reference, prompt, targetConversationId, materials);
+  };
+
+  const executeSceneGlobalAssetEdit = async (request: PendingImageEditRequest): Promise<void> => {
+    const targetConversationId = request.conversationId;
+    const reference = request.sceneGlobalAssetReference;
+    if (!reference) return;
+    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId, [request.storyboardMessageId || ""]);
+    if (!storyboardMessage?.artifact?.videoScenePackages) {
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再编辑。", targetConversationId);
+      return;
+    }
+    const uploadedReferences = uploadedReferenceMaterials(request.materials);
+    const shouldFuseAsset = request.mode === "scene_global_asset_fusion" || uploadedReferences.length >= 1;
     setBusyForConversation(targetConversationId, true);
     pushAssistant(
       shouldFuseAsset
-        ? `正在融合引用素材和 ${uploadedReferences.length} 张上传图片，更新「${reference.name}」...`
-        : `正在调用图片编辑接口修改「${reference.name}」…`,
+        ? `正在融合引用素材和 ${uploadedReferences.length} 张上传图片，生成「${reference.name}」的候选新图…`
+        : `正在调用图片编辑接口生成「${reference.name}」的候选新图…`,
       targetConversationId,
     );
     try {
-      const request: ImageAssetEditJobRequest | ImageAssetFusionJobRequest = {
+      const jobRequest: ImageAssetEditJobRequest | ImageAssetFusionJobRequest = {
         asset_id: reference.asset_id,
         asset_name: reference.name,
         asset_group: reference.asset_group,
         source_image_url: reference.source_image_url,
-        prompt,
+        prompt: request.prompt,
         materials: uploadedReferences,
+        ratio: request.selection?.ratio,
+        size: request.selection?.size,
+        model: request.selection?.model,
       };
-      const started = shouldFuseAsset ? await api.startImageAssetFusionJob(request) : await api.startImageAssetEditJob(request);
+      const started = shouldFuseAsset ? await api.startImageAssetFusionJob(jobRequest) : await api.startImageAssetEditJob(jobRequest);
       const pendingImageJob: PendingImageJob = {
         job_id: started.job_id,
         conversation_id: targetConversationId,
@@ -2277,23 +2442,25 @@ export function WorkspacePage() {
         kind: shouldFuseAsset ? "scene_global_asset_fusion" : "scene_global_asset_edit",
         job_api: shouldFuseAsset ? "fuse_asset" : "edit_asset",
         started_at: new Date().toISOString(),
-        request,
+        request: jobRequest,
         artifact: storyboardMessage.artifact,
         sceneGlobalAssetReference: reference,
         storyboard_message_id: storyboardMessage.id,
       };
       await persistPendingImageJob(pendingImageJob, targetConversationId, shouldFuseAsset ? "scene_global_asset_fusion_running" : "scene_global_asset_edit_running", {
         scene_global_asset_reference: reference,
-        scene_global_asset_edit_prompt: prompt,
+        scene_global_asset_edit_prompt: request.prompt,
         scene_global_asset_fusion: shouldFuseAsset,
+        pendingImageEditRequest: null,
+        pending_image_edit_request: null,
       });
+      pendingImageEditRequestRef.current = null;
       await resumePendingImageJob(pendingImageJob);
     } catch (err) {
       pushAssistant(`全局素材图片编辑失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
-    return true;
   };
 
   const handleDeleteReferencedGlobalAsset = async (
@@ -2379,7 +2546,7 @@ export function WorkspacePage() {
       modelConfigs = await api.listImageGenerateModelConfigs();
     } catch (err) {
       modelConfigs = [DEFAULT_IMAGE_EDIT_MODEL_CONFIG];
-      pushAssistant(`图片模型配置读取失败，已使用默认模型 gpt-image-2。${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      pushAssistant(`图片模型配置读取失败，已使用默认模型 image-2。${err instanceof Error ? err.message : String(err)}`, targetConversationId);
     } finally {
       setBusyForConversation(targetConversationId, false);
     }
@@ -2552,9 +2719,16 @@ export function WorkspacePage() {
       intakeContext: (storedRequest.intakeContext || artifact.intakeContext || {}) as Record<string, unknown>,
       materials: (storedRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
       selection,
+      mode: storedRequest.mode,
+      sceneGlobalAssetReference: storedRequest.sceneGlobalAssetReference as SceneGlobalAssetReference | undefined,
+      storyboardMessageId: typeof storedRequest.storyboardMessageId === "string" ? storedRequest.storyboardMessageId : undefined,
     };
     recordImageEditConfirmedSelection(msg.id, targetConversationId, selection);
     pendingImageEditRequestRef.current = null;
+    if (request.mode === "scene_global_asset_edit" || request.mode === "scene_global_asset_fusion") {
+      await executeSceneGlobalAssetEdit(request);
+      return;
+    }
     await executeDirectImageEdit(request);
   };
 
@@ -2568,9 +2742,8 @@ export function WorkspacePage() {
       intakeContext?: Record<string, unknown>;
     },
     targetConversationId = conversationIdRef.current,
-    options: { autoConfirm?: boolean } = {},
   ) => {
-    const message = pushArtifact(`已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未选择将采用推荐方向。`, {
+    return pushArtifact("已根据表单生成 3 个创意方向，请选择一个进入 plan.md 策划。", {
       type: "directions",
       title: "创意方向",
       description: `${directions.length} 个方向，第一项为推荐方向`,
@@ -2582,14 +2755,6 @@ export function WorkspacePage() {
       materials: context.materials || [],
       coreMessage: context.coreMessage,
     }, targetConversationId);
-    const recommended = directions.find((direction) => direction.recommended) || directions[0];
-    if ((options.autoConfirm ?? true) && recommended) {
-      window.setTimeout(() => {
-        if (!shouldAutoSelectDirection(message, targetConversationId)) return;
-        void handleSelectDirection(message, recommended, true);
-      }, AUTO_CONFIRM_TIMEOUT_MS);
-    }
-    return message;
   };
 
   const pushPlanArtifact = (
@@ -2917,7 +3082,7 @@ export function WorkspacePage() {
       form: context.form,
       creativeDirections: directionResult.creative_directions,
     });
-    if (!hasDirectionsArtifactForDraft(messagesRef.current, targetConversationId, draft)) {
+    if (context.revisionFeedback || !hasDirectionsArtifactForDraft(messagesRef.current, targetConversationId, draft)) {
       pushDirectionsArtifact(directionResult.creative_directions, {
         intent: context.intent,
         formValues: context.formValues,
@@ -3495,35 +3660,36 @@ export function WorkspacePage() {
       return;
     }
 
-    const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
-      targetConversationId,
-      {
-        assetId: reference.asset_id,
-        assetGroup: reference.asset_group,
-        editedImageUrl: nextUrl,
-      },
-      storyboardMessage?.id,
-      baseVideoScenePackages,
+    const originalImageUrl = String(
+      (reference as Record<string, unknown>).original_image_url ||
+        (reference as Record<string, unknown>).originalImageUrl ||
+        reference.source_image_url,
     );
-    if (!updatedPackages) {
-      releaseArtifactAction(processedKey);
-      pushAssistant("素材图片编辑完成，但未能写回场景包，请刷新后重试。", targetConversationId);
-      await clearPendingImageJob(targetConversationId, "scene_global_asset_edit_failed", {
-        scene_global_asset_edit: editResult,
-      }).catch(() => {});
-      return;
-    }
-
-    persistScenePackageSnapshot(targetConversationId, updatedPackages, isFusion ? "scene_global_asset_fused" : "scene_global_asset_edited", {
-      scene_global_asset_edit: editResult,
-      scene_global_asset_fusion: isFusion ? editResult : undefined,
-    });
-
-    const updatedScenePackageMessageId = uid();
-    pushArtifact("全局素材图片已编辑完成，并已替换到当前场景包中。", {
+    const review: SceneGlobalAssetEditReview = {
+      asset_id: reference.asset_id,
+      asset_group: reference.asset_group,
+      asset_name: reference.name,
+      original_image_url: originalImageUrl,
+      source_image_url: reference.source_image_url,
+      edited_image_url: nextUrl,
+      source_message_id: storyboardMessage?.id || pendingImageJob.source_message_id,
+      storyboard_message_id: storyboardMessage?.id || pendingImageJob.storyboard_message_id,
+      videoScenePackages: baseVideoScenePackages,
+      originalVideoScenePackages: baseArtifact.originalVideoScenePackages || baseVideoScenePackages,
+      editResult,
+      request: pendingImageJob.request as unknown as Record<string, unknown>,
+      selection: {
+        model: String((pendingImageJob.request as ImageAssetEditJobRequest).model || "gpt-image-2"),
+        ratio: String((pendingImageJob.request as ImageAssetEditJobRequest).ratio || defaultGlobalSceneAssetRatio(reference.asset_group)),
+        size: String((pendingImageJob.request as ImageAssetEditJobRequest).size || "4K"),
+      },
+      prompt: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+      is_fusion: isFusion,
+    };
+    pushArtifact("全局素材候选图已生成，请确认是否替换到当前场景包。", {
       type: "image_result",
-      title: "全局素材图片编辑结果",
-      description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
+      title: isFusion ? "全局素材图片融合结果" : "全局素材图片编辑结果",
+      description: `候选新图已生成。确认后才会替换「${reference.name}」并同步更新分镜引用。`,
       actionLabel: "查看",
       imageResult: {
         ok: true,
@@ -3537,35 +3703,27 @@ export function WorkspacePage() {
         raw: editResult.raw,
       },
       intent: "image",
-      materials: [{ ...reference, url: nextUrl, source_image_url: nextUrl, storyboard_message_id: updatedScenePackageMessageId }],
-      imageRevisionFeedback: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+      materials: [{
+        ...reference,
+        url: nextUrl,
+        source_image_url: nextUrl,
+        original_image_url: originalImageUrl,
+        storyboard_message_id: review.storyboard_message_id,
+      }],
+      imageRevisionFeedback: review.prompt,
+      imageEditConfirmedSelection: review.selection,
+      sceneGlobalAssetEditReview: review,
+      reviewRequestedAt: new Date().toISOString(),
     }, targetConversationId);
-    const updatedScenePackageMessage = pushArtifact("已把编辑后的图片同步回视频场景包，请继续确认或生成分镜视频。", {
-      type: "video_scene_packages",
-      title: "视频场景包",
-      description: `已更新「${reference.name}」，后续生成场景视频会使用新图。`,
-      actionLabel: "确认",
-      videoScenePackages: updatedPackages,
-      originalVideoScenePackages: baseArtifact.originalVideoScenePackages || baseVideoScenePackages,
-      sceneAssetFailures: baseArtifact.sceneAssetFailures || [],
-      intent: "video",
-      formValues: baseArtifact.formValues,
-      intakeContext: baseArtifact.intakeContext,
-      materials: baseArtifact.materials || [],
-      selectedDirection: baseArtifact.selectedDirection,
-      plan: baseArtifact.plan,
-    }, targetConversationId, updatedScenePackageMessageId);
-    if (isVisibleConversation(targetConversationId)) {
-      setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-      setCanvasOpen(true);
-    }
 
-    await clearPendingImageJob(targetConversationId, isFusion ? "scene_global_asset_fused" : "scene_global_asset_edited", {
-      global_assets: updatedPackages.global_assets,
-      scene_packages: updatedPackages.scene_packages,
+    await clearPendingImageJob(targetConversationId, isFusion ? "scene_global_asset_fusion_review_pending" : "scene_global_asset_edit_review_pending", {
       scene_global_asset_edit: editResult,
       scene_global_asset_fusion: isFusion ? editResult : undefined,
+      scene_global_asset_edit_review: review,
+      pendingImageEditRequest: null,
+      pending_image_edit_request: null,
     }).catch(() => {});
+    return;
   };
 
   const handleCompletedSceneAssetJob = async (
@@ -4711,7 +4869,7 @@ export function WorkspacePage() {
         materials: flowDraft.materials || [],
         coreMessage: flowDraft.coreMessage || "",
         intakeContext: flowDraft.intakeContext,
-      }, detail.conversation.conversation_id, { autoConfirm: false });
+      }, detail.conversation.conversation_id);
     } else if (
       flowDraft?.stage === "form_pending" &&
       !hasPassedRequirementCollection(
@@ -5847,15 +6005,65 @@ export function WorkspacePage() {
       .finally(() => releaseArtifactAction(processedKey));
   };
 
-  const handleSelectDirection = async (msg: ChatMessage, direction: CreativeDirectionResponse, auto = false) => {
+  const handleRegenerateDirections = async (msg: ChatMessage) => {
+    const artifact = msg.artifact;
+    if (artifact?.type !== "directions" || !isCreationIntent(artifact.intent) || !artifact.formValues) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (hasLaterDirectionSuccessor(messagesRef.current, targetConversationId, msg)) return;
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    const previousDirections = (artifact.directions || []).map((direction) => ({
+      title: direction.title,
+      description: direction.description,
+      tags: direction.tags,
+      data: direction.data,
+    }));
+    const regenerationFeedback = "用户对上一轮 3 个创意方向都不满意，请避开上一轮方向，生成新的差异化方向。";
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant("已收到不满意反馈，正在重新生成 3 个创意方向…", targetConversationId);
+    try {
+      await startDirectionJob(
+        targetConversationId,
+        {
+          intent: artifact.intent,
+          values: artifact.formValues,
+          materials: artifact.materials || [],
+          product_creative_profile: {
+            core_message: artifact.coreMessage || pendingCore,
+            regenerate: true,
+            revision_feedback: regenerationFeedback,
+            regeneration_feedback: regenerationFeedback,
+            previous_creative_directions: previousDirections,
+          },
+          intake_context: artifact.intakeContext,
+        },
+        {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          materials: artifact.materials || [],
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+          revisionFeedback: regenerationFeedback,
+        },
+        "directions_running",
+        msg.id,
+      );
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(`重新生成创意方向失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleSelectDirection = async (msg: ChatMessage, direction: CreativeDirectionResponse) => {
     if (!isCreationIntent(msg.artifact?.intent) || !msg.artifact?.formValues) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    if (auto && !shouldAutoSelectDirection(msg, targetConversationId)) return;
     if (hasLaterDirectionSuccessor(messagesRef.current, targetConversationId, msg)) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(auto ? `${AUTO_CONFIRM_TIMEOUT_SECONDS} 秒未选择，已默认采用推荐方向「${direction.title}」，正在生成 plan.md…` : `已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
+    pushAssistant(`已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
     try {
       const plan = await api.createPlanMarkdown({
         intent: msg.artifact.intent,
@@ -5994,7 +6202,7 @@ export function WorkspacePage() {
       selectedDirection.title,
       selectedDirection.description,
     ]);
-    pushAssistant("视频 plan.md 已同意，正在准备可编辑场景包…", targetConversationId);
+    pushAssistant("视频plan.md已同意,正在准备可编辑视频资产", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
         form_values: formValues,
@@ -6183,6 +6391,68 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     imageRevisionArtifactRef.current = null;
+    const sceneAssetReview = msg.artifact.sceneGlobalAssetEditReview;
+    if (sceneAssetReview) {
+      const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
+        targetConversationId,
+        {
+          assetId: sceneAssetReview.asset_id,
+          assetGroup: sceneAssetReview.asset_group,
+          editedImageUrl: sceneAssetReview.edited_image_url,
+        },
+        sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
+        sceneAssetReview.videoScenePackages,
+      );
+      if (!updatedPackages) {
+        releaseArtifactAction(processedKey);
+        pushAssistant("素材候选图已确认，但没有找到可写回的场景包。请从最新场景包重新引用素材后再试。", targetConversationId);
+        return;
+      }
+      const storyboardMessageId = sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id;
+      const sourceScenePackageArtifact = messagesRef.current.find(
+        (message) =>
+          message.id === storyboardMessageId &&
+          messageConversationId(message, targetConversationId) === targetConversationId &&
+          message.artifact?.type === "video_scene_packages" &&
+          Boolean(message.artifact.videoScenePackages),
+      )?.artifact;
+      markImageResultAccepted(msg.id, targetConversationId);
+      const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
+        type: "video_scene_packages",
+        title: sourceScenePackageArtifact?.title || "视频场景包",
+        description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
+        actionLabel: "确认",
+        videoScenePackages: updatedPackages,
+        originalVideoScenePackages:
+          sourceScenePackageArtifact?.originalVideoScenePackages ||
+          sceneAssetReview.originalVideoScenePackages ||
+          sceneAssetReview.videoScenePackages,
+        sceneAssetFailures: sourceScenePackageArtifact?.sceneAssetFailures || [],
+        intent: "video",
+        formValues: sourceScenePackageArtifact?.formValues,
+        intakeContext: sourceScenePackageArtifact?.intakeContext,
+        materials: sourceScenePackageArtifact?.materials || [],
+        selectedDirection: sourceScenePackageArtifact?.selectedDirection,
+        plan: sourceScenePackageArtifact?.plan,
+        videoScenePackageEditedSceneIds: [],
+      }, targetConversationId);
+      persistScenePackageSnapshot(
+        targetConversationId,
+        updatedPackages,
+        sceneAssetReview.is_fusion ? "scene_global_asset_fused" : "scene_global_asset_edited",
+        {
+          scene_global_asset_edit_review: sceneAssetReview,
+          scene_global_asset_edit: sceneAssetReview.editResult,
+          scene_global_asset_fusion: sceneAssetReview.is_fusion ? sceneAssetReview.editResult : undefined,
+        },
+      );
+      if (isVisibleConversation(targetConversationId)) {
+        setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
+        setCanvasOpen(true);
+      }
+      pushAssistant(`已确认并替换「${sceneAssetReview.asset_name || sceneAssetReview.asset_id}」，场景包里的分镜引用也已同步更新。`, targetConversationId);
+      return;
+    }
     markImageResultAccepted(msg.id, targetConversationId);
     pushAssistant(auto ? timeoutReviewMessage(AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认图片满意，流程结束。", targetConversationId);
     if (targetConversationId) {
@@ -6198,14 +6468,38 @@ export function WorkspacePage() {
   function handleReviseImageResult(msg: ChatMessage) {
     if (!msg.artifact?.imageResult || !canAcceptImageResult(msg.artifact.imageResult)) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    if (isReviewExpired(msg.artifact.reviewExpiresAt)) {
+    const sceneAssetReview = msg.artifact.sceneGlobalAssetEditReview;
+    if (!sceneAssetReview && isReviewExpired(msg.artifact.reviewExpiresAt)) {
       void handleAcceptImageResult(msg, true);
       return;
     }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    imageRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
-    const sceneGlobalAssetReference = sceneGlobalAssetReferenceFromMaterials(msg.artifact.materials || []);
+    const sceneGlobalAssetReference = sceneAssetReview
+      ? {
+          source: "scene_global_asset" as const,
+          asset_id: sceneAssetReview.asset_id,
+          asset_group: sceneAssetReview.asset_group,
+          scene_global_asset_action: "edit" as const,
+          name: sceneAssetReview.asset_name || sceneAssetReview.asset_id,
+          source_image_url: sceneAssetReview.edited_image_url,
+          original_image_url: sceneAssetReview.original_image_url,
+          url: sceneAssetReview.edited_image_url,
+          type: "image" as const,
+          filename: `${sceneAssetReview.asset_id}.png`,
+          storyboard_message_id: sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
+        }
+      : sceneGlobalAssetReferenceFromMaterials(msg.artifact.materials || []);
+    const revisionArtifact = sceneGlobalAssetReference
+      ? {
+          ...msg.artifact,
+          materials: [
+            sceneGlobalAssetReference,
+            ...(msg.artifact.materials || []).filter((material) => material.source !== "scene_global_asset"),
+          ],
+        }
+      : msg.artifact;
+    imageRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: revisionArtifact };
     pushAssistant(
       sceneGlobalAssetReference
         ? `请在输入框填写「${sceneGlobalAssetReference.name}」的图片修改意见，我会继续编辑这张全局素材并替换回场景包。`
@@ -6540,6 +6834,7 @@ export function WorkspacePage() {
         composerPrefillRequest={composerPrefillRequest}
         busy={busy || dialogOpen}
         onSelectDirection={handleSelectDirection}
+        onRegenerateDirections={handleRegenerateDirections}
         onApprovePlan={handleApprovePlan}
         onRevisePlan={handleRevisePlan}
         onGenerateImage={handleGenerateImage}

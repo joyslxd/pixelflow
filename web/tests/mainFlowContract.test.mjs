@@ -8,6 +8,7 @@ const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/compo
 const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPanel.tsx"), "utf8");
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
+const viteConfigSource = fs.readFileSync(path.resolve("vite.config.ts"), "utf8");
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -81,11 +82,35 @@ function resumePendingImageJobSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handleCompletedIntakeJobSource() {
+  const start = workspaceSource.indexOf("const handleCompletedIntakeJob = async");
+  const end = workspaceSource.indexOf("const resumePendingIntakeJob = async", start);
+  assert.notEqual(start, -1, "handleCompletedIntakeJob must exist");
+  assert.notEqual(end, -1, "resumePendingIntakeJob must follow intake completion");
+  return workspaceSource.slice(start, end);
+}
+
 function handleEditReferencedGlobalAssetSource() {
   const start = workspaceSource.indexOf("const handleEditReferencedGlobalAsset = async");
   const end = workspaceSource.indexOf("const handleDeleteReferencedGlobalAsset = async", start);
   assert.notEqual(start, -1, "handleEditReferencedGlobalAsset must exist");
   assert.notEqual(end, -1, "handleDeleteReferencedGlobalAsset must follow global asset edit");
+  return workspaceSource.slice(start, end);
+}
+
+function pushSceneGlobalAssetEditOptionsSource() {
+  const start = workspaceSource.indexOf("const pushSceneGlobalAssetEditOptions = async");
+  const end = workspaceSource.indexOf("const handleEditReferencedGlobalAsset = async", start);
+  assert.notEqual(start, -1, "pushSceneGlobalAssetEditOptions must exist");
+  assert.notEqual(end, -1, "handleEditReferencedGlobalAsset must follow global asset edit options");
+  return workspaceSource.slice(start, end);
+}
+
+function executeSceneGlobalAssetEditSource() {
+  const start = workspaceSource.indexOf("const executeSceneGlobalAssetEdit = async");
+  const end = workspaceSource.indexOf("const handleDeleteReferencedGlobalAsset = async", start);
+  assert.notEqual(start, -1, "executeSceneGlobalAssetEdit must exist");
+  assert.notEqual(end, -1, "handleDeleteReferencedGlobalAsset must follow global asset edit execution");
   return workspaceSource.slice(start, end);
 }
 
@@ -102,6 +127,14 @@ function handleCompletedImageAssetEditJobSource() {
   const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
   assert.notEqual(start, -1, "handleCompletedImageAssetEditJob must exist");
   assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow image asset edit completion");
+  return workspaceSource.slice(start, end);
+}
+
+function handleAcceptImageResultSource() {
+  const start = workspaceSource.indexOf("async function handleAcceptImageResult");
+  const end = workspaceSource.indexOf("function handleReviseImageResult", start);
+  assert.notEqual(start, -1, "handleAcceptImageResult must exist");
+  assert.notEqual(end, -1, "handleReviseImageResult must follow image result acceptance");
   return workspaceSource.slice(start, end);
 }
 
@@ -235,16 +268,17 @@ test("restoring or creating a conversation clears stale pending dialog attachmen
 
 test("image edit intake bypasses the normal directions and plan flow", () => {
   const source = handleSendSource();
+  const intakeCompletionSource = handleCompletedIntakeJobSource();
   assert.match(workspaceSource, /pendingImageEditRequestRef/, "Workspace must store an image-edit request while waiting for upload");
   assert.match(workspaceSource, /function looksLikeImageEditPrompt/, "Workspace must detect natural image-edit prompts");
   assert.match(workspaceSource, /function isImageEditIntake/, "Workspace must detect image-edit intake metadata");
   assert.match(workspaceSource, /const executeDirectImageEdit = async/, "Workspace must have a direct image-edit executor");
   assert.match(source, /if \(pendingImageEditRequestRef\.current\?\.conversationId === activeConversation\)/, "next user upload must resume pending image edit");
   assert.match(source, /looksLikeImageEditPrompt\(text\)[\s\S]*pendingImageEditRequestRef\.current = null/, "a fresh image-edit prompt must reset stale pending image-edit state");
-  assert.match(source, /if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)/, "image-edit intake must branch before the generic image form");
-  assert.match(source, /请上传需要编辑的图片/, "missing source image should prompt the user to upload");
-  assert.match(source, /showImageEditOptions/, "image-edit branch must show model options before generation");
-  assert.equal(/if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)[\s\S]*executeDirectImageEdit/.test(source), false, "image-edit intake must not generate before model confirmation");
+  assert.match(intakeCompletionSource, /if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)/, "image-edit intake must branch before the generic image form");
+  assert.match(intakeCompletionSource, /请上传需要编辑的图片/, "missing source image should prompt the user to upload");
+  assert.match(intakeCompletionSource, /showImageEditOptions/, "image-edit branch must show model options before generation");
+  assert.equal(/if \(intake\.intent === "image" && isImageEditIntake\(intake, text\)\)[\s\S]*executeDirectImageEdit/.test(intakeCompletionSource), false, "image-edit intake must not generate before model confirmation");
 });
 
 test("image edit options load content-app model configs and submit selected model params", () => {
@@ -260,16 +294,19 @@ test("image edit options load content-app model configs and submit selected mode
   const executeSource = workspaceSource.slice(executeStart, executeEnd);
   assert.match(apiSource, /listImageGenerateModelConfigs/, "api client must expose content-app model config lookup");
   assert.equal(apiSource.includes("/api/modelParamConfig/listByCategory/image_generate"), true, "model config lookup must call content-app image_generate category");
+  assert.match(viteConfigSource, /\^\/api\(\/\|\$\)/, "Vite dev server must proxy all content-app /api calls");
   assert.match(optionsSource, /api\.listImageGenerateModelConfigs/, "image-edit options step must load live model configs");
   assert.match(optionsSource, /type:\s*"image_edit_options"/, "image-edit options must be rendered as a chat artifact");
-  assert.match(optionsSource, /gpt-image-2/, "image-edit options should prefer gpt-image-2 by default");
+  assert.match(workspaceSource, /modelType:\s*"gpt-image-2"/, "image-edit options should keep gpt-image-2 as the request model by default");
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
   assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 60_000/, "auto-confirm timeout must be 60 seconds");
   assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 60 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
+  assert.match(messageBubbleSource, /model === "gpt-image-2" \? "image-2"/, "MessageBubble must show image-2 as the gpt-image-2 display label");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
+  assert.match(messageBubbleSource, /max-h-\[420px\][\s\S]*object-contain/, "image result previews must preserve the generated image aspect ratio");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
   assert.match(messageBubbleSource, /尺寸/, "image-edit options card must show ratio choices");
   assert.match(messageBubbleSource, /imageEditUnsupportedReason/, "image-edit options must detect unsupported requested params");
@@ -345,9 +382,9 @@ test("closing the requirement dialog cancels and terminates the pending flow", (
 test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
   assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
-  assert.match(chatPanelSource, /isLatestActionableFlawAnalysis/, "ChatPanel must keep the latest QC result card actionable after analysis");
+  assert.match(chatPanelSource, /isLatestActionableQualityReview/, "ChatPanel must keep the latest QC result card actionable after analysis");
   assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");
-  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableFlawAnalysis &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result and recoverable failure cards");
+  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableQualityReview &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result and recoverable failure cards");
   assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
   assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");
 });
@@ -363,10 +400,11 @@ test("active assistant progress messages render a loading indicator", () => {
   assert.match(messageBubbleSource, /showProgressLoading[\s\S]*msg\.time/, "loading indicator should render above the message time");
   assert.match(messageBubbleSource, /animate-spin/, "loading indicator should spin");
   assert.match(messageBubbleSource, /conic-gradient/, "loading indicator should use a gradient ring");
-  assert.match(workspaceSource, /已默认采用推荐方向[\s\S]*正在生成 plan\.md/, "auto-selected directions must still show plan generation progress");
+  assert.doesNotMatch(workspaceSource, /已默认采用推荐方向[\s\S]*正在生成 plan\.md/, "directions must not auto-select a recommended option");
+  assert.match(messageBubbleSource, /重新生成创意方向/, "directions card should expose manual regeneration instead of auto-selection");
   assert.match(chatPanelSource, /采集 Agent 判断这是\(\?:图片\|视频\)生成需求/, "image and video intake confirmation should keep loading active before the next assistant result");
   assert.match(messageBubbleSource, /采集 Agent 判断这是\(\?:图片\|视频\)生成需求[\s\S]*计划文件生成中[\s\S]*采集 Agent\|理解\|表单/, "image and video intake confirmation loading should show plan file generation before generic intake text");
-  assert.match(messageBubbleSource, /可编辑场景包\|场景包[\s\S]*视频场景包生成中[\s\S]*plan\\\.md\|计划文件\|创作方案/, "scene package progress should be labeled before generic plan.md progress");
+  assert.match(messageBubbleSource, /可编辑视频资产\|可编辑场景包\|场景包[\s\S]*可编辑视频资产生成中\.\.\.[\s\S]*plan\\\.md\|计划文件\|创作方案/, "scene package progress should be labeled before generic plan.md progress");
   assert.match(messageBubbleSource, /计划文件/, "plan.md progress should be labeled as plan file generation");
 });
 
@@ -385,9 +423,9 @@ test("ppt page regenerate updates the same card and hides regenerate while a pag
   assert.notEqual(start, -1, "handleRegeneratePptImage must exist");
   assert.notEqual(end, -1, "handleGeneratePptFile must follow handleRegeneratePptImage");
   const source = workspaceSource.slice(start, end);
-  assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*runningImages\)/, "regenerate must switch the target page to running inside the same card");
+  assert.match(source, /updatePptImagesArtifactInMessage\(msg\.id,\s*targetConversationId,\s*runningImages,\s*artifact\)/, "regenerate must switch the target page to running inside the same card");
   assert.match(source, /image_message_id:\s*msg\.id/, "regenerate job must remember the target card id");
-  assert.match(workspaceSource, /handleCompletedPptImageRegenerationJob[\s\S]*updatePptImagesArtifactInMessage\(imageMessageId,\s*targetConversationId,\s*nextImages\)/, "regenerate result must update the same card");
+  assert.match(workspaceSource, /handleCompletedPptImageRegenerationJob[\s\S]*updatePptImagesArtifactInMessage\(imageMessageId,\s*targetConversationId,\s*nextImages,\s*sourceArtifact\)/, "regenerate result must update the same card");
   assert.equal(source.includes("pushPptImagesArtifact"), false, "regenerate must not append a new PPT image grid");
   assert.match(messageBubbleSource, /page\.status !== "running"/, "running PPT pages must hide the regenerate button");
   assert.match(messageBubbleSource, /loadingDots/, "PPT loading text should use animated dots");
@@ -460,25 +498,41 @@ test("restored conversations resume existing image jobs without starting duplica
 
 test("scene global asset image editing uses recoverable image edit jobs", () => {
   const source = handleEditReferencedGlobalAssetSource();
+  const optionsSource = pushSceneGlobalAssetEditOptionsSource();
+  const executeSource = executeSceneGlobalAssetEditSource();
   const lookupSource = findStoryboardMessageForGlobalAssetSource();
   const completionSource = handleCompletedImageAssetEditJobSource();
-  const startIndex = source.indexOf("api.startImageAssetEditJob(request)");
-  const fusionStartIndex = source.indexOf("api.startImageAssetFusionJob(request)");
-  const persistIndex = source.indexOf("await persistPendingImageJob(pendingImageJob");
-  const pollIndex = source.indexOf("await resumePendingImageJob(pendingImageJob)");
-  assert.notEqual(startIndex, -1, "global asset edit must start an image edit job explicitly");
-  assert.notEqual(fusionStartIndex, -1, "global asset fusion must start a separate fusion job when uploaded images exist");
+  const acceptSource = handleAcceptImageResultSource();
+  const startIndex = executeSource.indexOf("api.startImageAssetEditJob(jobRequest)");
+  const fusionStartIndex = executeSource.indexOf("api.startImageAssetFusionJob(jobRequest)");
+  const persistIndex = executeSource.indexOf("await persistPendingImageJob(pendingImageJob");
+  const pollIndex = executeSource.indexOf("await resumePendingImageJob(pendingImageJob)");
+  assert.match(source, /pushSceneGlobalAssetEditOptions/, "referenced global asset edits must open the model options step first");
+  assert.match(optionsSource, /api\.listImageGenerateModelConfigs/, "global asset edit options must load live content-app model configs");
+  assert.match(optionsSource, /type:\s*"image_edit_options"/, "global asset edit must render the shared image edit options card");
+  assert.match(optionsSource, /gpt-image-2/, "global asset edit options should default to gpt-image-2");
+  assert.match(optionsSource, /sceneGlobalAssetEditRatio/, "global asset edit options must infer the source asset ratio");
+  assert.notEqual(startIndex, -1, "confirmed global asset edit must start an image edit job explicitly");
+  assert.notEqual(fusionStartIndex, -1, "confirmed global asset fusion must start a separate fusion job when uploaded images exist");
   assert.notEqual(persistIndex, -1, "global asset edit must persist the job id");
   assert.notEqual(pollIndex, -1, "global asset edit must poll the persisted job");
   assert.ok(startIndex < persistIndex && fusionStartIndex < persistIndex && persistIndex < pollIndex, "global asset job id must be persisted before polling starts");
-  assert.match(source, /kind:\s*shouldFuseAsset \? "scene_global_asset_fusion" : "scene_global_asset_edit"/, "uploaded image materials must route to the fusion pending job kind");
-  assert.match(source, /job_api:\s*shouldFuseAsset \? "fuse_asset" : "edit_asset"/, "uploaded image materials must route to the fusion job API");
-  assert.match(source, /materials:\s*uploadedReferences/, "global asset jobs must pass uploaded image materials to the backend");
-  assert.equal(source.includes("api.editImageAsset"), false, "global asset edit must not synchronously wait on image editing");
+  assert.match(executeSource, /kind:\s*shouldFuseAsset \? "scene_global_asset_fusion" : "scene_global_asset_edit"/, "uploaded image materials must route to the fusion pending job kind");
+  assert.match(executeSource, /job_api:\s*shouldFuseAsset \? "fuse_asset" : "edit_asset"/, "uploaded image materials must route to the fusion job API");
+  assert.match(executeSource, /materials:\s*uploadedReferences/, "global asset jobs must pass uploaded image materials to the backend");
+  assert.match(executeSource, /model:\s*request\.selection\?\.model/, "global asset jobs must pass the confirmed model");
+  assert.match(executeSource, /ratio:\s*request\.selection\?\.ratio/, "global asset jobs must pass the confirmed ratio");
+  assert.match(executeSource, /size:\s*request\.selection\?\.size/, "global asset jobs must pass the confirmed quality");
+  assert.equal(executeSource.includes("api.editImageAsset"), false, "global asset edit must not synchronously wait on image editing");
   assert.match(lookupSource, /const currentMessages = messagesRef\.current/, "global asset lookup must use the latest restored message ref");
   assert.match(lookupSource, /preferredMessageIds/, "global asset lookup must prefer persisted source message ids");
   assert.match(completionSource, /pendingImageJob\.artifact\?\.videoScenePackages/, "completion must fall back to the persisted job artifact");
-  assert.match(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "global asset edit completion must sync edited images back into all scene package cards");
+  assert.match(completionSource, /sceneGlobalAssetEditReview/, "completion must create a review payload instead of replacing immediately");
+  assert.match(completionSource, /scene_global_asset_edit_review/, "completion must persist the pending review payload");
+  assert.doesNotMatch(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "completion must not replace scene package assets before user confirmation");
+  assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*syncGlobalSceneAssetEditAcrossConversation/, "accepting the review must sync edited images back into scene package cards");
+  assert.match(acceptSource, /pushArtifact\("素材已替换，已推送更新后的场景包[\s\S]*type:\s*"video_scene_packages"/, "accepting the review must push a fresh scene package card after replacement");
+  assert.match(acceptSource, /setSelectedStoryboardMessageId\(updatedScenePackageMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
   assert.match(completionSource, /baseVideoScenePackages/, "completion must be able to patch the fallback scene package snapshot");
 });
 
