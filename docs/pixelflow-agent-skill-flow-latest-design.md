@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-07-05
+更新时间：2026-07-10
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -25,7 +25,7 @@ flowchart LR
   Flow --> Store["Task/Conversation Store<br/>Memory / SQL / MySQL"]
   Flow --> PM["PowerMem HTTP sidecar<br/>preference / brand / skill / experience"]
   Flow --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
-  Flow --> Skill["Skill Protocol<br/>Image / Video / Decompose / Flaw / SmartPPT"]
+  Flow --> Skill["Skill Protocol<br/>Image / Video / Seedance Prompt / Decompose / QC / SmartPPT"]
   Skill --> Borgrise["content-app/Borgrise API"]
   FE --> Upload["content-app /api/upload<br/>附件上传"]
 ```
@@ -53,7 +53,7 @@ flowchart TD
   D --> E{"intent"}
   E -->|"video_analysis"| VA["视频分析 Skill"]
   E -->|"image"| IF["图片需求表单"]
-  E -->|"video"| VF["视频需求表单"]
+  E -->|"video"| VF["视频需求清洗表单<br/>时长 / 画幅 / 视频模型 / 图片模型 / 用途 / 风格"]
   E -->|"ppt"| PF["PPT需求表单<br/>主题 / 风格 / Word Excel PDF 附件"]
   IF --> IV["表单校验 + 垂类画像"]
   VF --> IV
@@ -66,15 +66,17 @@ flowchart TD
   IV --> DIR["生成 3 个创意方向"]
   DIR --> CHOOSE["用户手动选择方向<br/>可重新生成"]
   CHOOSE -->|"不满意，重新生成"| DIR
-  CHOOSE -->|"选择方向"| PLAN["策划 Agent<br/>填充 plan.md"]
-  PLAN --> REVIEW["人工审核 plan.md<br/>手动同意后继续"]
-  REVIEW -->|"继续修改"| D
+  CHOOSE -->|"选择方向"| PLAN["策划 Agent<br/>按图片/视频独立模板调用 LLM 生成 plan.md v1"]
+  PLAN --> REVIEW["人工审核 plan.md<br/>手动同意、修订或回退"]
+  REVIEW -->|"当前创意内修改"| REVISE["Plan LLM 修订<br/>生成 v2/v3..."]
+  REVISE --> REVIEW
+  REVIEW -->|"重新生成新创意"| DIR
   REVIEW -->|"同意 image"| IMG["图片生成 Agent"]
   REVIEW -->|"同意 video"| VP["视频场景包 Agent"]
   IMG --> IR["图片结果确认<br/>满意结束 / 修改重生"]
-  VP --> SA["生成角色三视图、场景图、道具图"]
+  VP --> SA["按 Plan 创作合同生成<br/>角色三视图、场景图、道具图"]
   SA --> SB["前端分镜面板编辑<br/>故事线 / 镜头描述 / 旁白 / @素材"]
-  SB --> SV["并行生成每段场景视频"]
+  SB --> SV["按 Seedance 镜头 Prompt<br/>并行生成每段场景视频"]
   SV --> MERGE["按 scene_index 合并视频"]
   MERGE --> VR["视频结果确认<br/>无意见结束 / 修改循环"]
   VR -->|"提出修改"| QC["QAAgent QC 质检 Skill"]
@@ -88,11 +90,11 @@ flowchart TD
 
 | Agent | Controller / Service | 输入 | 输出 | 备注 |
 | --- | --- | --- | --- | --- |
-| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py` | 用户提示词、附件 materials、历史上下文 | intent、表单值、行业类型、数量、创意方向 | LLM 用 `deepseek-v4-pro`，失败时有规则 fallback |
-| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | 表单、创意方向、行业画像、素材、intake_context | plan.md、模板路径、一致性问题 | 读取项目内 plan.md 模板，不直接调用 LLM |
-| 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改意见、重试指令 | 前端负责确认状态和对话持久化；创意方向可重新生成但必须手动选择，图片结果保留超时默认，视频结果手动结束 |
+| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py` | 用户提示词、附件 materials、历史上下文 | intent、表单建议值、行业类型、数量、创意方向 | LLM 用 `deepseek-v4-pro`；视频会抽取总时长、画幅、视频模型、图片模型、用途和风格，但必须经用户表单确认后才能进入创意方向 |
+| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、模板路径、版本历史、最终生产合同、一致性问题 | 图片/视频使用独立模板并优先调用 `deepseek-v4-pro`；失败时生成同合同的确定性 Plan |
+| 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py` | plan.md、表单、创意方向、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 主流程是多场景片段生成后合并 |
+| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景资产和分镜视频严格使用 Plan 合同；镜头描述应用 Seedance Prompt Skill；主流程仍是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
@@ -104,7 +106,7 @@ flowchart TD
 
 | Skill | 代码位置 | 作用 | 失败策略 |
 | --- | --- | --- | --- |
-| IntentRecognitionSkill | `backend/pixelflow/intake/llm.py` | 识别 `image` / `video` / `ppt` / `video_analysis`，抽取主体、目标、行业、数量 | LLM 失败时用关键词 fallback |
+| IntentRecognitionSkill | `backend/pixelflow/intake/llm.py` | 识别 `image` / `video` / `ppt` / `video_analysis`，抽取主体、目标、行业、数量；视频额外抽取时长、画幅、视频模型、图片模型、用途和风格 | LLM 失败时用关键词 fallback，并保留表单人工确认 |
 | FormSchemaSkill | `backend/pixelflow/intake/forms.py` | 返回图片/视频/PPT表单 schema | 本地纯逻辑 |
 | FormValidationSkill | `backend/pixelflow/intake/forms.py` | 检查必填字段，最多 3 轮 | 超 3 轮终止并友好提示 |
 | IndustryProfileSkill | `backend/pixelflow/intake/industry_profile.py` | 命中垂类模板或用 LLM 生成行业创作画像 | LLM 失败时通用电商兜底 |
@@ -120,14 +122,19 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
-| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py` | 读取模板并填充 plan.md |
-| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py` | 检查 selected_direction 和表单关键字段是否缺失 |
+| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板，调用 LLM 生成具体 plan.md；LLM 失败时按同一合同确定性兜底 |
+| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/duration.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒及精确总时长 |
+| PlanRevisionSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 在当前创意内修订 Plan，生成新版本并保留历史 |
+| PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 将历史版本内容恢复成新的当前版本，不覆盖既有历史 |
 
 plan.md 模板路径：
 
 ```text
-backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
+backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
+backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 ```
+
+模板只是章节结构和信息密度范例。策划 Agent 必须结合当前表单、选中创意、行业画像、附件、语义记忆和创作合同重新生成内容，禁止把模板中的示例人物、产品或卖点复制到其他任务。前端统一把两类结果显示为 `plan.md`。
 
 ### 5.3 图片类 Skill
 
@@ -159,7 +166,10 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 
 | Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
 | --- | --- | --- | --- |
+| VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型和支持画幅，只向用户展示 Seedance；系统推荐优先 `seedance-2.0` |
+| SceneImageModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/image_generate` | 查询场景资产图片模型及其比例/清晰度能力；用户只选模型，能力范围随表单提交给 Plan Agent |
 | ScenePackageSkill | `backend/pixelflow/generate/scene_packages.py` | LLM + 本地规则 | 生成可编辑场景包 |
+| SeedanceShotPromptSkill | `backend/pixelflow/generate/seedance_prompt.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 无 | 按 Seedance 规则生成秒级镜头描述，并保留 `@asset_id`、mentions 和最多 9 张参考图 |
 | SceneAssetImageSkill | `pixelflow_video.py` + Image Skill | `/api/picture/text_to_image` | 生成人物三视图、场景图、道具图 |
 | TextToVideoSkill | `run_generation.py` | `/api/video/text-to-video` | 文生视频 |
 | ImageToVideoSkill | `run_generation.py` | `/api/video/image-to-video` | 首帧图生视频 |
@@ -172,9 +182,18 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 
 视频生成总规则：
 
+- 视频粗略需求不能直接生成创意方向。必须先展示需求清洗表单并由用户确认全部必填字段。
+- 视频表单保留产品信息、品类、目标人群、转化目标，并新增/明确：总时长、视频画幅、视频模型、图片模型、视频用途、视觉风格。
+- `video_duration_sec` 预设为 30/60/90/180 秒；选择“自定义”后只能提交 4-300 的自然数。前端和 Python 后端都校验。
+- 视频模型配置来自 `/api/modelParamConfig/listByCategory/video_generate`，只展示启用的 Seedance 模型；系统推荐默认解析为 `seedance-2.0`，界面仍展示实际推荐结果。
+- 图片模型配置来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择图片比例和清晰度；前端把所选模型支持的比例/清晰度列表作为只读能力数据交给 Plan Agent。
+- 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
+- Plan LLM 只能在 `image_model_capabilities` 范围内选择 `scene_image_ratio` 和 `scene_image_size`。非法输出按确定性规则修正；最终值写入 plan.md 和生产合同，场景资产生成阶段直接使用，不再猜测。
 - 主流程不因“文生视频/编辑视频/首帧图生视频”等入口类型而绕过场景包。
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
 - 每段片段最少 4 秒，最多 15 秒。
+- 所有片段的整数秒时长总和必须精确等于 `creation_contract.video_duration_sec`；300 秒可以产生超过旧上限 18 个的分镜。
+- 场景资产图片必须使用生产合同中的 `image_model + scene_image_ratio + scene_image_size`；分镜视频必须使用 `video_model + video_ratio + video_size + video_sound`，禁止混用图片和视频模型。
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
 - 镜头描述 `shot_description.text` 是一整段文本，时间范围统一使用秒级表达，例如 `0-10秒`、`10-15秒`；后端会归一化 LLM 返回的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
 - 场景视频 job 内部并行调用 content-app 视频接口，当前最大并发数为 100。并行只是提升同一批分镜的生成效率，整体阶段仍必须等所有分镜都成功、失败或额度暂停后，才进入汇总、重试或合并判断。
@@ -189,6 +208,32 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md
 - 场景包卡片上的继续/重新生成参考图调用 `/agent/flows/video/generate-scene-assets/start`，保存同一类 `pendingScenePackageJob`，恢复时只查询 `/agent/flows/video/generate-scene-assets/jobs/{job_id}`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
 - 场景包 job 状态使用 `stage=prepare_scene_packages | generate_scene_assets | completed`；参考图额度不足时状态为 `quota_paused`，result 保留 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
 - 场景视频生成、失败分镜重试和视频修改重生成启动后，前端必须把 Python job 的 `job_id`、原始请求、来源 artifact 和所属 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时，只允许继续轮询 `/agent/flows/video/generate-scenes/jobs/{job_id}`；如果 job 不存在或已过期，不自动重新启动，避免重复计费。
+
+最终生产合同示例：
+
+```json
+{
+  "version": 1,
+  "intent": "video",
+  "video_duration_sec": 180,
+  "video_ratio": "9:16",
+  "video_model_mode": "system_recommended",
+  "video_model": "seedance-2.0",
+  "video_size": "1080p",
+  "video_sound": "on",
+  "image_model": "gpt-image-2",
+  "image_model_capabilities": {
+    "aspect_ratios": ["1:1", "16:9", "9:16"],
+    "sizes": ["1080p", "2K", "4K"]
+  },
+  "video_usage": "宣传片",
+  "visual_style": "电影感写实",
+  "scene_image_ratio": "9:16",
+  "scene_image_size": "4K",
+  "scene_image_spec_source": "plan_llm",
+  "confirmed_by_user": true
+}
+```
 
 ### 5.5 视频分析类 Skill
 
@@ -466,21 +511,37 @@ sequenceDiagram
   participant VA as "视频生成 Agent"
   participant BG as "Borgrise"
   U->>FE: "输入视频需求和附件"
-  FE->>IA: "意图识别 + 表单 + 创意方向"
-  IA-->>FE: "selected_direction"
-  FE->>PA: "生成 plan.md"
-  PA-->>FE: "plan.md"
+  FE->>IA: "意图识别并抽取表单建议值"
+  par "读取动态模型配置"
+    FE->>BG: "GET /api/modelParamConfig/listByCategory/video_generate"
+    FE->>BG: "GET /api/modelParamConfig/listByCategory/image_generate"
+  end
+  FE-->>U: "需求清洗表单"
+  U->>FE: "确认总时长、画幅、视频模型、图片模型、用途和风格"
+  FE->>IA: "已确认表单 + creation_contract"
+  IA-->>FE: "3 个创意方向"
+  U->>FE: "选择方向"
+  FE->>PA: "按 plan_video.md 调用 LLM 生成 plan.md"
+  PA-->>FE: "plan.md v1 + 最终生产合同 + 精确分镜时长"
+  alt "当前创意内修改"
+    U->>FE: "修改意见"
+    FE->>PA: "POST /agent/flows/planning/plan/revise"
+    PA-->>FE: "plan.md v2/v3 + 历史版本"
+  else "重新生成新创意"
+    FE->>IA: "POST /agent/flows/intake/directions"
+    IA-->>FE: "新的 3 个创意方向"
+  end
   FE->>VA: "prepare-scene-packages/start"
   FE->>FE: "保存 pendingScenePackageJob 到 conversation context"
-  VA->>VA: "生成 global_assets + scene_packages"
-  VA->>BG: "文生图生成角色三视图、场景图、道具图"
+  VA->>VA: "按 Plan 精确时长和 Seedance Skill 生成 global_assets + scene_packages"
+  VA->>BG: "按合同 image_model/ratio/size 生成角色三视图、场景图、道具图"
   BG-->>VA: "参考图 URL"
   FE->>VA: "轮询 prepare-scene-packages/jobs/{job_id}"
   VA-->>FE: "可编辑场景包 + sceneAssetFailures"
   U->>FE: "编辑故事线、镜头描述、旁白、@参考图"
   FE->>VA: "generate-scenes/start"
   FE->>FE: "保存 pendingVideoJob 到 conversation context"
-  VA->>BG: "按片段调用视频接口"
+  VA->>BG: "按合同 video_model/ratio/size/sound 调用视频接口"
   FE->>VA: "轮询 jobs/{job_id}"
   VA-->>FE: "scene_videos"
   FE->>VA: "merge/start"
@@ -498,6 +559,15 @@ sequenceDiagram
   VA-->>FE: "新版合并视频"
 ```
 
+Plan 审核与版本规则：
+
+- 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
+- 当前创意内修改只调用 `/agent/flows/planning/plan/revise`，不得返回创意方向列表。
+- 重新生成新创意才调用 `/agent/flows/intake/directions` 返回新的 3 个方向。
+- 初始 Plan 是 v1，每次修订或回退都产生新版本；回退 v1 不覆盖历史，而是生成 `restored_from_version=1` 的新当前版本。
+- 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
+- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。
+
 场景视频接口选择：
 
 | 条件 | mode |
@@ -509,6 +579,18 @@ sequenceDiagram
 | 无参考素材 | `text_to_video` |
 
 如果 mode 是 `image_to_video` 但图片不足，或 `two_image_to_video` 但图片少于 2 张，后端会降级到 `reference_mode_video`。
+
+五类 content-app 请求体合同：
+
+| 接口 | 请求体字段 |
+| --- | --- |
+| `/api/video/text-to-video` | `prompt/model/ratio/size/duration/videoCount/sound` |
+| `/api/video/image-to-video` | `image_url/prompt/duration/ratio/model/size/sound/videoCount` |
+| `/api/video/two-image-to-video` | `first_frame_image_url/last_frame_image_url/prompt/ratio/duration/model/size/videoCount/sound` |
+| `/api/video/reference-mode-video` | `prompt/imageUrls/videoUrls/audioUrls/duration/ratio/sound/model/size/videoCount` |
+| `/api/video/edit-video` | `prompt/refImage/refVideo/model/duration/size/ratio/videoCount/sound` |
+
+这些 DTO 不再夹带 content-app 未声明的旧字段。`duration` 必须使用当前分镜真实的 4-15 秒整数，不能把 4 秒提升为 5 秒，也不能把 15 秒截成 10 秒。
 
 最终视频生成后的原场景包分镜修改：
 
@@ -667,7 +749,7 @@ flowchart TD
 | --- | --- |
 | intent/表单/创意方向 | `intake/llm.py`、`intake/forms.py`、`WorkspacePage.tsx` |
 | 垂类画像 | `intake/industry_profile.py`、`templates/industry_profile.md` |
-| plan.md | `creative/plan_markdown.py`、`templates/plan.md` |
+| plan.md | `creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/contract.py`、`creative/duration.py`、`templates/plan_video.md`、`templates/plan_image.md` |
 | 图片接口 | `generate/image_prepare.py`、`pixelflow_image.py`、`run_generation.py`、`api.ts` |
 | 视频场景包 | `generate/scene_packages.py`、`StoryboardPanel.tsx`、`SceneMentionEditor.tsx`、`scenePackages.ts` |
 | 视频接口 | `pixelflow_video.py`、`run_generation.py`、`api.ts` |

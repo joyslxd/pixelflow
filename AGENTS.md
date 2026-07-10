@@ -32,23 +32,30 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 11. `backend/pixelflow/intake/forms.py`
 12. `backend/pixelflow/intake/industry_profile.py`
 13. `backend/pixelflow/creative/plan_markdown.py`
-14. `backend/pixelflow/generate/image_prepare.py`
-15. `backend/pixelflow/generate/scene_packages.py`
-16. `backend/pixelflow/skills/base.py`
-17. `backend/pixelflow/skills/borgrise/skill.py`
-18. `backend/pixelflow/skills/borgrise/run_generation.py`
-19. `web/src/pages/WorkspacePage.tsx`
-20. `web/src/lib/api.ts`
-21. `web/src/components/canvas/StoryboardPanel.tsx`
-22. `web/src/components/canvas/SceneMentionEditor.tsx`
+14. `backend/pixelflow/creative/plan_llm.py`
+15. `backend/pixelflow/creative/contract.py`
+16. `backend/pixelflow/creative/duration.py`
+17. `backend/pixelflow/generate/image_prepare.py`
+18. `backend/pixelflow/generate/scene_packages.py`
+19. `backend/pixelflow/generate/seedance_prompt.py`
+20. `backend/pixelflow/skills/base.py`
+21. `backend/pixelflow/skills/borgrise/skill.py`
+22. `backend/pixelflow/skills/borgrise/run_generation.py`
+23. `web/src/pages/WorkspacePage.tsx`
+24. `web/src/lib/api.ts`
+25. `web/src/components/composer/GenParamsDialog.tsx`
+26. `web/src/components/canvas/StoryboardPanel.tsx`
+27. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
 | 文件 | 用途 |
 | --- | --- |
 | `CONTENT_APP_API_CALLS.md` | PixelFlow 调用 content-app/Borgrise 接口的清单和合同记录 |
-| `backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md` | 策划 Agent 填充 plan.md 的模板 |
+| `backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md` | 视频策划 Agent 的 plan.md 结构模板 |
+| `backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md` | 图片策划 Agent 的 plan.md 结构模板 |
 | `backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.md` | 垂类 Skill 的预制行业画像 |
+| `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | Seedance 分镜镜头描述规则；运行时由 `generate/seedance_prompt.py` 适配 |
 | `backend/skills/public/borgrise-creative-assistant-v2/references/` | Borgrise/content-app 能力调用说明 |
 
 ## 当前主流程
@@ -58,10 +65,10 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 ```text
 用户输入 + 附件
   -> 采集 Agent 识别 intent
-  -> 表单补全与垂类画像
+  -> 表单补全与垂类画像；视频需求必须确认时长、画幅、视频模型、图片模型、用途和风格
   -> 生成 3 个创意方向
-  -> 策划 Agent 填充 plan.md
-  -> 人工审核 plan.md
+  -> 策划 Agent 按图片/视频独立模板调用 LLM 生成 plan.md 与创作合同
+  -> 人工审核 plan.md；支持当前创意内版本化修订、历史回退或明确重生成新创意
   -> 图片生成 / 视频生成 / 视频分析 / PPT制作
   -> 用户确认、修改、重试或结束
 ```
@@ -95,7 +102,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 采集 | `GET /agent/flows/intake/forms/{intent}` | 获取图片、视频或PPT表单 schema |
 | 采集 | `POST /agent/flows/intake/validate` | 表单完整性校验，最多 3 轮 |
 | 采集 | `POST /agent/flows/intake/directions` | 生成 3 个创意方向 |
-| 策划 | `POST /agent/flows/planning/plan` | 根据模板填充 plan.md |
+| 策划 | `POST /agent/flows/planning/plan` | 按图片/视频独立模板与用户确认合同调用 LLM 生成 plan.md |
+| 策划 | `POST /agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并创建下一版本 |
+| 策划 | `POST /agent/flows/planning/plan/restore` | 将历史 Plan 内容恢复为新的当前版本 |
 | 图片 | `POST /agent/flows/image/prepare` | 判断图片接口并生成参数 |
 | 图片 | `POST /agent/flows/image/generate` | 调用图片 skill 生成，支持多张循环生成 |
 | 图片 | `POST /agent/flows/image/generate/start` | 启动可恢复图片生成异步任务 |
@@ -143,11 +152,11 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 | Agent | 主要文件 | 调用的 Skill / Service | 职责 |
 | --- | --- | --- | --- |
-| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py`、`intake/industry_profile.py` | IntentRecognitionSkill、FormValidationSkill、IndustryProfileSkill、CreativeDirectionSkill | 识别图片/视频/PPT/视频分析，补全表单，生成创意方向 |
-| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill | 使用项目内模板生成 plan.md |
-| 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环 |
+| 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py`、`intake/industry_profile.py` | IntentRecognitionSkill、FormValidationSkill、IndustryProfileSkill、CreativeDirectionSkill、动态模型配置查询 | 识别图片/视频/PPT/视频分析；视频先确认需求清洗表单和创作合同，再生成创意方向 |
+| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/contract.py`、`creative/duration.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill、PlanRevisionSkill、PlanRestoreSkill | 图片/视频按独立模板调用 LLM 生成 Plan，校验模型能力与精确时长，维护版本历史 |
+| 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环；当前创意内修订不得重新生成方向，历史版本支持回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`qc/video_review.py` | ScenePackageSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
+| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
@@ -198,6 +207,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 | Skill 方法 | content-app/Borgrise 接口 |
 | --- | --- |
+| 视频模型参数配置 | `/api/modelParamConfig/listByCategory/video_generate` |
 | `text_to_video` | `/api/video/text-to-video` |
 | `image_to_video` | `/api/video/image-to-video` |
 | `two_image_to_video` | `/api/video/two-image-to-video` |
@@ -205,6 +215,16 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | `edit_video` | `/api/video/edit-video` |
 | `extend_video` | `/api/video/extend-video` |
 | `merge_videos` | `/api/video/merge` |
+
+五类场景视频请求体必须按 content-app 当前 DTO 精确映射：
+
+- `text-to-video`：`prompt/model/ratio/size/duration/videoCount/sound`
+- `image-to-video`：`image_url/prompt/duration/ratio/model/size/sound/videoCount`
+- `two-image-to-video`：`first_frame_image_url/last_frame_image_url/prompt/ratio/duration/model/size/videoCount/sound`
+- `reference-mode-video`：`prompt/imageUrls/videoUrls/audioUrls/duration/ratio/sound/model/size/videoCount`
+- `edit-video`：`prompt/refImage/refVideo/model/duration/size/ratio/videoCount/sound`
+
+不要重新加回 content-app DTO 未声明的旧字段。Seedance 单分镜时长允许 4-15 秒，必须透传真实整数秒。
 
 视频理解接口：
 
@@ -256,9 +276,21 @@ SmartPPT接口：
 
 视频主流程仍是：plan.md -> 多个视频场景片段 -> 每段生成视频 -> 按顺序合并。
 
+需求清洗与创作合同：
+
+- 视频粗略需求必须先展示表单。必填项除原产品信息、产品品类、目标人群、转化目标外，还包含 `video_duration_sec`、`video_ratio`、`video_model`、`image_model`、`video_usage`；`visual_style` 可由 LLM 预填并允许用户修改。
+- `video_duration_sec` 预设 30/60/90/180；选择自定义后只能提交 4-300 的自然数。前端和 Pydantic 都必须校验。
+- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，只展示启用的 Seedance；系统推荐默认 `seedance-2.0` 并展示解析结果。画幅下拉只展示当前视频模型支持值。
+- 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择场景资产图片比例和清晰度；前端把所选模型支持的 `aspect_ratios/sizes` 作为 `image_model_capabilities` 提交。
+- 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
+- Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
+- 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。Plan 优先调用 `deepseek-v4-pro` 生成具体内容，失败时才使用同合同的确定性兜底。
+- 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。`/planning/plan/restore` 回退会创建新版本，不覆盖历史。
+
 场景包结构：
 
 - 每个片段最少 4 秒，最多 15 秒。
+- 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
 - 全局固定资产：`characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须生成同一人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、卖点物件必须进入 `props`，不能放进 `characters`。
@@ -266,6 +298,7 @@ SmartPPT接口：
 - `shot_description.text` 是一整段文本，不能拆成多个表单字段；文本里可以使用 `@asset_id` 关联角色、场景、道具。
 - `shot_description.text` 里的时间范围必须展示为秒级，例如 `0-10秒`、`10-15秒`；不要出现 `ms`、`毫秒` 或 `00:00.000` 这类毫秒时间码。
 - `shot_description.mentions` 保存 @ 选择对应的图片 URL，生成视频时这些 URL 会作为参考图集合。
+- 镜头描述由 `generate/seedance_prompt.py` 应用 vendored `skills/seedance-prompt/SKILL.md` 规则生成，仍需经过秒级时间码、`@asset_id` 和最多 9 张引用校验。
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset/start`，不能掉回普通采集 Agent。
@@ -279,6 +312,7 @@ SmartPPT接口：
 - 场景视频失败或额度暂停后，前端再次点击同一场景包的“确认并生成视频”时，只把 `generatedSceneVideos.failed_scenes` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`，已成功的分镜视频从 `generatedSceneVideos.scene_videos` 复用；补齐后再按 `scene_index` 合并完整视频。
 - 用户在原场景包的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge/start` 合并新版最终视频，并再次回填原场景包卡片。
 - 视频 plan.md 同意后，前端必须调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 内部顺序执行“生成可编辑场景包 -> 生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后必须立即写入 conversation context 的 `pendingScenePackageJob` / `pending_scene_package_job`，字段包含 `job_id`、`conversation_id`、`kind`、`started_at`、`request`、`artifact`、`source_message_id`。
+- 场景资产图片必须使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`；分镜视频必须使用 `video_model/video_ratio/video_size/video_sound`。图片模型不能传给视频接口，视频模型也不能传给图片接口。
 - `pendingScenePackageJob.kind` 固定为 `scene_package_generation` 或 `scene_asset_generation`。用户离开再返回同一对话时，只继续查询已有 `/prepare-scene-packages/jobs/{job_id}` 或 `/generate-scene-assets/jobs/{job_id}`，不能重新调用 `/start`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
 - 场景包主链路 job 的 `stage` 包含 `prepare_scene_packages`、`generate_scene_assets`、`completed`。参考图额度不足时 job 状态为 `quota_paused`，result 必须保留已生成的 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
 
@@ -430,9 +464,13 @@ corepack pnpm build
 
 - `backend/app/gateway/routers/pixelflow_planning.py`
 - `backend/pixelflow/creative/plan_markdown.py`
-- `backend/skills/public/borgrise-creative-assistant-v2/templates/plan.md`
+- `backend/pixelflow/creative/plan_llm.py`
+- `backend/pixelflow/creative/contract.py`
+- `backend/pixelflow/creative/duration.py`
+- `backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md`
+- `backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md`
 
-改模板时要同步检查图片、视频生成准备逻辑是否仍能解析关键信息。
+改模板时要同步检查图片、视频生成准备逻辑是否仍能解析关键信息，并保证 Plan 版本历史和 `creation_contract` 不丢失。视频 Plan 修改还要检查场景资产图片模型能力、每镜 4-15 秒和精确总时长。
 
 ### 修改图片生成
 
