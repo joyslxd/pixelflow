@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -185,46 +186,158 @@ async def test_powermem_service_serializes_parallel_record_requests():
 
 
 @pytest.mark.asyncio
-async def test_powermem_service_search_is_not_blocked_by_slow_background_record():
+async def test_powermem_service_serializes_search_behind_slow_record():
+    active_requests = 0
+    max_active_requests = 0
     record_started = asyncio.Event()
     release_record = asyncio.Event()
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/memories/search"):
-            return httpx.Response(
-                200,
-                json={
-                    "success": True,
-                    "data": {
-                        "results": [
-                            {
-                                "memory_id": "search-1",
-                                "content": "search result",
-                                "score": 0.9,
-                                "metadata": {},
-                            }
-                        ]
+        nonlocal active_requests, max_active_requests
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        try:
+            if request.url.path.endswith("/memories/search"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "results": [
+                                {
+                                    "memory_id": "search-1",
+                                    "content": "search result",
+                                    "score": 0.9,
+                                    "metadata": {},
+                                }
+                            ]
+                        },
                     },
-                },
-            )
+                )
+            record_started.set()
+            await release_record.wait()
+            return httpx.Response(200, json={"success": True, "data": [{"memory_id": "record-1"}]})
+        finally:
+            active_requests -= 1
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=0.5,
+            record_timeout_seconds=1.0,
+        ),
+        http_client=client,
+    )
+
+    record_task = asyncio.create_task(
+        service.record(user_id="u1", content="后台记忆", category="experience", infer=False)
+    )
+    await asyncio.wait_for(record_started.wait(), timeout=1)
+    search_task = asyncio.create_task(
+        service.search(user_id="u1", query="检索记忆", categories=["experience"])
+    )
+    await asyncio.sleep(0.02)
+
+    release_record.set()
+    results = await search_task
+
+    assert await record_task is True
+    assert [item.memory_id for item in results] == ["search-1"]
+    assert max_active_requests == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_search_lock_wait_uses_short_total_budget():
+    record_started = asyncio.Event()
+    release_record = asyncio.Event()
+    search_requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal search_requests
+        if request.url.path.endswith("/memories/search"):
+            search_requests += 1
+            return httpx.Response(200, json={"success": True, "data": {"results": []}})
         record_started.set()
         await release_record.wait()
         return httpx.Response(200, json={"success": True, "data": [{"memory_id": "record-1"}]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     service = PowerMemService(
-        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret"),
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=0.03,
+            record_timeout_seconds=1.0,
+            fail_open=True,
+        ),
         http_client=client,
     )
 
-    record_task = asyncio.create_task(service.record(user_id="u1", content="用户偏好真实摄影", category="preference"))
+    record_task = asyncio.create_task(
+        service.record(user_id="u1", content="慢速后台记忆", category="experience", infer=False)
+    )
     await asyncio.wait_for(record_started.wait(), timeout=1)
+    started_at = time.monotonic()
 
-    results = await asyncio.wait_for(service.search(user_id="u1", query="真实摄影", categories=["preference"]), timeout=0.2)
+    results = await service.search(user_id="u1", query="不能重叠", categories=["experience"])
+    elapsed = time.monotonic() - started_at
 
+    assert results == []
+    assert search_requests == 0
+    assert elapsed < 0.15
     release_record.set()
-    assert [item.memory_id for item in results] == ["search-1"]
     assert await record_task is True
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_serializes_health_behind_slow_record():
+    active_requests = 0
+    max_active_requests = 0
+    record_started = asyncio.Event()
+    release_record = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active_requests, max_active_requests
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        try:
+            if request.url.path.endswith("/system/health"):
+                return httpx.Response(200, json={"status": "ok"})
+            record_started.set()
+            await release_record.wait()
+            return httpx.Response(200, json={"success": True, "data": [{"memory_id": "record-1"}]})
+        finally:
+            active_requests -= 1
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=0.5,
+            record_timeout_seconds=1.0,
+        ),
+        http_client=client,
+    )
+
+    record_task = asyncio.create_task(
+        service.record(user_id="u1", content="后台记忆", category="experience", infer=False)
+    )
+    await asyncio.wait_for(record_started.wait(), timeout=1)
+    health_task = asyncio.create_task(service.health())
+    await asyncio.sleep(0.02)
+    release_record.set()
+
+    assert await record_task is True
+    assert (await health_task)["status"] == "ok"
+    assert max_active_requests == 1
     await client.aclose()
 
 
