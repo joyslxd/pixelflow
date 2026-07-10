@@ -337,6 +337,7 @@ class BorgriseSkill:
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "prompt": prompt,
@@ -344,6 +345,7 @@ class BorgriseSkill:
             "ratio": ratio,
             "size": size,
             "sound": sound,
+            "video_count": video_count,
         }
         if model:
             kwargs["model"] = model
@@ -358,6 +360,7 @@ class BorgriseSkill:
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "image_url": image_url,
@@ -366,6 +369,7 @@ class BorgriseSkill:
             "ratio": ratio,
             "size": size,
             "sound": sound,
+            "video_count": video_count,
         }
         if model:
             kwargs["model"] = model
@@ -381,6 +385,7 @@ class BorgriseSkill:
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "first_frame_image_url": first_frame_image_url,
@@ -390,6 +395,7 @@ class BorgriseSkill:
             "ratio": ratio,
             "size": size,
             "sound": sound,
+            "video_count": video_count,
         }
         if model:
             kwargs["model"] = model
@@ -428,6 +434,7 @@ class BorgriseSkill:
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "prompt": prompt,
@@ -438,6 +445,7 @@ class BorgriseSkill:
             "ratio": ratio,
             "size": size,
             "sound": sound,
+            "video_count": video_count,
         }
         if model:
             kwargs["model"] = model
@@ -453,6 +461,7 @@ class BorgriseSkill:
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult:
         kwargs: dict[str, Any] = {
             "ref_video": ref_video,
@@ -462,6 +471,7 @@ class BorgriseSkill:
             "ratio": ratio,
             "size": size,
             "sound": sound,
+            "video_count": video_count,
         }
         if model:
             kwargs["model"] = model

@@ -59,7 +59,8 @@ DEFAULT_IMAGE_QUALITY_BY_MODEL = {
     "nanobanana-pro": "1080p",
     "nano-banana": "1080p",
 }
-SEEDANCE_MAX_SEGMENT_DURATION = 10
+SEEDANCE_MIN_SEGMENT_DURATION = 4
+SEEDANCE_MAX_SEGMENT_DURATION = 15
 SAFE_MAX_LONG_VIDEO_DURATION = 30
 
 # 轮询配置
@@ -156,25 +157,31 @@ def validate_image_model_quality(model: str, size: str) -> dict | None:
 
 def validate_video_duration(duration: int, model: str) -> dict | None:
     """校验单次视频生成时长不能超过已知模型限制。"""
-    if duration <= 0:
-        return {"error": True, "message": "Duration must be a positive integer"}
-    if model == "seedance-2.0" and duration < 5:
-        return {
-            "error": True,
-            "message": "seedance-2.0 supports video durations from 5s to 10s per single call.",
-            "requested_duration": duration,
-            "min_single_call_duration": 5,
-        }
-    if model == "seedance-2.0" and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        return {"error": True, "message": "Duration must be an integer"}
+    is_seedance = "seedance" in str(model or "").lower()
+    if is_seedance and duration < SEEDANCE_MIN_SEGMENT_DURATION:
         return {
             "error": True,
             "message": (
-                f"seedance-2.0 supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
-                "Use long-reference-mode-video with exact 10s segment prompts for longer videos."
+                f"Seedance supports video durations from {SEEDANCE_MIN_SEGMENT_DURATION}s "
+                f"to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call."
+            ),
+            "requested_duration": duration,
+            "min_single_call_duration": SEEDANCE_MIN_SEGMENT_DURATION,
+        }
+    if is_seedance and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+        return {
+            "error": True,
+            "message": (
+                f"Seedance supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
+                "Split longer videos into multiple scene calls."
             ),
             "requested_duration": duration,
             "max_single_call_duration": SEEDANCE_MAX_SEGMENT_DURATION,
         }
+    if duration <= 0:
+        return {"error": True, "message": "Duration must be a positive integer"}
     return None
 
 
@@ -1180,14 +1187,12 @@ def image_to_video(image_url: str, prompt: str | None = None,
     request_data = {
         "image_url": image_url,
         "prompt": prompt,
-        "negative_prompt": "blurry, distorted, low quality, watermark, text overlay, shaky camera",
         "model": model,
         "duration": duration,
         "ratio": ratio,
         "size": size,
         "sound": sound,
         "videoCount": video_count,
-        "seed": None
     }
 
     print(f"\n{'='*60}")

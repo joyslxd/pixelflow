@@ -190,6 +190,7 @@ class VideoGenerationSkill(Protocol):
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult: ...
 
     async def image_to_video(
@@ -201,6 +202,7 @@ class VideoGenerationSkill(Protocol):
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult: ...
 
     async def two_image_to_video(
@@ -213,6 +215,7 @@ class VideoGenerationSkill(Protocol):
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult: ...
 
     async def extend_video(
@@ -237,6 +240,7 @@ class VideoGenerationSkill(Protocol):
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult: ...
 
     async def edit_video(
@@ -249,6 +253,7 @@ class VideoGenerationSkill(Protocol):
         size: str = "720p",
         model: str | None = None,
         sound: str = "on",
+        video_count: int = 1,
     ) -> GenerationResult: ...
 
     async def merge_videos(
