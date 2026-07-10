@@ -281,18 +281,21 @@ async def test_powermem_service_search_lock_wait_uses_short_total_budget():
     record_task = asyncio.create_task(
         service.record(user_id="u1", content="慢速后台记忆", category="experience", infer=False)
     )
-    await asyncio.wait_for(record_started.wait(), timeout=1)
-    started_at = time.monotonic()
+    try:
+        await asyncio.wait_for(record_started.wait(), timeout=1)
+        started_at = time.monotonic()
 
-    results = await service.search(user_id="u1", query="不能重叠", categories=["experience"])
-    elapsed = time.monotonic() - started_at
+        results = await service.search(user_id="u1", query="不能重叠", categories=["experience"])
+        elapsed = time.monotonic() - started_at
 
-    assert results == []
-    assert search_requests == 0
-    assert elapsed < 0.15
-    release_record.set()
-    assert await record_task is True
-    await client.aclose()
+        assert results == []
+        assert search_requests == 0
+        assert elapsed < 0.15
+    finally:
+        release_record.set()
+        record_result = await record_task
+        await client.aclose()
+    assert record_result is True
 
 
 @pytest.mark.asyncio

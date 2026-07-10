@@ -114,9 +114,8 @@ class PowerMemService:
         self.config = config or load_power_mem_config_from_env()
         self._client = http_client
         self._owns_client = http_client is None
-        self._lock = asyncio.Lock()
-        self._search_lock = asyncio.Lock()
-        self._record_lock = asyncio.Lock()
+        self._client_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
 
     def status_snapshot(self) -> dict[str, Any]:
         if not self.config.enabled:
@@ -168,36 +167,35 @@ class PowerMemService:
         search_limit = max(1, min(100, limit or self.config.search_limit))
         category_values = [category for category in (categories or []) if category]
         try:
-            async with self._search_lock:
-                if len(category_values) > 1:
-                    items: list[SemanticMemoryItem] = []
-                    for category in category_values:
-                        try:
-                            items.extend(
-                                await self._search_once(
-                                    user_id=user_id,
-                                    query=query,
-                                    category=category,
-                                    source_agent=source_agent,
-                                    run_id=run_id,
-                                    limit=search_limit,
-                                )
+            if len(category_values) > 1:
+                items: list[SemanticMemoryItem] = []
+                for category in category_values:
+                    try:
+                        items.extend(
+                            await self._search_once(
+                                user_id=user_id,
+                                query=query,
+                                category=category,
+                                source_agent=source_agent,
+                                run_id=run_id,
+                                limit=search_limit,
                             )
-                        except Exception as exc:
-                            if self.config.fail_open:
-                                _log_fail_open(f"PowerMem search failed for category={category}", exc)
-                                continue
-                            raise
-                    return _dedupe_and_sort(items)[:search_limit]
-                category = category_values[0] if category_values else None
-                return await self._search_once(
-                    user_id=user_id,
-                    query=query,
-                    category=category,
-                    source_agent=source_agent,
-                    run_id=run_id,
-                    limit=search_limit,
-                )
+                        )
+                    except Exception as exc:
+                        if self.config.fail_open:
+                            _log_fail_open(f"PowerMem search failed for category={category}", exc)
+                            continue
+                        raise
+                return _dedupe_and_sort(items)[:search_limit]
+            category = category_values[0] if category_values else None
+            return await self._search_once(
+                user_id=user_id,
+                query=query,
+                category=category,
+                source_agent=source_agent,
+                run_id=run_id,
+                limit=search_limit,
+            )
         except Exception as exc:
             if self.config.fail_open:
                 _log_fail_open("PowerMem search failed", exc)
@@ -240,24 +238,23 @@ class PowerMemService:
         if run_id:
             payload["run_id"] = run_id
         try:
-            async with self._record_lock:
-                response = await self._request("POST", "/memories", json=payload, timeout=self.config.record_timeout_seconds)
-                if _should_retry_record_without_infer(response, category=category, infer=infer):
-                    fallback_payload = _fallback_payload_without_infer(payload)
-                    logger.warning(
-                        "PowerMem preference infer returned no memories; retrying with infer=false "
-                        "source_agent=%s category=%s",
-                        source_agent,
-                        category,
-                    )
-                    fallback_response = await self._request(
-                        "POST",
-                        "/memories",
-                        json=fallback_payload,
-                        timeout=self.config.record_timeout_seconds,
-                    )
-                    return _record_response_succeeded(fallback_response)
-                return _record_response_succeeded(response)
+            response = await self._request("POST", "/memories", json=payload, timeout=self.config.record_timeout_seconds)
+            if _should_retry_record_without_infer(response, category=category, infer=infer):
+                fallback_payload = _fallback_payload_without_infer(payload)
+                logger.warning(
+                    "PowerMem preference infer returned no memories; retrying with infer=false "
+                    "source_agent=%s category=%s",
+                    source_agent,
+                    category,
+                )
+                fallback_response = await self._request(
+                    "POST",
+                    "/memories",
+                    json=fallback_payload,
+                    timeout=self.config.record_timeout_seconds,
+                )
+                return _record_response_succeeded(fallback_response)
+            return _record_response_succeeded(response)
         except Exception as exc:
             if self.config.fail_open:
                 _log_fail_open("PowerMem record failed", exc)
@@ -305,19 +302,27 @@ class PowerMemService:
         headers = {"Content-Type": "application/json"} if json is not None else {}
         if auth and self.config.api_key:
             headers["X-API-Key"] = self.config.api_key
-        # 单次请求级超时覆盖 client 默认超时：record 用 record_timeout_seconds，
-        # search/health 用 timeout_seconds。
+        # 总预算同时覆盖共享闸门等待和 HTTP 请求：record 使用长预算，
+        # search/health 使用短预算，避免锁等待绕过 fail-open 超时。
         request_timeout = timeout if timeout is not None else self.config.timeout_seconds
-        response = await client.request(method, self._url(path), headers=headers, json=json, timeout=request_timeout)
-        response.raise_for_status()
-        if response.content:
-            return response.json()
-        return {}
+        async with asyncio.timeout(request_timeout):
+            async with self._request_lock:
+                response = await client.request(
+                    method,
+                    self._url(path),
+                    headers=headers,
+                    json=json,
+                    timeout=request_timeout,
+                )
+                response.raise_for_status()
+                if response.content:
+                    return response.json()
+                return {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
             return self._client
-        async with self._lock:
+        async with self._client_lock:
             if self._client is None:
                 self._client = httpx.AsyncClient(timeout=self.config.timeout_seconds)
         return self._client
