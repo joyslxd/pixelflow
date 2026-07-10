@@ -331,12 +331,16 @@ export interface ImageModelParamConfig {
   paramConfig?: {
     sizeList?: string[];
     aspectRatioList?: string[];
+    onSoundList?: string[];
+    videoDurationList?: string[];
     imageNumList?: string[];
     modelGenerateTypeList?: string[];
     uploadFileTypeList?: string[];
   };
   isEnabled?: boolean;
 }
+
+export type VideoModelParamConfig = ImageModelParamConfig;
 
 export interface ImageEditModelSelection {
   model: string;
@@ -1222,6 +1226,9 @@ export const api = {
 
   listImageGenerateModelConfigs: () =>
     contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
+
+  listVideoGenerateModelConfigs: () =>
+    contentAppReq<VideoModelParamConfig[]>("/api/modelParamConfig/listByCategory/video_generate"),
 
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),

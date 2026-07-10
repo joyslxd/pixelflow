@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, ChevronUp, FilePenLine, Upload, X } from "lucide-react";
-import { api, type UploadedAttachment } from "@/lib/api";
+import { api, type ImageModelParamConfig, type UploadedAttachment } from "@/lib/api";
+import {
+  FALLBACK_IMAGE_MODEL_CONFIG,
+  FALLBACK_VIDEO_MODEL_CONFIG,
+  filterSeedanceConfigs,
+  imageModelCapabilities,
+  resolveImageModel,
+  resolveVideoModel,
+  videoRatios,
+  type ImageModelCapabilities,
+} from "@/lib/videoRequirementConfig";
 
 export type CreationIntent = "video" | "image" | "ppt";
 
@@ -11,6 +21,16 @@ export interface VideoRequirementForm {
   product_category: string;
   target_audience: string;
   conversion_goal: string;
+  video_duration_sec: number;
+  video_ratio: string;
+  video_model_mode: "system_recommended" | "manual";
+  video_model: string;
+  video_size: string;
+  video_sound: "on" | "off";
+  image_model: string;
+  image_model_capabilities: ImageModelCapabilities;
+  video_usage: string;
+  visual_style: string;
 }
 
 export interface ImageRequirementForm {
@@ -45,6 +65,9 @@ interface GenParamsDialogProps {
 }
 
 const VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"];
+const VIDEO_DURATION_OPTIONS = ["30", "60", "90", "180", "自定义"];
+const VIDEO_MODEL_MODES = ["system_recommended", "manual"] as const;
+type VideoDurationMode = (typeof VIDEO_DURATION_OPTIONS)[number];
 
 const IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"];
 const IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"];
@@ -56,6 +79,7 @@ const PPT_ACCEPT = ".doc,.docx,.xls,.xlsx,.pdf";
 
 const inputCls =
   "h-12 w-full rounded-xl border border-line bg-surface px-4 text-[14px] text-ink outline-none placeholder:text-ink-soft/55 focus:border-accent/40";
+const selectCls = `${inputCls} appearance-none pr-10`;
 
 const textValue = (values: Record<string, unknown>, key: string, fallback = "") => {
   const value = values[key];
@@ -72,14 +96,52 @@ const numberValue = (values: Record<string, unknown>, key: string, fallback: num
   return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(10, Math.round(parsed))) : fallback;
 };
 
+const naturalNumberValue = (values: Record<string, unknown>, key: string, fallback: number, min: number, max: number) => {
+  const parsed = Number(values[key]);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+};
+
+function initialImageModelCapabilities(values: Record<string, unknown>): ImageModelCapabilities {
+  const raw = values.image_model_capabilities;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const capabilities = raw as Record<string, unknown>;
+    const aspectRatios = Array.isArray(capabilities.aspect_ratios)
+      ? capabilities.aspect_ratios.map(String).filter(Boolean)
+      : [];
+    const sizes = Array.isArray(capabilities.sizes) ? capabilities.sizes.map(String).filter(Boolean) : [];
+    if (aspectRatios.length > 0 && sizes.length > 0) {
+      return { aspect_ratios: aspectRatios, sizes };
+    }
+  }
+  return imageModelCapabilities(FALLBACK_IMAGE_MODEL_CONFIG);
+}
+
 function videoInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): VideoRequirementForm {
+  const modelMode = textValue(values, "video_model_mode", "system_recommended");
   return {
     intent: "video",
     product_info: textValue(values, "product_info", initialCoreMessage ?? ""),
     product_category: textValue(values, "product_category"),
     target_audience: textValue(values, "target_audience"),
     conversion_goal: optionValue(values, "conversion_goal", VIDEO_GOALS, "引流直播间"),
+    video_duration_sec: naturalNumberValue(values, "video_duration_sec", 30, 4, 300),
+    video_ratio: textValue(values, "video_ratio", "9:16"),
+    video_model_mode: VIDEO_MODEL_MODES.includes(modelMode as (typeof VIDEO_MODEL_MODES)[number])
+      ? (modelMode as VideoRequirementForm["video_model_mode"])
+      : "system_recommended",
+    video_model: textValue(values, "video_model", "seedance-2.0"),
+    video_size: textValue(values, "video_size", "1080p"),
+    video_sound: textValue(values, "video_sound", "on") === "off" ? "off" : "on",
+    image_model: textValue(values, "image_model", "gpt-image-2"),
+    image_model_capabilities: initialImageModelCapabilities(values),
+    video_usage: textValue(values, "video_usage", "宣传片"),
+    visual_style: textValue(values, "visual_style"),
   };
+}
+
+function videoDurationModeValue(duration: number): VideoDurationMode {
+  const value = String(duration);
+  return VIDEO_DURATION_OPTIONS.includes(value) ? value : "自定义";
 }
 
 function imageInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): ImageRequirementForm {
@@ -189,6 +251,14 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [video, setVideo] = useState<VideoRequirementForm>(() => videoInitialValues(initialCoreMessage, initialValues));
+  const [videoDurationMode, setVideoDurationMode] = useState<VideoDurationMode>(() => videoDurationModeValue(video.video_duration_sec));
+  const [customVideoDuration, setCustomVideoDuration] = useState(() =>
+    videoDurationModeValue(video.video_duration_sec) === "自定义" ? String(video.video_duration_sec) : "",
+  );
+  const [videoModelConfigs, setVideoModelConfigs] = useState<ImageModelParamConfig[]>([FALLBACK_VIDEO_MODEL_CONFIG]);
+  const [imageModelConfigs, setImageModelConfigs] = useState<ImageModelParamConfig[]>([FALLBACK_IMAGE_MODEL_CONFIG]);
+  const [modelConfigsLoading, setModelConfigsLoading] = useState(false);
+  const [modelConfigsError, setModelConfigsError] = useState("");
   const [image, setImage] = useState<ImageRequirementForm>(() => imageInitialValues(initialCoreMessage, initialValues));
   const [ppt, setPpt] = useState<PptRequirementForm>(() => pptInitialValues(initialCoreMessage, initialValues, initialMaterials));
   const [pptStyleMode, setPptStyleMode] = useState(() => pptStyleModeValue(ppt.ppt_style));
@@ -199,7 +269,11 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     setSubmitted(false);
     setCollapsed(false);
     setUploadError("");
-    setVideo(videoInitialValues(initialCoreMessage, initialValues));
+    const nextVideo = videoInitialValues(initialCoreMessage, initialValues);
+    const nextDurationMode = videoDurationModeValue(nextVideo.video_duration_sec);
+    setVideo(nextVideo);
+    setVideoDurationMode(nextDurationMode);
+    setCustomVideoDuration(nextDurationMode === "自定义" ? String(nextVideo.video_duration_sec) : "");
     setImage(imageInitialValues(initialCoreMessage, initialValues));
     const nextPpt = pptInitialValues(initialCoreMessage, initialValues, initialMaterials);
     setPpt(nextPpt);
@@ -207,12 +281,63 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     setPptCustomStyle(pptCustomStyleValue(nextPpt.ppt_style));
   }, [open, intent, initialCoreMessage, initialValues, initialMaterials]);
 
+  useEffect(() => {
+    if (!open || intent !== "video") return;
+    let cancelled = false;
+    setModelConfigsLoading(true);
+    setModelConfigsError("");
+    void Promise.allSettled([api.listVideoGenerateModelConfigs(), api.listImageGenerateModelConfigs()]).then((results) => {
+      if (cancelled) return;
+      const rawVideoConfigs = results[0].status === "fulfilled" ? results[0].value : [];
+      const rawImageConfigs = results[1].status === "fulfilled" ? results[1].value : [];
+      const availableVideoConfigs = filterSeedanceConfigs(rawVideoConfigs);
+      const availableImageConfigs = rawImageConfigs.filter((config) => config.isEnabled !== false);
+      const nextVideoConfigs = availableVideoConfigs.length > 0 ? availableVideoConfigs : [FALLBACK_VIDEO_MODEL_CONFIG];
+      const nextImageConfigs = availableImageConfigs.length > 0 ? availableImageConfigs : [FALLBACK_IMAGE_MODEL_CONFIG];
+      const requestedVideoModel = textValue(initialValues, "video_model", "seedance-2.0");
+      const requestedImageModel = textValue(initialValues, "image_model", "gpt-image-2");
+      const selectedVideoConfig = resolveVideoModel(nextVideoConfigs, requestedVideoModel);
+      const selectedImageConfig = resolveImageModel(nextImageConfigs, requestedImageModel);
+      const ratios = videoRatios(selectedVideoConfig);
+
+      setVideoModelConfigs(nextVideoConfigs);
+      setImageModelConfigs(nextImageConfigs);
+      setVideo((current) => ({
+        ...current,
+        video_model: selectedVideoConfig.modelType,
+        video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+        image_model: selectedImageConfig.modelType,
+        image_model_capabilities: imageModelCapabilities(selectedImageConfig),
+      }));
+      if (results.some((result) => result.status === "rejected")) {
+        setModelConfigsError("部分模型配置读取失败，当前展示可用的默认配置。");
+      }
+      setModelConfigsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, intent, initialValues]);
+
   if (!open) return null;
 
   const isVideo = intent === "video";
   const isPpt = intent === "ppt";
+  const validVideoDuration = Number.isInteger(video.video_duration_sec) && video.video_duration_sec >= 4 && video.video_duration_sec <= 300;
   const canConfirm = isVideo
-    ? Boolean(video.product_info.trim() && video.product_category.trim() && video.target_audience.trim() && video.conversion_goal)
+    ? Boolean(
+        video.product_info.trim()
+          && video.product_category.trim()
+          && video.target_audience.trim()
+          && video.conversion_goal
+          && validVideoDuration
+          && video.video_ratio
+          && video.video_model
+          && video.image_model
+          && video.image_model_capabilities.aspect_ratios.length > 0
+          && video.image_model_capabilities.sizes.length > 0
+          && video.video_usage.trim(),
+      )
     : isPpt
       ? Boolean(ppt.ppt_topic.trim() && ppt.ppt_style && ppt.attachments.length > 0 && !uploading)
       : Boolean(image.image_goal.trim() && image.image_type && image.image_usage && image.image_style && image.image_size);
@@ -221,6 +346,64 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     if (!canConfirm) return;
     setSubmitted(true);
     onConfirm(isVideo ? video : isPpt ? ppt : image);
+  };
+
+  const updateVideoDurationMode = (value: string) => {
+    const mode = value as VideoDurationMode;
+    setVideoDurationMode(mode);
+    if (mode === "自定义") {
+      setCustomVideoDuration("");
+      setVideo((current) => ({ ...current, video_duration_sec: 0 }));
+      return;
+    }
+    setCustomVideoDuration("");
+    setVideo((current) => ({ ...current, video_duration_sec: Number(mode) }));
+  };
+
+  const updateCustomVideoDuration = (value: string) => {
+    if (value && !/^\d+$/.test(value)) return;
+    setCustomVideoDuration(value);
+    const duration = Number(value);
+    setVideo((current) => ({
+      ...current,
+      video_duration_sec: Number.isInteger(duration) && duration >= 4 && duration <= 300 ? duration : 0,
+    }));
+  };
+
+  const updateVideoModelMode = (value: string) => {
+    const mode = value === "manual" ? "manual" : "system_recommended";
+    if (mode === "manual") {
+      setVideo((current) => ({ ...current, video_model_mode: mode }));
+      return;
+    }
+    const selected = resolveVideoModel(videoModelConfigs, "seedance-2.0");
+    const ratios = videoRatios(selected);
+    setVideo((current) => ({
+      ...current,
+      video_model_mode: mode,
+      video_model: selected.modelType,
+      video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+    }));
+  };
+
+  const updateVideoModel = (modelType: string) => {
+    const selected = resolveVideoModel(videoModelConfigs, modelType);
+    const ratios = videoRatios(selected);
+    setVideo((current) => ({
+      ...current,
+      video_model_mode: "manual",
+      video_model: selected.modelType,
+      video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+    }));
+  };
+
+  const updateImageModel = (modelType: string) => {
+    const selected = resolveImageModel(imageModelConfigs, modelType);
+    setVideo((current) => ({
+      ...current,
+      image_model: selected.modelType,
+      image_model_capabilities: imageModelCapabilities(selected),
+    }));
   };
 
   const updatePptStyle = (value: string) => {
@@ -320,6 +503,88 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                 <FieldBlock index={4} label="转化目标">
                   <PillGroup options={VIDEO_GOALS} value={video.conversion_goal} onChange={(v) => setVideo((p) => ({ ...p, conversion_goal: v }))} />
                 </FieldBlock>
+                <FieldBlock index={5} label="视频总时长">
+                  <PillGroup options={VIDEO_DURATION_OPTIONS} value={videoDurationMode} onChange={updateVideoDurationMode} />
+                  {videoDurationMode === "自定义" && (
+                    <div className="space-y-2">
+                      <input
+                        className={inputCls}
+                        type="number"
+                        min={4}
+                        max={300}
+                        step={1}
+                        inputMode="numeric"
+                        value={customVideoDuration}
+                        onChange={(event) => updateCustomVideoDuration(event.target.value)}
+                        placeholder="请输入 4-300 之间的自然数秒"
+                      />
+                      {customVideoDuration && !validVideoDuration && (
+                        <div className="text-[12px] text-amber">视频总时长必须是 4-300 之间的自然数。</div>
+                      )}
+                    </div>
+                  )}
+                </FieldBlock>
+                <FieldBlock index={6} label="视频画幅">
+                  <select
+                    className={selectCls}
+                    value={video.video_ratio}
+                    onChange={(event) => setVideo((current) => ({ ...current, video_ratio: event.target.value }))}
+                  >
+                    {videoRatios(resolveVideoModel(videoModelConfigs, video.video_model)).map((ratio) => (
+                      <option key={ratio} value={ratio}>
+                        {ratio}
+                      </option>
+                    ))}
+                  </select>
+                </FieldBlock>
+                <FieldBlock index={7} label="视频模型">
+                  <PillGroup
+                    options={["系统推荐模型", "手动选择"]}
+                    value={video.video_model_mode === "system_recommended" ? "系统推荐模型" : "手动选择"}
+                    onChange={(value) => updateVideoModelMode(value === "手动选择" ? "manual" : "system_recommended")}
+                  />
+                  <select className={selectCls} value={video.video_model} onChange={(event) => updateVideoModel(event.target.value)}>
+                    {videoModelConfigs.map((config) => (
+                      <option key={config.modelType} value={config.modelType}>
+                        {config.modelType}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-[12px] text-ink-soft">
+                    {video.video_model_mode === "system_recommended" ? `系统推荐结果：${video.video_model}` : `已选择：${video.video_model}`}
+                  </div>
+                </FieldBlock>
+                <FieldBlock index={8} label="图片模型">
+                  <select className={selectCls} value={video.image_model} onChange={(event) => updateImageModel(event.target.value)}>
+                    {imageModelConfigs.map((config) => (
+                      <option key={config.modelType} value={config.modelType}>
+                        {config.modelType}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-[12px] text-ink-soft">角色、场景和道具图片将使用该模型；图片比例与清晰度由 plan.md 在模型支持范围内自动规划。</div>
+                </FieldBlock>
+                <FieldBlock index={9} label="视频用途">
+                  <input
+                    className={inputCls}
+                    value={video.video_usage}
+                    onChange={(event) => setVideo((current) => ({ ...current, video_usage: event.target.value }))}
+                    placeholder="例如：品牌宣传、产品介绍、活动预热"
+                  />
+                </FieldBlock>
+                <FieldBlock index={10} label="视觉风格">
+                  <input
+                    className={inputCls}
+                    value={video.visual_style}
+                    onChange={(event) => setVideo((current) => ({ ...current, visual_style: event.target.value }))}
+                    placeholder="例如：电影光影、科技感、写实、未来感"
+                  />
+                </FieldBlock>
+                {(modelConfigsLoading || modelConfigsError) && (
+                  <div className="rounded-xl border border-line bg-surface px-4 py-3 text-[12px] text-ink-soft">
+                    {modelConfigsLoading ? "正在读取可用模型配置..." : modelConfigsError}
+                  </div>
+                )}
               </>
             ) : isPpt ? (
               <>

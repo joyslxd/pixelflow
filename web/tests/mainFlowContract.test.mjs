@@ -9,6 +9,7 @@ const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPa
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 const viteConfigSource = fs.readFileSync(path.resolve("vite.config.ts"), "utf8");
+const videoRequirementConfigSource = fs.readFileSync(path.resolve("src/lib/videoRequirementConfig.ts"), "utf8");
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -145,6 +146,28 @@ test("new conversation stores the user message before agent replies", () => {
   assert.notEqual(appendIndex, -1, "handleSend must await user message persistence");
   assert.notEqual(firstAgentIndex, -1, "handleSend must still call the intake agent");
   assert.ok(appendIndex < firstAgentIndex, "user message persistence must happen before the first agent reply");
+});
+
+test("video requirement form collects and persists the complete creation contract", () => {
+  assert.match(apiSource, /listVideoGenerateModelConfigs/, "api client must load video model configs");
+  assert.equal(apiSource.includes("/api/modelParamConfig/listByCategory/video_generate"), true, "video model configs must use video_generate");
+  assert.match(genParamsDialogSource, /视频总时长/, "video form must show total duration");
+  assert.match(genParamsDialogSource, /视频画幅/, "video form must show video ratio");
+  assert.match(genParamsDialogSource, /视频模型/, "video form must show video model");
+  assert.match(genParamsDialogSource, /图片模型/, "video form must show scene image model");
+  assert.match(genParamsDialogSource, /视频用途/, "video form must show video usage");
+  assert.match(genParamsDialogSource, /视觉风格/, "video form must show visual style");
+  assert.match(genParamsDialogSource, /\["30", "60", "90", "180", "自定义"\]/, "duration presets must include custom");
+  assert.match(genParamsDialogSource, /min=\{4\}/, "custom duration must enforce the lower boundary");
+  assert.match(genParamsDialogSource, /max=\{300\}/, "custom duration must enforce the upper boundary");
+  assert.match(genParamsDialogSource, /image_model_capabilities/, "selected image model capabilities must be submitted");
+  assert.equal(genParamsDialogSource.includes('label="图片比例"'), false, "video form must not ask users for scene image ratio");
+  assert.equal(genParamsDialogSource.includes('label="图片清晰度"'), false, "video form must not ask users for scene image quality");
+  assert.match(workspaceSource, /video_duration_sec:\s*form\.video_duration_sec/, "Workspace must persist confirmed video duration");
+  assert.match(workspaceSource, /video_model:\s*form\.video_model/, "Workspace must persist confirmed video model");
+  assert.match(workspaceSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
+  assert.match(workspaceSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
+  assert.match(videoRequirementConfigSource, /filterSeedanceConfigs/, "video model filtering must remain centralized");
 });
 
 test("new conversation route replacement does not clear the first intake progress message", () => {

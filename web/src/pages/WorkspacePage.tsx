@@ -741,6 +741,16 @@ function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
       product_category: form.product_category,
       target_audience: form.target_audience,
       conversion_goal: form.conversion_goal,
+      video_duration_sec: form.video_duration_sec,
+      video_ratio: form.video_ratio,
+      video_model_mode: form.video_model_mode,
+      video_model: form.video_model,
+      video_size: form.video_size,
+      video_sound: form.video_sound,
+      image_model: form.image_model,
+      image_model_capabilities: form.image_model_capabilities,
+      video_usage: form.video_usage,
+      visual_style: form.visual_style,
     };
   }
   if (form.intent === "ppt") {
