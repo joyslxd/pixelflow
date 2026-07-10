@@ -1,38 +1,54 @@
-"""PixelFlow v2 plan.md 模板填充纯逻辑。
-
-这个模块对应设计文档里的 PlanTemplateFillSkill 和 PlanConsistencyCheckSkill
-的本地确定性实现。它读取项目内固定模板路径，输出前端可审核的 Markdown，
-不调用 LLM、数据库或博观接口。
-"""
+"""Plan template filling, LLM planning, versioning, and strict contracts."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from pixelflow.creative.contract import VideoCreationContract, build_video_creation_contract, resolve_scene_image_spec
+from pixelflow.creative.duration import scene_time_ranges, split_video_duration
+from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME, ModelFactory, generate_plan_payload, revise_plan_payload
 from pixelflow.memory import semantic_memory_text
 
 CreationIntent = Literal["video", "image"]
 
-PLAN_TEMPLATE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "skills"
-    / "public"
-    / "borgrise-creative-assistant-v2"
-    / "templates"
-    / "plan.md"
-)
+TEMPLATE_DIRECTORY = Path(__file__).resolve().parents[2] / "skills" / "public" / "borgrise-creative-assistant-v2" / "templates"
+VIDEO_PLAN_TEMPLATE_PATH = TEMPLATE_DIRECTORY / "plan_video.md"
+IMAGE_PLAN_TEMPLATE_PATH = TEMPLATE_DIRECTORY / "plan_image.md"
+PLAN_TEMPLATE_PATH = VIDEO_PLAN_TEMPLATE_PATH
+
+_REQUIRED_TEMPLATE_SECTIONS = {
+    "video": ("## 一、选题方向", "## 三、视频规格", "## 五、镜头列表"),
+    "image": ("## 一、选题方向", "## 三、图片规格", "## 五、主图方案"),
+}
+_TEMPLATE_SAMPLE_ENTITIES = ("苹果PRO", "林晓", "赵总监", "周洋")
 
 
 @dataclass(frozen=True)
 class PlanMarkdownResult:
     output_type: CreationIntent
     plan_markdown: str
-    template_path: Path = PLAN_TEMPLATE_PATH
+    template_path: Path
     consistency_issues: list[str] = field(default_factory=list)
     review_timeout_sec: int | None = None
+    plan_version: int = 1
+    plan_history: list[dict[str, Any]] = field(default_factory=list)
+    creation_contract: dict[str, Any] = field(default_factory=dict)
+    scene_durations_sec: list[int] = field(default_factory=list)
+    llm_used: bool = False
+    model_name: str = PLAN_LLM_MODEL_NAME
+    error: str | None = None
+    restored_from_version: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.plan_history:
+            object.__setattr__(
+                self,
+                "plan_history",
+                [_history_entry(self.plan_version, self.plan_markdown, self.restored_from_version)],
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,7 +57,40 @@ class PlanMarkdownResult:
             "template_path": self.template_path.as_posix(),
             "consistency_issues": self.consistency_issues,
             "review_timeout_sec": self.review_timeout_sec,
+            "plan_version": self.plan_version,
+            "plan_history": self.plan_history,
+            "creation_contract": self.creation_contract,
+            "scene_durations_sec": self.scene_durations_sec,
+            "llm_used": self.llm_used,
+            "model_name": self.model_name,
+            "error": self.error,
+            "restored_from_version": self.restored_from_version,
         }
+
+    def next_version(
+        self,
+        *,
+        plan_markdown: str,
+        plan_history: list[dict[str, Any]] | None = None,
+        current_version: int | None = None,
+        restored_from_version: int | None = None,
+        llm_used: bool | None = None,
+        error: str | None = None,
+        creation_contract: dict[str, Any] | None = None,
+    ) -> PlanMarkdownResult:
+        version = max(1, int(current_version or self.plan_version)) + 1
+        history = _normalized_history(plan_history or self.plan_history)
+        history.append(_history_entry(version, plan_markdown, restored_from_version))
+        return replace(
+            self,
+            plan_markdown=plan_markdown,
+            plan_version=version,
+            plan_history=history,
+            restored_from_version=restored_from_version,
+            llm_used=self.llm_used if llm_used is None else llm_used,
+            error=error,
+            creation_contract=creation_contract or self.creation_contract,
+        )
 
 
 def build_plan_markdown(
@@ -52,23 +101,447 @@ def build_plan_markdown(
     materials: list[dict[str, Any]] | None = None,
     intake_context: dict[str, Any] | None = None,
 ) -> PlanMarkdownResult:
-    _ensure_template_available()
+    """Build the deterministic fallback Plan with the same production contract."""
+    template_path, _ = _load_template(intent)
+    profile = _merged_profile(product_creative_profile or {}, intake_context or {})
     issues = _consistency_issues(intent, form_values, selected_direction)
+    if intent == "video":
+        contract, durations, corrections = _video_contract_and_durations(form_values)
+        markdown = _fallback_video_plan(
+            form_values,
+            selected_direction,
+            profile,
+            materials or [],
+            intake_context or {},
+            contract,
+            durations,
+        )
+        return PlanMarkdownResult(
+            output_type=intent,
+            plan_markdown=markdown,
+            template_path=template_path,
+            consistency_issues=[*issues, *corrections],
+            creation_contract=contract.model_dump(exclude_none=True),
+            scene_durations_sec=durations,
+        )
+    markdown = _fallback_image_plan(form_values, selected_direction, profile, materials or [], intake_context or {})
+    return PlanMarkdownResult(
+        output_type=intent,
+        plan_markdown=markdown,
+        template_path=template_path,
+        consistency_issues=issues,
+        creation_contract=_image_creation_contract(form_values, intake_context or {}),
+    )
+
+
+async def build_plan_markdown_with_llm(
+    intent: CreationIntent,
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    product_creative_profile: dict[str, Any] | None = None,
+    materials: list[dict[str, Any]] | None = None,
+    intake_context: dict[str, Any] | None = None,
+    *,
+    model_name: str = PLAN_LLM_MODEL_NAME,
+    model_factory: ModelFactory | None = None,
+) -> PlanMarkdownResult:
+    template_path, template_markdown = _load_template(intent)
+    profile = _merged_profile(product_creative_profile or {}, intake_context or {})
     context = intake_context or {}
-    profile = _merged_profile(product_creative_profile or {}, context)
-    if intent == "image":
-        markdown = _build_image_plan(form_values, selected_direction, profile, materials or [], context)
+    issues = _consistency_issues(intent, form_values, selected_direction)
+    contract: VideoCreationContract | None = None
+    durations: list[int] = []
+    scene_timeline: list[dict[str, int]] = []
+    creation_contract = _image_creation_contract(form_values, context)
+    if intent == "video":
+        contract = build_video_creation_contract(form_values)
+        durations = split_video_duration(contract.video_duration_sec)
+        scene_timeline = _scene_timeline(durations)
+        creation_contract = contract.model_dump(exclude_none=True)
+    try:
+        payload = await generate_plan_payload(
+            intent=intent,
+            template_markdown=template_markdown,
+            form_values=form_values,
+            selected_direction=selected_direction,
+            product_creative_profile=profile,
+            materials=materials or [],
+            intake_context=context,
+            creation_contract=creation_contract,
+            scene_timeline=scene_timeline,
+            model_name=model_name,
+            model_factory=model_factory,
+        )
+        markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, context)
+        corrections: list[str] = []
+        if contract is not None:
+            contract, corrections = resolve_scene_image_spec(
+                contract,
+                _text(payload.get("scene_image_ratio")),
+                _text(payload.get("scene_image_size")),
+            )
+            creation_contract = contract.model_dump(exclude_none=True)
+        markdown = _with_execution_contract(intent, markdown, creation_contract, durations)
+        return PlanMarkdownResult(
+            output_type=intent,
+            plan_markdown=markdown,
+            template_path=template_path,
+            consistency_issues=[*issues, *corrections],
+            creation_contract=creation_contract,
+            scene_durations_sec=durations,
+            llm_used=True,
+            model_name=model_name,
+        )
+    except Exception as exc:  # noqa: BLE001 - Plan generation must degrade to a valid contract
+        fallback = build_plan_markdown(intent, form_values, selected_direction, profile, materials, context)
+        return replace(fallback, error=str(exc), model_name=model_name)
+
+
+async def revise_plan_markdown_with_llm(
+    *,
+    intent: CreationIntent,
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    current_plan_markdown: str,
+    current_plan_version: int,
+    plan_history: list[dict[str, Any]],
+    revision_feedback: str,
+    creation_contract: dict[str, Any] | None = None,
+    model_name: str = PLAN_LLM_MODEL_NAME,
+    model_factory: ModelFactory | None = None,
+) -> PlanMarkdownResult:
+    template_path, template_markdown = _load_template(intent)
+    base = build_plan_markdown(intent, form_values, selected_direction)
+    contract: VideoCreationContract | None = None
+    durations: list[int] = []
+    timeline: list[dict[str, int]] = []
+    authoritative_contract = dict(creation_contract or base.creation_contract)
+    if intent == "video":
+        contract = VideoCreationContract.model_validate(authoritative_contract or build_video_creation_contract(form_values).model_dump())
+        durations = split_video_duration(contract.video_duration_sec)
+        timeline = _scene_timeline(durations)
+    try:
+        payload = await revise_plan_payload(
+            intent=intent,
+            template_markdown=template_markdown,
+            current_plan_markdown=current_plan_markdown,
+            revision_feedback=revision_feedback,
+            form_values=form_values,
+            selected_direction=selected_direction,
+            creation_contract=authoritative_contract,
+            scene_timeline=timeline,
+            model_name=model_name,
+            model_factory=model_factory,
+        )
+        markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, {})
+        corrections: list[str] = []
+        if contract is not None:
+            contract, corrections = resolve_scene_image_spec(
+                contract,
+                _text(payload.get("scene_image_ratio")) or contract.scene_image_ratio,
+                _text(payload.get("scene_image_size")) or contract.scene_image_size,
+            )
+            authoritative_contract = contract.model_dump(exclude_none=True)
+        markdown = _with_execution_contract(intent, markdown, authoritative_contract, durations)
+        revised = replace(
+            base,
+            template_path=template_path,
+            consistency_issues=corrections,
+            creation_contract=authoritative_contract,
+            scene_durations_sec=durations,
+            llm_used=True,
+            model_name=model_name,
+        )
+        return revised.next_version(
+            plan_markdown=markdown,
+            plan_history=plan_history,
+            current_version=current_plan_version,
+            llm_used=True,
+            creation_contract=authoritative_contract,
+        )
+    except Exception as exc:  # noqa: BLE001
+        markdown = f"{current_plan_markdown.rstrip()}\n\n## 本次修改意见\n\n{revision_feedback.strip()}"
+        markdown = _with_execution_contract(intent, markdown, authoritative_contract, durations)
+        return replace(base, error=str(exc), model_name=model_name).next_version(
+            plan_markdown=markdown,
+            plan_history=plan_history,
+            current_version=current_plan_version,
+            llm_used=False,
+            error=str(exc),
+            creation_contract=authoritative_contract,
+        )
+
+
+def restore_plan_version(
+    *,
+    intent: CreationIntent,
+    current_plan_markdown: str,
+    current_plan_version: int,
+    plan_history: list[dict[str, Any]],
+    restore_version: int,
+    creation_contract: dict[str, Any] | None = None,
+    scene_durations_sec: list[int] | None = None,
+) -> PlanMarkdownResult:
+    history = _normalized_history(plan_history)
+    source = next((item for item in history if int(item.get("version") or 0) == restore_version), None)
+    if source is None:
+        raise ValueError(f"plan.md v{restore_version} 不存在，无法回退")
+    base = PlanMarkdownResult(
+        output_type=intent,
+        plan_markdown=current_plan_markdown,
+        template_path=_template_path(intent),
+        plan_version=current_plan_version,
+        plan_history=history,
+        creation_contract=dict(creation_contract or {}),
+        scene_durations_sec=list(scene_durations_sec or []),
+    )
+    return base.next_version(
+        plan_markdown=str(source.get("plan_markdown") or ""),
+        plan_history=history,
+        current_version=current_plan_version,
+        restored_from_version=restore_version,
+    )
+
+
+def _video_contract_and_durations(form_values: dict[str, Any]) -> tuple[VideoCreationContract, list[int], list[str]]:
+    contract = build_video_creation_contract(form_values)
+    durations = split_video_duration(contract.video_duration_sec)
+    contract, corrections = resolve_scene_image_spec(
+        contract,
+        _text(form_values.get("scene_image_ratio")) or contract.video_ratio,
+        _text(form_values.get("scene_image_size")) or "4K",
+    )
+    return contract, durations, corrections
+
+
+def _fallback_video_plan(
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    profile: dict[str, Any],
+    materials: list[dict[str, Any]],
+    intake_context: dict[str, Any],
+    contract: VideoCreationContract,
+    durations: list[int],
+) -> str:
+    product = _context_text_value(intake_context, "product_subject") or _text(form_values.get("product_info"), "未命名产品")
+    category = _text(form_values.get("product_category"), "未分类")
+    audience = _text(form_values.get("target_audience"), "目标用户")
+    conversion_goal = _text(form_values.get("conversion_goal"), "完成转化")
+    direction_title = _text(selected_direction.get("title"), "推荐创意方向")
+    direction_description = _text(selected_direction.get("description"), "围绕产品卖点组织完整方案。")
+    visual_style = contract.visual_style or "真实广告风格"
+    anchor = _visual_anchor(selected_direction, profile)
+    memory = _memory_summary(profile, intake_context)
+    ranges = scene_time_ranges(durations)
+    scene_lines = []
+    for index, ((start, end), duration) in enumerate(zip(ranges, durations, strict=True), start=1):
+        stage = _scene_stage(index, len(durations))
+        scene_lines.append(
+            f"- 镜头{index}-「{_timecode(start)}-{_timecode(end)}」\n"
+            f"  - 画面：{stage}，围绕 {product} 与 {anchor} 推进，采用 {visual_style}，严格持续 {duration} 秒。\n"
+            f"  - 文案：围绕「{direction_description}」推进当前信息点；旁白与音效服务 {conversion_goal}。"
+        )
+    markdown = f"""# {product} — {direction_title}
+
+## 一、选题方向
+
+{direction_description}
+
+产品定位：{product} = 面向 {audience} 的 {category} 内容主角。
+产品剧情角色：作为解决问题、证明卖点和推动转化的关键要素。
+系列记忆句：看见需求，想到 {product}。
+
+## 二、选题优势
+
+- **爆点机制**：开场建立冲突，中段完成产品证明，结尾收口到 {conversion_goal}
+- **人群**：{audience}
+- **依据**：{anchor}；素材：{_material_summary(materials)}
+- **长期记忆约束**：{memory or "暂无，按本次表单执行"}
+- **转化逻辑链**：痛点 -> 产品介入 -> 效果证明 -> {conversion_goal}
+
+## 三、视频规格
+
+- 任务类型：{contract.video_usage}
+- 画幅：{contract.video_ratio}
+- 时长：{contract.video_duration_sec} 秒
+- 时间轴：00:00-{_timecode(contract.video_duration_sec)}
+- 视频模型：{contract.video_model}
+- 图片模型：{contract.image_model}
+- 风格：{visual_style}
+- 转化目标：{conversion_goal}
+
+## 四、角色列表
+
+- 主角：{audience} 中具有代表性的人物，只生成真实人物三视图。
+- 产品/商品：{product}，作为道具资产，不放入人物角色栏目。
+- 场景与道具：围绕 {anchor} 规划，保持全片视觉一致。
+
+## 五、镜头列表
+
+{chr(10).join(scene_lines)}
+
+## 背景音乐
+
+- 前段：建立注意力和冲突。
+- 中段：推动产品证明。
+- 后段：完成 {conversion_goal} 收口。
+
+## 前3秒钩子
+
+用 {audience} 的高频痛点和明确动作建立悬念，并在 3 秒内让用户理解观看理由。
+"""
+    return _with_execution_contract("video", markdown, contract.model_dump(exclude_none=True), durations)
+
+
+def _fallback_image_plan(
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    profile: dict[str, Any],
+    materials: list[dict[str, Any]],
+    intake_context: dict[str, Any],
+) -> str:
+    goal = _context_text_value(intake_context, "creation_goal") or _text(form_values.get("image_goal"), "图片创作目标")
+    subject = _context_text_value(intake_context, "product_subject") or goal
+    direction_title = _text(selected_direction.get("title"), "推荐创意方向")
+    direction_description = _text(selected_direction.get("description"), "围绕主体建立清晰主视觉。")
+    usage = _text(form_values.get("image_usage"), "内容发布")
+    style = _text(form_values.get("image_style"), "真实摄影")
+    size = _text(form_values.get("image_size"), "自动适配")
+    image_type = _text(form_values.get("image_type"), "图片")
+    anchor = _visual_anchor(selected_direction, profile)
+    memory = _memory_summary(profile, intake_context)
+    count = _context_int_value(intake_context, "requested_output_count") or _positive_int(form_values.get("image_count"), 1)
+    original_prompt = _context_text_value(intake_context, "source_prompt")
+    industry_type = _context_text_value(intake_context, "industry_type") or "general"
+    markdown = f"""# {goal}｜{direction_title}
+
+## 一、选题方向
+
+{direction_description}
+
+原始需求：{original_prompt or "未提供"}
+产品主体：{subject}
+创作目标：{goal}
+行业类型：{industry_type}
+核心表达：围绕 {subject}，用 {anchor} 建立可直接用于 {usage} 的成品视觉。
+产品定位：{subject} = 当前画面的唯一核心主体。
+记忆句：一眼看到重点，一张图完成表达。
+
+## 二、选题优势
+
+- **爆点机制**：主体聚焦、卖点清楚、风格统一
+- **人群与用途**：{usage}
+- **素材依据**：{_material_summary(materials)}
+- **长期记忆约束**：{memory or "暂无，按本次表单执行"}
+
+## 三、图片规格
+
+- 任务类型：{image_type}
+- 尺寸：{size}
+- 生成数量：{count} 张
+- 用途：{usage}
+- 风格：{style}
+
+## 四、画面元素
+
+- 主视觉主体：{subject}
+- 场景环境：围绕 {anchor} 组织
+- 信息元素：标题、辅助文案或视觉标签按用途保留
+- 道具关系：只保留能帮助表达卖点的元素
+
+## 五、主图方案
+
+### 方案A：{direction_title}
+
+**画面**：{direction_description}，主体清晰，构图稳定，符合 {style}。
+**主标题**：围绕 {goal} 提炼 18 字以内标题。
+**CTA**：根据 {usage} 给出明确行动提示。
+
+## 六、视觉重点
+
+- 主体和核心卖点必须可识别。
+- 避免无关文字、水印和虚假承诺。
+- 所有生成结果严格继承本方案的用途、风格、尺寸和数量。
+
+## 七、图片钩子
+
+通过 {anchor} 在第一眼建立主题和记忆点。
+"""
+    return _with_execution_contract("image", markdown, _image_creation_contract(form_values, intake_context), [])
+
+
+def _with_execution_contract(
+    intent: CreationIntent,
+    markdown: str,
+    creation_contract: dict[str, Any],
+    durations: list[int],
+) -> str:
+    base = markdown.split("\n## 制作执行合同", 1)[0].rstrip()
+    if intent == "video":
+        ranges = scene_time_ranges(durations)
+        timeline = "\n".join(f"- 分镜{index}：{_timecode(start)}-{_timecode(end)}，{duration} 秒" for index, ((start, end), duration) in enumerate(zip(ranges, durations, strict=True), start=1))
+        contract_block = f"""## 制作执行合同
+
+- 视频总时长：{creation_contract.get("video_duration_sec")} 秒
+- 视频画幅：{creation_contract.get("video_ratio")}
+- 视频模型：{creation_contract.get("video_model")}
+- 视频清晰度：{creation_contract.get("video_size")}
+- 图片模型：{creation_contract.get("image_model")}
+- 图片比例：{creation_contract.get("scene_image_ratio")}
+- 图片清晰度：{creation_contract.get("scene_image_size")}
+- 视频用途：{creation_contract.get("video_usage")}
+- 视觉风格：{creation_contract.get("visual_style") or "由当前 Plan 统一约束"}
+- 执行规则：角色、场景、道具图片及全部分镜视频必须继承本合同；不得改用其他模型或比例。
+
+### 精确分镜时间线
+
+{timeline}
+"""
     else:
-        markdown = _build_video_plan(form_values, selected_direction, profile, materials or [], context)
-    return PlanMarkdownResult(output_type=intent, plan_markdown=markdown, consistency_issues=issues)
+        contract_block = f"""## 制作执行合同
+
+- 图片目标：{creation_contract.get("image_goal")}
+- 图片类型：{creation_contract.get("image_type")}
+- 图片用途：{creation_contract.get("image_usage")}
+- 图片风格：{creation_contract.get("image_style")}
+- 图片尺寸：{creation_contract.get("image_size")}
+- 生成数量：{creation_contract.get("image_count")} 张
+- 执行规则：后续图片生成必须严格继承当前 plan.md 和本合同。
+"""
+    return f"{base}\n\n{contract_block.strip()}\n"
 
 
-def _ensure_template_available() -> None:
-    text = PLAN_TEMPLATE_PATH.read_text(encoding="utf-8")
-    required_sections = ["## 一、选题方向", "## 十、开发输出要求"]
-    missing = [section for section in required_sections if section not in text]
+def _validated_llm_markdown(
+    intent: CreationIntent,
+    payload: dict[str, Any],
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any],
+) -> str:
+    markdown = _text(payload.get("plan_markdown"))
+    if not markdown:
+        raise ValueError("Plan LLM response is missing plan_markdown")
+    missing = [section for section in _REQUIRED_TEMPLATE_SECTIONS[intent] if section not in markdown]
     if missing:
-        raise ValueError(f"plan.md 模板缺少固定章节：{', '.join(missing)}")
+        raise ValueError(f"Plan LLM response is missing sections: {', '.join(missing)}")
+    allowed_text = json.dumps([form_values, selected_direction, intake_context], ensure_ascii=False, default=str)
+    leaked = [entity for entity in _TEMPLATE_SAMPLE_ENTITIES if entity in markdown and entity not in allowed_text]
+    if leaked:
+        raise ValueError(f"Plan LLM copied template sample entities: {', '.join(leaked)}")
+    return markdown
+
+
+def _load_template(intent: CreationIntent) -> tuple[Path, str]:
+    path = _template_path(intent)
+    text = path.read_text(encoding="utf-8")
+    missing = [section for section in _REQUIRED_TEMPLATE_SECTIONS[intent] if section not in text]
+    if missing:
+        raise ValueError(f"{path.name} 模板缺少固定章节：{', '.join(missing)}")
+    return path, text
+
+
+def _template_path(intent: CreationIntent) -> Path:
+    return VIDEO_PLAN_TEMPLATE_PATH if intent == "video" else IMAGE_PLAN_TEMPLATE_PATH
 
 
 def _consistency_issues(intent: CreationIntent, form_values: dict[str, Any], selected_direction: dict[str, Any]) -> list[str]:
@@ -77,325 +550,62 @@ def _consistency_issues(intent: CreationIntent, form_values: dict[str, Any], sel
         issues.append("缺少 selected_direction.direction_id")
     if not selected_direction.get("title"):
         issues.append("缺少 selected_direction.title")
-    if intent == "video":
-        for field_name in ["product_info", "product_category", "target_audience", "conversion_goal"]:
-            if not _text(form_values.get(field_name)):
-                issues.append(f"视频表单缺少 {field_name}")
-    if intent == "image":
-        for field_name in ["image_goal", "image_type", "image_usage", "image_style", "image_size"]:
-            if not _text(form_values.get(field_name)):
-                issues.append(f"图片表单缺少 {field_name}")
+    required = ("product_info", "product_category", "target_audience", "conversion_goal") if intent == "video" else ("image_goal", "image_type", "image_usage", "image_style", "image_size")
+    for field_name in required:
+        if not _text(form_values.get(field_name)):
+            issues.append(f"{intent} 表单缺少 {field_name}")
     return issues
 
 
-def _build_video_plan(
-    form_values: dict[str, Any],
-    selected_direction: dict[str, Any],
-    product_creative_profile: dict[str, Any],
-    materials: list[dict[str, Any]],
-    intake_context: dict[str, Any],
-) -> str:
-    product = _context_text_value(intake_context, "product_subject") or _text(form_values.get("product_info"), "未命名产品")
-    original_prompt = _context_text_value(intake_context, "source_prompt")
-    industry_type = _context_text_value(intake_context, "industry_type")
-    creation_goal = _context_text_value(intake_context, "creation_goal")
-    category = _text(form_values.get("product_category"), "未分类")
-    audience = _text(form_values.get("target_audience"), "目标用户")
-    goal = _text(form_values.get("conversion_goal"), "完成转化")
-    direction_title = _text(selected_direction.get("title"), "推荐创意方向")
-    direction_description = _text(selected_direction.get("description"), "围绕产品卖点组织完整创作方案。")
-    visual_anchor = _visual_anchor(selected_direction, product_creative_profile)
-    material_summary = _material_summary(materials)
-    memory_summary = _memory_summary(product_creative_profile, intake_context)
-    duration_seconds = _infer_duration_seconds(form_values, selected_direction, product_creative_profile, materials)
-    shot_ranges = _shot_ranges(duration_seconds)
-    return f"""# {product}｜{direction_title}
-
-## 一、选题方向
-
-原始需求：{original_prompt or "未提供"}  
-产品主体：{product}  
-创作目标：{creation_goal or product}  
-行业类型：{industry_type or category}  
-内容类型：AD 投放短视频。  
-人物/场景冲突：{audience} 在高频使用场景中遇到明确痛点，需要一个可信解决方案。  
-产品/商品能力：{product} 作为 {category} 产品，用 {visual_anchor} 建立记忆点。  
-结果反转：从问题焦虑转为可感知的解决结果，并自然导向 {goal}。
-
-产品定位：{product} = 面向 {audience} 的 {category} 转化型内容主角。  
-产品剧情角色：解决方案和关键道具，负责推动冲突解决和结果证明。  
-系列记忆句：看见问题，马上想到 {product}。
-
----
-
-## 二、选题优势
-
-- **爆点机制**：前三秒抛出真实痛点；中段放大使用压力；产品在解决节点首次露出；用结果证明降低犹豫；结尾引导 {goal}
-- **人群**：{audience}｜A3 兴趣到 A4 转化
-- **依据**：表单品类为 {category}，创意方向为「{direction_title}」，素材基础为 {material_summary}
-- **长期记忆约束**：{memory_summary or "暂无可用长期记忆，本次按表单和创意方向执行"}
-- **转化逻辑链**：冲突起点 -> 问题升级 -> 产品介入 -> 效果证明 -> 用户信任并执行 {goal}
-- **产品剧情检验**：通过 -- 去掉 {product} 后，剧情无法完成反转和转化收口
-- **系列延展性**：可系列化；可延展到通勤场景、家庭场景、直播间预热场景
-
----
-
-## 三、视频规格
-
-- 任务类型：AD 投放短视频
-- 画幅：9:16 竖屏
-- 时长：{duration_seconds} 秒
-- 时间轴：00:00-{_timecode(duration_seconds)}
-- 风格：信息流广告风格
-- 调性：真实、紧凑、可信、有转化推动力
-- 投放平台：抖音
-- 转化目标：{goal}
-- 投放方式：信息流广告
-
----
-
-## 四、角色列表
-
-- 主角用户：{audience}，真实生活状态，表达当前痛点和犹豫，承担代入作用
-- 旁白/字幕：清晰指出问题、卖点和行动提示，承担节奏推进作用
-- 场景环境：围绕 {visual_anchor} 组织画面，承担可信背景作用
-- {product}：外观清晰、卖点明确、视觉锚点为 {visual_anchor}，在剧情中承担解决方案作用
-
----
-
-## 五、镜头列表
-
-- 镜头1-「{shot_ranges[0]}」
-  - 画面：近景展示目标用户遇到痛点，构图紧凑，光线真实，快速制造停留理由
-  - 文案：你是不是也遇到过这个问题？音效：轻微提示音
-
-- 镜头2-「{shot_ranges[1]}」
-  - 画面：切到具体使用场景，展示问题升级和用户犹豫
-  - 文案：问题不是忍一忍就过去，而是需要一个更直接的解决方式。音效：节奏推进
-
-- 镜头3-「{shot_ranges[2]}」
-  - 画面：{product} 首次清晰露出，围绕 {visual_anchor} 展示核心卖点
-  - 文案：这就是我现在用的 {product}。音效：产品露出提示
-
-- 镜头4-「{shot_ranges[3]}」
-  - 画面：连续展示产品使用过程、细节和结果反馈
-  - 文案：重点不是夸张承诺，而是把真实变化看清楚。音效：节奏加快
-
-- 镜头5-「{shot_ranges[4]}」
-  - 画面：产品定格和行动入口同屏出现，收束到 {goal}
-  - 文案：想要同款体验，现在就去了解 {product}。音效：收束提示音
-
----
-
-## 六、背景音乐
-
-- 前半段「{_timecode(0)}-{_timecode(max(1, round(duration_seconds * 0.27)))}」：轻微紧张感节奏，制造冲突和停留
-- 中段「{_timecode(max(1, round(duration_seconds * 0.27)))}-{_timecode(max(2, round(duration_seconds * 0.73)))}」：节奏逐渐加快，推动产品证明过程
-- 后段「{_timecode(max(2, round(duration_seconds * 0.73)))}-{_timecode(duration_seconds)}」：清晰明亮的收束音乐，完成转化收口
-
----
-
-## 七、前3秒钩子
-
-用 {audience} 的真实痛点作为强冲突开场，让用户立刻判断“这说的是我”，并愿意继续看产品如何解决。
-
----
-
-## 八、产品露出设计
-
-- 首次露出时间：00:08
-- 露出方式：问题解决时自然出现
-- 露出画面：产品外观、核心功能点、使用动作和结果反馈
-- 露出目的：推动剧情、证明卖点、建立信任、引导 {goal}
-
----
-
-## 九、转化收口
-
-- 转化动作：{goal}
-- 转化话术：想要更快解决这个问题，现在就去了解 {product}
-- 转化画面：产品图、行动入口、关键卖点和使用结果同屏
-- 注意事项：避免夸大承诺，避免虚假优惠，避免绝对化违规词
-- 长期记忆注意事项：{memory_summary or "暂无"}
-
----
-
-## 十、开发输出要求
-
-生成该 plan.md 后，后续创作生成 Agent 必须以本方案为权威合同。镜头列表必须按时间轴执行，每个镜头都要包含镜头编号、时间段、画面描述、文案/台词/旁白和音效。创意方向说明：{direction_description}
-"""
-
-
-def _infer_duration_seconds(
-    form_values: dict[str, Any],
-    selected_direction: dict[str, Any],
-    product_creative_profile: dict[str, Any],
-    materials: list[dict[str, Any]],
-) -> int:
-    text_parts = [
-        _text(form_values.get("duration")),
-        _text(form_values.get("duration_seconds")),
-        _text(product_creative_profile.get("core_message")),
-        _text(product_creative_profile.get("duration")),
-        _text(selected_direction.get("title")),
-        _text(selected_direction.get("description")),
-        _material_summary(materials),
-    ]
-    text = "\n".join(part for part in text_parts if part)
-    minute_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:分钟|分|minute|minutes|min)", text, flags=re.IGNORECASE)
-    if minute_match:
-        return _clamp_duration_seconds(float(minute_match.group(1)) * 60)
-    second_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|s|sec|secs|second|seconds)", text, flags=re.IGNORECASE)
-    if second_match:
-        return _clamp_duration_seconds(float(second_match.group(1)))
-    return 30
-
-
-def _clamp_duration_seconds(value: float) -> int:
-    return max(1, min(180, round(value)))
-
-
-def _shot_ranges(duration_seconds: int) -> list[str]:
-    cut_points = [
-        0,
-        max(1, round(duration_seconds * 0.10)),
-        max(2, round(duration_seconds * 0.27)),
-        max(3, round(duration_seconds * 0.47)),
-        max(4, round(duration_seconds * 0.73)),
-        duration_seconds,
-    ]
-    for index in range(1, len(cut_points)):
-        if cut_points[index] <= cut_points[index - 1]:
-            cut_points[index] = cut_points[index - 1] + 1
-    cut_points[-1] = duration_seconds
-    return [f"{_timecode(cut_points[index])}-{_timecode(cut_points[index + 1])}" for index in range(5)]
-
-
-def _timecode(seconds: int) -> str:
-    minutes, secs = divmod(max(0, seconds), 60)
-    return f"{minutes:02d}:{secs:02d}"
-
-
-def _build_image_plan(
-    form_values: dict[str, Any],
-    selected_direction: dict[str, Any],
-    product_creative_profile: dict[str, Any],
-    materials: list[dict[str, Any]],
-    intake_context: dict[str, Any],
-) -> str:
-    image_goal = _context_text_value(intake_context, "creation_goal") or _text(form_values.get("image_goal"), "图片创作目标")
-    product_subject = _context_text_value(intake_context, "product_subject") or image_goal
-    original_prompt = _context_text_value(intake_context, "source_prompt")
-    industry_type = _context_text_value(intake_context, "industry_type")
-    requested_count = _context_int_value(intake_context, "requested_output_count") or 1
-    image_type = _text(form_values.get("image_type"), "图片")
-    usage = _text(form_values.get("image_usage"), "内容使用")
-    style = _text(form_values.get("image_style"), "自由发挥")
-    size = _text(form_values.get("image_size"), "自动适配")
-    direction_title = _text(selected_direction.get("title"), "推荐创意方向")
-    direction_description = _text(selected_direction.get("description"), "围绕图片目标组织完整创作方案。")
-    visual_anchor = _visual_anchor(selected_direction, product_creative_profile)
-    material_summary = _material_summary(materials)
-    memory_summary = _memory_summary(product_creative_profile, intake_context)
-    return f"""# {image_goal}｜{direction_title}
-
-## 一、选题方向
-
-原始需求：{original_prompt or "未提供"}  
-产品主体：{product_subject}  
-创作目标：{image_goal}  
-行业类型：{industry_type or "general"}  
-生成数量：{requested_count} 张  
-内容类型：图片生成。  
-人物/场景冲突：围绕 {usage} 的第一眼注意力建立画面焦点。  
-产品/商品能力：通过 {visual_anchor} 让主题更容易被识别和记住。  
-结果反转：从普通图片需求升级为可直接用于 {usage} 的成品视觉。
-
-产品定位：{product_subject} = 面向 {usage} 的 {image_type} 主体，创作目标为 {image_goal}。  
-产品剧情角色：视频生成不适用；图片中承担主视觉主体和信息焦点。  
-系列记忆句：一眼看到重点，一张图完成表达。
-
----
-
-## 二、选题优势
-
-- **爆点机制**：用主体焦点吸引视线；用风格和构图制造记忆；用信息层级服务 {usage}
-- **人群**：{usage} 触达用户｜A1 认知到 A3 兴趣
-- **依据**：图片类型为 {image_type}，图片风格为 {style}，素材基础为 {material_summary}
-- **长期记忆约束**：{memory_summary or "暂无可用长期记忆，本次按表单和创意方向执行"}
-- **转化逻辑链**：画面吸引 -> 信息识别 -> 风格建立 -> 信任形成 -> 用户继续点击或停留
-- **产品剧情检验**：通过 -- 去掉主体后，图片无法表达 {image_goal}
-- **系列延展性**：可系列化；可延展到封面图、详情页配图、活动视觉
-
----
-
-## 三、视频规格
-
-- 任务类型：图片生成
-- 画幅：{size}
-- 时长：视频生成不适用
-- 风格：{style}
-- 调性：清晰、稳定、可发布
-- 投放平台：按 {usage} 选择
-- 转化目标：提升点击、停留和信息理解
-- 投放方式：图片物料投放或内容发布
-
----
-
-## 四、角色列表
-
-- 主视觉主体：{image_goal}，承担第一视觉焦点
-- 场景环境：围绕 {visual_anchor} 组织背景和道具关系
-- 信息元素：标题、辅助文案或视觉标签，承担快速理解作用
-- 产品/商品名称：按 {product_subject} 呈现，视觉锚点为 {visual_anchor}
-
----
-
-## 五、镜头列表
-
-- 镜头1-「静态画面」
-  - 画面：主体居中或黄金分割构图，围绕 {visual_anchor} 建立风格，整体符合 {style}
-  - 文案：根据 {usage} 保留标题或留白。音效：视频生成不适用
-
----
-
-## 六、背景音乐
-
-- 前半段「不适用」：视频生成不适用
-- 中段「不适用」：视频生成不适用
-- 后段「不适用」：视频生成不适用
-
----
-
-## 七、前3秒钩子
-
-视频生成不适用；图片第一眼钩子是清晰主体、强风格和明确的信息层级。
-
----
-
-## 八、产品露出设计
-
-- 首次露出时间：静态画面首屏即露出
-- 露出方式：主体视觉直接呈现
-- 露出画面：{product_subject}、关键风格元素和 {visual_anchor}
-- 露出目的：让用户快速理解主题，并服务 {usage}
-
----
-
-## 九、转化收口
-
-- 转化动作：根据 {usage} 承接点击、发布、详情页浏览或活动引导
-- 转化话术：围绕图片目标添加短标题或行动提示
-- 转化画面：主体、关键信息和视觉锚点统一呈现
-- 注意事项：避免夸大承诺，避免虚假优惠，避免绝对化违规词
-- 长期记忆注意事项：{memory_summary or "暂无"}
-
----
-
-## 十、开发输出要求
-
-生成该 plan.md 后，后续图片生成 Agent 必须以本方案为权威合同。图片生成参数必须继承图片类型、用途、风格、尺寸和创意方向。创意方向说明：{direction_description}
-"""
+def _image_creation_contract(form_values: dict[str, Any], intake_context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "intent": "image",
+        "image_goal": _context_text_value(intake_context, "creation_goal") or _text(form_values.get("image_goal")),
+        "image_type": _text(form_values.get("image_type")),
+        "image_usage": _text(form_values.get("image_usage")),
+        "image_style": _text(form_values.get("image_style")),
+        "image_size": _text(form_values.get("image_size"), "自动适配"),
+        "image_count": _context_int_value(intake_context, "requested_output_count") or _positive_int(form_values.get("image_count"), 1),
+    }
+
+
+def _scene_timeline(durations: list[int]) -> list[dict[str, int]]:
+    return [{"scene_index": index, "start_sec": start, "end_sec": end, "duration_sec": duration} for index, ((start, end), duration) in enumerate(zip(scene_time_ranges(durations), durations, strict=True), start=1)]
+
+
+def _scene_stage(index: int, count: int) -> str:
+    ratio = index / max(1, count)
+    if index == 1:
+        return "以强动作和明确痛点开场"
+    if ratio <= 0.3:
+        return "补充人物目标与使用场景，逐步升级问题"
+    if ratio <= 0.65:
+        return "让产品自然介入并展示关键使用过程"
+    if ratio <= 0.85:
+        return "用细节、对比或反馈证明产品价值"
+    return "收束结果并给出清晰行动提示"
+
+
+def _history_entry(version: int, plan_markdown: str, restored_from_version: int | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {"version": version, "plan_markdown": plan_markdown}
+    if restored_from_version is not None:
+        item["restored_from_version"] = restored_from_version
+    return item
+
+
+def _normalized_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        version = _positive_int(item.get("version"), 0)
+        markdown = _text(item.get("plan_markdown"))
+        if version <= 0 or not markdown or version in seen:
+            continue
+        seen.add(version)
+        result.append(dict(item))
+    return sorted(result, key=lambda item: int(item["version"]))
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -406,44 +616,48 @@ def _text(value: Any, default: str = "") -> str:
     return str(value)
 
 
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
 def _context_text_value(intake_context: dict[str, Any], key: str) -> str:
-    value = intake_context.get(key)
-    return _text(value)
+    return _text(intake_context.get(key))
 
 
 def _context_int_value(intake_context: dict[str, Any], key: str) -> int | None:
-    try:
-        value = int(intake_context.get(key))
-    except (TypeError, ValueError):
-        return None
-    return max(1, min(10, value))
+    value = _positive_int(intake_context.get(key), 0)
+    return max(1, min(10, value)) if value else None
 
 
 def _merged_profile(product_creative_profile: dict[str, Any], intake_context: dict[str, Any]) -> dict[str, Any]:
     context_profile = intake_context.get("product_creative_profile")
-    if not isinstance(context_profile, dict):
-        return product_creative_profile
-    return {**context_profile, **product_creative_profile}
+    return {**context_profile, **product_creative_profile} if isinstance(context_profile, dict) else product_creative_profile
 
 
 def _visual_anchor(selected_direction: dict[str, Any], product_creative_profile: dict[str, Any]) -> str:
-    direction_data = selected_direction.get("data")
-    if isinstance(direction_data, dict) and _text(direction_data.get("visual_anchor")):
-        return _text(direction_data.get("visual_anchor"))
+    data = selected_direction.get("data")
+    if isinstance(data, dict) and _text(data.get("visual_anchor")):
+        return _text(data.get("visual_anchor"))
     anchors = product_creative_profile.get("visual_anchor_keywords")
-    if isinstance(anchors, list) and anchors:
-        return "、".join(_text(anchor) for anchor in anchors[:3] if _text(anchor)) or "产品质感、真实使用、转化动作"
+    if isinstance(anchors, list):
+        normalized = "、".join(_text(item) for item in anchors[:3] if _text(item))
+        if normalized:
+            return normalized
     return "产品质感、真实使用、转化动作"
 
 
 def _memory_summary(product_creative_profile: dict[str, Any], intake_context: dict[str, Any]) -> str:
-    profile_summary = semantic_memory_text(product_creative_profile.get("semantic_memory"))
-    if profile_summary:
-        return profile_summary
-    return semantic_memory_text(intake_context.get("semantic_memory"))
+    return semantic_memory_text(product_creative_profile.get("semantic_memory")) or semantic_memory_text(intake_context.get("semantic_memory"))
 
 
 def _material_summary(materials: list[dict[str, Any]]) -> str:
-    if not materials:
-        return "暂无额外素材，主要依据用户表单和创意方向"
-    return f"{len(materials)} 个素材，后续生成时按素材类型引用"
+    return f"{len(materials)} 个可引用素材" if materials else "暂无额外素材，按表单和创意方向执行"
+
+
+def _timecode(seconds: int) -> str:
+    minutes, secs = divmod(max(0, int(seconds)), 60)
+    return f"{minutes:02d}:{secs:02d}"

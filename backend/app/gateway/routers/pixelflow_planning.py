@@ -8,7 +8,12 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
-from pixelflow.creative.plan_markdown import CreationIntent, build_plan_markdown
+from pixelflow.creative.plan_markdown import (
+    CreationIntent,
+    build_plan_markdown_with_llm,
+    restore_plan_version,
+    revise_plan_markdown_with_llm,
+)
 from pixelflow.memory import with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/planning", tags=["pixelflow-flows"])
@@ -57,6 +62,37 @@ class PlanMarkdownResponse(BaseModel):
     template_path: str
     consistency_issues: list[str] = Field(default_factory=list)
     review_timeout_sec: int | None = None
+    plan_version: int = 1
+    plan_history: list[dict[str, Any]] = Field(default_factory=list)
+    creation_contract: dict[str, Any] = Field(default_factory=dict)
+    scene_durations_sec: list[int] = Field(default_factory=list)
+    llm_used: bool = False
+    model_name: str = "deepseek-v4-pro"
+    error: str | None = None
+    restored_from_version: int | None = None
+
+
+class PlanRevisionRequest(PlanMarkdownRequest):
+    current_plan_markdown: str
+    current_plan_version: int = Field(default=1, ge=1)
+    plan_history: list[dict[str, Any]] = Field(default_factory=list)
+    revision_feedback: str = Field(min_length=1)
+    creation_contract: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlanRestoreRequest(BaseModel):
+    intent: CreationIntent
+    current_plan_markdown: str
+    current_plan_version: int = Field(ge=1)
+    plan_history: list[dict[str, Any]] = Field(default_factory=list)
+    restore_version: int = Field(ge=1)
+    creation_contract: dict[str, Any] = Field(default_factory=dict)
+    scene_durations_sec: list[int] = Field(default_factory=list)
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def normalize_intent_alias(cls, value: Any) -> Any:
+        return PlanMarkdownRequest.normalize_intent_alias(value)
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
@@ -72,7 +108,7 @@ async def create_plan_markdown(body: PlanMarkdownRequest, request: Request) -> P
         memories,
         product_creative_profile=body.product_creative_profile,
     )
-    result = build_plan_markdown(
+    result = await build_plan_markdown_with_llm(
         body.intent,
         body.form_values,
         body.selected_direction,
@@ -92,5 +128,53 @@ async def create_plan_markdown(body: PlanMarkdownRequest, request: Request) -> P
         metadata={"source": "planning_plan", "intent": body.intent, "consistency_issues": result.consistency_issues},
         memory_type="experience",
         infer=False,
+    )
+    return PlanMarkdownResponse(**result.to_dict())
+
+
+@router.post("/plan/revise", response_model=PlanMarkdownResponse)
+async def revise_plan_markdown(body: PlanRevisionRequest, request: Request) -> PlanMarkdownResponse:
+    user_id, _memories = await search_power_mem(
+        request,
+        source_agent="planning_agent",
+        query_values=[body.form_values, body.selected_direction, body.current_plan_markdown, body.revision_feedback],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    result = await revise_plan_markdown_with_llm(
+        intent=body.intent,
+        form_values=body.form_values,
+        selected_direction=body.selected_direction,
+        current_plan_markdown=body.current_plan_markdown,
+        current_plan_version=body.current_plan_version,
+        plan_history=body.plan_history,
+        revision_feedback=body.revision_feedback,
+        creation_contract=body.creation_contract,
+    )
+    record_power_mem_background(
+        power_mem_service(request),
+        user_id=user_id,
+        content=concise_result_summary(
+            "策划 Agent 修订 plan.md",
+            {"intent": body.intent, "message": f"version={result.plan_version}", "ok": not result.error},
+        ),
+        category="experience",
+        source_agent="planning_agent",
+        metadata={"source": "planning_plan_revision", "intent": body.intent, "plan_version": result.plan_version},
+        memory_type="experience",
+        infer=False,
+    )
+    return PlanMarkdownResponse(**result.to_dict())
+
+
+@router.post("/plan/restore", response_model=PlanMarkdownResponse)
+async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownResponse:
+    result = restore_plan_version(
+        intent=body.intent,
+        current_plan_markdown=body.current_plan_markdown,
+        current_plan_version=body.current_plan_version,
+        plan_history=body.plan_history,
+        restore_version=body.restore_version,
+        creation_contract=body.creation_contract,
+        scene_durations_sec=body.scene_durations_sec,
     )
     return PlanMarkdownResponse(**result.to_dict())
