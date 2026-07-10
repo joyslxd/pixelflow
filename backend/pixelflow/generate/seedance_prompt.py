@@ -1,0 +1,99 @@
+"""Runtime adapter for the vendored Seedance prompt-authoring Skill."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from functools import lru_cache
+from pathlib import Path
+
+SEEDANCE_SKILL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "skills"
+    / "public"
+    / "borgrise-creative-assistant-v2"
+    / "skills"
+    / "seedance-prompt"
+    / "SKILL.md"
+)
+MAX_IMAGE_REFERENCES = 9
+
+
+@lru_cache(maxsize=1)
+def load_seedance_guidance() -> str:
+    """Load the concise Seedance rules needed by the scene-package LLM."""
+    source = SEEDANCE_SKILL_PATH.read_text(encoding="utf-8")
+    sections = [
+        _markdown_section(source, "Seedance 2.0 核心能力", level=2),
+        _markdown_section(source, "@引用系统", level=2),
+        _markdown_section(source, "7. 声音控制", level=3),
+        _markdown_section(source, "高级提示词技巧", level=2),
+        _markdown_section(source, "镜头语言词汇库", level=2),
+        _markdown_section(source, "时长策略", level=2),
+    ]
+    guidance = "\n\n".join(section.strip() for section in sections if section.strip())
+    if not guidance:
+        raise ValueError(f"Seedance guidance sections are missing from {SEEDANCE_SKILL_PATH}")
+    return guidance
+
+
+def build_seedance_shot_prompt(
+    *,
+    scene_index: int,
+    start_second: int,
+    end_second: int,
+    plan_markdown: str,
+    storyline: str,
+    narration: str,
+    visual_style: str,
+    available_asset_ids: Sequence[str],
+    video_ratio: str,
+    include_guidance: bool = True,
+    include_plan: bool = True,
+) -> str:
+    """Build one scene's strict Seedance shot-description instruction."""
+    duration = end_second - start_second
+    if scene_index < 1:
+        raise ValueError("scene_index must be positive")
+    if start_second < 0 or duration < 4 or duration > 15:
+        raise ValueError("Seedance scene range must be 4-15 integer seconds")
+
+    asset_ids = _normalize_asset_ids(available_asset_ids)
+    if len(asset_ids) > MAX_IMAGE_REFERENCES:
+        raise ValueError(f"Seedance supports at most {MAX_IMAGE_REFERENCES} image references per scene")
+    references = "、".join(f"@{asset_id}" for asset_id in asset_ids) or "无图片参考"
+    guidance = f"Seedance Skill 规则：\n{load_seedance_guidance()}\n\n" if include_guidance else ""
+    plan_context = f"\n- 必须严格执行的 plan.md：\n{str(plan_markdown or '').strip()[:6000]}" if include_plan else ""
+    return (
+        f"{guidance}"
+        f"分镜 {scene_index} 的执行合同：\n"
+        f"- 精确时间范围：{start_second}-{end_second}秒（时长 {duration} 秒）\n"
+        f"- 视频画幅：{video_ratio}\n"
+        f"- 视觉风格：{visual_style}\n"
+        f"- 故事线：{storyline}\n"
+        f"- 旁白：{narration or '本分镜无旁白'}\n"
+        f"- 可引用素材：{references}\n"
+        f"- 素材规则：只允许使用上述 @asset_id，不要使用未声明素材；每个分镜最多 {MAX_IMAGE_REFERENCES} 张图片参考。\n"
+        "- 镜头描述必须是一整段中文，按需要在该精确秒段内继续划分秒级时间戳；"
+        "包含地点、角色、景别、动作、运镜、光影、声音/对白，并明确每个 @素材的用途。\n"
+        "- 不得使用 ms、毫秒或带小数的时间码。"
+        f"{plan_context}"
+    )
+
+
+def _markdown_section(source: str, heading: str, *, level: int) -> str:
+    marker = "#" * level
+    match = re.search(
+        rf"(?ms)^{re.escape(marker)}\s+{re.escape(heading)}\s*$.*?(?=^{'#' * level}\s+|\Z)",
+        source,
+    )
+    return match.group(0).strip() if match else ""
+
+
+def _normalize_asset_ids(values: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        asset_id = str(value or "").strip().lstrip("@").strip()
+        if asset_id and asset_id not in normalized:
+            normalized.append(asset_id)
+    return normalized

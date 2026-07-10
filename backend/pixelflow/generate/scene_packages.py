@@ -13,10 +13,17 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from pixelflow.creative.duration import (
+    MAX_SCENE_DURATION_SEC,
+    MIN_SCENE_DURATION_SEC,
+    scene_time_ranges,
+    split_video_duration,
+)
+from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_seedance_guidance
+
 DEFAULT_TARGET_DURATION_MS = 30_000
-MIN_SCENE_DURATION_MS = 4_000
-MAX_SCENE_DURATION_MS = 15_000
-PREFERRED_SCENE_DURATION_MS = 10_000
+MIN_SCENE_DURATION_MS = MIN_SCENE_DURATION_SEC * 1000
+MAX_SCENE_DURATION_MS = MAX_SCENE_DURATION_SEC * 1000
 SCENE_PACKAGE_LLM_MODEL_NAME = "deepseek-v4-pro"
 ModelFactory = Callable[..., Any]
 
@@ -31,9 +38,8 @@ def prepare_video_scene_packages(
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
-    duration_ms = _clamp_positive_int(target_duration_ms, DEFAULT_TARGET_DURATION_MS)
-    scene_count = _scene_count(duration_ms)
-    durations = _split_duration(duration_ms, scene_count)
+    duration_ms, durations = _exact_scene_durations_ms(target_duration_ms)
+    scene_count = len(durations)
 
     product_name = _first_text(
         form_values.get("product_info"),
@@ -88,6 +94,7 @@ def prepare_video_scene_packages(
             stage_name=stage["name"],
             shot_description=shot_description,
             visual_style=global_assets["visual_style"],
+            video_ratio=_first_text(form_values.get("video_ratio"), "9:16"),
         )
         scenes.append(
             {
@@ -131,9 +138,8 @@ async def prepare_video_scene_packages_with_llm(
     """用 LLM 生成视频场景包，失败时降级到规则版场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
-    duration_ms = _clamp_positive_int(target_duration_ms, DEFAULT_TARGET_DURATION_MS)
-    scene_count = _scene_count(duration_ms)
-    durations = _split_duration(duration_ms, scene_count)
+    duration_ms, durations = _exact_scene_durations_ms(target_duration_ms)
+    scene_count = len(durations)
     try:
         payload = await asyncio.to_thread(
             _invoke_scene_package_model,
@@ -219,12 +225,48 @@ def _scene_package_prompt(
     target_duration_ms: int,
     durations: list[int],
 ) -> str:
+    duration_seconds = [duration // 1000 for duration in durations]
+    time_ranges = scene_time_ranges(duration_seconds)
+    stage_templates = _stage_templates(len(durations))
+    default_assets = _default_global_assets(
+        form_values=form_values,
+        selected_direction=selected_direction,
+        stage_templates=stage_templates,
+    )
+    visual_style = _first_text(
+        form_values.get("visual_style"),
+        default_assets["visual_style"].get("description"),
+    )
+    video_ratio = _first_text(form_values.get("video_ratio"), "9:16")
+    shot_contracts: list[str] = []
+    for index, ((start_second, end_second), stage) in enumerate(zip(time_ranges, stage_templates, strict=True), start=1):
+        reference_ids = _default_reference_asset_ids(default_assets, stage["asset_id"])
+        shot_contracts.append(
+            build_seedance_shot_prompt(
+                scene_index=index,
+                start_second=start_second,
+                end_second=end_second,
+                plan_markdown=plan_markdown,
+                storyline=f"严格承接 plan.md 的第 {index} 个分镜故事线",
+                narration="由当前 plan.md 和故事节奏决定，可为空",
+                visual_style=visual_style,
+                available_asset_ids=reference_ids,
+                video_ratio=video_ratio,
+                include_guidance=False,
+                include_plan=False,
+            )
+        )
+    seedance_guidance = load_seedance_guidance()
+    shot_contract_text = "\n\n".join(shot_contracts)
     return f"""你是 PixelFlow 创作生成 Agent 的视频场景包 Skill。
 请根据 plan.md、表单和创意方向，生成一组可编辑的视频场景片段。
 
+以下是项目内 Seedance 2.0 Skill 的强制指导：
+{seedance_guidance}
+
 硬性要求：
 1. 必须返回 {len(durations)} 个 scene_packages，顺序和 durations_ms 完全对应。
-2. 每个片段时长必须在 {MIN_SCENE_DURATION_MS} 到 {MAX_SCENE_DURATION_MS} ms 之间。
+2. 每个片段时长必须在 {MIN_SCENE_DURATION_SEC} 到 {MAX_SCENE_DURATION_SEC} 秒之间，并严格使用下面逐分镜执行合同的秒段。
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
 4. global_assets.characters 只能是人物角色，不能放产品、商品、道具或场景；每个角色必须提供 three_view_prompt，用来生成当前人物的正面、侧面、背面三视图。
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
@@ -263,8 +305,11 @@ def _scene_package_prompt(
   }}
 ]}}
 
-目标总时长 ms：{target_duration_ms}
-片段 durations_ms：{json.dumps(durations, ensure_ascii=False)}
+目标总时长秒：{target_duration_ms // 1000}
+片段 durations_sec：{json.dumps(duration_seconds, ensure_ascii=False)}
+视频画幅：{video_ratio}
+逐分镜 Seedance 执行合同：
+{shot_contract_text}
 表单数据：{json.dumps(form_values, ensure_ascii=False)}
 创意方向：{json.dumps(selected_direction, ensure_ascii=False)}
 素材集合：{json.dumps(materials, ensure_ascii=False)}
@@ -794,29 +839,17 @@ def _default_global_assets(
     }
 
 
-def _scene_count(duration_ms: int) -> int:
-    count = math.ceil(duration_ms / PREFERRED_SCENE_DURATION_MS)
-    return max(1, min(18, count))
-
-
-def _split_duration(total_ms: int, scene_count: int) -> list[int]:
-    durations: list[int] = []
-    remaining = total_ms
-    for index in range(scene_count, 0, -1):
-        duration = min(MAX_SCENE_DURATION_MS, max(MIN_SCENE_DURATION_MS, remaining // index))
-        durations.append(duration)
-        remaining -= duration
-    if remaining > 0:
-        for index in range(len(durations)):
-            available = MAX_SCENE_DURATION_MS - durations[index]
-            if available <= 0:
-                continue
-            add = min(available, remaining)
-            durations[index] += add
-            remaining -= add
-            if remaining == 0:
-                break
-    return durations
+def _exact_scene_durations_ms(target_duration_ms: Any) -> tuple[int, list[int]]:
+    if isinstance(target_duration_ms, bool):
+        raise ValueError("target video duration must use integer seconds")
+    try:
+        duration_ms = int(target_duration_ms)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("target video duration must use integer seconds") from exc
+    if duration_ms % 1000 != 0:
+        raise ValueError("target video duration must not contain milliseconds")
+    durations = [duration * 1000 for duration in split_video_duration(duration_ms // 1000)]
+    return duration_ms, durations
 
 
 def _stage_templates(scene_count: int) -> list[dict[str, str]]:
@@ -1002,10 +1035,11 @@ def _build_scene_prompt(
     stage_name: str,
     shot_description: dict[str, Any],
     visual_style: dict[str, Any],
+    video_ratio: str,
 ) -> str:
     shot_prompt = _build_prompt_from_scene_fields(storyline, shot_description, narration, visual_style)
     return (
-        f"{stage_name}。生成一段9:16电商短视频片段，产品是{product_name}，品类是{product_category}，"
+        f"{stage_name}。生成一段{video_ratio}电商短视频片段，产品是{product_name}，品类是{product_category}，"
         f"目标人群是{target_audience}，转化目标是{conversion_goal}。创意方向：{direction_title}。"
         f"{direction_description}。{shot_prompt}。"
         "要求主体、商品颜色、道具和场景在前后镜头中保持一致；避免人物畸形、手部变形、字幕乱码、无关物体乱入。"

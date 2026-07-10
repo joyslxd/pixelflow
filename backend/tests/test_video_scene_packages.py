@@ -69,6 +69,58 @@ def test_prepare_video_scene_packages_uses_second_ranges_in_shot_description():
     assert "0-10秒" in shot_text
 
 
+def test_prepare_video_scene_packages_supports_300_seconds_without_legacy_scene_cap():
+    result = prepare_video_scene_packages(
+        form_values={
+            "product_info": "户外防水背包",
+            "product_category": "服饰鞋包",
+            "target_audience": "长途旅行人群",
+            "conversion_goal": "直接购买",
+            "video_ratio": "9:16",
+        },
+        plan_markdown="## 创作目标\n严格按 300 秒计划展示产品能力。",
+        selected_direction={"title": "极端天气实测"},
+        target_duration_ms=300_000,
+    )
+
+    durations = [scene["duration_ms"] for scene in result["scene_packages"]]
+    assert len(durations) == 30
+    assert sum(durations) == 300_000
+    assert all(4_000 <= duration <= 15_000 for duration in durations)
+
+
+def test_scene_package_llm_prompt_includes_seedance_guidance_and_final_video_ratio():
+    captured: dict[str, str] = {}
+
+    class FailingModel:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            raise RuntimeError("capture prompt")
+
+    __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={
+                "product_info": "户外防水背包",
+                "product_category": "服饰鞋包",
+                "target_audience": "长途旅行人群",
+                "conversion_goal": "直接购买",
+                "video_ratio": "9:16",
+            },
+            plan_markdown="## 创作目标\n严格根据 plan.md 生成镜头。",
+            selected_direction={"title": "极端天气实测"},
+            target_duration_ms=20_000,
+            model_factory=lambda *_args, **_kwargs: FailingModel(),
+        )
+    )
+
+    assert "Seedance 2.0" in captured["prompt"]
+    assert "0-10秒" in captured["prompt"]
+    assert "10-20秒" in captured["prompt"]
+    assert "9:16" in captured["prompt"]
+    assert "最多 9" in captured["prompt"]
+    assert "严格根据 plan.md 生成镜头" in captured["prompt"]
+
+
 def test_prepare_video_scene_packages_with_llm_normalizes_millisecond_ranges():
     class FakeMessage:
         def __init__(self, content: str) -> None:

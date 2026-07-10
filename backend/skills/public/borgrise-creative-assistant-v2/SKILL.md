@@ -20,7 +20,9 @@ This skill is split into three clear modules. Pick the module by user intent and
 - `scripts/run_generation.py`: executable CLI for Borgrise upload, polling, 生图, 生视频, reference-mode video, long video, native-audio video, and virtual-human asset commands.
 - `references/api-reference.md`: compact Borgrise API and payload reference for exact endpoint/header/body shapes.
 - `references/scene-playbook.md`: prompt quality guide for product images, lifestyle images, showcase videos, reference-mode videos, native-audio videos, and long videos.
-- `templates/plan.md`: runtime plan template used by planning agents when filling the user-facing creative plan.
+- `skills/seedance-prompt/SKILL.md`: vendored Seedance 2.0 prompt guidance used when building each video scene's shot description.
+- `templates/plan_video.md`: runtime video plan template used by planning agents.
+- `templates/plan_image.md`: runtime image plan template used by planning agents.
 - `templates/industry_profile.md`: runtime vertical-industry skill specification for producing `product_creative_profile`.
 - `tests/`: zero-dependency Python tests for skill structure and high-risk generation-script behavior.
 
