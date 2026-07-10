@@ -570,6 +570,7 @@ def test_image_router_edits_scene_global_asset(monkeypatch):
                 "asset_group": "characters",
                 "source_image_url": "https://x/role.png",
                 "prompt": "把衣服改成白色",
+                "model": "seeddream-5.0",
             },
         )
 
@@ -618,6 +619,7 @@ def test_image_router_edit_asset_uses_uploaded_reference_materials(monkeypatch):
                 "asset_group": "props",
                 "source_image_url": "https://x/old-prop.png",
                 "prompt": "更新为新的鞋子",
+                "model": "seeddream-5.0",
                 "materials": [
                     {"url": "https://x/fila1.jpg", "mediaType": "image"},
                     {"url": "https://x/fila2.jpg", "mediaType": "image"},
@@ -673,6 +675,7 @@ def test_image_router_fuse_asset_uses_source_and_uploaded_image(monkeypatch):
                 "asset_group": "props",
                 "source_image_url": "https://x/old-prop.png",
                 "prompt": "融合成新商品图",
+                "model": "seeddream-5.0",
                 "materials": [
                     {"url": "https://x/uploaded.png", "mediaType": "image"},
                     {"url": "https://x/ref.mp4", "mediaType": "video"},
