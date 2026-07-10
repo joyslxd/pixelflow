@@ -17,6 +17,7 @@ interface MessageBubbleProps {
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
+  onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
@@ -210,6 +211,7 @@ export function MessageBubble({
   onRegenerateDirections,
   onApprovePlan,
   onRevisePlan,
+  onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
   onAcceptImageResult,
@@ -524,7 +526,9 @@ export function MessageBubble({
                 <FileText size={18} />
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title}</span>
+                <span className="block text-[13px] font-semibold text-ink">
+                  {msg.artifact.title} v{msg.artifact.plan.plan_version || msg.artifact.planVersion || 1}
+                </span>
                 <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
               </span>
             </div>
@@ -534,6 +538,23 @@ export function MessageBubble({
             {msg.artifact.plan.consistency_issues.length > 0 && (
               <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
                 {msg.artifact.plan.consistency_issues.join("；")}
+              </div>
+            )}
+            {msg.artifact.plan.plan_history?.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-canvas px-3 py-2">
+                <span className="text-[12px] text-ink-soft">历史版本</span>
+                {msg.artifact.plan.plan_history
+                  .filter((item) => item.version !== msg.artifact?.plan?.plan_version)
+                  .map((item) => (
+                    <button
+                      key={item.version}
+                      type="button"
+                      onClick={() => onRollbackPlan?.(msg, item.version)}
+                      className="rounded-lg border border-line bg-white px-2.5 py-1 text-[12px] font-medium text-ink hover:border-accent/40 hover:text-accent"
+                    >
+                      回退到 v{item.version}
+                    </button>
+                  ))}
               </div>
             )}
             <div className="flex gap-2">

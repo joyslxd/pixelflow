@@ -10,6 +10,8 @@ const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/Me
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 const viteConfigSource = fs.readFileSync(path.resolve("vite.config.ts"), "utf8");
 const videoRequirementConfigSource = fs.readFileSync(path.resolve("src/lib/videoRequirementConfig.ts"), "utf8");
+const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
+const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -168,6 +170,20 @@ test("video requirement form collects and persists the complete creation contrac
   assert.match(workspaceSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
   assert.match(workspaceSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
   assert.match(videoRequirementConfigSource, /filterSeedanceConfigs/, "video model filtering must remain centralized");
+});
+
+test("plan revision defaults to modifying the current creative and only regenerates directions on explicit choice", () => {
+  assert.match(planRevisionDialogSource, /extend_current/, "revision dialog must expose current-creative modification");
+  assert.match(planRevisionDialogSource, /regenerate_directions/, "revision dialog must expose creative regeneration");
+  assert.match(planRevisionDialogSource, /useState<PlanRevisionMode>\("extend_current"\)/, "current-creative modification must be the default");
+  assert.match(planRevisionDialogSource, /在当前创意基础上扩展\/修改/, "dialog must explain current creative modification");
+  assert.match(planRevisionDialogSource, /放弃当前创意，重新生成新创意/, "dialog must explain creative regeneration");
+  assert.match(workspaceSource, /api\.revisePlanMarkdown/, "extend-current mode must call the Plan revision endpoint");
+  assert.match(workspaceSource, /mode === "regenerate_directions"[\s\S]*startDirectionJob/, "only regenerate mode may call the directions job");
+  assert.match(apiSource, /planning\/plan\/revise/, "api client must expose Plan revision");
+  assert.match(apiSource, /planning\/plan\/restore/, "api client must expose Plan restore");
+  assert.match(messageBubbleSource, /plan\.plan_version/, "Plan cards must display their version");
+  assert.match(messageBubbleSource, /onRollbackPlan/, "Plan cards with history must expose rollback");
 });
 
 test("new conversation route replacement does not clear the first intake progress message", () => {
@@ -403,7 +419,7 @@ test("closing the requirement dialog cancels and terminates the pending flow", (
 });
 
 test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
-  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
+  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen \|\| Boolean\(pendingPlanRevisionChoice\)\}/, "open dialogs must keep the chat in busy mode");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
   assert.match(chatPanelSource, /isLatestActionableQualityReview/, "ChatPanel must keep the latest QC result card actionable after analysis");
   assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");

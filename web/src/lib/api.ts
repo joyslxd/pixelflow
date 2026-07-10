@@ -224,6 +224,14 @@ export interface PlanMarkdownResponse {
   template_path: string;
   consistency_issues: string[];
   review_timeout_sec: number | null;
+  plan_version: number;
+  plan_history: Array<{ version: number; plan_markdown: string; restored_from_version?: number }>;
+  creation_contract: Record<string, unknown>;
+  scene_durations_sec: number[];
+  llm_used: boolean;
+  model_name: string;
+  error: string | null;
+  restored_from_version: number | null;
 }
 
 export interface ImagePrepareResponse {
@@ -1369,6 +1377,30 @@ export const api = {
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan`, { method: "POST", body: JSON.stringify(body) }),
+
+  revisePlanMarkdown: (body: {
+    intent: CreationIntent;
+    form_values: Record<string, unknown>;
+    selected_direction: Record<string, unknown>;
+    current_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    revision_feedback: string;
+    creation_contract?: Record<string, unknown>;
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/revise`, { method: "POST", body: JSON.stringify(body) }),
+
+  restorePlanMarkdown: (body: {
+    intent: CreationIntent;
+    current_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    restore_version: number;
+    creation_contract?: Record<string, unknown>;
+    scene_durations_sec?: number[];
+  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/restore`, { method: "POST", body: JSON.stringify(body) }),
 
   prepareImageGeneration: (body: {
     form_values: Record<string, unknown>;
