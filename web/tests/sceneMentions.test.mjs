@@ -116,6 +116,45 @@ test("normalizeShotMentions refreshes existing mentions from matching generated 
   ]);
 });
 
+test("normalizeShotMentions preserves generation reference metadata from global assets", () => {
+  const mentions = normalizeShotMentions(
+    {
+      mentions: [
+        {
+          asset_id: "character-host",
+          name: "Host",
+          image_url: "https://x/stale-role.png",
+        },
+      ],
+    },
+    [],
+    {
+      characters: [
+        {
+          asset_id: "character-host",
+          name: "Host",
+          three_view_images: ["https://x/digital-human-cover.png"],
+          generation_reference_url: "asset://asset-123",
+          third_asset_id: "asset-123",
+          replacement_source: "digital_human",
+        },
+      ],
+    },
+  );
+
+  assert.deepEqual(mentions, [
+    {
+      asset_id: "character-host",
+      type: "character",
+      name: "Host",
+      image_url: "https://x/digital-human-cover.png",
+      generation_reference_url: "asset://asset-123",
+      third_asset_id: "asset-123",
+      replacement_source: "digital_human",
+    },
+  ]);
+});
+
 test("upsertShotMention updates shot description text mentions without duplicating images", () => {
   const candidates = buildMentionCandidates(globalAssets);
   const shot = upsertShotMention(

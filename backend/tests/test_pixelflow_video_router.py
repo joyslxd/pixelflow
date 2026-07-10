@@ -834,6 +834,53 @@ def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
 
+def test_generate_scene_videos_prefers_generation_reference_url_over_display_image(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(ok=True, task_id="ref-task", url="https://x/ref.mp4", raw={"endpoint": "/api/video/reference-mode-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 5000,
+                        "prompt": "数字人出镜",
+                        "generation_mode": "reference_mode_video",
+                        "shot_description": {
+                            "mentions": [
+                                {
+                                    "asset_id": "character-host",
+                                    "image_url": "https://x/digital-human-cover.png",
+                                    "generation_reference_url": "asset://asset-123",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert calls[0]["image_urls"] == ["asset://asset-123"]
+
+
 def test_video_router_clamps_scene_call_duration_to_seedance_single_call_range(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult

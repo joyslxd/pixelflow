@@ -29,6 +29,28 @@ const PPT_JOB_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 export type CreationIntent = "video" | "image" | "ppt";
 export type IntakeIntent = CreationIntent | "video_analysis" | "unknown";
+export type DigitalHumanAssetType = "xnszr" | "zrszr" | "ipsc";
+
+export interface ContentAssetItem extends Record<string, unknown> {
+  id?: string | number;
+  name?: string;
+  description?: string;
+  assetType?: string;
+  assetSource?: string;
+  refrenceUrl?: string;
+  thirdAssetId?: string;
+  result?: Record<string, unknown>;
+}
+
+export interface ContentAssetPageResponse {
+  history?: ContentAssetItem[];
+  records?: ContentAssetItem[];
+  list?: ContentAssetItem[];
+  totalPages?: number;
+  pages?: number;
+  total?: number;
+  pageCurrent?: number;
+}
 
 export interface TaskResponse {
   task_id: string;
@@ -1222,6 +1244,35 @@ export const api = {
 
   listImageGenerateModelConfigs: () =>
     contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
+
+  listCharacterAssets: (body: {
+    assetType: DigitalHumanAssetType;
+    assetSource?: string;
+    pageCurrent: number;
+    pageSize: number;
+  }) =>
+    contentAppReq<ContentAssetPageResponse>("/api/asset/character-assets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetSource: body.assetSource && body.assetSource !== "all" ? body.assetSource : "",
+        assetType: body.assetType,
+        pageCurrent: body.pageCurrent,
+        pageSize: body.pageSize,
+      }),
+    }),
+
+  listContentImageAssets: (body: { pageCurrent: number; pageSize: number }) =>
+    contentAppReq<ContentAssetPageResponse>("/api/asset/assets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetSource: "all",
+        assetType: "image",
+        pageCurrent: body.pageCurrent,
+        pageSize: body.pageSize,
+      }),
+    }),
 
   createTask: (body: CreateTaskBody) =>
     req<TaskResponse>(FLOW_BASE, { method: "POST", body: JSON.stringify({ task_type: "ecom_video", auto_start: true, ...body }) }),

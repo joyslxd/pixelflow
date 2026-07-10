@@ -1238,12 +1238,18 @@ def _urls_from_value(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         text = value.strip()
-        return [text] if text.startswith(("http://", "https://")) else []
+        return [text] if _is_reference_asset_url(text) else []
     if isinstance(value, dict):
         urls: list[str] = []
+        for key in ("generation_reference_url", "generationReferenceUrl", "asset_reference", "assetReference"):
+            item = value.get(key)
+            if isinstance(item, str) and _is_reference_asset_url(item.strip()):
+                urls.append(item.strip())
+        if urls:
+            return urls
         for key in ("image_url", "imageUrl", "url", "download_url", "downloadUrl", "src"):
             item = value.get(key)
-            if isinstance(item, str) and item.strip().startswith(("http://", "https://")):
+            if isinstance(item, str) and _is_reference_asset_url(item.strip()):
                 urls.append(item.strip())
         for key in ("images", "image_urls", "imageUrls", "reference_image_urls", "referenceImageUrls"):
             urls.extend(_urls_from_value(value.get(key)))
@@ -1254,6 +1260,10 @@ def _urls_from_value(value: Any) -> list[str]:
             urls.extend(_urls_from_value(item))
         return urls
     return []
+
+
+def _is_reference_asset_url(value: str) -> bool:
+    return value.startswith(("http://", "https://", "asset://"))
 
 
 async def _run_scene_video_generation(

@@ -262,6 +262,9 @@ function createMentionChip(mention: SceneMention): HTMLSpanElement {
   chip.setAttribute("data-mention-type", mention.type);
   chip.setAttribute("data-mention-name", mention.name);
   chip.setAttribute("data-mention-image-url", mention.image_url || "");
+  chip.setAttribute("data-mention-generation-reference-url", mention.generation_reference_url || "");
+  chip.setAttribute("data-mention-third-asset-id", mention.third_asset_id || "");
+  chip.setAttribute("data-mention-replacement-source", mention.replacement_source || "");
   chip.className =
     "scene-mention-token group relative mx-0.5 inline-flex max-w-[180px] cursor-default items-center gap-1 rounded-full border border-accent/25 bg-accent-soft px-1.5 py-0.5 align-middle text-accent";
   if (mention.image_url) {
@@ -308,6 +311,9 @@ function serializeNode(node: ChildNode, mentions: SceneMention[], seen: Set<stri
       type: mentionType(node.dataset.mentionType),
       name: node.dataset.mentionName || node.dataset.mentionId,
       image_url: node.dataset.mentionImageUrl || undefined,
+      generation_reference_url: node.dataset.mentionGenerationReferenceUrl || undefined,
+      third_asset_id: node.dataset.mentionThirdAssetId || undefined,
+      replacement_source: node.dataset.mentionReplacementSource || undefined,
     };
     if (!seen.has(mention.asset_id) && mentions.length < MAX_REFERENCE_IMAGE_COUNT) {
       seen.add(mention.asset_id);
@@ -339,6 +345,14 @@ function insertTextAtSelection(text: string) {
 function editorStateKey(text: string, mentions: SceneMention[]): string {
   return JSON.stringify({
     text,
-    mentions: mentions.map((mention) => [mention.asset_id, mention.type, mention.name, mention.image_url || ""]),
+    mentions: mentions.map((mention) => [
+      mention.asset_id,
+      mention.type,
+      mention.name,
+      mention.image_url || "",
+      mention.generation_reference_url || "",
+      mention.third_asset_id || "",
+      mention.replacement_source || "",
+    ]),
   });
 }

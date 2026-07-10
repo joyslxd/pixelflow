@@ -46,6 +46,7 @@ import {
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
+  applyGlobalSceneAssetReplacement,
   applyGlobalSceneAssetImageEdit,
   DEFAULT_TARGET_DURATION_MS,
   defaultGlobalSceneAssetRatio,
@@ -63,6 +64,7 @@ import {
   uploadedReferenceMaterials,
   type GlobalSceneAssetGroup,
   type SceneGlobalAssetReference,
+  type SceneGlobalAssetReplacement,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -2276,6 +2278,66 @@ export function WorkspacePage() {
       return [deleteMaterial, ...next].slice(0, 1);
     });
     setComposerPrefillRequest({ id: uid(), content: SCENE_GLOBAL_ASSET_DELETE_PROMPT(deleteMaterial.name) });
+  };
+
+  const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
+    const targetConversationId = currentConversationId || conversationIdRef.current;
+    const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
+    if (!storyboardMessage?.artifact?.videoScenePackages) {
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再替换。", targetConversationId);
+      return;
+    }
+    const patched = applyGlobalSceneAssetReplacement(
+      storyboardMessage.artifact.videoScenePackages.global_assets,
+      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
+      {
+        assetId: reference.asset_id,
+        assetGroup: reference.asset_group,
+        replacement,
+      },
+    );
+    const updatedPackages: PrepareScenePackagesResponse = {
+      ...storyboardMessage.artifact.videoScenePackages,
+      global_assets: patched.global_assets,
+      scene_packages: patched.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+    };
+
+    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+    const sourceScenePackageArtifact = storyboardMessage.artifact;
+    const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
+      type: "video_scene_packages",
+      title: sourceScenePackageArtifact.title || "视频场景包",
+      description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
+      actionLabel: "确认",
+      videoScenePackages: updatedPackages,
+      originalVideoScenePackages: sourceScenePackageArtifact.originalVideoScenePackages || storyboardMessage.artifact.videoScenePackages,
+      sceneAssetFailures: sourceScenePackageArtifact.sceneAssetFailures || [],
+      intent: "video",
+      formValues: sourceScenePackageArtifact.formValues,
+      intakeContext: sourceScenePackageArtifact.intakeContext,
+      materials: sourceScenePackageArtifact.materials || [],
+      selectedDirection: sourceScenePackageArtifact.selectedDirection,
+      plan: sourceScenePackageArtifact.plan,
+      videoScenePackageEditedSceneIds: [],
+    }, targetConversationId);
+    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
+    if (isVisibleConversation(targetConversationId)) {
+      setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
+      setCanvasOpen(true);
+    }
+    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_replaced", {
+      scene_global_asset_replacement: {
+        asset_id: reference.asset_id,
+        asset_group: reference.asset_group,
+        replacement_source: replacement.source,
+        display_image_url: replacement.displayImageUrl,
+        generation_reference_url: replacement.generationReferenceUrl,
+        third_asset_id: replacement.thirdAssetId,
+        replacement_asset_type: replacement.assetType,
+        replacement_asset_id: replacement.contentAssetId,
+      },
+    });
   };
 
   const handleRemoveReferencedMaterial = (key: string) => {
@@ -6882,6 +6944,7 @@ export function WorkspacePage() {
           onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
           onReferenceGlobalAsset={handleReferenceGlobalAsset}
           onDeleteGlobalAsset={handleDeleteGlobalAsset}
+          onReplaceGlobalAsset={handleReplaceGlobalAsset}
           onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
           onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
           onClose={() => {

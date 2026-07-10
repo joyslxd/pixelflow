@@ -20,6 +20,19 @@ export interface SceneGlobalAssetReference extends Record<string, unknown> {
   storyboard_message_id?: string;
 }
 
+export type SceneGlobalAssetReplacementSource = "digital_human" | "image_asset";
+
+export interface SceneGlobalAssetReplacement {
+  source: SceneGlobalAssetReplacementSource;
+  displayImageUrl: string;
+  generationReferenceUrl: string;
+  thirdAssetId?: string;
+  assetType?: string;
+  contentAssetId?: string;
+  assetName?: string;
+  raw?: Record<string, unknown>;
+}
+
 export interface GlobalSceneAssets {
   characters?: Array<Record<string, unknown>>;
   scenes?: Array<Record<string, unknown>>;
@@ -237,6 +250,23 @@ export function applyGlobalSceneAssetImageEdit<T extends GlobalSceneAssets, S ex
   };
 }
 
+export function applyGlobalSceneAssetReplacement<T extends GlobalSceneAssets, S extends ScenePackageRecord[]>(
+  globalAssets: T,
+  scenePackages: S,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; replacement: SceneGlobalAssetReplacement },
+): { global_assets: T; scene_packages: S } {
+  return {
+    global_assets: replaceGlobalSceneAssetReference(globalAssets, input) as T,
+    scene_packages: syncScenePackageMentionImageUrls(scenePackages, {
+      assetId: input.assetId,
+      editedImageUrl: input.replacement.displayImageUrl,
+      generationReferenceUrl: input.replacement.generationReferenceUrl,
+      thirdAssetId: input.replacement.thirdAssetId,
+      replacementSource: input.replacement.source,
+    }) as S,
+  };
+}
+
 export function replaceGlobalSceneAssetImage<T extends GlobalSceneAssets>(
   globalAssets: T,
   input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
@@ -255,9 +285,31 @@ export function replaceGlobalSceneAssetImage<T extends GlobalSceneAssets>(
   } as T;
 }
 
+export function replaceGlobalSceneAssetReference<T extends GlobalSceneAssets>(
+  globalAssets: T,
+  input: { assetId: string; assetGroup: GlobalSceneAssetGroup; replacement: SceneGlobalAssetReplacement },
+): T {
+  const rawGroupRecords = globalAssets[input.assetGroup];
+  const groupRecords: Array<Record<string, unknown>> = Array.isArray(rawGroupRecords) ? rawGroupRecords : [];
+  return {
+    ...globalAssets,
+    [input.assetGroup]: groupRecords.map((asset) => {
+      if (stringValue(asset.asset_id) !== input.assetId && stringValue(asset.id) !== input.assetId) return asset;
+      const key = input.assetGroup === "characters" ? "three_view_images" : "images";
+      return replaceFirstUrlWithReference(asset, key, input.replacement);
+    }),
+  } as T;
+}
+
 export function syncScenePackageMentionImageUrls<T extends ScenePackageRecord>(
   scenes: T[],
-  input: { assetId: string; editedImageUrl: string },
+  input: {
+    assetId: string;
+    editedImageUrl: string;
+    generationReferenceUrl?: string;
+    thirdAssetId?: string;
+    replacementSource?: SceneGlobalAssetReplacementSource;
+  },
 ): T[] {
   return scenes.map((scene) => {
     const shotDescription = scene.shot_description;
@@ -271,7 +323,14 @@ export function syncScenePackageMentionImageUrls<T extends ScenePackageRecord>(
       const mentionAssetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
       if (mentionAssetId !== input.assetId) return mention;
       changed = true;
-      return { ...record, image_url: input.editedImageUrl };
+      const cleanedRecord = input.generationReferenceUrl ? record : withoutGenerationReferenceFields(record);
+      return {
+        ...cleanedRecord,
+        image_url: input.editedImageUrl,
+        ...(input.generationReferenceUrl ? { generation_reference_url: input.generationReferenceUrl } : {}),
+        ...(input.thirdAssetId ? { third_asset_id: input.thirdAssetId } : {}),
+        ...(input.replacementSource ? { replacement_source: input.replacementSource } : {}),
+      };
     });
     if (!changed) return scene;
     return {
@@ -338,7 +397,7 @@ export function sceneGenerationPayloadFromPackage(
     shot_description: scene.shot_description,
     narration: scene.narration,
     generation_mode: scene.generation_mode,
-    image_urls: options.edited ? collectExplicitSceneImageUrls(scene, globalAssets) : collectSceneImageUrls(scene, globalAssets),
+    image_urls: options.edited ? collectExplicitSceneGenerationImageUrls(scene, globalAssets) : collectSceneGenerationImageUrls(scene, globalAssets),
     video_urls: scene.video_urls || [],
     audio_urls: scene.audio_urls || [],
   };
@@ -465,12 +524,46 @@ function editedSceneGenerationPrompt(scene: ScenePackageRecord): string {
   return pieces.filter(Boolean).join("\n");
 }
 
-function collectExplicitSceneImageUrls(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): string[] {
+function collectSceneGenerationImageUrls(
+  scene: Pick<ScenePackageRecord, "image_urls" | "characters" | "scene_images" | "prop_images" | "reference_asset_ids" | "shot_description">,
+  globalAssets?: GlobalSceneAssets,
+): string[] {
+  const urls = new Set(stringArray(scene.image_urls));
+  const mentionUrls = collectMentionGenerationReferenceUrls(scene.shot_description);
+  mentionUrls.forEach((url) => urls.add(url));
+  if (mentionUrls.length > 0) {
+    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+  }
+  if (globalAssets && stringArray(scene.reference_asset_ids).length > 0) {
+    stringArray(scene.reference_asset_ids).forEach((assetId) => {
+      collectGlobalAssetGenerationUrls(globalAssets, assetId).forEach((url) => urls.add(url));
+    });
+    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+  }
+  const collectFromRecords = (items: unknown, keys: string[]) => {
+    if (!Array.isArray(items)) return;
+    items.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const generationReference = generationReferenceUrlFromRecord(item as Record<string, unknown>);
+      if (generationReference) {
+        urls.add(generationReference);
+        return;
+      }
+      keys.forEach((key) => stringArray((item as Record<string, unknown>)[key]).forEach((url) => urls.add(url)));
+    });
+  };
+  collectFromRecords(scene.characters, ["three_view_images", "images"]);
+  collectFromRecords(scene.scene_images, ["images"]);
+  collectFromRecords(scene.prop_images, ["images"]);
+  return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+function collectExplicitSceneGenerationImageUrls(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): string[] {
   const urls = new Set<string>();
-  collectMentionImageUrls(scene.shot_description).forEach((url) => urls.add(url));
+  collectMentionGenerationReferenceUrls(scene.shot_description).forEach((url) => urls.add(url));
   if (globalAssets) {
     stringArray(scene.reference_asset_ids).forEach((assetId) => {
-      collectGlobalAssetUrls(globalAssets, assetId).forEach((url) => urls.add(url));
+      collectGlobalAssetGenerationUrls(globalAssets, assetId).forEach((url) => urls.add(url));
     });
   }
   return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
@@ -551,11 +644,33 @@ function normalizeTargetDurationMs(value: number): number {
 
 function replaceFirstUrl(record: Record<string, unknown>, key: string, editedImageUrl: string): Record<string, unknown> {
   const current = stringArray(record[key]);
+  const cleanedRecord = withoutGenerationReferenceFields(record);
   return {
-    ...record,
+    ...cleanedRecord,
     [key]: current.length > 0 ? [editedImageUrl, ...current.slice(1)] : [editedImageUrl],
     image_url: editedImageUrl,
     url: editedImageUrl,
+  };
+}
+
+function replaceFirstUrlWithReference(
+  record: Record<string, unknown>,
+  key: string,
+  replacement: SceneGlobalAssetReplacement,
+): Record<string, unknown> {
+  const current = stringArray(record[key]);
+  const displayImageUrl = replacement.displayImageUrl;
+  return {
+    ...record,
+    [key]: current.length > 0 ? [displayImageUrl, ...current.slice(1)] : [displayImageUrl],
+    image_url: displayImageUrl,
+    url: displayImageUrl,
+    generation_reference_url: replacement.generationReferenceUrl,
+    replacement_source: replacement.source,
+    ...(replacement.thirdAssetId ? { third_asset_id: replacement.thirdAssetId } : {}),
+    ...(replacement.assetType ? { replacement_asset_type: replacement.assetType } : {}),
+    ...(replacement.contentAssetId ? { replacement_asset_id: replacement.contentAssetId } : {}),
+    ...(replacement.assetName ? { replacement_asset_name: replacement.assetName } : {}),
   };
 }
 
@@ -575,12 +690,32 @@ function clearGlobalSceneAssetImage<T extends GlobalSceneAssets>(
 }
 
 function clearAssetImageFields(asset: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...asset };
+  const next = withoutGenerationReferenceFields(asset);
   for (const key of ["three_view_images", "images", "image_urls"]) {
     if (Array.isArray(next[key])) next[key] = [];
   }
   for (const key of ["image_url", "url"]) {
     if (typeof next[key] === "string") next[key] = "";
+  }
+  return next;
+}
+
+function withoutGenerationReferenceFields(record: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...record };
+  for (const key of [
+    "generation_reference_url",
+    "generationReferenceUrl",
+    "asset_reference",
+    "assetReference",
+    "third_asset_id",
+    "thirdAssetId",
+    "replacement_source",
+    "replacementSource",
+    "replacement_asset_type",
+    "replacement_asset_id",
+    "replacement_asset_name",
+  ]) {
+    delete next[key];
   }
   return next;
 }
@@ -659,6 +794,14 @@ function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string
   ];
 }
 
+function collectGlobalAssetGenerationUrls(globalAssets: GlobalSceneAssets, assetId: string): string[] {
+  const asset = findGlobalAsset(globalAssets, assetId);
+  if (!asset) return [];
+  const generationReference = generationReferenceUrlFromRecord(asset);
+  if (generationReference) return [generationReference];
+  return collectGlobalAssetUrls(globalAssets, assetId);
+}
+
 function collectMentionImageUrls(shotDescription: unknown): string[] {
   if (!shotDescription || typeof shotDescription !== "object") return [];
   const mentions = (shotDescription as Record<string, unknown>).mentions;
@@ -679,6 +822,44 @@ function collectMentionImageUrls(shotDescription: unknown): string[] {
     }
   }
   return urls;
+}
+
+function collectMentionGenerationReferenceUrls(shotDescription: unknown): string[] {
+  if (!shotDescription || typeof shotDescription !== "object") return [];
+  const mentions = (shotDescription as Record<string, unknown>).mentions;
+  if (!Array.isArray(mentions)) return [];
+  const urls: string[] = [];
+  for (const mention of mentions) {
+    if (!mention || typeof mention !== "object") continue;
+    const record = mention as Record<string, unknown>;
+    const generationReference = generationReferenceUrlFromRecord(record);
+    if (generationReference) {
+      urls.push(generationReference);
+      continue;
+    }
+    const direct =
+      stringValue(record.image_url) ||
+      stringValue(record.imageUrl) ||
+      stringValue(record.url) ||
+      stringValue(record.download_url) ||
+      stringValue(record.downloadUrl);
+    if (direct) urls.push(direct);
+    for (const key of ["images", "image_urls", "imageUrls"]) {
+      stringArray(record[key]).forEach((url) => urls.push(url));
+    }
+  }
+  return urls;
+}
+
+function generationReferenceUrlFromRecord(record: Record<string, unknown>): string {
+  const direct =
+    stringValue(record.generation_reference_url) ||
+    stringValue(record.generationReferenceUrl) ||
+    stringValue(record.asset_reference) ||
+    stringValue(record.assetReference);
+  if (direct) return direct;
+  const thirdAssetId = stringValue(record.third_asset_id) || stringValue(record.thirdAssetId);
+  return thirdAssetId ? `asset://${thirdAssetId.replace(/^asset:\/\//, "")}` : "";
 }
 
 function findGlobalAsset(globalAssets: GlobalSceneAssets, assetId: string): Record<string, unknown> | undefined {

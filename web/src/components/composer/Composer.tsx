@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileText, ImageIcon, Loader2, Plus, SendHorizontal, X } from "lucide-react";
+import { ArrowUp, FileText, ImageIcon, Loader2, Plus, X } from "lucide-react";
 import { api, type UploadedAttachment } from "@/lib/api";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 
@@ -69,15 +69,15 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   const materialsForDisplay = [...referencedMaterials, ...attachments];
 
   return (
-    <div className="rounded-[18px] border border-line bg-surface p-2 shadow-[0_1px_2px_rgba(16,24,40,0.04),0_8px_24px_rgba(16,24,40,0.05)]">
+    <div className="rounded-[24px] border border-line bg-white px-3 pb-3 pt-4 shadow-[0_1px_2px_rgba(16,24,40,0.04),0_10px_30px_rgba(16,24,40,0.08)] transition-colors focus-within:border-ink-soft/35">
       {materialsForDisplay.length > 0 && (
-        <div className="mb-2 flex max-h-24 flex-wrap gap-2 overflow-y-auto px-1">
+        <div className="mb-3 flex max-h-24 flex-wrap gap-2 overflow-y-auto px-1">
           {materialsForDisplay.map((item) => {
             const url = materialUrl(item);
             const isReferenced = item.source === "scene_global_asset";
             const isImage = materialType(item) === "image" || Boolean(item.source_image_url);
             return (
-              <span key={materialKey(item)} className="flex max-w-[220px] items-center gap-2 rounded-xl border border-line bg-white px-2 py-1.5 text-[12px] text-ink">
+              <span key={materialKey(item)} className="flex max-w-[220px] items-center gap-2 rounded-xl border border-line bg-canvas/70 px-2 py-1.5 text-[12px] text-ink">
                 {isImage && url ? (
                   <img src={url} alt="" className="h-7 w-7 shrink-0 rounded-full object-cover" />
                 ) : isImage ? (
@@ -100,39 +100,41 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
         </div>
       )}
       {uploadError && <div className="mb-2 rounded-xl border border-amber/30 bg-amber/10 px-3 py-2 text-[12px] text-ink">{uploadError}</div>}
-      <div className="flex items-end gap-2 pl-1">
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        rows={2}
+        placeholder="说说你想做什么，例如：帮保温杯做一条冬季通勤的种草短视频"
+        className="min-h-[64px] max-h-[320px] w-full resize-none overflow-y-auto bg-transparent px-2 text-[15px] leading-7 text-ink outline-none placeholder:text-ink-soft/60"
+      />
+      <div className="mt-2 flex min-h-10 items-center gap-2">
         <input ref={inputRef} type="file" multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
         <button
           type="button"
           onClick={selectFiles}
           disabled={busy || uploading}
-          className="mb-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-soft hover:bg-canvas hover:text-ink disabled:opacity-40"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-soft transition-colors hover:bg-canvas hover:text-ink disabled:opacity-40"
           aria-label="添加素材"
         >
           {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
         </button>
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          rows={1}
-          placeholder="说说你想做什么，例如：帮保温杯做一条冬季通勤的种草短视频"
-          className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-relaxed text-ink outline-none placeholder:text-ink-soft/60"
-        />
+        {materialsForDisplay.length > 0 ? <span className="text-[12px] text-ink-soft">已添加 {materialsForDisplay.length} 个素材</span> : null}
+        <div className="flex-1" />
         <button
           type="button"
           onClick={submit}
           disabled={!canSend}
-          className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand text-white transition-opacity disabled:opacity-30"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white transition-all hover:scale-[1.03] disabled:scale-100 disabled:bg-ink-soft/35 disabled:text-white"
           aria-label="发送"
         >
-          <SendHorizontal size={17} />
+          <ArrowUp size={18} strokeWidth={2.4} />
         </button>
       </div>
     </div>

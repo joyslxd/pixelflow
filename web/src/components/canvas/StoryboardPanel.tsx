@@ -1,5 +1,6 @@
-import { ArrowLeft, Box, Download, ImageIcon, MapPin, Sparkles, Trash2, UserRound, X } from "lucide-react";
+import { ArrowLeft, Box, Download, ImageIcon, MapPin, Replace, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
+import { SceneAssetReplacementPicker } from "@/components/canvas/SceneAssetReplacementPicker";
 import type { ChatMessage } from "@/lib/chat";
 import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
 import {
@@ -7,6 +8,7 @@ import {
   stringArray,
   type GlobalSceneAssets,
   type SceneGlobalAssetReference,
+  type SceneGlobalAssetReplacement,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -18,6 +20,7 @@ interface StoryboardPanelProps {
   onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void;
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
+  onReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
   onClose?: () => void;
@@ -120,6 +123,7 @@ export function StoryboardPanel({
   onUpdateVideoScenePackage,
   onReferenceGlobalAsset,
   onDeleteGlobalAsset,
+  onReplaceGlobalAsset,
   onGenerateVideo,
   onRetrySceneAssets,
   onClose,
@@ -130,6 +134,7 @@ export function StoryboardPanel({
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
+  const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
   const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
@@ -203,6 +208,18 @@ export function StoryboardPanel({
     if (!previewAsset) return;
     onDeleteGlobalAsset?.({ ...previewAsset, scene_global_asset_action: "delete" });
     setPreviewAsset(null);
+  };
+
+  const replacePreviewAsset = () => {
+    if (!previewAsset) return;
+    setReplacementTarget(previewAsset);
+    setPreviewAsset(null);
+  };
+
+  const confirmReplacement = (replacement: SceneGlobalAssetReplacement) => {
+    if (!replacementTarget) return;
+    onReplaceGlobalAsset?.(replacementTarget, replacement);
+    setReplacementTarget(null);
   };
 
   return (
@@ -406,6 +423,15 @@ export function StoryboardPanel({
                   </button>
                   <button
                     type="button"
+                    onClick={replacePreviewAsset}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    title="替换素材"
+                    aria-label="替换素材"
+                  >
+                    <Replace size={17} />
+                  </button>
+                  <button
+                    type="button"
                     onClick={deletePreviewAsset}
                     className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
                     title="删除素材"
@@ -436,6 +462,15 @@ export function StoryboardPanel({
             ) : null}
           </div>
         </div>
+      ) : null}
+      {replacementTarget ? (
+        <SceneAssetReplacementPicker
+          open={Boolean(replacementTarget)}
+          assetGroup={replacementTarget.asset_group}
+          assetName={replacementTarget.name}
+          onCancel={() => setReplacementTarget(null)}
+          onConfirm={confirmReplacement}
+        />
       ) : null}
     </aside>
   );

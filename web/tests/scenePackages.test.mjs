@@ -5,6 +5,7 @@ const moduleUrl = process.env.SCENE_PACKAGES_TEST_MODULE;
 assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scenePackages module");
 
 const {
+  applyGlobalSceneAssetReplacement,
   applyGlobalSceneAssetImageEdit,
   aspectRatioValue,
   collectSceneImageUrls,
@@ -351,6 +352,114 @@ test("applyGlobalSceneAssetImageEdit updates prop first image and mention urls",
   assert.equal(updated.global_assets.props[0].images[0], "https://x/global-prop-edited.png");
   assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/global-prop-edited.png");
   assert.equal(updated.scene_packages[0].shot_description.mentions[1].image_url, "https://x/global-role.png");
+});
+
+test("applyGlobalSceneAssetReplacement stores digital human references without marking scene edits", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    image_urls: [],
+    shot_description: {
+      text: "角色:@讲解者 在桌前介绍产品。",
+      mentions: [{ asset_id: "character-host", name: "讲解者", image_url: "https://x/global-role.png" }],
+    },
+  };
+
+  const updated = applyGlobalSceneAssetReplacement(sampleGlobalAssets(), [sceneWithMentions], {
+    assetId: "character-host",
+    assetGroup: "characters",
+    replacement: {
+      source: "digital_human",
+      displayImageUrl: "https://x/digital-human-cover.png",
+      generationReferenceUrl: "asset://asset-123",
+      thirdAssetId: "asset-123",
+      assetType: "xnszr",
+      contentAssetId: "42",
+      assetName: "数字人A",
+    },
+  });
+
+  assert.equal(updated.global_assets.characters[0].asset_id, "character-host");
+  assert.equal(updated.global_assets.characters[0].name, "讲解者");
+  assert.equal(updated.global_assets.characters[0].three_view_images[0], "https://x/digital-human-cover.png");
+  assert.equal(updated.global_assets.characters[0].generation_reference_url, "asset://asset-123");
+  assert.equal(updated.global_assets.characters[0].third_asset_id, "asset-123");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/digital-human-cover.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, "asset://asset-123");
+
+  const payload = sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets);
+  assert.deepEqual(payload.image_urls, ["asset://asset-123"]);
+});
+
+test("applyGlobalSceneAssetReplacement stores image asset references as normal image urls", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    image_urls: [],
+    shot_description: {
+      text: "地点:@桌面场景 中展示产品。",
+      mentions: [{ asset_id: "scene-desk", name: "桌面场景", image_url: "https://x/global-scene.png" }],
+    },
+  };
+
+  const updated = applyGlobalSceneAssetReplacement(sampleGlobalAssets(), [sceneWithMentions], {
+    assetId: "scene-desk",
+    assetGroup: "scenes",
+    replacement: {
+      source: "image_asset",
+      displayImageUrl: "https://x/asset-library-scene.png",
+      generationReferenceUrl: "https://x/asset-library-scene.png",
+      assetType: "image",
+      contentAssetId: "100",
+      assetName: "资产库场景图",
+    },
+  });
+
+  assert.equal(updated.global_assets.scenes[0].images[0], "https://x/asset-library-scene.png");
+  assert.equal(updated.global_assets.scenes[0].generation_reference_url, "https://x/asset-library-scene.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/asset-library-scene.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, "https://x/asset-library-scene.png");
+
+  const payload = sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets);
+  assert.deepEqual(payload.image_urls, ["https://x/asset-library-scene.png"]);
+});
+
+test("plain global asset image edits clear stale digital human generation references", () => {
+  const [scene] = sampleScenes();
+  const sceneWithDigitalHuman = {
+    ...scene,
+    image_urls: [],
+    shot_description: {
+      mentions: [
+        {
+          asset_id: "character-host",
+          image_url: "https://x/digital-human-cover.png",
+          generation_reference_url: "asset://asset-123",
+          third_asset_id: "asset-123",
+        },
+      ],
+    },
+  };
+  const assetsWithDigitalHuman = {
+    ...sampleGlobalAssets(),
+    characters: [
+      {
+        ...sampleGlobalAssets().characters[0],
+        generation_reference_url: "asset://asset-123",
+        third_asset_id: "asset-123",
+      },
+    ],
+  };
+
+  const updated = applyGlobalSceneAssetImageEdit(assetsWithDigitalHuman, [sceneWithDigitalHuman], {
+    assetId: "character-host",
+    assetGroup: "characters",
+    editedImageUrl: "https://x/edited-role.png",
+  });
+
+  assert.equal(updated.global_assets.characters[0].generation_reference_url, undefined);
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, undefined);
+  assert.deepEqual(sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets).image_urls, ["https://x/edited-role.png"]);
 });
 
 test("global scene asset edit ratio prefers metadata before fallback", () => {

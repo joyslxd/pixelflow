@@ -677,6 +677,15 @@ flowchart TD
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
 | 文档 | `README.md`、`AGENTS.md`、`CONTENT_APP_API_CALLS.md`、本文件 |
 
+### 14.1 分镜全局素材替换
+
+视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材。该能力会替换当前场景包的 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片，作为后续确认和生成视频的可操作卡片。
+
+- 角色素材 `characters` 可替换为数字人素材或图片素材；场景 `scenes` 和道具 `props` 只能替换为图片素材。
+- 数字人素材前端直连 `/api/asset/character-assets`，支持 `xnszr`、`zrszr`、`ipsc` 三类；展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`。
+- 图片素材前端直连 `/api/asset/assets`，固定查询 `assetType=image`、`assetSource=all`；展示图和模型引用都使用图片 URL。
+- 场景视频 payload 收集参考图时优先使用 `generation_reference_url`，没有该字段才兜底展示图 URL，避免数字人素材同时把 `asset://thirdAssetId` 和展示图 URL 传给模型。
+
 ## 15. 推荐验证清单
 
 本地 content_frontend + PixelFlow 联调启动链路：
