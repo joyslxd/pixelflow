@@ -246,6 +246,25 @@ export interface PlanMarkdownResponse {
   template_path: string;
   consistency_issues: string[];
   review_timeout_sec: number | null;
+  plan_version: number;
+  plan_history: Array<{ version: number; plan_markdown: string; restored_from_version?: number }>;
+  creation_contract: Record<string, unknown>;
+  scene_durations_sec: number[];
+  llm_used: boolean;
+  model_name: string;
+  error: string | null;
+  restored_from_version: number | null;
+}
+
+export interface VideoCreationContract extends Record<string, unknown> {
+  video_duration_sec: number;
+  video_ratio: string;
+  video_model: string;
+  video_size: string;
+  video_sound: string;
+  image_model: string;
+  scene_image_ratio?: string | null;
+  scene_image_size?: string | null;
 }
 
 export interface ImagePrepareResponse {
@@ -353,12 +372,16 @@ export interface ImageModelParamConfig {
   paramConfig?: {
     sizeList?: string[];
     aspectRatioList?: string[];
+    onSoundList?: string[];
+    videoDurationList?: string[];
     imageNumList?: string[];
     modelGenerateTypeList?: string[];
     uploadFileTypeList?: string[];
   };
   isEnabled?: boolean;
 }
+
+export type VideoModelParamConfig = ImageModelParamConfig;
 
 export interface ImageEditModelSelection {
   model: string;
@@ -415,6 +438,7 @@ export interface PrepareScenePackagesResponse {
     scene_images?: Array<Record<string, unknown>>;
     prop_images?: Array<Record<string, unknown>>;
   }>;
+  creation_contract?: VideoCreationContract | null;
 }
 
 export interface GenerateSceneAssetsResponse {
@@ -1245,6 +1269,9 @@ export const api = {
   listImageGenerateModelConfigs: () =>
     contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
 
+  listVideoGenerateModelConfigs: () =>
+    contentAppReq<VideoModelParamConfig[]>("/api/modelParamConfig/listByCategory/video_generate"),
+
   listCharacterAssets: (body: {
     assetType: DigitalHumanAssetType;
     assetSource?: string;
@@ -1414,6 +1441,30 @@ export const api = {
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan`, { method: "POST", body: JSON.stringify(body) }),
 
+  revisePlanMarkdown: (body: {
+    intent: CreationIntent;
+    form_values: Record<string, unknown>;
+    selected_direction: Record<string, unknown>;
+    current_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    revision_feedback: string;
+    creation_contract?: Record<string, unknown>;
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/revise`, { method: "POST", body: JSON.stringify(body) }),
+
+  restorePlanMarkdown: (body: {
+    intent: CreationIntent;
+    current_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    restore_version: number;
+    creation_contract?: Record<string, unknown>;
+    scene_durations_sec?: number[];
+  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/restore`, { method: "POST", body: JSON.stringify(body) }),
+
   prepareImageGeneration: (body: {
     form_values: Record<string, unknown>;
     plan_markdown: string;
@@ -1510,6 +1561,7 @@ export const api = {
     selected_direction: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
   startPrepareScenePackagesJob: (body: {
@@ -1518,6 +1570,7 @@ export const api = {
     selected_direction: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
       method: "POST",
@@ -1533,16 +1586,20 @@ export const api = {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
+    image_ratio?: string;
     image_size?: string;
     model?: string | null;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
 
   startSceneAssetsJob: (body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
+    image_ratio?: string;
     image_size?: string;
     model?: string | null;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
       method: "POST",
@@ -1560,6 +1617,7 @@ export const api = {
     size?: string;
     model?: string | null;
     sound?: string;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
       method: "POST",

@@ -12,9 +12,20 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
+
+from pixelflow.creative.contract import build_video_creation_contract
+
 CreationIntent = Literal["video", "image", "ppt"]
 
 VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"]
+VIDEO_DURATION_OPTIONS = ["30", "60", "90", "180", "自定义"]
+VIDEO_RATIOS = ["9:16", "16:9", "1:1"]
+VIDEO_MODEL_MODES = ["system_recommended", "manual"]
+DEFAULT_IMAGE_MODEL_CAPABILITIES = {
+    "aspect_ratios": ["1:1", "16:9", "9:16"],
+    "sizes": ["1080p", "2K", "4K"],
+}
 IMAGE_TYPES = ["商品广告图", "人物/场景图", "海报/封面图", "插画/概念图", "背景/素材图", "其他"]
 IMAGE_USAGES = ["广告投放", "社媒发布", "内容封面", "详情页配图", "活动宣传", "内部展示", "其他用途"]
 IMAGE_STYLES = ["真实摄影", "高级质感", "简洁干净", "小红书风", "科技感", "插画风", "自由发挥"]
@@ -27,13 +38,13 @@ PPT_ATTACHMENT_EXTENSIONS = [".doc", ".docx", ".xls", ".xlsx", ".pdf"]
 class FormField:
     id: str
     label: str
-    type: Literal["text", "radio_group", "file_list"]
+    type: Literal["text", "radio_group", "select", "file_list"]
     required: bool = True
     placeholder: str = ""
     options: list[str] = field(default_factory=list)
     accept: list[str] = field(default_factory=list)
     multiple: bool = False
-    default_value: str = ""
+    default_value: Any = ""
     source: Literal["system", "user", "llm"] = "system"
     confidence: float = 0
 
@@ -124,6 +135,31 @@ def get_form_schema(intent: CreationIntent) -> FormSchema:
                 FormField(id="product_category", label="产品品类", type="text", placeholder="例如：服饰鞋包、运动鞋、数码3C"),
                 FormField(id="target_audience", label="目标人群", type="text", placeholder="25-35"),
                 FormField(id="conversion_goal", label="转化目标", type="radio_group", options=VIDEO_GOALS),
+                FormField(
+                    id="video_duration_sec",
+                    label="视频总时长",
+                    type="radio_group",
+                    options=VIDEO_DURATION_OPTIONS,
+                    default_value=30,
+                ),
+                FormField(id="video_ratio", label="视频画幅", type="select", options=VIDEO_RATIOS, default_value="9:16"),
+                FormField(
+                    id="video_model_mode",
+                    label="视频模型选择方式",
+                    type="radio_group",
+                    options=VIDEO_MODEL_MODES,
+                    default_value="system_recommended",
+                ),
+                FormField(id="video_model", label="视频模型", type="select", options=["seedance-2.0"], default_value="seedance-2.0"),
+                FormField(id="image_model", label="图片模型", type="select", options=["gpt-image-2"], default_value="gpt-image-2"),
+                FormField(
+                    id="image_model_capabilities",
+                    label="图片模型能力",
+                    type="text",
+                    default_value=DEFAULT_IMAGE_MODEL_CAPABILITIES,
+                ),
+                FormField(id="video_usage", label="视频用途", type="text", placeholder="例如：品牌宣传、产品介绍、活动预热", default_value="宣传片"),
+                FormField(id="visual_style", label="视觉风格", type="text", placeholder="例如：电影光影、科技感、写实、未来感", required=False),
             ],
         )
     if intent == "ppt":
@@ -165,12 +201,24 @@ def validate_form(intent: CreationIntent, values: dict[str, Any] | None, intake_
     attachment_errors = _unsupported_ppt_attachments(normalized.get("attachments")) if intent == "ppt" else []
     if attachment_errors and "attachments" not in missing:
         missing.append("attachments")
+    video_contract_error = ""
+    if intent == "video" and not missing:
+        try:
+            creation_contract = build_video_creation_contract(normalized)
+            normalized.update(creation_contract.model_dump(exclude_none=True))
+        except (ValidationError, ValueError) as exc:
+            video_contract_error = _video_contract_error_message(exc)
+            for field_id in _video_contract_error_fields(exc):
+                if field_id not in missing:
+                    missing.append(field_id)
     is_complete = not missing
     terminated = bool(missing and intake_rounds >= 3)
     if is_complete:
         message = "表单信息已完整，可以生成创意方向。"
     elif attachment_errors:
         message = "附件类型不支持，仅支持 Word、Excel、PDF 文件。"
+    elif video_contract_error:
+        message = video_contract_error
     elif terminated:
         message = f"最多确认 3 次后仍缺少关键数据：{', '.join(missing)}。"
     else:
@@ -286,6 +334,25 @@ def _normalize_values(schema: FormSchema, values: dict[str, Any]) -> dict[str, A
     return normalized
 
 
+def _video_contract_error_fields(exc: ValidationError | ValueError) -> list[str]:
+    if not isinstance(exc, ValidationError):
+        return ["video_duration_sec"]
+    fields: list[str] = []
+    for error in exc.errors():
+        location = error.get("loc") or ()
+        field_id = str(location[0]) if location else "video_duration_sec"
+        if field_id not in fields:
+            fields.append(field_id)
+    return fields or ["video_duration_sec"]
+
+
+def _video_contract_error_message(exc: ValidationError | ValueError) -> str:
+    fields = _video_contract_error_fields(exc)
+    if "video_duration_sec" in fields:
+        return "视频总时长必须是 4-300 之间的自然数。"
+    return f"视频需求参数不合法，请重新确认：{', '.join(fields)}。"
+
+
 def _normalize_attachments(value: Any) -> list[dict[str, Any]]:
     if value is None or value == "":
         return []
@@ -303,15 +370,7 @@ def _unsupported_ppt_attachments(value: Any) -> list[dict[str, Any]]:
     attachments = _normalize_attachments(value)
     unsupported: list[dict[str, Any]] = []
     for attachment in attachments:
-        path = str(
-            attachment.get("url")
-            or attachment.get("fileUrl")
-            or attachment.get("file_url")
-            or attachment.get("path")
-            or attachment.get("name")
-            or attachment.get("filename")
-            or ""
-        )
+        path = str(attachment.get("url") or attachment.get("fileUrl") or attachment.get("file_url") or attachment.get("path") or attachment.get("name") or attachment.get("filename") or "")
         suffix = _attachment_suffix(path)
         if suffix not in PPT_ATTACHMENT_EXTENSIONS:
             unsupported.append(attachment)

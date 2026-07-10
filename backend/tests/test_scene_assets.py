@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-
 from typing import Any
 
 from pixelflow.generate.scene_assets import (
@@ -90,7 +89,9 @@ def test_generate_scene_assets_passes_all_collected_reference_images_for_props()
                 {"url": "https://x/product-a.png", "mediaType": "image"},
                 {"artifact_url": "https://x/product-b.png"},
             ],
-            image_size="1080p",
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
             quota_checker=lambda _value: False,
         )
     )
@@ -101,8 +102,46 @@ def test_generate_scene_assets_passes_all_collected_reference_images_for_props()
         "https://x/product-b.png",
         "https://x/scene-ref.png",
     ]
-    assert captured["model"] == "seeddream-5.0"
-    assert captured["size"] == "2K"
+    assert captured["model"] == "gpt-image-2"
+    assert captured["ratio"] == "9:16"
+    assert captured["size"] == "4K"
+
+
+def test_generate_scene_assets_uses_plan_image_contract_for_every_asset_call():
+    calls: list[dict[str, Any]] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append({"method": "text_to_image", **kwargs})
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/text-{len(calls)}.png"}], raw={})
+
+        async def reference_image(self, **kwargs):
+            calls.append({"method": "reference_image", **kwargs})
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/ref-{len(calls)}.png"}], raw={})
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [{"asset_id": "character-presenter", "three_view_prompt": "讲解者人物三视图"}],
+                "scenes": [{"asset_id": "scene-office", "image_prompt": "办公室场景图"}],
+                "props": [{"asset_id": "prop-backpack", "image_prompt": "背包道具图"}],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[{"url": "https://x/backpack.png", "mediaType": "image"}],
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 3
+    assert {call["method"] for call in calls} == {"text_to_image", "reference_image"}
+    assert all(call["ratio"] == "9:16" for call in calls)
+    assert all(call["size"] == "4K" for call in calls)
+    assert all(call["model"] == "gpt-image-2" for call in calls)
 
 
 def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_materials_present():
@@ -118,8 +157,9 @@ def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_ma
         async def reference_image(self, **kwargs):
             calls.append(f"ref:{kwargs['prompt']}")
             assert kwargs["reference_images"] == ["https://x/product.png"]
-            assert kwargs["model"] == "seeddream-5.0"
-            assert kwargs["size"] == "2K"
+            assert kwargs["model"] == "gpt-image-2"
+            assert kwargs["ratio"] == "9:16"
+            assert kwargs["size"] == "4K"
             if "场景图" in kwargs["prompt"]:
                 assert "场景风格" in kwargs["prompt"]
                 return ImageGenerationResult(
@@ -144,7 +184,9 @@ def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_ma
             },
             scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
             materials=[{"url": "https://x/product.png", "mediaType": "image"}],
-            image_size="1080p",
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
             quota_checker=lambda _value: False,
         )
     )

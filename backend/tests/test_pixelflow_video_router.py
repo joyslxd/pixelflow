@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -85,6 +86,140 @@ def test_video_router_prepares_scene_packages():
     assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
     assert data["scene_packages"][0]["shot_description"]["mentions"]
     assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
+
+
+def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    captured: dict[str, object] = {}
+
+    async def fake_prepare_video_scene_packages_with_llm(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": kwargs["target_duration_ms"],
+            "global_assets": {"characters": [], "scenes": [], "props": []},
+            "scene_packages": [
+                {"scene_id": f"scene-{index}", "scene_index": index, "duration_ms": 10_000, "prompt": f"分镜 {index}"}
+                for index in range(1, 19)
+            ],
+        }
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    creation_contract = {
+        "version": 1,
+        "intent": "video",
+        "video_duration_sec": 180,
+        "video_ratio": "9:16",
+        "video_model_mode": "system_recommended",
+        "video_model": "seedance-2.0",
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16", "1:1"], "sizes": ["4K", "2K"]},
+        "video_usage": "宣传片",
+        "visual_style": "电影写实",
+        "confirmed_by_user": True,
+        "scene_image_ratio": "9:16",
+        "scene_image_size": "4K",
+        "scene_image_spec_source": "plan_llm",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/prepare-scene-packages",
+            json={
+                "form_values": {"product_info": "通勤背包"},
+                "plan_markdown": "## 视频计划\n总时长 180 秒。",
+                "selected_direction": {"title": "暴雨通勤"},
+                "target_duration_ms": 30_000,
+                "creation_contract": creation_contract,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["target_duration_ms"] == 180_000
+    assert captured["form_values"]["video_ratio"] == "9:16"
+    assert response.json()["creation_contract"] == creation_contract
+
+
+def test_provider_video_duration_uses_exact_integer_seconds():
+    from app.gateway.routers.pixelflow_video import _provider_video_duration_seconds
+
+    assert _provider_video_duration_seconds(4_000, "seedance-2.0") == 4
+    assert _provider_video_duration_seconds(15_000, "seedance-2.0") == 15
+    with pytest.raises(ValueError, match="4-15"):
+        _provider_video_duration_seconds(3_000, "seedance-2.0")
+    with pytest.raises(ValueError, match="integer seconds"):
+        _provider_video_duration_seconds(4_500, "seedance-2.0")
+
+
+def test_scene_video_generation_contract_overrides_conflicting_legacy_fields(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    captured: dict[str, object] = {}
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            captured.update(kwargs)
+            return GenerationResult(ok=True, task_id="scene-task", url="https://x/scene.mp4", raw={"endpoint": "/api/video/text-to-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    creation_contract = {
+        "version": 1,
+        "intent": "video",
+        "video_duration_sec": 15,
+        "video_ratio": "9:16",
+        "video_model_mode": "manual",
+        "video_model": "seedance-2.0",
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+        "video_usage": "宣传片",
+        "visual_style": "电影写实",
+        "confirmed_by_user": True,
+        "scene_image_ratio": "9:16",
+        "scene_image_size": "4K",
+        "scene_image_spec_source": "plan_llm",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 15_000,
+                        "prompt": "精确 15 秒产品展示",
+                        "generation_mode": "text_to_video",
+                    }
+                ],
+                "ratio": "1:1",
+                "size": "720p",
+                "model": "legacy-model",
+                "sound": "off",
+                "creation_contract": creation_contract,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert captured["duration"] == 15
+    assert captured["ratio"] == "9:16"
+    assert captured["size"] == "1080p"
+    assert captured["model"] == "seedance-2.0"
+    assert captured["sound"] == "on"
 
 
 def test_video_prepare_scene_packages_records_power_mem_experience(monkeypatch):
@@ -206,15 +341,14 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
     class FakeImageSkill:
         async def text_to_image(self, **kwargs):
             prompt = kwargs["prompt"]
-            assert kwargs["size"] == "1080p"
+            assert kwargs["size"] == "4K"
+            assert kwargs["ratio"] == "9:16"
+            assert kwargs["model"] == "gpt-image-2"
             if "角色三视图" in prompt:
-                assert kwargs["ratio"] == "1:1"
                 return ImageGenerationResult(ok=True, images=[{"url": "https://x/role.png"}], raw={"endpoint": "/api/picture/text_to_image"})
             if "场景图" in prompt:
-                assert kwargs["ratio"] == "9:16"
                 return ImageGenerationResult(ok=True, images=[{"url": "https://x/scene.png"}], raw={"endpoint": "/api/picture/text_to_image"})
             if "道具图" in prompt:
-                assert kwargs["ratio"] == "1:1"
                 return ImageGenerationResult(ok=True, images=[{"url": "https://x/prop.png"}], raw={"endpoint": "/api/picture/text_to_image"})
             raise AssertionError(f"unexpected prompt: {prompt}")
 
@@ -243,6 +377,9 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
                         "reference_asset_ids": ["character-presenter", "scene-desk", "prop-product"],
                     }
                 ],
+                "image_ratio": "9:16",
+                "image_size": "4K",
+                "model": "gpt-image-2",
             },
         )
 
@@ -270,8 +407,9 @@ def test_video_router_generates_prop_assets_with_reference_images(monkeypatch):
 
         async def reference_image(self, **kwargs):
             assert kwargs["reference_images"] == ["https://x/product.png"]
-            assert kwargs["model"] == "seeddream-5.0"
-            assert kwargs["size"] == "2K"
+            assert kwargs["model"] == "gpt-image-2"
+            assert kwargs["ratio"] == "9:16"
+            assert kwargs["size"] == "4K"
             assert "参考图" in kwargs["prompt"]
             return ImageGenerationResult(
                 ok=True,
@@ -295,6 +433,9 @@ def test_video_router_generates_prop_assets_with_reference_images(monkeypatch):
                     "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
                 },
                 "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+                "image_ratio": "9:16",
+                "image_size": "4K",
+                "model": "gpt-image-2",
             },
         )
 
@@ -833,7 +974,6 @@ def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch
     assert data["failed_scenes"][0]["scene_id"] == "scene-7"
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
 
-
 def test_generate_scene_videos_prefers_generation_reference_url_over_display_image(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
@@ -881,7 +1021,7 @@ def test_generate_scene_videos_prefers_generation_reference_url_over_display_ima
     assert calls[0]["image_urls"] == ["asset://asset-123"]
 
 
-def test_video_router_clamps_scene_call_duration_to_seedance_single_call_range(monkeypatch):
+def test_video_router_preserves_exact_scene_duration_for_seedance(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import GenerationResult
 
@@ -916,7 +1056,7 @@ def test_video_router_clamps_scene_call_duration_to_seedance_single_call_range(m
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True
-    assert [call["duration"] for call in calls] == [5, 10]
+    assert [call["duration"] for call in calls] == [4, 15]
     assert [scene["duration_ms"] for scene in data["scene_videos"]] == [4000, 15000]
 
 

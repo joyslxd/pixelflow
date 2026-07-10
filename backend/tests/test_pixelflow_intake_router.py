@@ -40,7 +40,25 @@ def test_intake_router_validates_and_returns_three_directions():
     with TestClient(app) as client:
         schema = client.get("/agent/flows/intake/forms/video").json()
         assert schema["form_id"] == "ad_short_video_intake"
-        assert [field["id"] for field in schema["fields"]] == ["product_info", "product_category", "target_audience", "conversion_goal"]
+        assert [field["id"] for field in schema["fields"]] == [
+            "product_info",
+            "product_category",
+            "target_audience",
+            "conversion_goal",
+            "video_duration_sec",
+            "video_ratio",
+            "video_model_mode",
+            "video_model",
+            "image_model",
+            "image_model_capabilities",
+            "video_usage",
+            "visual_style",
+        ]
+        fields = {field["id"]: field for field in schema["fields"]}
+        assert fields["video_duration_sec"]["default_value"] == 30
+        assert fields["video_ratio"]["default_value"] == "9:16"
+        assert fields["video_model"]["default_value"] == "seedance-2.0"
+        assert fields["image_model"]["default_value"] == "gpt-image-2"
 
         invalid = client.post(
             "/agent/flows/intake/validate",

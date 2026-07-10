@@ -9,13 +9,40 @@ def test_video_form_schema_matches_required_screenshot_fields():
     assert schema.form_id == "ad_short_video_intake"
     assert schema.title == "AD投放短视频需求收集"
     assert schema.output_type == "video"
-    assert [field.id for field in schema.fields] == ["product_info", "product_category", "target_audience", "conversion_goal"]
+    assert [field.id for field in schema.fields] == [
+        "product_info",
+        "product_category",
+        "target_audience",
+        "conversion_goal",
+        "video_duration_sec",
+        "video_ratio",
+        "video_model_mode",
+        "video_model",
+        "image_model",
+        "image_model_capabilities",
+        "video_usage",
+        "visual_style",
+    ]
     assert schema.fields[0].placeholder == "苹果什么什么PRO"
     assert schema.fields[1].type == "text"
     assert schema.fields[1].placeholder == "例如：服饰鞋包、运动鞋、数码3C"
     assert schema.fields[1].options == []
     assert schema.fields[3].options == ["直接购买", "品牌曝光", "种草引流", "引流直播间"]
-    assert all(field.required for field in schema.fields)
+    fields = {field.id: field for field in schema.fields}
+    assert fields["video_duration_sec"].default_value == 30
+    assert fields["video_duration_sec"].options == ["30", "60", "90", "180", "自定义"]
+    assert fields["video_ratio"].type == "select"
+    assert fields["video_ratio"].default_value == "9:16"
+    assert fields["video_model_mode"].default_value == "system_recommended"
+    assert fields["video_model"].default_value == "seedance-2.0"
+    assert fields["image_model"].default_value == "gpt-image-2"
+    assert fields["image_model_capabilities"].default_value == {
+        "aspect_ratios": ["1:1", "16:9", "9:16"],
+        "sizes": ["1080p", "2K", "4K"],
+    }
+    assert fields["video_usage"].default_value == "宣传片"
+    assert fields["visual_style"].required is False
+    assert all(field.required for field in schema.fields if field.id != "visual_style")
     assert all(field.source == "system" for field in schema.fields)
     assert all(field.confidence == 0 for field in schema.fields)
 
@@ -56,6 +83,53 @@ def test_validate_form_returns_missing_fields_and_terminates_after_three_rounds(
     assert result.terminated is True
     assert result.missing_fields == ["product_info", "product_category", "target_audience", "conversion_goal"]
     assert "最多确认 3 次" in result.message
+
+
+def test_validate_video_form_builds_confirmed_creation_contract() -> None:
+    result = validate_form(
+        "video",
+        {
+            "product_info": "AuroraFit 智能健康戒指",
+            "product_category": "数码3C",
+            "target_audience": "25-35 岁健康管理人群",
+            "conversion_goal": "引流直播间",
+            "video_duration_sec": 180,
+            "video_ratio": "16:9",
+            "video_model_mode": "manual",
+            "video_model": "seedance-2.0",
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {
+                "aspect_ratios": ["1:1", "16:9", "9:16"],
+                "sizes": ["1080p", "2K", "4K"],
+            },
+            "video_usage": "新品宣传",
+            "visual_style": "电影写实风",
+        },
+    )
+
+    assert result.is_complete is True
+    assert result.values["video_duration_sec"] == 180
+    assert result.values["video_ratio"] == "16:9"
+    assert result.values["video_model"] == "seedance-2.0"
+    assert result.values["image_model"] == "gpt-image-2"
+    assert result.values["image_model_capabilities"]["sizes"] == ["1080p", "2K", "4K"]
+
+
+def test_validate_video_form_rejects_invalid_custom_duration() -> None:
+    result = validate_form(
+        "video",
+        {
+            "product_info": "AuroraFit 智能健康戒指",
+            "product_category": "数码3C",
+            "target_audience": "25-35 岁健康管理人群",
+            "conversion_goal": "引流直播间",
+            "video_duration_sec": 301,
+        },
+    )
+
+    assert result.is_complete is False
+    assert "video_duration_sec" in result.missing_fields
+    assert "4-300" in result.message
 
 
 def test_validate_form_accepts_complete_image_values():

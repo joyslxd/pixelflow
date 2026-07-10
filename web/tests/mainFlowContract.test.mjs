@@ -9,6 +9,9 @@ const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPa
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 const viteConfigSource = fs.readFileSync(path.resolve("vite.config.ts"), "utf8");
+const videoRequirementConfigSource = fs.readFileSync(path.resolve("src/lib/videoRequirementConfig.ts"), "utf8");
+const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
+const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
 
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
@@ -145,6 +148,42 @@ test("new conversation stores the user message before agent replies", () => {
   assert.notEqual(appendIndex, -1, "handleSend must await user message persistence");
   assert.notEqual(firstAgentIndex, -1, "handleSend must still call the intake agent");
   assert.ok(appendIndex < firstAgentIndex, "user message persistence must happen before the first agent reply");
+});
+
+test("video requirement form collects and persists the complete creation contract", () => {
+  assert.match(apiSource, /listVideoGenerateModelConfigs/, "api client must load video model configs");
+  assert.equal(apiSource.includes("/api/modelParamConfig/listByCategory/video_generate"), true, "video model configs must use video_generate");
+  assert.match(genParamsDialogSource, /视频总时长/, "video form must show total duration");
+  assert.match(genParamsDialogSource, /视频画幅/, "video form must show video ratio");
+  assert.match(genParamsDialogSource, /视频模型/, "video form must show video model");
+  assert.match(genParamsDialogSource, /图片模型/, "video form must show scene image model");
+  assert.match(genParamsDialogSource, /视频用途/, "video form must show video usage");
+  assert.match(genParamsDialogSource, /视觉风格/, "video form must show visual style");
+  assert.match(genParamsDialogSource, /\["30", "60", "90", "180", "自定义"\]/, "duration presets must include custom");
+  assert.match(genParamsDialogSource, /min=\{4\}/, "custom duration must enforce the lower boundary");
+  assert.match(genParamsDialogSource, /max=\{300\}/, "custom duration must enforce the upper boundary");
+  assert.match(genParamsDialogSource, /image_model_capabilities/, "selected image model capabilities must be submitted");
+  assert.equal(genParamsDialogSource.includes('label="图片比例"'), false, "video form must not ask users for scene image ratio");
+  assert.equal(genParamsDialogSource.includes('label="图片清晰度"'), false, "video form must not ask users for scene image quality");
+  assert.match(workspaceSource, /video_duration_sec:\s*form\.video_duration_sec/, "Workspace must persist confirmed video duration");
+  assert.match(workspaceSource, /video_model:\s*form\.video_model/, "Workspace must persist confirmed video model");
+  assert.match(workspaceSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
+  assert.match(workspaceSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
+  assert.match(videoRequirementConfigSource, /filterSeedanceConfigs/, "video model filtering must remain centralized");
+});
+
+test("plan revision defaults to modifying the current creative and only regenerates directions on explicit choice", () => {
+  assert.match(planRevisionDialogSource, /extend_current/, "revision dialog must expose current-creative modification");
+  assert.match(planRevisionDialogSource, /regenerate_directions/, "revision dialog must expose creative regeneration");
+  assert.match(planRevisionDialogSource, /useState<PlanRevisionMode>\("extend_current"\)/, "current-creative modification must be the default");
+  assert.match(planRevisionDialogSource, /在当前创意基础上扩展\/修改/, "dialog must explain current creative modification");
+  assert.match(planRevisionDialogSource, /放弃当前创意，重新生成新创意/, "dialog must explain creative regeneration");
+  assert.match(workspaceSource, /api\.revisePlanMarkdown/, "extend-current mode must call the Plan revision endpoint");
+  assert.match(workspaceSource, /mode === "regenerate_directions"[\s\S]*startDirectionJob/, "only regenerate mode may call the directions job");
+  assert.match(apiSource, /planning\/plan\/revise/, "api client must expose Plan revision");
+  assert.match(apiSource, /planning\/plan\/restore/, "api client must expose Plan restore");
+  assert.match(messageBubbleSource, /plan\.plan_version/, "Plan cards must display their version");
+  assert.match(messageBubbleSource, /onRollbackPlan/, "Plan cards with history must expose rollback");
 });
 
 test("new conversation route replacement does not clear the first intake progress message", () => {
@@ -380,7 +419,7 @@ test("closing the requirement dialog cancels and terminates the pending flow", (
 });
 
 test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
-  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen\}/, "open dialogs must keep the chat in busy mode");
+  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen \|\| Boolean\(pendingPlanRevisionChoice\)\}/, "open dialogs must keep the chat in busy mode");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
   assert.match(chatPanelSource, /isLatestActionableQualityReview/, "ChatPanel must keep the latest QC result card actionable after analysis");
   assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");
@@ -601,6 +640,24 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.notEqual(pollIndex, -1, "video approval must poll the persisted job");
   assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "scene package job id must be persisted before polling starts");
   assert.match(source, /kind:\s*"scene_package_generation"/, "scene package generation must record its pending job kind");
+});
+
+test("video plan contract drives scene package assets videos and recoverable jobs", () => {
+  const approveSource = handleApprovePlanSource();
+  const sceneRequestStart = workspaceSource.indexOf("const sceneVideoRequestFromPackages = (");
+  const sceneRequestEnd = workspaceSource.indexOf("const handleCompletedSceneGenerationJob", sceneRequestStart);
+  const sceneRequestSource = workspaceSource.slice(sceneRequestStart, sceneRequestEnd);
+
+  assert.match(approveSource, /const creationContract = artifact\.plan\.creation_contract/, "video approval must use the final Plan contract");
+  assert.match(approveSource, /target_duration_ms:\s*creationContract\.video_duration_sec \* 1000/, "scene timeline must use confirmed duration");
+  assert.match(approveSource, /creation_contract:\s*creationContract/, "scene package request must carry the final contract");
+  assert.doesNotMatch(approveSource, /inferTargetDurationMs\(/, "video approval must not infer duration again after Plan approval");
+  assert.match(sceneRequestSource, /videoScenePackages\.creation_contract/, "scene video request must read the persisted final contract");
+  assert.match(sceneRequestSource, /ratio:\s*creationContract\.video_ratio/, "scene videos must use the confirmed ratio");
+  assert.match(sceneRequestSource, /size:\s*creationContract\.video_size/, "scene videos must use the confirmed size");
+  assert.match(sceneRequestSource, /model:\s*creationContract\.video_model/, "scene videos must use the confirmed model");
+  assert.match(sceneRequestSource, /sound:\s*creationContract\.video_sound/, "scene videos must use the confirmed sound setting");
+  assert.match(workspaceSource, /creation_contract:\s*videoScenePackages\.creation_contract/, "conversation context must persist the contract with scene packages");
 });
 
 test("restored conversations resume existing video jobs without starting duplicates", () => {

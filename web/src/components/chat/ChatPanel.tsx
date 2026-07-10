@@ -17,6 +17,7 @@ interface ChatPanelProps {
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
+  onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
@@ -69,6 +70,7 @@ export function ChatPanel({
   onRegenerateDirections,
   onApprovePlan,
   onRevisePlan,
+  onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
   onAcceptImageResult,
@@ -141,6 +143,7 @@ export function ChatPanel({
                 onRegenerateDirections={onRegenerateDirections}
                 onApprovePlan={onApprovePlan}
                 onRevisePlan={onRevisePlan}
+                onRollbackPlan={onRollbackPlan}
                 onGenerateImage={onGenerateImage}
                 onConfirmImageEditOptions={onConfirmImageEditOptions}
                 onAcceptImageResult={onAcceptImageResult}

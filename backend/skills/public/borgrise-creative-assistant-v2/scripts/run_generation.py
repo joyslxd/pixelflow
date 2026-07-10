@@ -53,7 +53,8 @@ DEFAULT_IMAGE_MODEL = "seeddream-5.0"
 DEFAULT_VIDEO_MODEL = "seedance-2.0"
 SUPPORTED_RATIOS = {"1:1", "9:16", "16:9"}
 SUPPORTED_IMAGE_QUALITIES = {"all", "480p", "720p", "1080p", "2K", "3K", "4K", "5K", "6K", "7K", "8K"}
-SEEDANCE_MAX_SEGMENT_DURATION = 10
+SEEDANCE_MIN_SEGMENT_DURATION = 4
+SEEDANCE_MAX_SEGMENT_DURATION = 15
 SAFE_MAX_LONG_VIDEO_DURATION = 30
 
 # Polling settings
@@ -116,18 +117,31 @@ def validate_image_quality(size: str) -> Optional[Dict]:
 
 def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
     """Keep single video calls within known model limits."""
-    if duration <= 0:
-        return {"error": True, "message": "Duration must be a positive integer"}
-    if model == "seedance-2.0" and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        return {"error": True, "message": "Duration must be an integer"}
+    is_seedance = "seedance" in str(model or "").lower()
+    if is_seedance and duration < SEEDANCE_MIN_SEGMENT_DURATION:
         return {
             "error": True,
             "message": (
-                f"seedance-2.0 supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
-                "Use long-reference-mode-video with exact 10s segment prompts for longer videos."
+                f"Seedance supports video durations from {SEEDANCE_MIN_SEGMENT_DURATION}s "
+                f"to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call."
+            ),
+            "requested_duration": duration,
+            "min_single_call_duration": SEEDANCE_MIN_SEGMENT_DURATION,
+        }
+    if is_seedance and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+        return {
+            "error": True,
+            "message": (
+                f"Seedance supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
+                "Split longer videos into multiple scene calls."
             ),
             "requested_duration": duration,
             "max_single_call_duration": SEEDANCE_MAX_SEGMENT_DURATION,
         }
+    if duration <= 0:
+        return {"error": True, "message": "Duration must be a positive integer"}
     return None
 
 
@@ -751,6 +765,9 @@ def resolve_asset_urls(asset_ids: List[str]) -> Dict:
 def image_to_video(image_url: str, prompt: Optional[str] = None,
                    duration: int = 10, ratio: str = "9:16",
                    model: str = DEFAULT_VIDEO_MODEL,
+                   size: str = "720p",
+                   sound: str = "on",
+                   video_count: int = 1,
                    product_description: Optional[str] = None,
                    auto_poll: bool = True) -> Dict:
     """Generate video from image."""
@@ -767,11 +784,12 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     request_data = {
         "image_url": image_url,
         "prompt": prompt,
-        "negative_prompt": "blurry, distorted, low quality, watermark, text overlay, shaky camera",
         "model": model,
         "duration": duration,
         "ratio": ratio,
-        "seed": None
+        "size": size,
+        "sound": sound,
+        "videoCount": video_count,
     }
 
     print(f"\n{'='*60}")
@@ -782,7 +800,7 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     print(f"Ratio: {ratio}")
     print(f"{'='*60}\n")
 
-    headers = get_headers(model=model, bill_type=3, duration=duration, size="720p", model_header="modelType")
+    headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
     result = make_request("/video/image-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
@@ -2308,6 +2326,9 @@ def main():
     p_i2v.add_argument("--product-description", help="Product description (will craft prompt)")
     p_i2v.add_argument("--duration", type=int, default=10, help="Video duration in seconds")
     p_i2v.add_argument("--ratio", default="9:16", help="Aspect ratio")
+    p_i2v.add_argument("--size", default="720p", help="Video size (720p, 1080p)")
+    p_i2v.add_argument("--sound", default="on", help="Sound setting, usually on/off")
+    p_i2v.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_i2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
@@ -2521,6 +2542,9 @@ def main():
                 duration=args.duration,
                 ratio=args.ratio,
                 model=args.model,
+                size=args.size,
+                sound=args.sound,
+                video_count=args.video_count,
                 product_description=args.product_description
             )
         elif args.command == "text-to-video":

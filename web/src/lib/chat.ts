@@ -75,6 +75,10 @@ export interface ChatMessage {
     coreMessage?: string;
     selectedDirection?: CreativeDirectionResponse;
     plan?: PlanMarkdownResponse;
+    planVersion?: number;
+    planHistory?: PlanMarkdownResponse["plan_history"];
+    creationContract?: Record<string, unknown>;
+    restoredFromVersion?: number | null;
     imagePrepare?: ImagePrepareResponse;
     imageResult?: ImageGenerateResponse;
     imageAccepted?: boolean;

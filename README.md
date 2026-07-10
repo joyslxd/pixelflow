@@ -14,14 +14,14 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
-| 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图，抽取主体、行业、目标和生成数量 |
-| 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充 |
+| 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
+| 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
-| plan.md 策划 | 可用 | 使用项目内模板填充 plan.md，并返回前端审核 |
+| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md，支持版本化修订与回退；LLM 失败时按同一创作合同兜底 |
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
-| 视频生成 | 可用 | 按 plan.md 生成场景包、角色三视图、场景图、道具图、逐段视频并合并 |
+| 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
 | 视频修改循环 | 可用 | 支持 QAAgent QC 质检、按受影响场景重生并重新合并 |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
@@ -50,14 +50,14 @@ pixelflow/
 │   ├── app/gateway/                 # FastAPI 网关、/agent Controller、鉴权、配置加载
 │   ├── pixelflow/                   # PixelFlow 业务逻辑
 │   │   ├── intake/                  # 意图识别、表单、垂类画像、采集上下文
-│   │   ├── creative/                # plan.md 填充、Brief/策划逻辑
-│   │   ├── generate/                # 图片参数准备、视频场景包
+│   │   ├── creative/                # 双 Plan 模板、LLM 策划、创作合同、版本和时长分配
+│   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
 │   ├── packages/harness/deerflow/   # DeerFlow 基础设施
-│   ├── skills/public/               # Borgrise creative assistant skill 与模板
+│   ├── skills/public/               # Borgrise creative assistant、图片/视频 Plan 模板与 Seedance Prompt Skill
 │   └── tests/                       # 后端测试
 ├── web/
 │   ├── src/pages/WorkspacePage.tsx  # 前端主流程编排
@@ -76,16 +76,16 @@ flowchart TD
   A["用户输入提示词和附件"] --> B["采集 Agent 识别意图"]
   B --> C{"intent"}
   C -->|"image"| D["图片表单 + 创意方向 + plan.md"]
-  C -->|"video"| E["视频表单 + 创意方向 + plan.md"]
+  C -->|"video"| E["视频需求清洗表单 + 创作合同 + 创意方向 + plan.md"]
   C -->|"video_analysis"| F["视频链接识别 + storyboard 拆解"]
   C -->|"ppt"| Q["PPT表单 + 附件"]
   D --> G["图片参数准备"]
   G --> H["调用图片 Skill"]
   H --> I["图片结果确认或重新生成"]
-  E --> J["生成可编辑视频场景包"]
-  J --> K["生成角色三视图、场景图、道具图"]
+  E --> J["按当前 Plan 和创作合同生成可编辑视频场景包"]
+  J --> K["按 Plan 指定图片模型、比例、清晰度生成角色三视图、场景图、道具图"]
   K --> L["前端编辑故事线、镜头描述、旁白和 @参考图"]
-  L --> M["并行生成场景视频"]
+  L --> M["按 Seedance Prompt 和视频合同并行生成场景视频"]
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
   F --> P["返回分析结果"]
@@ -104,6 +104,8 @@ flowchart TD
 - PowerMem 只保存业务摘要、偏好、品牌上下文和 Agent 经验，不写入用户 token、供应商密钥、原始异常堆栈或本地部署目录。
 - content-app 返回额度不足、余额不足、HTTP 402 等信息时，当前生成必须立即暂停并保存可恢复上下文。
 - 前端展示 Agent 进度时只能展示业务摘要，不能暴露原始 prompt、思维链、供应商密钥或完整内部堆栈。
+- 视频表单确认后的 `creation_contract` 是后续创意、Plan、场景资产和视频生成的权威合同；后续阶段不能重新猜测总时长、画幅或模型。
+- 视频场景资产图片的比例和清晰度不由用户在表单中选择。Plan LLM 只能从所选图片模型的实时能力范围中选择，并把最终值写入 plan.md 和合同。
 
 ## 核心 API
 
@@ -118,6 +120,8 @@ flowchart TD
 | 采集 | POST | `/agent/flows/intake/validate` | 表单完整性校验 |
 | 采集 | POST | `/agent/flows/intake/directions` | 生成 3 个创意方向 |
 | 策划 | POST | `/agent/flows/planning/plan` | 填充 plan.md |
+| 策划 | POST | `/agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并生成新版本 |
+| 策划 | POST | `/agent/flows/planning/plan/restore` | 将历史 Plan 恢复为新的当前版本 |
 | 图片 | POST | `/agent/flows/image/prepare` | 选择图片接口并生成参数 |
 | 图片 | POST | `/agent/flows/image/generate` | 同步生成图片，兼容旧调用 |
 | 图片 | POST | `/agent/flows/image/generate/start` | 启动可恢复图片生成 job |
@@ -197,6 +201,7 @@ PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
 
 | PixelFlow Skill | content-app/Borgrise 接口 |
 | --- | --- |
+| 视频模型参数配置 | `/api/modelParamConfig/listByCategory/video_generate` |
 | 文生视频 | `/api/video/text-to-video` |
 | 首帧图生视频 | `/api/video/image-to-video` |
 | 首尾帧生视频 | `/api/video/two-image-to-video` |
@@ -204,6 +209,16 @@ PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
 | 编辑视频 | `/api/video/edit-video` |
 | 延伸视频 | `/api/video/extend-video` |
 | 合并视频 | `/api/video/merge` |
+
+五类场景视频请求体按 content-app 当前 DTO 精确映射：
+
+| 接口 | 字段 |
+| --- | --- |
+| `/api/video/text-to-video` | `prompt/model/ratio/size/duration/videoCount/sound` |
+| `/api/video/image-to-video` | `image_url/prompt/duration/ratio/model/size/sound/videoCount` |
+| `/api/video/two-image-to-video` | `first_frame_image_url/last_frame_image_url/prompt/ratio/duration/model/size/videoCount/sound` |
+| `/api/video/reference-mode-video` | `prompt/imageUrls/videoUrls/audioUrls/duration/ratio/sound/model/size/videoCount` |
+| `/api/video/edit-video` | `prompt/refImage/refVideo/model/duration/size/ratio/videoCount/sound` |
 
 视频理解：
 
@@ -226,11 +241,30 @@ SmartPPT：
 
 SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/status` 轮询，默认超时 2 小时。
 
+## 视频需求清洗与创作合同
+
+- 视频粗略需求经采集 LLM 预填后，必须先展示需求清洗表单。表单保留产品信息、产品品类、目标人群和转化目标，并包含总时长、视频画幅、视频模型、图片模型、视频用途和视觉风格。
+- 总时长支持 30/60/90/180 秒和自定义；自定义只能是 4-300 的自然数。用户选择 180 秒后，Plan 和全部分镜总时长必须精确等于 180 秒。
+- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端只展示 Seedance；系统推荐默认解析成 `seedance-2.0`，并向用户展示实际结果。
+- 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。表单不展示图片比例和清晰度，只把所选模型及其能力范围提交给 Plan Agent。
+- Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`。不合法输出会被后端修正为合法值，并记录一致性提示。
+- 优先级固定为“用户确认值 > LLM 预填值 > 系统默认值”。Plan、场景包、场景资产和场景视频只读取当前激活 Plan 的最终 `creation_contract`。
+
+图片和视频分别使用：
+
+```text
+backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
+backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
+```
+
+Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重新生成新创意”才重新返回 3 个方向。历史 Plan 可以回退，回退会创建一个新版本而不是覆盖历史。
+
 ## 视频场景包规则
 
 视频生成主流程固定为：plan.md -> 多个视频场景片段 -> 每段生成视频 -> 按顺序合并。
 
 - 每个场景片段最少 4 秒，最多 15 秒。
+- 所有分镜整数秒时长总和必须精确等于用户确认的 `video_duration_sec`；300 秒任务允许产生超过 18 个分镜。
 - 全局固定资产是 `characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、书包、球、床垫等非人物主体放到 `props`。
@@ -238,6 +272,8 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - `shot_description.text` 的时间范围必须使用秒级表达，例如 `0-10秒`，不要使用 `ms`、`毫秒` 或 `00:00.000`。
 - 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
 - 每个视频场景片段最多 9 张参考图。
+- 镜头描述由 `backend/pixelflow/generate/seedance_prompt.py` 应用项目内 `skills/seedance-prompt/SKILL.md` 规则生成，继续保留 `@asset_id` 和 mentions 图片 URL。
+- 角色三视图、场景图和道具图统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`；分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
 - 新需求入口使用可恢复 job：用户消息保存走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存完成后采集意图识别走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并写入 `pendingIntakeJob` / `pending_intake_job`。用户切到历史对话、创作页、iframe 外或刷新后只轮询已有 job，不重复追加用户消息、不重复启动采集流程；旧 `/messages` 和 `/intake/analyze` 同步接口仅做兼容。

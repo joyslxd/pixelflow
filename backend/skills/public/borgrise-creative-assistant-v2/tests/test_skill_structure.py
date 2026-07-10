@@ -18,6 +18,8 @@ class SkillStructureTest(unittest.TestCase):
             ROOT / "references" / "creative-generation.md",
             ROOT / "references" / "api-reference.md",
             ROOT / "references" / "scene-playbook.md",
+            ROOT / "skills" / "seedance-prompt" / "SKILL.md",
+            ROOT / "skills" / "seedance-prompt" / "THIRD_PARTY_NOTICE.md",
         ]
 
         for path in expected_files:
@@ -89,6 +91,9 @@ class SkillStructureTest(unittest.TestCase):
             "scripts/run_generation.py",
             "references/api-reference.md",
             "references/scene-playbook.md",
+            "skills/seedance-prompt/SKILL.md",
+            "templates/plan_video.md",
+            "templates/plan_image.md",
             "tests/",
         ]:
             self.assertIn(resource, router)

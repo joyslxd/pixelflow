@@ -46,6 +46,72 @@ def test_recognize_intent_uses_llm_json_and_normalizes_video_generation() -> Non
     assert result.values["conversion_goal"] == "引流直播间"
 
 
+def test_recognize_intent_extracts_complete_video_creation_contract_from_llm() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "intent": "video_generation",
+          "confidence": 0.98,
+          "reason": "用户明确指定了视频和图片生产参数",
+          "product_subject": "智能健康戒指",
+          "creation_goal": "智能健康戒指新品宣传视频",
+          "industry_type": "数码3C",
+          "values": {
+            "product_info": "智能健康戒指",
+            "product_category": "数码3C",
+            "target_audience": "25-35岁健康管理人群",
+            "conversion_goal": "品牌曝光",
+            "video_duration_sec": 180,
+            "video_ratio": "16:9",
+            "video_model_mode": "manual",
+            "video_model": "seedance-2.0",
+            "image_model": "gpt-image-2",
+            "video_usage": "新品宣传",
+            "visual_style": "电影写实风"
+          }
+        }
+        """
+    )
+
+    result = asyncio.run(
+        recognize_intent_with_llm(
+            "用 seedance-2.0 和 gpt-image-2 做一个180秒、16:9、电影写实风的新品宣传视频",
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert result.intent == "video"
+    assert result.values["video_duration_sec"] == 180
+    assert result.values["video_ratio"] == "16:9"
+    assert result.values["video_model_mode"] == "manual"
+    assert result.values["video_model"] == "seedance-2.0"
+    assert result.values["image_model"] == "gpt-image-2"
+    assert result.values["video_usage"] == "新品宣传"
+    assert result.values["visual_style"] == "电影写实风"
+
+
+def test_recognize_intent_fallback_extracts_video_creation_contract() -> None:
+    class BrokenModel:
+        def invoke(self, _prompt):
+            raise RuntimeError("model down")
+
+    result = asyncio.run(
+        recognize_intent_with_llm(
+            "用 seedance-2.0 和 gpt-image-2 做一个180秒、16:9、电影写实风的新品宣传视频",
+            model_factory=lambda *_args, **_kwargs: BrokenModel(),
+        )
+    )
+
+    assert result.intent == "video"
+    assert result.values["video_duration_sec"] == 180
+    assert result.values["video_ratio"] == "16:9"
+    assert result.values["video_model_mode"] == "manual"
+    assert result.values["video_model"] == "seedance-2.0"
+    assert result.values["image_model"] == "gpt-image-2"
+    assert result.values["video_usage"] == "新品宣传"
+    assert result.values["visual_style"] == "电影写实风"
+
+
 def test_recognize_intent_preserves_requested_image_count_from_llm_json() -> None:
     fake_model = FakeModel(
         """
@@ -329,9 +395,7 @@ def test_recognize_intent_fallback_extracts_image_edit_ratio_and_quality() -> No
         def invoke(self, _prompt):
             raise RuntimeError("model down")
 
-    result = asyncio.run(
-        recognize_intent_with_llm("把这张图片改成蓝色科技风海报，9:16，4K清晰度", model_factory=lambda *_args, **_kwargs: BrokenModel())
-    )
+    result = asyncio.run(recognize_intent_with_llm("把这张图片改成蓝色科技风海报，9:16，4K清晰度", model_factory=lambda *_args, **_kwargs: BrokenModel()))
 
     assert result.intent == "image"
     assert result.values["image_operation"] == "image_edit"

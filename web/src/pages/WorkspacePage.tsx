@@ -4,6 +4,7 @@ import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
 import { StoryboardPanel } from "@/components/canvas/StoryboardPanel";
 import { GenParamsDialog, type CreationIntent, type GenParamsForm } from "@/components/composer/GenParamsDialog";
+import { PlanRevisionDialog, type PlanRevisionMode } from "@/components/composer/PlanRevisionDialog";
 import {
   api,
   setActiveConversationId as setActiveConversationIdForTrace,
@@ -33,6 +34,7 @@ import {
   type SceneGenerationPayload,
   type SceneVideoPayload,
   type TaskEvent,
+  type VideoCreationContract,
 } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
@@ -55,7 +57,6 @@ import {
   globalSceneAssetRatioFromMetadata,
   inferGlobalSceneAssetRatioFromMetadata,
   nearestSupportedAspectRatio,
-  inferTargetDurationMs,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
@@ -205,6 +206,10 @@ interface WorkspaceSnapshot {
   pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
   pending_direction_job?: PendingDirectionJob | null;
+  pendingPlanRevisionRequest?: PendingConversationArtifact | null;
+  pending_plan_revision_request?: PendingConversationArtifact | null;
+  pendingPlanRevisionChoice?: PendingPlanRevisionChoice | null;
+  pending_plan_revision_choice?: PendingPlanRevisionChoice | null;
   pendingImageEditRequest?: PendingImageEditRequest | null;
   imageEditConfirmedSelections?: Record<string, ImageEditModelSelection>;
   pendingImageJob?: PendingImageJob | null;
@@ -240,6 +245,17 @@ type ChatArtifact = NonNullable<ChatMessage["artifact"]>;
 interface PendingConversationArtifact {
   conversationId: string;
   artifact: ChatArtifact;
+  sourceMessageId?: string;
+  processedKey?: string;
+}
+
+interface PendingPlanRevisionChoice {
+  conversationId: string;
+  artifact: ChatArtifact;
+  feedback: string;
+  materials: Array<Record<string, unknown>>;
+  sourceMessageId: string;
+  processedKey?: string;
 }
 
 interface PendingDialogContext {
@@ -607,14 +623,17 @@ interface PrepareScenePackagesJobRequest {
   selected_direction: Record<string, unknown>;
   materials?: Array<Record<string, unknown>>;
   target_duration_ms?: number;
+  creation_contract?: VideoCreationContract;
 }
 
 interface SceneAssetsJobRequest {
   global_assets?: Record<string, unknown>;
   scene_packages: PrepareScenePackagesResponse["scene_packages"];
   materials?: Array<Record<string, unknown>>;
+  image_ratio?: string;
   image_size?: string;
   model?: string | null;
+  creation_contract?: VideoCreationContract;
 }
 
 interface PendingScenePackageJob {
@@ -635,6 +654,7 @@ interface SceneVideosJobRequest {
   size?: string;
   model?: string | null;
   sound?: string;
+  creation_contract?: VideoCreationContract;
 }
 
 interface MergeSceneVideosJobRequest {
@@ -743,6 +763,16 @@ function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
       product_category: form.product_category,
       target_audience: form.target_audience,
       conversion_goal: form.conversion_goal,
+      video_duration_sec: form.video_duration_sec,
+      video_ratio: form.video_ratio,
+      video_model_mode: form.video_model_mode,
+      video_model: form.video_model,
+      video_size: form.video_size,
+      video_sound: form.video_sound,
+      image_model: form.image_model,
+      image_model_capabilities: form.image_model_capabilities,
+      video_usage: form.video_usage,
+      visual_style: form.visual_style,
     };
   }
   if (form.intent === "ppt") {
@@ -1346,6 +1376,7 @@ function restoreLatestVideoScenePackagesFromContext(
         target_duration_ms: typeof context.target_duration_ms === "number" ? context.target_duration_ms : DEFAULT_TARGET_DURATION_MS,
         global_assets: globalAssets as PrepareScenePackagesResponse["global_assets"],
         scene_packages: scenePackages as PrepareScenePackagesResponse["scene_packages"],
+        creation_contract: context.creation_contract as VideoCreationContract | null | undefined,
       } satisfies PrepareScenePackagesResponse)
     : null;
   const latestIndex = [...messages]
@@ -1528,6 +1559,7 @@ export function WorkspacePage() {
   const [busy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
+  const [pendingPlanRevisionChoice, setPendingPlanRevisionChoice] = useState<PendingPlanRevisionChoice | null>(null);
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
   useEffect(() => {
@@ -2834,9 +2866,13 @@ export function WorkspacePage() {
     pushArtifact("plan.md 创作方案已生成，请审核后点击「同意方案」继续。", {
       type: "plan",
       title: "plan.md 创作方案",
-      description: `基于「${selectedDirection.title}」生成，模板来自项目内 plan.md`,
+      description: `基于「${selectedDirection.title}」生成，当前版本 v${plan.plan_version || 1}`,
       actionLabel: "审核",
       plan,
+      planVersion: plan.plan_version || 1,
+      planHistory: plan.plan_history || [],
+      creationContract: plan.creation_contract || {},
+      restoredFromVersion: plan.restored_from_version,
       selectedDirection,
       intent: context.intent,
       formValues: context.formValues,
@@ -3508,6 +3544,7 @@ export function WorkspacePage() {
     global_assets: videoScenePackages.global_assets,
     scene_packages: videoScenePackages.scene_packages,
     scene_asset_failures: sceneAssetFailures,
+    creation_contract: videoScenePackages.creation_contract,
   });
 
   const handleCompletedScenePackageJob = async (
@@ -3842,18 +3879,30 @@ export function WorkspacePage() {
     videoScenePackages: PrepareScenePackagesResponse,
     sceneIds?: Set<string>,
     editedSceneIds: Set<string> = sceneIds || new Set<string>(),
-  ): SceneVideosJobRequest => ({
-    scenes: videoScenePackages.scene_packages
-      .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
-      .map((scene) =>
-        sceneGenerationPayloadFromPackage(scene, videoScenePackages.global_assets, {
-          edited: editedSceneIds.has(scene.scene_id),
-        }) as SceneGenerationPayload,
-      ),
-    ratio: "9:16",
-    size: "720p",
-    sound: "on",
-  });
+  ): SceneVideosJobRequest => {
+    const creationContract = videoScenePackages.creation_contract || {
+      video_duration_sec: videoScenePackages.target_duration_ms / 1000,
+      video_ratio: "9:16",
+      video_model: "seedance-2.0",
+      video_size: "720p",
+      video_sound: "on",
+      image_model: "gpt-image-2",
+    };
+    return {
+      scenes: videoScenePackages.scene_packages
+        .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
+        .map((scene) =>
+          sceneGenerationPayloadFromPackage(scene, videoScenePackages.global_assets, {
+            edited: editedSceneIds.has(scene.scene_id),
+          }) as SceneGenerationPayload,
+        ),
+      ratio: creationContract.video_ratio,
+      size: creationContract.video_size,
+      model: creationContract.video_model,
+      sound: creationContract.video_sound,
+      creation_contract: creationContract,
+    };
+  };
 
   const mergeRequestFromSceneVideos = (
     sceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"],
@@ -4731,6 +4780,8 @@ export function WorkspacePage() {
     pendingMessageJobRef.current = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
     pendingIntakeJobRef.current = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
+    planRevisionArtifactRef.current = snapshot.pendingPlanRevisionRequest || snapshot.pending_plan_revision_request || null;
+    setPendingPlanRevisionChoice(snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null);
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
@@ -4774,6 +4825,14 @@ export function WorkspacePage() {
         pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
       pending_direction_job:
         pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
+      pendingPlanRevisionRequest:
+        planRevisionArtifactRef.current?.conversationId === snapshotConversationId ? planRevisionArtifactRef.current : null,
+      pending_plan_revision_request:
+        planRevisionArtifactRef.current?.conversationId === snapshotConversationId ? planRevisionArtifactRef.current : null,
+      pendingPlanRevisionChoice:
+        pendingPlanRevisionChoice?.conversationId === snapshotConversationId ? pendingPlanRevisionChoice : null,
+      pending_plan_revision_choice:
+        pendingPlanRevisionChoice?.conversationId === snapshotConversationId ? pendingPlanRevisionChoice : null,
       pendingImageEditRequest:
         pendingImageEditRequestRef.current?.conversationId === snapshotConversationId ? pendingImageEditRequestRef.current : null,
       imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
@@ -4848,6 +4907,7 @@ export function WorkspacePage() {
     pendingPptJobRef.current = null;
     pptDoneConversationIdsRef.current = new Set();
     planRevisionArtifactRef.current = null;
+    setPendingPlanRevisionChoice(null);
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
     briefReadyShownRef.current = false;
@@ -5163,7 +5223,7 @@ export function WorkspacePage() {
         })
         .catch(() => {});
     }, 400);
-  }, [pendingMaterials, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
+  }, [pendingMaterials, pendingPlanRevisionChoice, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
 
   const titleFromPrompt = (text: string) => {
     const normalized = text.trim() || "带附件对话";
@@ -5314,38 +5374,31 @@ export function WorkspacePage() {
     const pendingPlanRevision = planRevisionArtifactRef.current;
     if (pendingPlanRevision?.conversationId === activeConversation && pendingPlanRevision.artifact.intent && pendingPlanRevision.artifact.formValues) {
       const revisionArtifact = pendingPlanRevision.artifact;
-      const revisionIntent = revisionArtifact.intent;
-      const revisionFormValues = revisionArtifact.formValues;
       const flowMaterials = mergeMaterials(revisionArtifact.materials, materials);
-      if (!isCreationIntent(revisionIntent) || !revisionFormValues) return;
+      if (!isCreationIntent(revisionArtifact.intent) || !revisionArtifact.formValues || !revisionArtifact.plan || !revisionArtifact.selectedDirection) return;
       planRevisionArtifactRef.current = null;
-      setBusyForConversation(activeConversation, true);
-      pushAssistant("已收到修改意见，正在回到采集 Agent 重新生成 3 个创意方向…", activeConversation);
-      try {
-        await startDirectionJob(
-          activeConversation,
-          {
-            intent: revisionIntent,
-            values: revisionFormValues,
-            materials: flowMaterials,
-            product_creative_profile: { revision_feedback: text },
-            intake_context: revisionArtifact.intakeContext,
-          },
-          {
-            intent: revisionIntent,
-            formValues: revisionFormValues,
-            materials: flowMaterials,
-            coreMessage: `${revisionArtifact.coreMessage || pendingCore}\n修改意见：${text}`,
-            intakeContext: revisionArtifact.intakeContext,
-            revisionFeedback: text,
-          },
-          "directions_running",
-        );
-      } catch (err) {
-        pushAssistant(`重新生成创意方向失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
-      } finally {
-        setBusyForConversation(activeConversation, false);
-      }
+      const choice: PendingPlanRevisionChoice = {
+        conversationId: activeConversation,
+        artifact: revisionArtifact,
+        feedback: text.trim(),
+        materials: flowMaterials,
+        sourceMessageId: pendingPlanRevision.sourceMessageId || "",
+        processedKey: pendingPlanRevision.processedKey,
+      };
+      setPendingPlanRevisionChoice(choice);
+      pushAssistant("已收到 plan.md 修改意见，请选择是在当前创意上修改，还是放弃当前创意并重新生成 3 个方向。", activeConversation);
+      void api
+        .updateConversation(activeConversation, {
+          last_phase: "plan_revision_mode_pending",
+          context: {
+            ...makeSnapshot(activeConversation),
+            pendingPlanRevisionRequest: null,
+            pending_plan_revision_request: null,
+            pendingPlanRevisionChoice: choice,
+            pending_plan_revision_choice: choice,
+          } as unknown as Record<string, unknown>,
+        })
+        .catch(() => {});
       return;
     }
     const pendingImageRevision = imageRevisionArtifactRef.current;
@@ -6258,12 +6311,13 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     const formValues = artifact.formValues;
     const selectedDirection = artifact.selectedDirection;
-    const targetDurationMs = inferTargetDurationMs([
-      artifact.coreMessage,
-      artifact.plan.plan_markdown,
-      selectedDirection.title,
-      selectedDirection.description,
-    ]);
+    const creationContract = artifact.plan.creation_contract as unknown as VideoCreationContract;
+    if (!creationContract || typeof creationContract.video_duration_sec !== "number" || !creationContract.video_model || !creationContract.image_model) {
+      releaseArtifactAction(processedKey);
+      setBusyForConversation(targetConversationId, false);
+      pushAssistant("视频 plan.md 缺少完整制作合同，请重新生成 plan.md 后再继续。", targetConversationId);
+      return;
+    }
     pushAssistant("视频plan.md已同意,正在准备可编辑视频资产", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
@@ -6271,7 +6325,8 @@ export function WorkspacePage() {
         plan_markdown: artifact.plan.plan_markdown,
         selected_direction: selectedDirection as unknown as Record<string, unknown>,
         materials: artifact.materials || [],
-        target_duration_ms: targetDurationMs,
+        target_duration_ms: creationContract.video_duration_sec * 1000,
+        creation_contract: creationContract,
       };
       const started = await api.startPrepareScenePackagesJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -6290,6 +6345,7 @@ export function WorkspacePage() {
         selected_direction: selectedDirection,
         plan_markdown: artifact.plan.plan_markdown,
         plan_approved: true,
+        creation_contract: creationContract,
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -6315,7 +6371,10 @@ export function WorkspacePage() {
         global_assets: videoScenePackages.global_assets,
         scene_packages: videoScenePackages.scene_packages,
         materials: artifact.materials || [],
-        image_size: "1080p",
+        image_ratio: videoScenePackages.creation_contract?.scene_image_ratio || "9:16",
+        image_size: videoScenePackages.creation_contract?.scene_image_size || "1080p",
+        model: videoScenePackages.creation_contract?.image_model || "gpt-image-2",
+        creation_contract: videoScenePackages.creation_contract || undefined,
       };
       const started = await api.startSceneAssetsJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -6332,6 +6391,7 @@ export function WorkspacePage() {
         intake_context: artifact.intakeContext,
         scene_packages: videoScenePackages.scene_packages,
         scene_asset_failures: artifact.sceneAssetFailures || [],
+        creation_contract: videoScenePackages.creation_contract,
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -6346,15 +6406,161 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    planRevisionArtifactRef.current = msg.artifact ? { conversationId: targetConversationId, artifact: msg.artifact } : null;
-    pushAssistant("已暂停当前 plan.md。请在输入框填写修改意见，我会回到采集 Agent 重新生成创意方向。", targetConversationId);
+    planRevisionArtifactRef.current = msg.artifact
+      ? { conversationId: targetConversationId, artifact: msg.artifact, sourceMessageId: msg.id, processedKey }
+      : null;
+    pushAssistant("已暂停当前 plan.md。请在输入框填写修改意见，提交后我会让你选择修改当前 Plan 或重新生成创意。", targetConversationId);
     if (targetConversationId) {
       void api
         .updateConversation(targetConversationId, {
           last_phase: "plan_revision_requested",
-          context: { ...makeSnapshot(), plan_approved: false, plan_revision_requested: true } as unknown as Record<string, unknown>,
+          context: {
+            ...makeSnapshot(targetConversationId),
+            plan_approved: false,
+            plan_revision_requested: true,
+            pendingPlanRevisionRequest: planRevisionArtifactRef.current,
+            pending_plan_revision_request: planRevisionArtifactRef.current,
+          } as unknown as Record<string, unknown>,
         })
         .catch(() => {});
+    }
+  };
+
+  const handleConfirmPlanRevisionMode = async (mode: PlanRevisionMode) => {
+    const pending = pendingPlanRevisionChoice;
+    if (!pending) return;
+    const { artifact, conversationId: targetConversationId, feedback, materials } = pending;
+    if (!isCreationIntent(artifact.intent) || !artifact.formValues || !artifact.selectedDirection || !artifact.plan) return;
+    setPendingPlanRevisionChoice(null);
+    setBusyForConversation(targetConversationId, true);
+    try {
+      if (mode === "regenerate_directions") {
+        pushAssistant("已选择放弃当前创意，正在重新生成 3 个创意方向…", targetConversationId);
+        await startDirectionJob(
+          targetConversationId,
+          {
+            intent: artifact.intent,
+            values: artifact.formValues,
+            materials,
+            product_creative_profile: { revision_feedback: feedback },
+            intake_context: artifact.intakeContext,
+          },
+          {
+            intent: artifact.intent,
+            formValues: artifact.formValues,
+            materials,
+            coreMessage: `${artifact.coreMessage || pendingCore}\n修改意见：${feedback}`,
+            intakeContext: artifact.intakeContext,
+            revisionFeedback: feedback,
+          },
+          "directions_running",
+          pending.sourceMessageId,
+        );
+        return;
+      }
+
+      pushAssistant(`正在当前创意基础上修订 plan.md v${artifact.plan.plan_version || 1}…`, targetConversationId);
+      const plan = await api.revisePlanMarkdown({
+        intent: artifact.intent,
+        form_values: artifact.formValues,
+        selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
+        current_plan_markdown: artifact.plan.plan_markdown,
+        current_plan_version: artifact.plan.plan_version || 1,
+        plan_history: artifact.plan.plan_history || [],
+        revision_feedback: feedback,
+        creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
+        product_creative_profile: { revision_feedback: feedback },
+        intake_context: artifact.intakeContext,
+        materials,
+      });
+      pushPlanArtifact(
+        plan,
+        artifact.selectedDirection,
+        {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          materials,
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+        },
+        targetConversationId,
+      );
+      if (targetConversationId) {
+        await api.updateConversation(targetConversationId, {
+          last_phase: "plan_review",
+          context: {
+            ...makeSnapshot(targetConversationId),
+            pendingPlanRevisionChoice: null,
+            pending_plan_revision_choice: null,
+            selected_direction: artifact.selectedDirection,
+            plan_markdown: plan.plan_markdown,
+            plan_version: plan.plan_version,
+            plan_history: plan.plan_history,
+            creation_contract: plan.creation_contract,
+          } as unknown as Record<string, unknown>,
+        });
+      }
+    } catch (err) {
+      if (pending.processedKey) releaseArtifactAction(pending.processedKey);
+      pushAssistant(`plan.md 修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  const handleCancelPlanRevisionMode = () => {
+    const pending = pendingPlanRevisionChoice;
+    if (!pending) return;
+    setPendingPlanRevisionChoice(null);
+    if (pending.processedKey) releaseArtifactAction(pending.processedKey);
+    pushAssistant("已取消本次 plan.md 修改方式选择，当前 Plan 保持不变。", pending.conversationId);
+    void api
+      .updateConversation(pending.conversationId, {
+        last_phase: "plan_review",
+        context: {
+          ...makeSnapshot(pending.conversationId),
+          pendingPlanRevisionChoice: null,
+          pending_plan_revision_choice: null,
+        } as unknown as Record<string, unknown>,
+      })
+      .catch(() => {});
+  };
+
+  const handleRollbackPlan = async (msg: ChatMessage, version: number) => {
+    const artifact = msg.artifact;
+    if (!artifact?.plan || !isCreationIntent(artifact.intent) || !artifact.formValues || !artifact.selectedDirection) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    setBusyForConversation(targetConversationId, true);
+    pushAssistant(`正在把 plan.md v${artifact.plan.plan_version || 1} 回退到 v${version}，并保留为新版本…`, targetConversationId);
+    try {
+      const plan = await api.restorePlanMarkdown({
+        intent: artifact.intent,
+        current_plan_markdown: artifact.plan.plan_markdown,
+        current_plan_version: artifact.plan.plan_version || 1,
+        plan_history: artifact.plan.plan_history || [],
+        restore_version: version,
+        creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
+        scene_durations_sec: artifact.plan.scene_durations_sec || [],
+      });
+      pushPlanArtifact(
+        plan,
+        artifact.selectedDirection,
+        {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          materials: artifact.materials || [],
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+        },
+        targetConversationId,
+      );
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(`plan.md 回退失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -6662,6 +6868,7 @@ export function WorkspacePage() {
         generated_scene_videos: artifact.generatedSceneVideos?.scene_videos,
         failed_scenes: artifact.generatedSceneVideos?.failed_scenes,
         merged_video: artifact.mergedVideo,
+        creation_contract: videoScenePackages.creation_contract,
         affected_scene_ids: isDirtySceneRegeneration ? Array.from(dirtySceneIds) : isFailedSceneRetry ? Array.from(retrySceneIds) : undefined,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);
@@ -6894,11 +7101,12 @@ export function WorkspacePage() {
         referencedMaterials={referencedMaterials}
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         composerPrefillRequest={composerPrefillRequest}
-        busy={busy || dialogOpen}
+        busy={busy || dialogOpen || Boolean(pendingPlanRevisionChoice)}
         onSelectDirection={handleSelectDirection}
         onRegenerateDirections={handleRegenerateDirections}
         onApprovePlan={handleApprovePlan}
         onRevisePlan={handleRevisePlan}
+        onRollbackPlan={handleRollbackPlan}
         onGenerateImage={handleGenerateImage}
         onConfirmImageEditOptions={handleConfirmImageEditOptions}
         onAcceptImageResult={handleAcceptImageResult}
@@ -6978,6 +7186,12 @@ export function WorkspacePage() {
           onCancel={handleCancelParamsDialog}
         />
       )}
+      <PlanRevisionDialog
+        open={Boolean(pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
+        feedback={pendingPlanRevisionChoice?.feedback || ""}
+        onConfirm={(mode) => void handleConfirmPlanRevisionMode(mode)}
+        onCancel={handleCancelPlanRevisionMode}
+      />
     </div>
   );
 }

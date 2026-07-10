@@ -88,6 +88,7 @@ async def recognize_intent_with_llm(
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
         _copy_image_param_context(values, context_dict)
+        _copy_video_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=intent,
             confidence=_confidence(payload.get("confidence")),
@@ -114,6 +115,7 @@ async def recognize_intent_with_llm(
             values["image_operation"] = image_operation
             context_dict["image_operation"] = image_operation
         _copy_image_param_context(values, context_dict)
+        _copy_video_param_context(values, context_dict)
         return IntentRecognitionResult(
             intent=fallback,
             confidence=0.2 if fallback != "unknown" else 0,
@@ -220,7 +222,16 @@ def _intent_prompt(text: str) -> str:
 - unknown: 需求不足，无法判断。
 
 如果是 video_generation，可抽取 values 字段：
-product_info, product_category, target_audience, conversion_goal。
+product_info, product_category, target_audience, conversion_goal,
+video_duration_sec, video_ratio, video_model_mode, video_model, image_model,
+video_usage, visual_style。
+字段规则：
+- video_duration_sec 是视频总时长的自然数秒，范围 4-300；没有明确时长时写 30。
+- video_ratio 是最终视频画幅，只能优先识别 9:16、16:9、1:1；没有明确要求时写 9:16。
+- video_model 是生成分镜视频使用的 Seedance 模型；image_model 是生成角色、场景、道具图片使用的图片模型，两者不能混淆。
+- 用户明确说出 Seedance 模型时 video_model_mode=manual，否则 video_model_mode=system_recommended 且 video_model=seedance-2.0。
+- 用户没有明确图片模型时 image_model=gpt-image-2。
+- video_usage 是品牌宣传、产品介绍、活动预热、新品宣传等用途；visual_style 是电影写实、科技感等视觉风格。
 
 如果是 image_generation，可抽取 values 字段：
 image_goal, image_type, image_usage, image_style, image_size, image_quality, image_count。
@@ -436,12 +447,12 @@ def _fallback_intent(text: str) -> IntakeIntent:
         return "video_analysis"
     if any(hint in lowered for hint in ppt_hints):
         return "ppt"
-    if any(hint in lowered for hint in image_hints):
-        return "image"
     if any(hint in lowered for hint in video_hints):
         return "video"
     if "视频" in lowered and any(word in lowered for word in video_generation_words):
         return "video"
+    if any(hint in lowered for hint in image_hints):
+        return "image"
     return "unknown"
 
 
@@ -449,6 +460,8 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
     if intent == "ppt" and not values.get("ppt_topic"):
         topic = _extract_ppt_topic(text)
         return {**values, "ppt_topic": topic} if topic else values
+    if intent == "video":
+        return _augment_video_intent_values(values, text)
     if intent != "image":
         return values
     enriched = dict(values)
@@ -468,15 +481,34 @@ def _augment_intent_values(intent: IntakeIntent, values: dict[str, Any], text: s
     return {**enriched, "image_count": image_count}
 
 
+def _augment_video_intent_values(values: dict[str, Any], text: str) -> dict[str, Any]:
+    enriched = dict(values)
+    explicit_video_model = _extract_video_model(text)
+    explicit_image_model = _extract_requested_image_model(text)
+
+    if not _has(enriched.get("video_duration_sec")):
+        enriched["video_duration_sec"] = _extract_video_duration(text) or 30
+    if not _has(enriched.get("video_ratio")):
+        enriched["video_ratio"] = _extract_image_ratio(text) or "9:16"
+    if not _has(enriched.get("video_model")):
+        enriched["video_model"] = explicit_video_model or "seedance-2.0"
+    if not _has(enriched.get("video_model_mode")):
+        enriched["video_model_mode"] = "manual" if explicit_video_model else "system_recommended"
+    if not _has(enriched.get("image_model")):
+        enriched["image_model"] = explicit_image_model or "gpt-image-2"
+    if not _has(enriched.get("video_usage")):
+        enriched["video_usage"] = _extract_video_usage(text) or "宣传片"
+    if not _has(enriched.get("visual_style")):
+        visual_style = _extract_visual_style(text)
+        if visual_style:
+            enriched["visual_style"] = visual_style
+    return enriched
+
+
 def _image_operation_from_payload(intent: IntakeIntent, payload: dict[str, Any], values: dict[str, Any], text: str) -> str:
     if intent != "image":
         return ""
-    operation = _normalize_image_operation(
-        payload.get("image_operation")
-        or payload.get("operation")
-        or values.get("image_operation")
-        or values.get("operation")
-    )
+    operation = _normalize_image_operation(payload.get("image_operation") or payload.get("operation") or values.get("image_operation") or values.get("operation"))
     inferred = _infer_image_operation(text)
     if inferred in {"image_edit", "multi_image_fusion"} and operation in {"", "text_to_image", "reference_image"}:
         return inferred
@@ -605,6 +637,74 @@ def _extract_ppt_topic(text: str) -> str:
     return normalized[:40]
 
 
+def _extract_video_duration(text: str) -> int | None:
+    match = re.search(r"(?<!\d)(\d{1,3})\s*(?:秒|s(?:ec(?:ond)?s?)?)(?![A-Za-z])", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    duration = int(match.group(1))
+    return duration if 4 <= duration <= 300 else None
+
+
+def _extract_video_model(text: str) -> str:
+    match = re.search(r"\bseedance[\s_-]*(\d+(?:\.\d+)?(?:[\s_-]*(?:pro|lite|mini))?)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    suffix = re.sub(r"[\s_]+", "-", match.group(1).lower())
+    return f"seedance-{suffix}"
+
+
+def _extract_requested_image_model(text: str) -> str:
+    patterns = (
+        r"\bgpt[\s_-]*image[\s_-]*(\d+(?:\.\d+)?)\b",
+        r"\bseeddream[\s_-]*(\d+(?:\.\d+)?)\b",
+        r"\bnano[\s_-]*banana[\s_-]*(pro|\d+(?:\.\d+)?)\b",
+    )
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        suffix = match.group(1).lower()
+        prefixes = ("gpt-image", "seeddream", "nanobanana")
+        return f"{prefixes[index]}-{suffix}"
+    return ""
+
+
+def _extract_video_usage(text: str) -> str:
+    usage_hints = (
+        "新品宣传",
+        "品牌宣传",
+        "产品介绍",
+        "活动预热",
+        "广告投放",
+        "直播引流",
+        "带货",
+        "种草",
+        "企业宣传",
+    )
+    return next((hint for hint in usage_hints if hint in text), "")
+
+
+def _extract_visual_style(text: str) -> str:
+    style_hints = (
+        "电影写实风",
+        "电影写实",
+        "电影感写实",
+        "电影光影",
+        "真实摄影",
+        "高级质感",
+        "简洁干净",
+        "小红书风",
+        "科技感",
+        "插画风",
+        "未来感",
+    )
+    matched = next((hint for hint in style_hints if hint in text), "")
+    if matched:
+        return matched
+    match = re.search(r"(?:视觉风格|画面风格|风格)[为是：:]?\s*([^，。,.；;]{2,16})", text)
+    return match.group(1).strip() if match else ""
+
+
 def _extract_image_count(text: str) -> int | None:
     normalized = text.lower()
     patterns = [
@@ -652,6 +752,21 @@ def _extract_image_quality(text: str) -> str:
 
 def _copy_image_param_context(values: dict[str, Any], context_dict: dict[str, Any]) -> None:
     for key in ("image_size", "image_quality", "image_model"):
+        value = values.get(key)
+        if _has(value):
+            context_dict[key] = value
+
+
+def _copy_video_param_context(values: dict[str, Any], context_dict: dict[str, Any]) -> None:
+    for key in (
+        "video_duration_sec",
+        "video_ratio",
+        "video_model_mode",
+        "video_model",
+        "image_model",
+        "video_usage",
+        "visual_style",
+    ):
         value = values.get(key)
         if _has(value):
             context_dict[key] = value
