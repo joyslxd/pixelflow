@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -12,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
+from pixelflow.creative.contract import VideoCreationContract
 from pixelflow.generate.scene_assets import generate_scene_assets as run_generate_scene_assets
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
 from pixelflow.memory import semantic_memory_text, with_semantic_memory
@@ -43,8 +43,6 @@ _MAX_SCENE_ASSET_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
 _SCENE_VIDEO_MAX_CONCURRENCY = 100
 _SCENE_VIDEO_MAX_ATTEMPTS = 3
-_SEEDANCE_MIN_SINGLE_CALL_DURATION = 5
-_SEEDANCE_MAX_SINGLE_CALL_DURATION = 10
 
 DirectVideoMode = Literal[
     "text_to_video",
@@ -65,7 +63,7 @@ class SceneVideo(BaseModel):
 class SceneGenerationItem(BaseModel):
     scene_id: str
     scene_index: int
-    duration_ms: int = Field(gt=0, le=15_000)
+    duration_ms: int = Field(ge=4_000, le=15_000)
     prompt: str
     storyline: str = ""
     shot_description: dict[str, Any] = Field(default_factory=dict)
@@ -82,6 +80,7 @@ class GenerateSceneVideosRequest(BaseModel):
     size: str = "720p"
     model: str | None = None
     sound: str = "on"
+    creation_contract: VideoCreationContract | None = None
 
 
 class PrepareScenePackagesRequest(BaseModel):
@@ -91,6 +90,7 @@ class PrepareScenePackagesRequest(BaseModel):
     materials: list[dict[str, Any]] = Field(default_factory=list)
     target_duration_ms: int = 30_000
     intake_context: dict[str, Any] = Field(default_factory=dict)
+    creation_contract: VideoCreationContract | None = None
 
 
 class PrepareScenePackagesResponse(BaseModel):
@@ -101,14 +101,17 @@ class PrepareScenePackagesResponse(BaseModel):
     target_duration_ms: int
     global_assets: dict[str, Any] = Field(default_factory=dict)
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    creation_contract: dict[str, Any] | None = None
 
 
 class GenerateSceneAssetsRequest(BaseModel):
     global_assets: dict[str, Any] = Field(default_factory=dict)
     scene_packages: list[dict[str, Any]]
     materials: list[dict[str, Any]] = Field(default_factory=list)
+    image_ratio: str = "1:1"
     image_size: str = "1080p"
     model: str | None = None
+    creation_contract: VideoCreationContract | None = None
 
 
 class GenerateSceneAssetsResponse(BaseModel):
@@ -436,13 +439,33 @@ async def get_prepare_scene_packages_job(job_id: str) -> PrepareScenePackagesJob
 
 
 async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
+    contract = body.creation_contract
+    form_values = dict(body.form_values)
+    target_duration_ms = body.target_duration_ms
+    if contract is not None:
+        target_duration_ms = contract.video_duration_sec * 1000
+        form_values.update(
+            {
+                "video_duration_sec": contract.video_duration_sec,
+                "video_ratio": contract.video_ratio,
+                "video_model": contract.video_model,
+                "video_size": contract.video_size,
+                "video_sound": contract.video_sound,
+                "image_model": contract.image_model,
+                "scene_image_ratio": contract.scene_image_ratio,
+                "scene_image_size": contract.scene_image_size,
+                "video_usage": contract.video_usage,
+                "visual_style": contract.visual_style,
+            }
+        )
     result = await prepare_video_scene_packages_with_llm(
-        form_values=body.form_values,
+        form_values=form_values,
         plan_markdown=body.plan_markdown,
         selected_direction=body.selected_direction,
         materials=body.materials,
-        target_duration_ms=body.target_duration_ms,
+        target_duration_ms=target_duration_ms,
     )
+    result["creation_contract"] = contract.model_dump() if contract is not None else None
     return PrepareScenePackagesResponse(**result)
 
 
@@ -593,13 +616,15 @@ async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> G
     if not body.scene_packages:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
 
+    contract = body.creation_contract
     result = await run_generate_scene_assets(
         image_skill=get_image_skill(),
         global_assets=_clone_mapping(body.global_assets) if body.global_assets else {},
         scene_packages=[_clone_mapping(scene) for scene in body.scene_packages],
         materials=body.materials,
-        image_size=body.image_size,
-        model=body.model,
+        image_ratio=_scene_image_ratio(contract) if contract is not None else body.image_ratio,
+        image_size=_scene_image_size(contract) if contract is not None else body.image_size,
+        model=contract.image_model if contract is not None else body.model,
         quota_checker=is_quota_insufficient,
     )
     if result.get("quota_insufficient"):
@@ -772,6 +797,11 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         raise HTTPException(status_code=400, detail="scenes不能为空")
 
     skill = get_video_skill()
+    contract = body.creation_contract
+    video_ratio = contract.video_ratio if contract is not None else body.ratio
+    video_size = contract.video_size if contract is not None else body.size
+    video_model = contract.video_model if contract is not None else body.model
+    video_sound = contract.video_sound if contract is not None else body.sound
     semaphore = asyncio.Semaphore(max(1, min(_SCENE_VIDEO_MAX_CONCURRENCY, len(body.scenes))))
 
     async def run_scene_once(scene: SceneGenerationItem, attempt: int) -> GeneratedSceneVideo | dict[str, Any]:
@@ -786,7 +816,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
             }
         mode = _select_scene_video_mode(scene, image_urls)
         prompt = _build_scene_video_prompt(scene)
-        duration = _provider_video_duration_seconds(scene.duration_ms, body.model)
+        duration = _provider_video_duration_seconds(scene.duration_ms, video_model)
         result = await _run_scene_video_generation(
             skill=skill,
             mode=mode,
@@ -795,10 +825,10 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
             video_urls=_dedupe_urls(scene.video_urls),
             audio_urls=_dedupe_urls(scene.audio_urls),
             duration=duration,
-            ratio=body.ratio,
-            size=body.size,
-            model=body.model,
-            sound=body.sound,
+            ratio=video_ratio,
+            size=video_size,
+            model=video_model,
+            sound=video_sound,
         )
         endpoint = _direct_video_endpoint(mode, result.raw)
         if not result.ok or not result.url:
@@ -1015,7 +1045,10 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
                 global_assets=video_scene_packages.global_assets,
                 scene_packages=video_scene_packages.scene_packages,
                 materials=body.materials,
-                image_size="1080p",
+                image_ratio=_scene_image_ratio(body.creation_contract),
+                image_size=_scene_image_size(body.creation_contract),
+                model=body.creation_contract.image_model if body.creation_contract is not None else None,
+                creation_contract=body.creation_contract,
             )
         )
         scene_packages_for_review = PrepareScenePackagesResponse(
@@ -1182,10 +1215,13 @@ def _select_scene_video_mode(scene: SceneGenerationItem, image_urls: list[str]) 
 
 
 def _provider_video_duration_seconds(duration_ms: int, model: str | None) -> int:
-    seconds = max(1, math.ceil(duration_ms / 1000))
-    if model is None or model == "seedance-2.0":
-        return max(_SEEDANCE_MIN_SINGLE_CALL_DURATION, min(_SEEDANCE_MAX_SINGLE_CALL_DURATION, seconds))
-    return max(1, min(15, seconds))
+    del model
+    if duration_ms % 1000 != 0:
+        raise ValueError("video duration must use integer seconds")
+    seconds = duration_ms // 1000
+    if seconds < 4 or seconds > 15:
+        raise ValueError("video duration must be between 4-15 seconds")
+    return seconds
 
 
 def _build_scene_video_prompt(scene: SceneGenerationItem) -> str:
@@ -1350,7 +1386,24 @@ def _with_video_memory(body: PrepareScenePackagesRequest, memories: list[Any]) -
         materials=body.materials,
         target_duration_ms=body.target_duration_ms,
         intake_context=intake_context,
+        creation_contract=body.creation_contract,
     )
+
+
+def _scene_image_ratio(contract: VideoCreationContract | None) -> str:
+    if contract is None:
+        return "9:16"
+    if not contract.scene_image_ratio:
+        raise ValueError("video creation contract is missing scene_image_ratio")
+    return contract.scene_image_ratio
+
+
+def _scene_image_size(contract: VideoCreationContract | None) -> str:
+    if contract is None:
+        return "1080p"
+    if not contract.scene_image_size:
+        raise ValueError("video creation contract is missing scene_image_size")
+    return contract.scene_image_size
 
 
 def _asset_count(global_assets: dict[str, Any]) -> int:

@@ -234,6 +234,17 @@ export interface PlanMarkdownResponse {
   restored_from_version: number | null;
 }
 
+export interface VideoCreationContract extends Record<string, unknown> {
+  video_duration_sec: number;
+  video_ratio: string;
+  video_model: string;
+  video_size: string;
+  video_sound: string;
+  image_model: string;
+  scene_image_ratio?: string | null;
+  scene_image_size?: string | null;
+}
+
 export interface ImagePrepareResponse {
   ok: boolean;
   method: "text_to_image" | "multi_reference_image_generation" | "image_edit" | "multi_image_fusion";
@@ -405,6 +416,7 @@ export interface PrepareScenePackagesResponse {
     scene_images?: Array<Record<string, unknown>>;
     prop_images?: Array<Record<string, unknown>>;
   }>;
+  creation_contract?: VideoCreationContract | null;
 }
 
 export interface GenerateSceneAssetsResponse {
@@ -1498,6 +1510,7 @@ export const api = {
     selected_direction: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
   startPrepareScenePackagesJob: (body: {
@@ -1506,6 +1519,7 @@ export const api = {
     selected_direction: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
       method: "POST",
@@ -1521,16 +1535,20 @@ export const api = {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
+    image_ratio?: string;
     image_size?: string;
     model?: string | null;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
 
   startSceneAssetsJob: (body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
+    image_ratio?: string;
     image_size?: string;
     model?: string | null;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
       method: "POST",
@@ -1548,6 +1566,7 @@ export const api = {
     size?: string;
     model?: string | null;
     sound?: string;
+    creation_contract?: VideoCreationContract | Record<string, unknown>;
   }) =>
     req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
       method: "POST",

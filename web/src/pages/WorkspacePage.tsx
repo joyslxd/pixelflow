@@ -34,6 +34,7 @@ import {
   type SceneGenerationPayload,
   type SceneVideoPayload,
   type TaskEvent,
+  type VideoCreationContract,
 } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
@@ -55,7 +56,6 @@ import {
   globalSceneAssetRatioFromMetadata,
   inferGlobalSceneAssetRatioFromMetadata,
   nearestSupportedAspectRatio,
-  inferTargetDurationMs,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
@@ -621,14 +621,17 @@ interface PrepareScenePackagesJobRequest {
   selected_direction: Record<string, unknown>;
   materials?: Array<Record<string, unknown>>;
   target_duration_ms?: number;
+  creation_contract?: VideoCreationContract;
 }
 
 interface SceneAssetsJobRequest {
   global_assets?: Record<string, unknown>;
   scene_packages: PrepareScenePackagesResponse["scene_packages"];
   materials?: Array<Record<string, unknown>>;
+  image_ratio?: string;
   image_size?: string;
   model?: string | null;
+  creation_contract?: VideoCreationContract;
 }
 
 interface PendingScenePackageJob {
@@ -649,6 +652,7 @@ interface SceneVideosJobRequest {
   size?: string;
   model?: string | null;
   sound?: string;
+  creation_contract?: VideoCreationContract;
 }
 
 interface MergeSceneVideosJobRequest {
@@ -1370,6 +1374,7 @@ function restoreLatestVideoScenePackagesFromContext(
         target_duration_ms: typeof context.target_duration_ms === "number" ? context.target_duration_ms : DEFAULT_TARGET_DURATION_MS,
         global_assets: globalAssets as PrepareScenePackagesResponse["global_assets"],
         scene_packages: scenePackages as PrepareScenePackagesResponse["scene_packages"],
+        creation_contract: context.creation_contract as VideoCreationContract | null | undefined,
       } satisfies PrepareScenePackagesResponse)
     : null;
   const latestIndex = [...messages]
@@ -3477,6 +3482,7 @@ export function WorkspacePage() {
     global_assets: videoScenePackages.global_assets,
     scene_packages: videoScenePackages.scene_packages,
     scene_asset_failures: sceneAssetFailures,
+    creation_contract: videoScenePackages.creation_contract,
   });
 
   const handleCompletedScenePackageJob = async (
@@ -3811,18 +3817,30 @@ export function WorkspacePage() {
     videoScenePackages: PrepareScenePackagesResponse,
     sceneIds?: Set<string>,
     editedSceneIds: Set<string> = sceneIds || new Set<string>(),
-  ): SceneVideosJobRequest => ({
-    scenes: videoScenePackages.scene_packages
-      .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
-      .map((scene) =>
-        sceneGenerationPayloadFromPackage(scene, videoScenePackages.global_assets, {
-          edited: editedSceneIds.has(scene.scene_id),
-        }) as SceneGenerationPayload,
-      ),
-    ratio: "9:16",
-    size: "720p",
-    sound: "on",
-  });
+  ): SceneVideosJobRequest => {
+    const creationContract = videoScenePackages.creation_contract || {
+      video_duration_sec: videoScenePackages.target_duration_ms / 1000,
+      video_ratio: "9:16",
+      video_model: "seedance-2.0",
+      video_size: "720p",
+      video_sound: "on",
+      image_model: "gpt-image-2",
+    };
+    return {
+      scenes: videoScenePackages.scene_packages
+        .filter((scene) => !sceneIds || sceneIds.has(scene.scene_id))
+        .map((scene) =>
+          sceneGenerationPayloadFromPackage(scene, videoScenePackages.global_assets, {
+            edited: editedSceneIds.has(scene.scene_id),
+          }) as SceneGenerationPayload,
+        ),
+      ratio: creationContract.video_ratio,
+      size: creationContract.video_size,
+      model: creationContract.video_model,
+      sound: creationContract.video_sound,
+      creation_contract: creationContract,
+    };
+  };
 
   const mergeRequestFromSceneVideos = (
     sceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"],
@@ -6231,12 +6249,13 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, true);
     const formValues = artifact.formValues;
     const selectedDirection = artifact.selectedDirection;
-    const targetDurationMs = inferTargetDurationMs([
-      artifact.coreMessage,
-      artifact.plan.plan_markdown,
-      selectedDirection.title,
-      selectedDirection.description,
-    ]);
+    const creationContract = artifact.plan.creation_contract as unknown as VideoCreationContract;
+    if (!creationContract || typeof creationContract.video_duration_sec !== "number" || !creationContract.video_model || !creationContract.image_model) {
+      releaseArtifactAction(processedKey);
+      setBusyForConversation(targetConversationId, false);
+      pushAssistant("视频 plan.md 缺少完整制作合同，请重新生成 plan.md 后再继续。", targetConversationId);
+      return;
+    }
     pushAssistant("视频plan.md已同意,正在准备可编辑视频资产", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
@@ -6244,7 +6263,8 @@ export function WorkspacePage() {
         plan_markdown: artifact.plan.plan_markdown,
         selected_direction: selectedDirection as unknown as Record<string, unknown>,
         materials: artifact.materials || [],
-        target_duration_ms: targetDurationMs,
+        target_duration_ms: creationContract.video_duration_sec * 1000,
+        creation_contract: creationContract,
       };
       const started = await api.startPrepareScenePackagesJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -6263,6 +6283,7 @@ export function WorkspacePage() {
         selected_direction: selectedDirection,
         plan_markdown: artifact.plan.plan_markdown,
         plan_approved: true,
+        creation_contract: creationContract,
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -6288,7 +6309,10 @@ export function WorkspacePage() {
         global_assets: videoScenePackages.global_assets,
         scene_packages: videoScenePackages.scene_packages,
         materials: artifact.materials || [],
-        image_size: "1080p",
+        image_ratio: videoScenePackages.creation_contract?.scene_image_ratio || "9:16",
+        image_size: videoScenePackages.creation_contract?.scene_image_size || "1080p",
+        model: videoScenePackages.creation_contract?.image_model || "gpt-image-2",
+        creation_contract: videoScenePackages.creation_contract || undefined,
       };
       const started = await api.startSceneAssetsJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -6305,6 +6329,7 @@ export function WorkspacePage() {
         intake_context: artifact.intakeContext,
         scene_packages: videoScenePackages.scene_packages,
         scene_asset_failures: artifact.sceneAssetFailures || [],
+        creation_contract: videoScenePackages.creation_contract,
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -6781,6 +6806,7 @@ export function WorkspacePage() {
         generated_scene_videos: artifact.generatedSceneVideos?.scene_videos,
         failed_scenes: artifact.generatedSceneVideos?.failed_scenes,
         merged_video: artifact.mergedVideo,
+        creation_contract: videoScenePackages.creation_contract,
         affected_scene_ids: isDirtySceneRegeneration ? Array.from(dirtySceneIds) : isFailedSceneRetry ? Array.from(retrySceneIds) : undefined,
       });
       await resumePendingVideoJob(pendingVideoJob, processedKey);

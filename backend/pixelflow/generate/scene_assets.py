@@ -5,20 +5,18 @@ from __future__ import annotations
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from pixelflow.generate.image_prepare import TEXT_TO_IMAGE_MODEL, filter_image_materials
+from pixelflow.generate.image_prepare import filter_image_materials
 
 TEXT_TO_IMAGE_ENDPOINT = "/api/picture/text_to_image"
 REFERENCE_IMAGE_ENDPOINT = "/api/picture/multi_reference_image_generation"
 MIXED_IMAGE_ENDPOINT = "/api/picture/mixed"
 MAX_REFERENCE_IMAGES = 9
-REFERENCE_IMAGE_MODEL = TEXT_TO_IMAGE_MODEL
+# 全局素材手动编辑仍保留原默认值；场景包资产生成不会使用这个常量。
 REFERENCE_IMAGE_QUALITY = "2K"
 PROP_REFERENCE_PROMPT_SUFFIX = "以参考图中的产品/商品外观为准，保持包装、颜色、材质和比例一致，干净背景，无文字水印。"
 SCENE_REFERENCE_PROMPT_SUFFIX = "如果图片是背景墙、天花板、地板等场景元素，以参考图中的场景风格和环境氛围为准，保持空间布局、色调和光影一致，干净画面，无文字水印。如果是产品图，生成的场景图必须包含该产品。"
 # 兼容旧命名
 MAX_PROP_REFERENCE_IMAGES = MAX_REFERENCE_IMAGES
-PROP_REFERENCE_IMAGE_MODEL = REFERENCE_IMAGE_MODEL
-PROP_REFERENCE_IMAGE_QUALITY = REFERENCE_IMAGE_QUALITY
 
 
 class ImageSkill(Protocol):
@@ -172,6 +170,7 @@ async def generate_scene_assets(
     global_assets: dict[str, Any],
     scene_packages: list[dict[str, Any]],
     materials: list[dict[str, Any]] | None = None,
+    image_ratio: str = "1:1",
     image_size: str = "1080p",
     model: str | None = None,
     quota_checker: Any,
@@ -197,8 +196,8 @@ async def generate_scene_assets(
                 reference_images=reference_urls,
                 prompt=_enhance_reference_prompt(prompt, asset_type),
                 ratio=ratio,
-                size=REFERENCE_IMAGE_QUALITY,
-                model=REFERENCE_IMAGE_MODEL,
+                size=image_size,
+                model=model,
                 max_images=1,
             )
             endpoint = REFERENCE_IMAGE_ENDPOINT
@@ -259,30 +258,30 @@ async def generate_scene_assets(
         for character in _list_of_dicts(assets.get("characters")):
             prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
             if prompt:
-                asset_jobs.append((character, "three_view_images", prompt, "1:1", {"asset_id": character.get("asset_id"), "asset_type": "character"}))
+                asset_jobs.append((character, "three_view_images", prompt, image_ratio, {"asset_id": character.get("asset_id"), "asset_type": "character"}))
         for scene_image in _list_of_dicts(assets.get("scenes")):
             prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
             if prompt:
-                asset_jobs.append((scene_image, "images", prompt, "9:16", {"asset_id": scene_image.get("asset_id"), "asset_type": "scene_image"}))
+                asset_jobs.append((scene_image, "images", prompt, image_ratio, {"asset_id": scene_image.get("asset_id"), "asset_type": "scene_image"}))
         for prop_image in _list_of_dicts(assets.get("props")):
             prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
             if prompt:
-                asset_jobs.append((prop_image, "images", prompt, "1:1", {"asset_id": prop_image.get("asset_id"), "asset_type": "prop_image"}))
+                asset_jobs.append((prop_image, "images", prompt, image_ratio, {"asset_id": prop_image.get("asset_id"), "asset_type": "prop_image"}))
     else:
         for scene in enriched:
             scene_id = str(scene.get("scene_id") or "")
             for character in _list_of_dicts(scene.get("characters")):
                 prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
                 if prompt:
-                    asset_jobs.append((character, "three_view_images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "character"}))
+                    asset_jobs.append((character, "three_view_images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "character"}))
             for scene_image in _list_of_dicts(scene.get("scene_images")):
                 prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
                 if prompt:
-                    asset_jobs.append((scene_image, "images", prompt, "9:16", {"scene_id": scene_id, "asset_type": "scene_image"}))
+                    asset_jobs.append((scene_image, "images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "scene_image"}))
             for prop_image in _list_of_dicts(scene.get("prop_images")):
                 prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
                 if prompt:
-                    asset_jobs.append((prop_image, "images", prompt, "1:1", {"scene_id": scene_id, "asset_type": "prop_image"}))
+                    asset_jobs.append((prop_image, "images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "prop_image"}))
 
     for target, field_name, prompt, ratio, context in asset_jobs:
         urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)

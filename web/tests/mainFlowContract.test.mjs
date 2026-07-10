@@ -642,6 +642,24 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.match(source, /kind:\s*"scene_package_generation"/, "scene package generation must record its pending job kind");
 });
 
+test("video plan contract drives scene package assets videos and recoverable jobs", () => {
+  const approveSource = handleApprovePlanSource();
+  const sceneRequestStart = workspaceSource.indexOf("const sceneVideoRequestFromPackages = (");
+  const sceneRequestEnd = workspaceSource.indexOf("const handleCompletedSceneGenerationJob", sceneRequestStart);
+  const sceneRequestSource = workspaceSource.slice(sceneRequestStart, sceneRequestEnd);
+
+  assert.match(approveSource, /const creationContract = artifact\.plan\.creation_contract/, "video approval must use the final Plan contract");
+  assert.match(approveSource, /target_duration_ms:\s*creationContract\.video_duration_sec \* 1000/, "scene timeline must use confirmed duration");
+  assert.match(approveSource, /creation_contract:\s*creationContract/, "scene package request must carry the final contract");
+  assert.doesNotMatch(approveSource, /inferTargetDurationMs\(/, "video approval must not infer duration again after Plan approval");
+  assert.match(sceneRequestSource, /videoScenePackages\.creation_contract/, "scene video request must read the persisted final contract");
+  assert.match(sceneRequestSource, /ratio:\s*creationContract\.video_ratio/, "scene videos must use the confirmed ratio");
+  assert.match(sceneRequestSource, /size:\s*creationContract\.video_size/, "scene videos must use the confirmed size");
+  assert.match(sceneRequestSource, /model:\s*creationContract\.video_model/, "scene videos must use the confirmed model");
+  assert.match(sceneRequestSource, /sound:\s*creationContract\.video_sound/, "scene videos must use the confirmed sound setting");
+  assert.match(workspaceSource, /creation_contract:\s*videoScenePackages\.creation_contract/, "conversation context must persist the contract with scene packages");
+});
+
 test("restored conversations resume existing video jobs without starting duplicates", () => {
   const applySource = applyConversationSource();
   assert.match(applySource, /snapshot\.pendingVideoJob \|\| snapshot\.pending_video_job/, "restore must read pending video job metadata");
