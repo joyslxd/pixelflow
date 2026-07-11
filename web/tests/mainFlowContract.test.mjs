@@ -186,6 +186,29 @@ test("plan revision defaults to modifying the current creative and only regenera
   assert.match(messageBubbleSource, /onRollbackPlan/, "Plan cards with history must expose rollback");
 });
 
+test("plan rollback activates history directly and persists conversation context", () => {
+  const start = workspaceSource.indexOf("const handleRollbackPlan = async");
+  const end = workspaceSource.indexOf("const handle", start + 30);
+  assert.notEqual(start, -1, "Plan rollback handler must exist");
+  assert.notEqual(end, -1, "the next handler must follow Plan rollback");
+  const rollbackSource = workspaceSource.slice(start, end);
+
+  assert.equal(
+    rollbackSource.includes("并保留为新版本"),
+    false,
+    "rollback must not claim that it creates another version",
+  );
+  assert.match(rollbackSource, /api\.updateConversation/, "rollback must persist the active version");
+  assert.match(rollbackSource, /if \(targetConversationId\)/, "context persistence must use the validated conversation id");
+  assert.match(rollbackSource, /plan_version:\s*plan\.plan_version/, "context must save active version");
+  assert.match(rollbackSource, /plan_history:\s*plan\.plan_history/, "context must save unchanged history");
+  assert.match(rollbackSource, /creation_contract:\s*plan\.creation_contract/, "context must save restored contract");
+  assert.ok(
+    rollbackSource.indexOf("api.updateConversation") < rollbackSource.indexOf("已回退到 plan.md"),
+    "success message must follow persistence",
+  );
+});
+
 test("new conversation route replacement does not clear the first intake progress message", () => {
   const ensureStart = workspaceSource.indexOf("const ensureConversation = async");
   const ensureEnd = workspaceSource.indexOf("const normalizeSendInput", ensureStart);

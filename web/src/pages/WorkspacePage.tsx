@@ -6533,7 +6533,10 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant(`正在把 plan.md v${artifact.plan.plan_version || 1} 回退到 v${version}，并保留为新版本…`, targetConversationId);
+    pushAssistant(
+      `正在把 plan.md v${artifact.plan.plan_version || 1} 直接回退到 v${version}，不会创建新版本…`,
+      targetConversationId,
+    );
     try {
       const plan = await api.restorePlanMarkdown({
         intent: artifact.intent,
@@ -6556,6 +6559,22 @@ export function WorkspacePage() {
         },
         targetConversationId,
       );
+      if (targetConversationId) {
+        await api.updateConversation(targetConversationId, {
+          last_phase: "plan_review",
+          context: {
+            ...makeSnapshot(targetConversationId),
+            selected_direction: artifact.selectedDirection,
+            plan_markdown: plan.plan_markdown,
+            plan_version: plan.plan_version,
+            plan_history: plan.plan_history,
+            creation_contract: plan.creation_contract,
+            scene_durations_sec: plan.scene_durations_sec,
+            restored_from_version: plan.restored_from_version,
+          } as unknown as Record<string, unknown>,
+        });
+      }
+      pushAssistant(`已回退到 plan.md v${plan.plan_version}，未创建新版本。`, targetConversationId);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 回退失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);

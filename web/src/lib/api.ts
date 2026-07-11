@@ -247,7 +247,13 @@ export interface PlanMarkdownResponse {
   consistency_issues: string[];
   review_timeout_sec: number | null;
   plan_version: number;
-  plan_history: Array<{ version: number; plan_markdown: string; restored_from_version?: number }>;
+  plan_history: Array<{
+    version: number;
+    plan_markdown: string;
+    restored_from_version?: number;
+    creation_contract?: Record<string, unknown>;
+    scene_durations_sec?: number[];
+  }>;
   creation_contract: Record<string, unknown>;
   scene_durations_sec: number[];
   llm_used: boolean;
