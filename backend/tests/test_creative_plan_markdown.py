@@ -4,6 +4,8 @@ import asyncio
 import copy
 from pathlib import Path
 
+import pytest
+
 from pixelflow.creative.plan_markdown import (
     PlanMarkdownResult,
     build_plan_markdown,
@@ -251,6 +253,155 @@ def test_restore_legacy_history_keeps_current_authoritative_contract():
     assert result.plan_version == 1
     assert result.creation_contract == current_contract
     assert result.scene_durations_sec == [10, 10]
+
+
+def test_restore_image_plan_preserves_explicit_empty_snapshots():
+    current_contract = {"intent": "image", "image_model_capabilities": {"sizes": ["2K"]}}
+
+    result = restore_plan_version(
+        intent="image",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[
+            {
+                "version": 1,
+                "plan_markdown": "# plan.md v1",
+                "creation_contract": {},
+                "scene_durations_sec": [],
+            },
+            {
+                "version": 2,
+                "plan_markdown": "# plan.md v2",
+                "creation_contract": current_contract,
+                "scene_durations_sec": [10],
+            },
+        ],
+        restore_version=1,
+        creation_contract=current_contract,
+        scene_durations_sec=[10],
+    )
+
+    assert result.creation_contract == {}
+    assert result.scene_durations_sec == []
+
+
+@pytest.mark.parametrize(
+    "malformed_durations",
+    ([None, 10], [object(), 10], ["invalid", 10]),
+    ids=("none", "object", "invalid-string"),
+)
+def test_restore_malformed_scene_durations_falls_back_to_current_authoritative_value(
+    malformed_durations: list[object],
+):
+    current_contract = {"video_model": "seedance-2.0", "video_duration_sec": 20}
+
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[
+            {
+                "version": 1,
+                "plan_markdown": "# plan.md v1",
+                "creation_contract": {"video_model": "seedance-1.5-pro", "video_duration_sec": 20},
+                "scene_durations_sec": malformed_durations,
+            },
+            {
+                "version": 2,
+                "plan_markdown": "# plan.md v2",
+                "creation_contract": current_contract,
+                "scene_durations_sec": [10, 10],
+            },
+        ],
+        restore_version=1,
+        creation_contract=current_contract,
+        scene_durations_sec=[10, 10],
+    )
+
+    assert result.scene_durations_sec == [10, 10]
+
+
+def test_initial_plan_history_snapshot_deep_copies_nested_contract():
+    contract = {"image_model_capabilities": {"aspect_ratios": ["1:1"]}}
+    result = PlanMarkdownResult(
+        output_type="image",
+        plan_markdown="# plan.md v1",
+        template_path=Path("plan_image.md"),
+        creation_contract=contract,
+    )
+
+    contract["image_model_capabilities"]["aspect_ratios"].append("9:16")
+    result.creation_contract["image_model_capabilities"]["aspect_ratios"].append("16:9")
+
+    assert result.plan_history[0]["creation_contract"] == {
+        "image_model_capabilities": {"aspect_ratios": ["1:1"]}
+    }
+
+
+def test_next_version_deep_copies_nested_contract_and_caller_history():
+    caller_history = [
+        {
+            "version": 1,
+            "plan_markdown": "# plan.md v1",
+            "creation_contract": {"image_model_capabilities": {"sizes": ["2K"]}},
+            "scene_durations_sec": [],
+        }
+    ]
+    original_history = copy.deepcopy(caller_history)
+    next_contract = {"image_model_capabilities": {"sizes": ["4K"]}}
+    current = PlanMarkdownResult(
+        output_type="image",
+        plan_markdown="# plan.md v1",
+        template_path=Path("plan_image.md"),
+        plan_history=caller_history,
+        creation_contract=next_contract,
+    )
+
+    revised = current.next_version(
+        plan_markdown="# plan.md v2",
+        plan_history=caller_history,
+        creation_contract=next_contract,
+    )
+    next_contract["image_model_capabilities"]["sizes"].append("8K")
+    revised.creation_contract["image_model_capabilities"]["sizes"].append("1080p")
+
+    assert revised.plan_history[-1]["creation_contract"] == {
+        "image_model_capabilities": {"sizes": ["4K"]}
+    }
+    revised.plan_history[0]["creation_contract"]["image_model_capabilities"]["sizes"].append("4K")
+    assert caller_history == original_history
+
+
+def test_restore_deep_copies_nested_contract_and_caller_history():
+    history = [
+        {
+            "version": 1,
+            "plan_markdown": "# plan.md v1",
+            "creation_contract": {"image_model_capabilities": {"aspect_ratios": ["1:1"]}},
+            "scene_durations_sec": [],
+        },
+        {
+            "version": 2,
+            "plan_markdown": "# plan.md v2",
+            "creation_contract": {"image_model_capabilities": {"aspect_ratios": ["9:16"]}},
+            "scene_durations_sec": [],
+        },
+    ]
+    original_history = copy.deepcopy(history)
+
+    result = restore_plan_version(
+        intent="image",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=history,
+        restore_version=1,
+        creation_contract=history[1]["creation_contract"],
+    )
+    result.creation_contract["image_model_capabilities"]["aspect_ratios"].append("16:9")
+
+    assert result.plan_history[0]["creation_contract"] == original_history[0]["creation_contract"]
+    result.plan_history[0]["creation_contract"]["image_model_capabilities"]["aspect_ratios"].append("4:3")
+    assert history == original_history
 
 
 def test_next_version_uses_history_max_after_restore():

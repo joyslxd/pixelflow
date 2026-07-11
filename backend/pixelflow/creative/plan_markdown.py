@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -89,8 +90,10 @@ class PlanMarkdownResult:
         history = _normalized_history(plan_history or self.plan_history)
         history_max = max((int(item["version"]) for item in history), default=0)
         version = max(1, int(current_version or self.plan_version), history_max) + 1
-        next_contract = dict(creation_contract or self.creation_contract)
-        next_durations = list(self.scene_durations_sec)
+        next_contract = copy.deepcopy(
+            creation_contract if creation_contract is not None else self.creation_contract
+        )
+        next_durations = copy.deepcopy(self.scene_durations_sec)
         history.append(
             _history_entry(
                 version,
@@ -309,14 +312,14 @@ def restore_plan_version(
     source_contract = source.get("creation_contract")
     source_durations = source.get("scene_durations_sec")
     resolved_contract = (
-        dict(source_contract)
-        if isinstance(source_contract, dict) and source_contract
-        else dict(creation_contract or {})
+        copy.deepcopy(source_contract)
+        if "creation_contract" in source and isinstance(source_contract, dict)
+        else copy.deepcopy(creation_contract or {})
     )
-    resolved_durations = (
-        [int(value) for value in source_durations]
-        if isinstance(source_durations, list) and source_durations
-        else list(scene_durations_sec or [])
+    resolved_durations = _resolve_history_scene_durations(
+        source,
+        source_durations,
+        scene_durations_sec,
     )
     return PlanMarkdownResult(
         output_type=intent,
@@ -624,8 +627,8 @@ def _history_entry(
     item: dict[str, Any] = {
         "version": version,
         "plan_markdown": plan_markdown,
-        "creation_contract": dict(creation_contract or {}),
-        "scene_durations_sec": list(scene_durations_sec or []),
+        "creation_contract": copy.deepcopy(creation_contract or {}),
+        "scene_durations_sec": copy.deepcopy(scene_durations_sec or []),
     }
     if restored_from_version is not None:
         item["restored_from_version"] = restored_from_version
@@ -643,8 +646,21 @@ def _normalized_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if version <= 0 or not markdown or version in seen:
             continue
         seen.add(version)
-        result.append(dict(item))
+        result.append(copy.deepcopy(item))
     return sorted(result, key=lambda item: int(item["version"]))
+
+
+def _resolve_history_scene_durations(
+    source: dict[str, Any],
+    source_durations: Any,
+    fallback_durations: list[int] | None,
+) -> list[int]:
+    if "scene_durations_sec" not in source or not isinstance(source_durations, list):
+        return copy.deepcopy(fallback_durations or [])
+    try:
+        return [int(value) for value in source_durations]
+    except (TypeError, ValueError):
+        return copy.deepcopy(fallback_durations or [])
 
 
 def _text(value: Any, default: str = "") -> str:

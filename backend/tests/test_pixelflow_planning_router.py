@@ -270,6 +270,45 @@ def test_planning_router_restores_history_without_creating_version(intent: str):
     assert data["plan_history"] == history
 
 
+def test_planning_router_preserves_explicit_empty_image_snapshots():
+    from app.gateway.routers import pixelflow_planning
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/restore",
+            json={
+                "intent": "image",
+                "current_plan_markdown": "# plan.md v2",
+                "current_plan_version": 2,
+                "plan_history": [
+                    {
+                        "version": 1,
+                        "plan_markdown": "# plan.md v1",
+                        "creation_contract": {},
+                        "scene_durations_sec": [],
+                    },
+                    {
+                        "version": 2,
+                        "plan_markdown": "# plan.md v2",
+                        "creation_contract": {"intent": "image", "image_size": "9:16"},
+                        "scene_durations_sec": [10],
+                    },
+                ],
+                "restore_version": 1,
+                "creation_contract": {"intent": "image", "image_size": "9:16"},
+                "scene_durations_sec": [10],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["creation_contract"] == {}
+    assert data["scene_durations_sec"] == []
+
+
 def test_planning_router_uses_power_mem_context_in_plan():
     from app.gateway.routers import pixelflow_planning
     from pixelflow.memory import SemanticMemoryItem
