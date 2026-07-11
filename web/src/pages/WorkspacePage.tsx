@@ -11,6 +11,7 @@ import {
   subscribeTaskEvents,
   type ConversationDetailResponse,
   type ConversationMessageResponse,
+  type ConversationMessageJobStatusResponse,
   type CreativeDirectionResponse,
   type CreativeDirectionsResponse,
   type ImageEditModelSelection,
@@ -39,6 +40,7 @@ import {
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import { activePlanSnapshotForConversation } from "@/lib/activePlanSnapshot";
+import { planContextFromSavedMessage, resumePlanMessageJobStep } from "@/lib/planMessageRecovery";
 import {
   appendVisibleConversationMessage,
   messageConversationId,
@@ -295,11 +297,21 @@ interface ConversationMessageJobRequest {
   payload?: Record<string, unknown>;
 }
 
-interface PendingMessageJobContinuation {
+interface PendingHandleSendMessageContinuation {
   type: "handle_send";
   content: string;
   materials: Array<Record<string, unknown>>;
 }
+
+interface PendingPlanSaveMessageContinuation {
+  type: "plan_save";
+  last_phase: string;
+  context: Record<string, unknown>;
+  success_message?: string;
+  processed_key?: string;
+}
+
+type PendingMessageJobContinuation = PendingHandleSendMessageContinuation | PendingPlanSaveMessageContinuation;
 
 interface PendingMessageJob {
   job_id: string;
@@ -1688,6 +1700,13 @@ export function WorkspacePage() {
   };
 
   const beginArtifactAction = (msg: ChatMessage, targetConversationId: string): string => {
+    const pendingMessageJob = pendingMessageJobRef.current;
+    if (
+      pendingMessageJob?.conversation_id === targetConversationId
+      && pendingMessageJob.continue_after_save?.type === "plan_save"
+    ) {
+      return "";
+    }
     const key = processedArtifactKey(msg, targetConversationId);
     if (processedArtifactIdsRef.current.has(key)) return "";
     processedArtifactIdsRef.current.add(key);
@@ -1775,7 +1794,12 @@ export function WorkspacePage() {
     };
   };
 
-  const replaceOptimisticMessage = (optimisticMessageId: string, savedMessage: ChatMessage, targetConversationId: string) => {
+  const replaceOptimisticMessage = (
+    optimisticMessageId: string,
+    savedMessage: ChatMessage,
+    targetConversationId: string,
+    preferSavedArtifact = false,
+  ) => {
     setMessages((items) => {
       const currentMessage = items.find((item) => item.id === optimisticMessageId);
       if (!currentMessage) {
@@ -1789,8 +1813,8 @@ export function WorkspacePage() {
       }
       const nextItems = replaceMessageById(items, optimisticMessageId, {
         ...savedMessage,
-        artifact: currentMessage?.artifact || savedMessage.artifact,
-        materials: currentMessage?.materials || savedMessage.materials,
+        artifact: preferSavedArtifact ? savedMessage.artifact : currentMessage?.artifact || savedMessage.artifact,
+        materials: preferSavedArtifact ? savedMessage.materials : currentMessage?.materials || savedMessage.materials,
         conversationId: targetConversationId,
       });
       messagesRef.current = nextItems;
@@ -1842,18 +1866,34 @@ export function WorkspacePage() {
     });
   };
 
-  const persistPlanArtifactForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
+  const persistPlanArtifactForConversation = async (
+    message: ChatMessage,
+    targetConversationId: string,
+    continuation: PendingPlanSaveMessageContinuation,
+  ): Promise<void> => {
     pendingPlanMessagePersistenceIdsRef.current.add(message.id);
-    const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
     try {
       if (!targetConversationId) throw new Error("无法保存 plan.md：对话 ID 不存在");
-      const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
-      pendingPlanMessagePersistenceIdsRef.current.delete(optimisticMessage.id);
-      replaceOptimisticMessage(optimisticMessage.id, savedMessage, targetConversationId);
-      return savedMessage;
+      const pendingMessageJob = await startConversationMessageJobForConversation(
+        message,
+        targetConversationId,
+        continuation,
+      );
+      if (!pendingMessageJob) throw new Error("无法保存 plan.md：消息任务未启动");
+      await resumePendingMessageJob(pendingMessageJob);
     } catch (err) {
-      pendingPlanMessagePersistenceIdsRef.current.delete(optimisticMessage.id);
-      removeOptimisticMessage(optimisticMessage.id, targetConversationId);
+      const pendingMessageJob = pendingMessageJobRef.current;
+      if (
+        pendingMessageJob?.source_message_id === message.id
+        && pendingMessageJob.continue_after_save?.type === "plan_save"
+      ) {
+        window.setTimeout(() => {
+          void resumePendingMessageJob(pendingMessageJob).catch(() => {});
+        }, 0);
+        return;
+      }
+      pendingPlanMessagePersistenceIdsRef.current.delete(message.id);
+      removeOptimisticMessage(message.id, targetConversationId);
       throw err;
     }
   };
@@ -1888,7 +1928,11 @@ export function WorkspacePage() {
       message: optimisticMessage,
       continue_after_save: continuation,
     };
-    await persistPendingMessageJob(pendingMessageJob, targetConversationId, "message_save_running");
+    await persistPendingMessageJob(
+      pendingMessageJob,
+      targetConversationId,
+      continuation?.type === "plan_save" ? "plan_message_save_running" : "message_save_running",
+    );
     return pendingMessageJob;
   };
 
@@ -2922,22 +2966,6 @@ export function WorkspacePage() {
     },
   });
 
-  const pushPlanArtifact = (
-    plan: PlanMarkdownResponse,
-    selectedDirection: CreativeDirectionResponse,
-    context: {
-      intent: CreationIntent;
-      formValues: Record<string, unknown>;
-      coreMessage: string;
-      materials?: Array<Record<string, unknown>>;
-      intakeContext?: Record<string, unknown>;
-    },
-    targetConversationId = conversationIdRef.current,
-  ) => {
-    const message = createPlanArtifactMessage(plan, selectedDirection, context, targetConversationId);
-    pushArtifact(message.content, message.artifact, targetConversationId, message.id);
-  };
-
   const pushPptOutlineArtifact = (
     pptSummary: PptSummaryResult,
     context: {
@@ -3534,11 +3562,144 @@ export function WorkspacePage() {
     activeMessageJobPollsRef.current.add(pollKey);
     const shouldContinuePolling = () => isVisibleConversation(pendingMessageJob.conversation_id);
     const stopIfHidden = () => !shouldContinuePolling();
+    const planContinuation =
+      pendingMessageJob.continue_after_save?.type === "plan_save"
+        ? pendingMessageJob.continue_after_save
+        : null;
     setBusyForConversation(pendingMessageJob.conversation_id, true);
+    if (planContinuation) {
+      const failPendingPlanMessage = async (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pendingPlanMessagePersistenceIdsRef.current.delete(pendingMessageJob.source_message_id);
+        removeOptimisticMessage(pendingMessageJob.source_message_id, pendingMessageJob.conversation_id);
+        if (planContinuation.processed_key) releaseArtifactAction(planContinuation.processed_key);
+        await clearPendingMessageJob(pendingMessageJob.conversation_id, "plan_message_save_failed", {
+          message_job_resume_error: message,
+        }).catch(() => {});
+        pushAssistant(`plan.md 消息保存失败:${message}`, pendingMessageJob.conversation_id);
+      };
+      try {
+        await persistPendingMessageJob(
+          pendingMessageJob,
+          pendingMessageJob.conversation_id,
+          "plan_message_save_running",
+        ).catch(() => {});
+        const step = await resumePlanMessageJobStep(pendingMessageJob, {
+          shouldContinue: shouldContinuePolling,
+          getStatus: () =>
+            api.getConversationMessageJob(pendingMessageJob.conversation_id, pendingMessageJob.job_id),
+          pollStatus: async (onStatus) => {
+            let latestStatus: ConversationMessageJobStatusResponse | null = null;
+            const saved = await api.pollConversationMessageJob(
+              pendingMessageJob.conversation_id,
+              pendingMessageJob.job_id,
+              shouldContinuePolling,
+              (status) => {
+                latestStatus = status;
+                onStatus(status);
+              },
+            );
+            if (saved) {
+              return {
+                ok: true,
+                job_id: pendingMessageJob.job_id,
+                status: "completed",
+                result: saved,
+                error: null,
+                message: "Plan 消息已保存",
+              };
+            }
+            return latestStatus;
+          },
+          restart: (request: ConversationMessageJobRequest) =>
+            api.startConversationMessageJob(pendingMessageJob.conversation_id, request),
+        });
+        if (step.kind === "pending") {
+          if (step.pending.job_id !== pendingMessageJob.job_id) {
+            try {
+              await persistPendingMessageJob(
+                step.pending,
+                step.pending.conversation_id,
+                "plan_message_save_running",
+              );
+            } catch {
+              pendingMessageJobRef.current = step.pending;
+              window.setTimeout(() => {
+                void resumePendingMessageJob(step.pending).catch(() => {});
+              }, 0);
+              return;
+            }
+            await resumePendingMessageJob(step.pending);
+          }
+          return;
+        }
+        if (step.kind === "failed") {
+          await failPendingPlanMessage(step.error);
+          return;
+        }
+
+        const savedMessage = messageFromResponse(step.result, pendingMessageJob.conversation_id);
+        if (!savedMessage) {
+          await failPendingPlanMessage(new Error("服务端 Plan 消息无法恢复"));
+          return;
+        }
+        let authoritativeContext: Record<string, unknown>;
+        try {
+          authoritativeContext = planContextFromSavedMessage(savedMessage, planContinuation.context);
+        } catch (protocolError) {
+          await failPendingPlanMessage(protocolError);
+          return;
+        }
+        pendingPlanMessagePersistenceIdsRef.current.delete(pendingMessageJob.source_message_id);
+        replaceOptimisticMessage(
+          pendingMessageJob.source_message_id,
+          savedMessage,
+          pendingMessageJob.conversation_id,
+          true,
+        );
+        try {
+          await api.updateConversation(pendingMessageJob.conversation_id, {
+            last_phase: planContinuation.last_phase,
+            context: {
+              ...makeSnapshot(pendingMessageJob.conversation_id),
+              ...authoritativeContext,
+              pendingMessageJob: null,
+              pending_message_job: null,
+            } as unknown as Record<string, unknown>,
+          });
+        } catch (contextError) {
+          await persistPendingMessageJob(
+            pendingMessageJob,
+            pendingMessageJob.conversation_id,
+            "plan_context_sync_pending",
+            {
+              message_job_resume_error:
+                contextError instanceof Error ? contextError.message : String(contextError),
+            },
+          ).catch(() => {});
+          return;
+        }
+        pendingMessageJobRef.current = null;
+        if (authoritativeContext.flowDraft === null) flowDraftRef.current = null;
+        if (authoritativeContext.pendingDirectionJob === null) pendingDirectionJobRef.current = null;
+        if (authoritativeContext.pendingPlanRevisionChoice === null) setPendingPlanRevisionChoice(null);
+        if (planContinuation.success_message) {
+          pushAssistant(planContinuation.success_message, pendingMessageJob.conversation_id);
+        }
+      } finally {
+        activeMessageJobPollsRef.current.delete(pollKey);
+        setBusyForConversation(pendingMessageJob.conversation_id, false);
+      }
+      return;
+    }
+
     try {
       if (stopIfHidden()) return;
       const status = await api.getConversationMessageJob(pendingMessageJob.conversation_id, pendingMessageJob.job_id);
       if (stopIfHidden()) return;
+      if (status.status === "failed") {
+        throw new Error(status.error || status.message || "对话消息保存失败");
+      }
       const saved =
         status.status === "completed" && status.result
           ? status.result
@@ -3568,9 +3729,9 @@ export function WorkspacePage() {
       }).catch(() => {});
       if (nextIntakeJob) await resumePendingIntakeJob(nextIntakeJob);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       if (stopIfHidden()) return;
       if (isTransientFetchAbort(err)) return;
-      const message = err instanceof Error ? err.message : String(err);
       pushAssistant(
         message.includes("404")
           ? "之前的对话消息保存任务不存在或已过期。请确认历史对话里是否已保存该消息，必要时重新发送。"
@@ -4834,6 +4995,11 @@ export function WorkspacePage() {
     pendingDialogContextRef.current = null;
     flowDraftRef.current = snapshot.flowDraft || null;
     pendingMessageJobRef.current = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
+    pendingPlanMessagePersistenceIdsRef.current = new Set(
+      pendingMessageJobRef.current?.continue_after_save?.type === "plan_save"
+        ? [pendingMessageJobRef.current.source_message_id]
+        : [],
+    );
     pendingIntakeJobRef.current = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     planRevisionArtifactRef.current = snapshot.pendingPlanRevisionRequest || snapshot.pending_plan_revision_request || null;
@@ -4959,6 +5125,7 @@ export function WorkspacePage() {
     pendingDialogContextRef.current = null;
     flowDraftRef.current = null;
     pendingMessageJobRef.current = null;
+    pendingPlanMessagePersistenceIdsRef.current = new Set();
     pendingIntakeJobRef.current = null;
     pendingDirectionJobRef.current = null;
     pendingImageEditRequestRef.current = null;
@@ -6198,34 +6365,35 @@ export function WorkspacePage() {
         intake_context: msg.artifact.intakeContext,
         materials: msg.artifact.materials || [],
       });
-      pushPlanArtifact(plan, direction, {
-        intent: msg.artifact.intent,
-        formValues: msg.artifact.formValues,
-        materials: msg.artifact.materials || [],
-        coreMessage: msg.artifact.coreMessage || pendingCore,
-        intakeContext: msg.artifact.intakeContext,
-      }, targetConversationId);
-      flowDraftRef.current = null;
-      pendingDirectionJobRef.current = null;
-      if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
-            last_phase: "plan_review",
-            context: {
-              ...makeSnapshot(),
-              flowDraft: null,
-              pendingDirectionJob: null,
-              pending_direction_job: null,
-              intent: msg.artifact.intent,
-              form_values: msg.artifact.formValues,
-              intake_context: msg.artifact.intakeContext,
-              materials: msg.artifact.materials || [],
-              selected_direction: direction,
-              plan_markdown: plan.plan_markdown,
-            } as unknown as Record<string, unknown>,
-          })
-          .catch(() => {});
-      }
+      await persistPlanArtifactForConversation(
+        createPlanArtifactMessage(
+          plan,
+          direction,
+          {
+            intent: msg.artifact.intent,
+            formValues: msg.artifact.formValues,
+            materials: msg.artifact.materials || [],
+            coreMessage: msg.artifact.coreMessage || pendingCore,
+            intakeContext: msg.artifact.intakeContext,
+          },
+          targetConversationId,
+        ),
+        targetConversationId,
+        {
+          type: "plan_save",
+          last_phase: "plan_review",
+          processed_key: processedKey,
+          context: {
+            flowDraft: null,
+            pendingDirectionJob: null,
+            pending_direction_job: null,
+            intent: msg.artifact.intent,
+            form_values: msg.artifact.formValues,
+            intake_context: msg.artifact.intakeContext,
+            materials: msg.artifact.materials || [],
+          },
+        },
+      );
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -6497,34 +6665,16 @@ export function WorkspacePage() {
           targetConversationId,
         ),
         targetConversationId,
+        {
+          type: "plan_save",
+          last_phase: "plan_review",
+          processed_key: pending.processedKey,
+          context: {
+            pendingPlanRevisionChoice: null,
+            pending_plan_revision_choice: null,
+          },
+        },
       );
-      try {
-        if (targetConversationId) {
-          await api.updateConversation(targetConversationId, {
-            last_phase: "plan_review",
-            context: {
-              ...makeSnapshot(targetConversationId),
-              pendingPlanRevisionChoice: null,
-              pending_plan_revision_choice: null,
-              selected_direction: artifact.selectedDirection,
-              plan_markdown: plan.plan_markdown,
-              plan_version: plan.plan_version,
-              plan_history: plan.plan_history,
-              creation_contract: plan.creation_contract,
-              scene_durations_sec: plan.scene_durations_sec,
-              restored_from_version: plan.restored_from_version,
-            } as unknown as Record<string, unknown>,
-          });
-        }
-      } catch (contextError) {
-        pushAssistant(
-          `plan.md v${plan.plan_version} 版本已保存，但上下文同步失败，可刷新恢复。${
-            contextError instanceof Error ? `（${contextError.message}）` : ""
-          }`,
-          targetConversationId,
-        );
-        return;
-      }
     } catch (err) {
       if (pending.processedKey) releaseArtifactAction(pending.processedKey);
       pushAssistant(`plan.md 修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -6587,33 +6737,14 @@ export function WorkspacePage() {
           targetConversationId,
         ),
         targetConversationId,
+        {
+          type: "plan_save",
+          last_phase: "plan_review",
+          processed_key: processedKey,
+          success_message: `已回退到 plan.md v${plan.plan_version}，未创建新版本。`,
+          context: rollbackSnapshot as unknown as Record<string, unknown>,
+        },
       );
-      try {
-        if (targetConversationId) {
-          await api.updateConversation(targetConversationId, {
-            last_phase: "plan_review",
-            context: {
-              ...rollbackSnapshot,
-              selected_direction: artifact.selectedDirection,
-              plan_markdown: plan.plan_markdown,
-              plan_version: plan.plan_version,
-              plan_history: plan.plan_history,
-              creation_contract: plan.creation_contract,
-              scene_durations_sec: plan.scene_durations_sec,
-              restored_from_version: plan.restored_from_version,
-            } as unknown as Record<string, unknown>,
-          });
-        }
-      } catch (contextError) {
-        pushAssistant(
-          `plan.md v${plan.plan_version} 版本已保存，但上下文同步失败，可刷新恢复。${
-            contextError instanceof Error ? `（${contextError.message}）` : ""
-          }`,
-          targetConversationId,
-        );
-        return;
-      }
-      pushAssistant(`已回退到 plan.md v${plan.plan_version}，未创建新版本。`, targetConversationId);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 回退失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);

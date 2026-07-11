@@ -200,43 +200,21 @@ test("plan rollback activates history directly and persists conversation context
     false,
     "rollback must not claim that it creates another version",
   );
-  assert.match(rollbackSource, /api\.updateConversation/, "rollback must persist the active version");
-  assert.match(rollbackSource, /if \(targetConversationId\)/, "context persistence must use the validated conversation id");
-  assert.match(rollbackSource, /plan_version:\s*plan\.plan_version/, "context must save active version");
-  assert.match(rollbackSource, /plan_history:\s*plan\.plan_history/, "context must save unchanged history");
-  assert.match(rollbackSource, /creation_contract:\s*plan\.creation_contract/, "context must save restored contract");
+  assert.equal(rollbackSource.includes("api.updateConversation"), false, "rollback context must only be written after the recoverable job completes");
+  assert.match(rollbackSource, /type:\s*"plan_save"/, "rollback must persist a recoverable Plan continuation");
   const snapshotIndex = rollbackSource.indexOf("const rollbackSnapshot = makeSnapshot(targetConversationId)");
   const restoreIndex = rollbackSource.indexOf("api.restorePlanMarkdown");
   const messagePersistIndex = rollbackSource.indexOf("await persistPlanArtifactForConversation");
-  const contextPersistIndex = rollbackSource.indexOf("await api.updateConversation");
   const successIndex = rollbackSource.indexOf("已回退到 plan.md");
   assert.notEqual(snapshotIndex, -1, "rollback must freeze the conversation snapshot");
   assert.ok(snapshotIndex < restoreIndex, "rollback must freeze the snapshot before calling restore");
-  assert.match(rollbackSource, /context:\s*\{\s*\.\.\.rollbackSnapshot/, "context persistence must use the frozen snapshot");
+  assert.match(rollbackSource, /context:\s*rollbackSnapshot/, "completion context must use the frozen snapshot");
   assert.notEqual(messagePersistIndex, -1, "rollback must await strict Plan message persistence");
-  assert.notEqual(contextPersistIndex, -1, "rollback must await conversation context persistence");
-  assert.ok(
-    messagePersistIndex < contextPersistIndex,
-    "Plan message persistence must finish before conversation context persistence",
-  );
-  assert.ok(contextPersistIndex < successIndex, "success message must follow context persistence");
-
-  const contextWarningStart = rollbackSource.indexOf("catch (contextError)");
-  assert.notEqual(contextWarningStart, -1, "context persistence must have a dedicated warning branch");
-  const contextWarningSource = rollbackSource.slice(contextWarningStart, successIndex);
-  assert.match(
-    contextWarningSource,
-    /版本已保存，但上下文同步失败，可刷新恢复/,
-    "context failure must explain that the persisted Plan can be restored after refresh",
-  );
-  assert.equal(
-    contextWarningSource.includes("releaseArtifactAction"),
-    false,
-    "context failure must not release the action after the Plan message was persisted",
-  );
+  assert.notEqual(successIndex, -1, "rollback success wording must travel with the continuation");
+  assert.ok(messagePersistIndex < successIndex, "success wording must be registered as part of strict persistence");
 });
 
-test("strict Plan message persistence removes optimistic cards and rethrows failures", () => {
+test("strict Plan message persistence starts and resumes a recoverable pending job", () => {
   const removeStart = workspaceSource.indexOf("const removeOptimisticMessage =");
   const strictStart = workspaceSource.indexOf("const persistPlanArtifactForConversation = async");
   const strictEnd = workspaceSource.indexOf("const startConversationMessageJobForConversation", strictStart);
@@ -248,13 +226,13 @@ test("strict Plan message persistence removes optimistic cards and rethrows fail
   const strictSource = workspaceSource.slice(strictStart, strictEnd);
   assert.match(removeSource, /items\.filter/, "removal must delete the optimistic message from current messages");
   assert.match(removeSource, /messagesRef\.current = nextItems/, "removal must keep the messages ref in sync");
-  assert.match(strictSource, /appendOptimisticMessageForConversation/, "strict persistence must first insert an optimistic card");
-  assert.match(strictSource, /await persistChatMessage/, "strict persistence must await the backend message save");
-  assert.match(strictSource, /replaceOptimisticMessage/, "strict persistence must replace the optimistic card after success");
+  assert.match(strictSource, /pendingPlanMessagePersistenceIdsRef\.current\.add/, "strict persistence must exclude the optimistic card from autosave");
+  assert.match(strictSource, /startConversationMessageJobForConversation/, "strict persistence must start through the shared pending job helper");
+  assert.match(strictSource, /await resumePendingMessageJob/, "strict persistence must resume the persisted job");
   assert.match(
     strictSource,
-    /catch \(err\)[\s\S]*removeOptimisticMessage\(optimisticMessage\.id, targetConversationId\)[\s\S]*throw err/,
-    "strict persistence must remove the optimistic card and rethrow save failures",
+    /pendingMessageJob\?\.source_message_id === message\.id[\s\S]*setTimeout\([\s\S]*resumePendingMessageJob\(pendingMessageJob\)/,
+    "start success with pending-context uncertainty must immediately resume the same in-memory job",
   );
   assert.equal(
     strictSource.includes("appendMessageForConversation("),
@@ -270,15 +248,72 @@ test("current-creative Plan revision persists the v3 message before context", ()
   assert.notEqual(end, -1, "Plan revision cancel handler must follow revision mode handler");
   const revisionSource = workspaceSource.slice(start, end);
   const messagePersistIndex = revisionSource.indexOf("await persistPlanArtifactForConversation");
-  const contextPersistIndex = revisionSource.indexOf("await api.updateConversation");
 
   assert.equal(revisionSource.includes("pushPlanArtifact("), false, "revision must not use the failure-swallowing Plan helper");
   assert.notEqual(messagePersistIndex, -1, "revision must await strict Plan message persistence");
   assert.match(revisionSource, /createPlanArtifactMessage\(/, "revision must persist the returned v3 Plan artifact");
-  assert.notEqual(contextPersistIndex, -1, "revision must persist context after the Plan message");
-  assert.ok(messagePersistIndex < contextPersistIndex, "message rejection must stop execution before context persistence");
-  assert.match(revisionSource, /plan_history:\s*plan\.plan_history/, "v1 -> v3 revision must retain v1 and v2 history");
-  assert.match(revisionSource, /scene_durations_sec:\s*plan\.scene_durations_sec/, "revision context must save scene durations");
+  assert.equal(revisionSource.includes("api.updateConversation"), false, "message rejection must prevent any revision context write");
+  assert.match(revisionSource, /type:\s*"plan_save"/, "v1 -> v3 revision must use a recoverable Plan continuation");
+  assert.match(revisionSource, /pendingPlanRevisionChoice:\s*null/, "completion must clear the revision choice only after save");
+});
+
+test("initial v1 Plan uses the recoverable strict message job before writing context", () => {
+  const start = workspaceSource.indexOf("const handleSelectDirection = async");
+  const end = workspaceSource.indexOf("const handleApprovePlan = async", start);
+  assert.notEqual(start, -1, "direction selection handler must exist");
+  assert.notEqual(end, -1, "Plan approval handler must follow direction selection");
+  const source = workspaceSource.slice(start, end);
+
+  assert.equal(source.includes("pushPlanArtifact("), false, "initial v1 must not use failure-swallowing Plan persistence");
+  assert.match(source, /await persistPlanArtifactForConversation\(/, "initial v1 must await recoverable Plan message persistence");
+  assert.match(source, /type:\s*"plan_save"/, "initial v1 must persist a plan_save continuation");
+  assert.match(source, /flowDraft:\s*null/, "initial Plan completion must clear the direction draft");
+  assert.equal(source.includes("api.updateConversation("), false, "initial handler must not write Plan context outside job completion");
+});
+
+test("recoverable Plan message jobs retain unknown results and resume with server artifact authority", () => {
+  const helperStart = workspaceSource.indexOf("const persistPlanArtifactForConversation = async");
+  const helperEnd = workspaceSource.indexOf("const startConversationMessageJobForConversation", helperStart);
+  const resumeStart = workspaceSource.indexOf("const resumePendingMessageJob = async");
+  const resumeEnd = workspaceSource.indexOf("const scenePackageContext", resumeStart);
+  assert.notEqual(helperStart, -1, "strict Plan helper must exist");
+  assert.notEqual(helperEnd, -1, "generic message start helper must follow strict Plan helper");
+  assert.notEqual(resumeStart, -1, "pending message resume helper must exist");
+  assert.notEqual(resumeEnd, -1, "scene package helper must follow message resume helper");
+  const helperSource = workspaceSource.slice(helperStart, helperEnd);
+  const resumeSource = workspaceSource.slice(resumeStart, resumeEnd);
+
+  assert.match(helperSource, /startConversationMessageJobForConversation/, "Plan helper must reuse the existing pending message job start path");
+  assert.match(helperSource, /await resumePendingMessageJob/, "Plan helper must resume the persisted job instead of blind polling");
+  assert.equal(helperSource.includes("persistChatMessage("), false, "Plan helper must not use non-recoverable start+poll persistence");
+  assert.match(resumeSource, /resumePlanMessageJobStep/, "resume must use the behavior-tested recoverable Plan job step");
+  assert.match(resumeSource, /planContextFromSavedMessage/, "completion context must derive from the server-saved artifact");
+  assert.match(resumeSource, /restart:\s*\(request(?::\s*ConversationMessageJobRequest)?\)/, "404 recovery must reuse the step-provided original request and client_message_id");
+  assert.match(resumeSource, /persistPendingMessageJob\(/, "unknown/restarted jobs must remain persisted");
+  assert.match(resumeSource, /const failPendingPlanMessage = async/, "malformed completed Plan results must use one explicit failure cleanup path");
+  assert.match(
+    resumeSource,
+    /planContextFromSavedMessage[\s\S]*catch \(protocolError\)[\s\S]*failPendingPlanMessage\(protocolError\)/,
+    "a completed message without a valid Plan artifact must fail explicitly instead of retrying forever",
+  );
+  assert.match(
+    resumeSource,
+    /pendingMessageJobRef\.current = step\.pending[\s\S]*setTimeout[\s\S]*resumePendingMessageJob\(step\.pending\)\.catch/,
+    "a failed 404 replacement-job context write must retain and safely reschedule the same replacement job",
+  );
+  assert.match(resumeSource, /continue_after_save\?\.type === "handle_send"/, "ordinary user-message continuation must remain supported");
+});
+
+test("restoring a pending plan_save keeps its optimistic Plan out of autosave authority", () => {
+  const applyStart = workspaceSource.indexOf("const applySnapshot =");
+  const applyEnd = workspaceSource.indexOf("const makeSnapshot", applyStart);
+  assert.notEqual(applyStart, -1, "applySnapshot must exist");
+  assert.notEqual(applyEnd, -1, "makeSnapshot must follow applySnapshot");
+  const applySource = workspaceSource.slice(applyStart, applyEnd);
+
+  assert.match(applySource, /continue_after_save\?\.type === "plan_save"/, "restore must recognize pending Plan message jobs");
+  assert.match(applySource, /pendingPlanMessagePersistenceIdsRef\.current = new Set/, "restore must rebuild the optimistic Plan exclusion set");
+  assert.match(applySource, /source_message_id/, "the restored Plan client message id must remain excluded until completion");
 });
 
 test("active Plan autosave reuses makeSnapshot instead of a drifting field list", () => {

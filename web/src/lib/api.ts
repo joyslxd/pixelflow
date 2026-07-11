@@ -863,6 +863,7 @@ async function pollConversationMessageJob(
   conversationId: string,
   jobId: string,
   shouldContinue: () => boolean = () => true,
+  onStatus?: (status: ConversationMessageJobStatusResponse) => void,
 ): Promise<ConversationMessageResponse | null> {
   const deadline = Date.now() + CONVERSATION_MESSAGE_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -870,6 +871,7 @@ async function pollConversationMessageJob(
     const status = await req<ConversationMessageJobStatusResponse>(
       `/conversations/${encodeURIComponent(conversationId)}/messages/jobs/${encodeURIComponent(jobId)}`,
     );
+    onStatus?.(status);
     if (!shouldContinue()) return null;
     if (status.status === "completed" && status.result) return status.result;
     if (status.status === "failed") {
