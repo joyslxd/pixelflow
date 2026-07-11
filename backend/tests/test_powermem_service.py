@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import httpx
@@ -115,6 +116,86 @@ async def test_powermem_service_searches_categories_sequentially_and_keeps_parti
 
 
 @pytest.mark.asyncio
+async def test_powermem_service_multi_category_search_uses_one_budget_and_keeps_partial_results(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen_categories: list[str] = []
+    attempted_categories: list[str] = []
+    lock_acquired = asyncio.Event()
+    release_lock = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        category = str(payload.get("filters", {}).get("category") or "")
+        seen_categories.append(category)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "memory_id": f"{category}-1",
+                            "content": f"{category} memory",
+                            "score": 0.8,
+                            "metadata": {"category": category},
+                        }
+                    ]
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=0.04,
+            fail_open=True,
+        ),
+        http_client=client,
+    )
+    original_search_once = service._search_once
+
+    async def hold_request_gate() -> None:
+        async with service._request_lock:
+            lock_acquired.set()
+            await release_lock.wait()
+
+    lock_holder: asyncio.Task[None] | None = None
+
+    async def controlled_search_once(**kwargs):
+        nonlocal lock_holder
+        category = str(kwargs.get("category") or "")
+        attempted_categories.append(category)
+        if category == "brand":
+            lock_holder = asyncio.create_task(hold_request_gate())
+            await lock_acquired.wait()
+        return await original_search_once(**kwargs)
+
+    monkeypatch.setattr(service, "_search_once", controlled_search_once)
+    started_at = time.monotonic()
+    try:
+        results = await service.search(
+            user_id="u1",
+            query="共享总预算",
+            categories=["preference", "brand", "skill", "experience"],
+        )
+        elapsed = time.monotonic() - started_at
+    finally:
+        release_lock.set()
+        if lock_holder is not None:
+            await lock_holder
+        await client.aclose()
+
+    assert [item.memory_id for item in results] == ["preference-1"]
+    assert seen_categories == ["preference"]
+    assert attempted_categories == ["preference", "brand"]
+    assert elapsed < 0.09
+
+
+@pytest.mark.asyncio
 async def test_powermem_service_retries_ob_session_error_for_search():
     attempts = 0
 
@@ -188,6 +269,42 @@ async def test_powermem_service_retries_ob_session_error_for_health():
 
     assert attempts == 3
     assert result["status"] == "ok"
+    await client.aclose()
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+@pytest.mark.asyncio
+async def test_powermem_service_does_not_retry_ob_session_error_from_auth_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+):
+    attempts = 0
+    retry_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            status_code,
+            request=request,
+            json={"success": False, "error": {"message": "OB_SESSION_ENTRY_EXIST(4661)"}},
+        )
+
+    monkeypatch.setattr(powermem_service_module.asyncio, "sleep", fake_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="鉴权失败", categories=["experience"])
+
+    assert results == []
+    assert attempts == 1
+    assert retry_delays == []
     await client.aclose()
 
 
@@ -608,6 +725,206 @@ async def test_powermem_service_serializes_health_behind_slow_record():
 
 
 @pytest.mark.asyncio
+async def test_powermem_service_cancelled_request_releases_shared_gate():
+    search_started = asyncio.Event()
+    search_cancelled = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/system/health"):
+            return httpx.Response(200, json={"status": "ok"})
+        search_started.set()
+        try:
+            await never_release.wait()
+        finally:
+            search_cancelled.set()
+        return httpx.Response(200, json={"success": True, "data": {"results": []}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", timeout_seconds=1.0),
+        http_client=client,
+    )
+    search_task = asyncio.create_task(
+        service.search(user_id="u1", query="取消中的检索", categories=["experience"])
+    )
+
+    await asyncio.wait_for(search_started.wait(), timeout=1)
+    search_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await search_task
+
+    assert search_cancelled.is_set()
+    assert (await asyncio.wait_for(service.health(), timeout=0.2))["status"] == "ok"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_close_waits_for_active_request_and_rejects_queued_request():
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        request_started.set()
+        await release_request.wait()
+        return httpx.Response(200, json={"success": True, "data": [{"memory_id": "record-1"}]})
+
+    class TrackingClient:
+        def __init__(self) -> None:
+            self.inner = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            self.close_calls = 0
+
+        async def request(self, *args, **kwargs):
+            return await self.inner.request(*args, **kwargs)
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            await self.inner.aclose()
+
+    client = TrackingClient()
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=1.0,
+            record_timeout_seconds=1.0,
+            fail_open=True,
+        ),
+        http_client=client,
+    )
+    active_record = asyncio.create_task(
+        service.record(user_id="u1", content="活动写入", category="experience", infer=False)
+    )
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    queued_search = asyncio.create_task(
+        service.search(user_id="u1", query="排队检索", categories=["experience"])
+    )
+    await asyncio.sleep(0)
+    close_task = asyncio.create_task(service.aclose())
+    await asyncio.sleep(0)
+
+    close_was_waiting = not close_task.done()
+    release_request.set()
+
+    assert await active_record is True
+    assert await queued_search == []
+    await close_task
+    await service.aclose()
+    assert close_was_waiting
+    assert requested_paths == ["/api/v1/memories"]
+    assert client.close_calls == 0
+    assert (await service.health())["status"] == "unreachable"
+    assert requested_paths == ["/api/v1/memories"]
+
+    await client.aclose()
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_close_before_first_request_prevents_client_creation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created_clients = 0
+
+    class UnexpectedClient:
+        async def request(self, *args, **kwargs):
+            return httpx.Response(200, json={"status": "unexpected"})
+
+        async def aclose(self) -> None:
+            return None
+
+    def client_factory(*args, **kwargs):
+        nonlocal created_clients
+        created_clients += 1
+        return UnexpectedClient()
+
+    monkeypatch.setattr(powermem_service_module.httpx, "AsyncClient", client_factory)
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True)
+    )
+
+    await service.aclose()
+    await service.aclose()
+    result = await service.health()
+
+    assert result["status"] == "unreachable"
+    assert created_clients == 0
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_cancelling_close_caller_does_not_abort_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+    client_closed = asyncio.Event()
+
+    class OwnedClient:
+        async def request(self, method, url, **kwargs):
+            request_started.set()
+            await release_request.wait()
+            request = httpx.Request(method, url)
+            return httpx.Response(
+                200,
+                request=request,
+                json={"success": True, "data": [{"memory_id": "record-1"}]},
+            )
+
+        async def aclose(self) -> None:
+            client_closed.set()
+
+    monkeypatch.setattr(powermem_service_module.httpx, "AsyncClient", lambda **kwargs: OwnedClient())
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            record_timeout_seconds=1.0,
+            fail_open=True,
+        )
+    )
+    record_task = asyncio.create_task(
+        service.record(user_id="u1", content="活动请求", category="experience", infer=False)
+    )
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    close_task = asyncio.create_task(service.aclose())
+    await asyncio.sleep(0)
+    close_task.cancel()
+    close_was_cancelled = False
+    try:
+        await close_task
+    except asyncio.CancelledError:
+        close_was_cancelled = True
+
+    release_request.set()
+    assert await record_task is True
+    await asyncio.wait_for(client_closed.wait(), timeout=1)
+    assert close_was_cancelled
+    assert (await service.health())["status"] == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_rejected_background_coroutine_is_closed():
+    service = PowerMemService(PowerMemConfig(enabled=True, base_url="https://example.test"))
+    await service.aclose()
+
+    async def background_work() -> None:
+        await asyncio.sleep(0)
+
+    coroutine = background_work()
+    try:
+        task = service.create_background_task(coroutine)
+    except AttributeError:
+        coroutine.close()
+        raise
+
+    assert task is None
+    assert coroutine.cr_frame is None
+
+
+@pytest.mark.asyncio
 async def test_powermem_service_falls_back_when_preference_infer_creates_no_memory():
     payloads: list[dict] = []
 
@@ -712,6 +1029,68 @@ async def test_powermem_service_fail_open_on_http_error():
 
     assert await service.search(user_id="u1", query="anything") == []
     assert await service.record(user_id="u1", content="anything", category="experience") is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_http_fail_open_log_only_contains_safe_metadata(
+    caplog: pytest.LogCaptureFixture,
+):
+    private_body = "provider-private-body-42b9"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            request=request,
+            json={"success": False, "error": {"message": private_body}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+    with caplog.at_level(logging.WARNING, logger="pixelflow.memory.service"):
+        results = await service.search(user_id="u1", query="不应进入日志的用户查询")
+
+    assert results == []
+    assert "PowerMem search failed" in caplog.text
+    assert "HTTPStatusError" in caplog.text
+    assert "status=500" in caplog.text
+    assert private_body not in caplog.text
+    assert "不应进入日志的用户查询" not in caplog.text
+    assert "Traceback" not in caplog.text
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_transport_fail_open_log_does_not_expose_exception_text(
+    caplog: pytest.LogCaptureFixture,
+):
+    private_error_text = "transport-private-detail-c103"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(private_error_text, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+    with caplog.at_level(logging.WARNING, logger="pixelflow.memory.service"):
+        result = await service.record(
+            user_id="u1",
+            content="不应进入日志的用户内容",
+            category="experience",
+            infer=False,
+        )
+
+    assert result is False
+    assert "PowerMem record failed" in caplog.text
+    assert "ConnectError" in caplog.text
+    assert private_error_text not in caplog.text
+    assert "不应进入日志的用户内容" not in caplog.text
+    assert "Traceback" not in caplog.text
     await client.aclose()
 
 

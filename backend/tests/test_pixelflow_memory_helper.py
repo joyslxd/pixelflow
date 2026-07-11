@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
-from app.gateway.pixelflow_memory import record_power_mem, record_power_mem_background
+from app.gateway.pixelflow_memory import current_user_id, record_power_mem, record_power_mem_background
+from pixelflow.memory import PowerMemConfig, PowerMemService
 
 
 @pytest.mark.asyncio
@@ -136,3 +138,90 @@ async def test_record_power_mem_background_dual_writes_skill_memory_for_skill_so
     assert service.records[1]["memory_type"] == "skill"
     assert service.records[1]["metadata"]["linked_category"] == "experience"
     assert "可复用 Skill 经验" in service.records[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_record_power_mem_background_is_cancelled_and_awaited_when_service_closes():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finalized = asyncio.Event()
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test"),
+        http_client=object(),
+    )
+
+    async def blocking_record(**kwargs):
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            finalized.set()
+        return True
+
+    service.record = blocking_record
+    record_power_mem_background(
+        service,
+        user_id="u1",
+        content="需要由服务关闭回收的后台任务",
+        category="experience",
+        source_agent="intake_agent",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await service.aclose()
+    was_finalized_by_close = finalized.is_set()
+    if not was_finalized_by_close:
+        release.set()
+        await asyncio.wait_for(finalized.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+    assert was_finalized_by_close
+    assert not getattr(service, "_background_tasks", set())
+
+
+@pytest.mark.asyncio
+async def test_record_power_mem_background_error_log_does_not_expose_exception_text_or_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    private_error_text = "provider-private-response-7f2a"
+
+    class FakePowerMemService:
+        async def record(self, **kwargs):
+            raise RuntimeError(private_error_text)
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.pixelflow_memory"):
+        record_power_mem_background(
+            FakePowerMemService(),
+            user_id="u1",
+            content="用户不希望出现在日志里的内容",
+            category="experience",
+            source_agent="intake_agent",
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert "PowerMem background record failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert private_error_text not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_current_user_id_fail_open_log_does_not_expose_auth_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    private_error_text = "auth-private-detail-cc81"
+
+    async def failing_get_current_user(request):
+        raise RuntimeError(private_error_text)
+
+    monkeypatch.setattr("app.gateway.pixelflow_memory.get_current_user", failing_get_current_user)
+    with caplog.at_level(logging.DEBUG, logger="app.gateway.pixelflow_memory"):
+        user_id = await current_user_id(object())
+
+    assert user_id is None
+    assert "Unable to resolve current user for PowerMem" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert private_error_text not in caplog.text
+    assert "Traceback" not in caplog.text

@@ -172,10 +172,12 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - 生产环境 `backend/config.prod.yml`：`pixelflow.powermem_base_url=http://127.0.0.1:18848`，走同机 sidecar。
 - `pixelflow.powermem_api_key` 必须与 PowerMem 服务端 API key 一致；不要把 content-app 用户 `Authorization` 当成 PowerMem key。
 - `pixelflow.powermem_fail_open=true` 时，PowerMem 不可用只记录 warning，主流程继续。
-- `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 60s），因为 record 全部是后台 `asyncio.create_task`，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
+- `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 60s），因为 record 由 `PowerMemService` 纳管为后台任务，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
 - PixelFlow 进程内所有 PowerMem search、record、health HTTP 请求共用同一请求闸门，避免 OceanBase `OB_SESSION_ENTRY_EXIST`。
-- search/health 的锁等待和 HTTP 共用短总预算，超时直接 fail-open，不绕过闸门并发请求；record 使用独立长预算。
-- 只有幂等的 search/health 对 `OB_SESSION_ENTRY_EXIST` 最多尝试 3 次，record 不自动重试。
+- search/health 的锁等待和 HTTP 共用短总预算；多 category search 也只共享一次公开调用预算，超时保留已完成分类的部分结果且不再执行后续分类；record 使用独立长预算。
+- 只有幂等的 search/health 在实际 5xx 响应中精确识别到 `OB_SESSION_ENTRY_EXIST` 时最多尝试 3 次；401/403 等非 5xx 和 record 都不自动重试。
+- `record_power_mem_background()` 创建的任务必须交给 `PowerMemService` 追踪；服务关闭时会拒绝新请求、取消并等待后台任务、等待活动请求退出闸门后再关闭自有 HTTP client，注入的测试/外部 client 不由服务关闭。
+- PowerMem fail-open 和后台错误日志只记录操作、异常类型、HTTP status 等安全元数据，不记录响应体、用户内容、异常字符串或完整 traceback。
 - 该闸门不跨进程；多 worker、多容器或多副本部署仍需要 PowerMem 服务端正确管理数据库 Session。
 - 网关侧 `record_power_mem` / `record_power_mem_background` 默认按 category 决定 infer：`preference` 默认 `infer=True`，让用户中文偏好进入 PowerMem 服务端语义抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，这些业务摘要已经由 Agent 分类，不再让 PowerMem 做二次 LLM 抽取。调用方显式传 `infer=True/False` 时以显式值为准。
 - `preference` 且 `infer=True` 时，如果 PowerMem 服务端返回 `success=true` 但 `data=[]`（常见于 LLM 抽取失败、额度不足被服务端吞成空结果，或未抽出 facts），`PowerMemService.record()` 会自动用同一内容再写一次 `infer=False`，metadata 增加 `infer_fallback=true` 和 `infer_fallback_reason=empty_infer_result`，保证用户偏好至少可以直接入库并被检索。

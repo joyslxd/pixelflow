@@ -24,8 +24,11 @@ def power_mem_service(request: Request) -> PowerMemService | None:
 async def current_user_id(request: Request) -> str | None:
     try:
         return await get_current_user(request)
-    except Exception:
-        logger.debug("Unable to resolve current user for PowerMem", exc_info=True)
+    except Exception as exc:
+        logger.debug(
+            "Unable to resolve current user for PowerMem exception_type=%s",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -123,10 +126,26 @@ def record_power_mem_background(
                     run_id=run_id,
                     infer=False,
                 )
-        except Exception:
-            logger.warning("PowerMem background record failed", exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "PowerMem background record failed exception_type=%s",
+                type(exc).__name__,
+            )
 
-    asyncio.create_task(_run())
+    coroutine = _run()
+    try:
+        create_background_task = getattr(service, "create_background_task", None)
+        if callable(create_background_task):
+            create_background_task(coroutine)
+        else:
+            # 测试 fake service 与旧的轻量实现没有生命周期调度器，保留兼容路径。
+            asyncio.create_task(coroutine)
+    except Exception as exc:
+        coroutine.close()
+        logger.warning(
+            "PowerMem background record scheduling failed exception_type=%s",
+            type(exc).__name__,
+        )
 
 
 def concise_result_summary(prefix: str, payload: dict[str, Any] | None = None) -> str:

@@ -356,10 +356,12 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 约束：
 
 - PowerMem 失败开放：不可用、超时或 5xx 时记录 warning，主流程继续。
-- `powermem_timeout_seconds` 只用于 search/health 同步读请求，默认 3 秒；record 写入走 `powermem_record_timeout_seconds`，默认 60 秒。
+- `powermem_timeout_seconds` 只用于 search/health 同步读请求，默认 3 秒；record 写入走 `powermem_record_timeout_seconds`，默认 60 秒，并由 `PowerMemService` 追踪其后台任务生命周期。
 - PixelFlow 进程内所有 PowerMem search、record、health HTTP 请求共用同一请求闸门，避免 OceanBase `OB_SESSION_ENTRY_EXIST`。
-- search/health 的锁等待和 HTTP 共用短总预算，超时直接 fail-open，不绕过闸门并发请求；record 使用独立长预算。
-- 只有幂等的 search/health 对 `OB_SESSION_ENTRY_EXIST` 最多尝试 3 次，record 不自动重试。
+- search/health 的锁等待和 HTTP 共用短总预算；多 category search 共享整次公开调用预算，超时返回已收集的部分结果并停止后续分类；record 使用独立长预算。
+- 只有幂等的 search/health 在 5xx 响应中精确识别到 `OB_SESSION_ENTRY_EXIST` 时最多尝试 3 次；401/403 等非 5xx 和 record 不自动重试。
+- 服务关闭会先拒绝新请求，取消并等待受管后台任务，再等待活动请求退出闸门并关闭自有 HTTP client；外部注入 client 的所有权仍属于调用方。
+- fail-open 与后台异常日志只保留操作、异常类型和 HTTP status 等安全元数据，不输出 provider body、用户内容、异常字符串或完整 traceback。
 - 该闸门不跨进程；多 worker、多容器或多副本部署仍需要 PowerMem 服务端正确管理数据库 Session。
 - 网关侧 `record_power_mem()` / `record_power_mem_background()` 默认按 category 决定 infer：`preference` 默认 `infer=True`，用于用户中文偏好的服务端抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，避免阶段摘要被重复 LLM 抽取。调用方显式传 `infer=True/False` 时以显式值为准。
 - `preference` 且 `infer=True` 写入时，如果 PowerMem 返回 `success=true` 但 `data=[]`，说明服务端没有创建 memory，可能是 LLM 抽取失败、额度不足被吞成空结果或未抽出 facts；`PowerMemService.record()` 会自动用同一内容再写一次 `infer=False`，metadata 标记 `infer_fallback=true` 和 `infer_fallback_reason=empty_infer_result`，保证偏好至少可以直接入库检索。
@@ -573,7 +575,9 @@ Plan 审核与版本规则：
 - 初始 Plan 是 v1；每次修订创建新版本，回退只直接激活所选历史版本并保持 `plan_history` 不变，不追加重复版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
 - 新版本历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照。回退时恢复所选版本的快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
-- 前端把回退后的激活版本及其合同、分镜时长持久化到 conversation context，刷新或重新进入对话后继续展示该版本。
+- 视频历史时长快照只接受非 `bool` 的整数，每段 4-15 秒且总和必须等于该历史版本合同的 `video_duration_sec`；任一字段非法时整组沿用当前权威分镜时长。图片显式空快照继续合法。
+- 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同与分镜时长，并统一由 `makeSnapshot()` 写入 conversation context，避免 400ms 自动保存覆盖回退结果。
+- Plan 消息以 `conversation_id + client_message_id` 幂等保存；同一对话在网络结果未知后重试只返回既有消息，且必须先确认消息落库再更新 context。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。
 

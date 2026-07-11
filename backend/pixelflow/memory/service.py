@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,7 +15,6 @@ import httpx
 logger = logging.getLogger(__name__)
 
 PIXELFLOW_POWERMEM_AGENT_ID = "pixelflow"
-MAX_LOG_ERROR_BODY = 300
 OB_SESSION_MAX_ATTEMPTS = 3
 OB_SESSION_RETRY_DELAYS = (0.05, 0.1)
 OB_SESSION_ENTRY_EXIST_TOKEN = re.compile(
@@ -121,8 +121,11 @@ class PowerMemService:
         self.config = config or load_power_mem_config_from_env()
         self._client = http_client
         self._owns_client = http_client is None
-        self._client_lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def status_snapshot(self) -> dict[str, Any]:
         if not self.config.enabled:
@@ -142,9 +145,46 @@ class PowerMemService:
         }
 
     async def aclose(self) -> None:
-        if self._client is not None and self._owns_client:
-            await self._client.aclose()
+        if self._close_task is None:
+            # 必须在第一次 await 前切换状态，确保已经排队和随后到达的请求都不会越过关闭边界。
+            self._closing = True
+            self._close_task = asyncio.create_task(self._aclose_impl())
+        # 调用方取消不能中断共享的关闭过程；后续 aclose 仍等待同一个任务。
+        await asyncio.shield(self._close_task)
+
+    def create_background_task(self, coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task[Any] | None:
+        """创建由服务生命周期管理的后台任务；关闭后拒绝并回收协程。"""
+        if self._closing or self._closed:
+            coroutine.close()
+            return None
+        try:
+            task = asyncio.create_task(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def _aclose_impl(self) -> None:
+        current_task = asyncio.current_task()
+        background_tasks = [
+            task for task in self._background_tasks if task is not current_task and not task.done()
+        ]
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
+        # 与活动请求共用唯一闸门：活动请求先完成，排队请求看到 closing 后拒绝执行。
+        async with self._request_lock:
+            client = self._client
             self._client = None
+            try:
+                if client is not None and self._owns_client:
+                    await client.aclose()
+            finally:
+                self._closed = True
 
     async def health(self) -> dict[str, Any]:
         if not self.config.available:
@@ -176,23 +216,32 @@ class PowerMemService:
         try:
             if len(category_values) > 1:
                 items: list[SemanticMemoryItem] = []
-                for category in category_values:
-                    try:
-                        items.extend(
-                            await self._search_once(
-                                user_id=user_id,
-                                query=query,
-                                category=category,
-                                source_agent=source_agent,
-                                run_id=run_id,
-                                limit=search_limit,
-                            )
-                        )
-                    except Exception as exc:
-                        if self.config.fail_open:
-                            _log_fail_open(f"PowerMem search failed for category={category}", exc)
-                            continue
+                try:
+                    # 多分类检索共享一次公开调用预算，避免每个分类重新获得完整 timeout。
+                    async with asyncio.timeout(self.config.timeout_seconds):
+                        for category in category_values:
+                            try:
+                                items.extend(
+                                    await self._search_once(
+                                        user_id=user_id,
+                                        query=query,
+                                        category=category,
+                                        source_agent=source_agent,
+                                        run_id=run_id,
+                                        limit=search_limit,
+                                    )
+                                )
+                            except TimeoutError:
+                                raise
+                            except Exception as exc:
+                                if self.config.fail_open:
+                                    _log_fail_open("PowerMem category search failed", exc)
+                                    continue
+                                raise
+                except TimeoutError as exc:
+                    if not self.config.fail_open:
                         raise
+                    _log_fail_open("PowerMem multi-category search timed out", exc)
                 return _dedupe_and_sort(items)[:search_limit]
             category = category_values[0] if category_values else None
             return await self._search_once(
@@ -305,7 +354,6 @@ class PowerMemService:
         auth: bool = True,
         timeout: float | None = None,
     ) -> Any:
-        client = await self._get_client()
         headers = {"Content-Type": "application/json"} if json is not None else {}
         if auth and self.config.api_key:
             headers["X-API-Key"] = self.config.api_key
@@ -314,6 +362,11 @@ class PowerMemService:
         request_timeout = timeout if timeout is not None else self.config.timeout_seconds
         async with asyncio.timeout(request_timeout):
             async with self._request_lock:
+                if self._closing or self._closed:
+                    raise RuntimeError("PowerMemService is closing or closed")
+                if self._client is None:
+                    self._client = httpx.AsyncClient(timeout=self.config.timeout_seconds)
+                client = self._client
                 # 仅幂等读取和搜索定向恢复 OceanBase 临时会话错误，record 写入保持单次。
                 max_attempts = OB_SESSION_MAX_ATTEMPTS if _is_ob_retryable_request(method, path) else 1
                 for attempt in range(max_attempts):
@@ -333,14 +386,6 @@ class PowerMemService:
                         if not _is_ob_session_entry_exist(exc) or attempt + 1 >= max_attempts:
                             raise
                         await asyncio.sleep(OB_SESSION_RETRY_DELAYS[attempt])
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is not None:
-            return self._client
-        async with self._client_lock:
-            if self._client is None:
-                self._client = httpx.AsyncClient(timeout=self.config.timeout_seconds)
-        return self._client
 
     def _url(self, path: str) -> str:
         base = self.config.base_url.rstrip("/")
@@ -425,6 +470,8 @@ def _dedupe_and_sort(items: list[SemanticMemoryItem]) -> list[SemanticMemoryItem
 
 
 def _is_ob_session_entry_exist(exc: httpx.HTTPStatusError) -> bool:
+    if not 500 <= exc.response.status_code < 600:
+        return False
     try:
         payload = exc.response.json()
     except ValueError:
@@ -448,7 +495,11 @@ def _is_ob_retryable_request(method: str, path: str) -> bool:
 
 def _log_fail_open(message: str, exc: BaseException) -> None:
     if isinstance(exc, httpx.HTTPStatusError):
-        body = exc.response.text.replace("\n", " ")[:MAX_LOG_ERROR_BODY]
-        logger.warning("%s: status=%s body=%s", message, exc.response.status_code, body)
+        logger.warning(
+            "%s exception_type=%s status=%s",
+            message,
+            type(exc).__name__,
+            exc.response.status_code,
+        )
         return
-    logger.warning("%s: %s", message, exc)
+    logger.warning("%s exception_type=%s", message, type(exc).__name__)
