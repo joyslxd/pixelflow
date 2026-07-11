@@ -24,12 +24,13 @@ def load_seedance_guidance() -> str:
     """Load the concise Seedance rules needed by the scene-package LLM."""
     source = SEEDANCE_SKILL_PATH.read_text(encoding="utf-8")
     sections = [
-        _markdown_section(source, "Seedance 2.0 核心能力", level=2),
-        _markdown_section(source, "@引用系统", level=2),
-        _markdown_section(source, "7. 声音控制", level=3),
-        _markdown_section(source, "高级提示词技巧", level=2),
-        _markdown_section(source, "镜头语言词汇库", level=2),
-        _markdown_section(source, "时长策略", level=2),
+        _markdown_section(source, "适用范围与模型边界", level=2),
+        _markdown_section(source, "PixelFlow 分镜执行合同", level=2),
+        _markdown_section(source, "参考素材与一致性", level=2),
+        _markdown_section(source, "声音、对白与字幕", level=2),
+        _markdown_section(source, "镜头语言与真实感", level=2),
+        _markdown_section(source, "电商与 UGC 场景", level=2),
+        _markdown_section(source, "质量检查", level=2),
     ]
     guidance = "\n\n".join(section.strip() for section in sections if section.strip())
     if not guidance:
@@ -48,27 +49,39 @@ def build_seedance_shot_prompt(
     visual_style: str,
     available_asset_ids: Sequence[str],
     video_ratio: str,
+    video_model: str,
     include_guidance: bool = True,
     include_plan: bool = True,
 ) -> str:
     """Build one scene's strict Seedance shot-description instruction."""
+    if (
+        isinstance(start_second, bool)
+        or not isinstance(start_second, int)
+        or isinstance(end_second, bool)
+        or not isinstance(end_second, int)
+    ):
+        raise ValueError("Seedance scene range must use integer seconds")
     duration = end_second - start_second
     if scene_index < 1:
         raise ValueError("scene_index must be positive")
     if start_second < 0 or duration < 4 or duration > 15:
         raise ValueError("Seedance scene range must be 4-15 integer seconds")
+    normalized_video_model = str(video_model or "").strip()
+    if not normalized_video_model:
+        raise ValueError("video_model is required for Seedance shot prompts")
 
     asset_ids = _normalize_asset_ids(available_asset_ids)
     if len(asset_ids) > MAX_IMAGE_REFERENCES:
         raise ValueError(f"Seedance supports at most {MAX_IMAGE_REFERENCES} image references per scene")
     references = "、".join(f"@{asset_id}" for asset_id in asset_ids) or "无图片参考"
-    guidance = f"Seedance Skill 规则：\n{load_seedance_guidance()}\n\n" if include_guidance else ""
+    guidance = f"Seedance 系列 Skill 规则：\n{load_seedance_guidance()}\n\n" if include_guidance else ""
     plan_context = f"\n- 必须严格执行的 plan.md：\n{str(plan_markdown or '').strip()[:6000]}" if include_plan else ""
     return (
         f"{guidance}"
         f"分镜 {scene_index} 的执行合同：\n"
         f"- 精确时间范围：{start_second}-{end_second}秒（时长 {duration} 秒）\n"
         f"- 视频画幅：{video_ratio}\n"
+        f"- 当前视频模型：{normalized_video_model}\n"
         f"- 视觉风格：{visual_style}\n"
         f"- 故事线：{storyline}\n"
         f"- 旁白：{narration or '本分镜无旁白'}\n"

@@ -238,6 +238,7 @@ def _scene_package_prompt(
         default_assets["visual_style"].get("description"),
     )
     video_ratio = _first_text(form_values.get("video_ratio"), "9:16")
+    video_model = _first_text(form_values.get("video_model"), "seedance")
     shot_contracts: list[str] = []
     for index, ((start_second, end_second), stage) in enumerate(zip(time_ranges, stage_templates, strict=True), start=1):
         reference_ids = _default_reference_asset_ids(default_assets, stage["asset_id"])
@@ -252,6 +253,7 @@ def _scene_package_prompt(
                 visual_style=visual_style,
                 available_asset_ids=reference_ids,
                 video_ratio=video_ratio,
+                video_model=video_model,
                 include_guidance=False,
                 include_plan=False,
             )
@@ -261,7 +263,7 @@ def _scene_package_prompt(
     return f"""你是 PixelFlow 创作生成 Agent 的视频场景包 Skill。
 请根据 plan.md、表单和创意方向，生成一组可编辑的视频场景片段。
 
-以下是项目内 Seedance 2.0 Skill 的强制指导：
+以下是项目内 Seedance 系列 Skill 的强制指导，当前视频模型为 {video_model}：
 {seedance_guidance}
 
 硬性要求：
