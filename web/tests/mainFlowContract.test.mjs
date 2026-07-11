@@ -231,7 +231,7 @@ test("strict Plan message persistence starts and resumes a recoverable pending j
   assert.match(strictSource, /await resumePendingMessageJob/, "strict persistence must resume the persisted job");
   assert.match(
     strictSource,
-    /pendingMessageJob\?\.source_message_id === message\.id[\s\S]*setTimeout\([\s\S]*resumePendingMessageJob\(pendingMessageJob\)/,
+    /pendingMessageJob\?\.source_message_id === message\.id[\s\S]*schedulePendingMessageJobResume\(pendingMessageJob, 0\)/,
     "start success with pending-context uncertainty must immediately resume the same in-memory job",
   );
   assert.equal(
@@ -298,10 +298,60 @@ test("recoverable Plan message jobs retain unknown results and resume with serve
   );
   assert.match(
     resumeSource,
-    /pendingMessageJobRef\.current = step\.pending[\s\S]*setTimeout[\s\S]*resumePendingMessageJob\(step\.pending\)\.catch/,
+    /pendingMessageJobRef\.current = restartedPendingMessageJob[\s\S]*schedulePendingMessageJobResume\(restartedPendingMessageJob\)/,
     "a failed 404 replacement-job context write must retain and safely reschedule the same replacement job",
   );
   assert.match(resumeSource, /continue_after_save\?\.type === "handle_send"/, "ordinary user-message continuation must remain supported");
+});
+
+test("Plan message recovery schedules replacement jobs non-recursively with generation checks and backoff", () => {
+  const schedulerStart = workspaceSource.indexOf("const schedulePendingMessageJobResume =");
+  const schedulerEnd = workspaceSource.indexOf("const persistPlanArtifactForConversation", schedulerStart);
+  const resumeStart = workspaceSource.indexOf("const resumePendingMessageJob = async");
+  const resumeEnd = workspaceSource.indexOf("const scenePackageContext", resumeStart);
+  assert.notEqual(schedulerStart, -1, "a shared non-recursive Plan message scheduler must exist");
+  assert.notEqual(schedulerEnd, -1, "strict Plan persistence must follow the scheduler");
+  const schedulerSource = workspaceSource.slice(schedulerStart, schedulerEnd);
+  const resumeSource = workspaceSource.slice(resumeStart, resumeEnd);
+
+  assert.match(schedulerSource, /planMessageResumeDelayMs/, "replacement retries must use bounded backoff");
+  assert.match(schedulerSource, /isSameMessageJobGeneration/, "stale scheduled jobs must not resume after the pending generation changes");
+  assert.match(schedulerSource, /resumePendingMessageJob\(current\)\.catch/, "scheduled recovery must absorb unexpected promise rejection");
+  assert.equal(
+    /await\s+resumePendingMessageJob\(step\.pending\)/.test(resumeSource),
+    false,
+    "404 replacement must not recursively await the next recovery generation",
+  );
+  assert.match(resumeSource, /restart_count:\s*\(pendingMessageJob\.restart_count \|\| 0\) \+ 1/, "each 404 generation must advance backoff state");
+  assert.match(resumeSource, /schedulePendingMessageJobResume\(restartedPendingMessageJob\)/, "replacement jobs must be scheduled after the current call exits");
+  assert.match(
+    resumeSource,
+    /if \(!shouldContinuePolling\(\)\) return;[\s\S]*retryPendingMessageJob[\s\S]*schedulePendingMessageJobResume\(retryPendingMessageJob\)/,
+    "network errors and 408 responses must reschedule the same job without spinning while hidden",
+  );
+  assert.match(
+    resumeSource,
+    /catch \(contextError\)[\s\S]*contextSyncPendingMessageJob[\s\S]*schedulePendingMessageJobResume\(contextSyncPendingMessageJob\)/,
+    "a saved Plan whose context update failed must automatically retry context synchronization",
+  );
+});
+
+test("ordinary sends cannot overwrite a pending Plan message recovery handle", () => {
+  const sendStart = workspaceSource.indexOf("const handleSend = async");
+  const sendEnd = workspaceSource.indexOf("const sceneGlobalAssetReference", sendStart);
+  const startJobStart = workspaceSource.indexOf("const startConversationMessageJobForConversation = async");
+  const startJobEnd = workspaceSource.indexOf("const pushAssistant", startJobStart);
+  const sendSource = workspaceSource.slice(sendStart, sendEnd);
+  const startJobSource = workspaceSource.slice(startJobStart, startJobEnd);
+
+  assert.match(sendSource, /isPendingPlanSaveForConversation/, "send entry must detect an existing Plan save job");
+  assert.match(sendSource, /schedulePendingMessageJobResume\(pendingPlanMessageJob, 0\)/, "send entry must prioritize the original Plan job");
+  assert.ok(
+    sendSource.indexOf("isPendingPlanSaveForConversation") < sendSource.indexOf("startConversationMessageJobForConversation"),
+    "the Plan guard must run before a new recoverable user message job starts",
+  );
+  assert.match(startJobSource, /continuation\?\.type !== "plan_save"/, "the shared message starter must defensively reject non-Plan overwrites");
+  assert.match(startJobSource, /isPendingPlanSaveForConversation/, "the defensive guard must be scoped to the same conversation");
 });
 
 test("restoring a pending plan_save keeps its optimistic Plan out of autosave authority", () => {

@@ -12,9 +12,38 @@ export function classifyPlanMessageResume(input: {
 }): PlanMessageResumeAction {
   if (input.hidden) return "retain_pending";
   if (input.status === "failed") return "clear_failed";
-  if (input.status === "completed" && input.hasResult) return "complete";
+  if (input.status === "completed") return input.hasResult ? "complete" : "clear_failed";
   if (input.errorStatus === 404) return "restart_same_client";
   return "retain_pending";
+}
+
+export function isPendingPlanSaveForConversation(
+  pending: { conversation_id?: string; continue_after_save?: { type?: string } } | null | undefined,
+  conversationId: string,
+): boolean {
+  return Boolean(
+    pending
+      && pending.conversation_id === conversationId
+      && pending.continue_after_save?.type === "plan_save",
+  );
+}
+
+export function isSameMessageJobGeneration(
+  current: { conversation_id?: string; job_id?: string; source_message_id?: string; restart_count?: number } | null | undefined,
+  candidate: { conversation_id?: string; job_id?: string; source_message_id?: string; restart_count?: number },
+): boolean {
+  return Boolean(
+    current
+      && current.conversation_id === candidate.conversation_id
+      && current.job_id === candidate.job_id
+      && current.source_message_id === candidate.source_message_id
+      && (current.restart_count || 0) === (candidate.restart_count || 0),
+  );
+}
+
+export function planMessageResumeDelayMs(restartCount: number | undefined): number {
+  const normalized = Number.isInteger(restartCount) && Number(restartCount) > 0 ? Number(restartCount) : 0;
+  return normalized === 0 ? 0 : Math.min(30_000, 500 * (2 ** Math.min(normalized - 1, 6)));
 }
 
 interface RecoverableMessageJobStatus<TResult> {

@@ -7,7 +7,14 @@ import { pathToFileURL } from "node:url";
 const moduleUrl = pathToFileURL(
   path.join(os.tmpdir(), "pixelflow-plan-message-recovery-test", "planMessageRecovery.js"),
 ).href;
-const { classifyPlanMessageResume, planContextFromSavedMessage, resumePlanMessageJobStep } = await import(moduleUrl);
+const {
+  classifyPlanMessageResume,
+  isPendingPlanSaveForConversation,
+  isSameMessageJobGeneration,
+  planContextFromSavedMessage,
+  planMessageResumeDelayMs,
+  resumePlanMessageJobStep,
+} = await import(moduleUrl);
 
 test("Plan 消息轮询网络失败、隐藏与超时都保留 pending，只有明确 failed 才清理", () => {
   assert.equal(classifyPlanMessageResume({}), "retain_pending");
@@ -16,6 +23,38 @@ test("Plan 消息轮询网络失败、隐藏与超时都保留 pending，只有�
   assert.equal(classifyPlanMessageResume({ status: "running" }), "retain_pending");
   assert.equal(classifyPlanMessageResume({ status: "failed" }), "clear_failed");
   assert.equal(classifyPlanMessageResume({ status: "completed", hasResult: true }), "complete");
+  assert.equal(classifyPlanMessageResume({ status: "completed", hasResult: false }), "clear_failed");
+});
+
+test("只有同一对话的 plan_save 会阻止普通消息覆盖恢复句柄", () => {
+  const pending = {
+    conversation_id: "conversation-a",
+    job_id: "job-1",
+    source_message_id: "plan-client-1",
+    continue_after_save: { type: "plan_save" },
+  };
+  assert.equal(isPendingPlanSaveForConversation(pending, "conversation-a"), true);
+  assert.equal(isPendingPlanSaveForConversation(pending, "conversation-b"), false);
+  assert.equal(
+    isPendingPlanSaveForConversation({ ...pending, continue_after_save: { type: "handle_send" } }, "conversation-a"),
+    false,
+  );
+});
+
+test("非递归恢复只执行当前 job 世代并对连续 404 使用有限退避", () => {
+  const current = {
+    conversation_id: "conversation-a",
+    job_id: "job-2",
+    source_message_id: "plan-client-1",
+    restart_count: 2,
+  };
+  assert.equal(isSameMessageJobGeneration(current, { ...current }), true);
+  assert.equal(isSameMessageJobGeneration(current, { ...current, job_id: "job-1" }), false);
+  assert.equal(isSameMessageJobGeneration(current, { ...current, restart_count: 1 }), false);
+  assert.equal(planMessageResumeDelayMs(undefined), 0);
+  assert.equal(planMessageResumeDelayMs(1), 500);
+  assert.equal(planMessageResumeDelayMs(2), 1000);
+  assert.equal(planMessageResumeDelayMs(20), 30000);
 });
 
 test("Plan 消息 job 404 必须以相同 client_message_id 重新启动而不是生成新消息 ID", () => {
@@ -173,4 +212,21 @@ test("job 404 单步恢复复用原 request 并只替换 job_id", async () => {
   assert.equal(result.pending.job_id, "replacement-job");
   assert.equal(result.pending.request.payload.client_message_id, "stable-plan-id");
   assert.deepEqual(restartedRequest, request);
+});
+
+test("completed 但 result 为空属于明确协议失败", async () => {
+  const result = await resumePlanMessageJobStep(
+    { job_id: "completed-without-result", request: { payload: { client_message_id: "stable-plan-id" } } },
+    {
+      shouldContinue: () => true,
+      getStatus: async () => ({ status: "completed", result: null }),
+      pollStatus: async () => {
+        throw new Error("协议失败不应继续轮询");
+      },
+      restart: async () => {
+        throw new Error("协议失败不应重启");
+      },
+    },
+  );
+  assert.equal(result.kind, "failed");
 });

@@ -40,7 +40,13 @@ import {
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import { activePlanSnapshotForConversation } from "@/lib/activePlanSnapshot";
-import { planContextFromSavedMessage, resumePlanMessageJobStep } from "@/lib/planMessageRecovery";
+import {
+  isPendingPlanSaveForConversation,
+  isSameMessageJobGeneration,
+  planContextFromSavedMessage,
+  planMessageResumeDelayMs,
+  resumePlanMessageJobStep,
+} from "@/lib/planMessageRecovery";
 import {
   appendVisibleConversationMessage,
   messageConversationId,
@@ -322,6 +328,7 @@ interface PendingMessageJob {
   request: ConversationMessageJobRequest;
   message: ChatMessage;
   continue_after_save?: PendingMessageJobContinuation;
+  restart_count?: number;
 }
 
 interface IntakeAnalyzeJobRequest {
@@ -1701,10 +1708,7 @@ export function WorkspacePage() {
 
   const beginArtifactAction = (msg: ChatMessage, targetConversationId: string): string => {
     const pendingMessageJob = pendingMessageJobRef.current;
-    if (
-      pendingMessageJob?.conversation_id === targetConversationId
-      && pendingMessageJob.continue_after_save?.type === "plan_save"
-    ) {
+    if (isPendingPlanSaveForConversation(pendingMessageJob, targetConversationId)) {
       return "";
     }
     const key = processedArtifactKey(msg, targetConversationId);
@@ -1866,6 +1870,16 @@ export function WorkspacePage() {
     });
   };
 
+  const schedulePendingMessageJobResume = (pendingMessageJob: PendingMessageJob, delayMs?: number) => {
+    const delay = delayMs ?? planMessageResumeDelayMs(pendingMessageJob.restart_count);
+    window.setTimeout(() => {
+      const current = pendingMessageJobRef.current;
+      if (!isSameMessageJobGeneration(current, pendingMessageJob)) return;
+      if (!current) return;
+      void resumePendingMessageJob(current).catch(() => {});
+    }, delay);
+  };
+
   const persistPlanArtifactForConversation = async (
     message: ChatMessage,
     targetConversationId: string,
@@ -1887,9 +1901,7 @@ export function WorkspacePage() {
         pendingMessageJob?.source_message_id === message.id
         && pendingMessageJob.continue_after_save?.type === "plan_save"
       ) {
-        window.setTimeout(() => {
-          void resumePendingMessageJob(pendingMessageJob).catch(() => {});
-        }, 0);
+        schedulePendingMessageJobResume(pendingMessageJob, 0);
         return;
       }
       pendingPlanMessagePersistenceIdsRef.current.delete(message.id);
@@ -1903,6 +1915,15 @@ export function WorkspacePage() {
     targetConversationId: string,
     continuation?: PendingMessageJobContinuation,
   ): Promise<PendingMessageJob | null> => {
+    const existingPendingMessageJob = pendingMessageJobRef.current;
+    if (
+      continuation?.type !== "plan_save"
+      && existingPendingMessageJob
+      && isPendingPlanSaveForConversation(existingPendingMessageJob, targetConversationId)
+    ) {
+      schedulePendingMessageJobResume(existingPendingMessageJob, 0);
+      throw new Error("当前 plan.md 仍在保存，请等待保存完成后再发送新消息");
+    }
     if (!targetConversationId) {
       appendOptimisticMessageForConversation(message, targetConversationId);
       return null;
@@ -3616,21 +3637,37 @@ export function WorkspacePage() {
         });
         if (step.kind === "pending") {
           if (step.pending.job_id !== pendingMessageJob.job_id) {
+            const restartedPendingMessageJob: PendingMessageJob = {
+              ...step.pending,
+              restart_count: (pendingMessageJob.restart_count || 0) + 1,
+            };
             try {
               await persistPendingMessageJob(
-                step.pending,
-                step.pending.conversation_id,
+                restartedPendingMessageJob,
+                restartedPendingMessageJob.conversation_id,
                 "plan_message_save_running",
               );
             } catch {
-              pendingMessageJobRef.current = step.pending;
-              window.setTimeout(() => {
-                void resumePendingMessageJob(step.pending).catch(() => {});
-              }, 0);
-              return;
+              pendingMessageJobRef.current = restartedPendingMessageJob;
             }
-            await resumePendingMessageJob(step.pending);
+            if (shouldContinuePolling()) schedulePendingMessageJobResume(restartedPendingMessageJob);
+            return;
           }
+          if (!shouldContinuePolling()) return;
+          const retryPendingMessageJob: PendingMessageJob = {
+            ...step.pending,
+            restart_count: (pendingMessageJob.restart_count || 0) + 1,
+          };
+          try {
+            await persistPendingMessageJob(
+              retryPendingMessageJob,
+              retryPendingMessageJob.conversation_id,
+              "plan_message_save_running",
+            );
+          } catch {
+            pendingMessageJobRef.current = retryPendingMessageJob;
+          }
+          schedulePendingMessageJobResume(retryPendingMessageJob);
           return;
         }
         if (step.kind === "failed") {
@@ -3668,15 +3705,24 @@ export function WorkspacePage() {
             } as unknown as Record<string, unknown>,
           });
         } catch (contextError) {
-          await persistPendingMessageJob(
-            pendingMessageJob,
-            pendingMessageJob.conversation_id,
-            "plan_context_sync_pending",
-            {
-              message_job_resume_error:
-                contextError instanceof Error ? contextError.message : String(contextError),
-            },
-          ).catch(() => {});
+          const contextSyncPendingMessageJob: PendingMessageJob = {
+            ...pendingMessageJob,
+            restart_count: (pendingMessageJob.restart_count || 0) + 1,
+          };
+          try {
+            await persistPendingMessageJob(
+              contextSyncPendingMessageJob,
+              contextSyncPendingMessageJob.conversation_id,
+              "plan_context_sync_pending",
+              {
+                message_job_resume_error:
+                  contextError instanceof Error ? contextError.message : String(contextError),
+              },
+            );
+          } catch {
+            pendingMessageJobRef.current = contextSyncPendingMessageJob;
+          }
+          if (shouldContinuePolling()) schedulePendingMessageJobResume(contextSyncPendingMessageJob);
           return;
         }
         pendingMessageJobRef.current = null;
@@ -5455,6 +5501,12 @@ export function WorkspacePage() {
     const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
       activeConversation = await ensureConversation(text);
+      const pendingPlanMessageJob = pendingMessageJobRef.current;
+      if (pendingPlanMessageJob && isPendingPlanSaveForConversation(pendingPlanMessageJob, activeConversation)) {
+        schedulePendingMessageJobResume(pendingPlanMessageJob, 0);
+        pushAssistant("当前 plan.md 仍在保存，我已继续查询原任务；保存完成后请重新发送这条消息。", activeConversation);
+        return;
+      }
       if (shouldUseRecoverableIntakeEntry(text, materials, activeConversation)) {
         const pendingMessageJob = await startConversationMessageJobForConversation(message, activeConversation, {
           type: "handle_send",
