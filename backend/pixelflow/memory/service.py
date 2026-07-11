@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,6 +17,10 @@ PIXELFLOW_POWERMEM_AGENT_ID = "pixelflow"
 MAX_LOG_ERROR_BODY = 300
 OB_SESSION_MAX_ATTEMPTS = 3
 OB_SESSION_RETRY_DELAYS = (0.05, 0.1)
+OB_SESSION_ENTRY_EXIST_TOKEN = re.compile(
+    r"(?<![A-Z0-9_])OB_SESSION_ENTRY_EXIST(?![A-Z0-9_])",
+    re.IGNORECASE,
+)
 
 
 def _bool_env(value: str | None, *, default: bool) -> bool:
@@ -420,11 +425,25 @@ def _dedupe_and_sort(items: list[SemanticMemoryItem]) -> list[SemanticMemoryItem
 
 
 def _is_ob_session_entry_exist(exc: httpx.HTTPStatusError) -> bool:
-    return "OB_SESSION_ENTRY_EXIST" in exc.response.text.upper()
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return _contains_ob_session_entry_exist_token(exc.response.text)
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    # 结构化响应只信任标准错误字段，避免 details 等无关内容误触发重试。
+    return any(_contains_ob_session_entry_exist_token(error.get(field)) for field in ("message", "code"))
+
+
+def _contains_ob_session_entry_exist_token(value: Any) -> bool:
+    return isinstance(value, str) and OB_SESSION_ENTRY_EXIST_TOKEN.search(value) is not None
 
 
 def _is_ob_retryable_request(method: str, path: str) -> bool:
-    return method.upper() == "GET" or path.rstrip("/").endswith("/memories/search")
+    return (method, path) in {("GET", "/system/health"), ("POST", "/memories/search")}
 
 
 def _log_fail_open(message: str, exc: BaseException) -> None:

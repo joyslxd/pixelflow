@@ -7,6 +7,7 @@ import time
 import httpx
 import pytest
 
+import pixelflow.memory.service as powermem_service_module
 from pixelflow.memory import PowerMemConfig, PowerMemService, load_power_mem_config_from_env
 
 
@@ -190,6 +191,148 @@ async def test_powermem_service_retries_ob_session_error_for_health():
     await client.aclose()
 
 
+@pytest.mark.parametrize(
+    "response_kwargs",
+    [
+        {"json": {"success": False, "error": {"message": "NOT_OB_SESSION_ENTRY_EXIST(4661)"}}},
+        {
+            "json": {
+                "success": False,
+                "error": {"code": "OB_SESSION_ENTRY_EXISTS", "message": "temporary backend failure"},
+            }
+        },
+        {
+            "json": {
+                "success": False,
+                "error": {"code": "SEARCH_FAILED", "message": "temporary backend failure"},
+                "details": "OB_SESSION_ENTRY_EXIST(4661)",
+            }
+        },
+        {"text": "NOT_OB_SESSION_ENTRY_EXIST(4661)"},
+        {"text": "OB_SESSION_ENTRY_EXISTS(4661)"},
+    ],
+    ids=[
+        "structured-prefixed-token",
+        "structured-suffixed-token",
+        "structured-unrelated-field",
+        "text-prefixed-token",
+        "text-suffixed-token",
+    ],
+)
+@pytest.mark.asyncio
+async def test_powermem_service_does_not_retry_similar_or_unrelated_ob_text(
+    monkeypatch: pytest.MonkeyPatch,
+    response_kwargs: dict,
+):
+    attempts = 0
+    retry_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(500, request=request, **response_kwargs)
+
+    monkeypatch.setattr(powermem_service_module.asyncio, "sleep", fake_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="相似错误", categories=["experience"])
+
+    assert results == []
+    assert attempts == 1
+    assert retry_delays == []
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_uses_ordered_backoff_for_non_json_ob_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    attempts = 0
+    retry_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(
+                500,
+                request=request,
+                text="temporary backend failure: OB_SESSION_ENTRY_EXIST(4661)",
+            )
+        return httpx.Response(200, json={"success": True, "data": {"results": []}})
+
+    monkeypatch.setattr(powermem_service_module.asyncio, "sleep", fake_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="退避顺序", categories=["experience"])
+
+    assert results == []
+    assert attempts == 3
+    assert retry_delays == [0.05, 0.1]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_ob_backoff_stays_inside_total_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    attempts = 0
+    retry_delays: list[float] = []
+    never_release = asyncio.Event()
+    sleep_cancelled = asyncio.Event()
+
+    async def controlled_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+        try:
+            await never_release.wait()
+        finally:
+            sleep_cancelled.set()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            500,
+            request=request,
+            json={"success": False, "error": {"message": "OB_SESSION_ENTRY_EXIST(4661)"}},
+        )
+
+    monkeypatch.setattr(powermem_service_module.asyncio, "sleep", controlled_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(
+            enabled=True,
+            base_url="https://example.test",
+            api_key="secret",
+            timeout_seconds=0.01,
+            fail_open=True,
+        ),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="总预算", categories=["experience"])
+
+    assert results == []
+    assert attempts == 1
+    assert retry_delays == [0.05]
+    assert sleep_cancelled.is_set()
+    await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_powermem_service_does_not_retry_ob_session_error_for_record():
     attempts = 0
@@ -214,6 +357,23 @@ async def test_powermem_service_does_not_retry_ob_session_error_for_record():
     assert ok is False
     assert attempts == 1
     await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        ("GET", "/system/health", True),
+        ("POST", "/memories/search", True),
+        ("GET", "/memories/search", False),
+        ("GET", "/system/info", False),
+        ("DELETE", "/memories/search", False),
+        ("POST", "/tenant/memories/search", False),
+        ("POST", "/memories/search/", False),
+        ("get", "/system/health", False),
+    ],
+)
+def test_powermem_service_only_retries_exact_allowed_requests(method: str, path: str, expected: bool):
+    assert powermem_service_module._is_ob_retryable_request(method, path) is expected
 
 
 @pytest.mark.asyncio
