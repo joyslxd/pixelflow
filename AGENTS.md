@@ -173,6 +173,10 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - `pixelflow.powermem_api_key` 必须与 PowerMem 服务端 API key 一致；不要把 content-app 用户 `Authorization` 当成 PowerMem key。
 - `pixelflow.powermem_fail_open=true` 时，PowerMem 不可用只记录 warning，主流程继续。
 - `pixelflow.powermem_timeout_seconds`（默认 3s）只用于 search/health 等「同步在用户请求路径上」的调用，必须短且 fail-open；record 写入走独立的 `pixelflow.powermem_record_timeout_seconds`（默认 60s），因为 record 全部是后台 `asyncio.create_task`，不在请求路径上，且 PowerMem 服务端 `infer=true` 要做 DeepSeek LLM 抽取（实测约 36s），不能和 search 共用 3s 否则会被静默打断。
+- PixelFlow 进程内所有 PowerMem search、record、health HTTP 请求共用同一请求闸门，避免 OceanBase `OB_SESSION_ENTRY_EXIST`。
+- search/health 的锁等待和 HTTP 共用短总预算，超时直接 fail-open，不绕过闸门并发请求；record 使用独立长预算。
+- 只有幂等的 search/health 对 `OB_SESSION_ENTRY_EXIST` 最多尝试 3 次，record 不自动重试。
+- 该闸门不跨进程；多 worker、多容器或多副本部署仍需要 PowerMem 服务端正确管理数据库 Session。
 - 网关侧 `record_power_mem` / `record_power_mem_background` 默认按 category 决定 infer：`preference` 默认 `infer=True`，让用户中文偏好进入 PowerMem 服务端语义抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，这些业务摘要已经由 Agent 分类，不再让 PowerMem 做二次 LLM 抽取。调用方显式传 `infer=True/False` 时以显式值为准。
 - `preference` 且 `infer=True` 时，如果 PowerMem 服务端返回 `success=true` 但 `data=[]`（常见于 LLM 抽取失败、额度不足被服务端吞成空结果，或未抽出 facts），`PowerMemService.record()` 会自动用同一内容再写一次 `infer=False`，metadata 增加 `infer_fallback=true` 和 `infer_fallback_reason=empty_infer_result`，保证用户偏好至少可以直接入库并被检索。
 - record 的 `memory_type` 必须和 `category` 一致：PowerMem 服务端会用 `memory_type` 覆写 `metadata.category`，若两者不一致（例如 `category="brand"` 配 `memory_type="fact"`），记忆会落到错误的 category，后续按 `filters.category` 检索时永远搜不到。

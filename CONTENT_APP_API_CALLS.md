@@ -30,6 +30,13 @@
 - `duration`
 - `apiModelParamObj`
 
+PowerMem 调用边界：
+
+- PixelFlow 进程内所有 PowerMem search、record、health HTTP 请求共用同一请求闸门，避免 OceanBase `OB_SESSION_ENTRY_EXIST`。
+- search/health 的锁等待和 HTTP 共用短总预算，超时直接 fail-open，不绕过闸门并发请求；record 使用独立长预算。
+- 只有幂等的 search/health 对 `OB_SESSION_ENTRY_EXIST` 最多尝试 3 次，record 不自动重试。
+- 该闸门不跨进程；多 worker、多容器或多副本部署仍需要 PowerMem 服务端正确管理数据库 Session。
+
 ## 主 PixelFlow 流程实际调用
 
 视频场景包、场景参考图、场景视频和最终视频合并都通过 PixelFlow Python job 包一层：前端先调用 `/agent/flows/video/prepare-scene-packages/start`、`/agent/flows/video/generate-scene-assets/start`、`/agent/flows/video/generate-scenes/start` 或 `/agent/flows/video/merge/start` 获取 Python `job_id`，再轮询对应 `/jobs/{job_id}`。视频需求表单先从 `video_generate` 读取 Seedance 模型和画幅，从 `image_generate` 读取场景资产图片模型能力；用户确认后形成创作合同。场景包主链路通过 `/api/picture/text_to_image` 严格使用 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size` 生成角色三视图、场景图和道具图；场景视频严格使用合同中的 `video_model/video_ratio/video_size/video_sound`。用户离开再回来只查询已有 Python job，不会重复触发 content-app 计费接口。场景视频生成 job 内部会并行调用下方视频生成接口，当前最大并发数为 100；所有分镜都成功、失败或额度暂停后才统一返回。全部成功后按 `scene_index` 启动 PixelFlow `/agent/flows/video/merge/start`；如果只有 1 个分镜，PixelFlow merge job 直接把该分镜 URL 作为最终视频返回，不调用 content-app `/api/video/merge`。失败重试时只重新提交 `failed_scenes` 中的分镜，已成功分镜复用旧视频 URL。

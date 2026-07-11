@@ -180,6 +180,10 @@ PixelFlow 第一版 PowerMem 集成同时覆盖两类能力：
 - 生产环境 `backend/config.prod.yml` 的 `pixelflow.powermem_base_url` 走本机 sidecar：`http://127.0.0.1:18848`。
 - PowerMem 不替代 `pixelflow_user_preferences` 结构化偏好表；结构化默认值、负向规则仍在业务 Store，PowerMem 负责语义检索和跨 Agent 经验复用。
 - `powermem_timeout_seconds` 只用于 search/health 这类同步读请求，当前默认 3 秒；record 写入统一走 `powermem_record_timeout_seconds`，当前默认 60 秒。
+- PixelFlow 进程内所有 PowerMem search、record、health HTTP 请求共用同一请求闸门，避免 OceanBase `OB_SESSION_ENTRY_EXIST`。
+- search/health 的锁等待和 HTTP 共用短总预算，超时直接 fail-open，不绕过闸门并发请求；record 使用独立长预算。
+- 只有幂等的 search/health 对 `OB_SESSION_ENTRY_EXIST` 最多尝试 3 次，record 不自动重试。
+- 该闸门不跨进程；多 worker、多容器或多副本部署仍需要 PowerMem 服务端正确管理数据库 Session。
 - 网关侧 `record_power_mem()` / `record_power_mem_background()` 默认按 category 决定 infer：`preference` 默认 `infer=True`，用于用户中文偏好的服务端抽取和向量化；`brand`、`experience`、`skill` 默认 `infer=False`，避免阶段摘要被重复 LLM 抽取。
 - 当前 `infer=True` 场景是用户偏好类：偏好 API 更新、偏好反馈、旧 Brief 修订反馈。若 PowerMem 返回 `success=true` 但 `data=[]`，`PowerMemService` 会自动用 `infer=False` 补写一次同一条偏好，避免服务端 LLM 额度不足或抽取空结果导致偏好完全丢失。
 - 图片/视频/PPT 等 Skill 调用类经验会自动双写 `experience` 与 `skill`，便于后续流程复用接口选择和失败处理经验。
