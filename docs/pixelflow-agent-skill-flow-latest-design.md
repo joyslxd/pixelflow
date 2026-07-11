@@ -125,7 +125,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 | PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板，调用 LLM 生成具体 plan.md；LLM 失败时按同一合同确定性兜底 |
 | PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/duration.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒及精确总时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 在当前创意内修订 Plan，生成新版本并保留历史 |
-| PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 将历史版本内容恢复成新的当前版本，不覆盖既有历史 |
+| PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
 
 plan.md 模板路径：
 
@@ -568,7 +568,10 @@ Plan 审核与版本规则：
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
 - 当前创意内修改只调用 `/agent/flows/planning/plan/revise`，不得返回创意方向列表。
 - 重新生成新创意才调用 `/agent/flows/intake/directions` 返回新的 3 个方向。
-- 初始 Plan 是 v1，每次修订或回退都产生新版本；回退 v1 不覆盖历史，而是生成 `restored_from_version=1` 的新当前版本。
+- 初始 Plan 是 v1；每次修订创建新版本，回退只直接激活所选历史版本并保持 `plan_history` 不变，不追加重复版本。
+- 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
+- 新版本历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照。回退时恢复所选版本的快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
+- 前端把回退后的激活版本及其合同、分镜时长持久化到 conversation context，刷新或重新进入对话后继续展示该版本。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。
 

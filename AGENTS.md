@@ -104,7 +104,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 采集 | `POST /agent/flows/intake/directions` | 生成 3 个创意方向 |
 | 策划 | `POST /agent/flows/planning/plan` | 按图片/视频独立模板与用户确认合同调用 LLM 生成 plan.md |
 | 策划 | `POST /agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并创建下一版本 |
-| 策划 | `POST /agent/flows/planning/plan/restore` | 将历史 Plan 内容恢复为新的当前版本 |
+| 策划 | `POST /agent/flows/planning/plan/restore` | 直接激活所选历史 Plan，不追加重复版本 |
 | 图片 | `POST /agent/flows/image/prepare` | 判断图片接口并生成参数 |
 | 图片 | `POST /agent/flows/image/generate` | 调用图片 skill 生成，支持多张循环生成 |
 | 图片 | `POST /agent/flows/image/generate/start` | 启动可恢复图片生成异步任务 |
@@ -289,7 +289,10 @@ SmartPPT接口：
 - 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
 - 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。Plan 优先调用 `deepseek-v4-pro` 生成具体内容，失败时才使用同合同的确定性兜底。
-- 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。`/planning/plan/restore` 回退会创建新版本，不覆盖历史。
+- 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
+- `/agent/flows/planning/plan/restore` 直接激活所选历史版本并保持既有历史不变，不追加重复版本；回退后的激活版本会持久化到 conversation context，刷新或重新进入对话后继续展示该版本。
+- 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
+- 每个新历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
 
 场景包结构：
 

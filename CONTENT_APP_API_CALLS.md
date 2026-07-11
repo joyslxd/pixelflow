@@ -41,6 +41,12 @@ PowerMem 调用边界：
 
 视频场景包、场景参考图、场景视频和最终视频合并都通过 PixelFlow Python job 包一层：前端先调用 `/agent/flows/video/prepare-scene-packages/start`、`/agent/flows/video/generate-scene-assets/start`、`/agent/flows/video/generate-scenes/start` 或 `/agent/flows/video/merge/start` 获取 Python `job_id`，再轮询对应 `/jobs/{job_id}`。视频需求表单先从 `video_generate` 读取 Seedance 模型和画幅，从 `image_generate` 读取场景资产图片模型能力；用户确认后形成创作合同。场景包主链路通过 `/api/picture/text_to_image` 严格使用 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size` 生成角色三视图、场景图和道具图；场景视频严格使用合同中的 `video_model/video_ratio/video_size/video_sound`。用户离开再回来只查询已有 Python job，不会重复触发 content-app 计费接口。场景视频生成 job 内部会并行调用下方视频生成接口，当前最大并发数为 100；所有分镜都成功、失败或额度暂停后才统一返回。全部成功后按 `scene_index` 启动 PixelFlow `/agent/flows/video/merge/start`；如果只有 1 个分镜，PixelFlow merge job 直接把该分镜 URL 作为最终视频返回，不调用 content-app `/api/video/merge`。失败重试时只重新提交 `failed_scenes` 中的分镜，已成功分镜复用旧视频 URL。
 
+Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
+
+- `/agent/flows/planning/plan/restore` 直接激活所选历史版本，不追加重复版本。
+- 回退后再次“继续修改”时，`/agent/flows/planning/plan/revise` 以历史最大版本号加一创建新版本；例如 v2 回退到 v1 后修订生成 v3，v2 仍保留。
+- 新版本历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长，确保后续 content-app 图片、视频调用仍使用正确参数。
+
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | `/api/auth/verify` | `POST` | `content_app_auth.verify_authorization_header_remote()`、SSE 生成器 | 实时校验 content-app token，禁用用户或失效 token 立即拒绝。 | `AuthController.verifyToken()` | pixelflow 本地只读取 JWT payload 里的 `sub` 作为用户名；token 真伪、过期和用户禁用状态以此接口返回为准。 |

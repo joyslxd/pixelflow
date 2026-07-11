@@ -121,7 +121,7 @@ flowchart TD
 | 采集 | POST | `/agent/flows/intake/directions` | 生成 3 个创意方向 |
 | 策划 | POST | `/agent/flows/planning/plan` | 填充 plan.md |
 | 策划 | POST | `/agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并生成新版本 |
-| 策划 | POST | `/agent/flows/planning/plan/restore` | 将历史 Plan 恢复为新的当前版本 |
+| 策划 | POST | `/agent/flows/planning/plan/restore` | 直接激活所选历史 Plan，不追加重复版本 |
 | 图片 | POST | `/agent/flows/image/prepare` | 选择图片接口并生成参数 |
 | 图片 | POST | `/agent/flows/image/generate` | 同步生成图片，兼容旧调用 |
 | 图片 | POST | `/agent/flows/image/generate/start` | 启动可恢复图片生成 job |
@@ -261,7 +261,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
 ```
 
-Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重新生成新创意”才重新返回 3 个方向。历史 Plan 可以回退，回退会创建一个新版本而不是覆盖历史。
+Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重新生成新创意”才重新返回 3 个方向。`/agent/flows/planning/plan/restore` 回退时直接激活所选历史版本并保持既有历史不变，不追加重复版本。回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。每个新历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
 
 ## 视频场景包规则
 
