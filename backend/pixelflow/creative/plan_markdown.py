@@ -47,7 +47,15 @@ class PlanMarkdownResult:
             object.__setattr__(
                 self,
                 "plan_history",
-                [_history_entry(self.plan_version, self.plan_markdown, self.restored_from_version)],
+                [
+                    _history_entry(
+                        self.plan_version,
+                        self.plan_markdown,
+                        self.restored_from_version,
+                        creation_contract=self.creation_contract,
+                        scene_durations_sec=self.scene_durations_sec,
+                    )
+                ],
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,9 +86,20 @@ class PlanMarkdownResult:
         error: str | None = None,
         creation_contract: dict[str, Any] | None = None,
     ) -> PlanMarkdownResult:
-        version = max(1, int(current_version or self.plan_version)) + 1
         history = _normalized_history(plan_history or self.plan_history)
-        history.append(_history_entry(version, plan_markdown, restored_from_version))
+        history_max = max((int(item["version"]) for item in history), default=0)
+        version = max(1, int(current_version or self.plan_version), history_max) + 1
+        next_contract = dict(creation_contract or self.creation_contract)
+        next_durations = list(self.scene_durations_sec)
+        history.append(
+            _history_entry(
+                version,
+                plan_markdown,
+                restored_from_version,
+                creation_contract=next_contract,
+                scene_durations_sec=next_durations,
+            )
+        )
         return replace(
             self,
             plan_markdown=plan_markdown,
@@ -89,7 +108,8 @@ class PlanMarkdownResult:
             restored_from_version=restored_from_version,
             llm_used=self.llm_used if llm_used is None else llm_used,
             error=error,
-            creation_contract=creation_contract or self.creation_contract,
+            creation_contract=next_contract,
+            scene_durations_sec=next_durations,
         )
 
 
@@ -286,19 +306,26 @@ def restore_plan_version(
     source = next((item for item in history if int(item.get("version") or 0) == restore_version), None)
     if source is None:
         raise ValueError(f"plan.md v{restore_version} 不存在，无法回退")
-    base = PlanMarkdownResult(
-        output_type=intent,
-        plan_markdown=current_plan_markdown,
-        template_path=_template_path(intent),
-        plan_version=current_plan_version,
-        plan_history=history,
-        creation_contract=dict(creation_contract or {}),
-        scene_durations_sec=list(scene_durations_sec or []),
+    source_contract = source.get("creation_contract")
+    source_durations = source.get("scene_durations_sec")
+    resolved_contract = (
+        dict(source_contract)
+        if isinstance(source_contract, dict) and source_contract
+        else dict(creation_contract or {})
     )
-    return base.next_version(
+    resolved_durations = (
+        [int(value) for value in source_durations]
+        if isinstance(source_durations, list) and source_durations
+        else list(scene_durations_sec or [])
+    )
+    return PlanMarkdownResult(
+        output_type=intent,
         plan_markdown=str(source.get("plan_markdown") or ""),
+        template_path=_template_path(intent),
+        plan_version=restore_version,
         plan_history=history,
-        current_version=current_plan_version,
+        creation_contract=resolved_contract,
+        scene_durations_sec=resolved_durations,
         restored_from_version=restore_version,
     )
 
@@ -586,8 +613,20 @@ def _scene_stage(index: int, count: int) -> str:
     return "收束结果并给出清晰行动提示"
 
 
-def _history_entry(version: int, plan_markdown: str, restored_from_version: int | None = None) -> dict[str, Any]:
-    item: dict[str, Any] = {"version": version, "plan_markdown": plan_markdown}
+def _history_entry(
+    version: int,
+    plan_markdown: str,
+    restored_from_version: int | None = None,
+    *,
+    creation_contract: dict[str, Any] | None = None,
+    scene_durations_sec: list[int] | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "version": version,
+        "plan_markdown": plan_markdown,
+        "creation_contract": dict(creation_contract or {}),
+        "scene_durations_sec": list(scene_durations_sec or []),
+    }
     if restored_from_version is not None:
         item["restored_from_version"] = restored_from_version
     return item
