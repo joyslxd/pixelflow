@@ -203,9 +203,61 @@ test("plan rollback activates history directly and persists conversation context
   assert.match(rollbackSource, /plan_version:\s*plan\.plan_version/, "context must save active version");
   assert.match(rollbackSource, /plan_history:\s*plan\.plan_history/, "context must save unchanged history");
   assert.match(rollbackSource, /creation_contract:\s*plan\.creation_contract/, "context must save restored contract");
+  const snapshotIndex = rollbackSource.indexOf("const rollbackSnapshot = makeSnapshot(targetConversationId)");
+  const restoreIndex = rollbackSource.indexOf("api.restorePlanMarkdown");
+  const messagePersistIndex = rollbackSource.indexOf("await persistPlanArtifactForConversation");
+  const contextPersistIndex = rollbackSource.indexOf("await api.updateConversation");
+  const successIndex = rollbackSource.indexOf("已回退到 plan.md");
+  assert.notEqual(snapshotIndex, -1, "rollback must freeze the conversation snapshot");
+  assert.ok(snapshotIndex < restoreIndex, "rollback must freeze the snapshot before calling restore");
+  assert.match(rollbackSource, /context:\s*\{\s*\.\.\.rollbackSnapshot/, "context persistence must use the frozen snapshot");
+  assert.notEqual(messagePersistIndex, -1, "rollback must await strict Plan message persistence");
+  assert.notEqual(contextPersistIndex, -1, "rollback must await conversation context persistence");
   assert.ok(
-    rollbackSource.indexOf("api.updateConversation") < rollbackSource.indexOf("已回退到 plan.md"),
-    "success message must follow persistence",
+    messagePersistIndex < contextPersistIndex,
+    "Plan message persistence must finish before conversation context persistence",
+  );
+  assert.ok(contextPersistIndex < successIndex, "success message must follow context persistence");
+
+  const contextWarningStart = rollbackSource.indexOf("catch (contextError)");
+  assert.notEqual(contextWarningStart, -1, "context persistence must have a dedicated warning branch");
+  const contextWarningSource = rollbackSource.slice(contextWarningStart, successIndex);
+  assert.match(
+    contextWarningSource,
+    /版本已保存，但上下文同步失败，可刷新恢复/,
+    "context failure must explain that the persisted Plan can be restored after refresh",
+  );
+  assert.equal(
+    contextWarningSource.includes("releaseArtifactAction"),
+    false,
+    "context failure must not release the action after the Plan message was persisted",
+  );
+});
+
+test("strict Plan message persistence removes optimistic cards and rethrows failures", () => {
+  const removeStart = workspaceSource.indexOf("const removeOptimisticMessage =");
+  const strictStart = workspaceSource.indexOf("const persistPlanArtifactForConversation = async");
+  const strictEnd = workspaceSource.indexOf("const startConversationMessageJobForConversation", strictStart);
+  assert.notEqual(removeStart, -1, "optimistic message removal helper must exist");
+  assert.notEqual(strictStart, -1, "strict Plan persistence helper must exist");
+  assert.notEqual(strictEnd, -1, "the next message helper must follow strict Plan persistence");
+
+  const removeSource = workspaceSource.slice(removeStart, strictStart);
+  const strictSource = workspaceSource.slice(strictStart, strictEnd);
+  assert.match(removeSource, /items\.filter/, "removal must delete the optimistic message from current messages");
+  assert.match(removeSource, /messagesRef\.current = nextItems/, "removal must keep the messages ref in sync");
+  assert.match(strictSource, /appendOptimisticMessageForConversation/, "strict persistence must first insert an optimistic card");
+  assert.match(strictSource, /await persistChatMessage/, "strict persistence must await the backend message save");
+  assert.match(strictSource, /replaceOptimisticMessage/, "strict persistence must replace the optimistic card after success");
+  assert.match(
+    strictSource,
+    /catch \(err\)[\s\S]*removeOptimisticMessage\(optimisticMessage\.id, targetConversationId\)[\s\S]*throw err/,
+    "strict persistence must remove the optimistic card and rethrow save failures",
+  );
+  assert.equal(
+    strictSource.includes("appendMessageForConversation("),
+    false,
+    "strict Plan persistence must not reuse the error-swallowing append helper",
   );
 });
 

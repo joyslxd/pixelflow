@@ -1823,6 +1823,29 @@ export function WorkspacePage() {
     return localMessage;
   };
 
+  const removeOptimisticMessage = (optimisticMessageId: string, targetConversationId: string) => {
+    setMessages((items) => {
+      const nextItems = items.filter(
+        (item) => item.id !== optimisticMessageId || messageConversationId(item, targetConversationId) !== targetConversationId,
+      );
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+  };
+
+  const persistPlanArtifactForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
+    const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
+    try {
+      if (!targetConversationId) throw new Error("无法保存 plan.md：对话 ID 不存在");
+      const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
+      replaceOptimisticMessage(optimisticMessage.id, savedMessage, targetConversationId);
+      return savedMessage;
+    } catch (err) {
+      removeOptimisticMessage(optimisticMessage.id, targetConversationId);
+      throw err;
+    }
+  };
+
   const startConversationMessageJobForConversation = async (
     message: ChatMessage,
     targetConversationId: string,
@@ -2851,7 +2874,7 @@ export function WorkspacePage() {
     }, targetConversationId);
   };
 
-  const pushPlanArtifact = (
+  const createPlanArtifactMessage = (
     plan: PlanMarkdownResponse,
     selectedDirection: CreativeDirectionResponse,
     context: {
@@ -2862,9 +2885,14 @@ export function WorkspacePage() {
       intakeContext?: Record<string, unknown>;
     },
     targetConversationId = conversationIdRef.current,
-  ) => {
-    pushArtifact("plan.md 创作方案已生成，请审核后点击「同意方案」继续。", {
-      type: "plan",
+  ) => ({
+    id: uid(),
+    conversationId: targetConversationId || undefined,
+    role: "assistant" as const,
+    content: "plan.md 创作方案已生成，请审核后点击「同意方案」继续。",
+    time: "",
+    artifact: {
+      type: "plan" as const,
       title: "plan.md 创作方案",
       description: `基于「${selectedDirection.title}」生成，当前版本 v${plan.plan_version || 1}`,
       actionLabel: "审核",
@@ -2879,7 +2907,23 @@ export function WorkspacePage() {
       intakeContext: context.intakeContext,
       materials: context.materials || [],
       coreMessage: context.coreMessage,
-    }, targetConversationId);
+    },
+  });
+
+  const pushPlanArtifact = (
+    plan: PlanMarkdownResponse,
+    selectedDirection: CreativeDirectionResponse,
+    context: {
+      intent: CreationIntent;
+      formValues: Record<string, unknown>;
+      coreMessage: string;
+      materials?: Array<Record<string, unknown>>;
+      intakeContext?: Record<string, unknown>;
+    },
+    targetConversationId = conversationIdRef.current,
+  ) => {
+    const message = createPlanArtifactMessage(plan, selectedDirection, context, targetConversationId);
+    pushArtifact(message.content, message.artifact, targetConversationId, message.id);
   };
 
   const pushPptOutlineArtifact = (
@@ -6532,6 +6576,7 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
+    const rollbackSnapshot = makeSnapshot(targetConversationId);
     setBusyForConversation(targetConversationId, true);
     pushAssistant(
       `正在把 plan.md v${artifact.plan.plan_version || 1} 直接回退到 v${version}，不会创建新版本…`,
@@ -6547,32 +6592,45 @@ export function WorkspacePage() {
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
       });
-      pushPlanArtifact(
-        plan,
-        artifact.selectedDirection,
-        {
-          intent: artifact.intent,
-          formValues: artifact.formValues,
-          materials: artifact.materials || [],
-          coreMessage: artifact.coreMessage || pendingCore,
-          intakeContext: artifact.intakeContext,
-        },
+      await persistPlanArtifactForConversation(
+        createPlanArtifactMessage(
+          plan,
+          artifact.selectedDirection,
+          {
+            intent: artifact.intent,
+            formValues: artifact.formValues,
+            materials: artifact.materials || [],
+            coreMessage: artifact.coreMessage || pendingCore,
+            intakeContext: artifact.intakeContext,
+          },
+          targetConversationId,
+        ),
         targetConversationId,
       );
-      if (targetConversationId) {
-        await api.updateConversation(targetConversationId, {
-          last_phase: "plan_review",
-          context: {
-            ...makeSnapshot(targetConversationId),
-            selected_direction: artifact.selectedDirection,
-            plan_markdown: plan.plan_markdown,
-            plan_version: plan.plan_version,
-            plan_history: plan.plan_history,
-            creation_contract: plan.creation_contract,
-            scene_durations_sec: plan.scene_durations_sec,
-            restored_from_version: plan.restored_from_version,
-          } as unknown as Record<string, unknown>,
-        });
+      try {
+        if (targetConversationId) {
+          await api.updateConversation(targetConversationId, {
+            last_phase: "plan_review",
+            context: {
+              ...rollbackSnapshot,
+              selected_direction: artifact.selectedDirection,
+              plan_markdown: plan.plan_markdown,
+              plan_version: plan.plan_version,
+              plan_history: plan.plan_history,
+              creation_contract: plan.creation_contract,
+              scene_durations_sec: plan.scene_durations_sec,
+              restored_from_version: plan.restored_from_version,
+            } as unknown as Record<string, unknown>,
+          });
+        }
+      } catch (contextError) {
+        pushAssistant(
+          `plan.md v${plan.plan_version} 版本已保存，但上下文同步失败，可刷新恢复。${
+            contextError instanceof Error ? `（${contextError.message}）` : ""
+          }`,
+          targetConversationId,
+        );
+        return;
       }
       pushAssistant(`已回退到 plan.md v${plan.plan_version}，未创建新版本。`, targetConversationId);
     } catch (err) {
