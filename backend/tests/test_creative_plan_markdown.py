@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from pixelflow.creative.plan_markdown import build_plan_markdown, build_plan_markdown_with_llm
+from pixelflow.creative.plan_markdown import (
+    PlanMarkdownResult,
+    build_plan_markdown,
+    build_plan_markdown_with_llm,
+    restore_plan_version,
+)
 
 VIDEO_FORM = {
     "product_info": "AuroraFit 智能健康戒指",
@@ -186,3 +192,81 @@ def test_build_video_plan_with_llm_uses_uploaded_template_and_constrains_scene_i
     assert "图片模型：gpt-image-2" in result.plan_markdown
     assert "苹果PRO" not in result.plan_markdown
     assert fake_model.prompts
+
+
+def test_restore_plan_version_activates_history_without_appending():
+    history = [
+        {
+            "version": 1,
+            "plan_markdown": "# plan.md v1",
+            "creation_contract": {"video_model": "seedance-1.5-pro", "video_duration_sec": 20},
+            "scene_durations_sec": [10, 10],
+        },
+        {
+            "version": 2,
+            "plan_markdown": "# plan.md v2",
+            "creation_contract": {"video_model": "seedance-2.0", "video_duration_sec": 20},
+            "scene_durations_sec": [5, 15],
+        },
+    ]
+
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=history,
+        restore_version=1,
+        creation_contract=history[1]["creation_contract"],
+        scene_durations_sec=history[1]["scene_durations_sec"],
+    )
+
+    assert result.plan_version == 1
+    assert result.plan_markdown == "# plan.md v1"
+    assert result.plan_history == history
+    assert result.restored_from_version == 1
+    assert result.creation_contract == history[0]["creation_contract"]
+    assert result.scene_durations_sec == [10, 10]
+
+
+def test_restore_legacy_history_keeps_current_authoritative_contract():
+    current_contract = {"video_model": "seedance-2.0", "video_duration_sec": 20}
+
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[
+            {"version": 1, "plan_markdown": "# plan.md v1"},
+            {"version": 2, "plan_markdown": "# plan.md v2"},
+        ],
+        restore_version=1,
+        creation_contract=current_contract,
+        scene_durations_sec=[10, 10],
+    )
+
+    assert result.plan_version == 1
+    assert result.creation_contract == current_contract
+    assert result.scene_durations_sec == [10, 10]
+
+
+def test_next_version_uses_history_max_after_restore():
+    restored = PlanMarkdownResult(
+        output_type="image",
+        plan_markdown="# plan.md v1",
+        template_path=Path("plan_image.md"),
+        plan_version=1,
+        plan_history=[
+            {"version": 1, "plan_markdown": "# plan.md v1"},
+            {"version": 2, "plan_markdown": "# plan.md v2"},
+        ],
+        creation_contract={"image_size": "9:16"},
+    )
+
+    revised = restored.next_version(
+        plan_markdown="# plan.md v3",
+        current_version=restored.plan_version,
+    )
+
+    assert revised.plan_version == 3
+    assert [item["version"] for item in revised.plan_history] == [1, 2, 3]
+    assert revised.plan_history[-1]["creation_contract"] == {"image_size": "9:16"}

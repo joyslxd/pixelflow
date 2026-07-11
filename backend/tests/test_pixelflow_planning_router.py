@@ -239,7 +239,8 @@ def test_planning_router_revises_current_plan_without_regenerating_directions(mo
     assert "增加开学季氛围" in data["plan_markdown"]
 
 
-def test_planning_router_restores_history_as_a_new_version():
+@pytest.mark.parametrize("intent", ["image", "video"])
+def test_planning_router_restores_history_without_creating_version(intent: str):
     from app.gateway.routers import pixelflow_planning
 
     app = make_authed_test_app(user_factory=_stable_user)
@@ -253,7 +254,7 @@ def test_planning_router_restores_history_as_a_new_version():
         response = client.post(
             "/agent/flows/planning/plan/restore",
             json={
-                "intent": "image",
+                "intent": intent,
                 "current_plan_markdown": "# plan.md v2",
                 "current_plan_version": 2,
                 "plan_history": history,
@@ -263,10 +264,10 @@ def test_planning_router_restores_history_as_a_new_version():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["plan_version"] == 3
+    assert data["plan_version"] == 1
     assert data["restored_from_version"] == 1
     assert data["plan_markdown"] == "# plan.md v1"
-    assert len(data["plan_history"]) == 3
+    assert data["plan_history"] == history
 
 
 def test_planning_router_uses_power_mem_context_in_plan():
