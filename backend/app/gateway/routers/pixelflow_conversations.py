@@ -268,7 +268,7 @@ async def _append_conversation_message(
         raise HTTPException(status_code=404, detail="Conversation not found")
     message = await store.append_conversation_message(
         PixelFlowConversationMessageRecord(
-            message_id=uuid.uuid4().hex,
+            message_id=_conversation_message_id(conversation_id, body.payload),
             conversation_id=conversation_id,
             user_id=user_id,
             role=body.role,
@@ -277,6 +277,15 @@ async def _append_conversation_message(
         )
     )
     return _message_response(message)
+
+
+def _conversation_message_id(conversation_id: str, payload: dict[str, Any]) -> str:
+    """按对话与前端消息 ID 生成可重试的稳定主键。"""
+    client_message_id = payload.get("client_message_id")
+    if isinstance(client_message_id, str) and client_message_id.strip():
+        idempotency_key = f"pixelflow-conversation-message:{conversation_id}:{client_message_id.strip()}"
+        return uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key).hex
+    return uuid.uuid4().hex
 
 
 @router.patch("/{conversation_id}/messages/{message_id}", response_model=ConversationMessageResponse)

@@ -103,3 +103,83 @@ def test_conversation_message_job_returns_pollable_saved_message():
 
         detail = client.get(f"/agent/conversations/{conversation_id}").json()
         assert [message["content"] for message in detail["messages"]] == ["帮我生成书包宣传图"]
+
+
+def test_conversation_message_retry_is_idempotent_per_conversation():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        first_conversation = client.post("/agent/conversations", json={"title": "第一条对话"}).json()
+        second_conversation = client.post("/agent/conversations", json={"title": "第二条对话"}).json()
+        payload = {
+            "role": "assistant",
+            "content": "plan.md v1",
+            "payload": {"client_message_id": "plan-card-v1", "artifact": {"type": "plan"}},
+        }
+
+        first = client.post(
+            f"/agent/conversations/{first_conversation['conversation_id']}/messages",
+            json=payload,
+        )
+        retried = client.post(
+            f"/agent/conversations/{first_conversation['conversation_id']}/messages",
+            json={**payload, "content": "这次重试不应覆盖首次内容"},
+        )
+        other_conversation = client.post(
+            f"/agent/conversations/{second_conversation['conversation_id']}/messages",
+            json=payload,
+        )
+
+        assert first.status_code == retried.status_code == other_conversation.status_code == 200
+        assert retried.json()["message_id"] == first.json()["message_id"]
+        assert retried.json()["content"] == "plan.md v1"
+        assert other_conversation.json()["message_id"] != first.json()["message_id"]
+        first_detail = client.get(
+            f"/agent/conversations/{first_conversation['conversation_id']}"
+        ).json()
+        second_detail = client.get(
+            f"/agent/conversations/{second_conversation['conversation_id']}"
+        ).json()
+        assert [message["content"] for message in first_detail["messages"]] == ["plan.md v1"]
+        assert [message["content"] for message in second_detail["messages"]] == ["plan.md v1"]
+
+
+def test_conversation_message_job_retry_does_not_duplicate_plan_message():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        conversation_id = client.post("/agent/conversations", json={"title": "Plan 重试"}).json()[
+            "conversation_id"
+        ]
+        request = {
+            "role": "assistant",
+            "content": "plan.md v1",
+            "payload": {"client_message_id": "plan-job-v1", "artifact": {"type": "plan"}},
+        }
+
+        started_jobs = [
+            client.post(f"/agent/conversations/{conversation_id}/messages/start", json=request).json()["job_id"]
+            for _ in range(2)
+        ]
+        results = []
+        for job_id in started_jobs:
+            for _ in range(30):
+                status = client.get(f"/agent/conversations/{conversation_id}/messages/jobs/{job_id}")
+                assert status.status_code == 200
+                if status.json()["status"] == "completed":
+                    results.append(status.json()["result"])
+                    break
+                time.sleep(0.01)
+
+        assert len(results) == 2
+        assert results[0]["message_id"] == results[1]["message_id"]
+        detail = client.get(f"/agent/conversations/{conversation_id}").json()
+        assert [message["content"] for message in detail["messages"]] == ["plan.md v1"]

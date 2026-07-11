@@ -287,8 +287,26 @@ def test_restore_image_plan_preserves_explicit_empty_snapshots():
 
 @pytest.mark.parametrize(
     "malformed_durations",
-    ([None, 10], [object(), 10], ["invalid", 10]),
-    ids=("none", "object", "invalid-string"),
+    (
+        [None, 10],
+        [object(), 10],
+        ["invalid", 10],
+        [10.0, 10],
+        [True, 10, 9],
+        [3, 10, 7],
+        [16, 4],
+        [10, 9],
+    ),
+    ids=(
+        "none",
+        "object",
+        "invalid-string",
+        "float",
+        "bool",
+        "below-minimum",
+        "above-maximum",
+        "wrong-total",
+    ),
 )
 def test_restore_malformed_scene_durations_falls_back_to_current_authoritative_value(
     malformed_durations: list[object],
@@ -310,15 +328,15 @@ def test_restore_malformed_scene_durations_falls_back_to_current_authoritative_v
                 "version": 2,
                 "plan_markdown": "# plan.md v2",
                 "creation_contract": current_contract,
-                "scene_durations_sec": [10, 10],
+                "scene_durations_sec": [6, 14],
             },
         ],
         restore_version=1,
         creation_contract=current_contract,
-        scene_durations_sec=[10, 10],
+        scene_durations_sec=[6, 14],
     )
 
-    assert result.scene_durations_sec == [10, 10]
+    assert result.scene_durations_sec == [6, 14]
 
 
 def test_initial_plan_history_snapshot_deep_copies_nested_contract():

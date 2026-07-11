@@ -38,6 +38,7 @@ import {
 } from "@/lib/api";
 import type { ChatMessage, CanvasState, Brief, BriefShot } from "@/lib/chat";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
+import { activePlanSnapshotForConversation } from "@/lib/activePlanSnapshot";
 import {
   appendVisibleConversationMessage,
   messageConversationId,
@@ -238,6 +239,13 @@ interface WorkspaceSnapshot {
   generated_scene_videos?: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"];
   merged_video?: NonNullable<ChatArtifact["mergedVideo"]>;
   video_scene_package_edited_scene_ids?: string[];
+  selected_direction?: unknown;
+  plan_markdown?: string;
+  plan_version?: number;
+  plan_history?: PlanMarkdownResponse["plan_history"];
+  creation_contract?: Record<string, unknown>;
+  scene_durations_sec?: number[];
+  restored_from_version?: number | null;
 }
 
 type ChatArtifact = NonNullable<ChatMessage["artifact"]>;
@@ -1582,6 +1590,7 @@ export function WorkspacePage() {
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
   const [currentTaskId, setCurrentTaskId] = useState("");
   const messagesRef = useRef<ChatMessage[]>([]);
+  const pendingPlanMessagePersistenceIdsRef = useRef(new Set<string>());
   const conversationIdRef = useRef<string>("");
   const routeConversationIdRef = useRef<string>("");
   const taskIdRef = useRef<string>("");
@@ -1834,13 +1843,16 @@ export function WorkspacePage() {
   };
 
   const persistPlanArtifactForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
+    pendingPlanMessagePersistenceIdsRef.current.add(message.id);
     const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
     try {
       if (!targetConversationId) throw new Error("无法保存 plan.md：对话 ID 不存在");
       const savedMessage = await persistChatMessage(targetConversationId, optimisticMessage);
+      pendingPlanMessagePersistenceIdsRef.current.delete(optimisticMessage.id);
       replaceOptimisticMessage(optimisticMessage.id, savedMessage, targetConversationId);
       return savedMessage;
     } catch (err) {
+      pendingPlanMessagePersistenceIdsRef.current.delete(optimisticMessage.id);
       removeOptimisticMessage(optimisticMessage.id, targetConversationId);
       throw err;
     }
@@ -4853,6 +4865,11 @@ export function WorkspacePage() {
 
   const makeSnapshot = (snapshotConversationId = currentConversationId): WorkspaceSnapshot => {
     const scenePackageSnapshot = latestScenePackageSnapshotForConversation(messagesRef.current, snapshotConversationId);
+    const activePlanSnapshot = activePlanSnapshotForConversation(
+      messagesRef.current,
+      snapshotConversationId,
+      pendingPlanMessagePersistenceIdsRef.current,
+    );
     return {
       taskId: currentTaskId,
       pendingMaterials,
@@ -4913,6 +4930,7 @@ export function WorkspacePage() {
       lastEventId: lastEventIdRef.current,
       announcedPhases: Array.from(announcedPhasesRef.current),
       briefReadyShown: briefReadyShownRef.current,
+      ...activePlanSnapshot,
       ...scenePackageSnapshot,
     };
   };
@@ -5206,59 +5224,7 @@ export function WorkspacePage() {
     if (restoringRef.current || !currentConversationId) return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
-      const snapshot: WorkspaceSnapshot = {
-        taskId: currentTaskId,
-        pendingMaterials,
-        flowDraft: flowDraftRef.current,
-        pendingMessageJob:
-          pendingMessageJobRef.current?.conversation_id === currentConversationId ? pendingMessageJobRef.current : null,
-        pending_message_job:
-          pendingMessageJobRef.current?.conversation_id === currentConversationId ? pendingMessageJobRef.current : null,
-        pendingIntakeJob:
-          pendingIntakeJobRef.current?.conversation_id === currentConversationId ? pendingIntakeJobRef.current : null,
-        pending_intake_job:
-          pendingIntakeJobRef.current?.conversation_id === currentConversationId ? pendingIntakeJobRef.current : null,
-        pendingDirectionJob:
-          pendingDirectionJobRef.current?.conversation_id === currentConversationId ? pendingDirectionJobRef.current : null,
-        pending_direction_job:
-          pendingDirectionJobRef.current?.conversation_id === currentConversationId ? pendingDirectionJobRef.current : null,
-        pendingImageEditRequest:
-          pendingImageEditRequestRef.current?.conversationId === currentConversationId ? pendingImageEditRequestRef.current : null,
-        imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
-        pendingImageJob:
-          pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
-        pending_image_job:
-          pendingImageJobRef.current?.conversation_id === currentConversationId ? pendingImageJobRef.current : null,
-        pendingImageRevision:
-          imageRevisionArtifactRef.current?.conversationId === currentConversationId ? imageRevisionArtifactRef.current : null,
-        pending_image_revision:
-          imageRevisionArtifactRef.current?.conversationId === currentConversationId ? imageRevisionArtifactRef.current : null,
-        pendingScenePackageJob:
-          pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
-        pending_scene_package_job:
-          pendingScenePackageJobRef.current?.conversation_id === currentConversationId ? pendingScenePackageJobRef.current : null,
-        pendingVideoJob:
-          pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
-        pending_video_job:
-          pendingVideoJobRef.current?.conversation_id === currentConversationId ? pendingVideoJobRef.current : null,
-        pendingVideoRevision:
-          videoRevisionArtifactRef.current?.conversationId === currentConversationId ? videoRevisionArtifactRef.current : null,
-        pending_video_revision:
-          videoRevisionArtifactRef.current?.conversationId === currentConversationId ? videoRevisionArtifactRef.current : null,
-        pendingPptJob:
-          pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
-        pending_ppt_job:
-          pendingPptJobRef.current?.conversation_id === currentConversationId ? pendingPptJobRef.current : null,
-        ppt_done: isPptDoneForConversation(currentConversationId),
-        image_accepted: latestImageResultArtifactForConversation(messagesRef.current, currentConversationId)?.imageAccepted === true,
-        video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, currentConversationId)?.videoAccepted === true,
-        canvas,
-        canvasOpen,
-        briefConfirmed,
-        lastEventId: lastEventIdRef.current,
-        announcedPhases: Array.from(announcedPhasesRef.current),
-        briefReadyShown: briefReadyShownRef.current,
-      };
+      const snapshot = makeSnapshot(currentConversationId);
       void api
         .updateConversation(currentConversationId, {
           current_task_id: currentTaskId || null,
@@ -5267,7 +5233,7 @@ export function WorkspacePage() {
         })
         .catch(() => {});
     }, 400);
-  }, [pendingMaterials, pendingPlanRevisionChoice, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
+  }, [messages, pendingMaterials, pendingPlanRevisionChoice, canvas, canvasOpen, briefConfirmed, currentTaskId, currentConversationId]);
 
   const titleFromPrompt = (text: string) => {
     const normalized = text.trim() || "带附件对话";
@@ -6517,32 +6483,47 @@ export function WorkspacePage() {
         intake_context: artifact.intakeContext,
         materials,
       });
-      pushPlanArtifact(
-        plan,
-        artifact.selectedDirection,
-        {
-          intent: artifact.intent,
-          formValues: artifact.formValues,
-          materials,
-          coreMessage: artifact.coreMessage || pendingCore,
-          intakeContext: artifact.intakeContext,
-        },
+      await persistPlanArtifactForConversation(
+        createPlanArtifactMessage(
+          plan,
+          artifact.selectedDirection,
+          {
+            intent: artifact.intent,
+            formValues: artifact.formValues,
+            materials,
+            coreMessage: artifact.coreMessage || pendingCore,
+            intakeContext: artifact.intakeContext,
+          },
+          targetConversationId,
+        ),
         targetConversationId,
       );
-      if (targetConversationId) {
-        await api.updateConversation(targetConversationId, {
-          last_phase: "plan_review",
-          context: {
-            ...makeSnapshot(targetConversationId),
-            pendingPlanRevisionChoice: null,
-            pending_plan_revision_choice: null,
-            selected_direction: artifact.selectedDirection,
-            plan_markdown: plan.plan_markdown,
-            plan_version: plan.plan_version,
-            plan_history: plan.plan_history,
-            creation_contract: plan.creation_contract,
-          } as unknown as Record<string, unknown>,
-        });
+      try {
+        if (targetConversationId) {
+          await api.updateConversation(targetConversationId, {
+            last_phase: "plan_review",
+            context: {
+              ...makeSnapshot(targetConversationId),
+              pendingPlanRevisionChoice: null,
+              pending_plan_revision_choice: null,
+              selected_direction: artifact.selectedDirection,
+              plan_markdown: plan.plan_markdown,
+              plan_version: plan.plan_version,
+              plan_history: plan.plan_history,
+              creation_contract: plan.creation_contract,
+              scene_durations_sec: plan.scene_durations_sec,
+              restored_from_version: plan.restored_from_version,
+            } as unknown as Record<string, unknown>,
+          });
+        }
+      } catch (contextError) {
+        pushAssistant(
+          `plan.md v${plan.plan_version} 版本已保存，但上下文同步失败，可刷新恢复。${
+            contextError instanceof Error ? `（${contextError.message}）` : ""
+          }`,
+          targetConversationId,
+        );
+        return;
       }
     } catch (err) {
       if (pending.processedKey) releaseArtifactAction(pending.processedKey);

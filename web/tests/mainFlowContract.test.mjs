@@ -10,6 +10,8 @@ const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/Me
 const apiSource = fs.readFileSync(path.resolve("src/lib/api.ts"), "utf8");
 const viteConfigSource = fs.readFileSync(path.resolve("vite.config.ts"), "utf8");
 const videoRequirementConfigSource = fs.readFileSync(path.resolve("src/lib/videoRequirementConfig.ts"), "utf8");
+const activePlanSnapshotPath = path.resolve("src/lib/activePlanSnapshot.ts");
+const activePlanSnapshotSource = fs.existsSync(activePlanSnapshotPath) ? fs.readFileSync(activePlanSnapshotPath, "utf8") : "";
 const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
 const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
 
@@ -259,6 +261,58 @@ test("strict Plan message persistence removes optimistic cards and rethrows fail
     false,
     "strict Plan persistence must not reuse the error-swallowing append helper",
   );
+});
+
+test("current-creative Plan revision persists the v3 message before context", () => {
+  const start = workspaceSource.indexOf("const handleConfirmPlanRevisionMode = async");
+  const end = workspaceSource.indexOf("const handleCancelPlanRevisionMode", start);
+  assert.notEqual(start, -1, "Plan revision mode handler must exist");
+  assert.notEqual(end, -1, "Plan revision cancel handler must follow revision mode handler");
+  const revisionSource = workspaceSource.slice(start, end);
+  const messagePersistIndex = revisionSource.indexOf("await persistPlanArtifactForConversation");
+  const contextPersistIndex = revisionSource.indexOf("await api.updateConversation");
+
+  assert.equal(revisionSource.includes("pushPlanArtifact("), false, "revision must not use the failure-swallowing Plan helper");
+  assert.notEqual(messagePersistIndex, -1, "revision must await strict Plan message persistence");
+  assert.match(revisionSource, /createPlanArtifactMessage\(/, "revision must persist the returned v3 Plan artifact");
+  assert.notEqual(contextPersistIndex, -1, "revision must persist context after the Plan message");
+  assert.ok(messagePersistIndex < contextPersistIndex, "message rejection must stop execution before context persistence");
+  assert.match(revisionSource, /plan_history:\s*plan\.plan_history/, "v1 -> v3 revision must retain v1 and v2 history");
+  assert.match(revisionSource, /scene_durations_sec:\s*plan\.scene_durations_sec/, "revision context must save scene durations");
+});
+
+test("active Plan autosave reuses makeSnapshot instead of a drifting field list", () => {
+  const makeStart = workspaceSource.indexOf("const makeSnapshot =");
+  const makeEnd = workspaceSource.indexOf("const resetWorkspace", makeStart);
+  const autosaveStart = workspaceSource.indexOf("useEffect(() => {", workspaceSource.indexOf("const restoreConversation = async"));
+  const titleStart = workspaceSource.indexOf("const titleFromPrompt", autosaveStart);
+  assert.notEqual(makeStart, -1, "makeSnapshot must exist");
+  assert.notEqual(makeEnd, -1, "resetWorkspace must follow makeSnapshot");
+  assert.notEqual(autosaveStart, -1, "400ms autosave effect must exist");
+  assert.notEqual(titleStart, -1, "title helper must follow autosave effect");
+  const makeSource = workspaceSource.slice(makeStart, makeEnd);
+  const autosaveSource = workspaceSource.slice(autosaveStart, titleStart);
+
+  assert.match(
+    makeSource,
+    /activePlanSnapshotForConversation\(\s*messagesRef\.current,\s*snapshotConversationId,\s*pendingPlanMessagePersistenceIdsRef\.current,?\s*\)/,
+    "makeSnapshot must derive active Plan while excluding messages that have not persisted",
+  );
+  assert.match(autosaveSource, /const snapshot(?:: WorkspaceSnapshot)? = makeSnapshot\(currentConversationId\)/, "autosave must reuse makeSnapshot");
+  assert.match(autosaveSource, /\[.*messages.*\]/s, "Plan message changes must schedule autosave");
+  for (const key of [
+    "selected_direction",
+    "plan_markdown",
+    "plan_version",
+    "plan_history",
+    "creation_contract",
+    "scene_durations_sec",
+    "restored_from_version",
+  ]) {
+    assert.match(activePlanSnapshotSource, new RegExp(key), `makeSnapshot active Plan contract must include ${key}`);
+  }
+  assert.match(workspaceSource, /pendingPlanMessagePersistenceIdsRef/, "optimistic Plan cards must be tracked until message persistence completes");
+  assert.match(makeSource, /pendingPlanMessagePersistenceIdsRef\.current/, "autosave must exclude Plan cards that are not persisted yet");
 });
 
 test("new conversation route replacement does not clear the first intake progress message", () => {
@@ -585,7 +639,7 @@ test("image jobs persist their id before polling so conversations can recover", 
   assert.match(apiSource, /pollImageAssetEditJob,/, "API client must expose polling for existing image asset edit jobs");
   assert.match(workspaceSource, /pendingImageJob\?: PendingImageJob \| null/, "WorkspaceSnapshot must store pending image jobs");
   assert.match(workspaceSource, /pending_image_job\?: PendingImageJob \| null/, "WorkspaceSnapshot must restore snake_case pending image jobs");
-  assert.match(workspaceSource, /pendingImageJobRef\.current\?\.conversation_id === currentConversationId/, "conversation snapshots must keep the active pending image job");
+  assert.match(workspaceSource, /pendingImageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending image job");
 
   const source = handleApprovePlanSource();
   const imageBranchStart = source.indexOf('if (artifact.intent === "image")');
@@ -656,7 +710,7 @@ test("scene video jobs persist their id before polling so conversations can reco
   assert.match(apiSource, /pollSceneVideoJob,/, "API client must expose polling for existing scene video jobs");
   assert.match(workspaceSource, /pendingVideoJob\?: PendingVideoJob \| null/, "WorkspaceSnapshot must store pending video jobs");
   assert.match(workspaceSource, /pending_video_job\?: PendingVideoJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending video jobs");
-  assert.match(workspaceSource, /pendingVideoJobRef\.current\?\.conversation_id === currentConversationId/, "conversation snapshots must keep the active pending video job");
+  assert.match(workspaceSource, /pendingVideoJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending video job");
 
   const source = handleGenerateVideoFromScenePackagesSource();
   const startIndex = source.indexOf("api.startSceneVideosJob(request)");
@@ -704,7 +758,7 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.match(apiSource, /pollSceneAssetsJob,/, "API client must expose polling for existing scene asset jobs");
   assert.match(workspaceSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
   assert.match(workspaceSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
-  assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === currentConversationId/, "conversation snapshots must keep the active pending scene package job");
+  assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending scene package job");
 
   const source = handleApprovePlanSource();
   const startIndex = source.indexOf("api.startPrepareScenePackagesJob(request)");

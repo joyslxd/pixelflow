@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.utils.time import coerce_iso
@@ -565,6 +566,12 @@ class SQLPixelFlowTaskStore:
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         async with self._sf() as session:
+            existing = await session.get(PixelFlowConversationMessageRow, message.message_id)
+            if existing is not None:
+                if existing.conversation_id != message.conversation_id:
+                    raise ValueError("conversation message_id collision across conversations")
+                return _conversation_message_row_to_record(existing)
+            conversation = await session.get(PixelFlowConversationRow, message.conversation_id)
             row = PixelFlowConversationMessageRow(
                 message_id=message.message_id,
                 conversation_id=message.conversation_id,
@@ -574,10 +581,16 @@ class SQLPixelFlowTaskStore:
                 payload_json=message.payload,
             )
             session.add(row)
-            conversation = await session.get(PixelFlowConversationRow, message.conversation_id)
             if conversation is not None:
                 conversation.updated_at = _now()
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.get(PixelFlowConversationMessageRow, message.message_id)
+                if existing is not None and existing.conversation_id == message.conversation_id:
+                    return _conversation_message_row_to_record(existing)
+                raise
             await session.refresh(row)
             return _conversation_message_row_to_record(row)
 
@@ -781,6 +794,19 @@ class MemoryPixelFlowTaskStore:
         return record
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
+        existing = next(
+            (
+                item
+                for rows in self._conversation_messages.values()
+                for item in rows
+                if item.message_id == message.message_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.conversation_id != message.conversation_id:
+                raise ValueError("conversation message_id collision across conversations")
+            return existing
         message.created_at = message.created_at or _dt(_now())
         self._conversation_messages.setdefault(message.conversation_id, []).append(message)
         conversation = self._conversations.get(message.conversation_id)

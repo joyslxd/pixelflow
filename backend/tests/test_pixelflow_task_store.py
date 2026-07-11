@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from pixelflow.tasks import (
@@ -157,6 +159,40 @@ async def test_memory_conversation_store_updates_message_by_client_message_id():
     assert updated.content == "PPT 图片已生成。"
     assert updated.payload["artifact"]["pptImages"]["pages"][0]["image_url"] == "https://cdn.example/p1.png"
     assert await store.update_conversation_message("c-ppt", "client-message-id", user_id="other", content="x") is None
+
+
+@pytest.mark.asyncio
+async def test_memory_conversation_store_concurrent_duplicate_message_returns_existing():
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(PixelFlowConversationRecord(conversation_id="c-plan", user_id="u1", title="Plan"))
+
+    first, retried = await asyncio.gather(
+        store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id="stable-plan-message",
+                conversation_id="c-plan",
+                user_id="u1",
+                role="assistant",
+                content="plan.md 首次写入",
+                payload={"client_message_id": "plan-v1"},
+            )
+        ),
+        store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id="stable-plan-message",
+                conversation_id="c-plan",
+                user_id="u1",
+                role="assistant",
+                content="重试不应重复插入",
+                payload={"client_message_id": "plan-v1"},
+            )
+        ),
+    )
+
+    assert first.message_id == retried.message_id == "stable-plan-message"
+    assert retried.content == "plan.md 首次写入"
+    messages = await store.list_conversation_messages("c-plan", user_id="u1")
+    assert [message.content for message in messages] == ["plan.md 首次写入"]
 
 
 @pytest.mark.asyncio
@@ -334,6 +370,53 @@ async def test_sql_conversation_store_updates_message_by_client_message_id(tmp_p
         assert messages[0].content == "PPT 图片已生成。"
         assert messages[0].payload["artifact"]["pptImages"]["pages"][0]["image_url"] == "https://cdn.example/p1.png"
         assert await store.update_conversation_message("c-ppt-sql", "client-message-id", user_id="other", content="x") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_conversation_store_concurrent_duplicate_message_returns_existing(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow-idempotency.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False))
+        await store.create_conversation(
+            PixelFlowConversationRecord(conversation_id="c-plan-sql", user_id="u1", title="Plan")
+        )
+
+        first, retried = await asyncio.gather(
+            store.append_conversation_message(
+                PixelFlowConversationMessageRecord(
+                    message_id="stable-plan-message-sql",
+                    conversation_id="c-plan-sql",
+                    user_id="u1",
+                    role="assistant",
+                    content="plan.md 首次写入",
+                    payload={"client_message_id": "plan-v1"},
+                )
+            ),
+            store.append_conversation_message(
+                PixelFlowConversationMessageRecord(
+                    message_id="stable-plan-message-sql",
+                    conversation_id="c-plan-sql",
+                    user_id="u1",
+                    role="assistant",
+                    content="重试不应重复插入",
+                    payload={"client_message_id": "plan-v1"},
+                )
+            ),
+        )
+
+        assert first.message_id == retried.message_id == "stable-plan-message-sql"
+        assert first.content == retried.content
+        messages = await store.list_conversation_messages("c-plan-sql", user_id="u1")
+        assert len(messages) == 1
+        assert messages[0].content in {"plan.md 首次写入", "重试不应重复插入"}
     finally:
         await engine.dispose()
 

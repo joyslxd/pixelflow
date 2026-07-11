@@ -317,8 +317,10 @@ def restore_plan_version(
         else copy.deepcopy(creation_contract or {})
     )
     resolved_durations = _resolve_history_scene_durations(
+        intent,
         source,
         source_durations,
+        resolved_contract,
         scene_durations_sec,
     )
     return PlanMarkdownResult(
@@ -651,12 +653,23 @@ def _normalized_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _resolve_history_scene_durations(
+    intent: CreationIntent,
     source: dict[str, Any],
     source_durations: Any,
+    resolved_contract: dict[str, Any],
     fallback_durations: list[int] | None,
 ) -> list[int]:
     if "scene_durations_sec" not in source or not isinstance(source_durations, list):
         return copy.deepcopy(fallback_durations or [])
+    if intent == "video":
+        expected_duration = resolved_contract.get("video_duration_sec")
+        is_valid_duration = isinstance(expected_duration, int) and not isinstance(expected_duration, bool)
+        is_valid_scenes = all(
+            isinstance(value, int) and not isinstance(value, bool) and 4 <= value <= 15
+            for value in source_durations
+        )
+        if not is_valid_duration or not is_valid_scenes or sum(source_durations) != expected_duration:
+            return copy.deepcopy(fallback_durations or [])
     try:
         return [int(value) for value in source_durations]
     except (TypeError, ValueError):
