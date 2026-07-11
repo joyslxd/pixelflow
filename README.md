@@ -249,7 +249,8 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 
 - 视频粗略需求经采集 LLM 预填后，必须先展示需求清洗表单。表单保留产品信息、产品品类、目标人群和转化目标，并包含总时长、视频画幅、视频模型、图片模型、视频用途和视觉风格。
 - 总时长支持 30/60/90/180 秒和自定义；自定义只能是 4-300 的自然数。用户选择 180 秒后，Plan 和全部分镜总时长必须精确等于 180 秒。
-- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端只展示 Seedance；系统推荐默认解析成 `seedance-2.0`，并向用户展示实际结果。
+- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认解析成 `seedance-2.0`，并向用户展示实际结果。这里的 2.0 只是推荐默认值，不是 Seedance Prompt Skill 的调用开关。
+- 模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准，PixelFlow 不根据型号名称自行推断能力。
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。表单不展示图片比例和清晰度，只把所选模型及其能力范围提交给 Plan Agent。
 - Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`。不合法输出会被后端修正为合法值，并记录一致性提示。
 - 优先级固定为“用户确认值 > LLM 预填值 > 系统默认值”。Plan、场景包、场景资产和场景视频只读取当前激活 Plan 的最终 `creation_contract`。
@@ -276,7 +277,8 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - `shot_description.text` 的时间范围必须使用秒级表达，例如 `0-10秒`，不要使用 `ms`、`毫秒` 或 `00:00.000`。
 - 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
 - 每个视频场景片段最多 9 张参考图。
-- 镜头描述由 `backend/pixelflow/generate/seedance_prompt.py` 应用项目内 `skills/seedance-prompt/SKILL.md` 规则生成，继续保留 `@asset_id` 和 mentions 图片 URL。
+- 镜头描述由 `backend/pixelflow/generate/seedance_prompt.py` 应用项目内 `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 会显式携带用户确认的 `video_model`，并继续保留 `@asset_id` 和 mentions 图片 URL。
+- `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 记录 Skill 的输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 角色三视图、场景图和道具图统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`；分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。

@@ -284,7 +284,8 @@ SmartPPT接口：
 
 - 视频粗略需求必须先展示表单。必填项除原产品信息、产品品类、目标人群、转化目标外，还包含 `video_duration_sec`、`video_ratio`、`video_model`、`image_model`、`video_usage`；`visual_style` 可由 LLM 预填并允许用户修改。
 - `video_duration_sec` 预设 30/60/90/180；选择自定义后只能提交 4-300 的自然数。前端和 Pydantic 都必须校验。
-- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，只展示启用的 Seedance；系统推荐默认 `seedance-2.0` 并展示解析结果。画幅下拉只展示当前视频模型支持值。
+- 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认 `seedance-2.0` 并展示解析结果。2.0 只是推荐默认值，不是 `seedance-prompt` 的调用开关；画幅下拉只展示当前视频模型支持值。
+- 模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准，不得按型号名称在 PixelFlow 中自行假设。
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择场景资产图片比例和清晰度；前端把所选模型支持的 `aspect_ratios/sizes` 作为 `image_model_capabilities` 提交。
 - 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
@@ -305,7 +306,8 @@ SmartPPT接口：
 - `shot_description.text` 是一整段文本，不能拆成多个表单字段；文本里可以使用 `@asset_id` 关联角色、场景、道具。
 - `shot_description.text` 里的时间范围必须展示为秒级，例如 `0-10秒`、`10-15秒`；不要出现 `ms`、`毫秒` 或 `00:00.000` 这类毫秒时间码。
 - `shot_description.mentions` 保存 @ 选择对应的图片 URL，生成视频时这些 URL 会作为参考图集合。
-- 镜头描述由 `generate/seedance_prompt.py` 应用 vendored `skills/seedance-prompt/SKILL.md` 规则生成，仍需经过秒级时间码、`@asset_id` 和最多 9 张引用校验。
+- 镜头描述由 `generate/seedance_prompt.py` 应用 vendored `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 必须显式携带用户确认的 `video_model`，并经过秒级时间码、`@asset_id` 和最多 9 张引用校验。
+- `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 保留两个输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset/start`，不能掉回普通采集 Agent。
