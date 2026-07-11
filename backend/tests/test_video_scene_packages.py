@@ -105,6 +105,7 @@ def test_scene_package_llm_prompt_includes_seedance_guidance_and_final_video_rat
                 "target_audience": "长途旅行人群",
                 "conversion_goal": "直接购买",
                 "video_ratio": "9:16",
+                "video_model": "seedance-1.5-pro",
             },
             plan_markdown="## 创作目标\n严格根据 plan.md 生成镜头。",
             selected_direction={"title": "极端天气实测"},
@@ -113,7 +114,8 @@ def test_scene_package_llm_prompt_includes_seedance_guidance_and_final_video_rat
         )
     )
 
-    assert "Seedance 2.0" in captured["prompt"]
+    assert "Seedance 系列" in captured["prompt"]
+    assert "当前视频模型：seedance-1.5-pro" in captured["prompt"]
     assert "0-10秒" in captured["prompt"]
     assert "10-20秒" in captured["prompt"]
     assert "9:16" in captured["prompt"]
