@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 
 from pixelflow.creative.plan_markdown import (
@@ -209,6 +210,7 @@ def test_restore_plan_version_activates_history_without_appending():
             "scene_durations_sec": [5, 15],
         },
     ]
+    original_history = copy.deepcopy(history)
 
     result = restore_plan_version(
         intent="video",
@@ -222,7 +224,9 @@ def test_restore_plan_version_activates_history_without_appending():
 
     assert result.plan_version == 1
     assert result.plan_markdown == "# plan.md v1"
-    assert result.plan_history == history
+    assert result.plan_history == original_history
+    assert [item["version"] for item in result.plan_history] == [1, 2]
+    assert history == original_history
     assert result.restored_from_version == 1
     assert result.creation_contract == history[0]["creation_contract"]
     assert result.scene_durations_sec == [10, 10]
@@ -250,16 +254,18 @@ def test_restore_legacy_history_keeps_current_authoritative_contract():
 
 
 def test_next_version_uses_history_max_after_restore():
+    creation_contract = {"video_model": "seedance-2.0", "video_duration_sec": 20}
     restored = PlanMarkdownResult(
-        output_type="image",
+        output_type="video",
         plan_markdown="# plan.md v1",
-        template_path=Path("plan_image.md"),
+        template_path=Path("plan_video.md"),
         plan_version=1,
         plan_history=[
             {"version": 1, "plan_markdown": "# plan.md v1"},
             {"version": 2, "plan_markdown": "# plan.md v2"},
         ],
-        creation_contract={"image_size": "9:16"},
+        creation_contract=creation_contract,
+        scene_durations_sec=[10, 10],
     )
 
     revised = restored.next_version(
@@ -269,4 +275,5 @@ def test_next_version_uses_history_max_after_restore():
 
     assert revised.plan_version == 3
     assert [item["version"] for item in revised.plan_history] == [1, 2, 3]
-    assert revised.plan_history[-1]["creation_contract"] == {"image_size": "9:16"}
+    assert revised.plan_history[-1]["creation_contract"] == creation_contract
+    assert revised.plan_history[-1]["scene_durations_sec"] == [10, 10]
