@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 PIXELFLOW_POWERMEM_AGENT_ID = "pixelflow"
 MAX_LOG_ERROR_BODY = 300
+OB_SESSION_MAX_ATTEMPTS = 3
+OB_SESSION_RETRY_DELAYS = (0.05, 0.1)
 
 
 def _bool_env(value: str | None, *, default: bool) -> bool:
@@ -307,17 +309,25 @@ class PowerMemService:
         request_timeout = timeout if timeout is not None else self.config.timeout_seconds
         async with asyncio.timeout(request_timeout):
             async with self._request_lock:
-                response = await client.request(
-                    method,
-                    self._url(path),
-                    headers=headers,
-                    json=json,
-                    timeout=request_timeout,
-                )
-                response.raise_for_status()
-                if response.content:
-                    return response.json()
-                return {}
+                # 仅幂等读取和搜索定向恢复 OceanBase 临时会话错误，record 写入保持单次。
+                max_attempts = OB_SESSION_MAX_ATTEMPTS if _is_ob_retryable_request(method, path) else 1
+                for attempt in range(max_attempts):
+                    try:
+                        response = await client.request(
+                            method,
+                            self._url(path),
+                            headers=headers,
+                            json=json,
+                            timeout=request_timeout,
+                        )
+                        response.raise_for_status()
+                        if response.content:
+                            return response.json()
+                        return {}
+                    except httpx.HTTPStatusError as exc:
+                        if not _is_ob_session_entry_exist(exc) or attempt + 1 >= max_attempts:
+                            raise
+                        await asyncio.sleep(OB_SESSION_RETRY_DELAYS[attempt])
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -407,6 +417,14 @@ def _dedupe_and_sort(items: list[SemanticMemoryItem]) -> list[SemanticMemoryItem
         if previous is None or ((item.score or 0) > (previous.score or 0)):
             deduped[key] = item
     return sorted(deduped.values(), key=lambda item: item.score or 0, reverse=True)
+
+
+def _is_ob_session_entry_exist(exc: httpx.HTTPStatusError) -> bool:
+    return "OB_SESSION_ENTRY_EXIST" in exc.response.text.upper()
+
+
+def _is_ob_retryable_request(method: str, path: str) -> bool:
+    return method.upper() == "GET" or path.rstrip("/").endswith("/memories/search")
 
 
 def _log_fail_open(message: str, exc: BaseException) -> None:

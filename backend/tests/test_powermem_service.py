@@ -78,7 +78,7 @@ async def test_powermem_service_searches_categories_sequentially_and_keeps_parti
                     "success": False,
                     "error": {
                         "code": "SEARCH_FAILED",
-                        "message": "Search failed: connect failed OB_SESSION_ENTRY_EXIST(4661)",
+                        "message": "Search failed: temporary backend failure",
                     },
                 },
             )
@@ -110,6 +110,109 @@ async def test_powermem_service_searches_categories_sequentially_and_keeps_parti
     assert seen_categories == ["preference", "brand", "skill"]
     assert max_active_requests == 1
     assert [item.memory_id for item in results] == ["preference-1", "skill-1"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_retries_ob_session_error_for_search():
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "success": False,
+                    "error": {
+                        "code": "SEARCH_FAILED",
+                        "message": "connect failed OB_SESSION_ENTRY_EXIST(4661)",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "memory_id": "recovered-1",
+                            "content": "重试后恢复",
+                            "score": 0.9,
+                            "metadata": {},
+                        }
+                    ]
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    results = await service.search(user_id="u1", query="恢复检索", categories=["experience"])
+
+    assert attempts == 3
+    assert [item.memory_id for item in results] == ["recovered-1"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_retries_ob_session_error_for_health():
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(
+                500,
+                request=request,
+                json={"success": False, "error": {"message": "OB_SESSION_ENTRY_EXIST(4661)"}},
+            )
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    result = await service.health()
+
+    assert attempts == 3
+    assert result["status"] == "ok"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_powermem_service_does_not_retry_ob_session_error_for_record():
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            500,
+            request=request,
+            json={"success": False, "error": {"message": "OB_SESSION_ENTRY_EXIST(4661)"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = PowerMemService(
+        PowerMemConfig(enabled=True, base_url="https://example.test", api_key="secret", fail_open=True),
+        http_client=client,
+    )
+
+    ok = await service.record(user_id="u1", content="不能重复写", category="experience", infer=False)
+
+    assert ok is False
+    assert attempts == 1
     await client.aclose()
 
 
