@@ -9,6 +9,7 @@ const {
   imageModelCapabilities,
   resolveImageModel,
   resolveVideoModel,
+  videoModelCapabilities,
   videoRatios,
 } = await import(moduleUrl);
 
@@ -21,7 +22,11 @@ const VIDEO_CONFIGS = [
   {
     modelType: "seedance-2.0-mini",
     isEnabled: true,
-    paramConfig: { aspectRatioList: ["9:16", "16:9"] },
+    paramConfig: {
+      aspectRatioList: ["9:16", "16:9"],
+      modelGenerateTypeList: ["文生视频", "首尾帧", "全能参考"],
+      uploadFileTypeList: ["JPG", "PNG", "MP4"],
+    },
   },
   {
     modelType: "seedance-2.0",
@@ -52,6 +57,32 @@ test("filters non-Seedance and disabled video models", () => {
   const filtered = filterSeedanceConfigs(VIDEO_CONFIGS);
 
   assert.deepEqual(filtered.map((item) => item.modelType), ["seedance-2.0-mini", "seedance-2.0"]);
+});
+
+test("submits selected Seedance generation capabilities for backend endpoint routing", () => {
+  const selected = resolveVideoModel(VIDEO_CONFIGS, "seedance-2.0-mini");
+
+  assert.deepEqual(videoModelCapabilities(selected), {
+    generation_types: ["文生视频", "首尾帧", "全能参考"],
+    upload_file_types: ["JPG", "PNG", "MP4"],
+  });
+});
+
+test("missing realtime model capabilities stay unknown instead of being invented", () => {
+  const missingCapabilities = {
+    modelType: "seedance-future",
+    isEnabled: true,
+    paramConfig: { aspectRatioList: ["9:16"] },
+  };
+
+  assert.deepEqual(videoModelCapabilities(missingCapabilities), {
+    generation_types: [],
+    upload_file_types: [],
+  });
+  assert.deepEqual(videoModelCapabilities(resolveVideoModel([], "")), {
+    generation_types: [],
+    upload_file_types: [],
+  });
 });
 
 test("defaults video model to seedance-2.0 and preserves a supported requested model", () => {

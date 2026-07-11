@@ -166,7 +166,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 
 | Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
 | --- | --- | --- | --- |
-| VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型和支持画幅，展示 content-app 返回的所有启用 Seedance；系统推荐优先 `seedance-2.0` |
+| VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型、画幅和 `modelGenerateTypeList/uploadFileTypeList`；展示 content-app 返回的所有启用 Seedance，并把用户所选模型的实时能力固化到创作合同；系统推荐优先 `seedance-2.0` |
 | SceneImageModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/image_generate` | 查询场景资产图片模型及其比例/清晰度能力；用户只选模型，能力范围随表单提交给 Plan Agent |
 | ScenePackageSkill | `backend/pixelflow/generate/scene_packages.py` | LLM + 本地规则 | 生成可编辑场景包 |
 | SeedanceShotPromptSkill | `backend/pixelflow/generate/seedance_prompt.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 无 | 对 Seedance 全系列通用；按实际 `video_model` 生成秒级镜头描述，并保留 `@asset_id`、mentions 和最多 9 张参考图 |
@@ -186,7 +186,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 视频表单保留产品信息、品类、目标人群、转化目标，并新增/明确：总时长、视频画幅、视频模型、图片模型、视频用途、视觉风格。
 - `video_duration_sec` 预设为 30/60/90/180 秒；选择“自定义”后只能提交 4-300 的自然数。前端和 Python 后端都校验。
 - 视频模型配置来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认解析为 `seedance-2.0`，界面仍展示实际推荐结果。2.0 只是推荐默认值，不是 `seedance-prompt` 的调用开关。
-- `seedance-prompt` 对 Seedance 全系列通用；场景包 Prompt 显式携带用户确认的 `video_model`，模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准。
+- `seedance-prompt` 对 Seedance 全系列通用；场景包 Prompt 显式携带用户确认的 `video_model`。前端把该模型实时 `modelGenerateTypeList/uploadFileTypeList` 保存为 `video_model_capabilities`，后端只按合同能力选择文生、首尾帧、全能参考、编辑或延伸端点，不按 Seedance 型号名称猜测能力。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 保留两个输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 图片模型配置来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择图片比例和清晰度；前端把所选模型支持的比例/清晰度列表作为只读能力数据交给 Plan Agent。
 - 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
@@ -581,17 +581,18 @@ Plan 审核与版本规则：
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。
 
-场景视频接口选择：
+场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：
 
 | 条件 | mode |
 | --- | --- |
-| `scene.generation_mode` 已指定 | 使用指定 mode |
-| 有视频素材且文本包含“延伸/续写/extend” | `extend_video` |
-| 有视频素材且文本包含“编辑/修改/调整/edit” | `edit_video` |
-| 有视频、图片或音频参考 | `reference_mode_video` |
-| 无参考素材 | `text_to_video` |
+| `scene.generation_mode` 已指定，且实时能力与素材均满足 | 使用指定 mode |
+| 显式 mode 不在实时能力中，或缺少首帧/首尾帧/参考视频 | 返回不可重试的能力不匹配，不静默改变编辑、延伸或首尾帧语义 |
+| 自动场景有参考素材，且实时能力包含“全能参考” | `reference_mode_video` |
+| 自动场景不支持“全能参考”，但实时能力包含“文生视频” | `text_to_video`；继续使用同一 Seedance Skill 生成的完整镜头提示词 |
+| 自动场景只有“首尾帧”等不兼容能力 | 返回不可重试的能力不匹配；角色/场景/道具资产不能冒充首尾帧 |
+| 旧合同没有能力快照 | 保持 legacy 首次选择；供应商明确返回 `task_type` 不兼容时，仅自动改试一次 `text_to_video`，不再重复无效 r2v |
 
-如果 mode 是 `image_to_video` 但图片不足，或 `two_image_to_video` 但图片少于 2 张，后端会降级到 `reference_mode_video`。
+`image_to_video` 必须有首帧，`two_image_to_video` 必须有用户明确提供的首帧和尾帧，`edit_video/extend_video` 必须有参考视频；素材不足时直接返回能力错误，不再偷偷改走 `reference_mode_video`。
 
 五类 content-app 请求体合同：
 

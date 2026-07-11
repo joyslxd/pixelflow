@@ -794,6 +794,7 @@ function valuesFromForm(form: GenParamsForm): Record<string, unknown> {
       video_ratio: form.video_ratio,
       video_model_mode: form.video_model_mode,
       video_model: form.video_model,
+      video_model_capabilities: form.video_model_capabilities,
       video_size: form.video_size,
       video_sound: form.video_sound,
       image_model: form.image_model,

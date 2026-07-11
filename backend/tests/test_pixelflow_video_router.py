@@ -119,6 +119,10 @@ def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(mo
         "video_ratio": "9:16",
         "video_model_mode": "system_recommended",
         "video_model": "seedance-2.0",
+        "video_model_capabilities": {
+            "generation_types": ["文生视频", "首尾帧", "全能参考", "编辑视频", "延伸视频"],
+            "upload_file_types": ["JPG", "JPEG", "PNG", "WEBP", "MP4", "MP3"],
+        },
         "video_size": "1080p",
         "video_sound": "on",
         "image_model": "gpt-image-2",
@@ -1019,6 +1023,373 @@ def test_generate_scene_videos_prefers_generation_reference_url_over_display_ima
     data = response.json()
     assert data["ok"] is True
     assert calls[0]["image_urls"] == ["asset://asset-123"]
+
+
+def test_generate_scene_videos_falls_back_to_supported_mode_when_model_has_no_omni_reference(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[tuple[str, dict]] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(("text_to_video", kwargs))
+            return GenerationResult(
+                ok=True,
+                task_id="text-task",
+                url="https://x/text.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+        async def reference_mode_video(self, **kwargs):
+            calls.append(("reference_mode_video", kwargs))
+            return GenerationResult(
+                ok=False,
+                error="r2v is unsupported",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    creation_contract = {
+        "version": 1,
+        "intent": "video",
+        "video_duration_sec": 4,
+        "video_ratio": "9:16",
+        "video_model_mode": "manual",
+        "video_model": "seedance-1.5",
+        "video_model_capabilities": {
+            "generation_types": ["首尾帧", "文生视频"],
+            "upload_file_types": ["JPG", "JPEG", "PNG"],
+        },
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+        "video_usage": "产品介绍",
+        "visual_style": "真实UGC摄影风",
+        "confirmed_by_user": True,
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 4000,
+                        "prompt": "使用 Seedance 镜头规则生成雨天通勤片段",
+                        "image_urls": ["https://x/character.png", "https://x/scene.png", "https://x/prop.png"],
+                    }
+                ],
+                "creation_contract": creation_contract,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["scene_videos"][0]["mode"] == "text_to_video"
+    assert data["scene_videos"][0]["endpoint"] == "/api/video/text-to-video"
+    assert [name for name, _kwargs in calls] == ["text_to_video"]
+    assert calls[0][1]["model"] == "seedance-1.5"
+
+
+def test_generate_scene_videos_old_contract_recovers_once_after_vendor_rejects_r2v(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[str] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **_kwargs):
+            calls.append("text_to_video")
+            return GenerationResult(
+                ok=True,
+                task_id="text-task",
+                url="https://x/text.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+        async def reference_mode_video(self, **_kwargs):
+            calls.append("reference_mode_video")
+            return GenerationResult(
+                ok=False,
+                error="The parameter task_type r2v does not support model current-model",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    old_contract = {
+        "video_duration_sec": 4,
+        "video_ratio": "9:16",
+        "video_model_mode": "manual",
+        "video_model": "seedance-legacy",
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+        "video_usage": "产品介绍",
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-legacy",
+                        "scene_index": 1,
+                        "duration_ms": 4000,
+                        "prompt": "旧对话自动场景",
+                        "image_urls": ["https://x/reference.png"],
+                    }
+                ],
+                "creation_contract": old_contract,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["scene_videos"][0]["mode"] == "text_to_video"
+    assert calls == ["reference_mode_video", "text_to_video"]
+
+
+@pytest.mark.parametrize(
+    ("model", "generation_types", "expected_mode"),
+    [
+        ("seedance-model-a", ["文生视频", "首尾帧", "全能参考"], "reference_mode_video"),
+        ("seedance-model-b", ["文生视频", "首尾帧"], "text_to_video"),
+    ],
+)
+def test_scene_video_auto_mode_uses_realtime_capabilities_not_model_name(model, generation_types, expected_mode):
+    from app.gateway.routers.pixelflow_video import SceneGenerationItem, _select_scene_video_mode
+    from pixelflow.creative.contract import VideoCreationContract
+
+    contract = VideoCreationContract.model_validate(
+        {
+            "video_duration_sec": 4,
+            "video_ratio": "9:16",
+            "video_model": model,
+            "video_model_capabilities": {"generation_types": generation_types},
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+            "video_usage": "产品介绍",
+        }
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt="自动场景",
+        image_urls=["https://x/character.png", "https://x/scene.png"],
+    )
+
+    assert _select_scene_video_mode(scene, scene.image_urls, creation_contract=contract) == expected_mode
+
+
+@pytest.mark.parametrize(
+    ("generation_mode", "generation_types", "image_urls", "video_urls"),
+    [
+        ("reference_mode_video", ["文生视频"], ["https://x/ref.png"], []),
+        ("image_to_video", ["首尾帧"], ["https://x/first.png"], []),
+        ("edit_video", ["文生视频"], ["https://x/ref.png"], ["https://x/source.mp4"]),
+        ("extend_video", ["文生视频"], [], ["https://x/source.mp4"]),
+        (None, ["首尾帧"], ["https://x/asset-a.png", "https://x/asset-b.png"], []),
+    ],
+)
+def test_scene_video_capability_mismatch_never_silently_changes_explicit_or_asset_semantics(
+    generation_mode,
+    generation_types,
+    image_urls,
+    video_urls,
+):
+    from app.gateway.routers.pixelflow_video import (
+        SceneGenerationItem,
+        SceneVideoCapabilityError,
+        _select_scene_video_mode,
+    )
+    from pixelflow.creative.contract import VideoCreationContract
+
+    contract = VideoCreationContract.model_validate(
+        {
+            "video_duration_sec": 4,
+            "video_ratio": "9:16",
+            "video_model": "seedance-capability-driven",
+            "video_model_capabilities": {"generation_types": generation_types},
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+            "video_usage": "产品介绍",
+        }
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt="能力不匹配场景",
+        generation_mode=generation_mode,
+        image_urls=image_urls,
+        video_urls=video_urls,
+    )
+
+    with pytest.raises(SceneVideoCapabilityError):
+        _select_scene_video_mode(scene, scene.image_urls, creation_contract=contract)
+
+
+def test_scene_video_two_image_mode_only_uses_explicit_first_last_frame_capability():
+    from app.gateway.routers.pixelflow_video import SceneGenerationItem, _select_scene_video_mode
+    from pixelflow.creative.contract import VideoCreationContract
+
+    contract = VideoCreationContract.model_validate(
+        {
+            "video_duration_sec": 4,
+            "video_ratio": "9:16",
+            "video_model": "seedance-capability-driven",
+            "video_model_capabilities": {"generation_types": ["首尾帧"]},
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+            "video_usage": "产品介绍",
+        }
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt="明确首尾帧",
+        generation_mode="two_image_to_video",
+        image_urls=["https://x/first.png", "https://x/last.png"],
+    )
+
+    assert _select_scene_video_mode(scene, scene.image_urls, creation_contract=contract) == "two_image_to_video"
+
+
+@pytest.mark.parametrize("prompt", ["编辑已有视频节奏", "延伸已有视频结尾"])
+def test_implicit_edit_or_extend_never_silently_degrades_to_text(prompt):
+    from app.gateway.routers.pixelflow_video import (
+        SceneGenerationItem,
+        SceneVideoCapabilityError,
+        _select_scene_video_mode,
+    )
+    from pixelflow.creative.contract import VideoCreationContract
+
+    contract = VideoCreationContract.model_validate(
+        {
+            "video_duration_sec": 4,
+            "video_ratio": "9:16",
+            "video_model": "seedance-capability-driven",
+            "video_model_capabilities": {"generation_types": ["文生视频"]},
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+            "video_usage": "产品介绍",
+        }
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt=prompt,
+        video_urls=["https://x/source.mp4"],
+    )
+
+    with pytest.raises(SceneVideoCapabilityError):
+        _select_scene_video_mode(scene, [], creation_contract=contract)
+
+
+def test_known_reference_only_capability_does_not_force_unsupported_text_fallback(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[str] = []
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **_kwargs):
+            calls.append("reference_mode_video")
+            return GenerationResult(
+                ok=False,
+                error="The parameter task_type r2v does not support model current-model",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+        async def text_to_video(self, **_kwargs):
+            calls.append("text_to_video")
+            return GenerationResult(ok=True, url="https://x/text.mp4", raw={"endpoint": "/api/video/text-to-video"})
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    contract = {
+        "video_duration_sec": 4,
+        "video_ratio": "9:16",
+        "video_model": "seedance-capability-driven",
+        "video_model_capabilities": {"generation_types": ["全能参考"]},
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+        "video_usage": "产品介绍",
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 4000,
+                        "prompt": "全能参考场景",
+                        "image_urls": ["https://x/reference.png"],
+                    }
+                ],
+                "creation_contract": contract,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["failed_scenes"][0]["attempts"] == 1
+    assert calls == ["reference_mode_video"]
+
+
+def test_i2v_alias_never_claims_first_last_frame_capability():
+    from app.gateway.routers.pixelflow_video import (
+        SceneGenerationItem,
+        SceneVideoCapabilityError,
+        _select_scene_video_mode,
+    )
+    from pixelflow.creative.contract import VideoCreationContract
+
+    contract = VideoCreationContract.model_validate(
+        {
+            "video_duration_sec": 4,
+            "video_ratio": "9:16",
+            "video_model": "seedance-capability-driven",
+            "video_model_capabilities": {"generation_types": ["i2v"]},
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+            "video_usage": "产品介绍",
+        }
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt="明确首尾帧",
+        generation_mode="two_image_to_video",
+        image_urls=["https://x/first.png", "https://x/last.png"],
+    )
+
+    with pytest.raises(SceneVideoCapabilityError):
+        _select_scene_video_mode(scene, scene.image_urls, creation_contract=contract)
 
 
 def test_video_router_preserves_exact_scene_duration_for_seedance(monkeypatch):

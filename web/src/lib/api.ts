@@ -266,6 +266,10 @@ export interface VideoCreationContract extends Record<string, unknown> {
   video_duration_sec: number;
   video_ratio: string;
   video_model: string;
+  video_model_capabilities?: {
+    generation_types: string[];
+    upload_file_types: string[];
+  };
   video_size: string;
   video_sound: string;
   image_model: string;

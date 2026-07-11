@@ -27,6 +27,27 @@ class ImageModelCapabilities(BaseModel):
         return normalized
 
 
+class VideoModelCapabilities(BaseModel):
+    """用户确认视频模型时同步固化的 content-app 实时能力。"""
+
+    generation_types: list[str] = Field(default_factory=list)
+    upload_file_types: list[str] = Field(default_factory=list)
+
+    @field_validator("generation_types", "upload_file_types", mode="before")
+    @classmethod
+    def normalize_options(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("video model capability options must be a list")
+        normalized: list[str] = []
+        for item in value:
+            option = str(item or "").strip()
+            if option and option not in normalized:
+                normalized.append(option)
+        return normalized
+
+
 class VideoCreationContract(BaseModel):
     version: StrictInt = 1
     intent: Literal["video"] = "video"
@@ -34,6 +55,7 @@ class VideoCreationContract(BaseModel):
     video_ratio: str
     video_model_mode: Literal["system_recommended", "manual"] = "system_recommended"
     video_model: str
+    video_model_capabilities: VideoModelCapabilities = Field(default_factory=VideoModelCapabilities)
     video_size: str = "1080p"
     video_sound: Literal["on", "off"] = "on"
     image_model: str

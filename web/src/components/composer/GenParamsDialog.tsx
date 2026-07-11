@@ -9,8 +9,10 @@ import {
   imageModelCapabilities,
   resolveImageModel,
   resolveVideoModel,
+  videoModelCapabilities,
   videoRatios,
   type ImageModelCapabilities,
+  type VideoModelCapabilities,
 } from "@/lib/videoRequirementConfig";
 
 export type CreationIntent = "video" | "image" | "ppt";
@@ -25,6 +27,7 @@ export interface VideoRequirementForm {
   video_ratio: string;
   video_model_mode: "system_recommended" | "manual";
   video_model: string;
+  video_model_capabilities: VideoModelCapabilities;
   video_size: string;
   video_sound: "on" | "off";
   image_model: string;
@@ -116,6 +119,23 @@ function initialImageModelCapabilities(values: Record<string, unknown>): ImageMo
   return imageModelCapabilities(FALLBACK_IMAGE_MODEL_CONFIG);
 }
 
+function initialVideoModelCapabilities(values: Record<string, unknown>): VideoModelCapabilities {
+  const raw = values.video_model_capabilities;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const capabilities = raw as Record<string, unknown>;
+    const generationTypes = Array.isArray(capabilities.generation_types)
+      ? capabilities.generation_types.map(String).filter(Boolean)
+      : [];
+    const uploadFileTypes = Array.isArray(capabilities.upload_file_types)
+      ? capabilities.upload_file_types.map(String).filter(Boolean)
+      : [];
+    if (generationTypes.length > 0) {
+      return { generation_types: generationTypes, upload_file_types: uploadFileTypes };
+    }
+  }
+  return videoModelCapabilities(FALLBACK_VIDEO_MODEL_CONFIG);
+}
+
 function videoInitialValues(initialCoreMessage: string | undefined, values: Record<string, unknown>): VideoRequirementForm {
   const modelMode = textValue(values, "video_model_mode", "system_recommended");
   return {
@@ -130,6 +150,7 @@ function videoInitialValues(initialCoreMessage: string | undefined, values: Reco
       ? (modelMode as VideoRequirementForm["video_model_mode"])
       : "system_recommended",
     video_model: textValue(values, "video_model", "seedance-2.0"),
+    video_model_capabilities: initialVideoModelCapabilities(values),
     video_size: textValue(values, "video_size", "1080p"),
     video_sound: textValue(values, "video_sound", "on") === "off" ? "off" : "on",
     image_model: textValue(values, "image_model", "gpt-image-2"),
@@ -298,6 +319,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       const requestedImageModel = textValue(initialValues, "image_model", "gpt-image-2");
       const selectedVideoConfig = resolveVideoModel(nextVideoConfigs, requestedVideoModel);
       const selectedImageConfig = resolveImageModel(nextImageConfigs, requestedImageModel);
+      const selectedVideoCapabilities = videoModelCapabilities(selectedVideoConfig);
       const ratios = videoRatios(selectedVideoConfig);
 
       setVideoModelConfigs(nextVideoConfigs);
@@ -305,12 +327,17 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       setVideo((current) => ({
         ...current,
         video_model: selectedVideoConfig.modelType,
+        video_model_capabilities: selectedVideoCapabilities,
         video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
         image_model: selectedImageConfig.modelType,
         image_model_capabilities: imageModelCapabilities(selectedImageConfig),
       }));
-      if (results.some((result) => result.status === "rejected")) {
-        setModelConfigsError("部分模型配置读取失败，当前展示可用的默认配置。");
+      if (
+        results.some((result) => result.status === "rejected")
+        || availableVideoConfigs.length === 0
+        || selectedVideoCapabilities.generation_types.length === 0
+      ) {
+        setModelConfigsError("视频模型实时能力读取失败或不完整，暂不能提交，请刷新后重试。");
       }
       setModelConfigsLoading(false);
     });
@@ -333,6 +360,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
           && validVideoDuration
           && video.video_ratio
           && video.video_model
+          && video.video_model_capabilities.generation_types.length > 0
           && video.image_model
           && video.image_model_capabilities.aspect_ratios.length > 0
           && video.image_model_capabilities.sizes.length > 0
@@ -382,6 +410,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       ...current,
       video_model_mode: mode,
       video_model: selected.modelType,
+      video_model_capabilities: videoModelCapabilities(selected),
       video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
     }));
   };
@@ -393,6 +422,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       ...current,
       video_model_mode: "manual",
       video_model: selected.modelType,
+      video_model_capabilities: videoModelCapabilities(selected),
       video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
     }));
   };

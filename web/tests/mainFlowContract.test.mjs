@@ -165,10 +165,12 @@ test("video requirement form collects and persists the complete creation contrac
   assert.match(genParamsDialogSource, /min=\{4\}/, "custom duration must enforce the lower boundary");
   assert.match(genParamsDialogSource, /max=\{300\}/, "custom duration must enforce the upper boundary");
   assert.match(genParamsDialogSource, /image_model_capabilities/, "selected image model capabilities must be submitted");
+  assert.match(genParamsDialogSource, /video_model_capabilities/, "selected video model generation capabilities must be submitted");
   assert.equal(genParamsDialogSource.includes('label="图片比例"'), false, "video form must not ask users for scene image ratio");
   assert.equal(genParamsDialogSource.includes('label="图片清晰度"'), false, "video form must not ask users for scene image quality");
   assert.match(workspaceSource, /video_duration_sec:\s*form\.video_duration_sec/, "Workspace must persist confirmed video duration");
   assert.match(workspaceSource, /video_model:\s*form\.video_model/, "Workspace must persist confirmed video model");
+  assert.match(workspaceSource, /video_model_capabilities:\s*form\.video_model_capabilities/, "Workspace must persist video model capabilities");
   assert.match(workspaceSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
   assert.match(workspaceSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
   assert.match(videoRequirementConfigSource, /filterSeedanceConfigs/, "video model filtering must remain centralized");

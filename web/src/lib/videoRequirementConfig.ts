@@ -18,6 +18,11 @@ export interface ImageModelCapabilities {
   sizes: string[];
 }
 
+export interface VideoModelCapabilities {
+  generation_types: string[];
+  upload_file_types: string[];
+}
+
 export const FALLBACK_VIDEO_MODEL_CONFIG: GenerateModelParamConfig = {
   modelType: "seedance-2.0",
   modelCategoryType: "video_generate",
@@ -66,6 +71,13 @@ export function resolveImageModel(configs: GenerateModelParamConfig[], requested
 
 export function videoRatios(config: GenerateModelParamConfig): string[] {
   return normalizedOptions(config.paramConfig?.aspectRatioList, FALLBACK_VIDEO_MODEL_CONFIG.paramConfig?.aspectRatioList || ["9:16"]);
+}
+
+export function videoModelCapabilities(config: GenerateModelParamConfig): VideoModelCapabilities {
+  return {
+    generation_types: normalizedOptions(config.paramConfig?.modelGenerateTypeList, []),
+    upload_file_types: normalizedOptions(config.paramConfig?.uploadFileTypeList, []),
+  };
 }
 
 export function imageModelCapabilities(config: GenerateModelParamConfig): ImageModelCapabilities {

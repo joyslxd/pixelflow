@@ -802,9 +802,14 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
     video_size = contract.video_size if contract is not None else body.size
     video_model = contract.video_model if contract is not None else body.model
     video_sound = contract.video_sound if contract is not None else body.sound
+    supported_generation_types = _video_generation_types(contract)
     semaphore = asyncio.Semaphore(max(1, min(_SCENE_VIDEO_MAX_CONCURRENCY, len(body.scenes))))
 
-    async def run_scene_once(scene: SceneGenerationItem, attempt: int) -> GeneratedSceneVideo | dict[str, Any]:
+    async def run_scene_once(
+        scene: SceneGenerationItem,
+        attempt: int,
+        mode_override: DirectVideoMode | None = None,
+    ) -> GeneratedSceneVideo | dict[str, Any]:
         image_urls = _scene_reference_image_urls(scene)
         if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
             return {
@@ -814,7 +819,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "image_count": len(image_urls),
                 "attempts": attempt,
             }
-        mode = _select_scene_video_mode(scene, image_urls)
+        mode = mode_override or _select_scene_video_mode(scene, image_urls, creation_contract=contract)
         prompt = _build_scene_video_prompt(scene)
         duration = _provider_video_duration_seconds(scene.duration_ms, video_model)
         result = await _run_scene_video_generation(
@@ -857,9 +862,18 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
     async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
         async with semaphore:
             last_failure: dict[str, Any] | None = None
+            mode_override: DirectVideoMode | None = None
             for attempt in range(1, _SCENE_VIDEO_MAX_ATTEMPTS + 1):
                 try:
-                    item = await run_scene_once(scene, attempt)
+                    item = await run_scene_once(scene, attempt, mode_override)
+                except SceneVideoCapabilityError as exc:
+                    return {
+                        "scene_id": scene.scene_id,
+                        "scene_index": scene.scene_index,
+                        "error": str(exc),
+                        "attempts": attempt,
+                        "capability_mismatch": True,
+                    }
                 except Exception as exc:  # noqa: BLE001 - per-scene vendor failures must not abort sibling scenes.
                     last_failure = {
                         "scene_id": scene.scene_id,
@@ -872,6 +886,21 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                     return item
                 last_failure = item
                 if is_quota_insufficient(item):
+                    return item
+                if _is_unsupported_task_type_failure(item):
+                    # 旧合同没有实时能力快照时保留 legacy 首次选择；供应商明确拒绝 task_type 后，
+                    # 自动场景只改试一次语义安全的文生视频，不再重复同一个无效 r2v。
+                    if (
+                        scene.generation_mode is None
+                        and mode_override is None
+                        and item.get("mode") == "reference_mode_video"
+                        and (
+                            supported_generation_types is None
+                            or _video_mode_is_supported("text_to_video", supported_generation_types)
+                        )
+                    ):
+                        mode_override = "text_to_video"
+                        continue
                     return item
             return last_failure or {
                 "scene_id": scene.scene_id,
@@ -1200,18 +1229,92 @@ def _scene_asset_job_message(status: str, result: GenerateSceneAssetsResponse | 
     return "场景参考图生成中。"
 
 
-def _select_scene_video_mode(scene: SceneGenerationItem, image_urls: list[str]) -> DirectVideoMode:
-    if scene.generation_mode:
-        return scene.generation_mode
+_VIDEO_MODE_CAPABILITY_ALIASES: dict[DirectVideoMode, tuple[str, ...]] = {
+    "text_to_video": ("文生视频", "text_to_video", "t2v"),
+    "image_to_video": ("图生视频", "首帧", "image_to_video", "i2v"),
+    "two_image_to_video": ("首尾帧", "two_image_to_video", "first_last_frame", "flf2v"),
+    "reference_mode_video": ("全能参考", "reference_mode_video", "omni_reference", "r2v"),
+    "edit_video": ("编辑视频", "edit_video"),
+    "extend_video": ("延伸视频", "extend_video"),
+}
+
+
+class SceneVideoCapabilityError(ValueError):
+    """实时模型能力与请求模式不匹配；属于不可重试的业务错误。"""
+
+
+def _select_scene_video_mode(
+    scene: SceneGenerationItem,
+    image_urls: list[str],
+    *,
+    creation_contract: VideoCreationContract | None = None,
+) -> DirectVideoMode:
+    requested_mode = scene.generation_mode
     text = f"{scene.prompt}\n{scene.storyline}\n{scene.narration}\n{scene.shot_description}".lower()
     video_urls = _dedupe_urls(scene.video_urls)
-    if video_urls and any(keyword in text for keyword in ("延伸", "续写", "extend")):
-        return "extend_video"
-    if video_urls and any(keyword in text for keyword in ("编辑", "修改", "调整", "edit")):
-        return "edit_video"
-    if video_urls or image_urls or scene.audio_urls:
-        return "reference_mode_video"
-    return "text_to_video"
+    if requested_mode is None:
+        if video_urls and any(keyword in text for keyword in ("延伸", "续写", "extend")):
+            requested_mode = "extend_video"
+        elif video_urls and any(keyword in text for keyword in ("编辑", "修改", "调整", "edit")):
+            requested_mode = "edit_video"
+        elif video_urls or image_urls or scene.audio_urls:
+            requested_mode = "reference_mode_video"
+        else:
+            requested_mode = "text_to_video"
+
+    supported_types = _video_generation_types(creation_contract)
+    if supported_types is None or _video_mode_is_supported(requested_mode, supported_types):
+        _validate_scene_video_mode_materials(requested_mode, image_urls, video_urls)
+        return requested_mode
+
+    # 自动场景中的图片是角色/场景/道具参考，不是首尾帧。模型没有全能参考能力时，
+    # 只能在实时配置明确支持文生视频时使用同一 Seedance Skill 提示词降级。
+    if (
+        scene.generation_mode is None
+        and requested_mode == "reference_mode_video"
+        and _video_mode_is_supported("text_to_video", supported_types)
+    ):
+        return "text_to_video"
+    raise SceneVideoCapabilityError(
+        f"视频模型不支持当前生成模式 {requested_mode}；实时能力={sorted(supported_types)}"
+    )
+
+
+def _video_generation_types(
+    creation_contract: VideoCreationContract | None,
+) -> set[str] | None:
+    configured = creation_contract.video_model_capabilities.generation_types if creation_contract is not None else []
+    if configured:
+        return {_normalize_video_capability(item) for item in configured if _normalize_video_capability(item)}
+
+    # 空能力代表旧合同 unknown，保持 legacy 选择；绝不根据型号名称猜测能力。
+    return None
+
+
+def _video_mode_is_supported(mode: DirectVideoMode, supported_types: set[str]) -> bool:
+    return any(_normalize_video_capability(alias) in supported_types for alias in _VIDEO_MODE_CAPABILITY_ALIASES[mode])
+
+
+def _normalize_video_capability(value: str) -> str:
+    return "".join(character for character in str(value or "").strip().lower() if character.isalnum() or "\u4e00" <= character <= "\u9fff")
+
+
+def _validate_scene_video_mode_materials(
+    mode: DirectVideoMode,
+    image_urls: list[str],
+    video_urls: list[str],
+) -> None:
+    if mode == "image_to_video" and not image_urls:
+        raise SceneVideoCapabilityError("image_to_video 至少需要 1 张首帧图片")
+    if mode == "two_image_to_video" and len(image_urls) < 2:
+        raise SceneVideoCapabilityError("two_image_to_video 至少需要首帧和尾帧 2 张图片")
+    if mode in {"edit_video", "extend_video"} and not video_urls:
+        raise SceneVideoCapabilityError(f"{mode} 至少需要 1 个参考视频")
+
+
+def _is_unsupported_task_type_failure(item: dict[str, Any]) -> bool:
+    text = f"{item.get('error') or ''} {item.get('raw') or ''}".lower()
+    return "task_type" in text and any(token in text for token in ("does not support", "not valid", "unsupported", "不支持"))
 
 
 def _provider_video_duration_seconds(duration_ms: int, model: str | None) -> int:
@@ -1320,11 +1423,11 @@ async def _run_scene_video_generation(
         return await skill.text_to_video(prompt=prompt, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
     if mode == "image_to_video":
         if not image_urls:
-            return await skill.reference_mode_video(prompt=prompt, image_urls=image_urls, video_urls=video_urls, audio_urls=audio_urls, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
+            raise SceneVideoCapabilityError("image_to_video 至少需要 1 张首帧图片")
         return await skill.image_to_video(image_url=image_urls[0], prompt=prompt, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
     if mode == "two_image_to_video":
         if len(image_urls) < 2:
-            return await skill.reference_mode_video(prompt=prompt, image_urls=image_urls, video_urls=video_urls, audio_urls=audio_urls, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
+            raise SceneVideoCapabilityError("two_image_to_video 至少需要首帧和尾帧 2 张图片")
         return await skill.two_image_to_video(
             first_frame_image_url=image_urls[0],
             last_frame_image_url=image_urls[1],
@@ -1337,7 +1440,7 @@ async def _run_scene_video_generation(
         )
     if mode == "edit_video":
         if not video_urls:
-            return await skill.reference_mode_video(prompt=prompt, image_urls=image_urls, video_urls=video_urls, audio_urls=audio_urls, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
+            raise SceneVideoCapabilityError("edit_video 至少需要 1 个参考视频")
         return await skill.edit_video(
             ref_video=video_urls[0],
             prompt=prompt,
@@ -1350,7 +1453,7 @@ async def _run_scene_video_generation(
         )
     if mode == "extend_video":
         if not video_urls:
-            return await skill.reference_mode_video(prompt=prompt, image_urls=image_urls, video_urls=video_urls, audio_urls=audio_urls, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
+            raise SceneVideoCapabilityError("extend_video 至少需要 1 个参考视频")
         return await skill.extend_video(video_url=video_urls[0], prompt=prompt, duration=duration, ratio=ratio, size=size, model=model, sound=sound)
     return await skill.reference_mode_video(
         prompt=prompt,

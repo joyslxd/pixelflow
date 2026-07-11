@@ -19,6 +19,10 @@ VALID_VIDEO_FORM = {
     "video_ratio": "9:16",
     "video_model_mode": "system_recommended",
     "video_model": "seedance-2.0",
+    "video_model_capabilities": {
+        "generation_types": ["文生视频", "首尾帧", "全能参考"],
+        "upload_file_types": ["JPG", "PNG", "MP4"],
+    },
     "video_size": "1080p",
     "video_sound": "on",
     "image_model": "gpt-image-2",
@@ -53,6 +57,8 @@ def test_build_video_creation_contract_normalizes_confirmed_form() -> None:
     assert contract.video_duration_sec == 180
     assert contract.video_ratio == "9:16"
     assert contract.video_model == "seedance-2.0"
+    assert contract.video_model_capabilities.generation_types == ["文生视频", "首尾帧", "全能参考"]
+    assert contract.video_model_capabilities.upload_file_types == ["JPG", "PNG", "MP4"]
     assert contract.image_model == "gpt-image-2"
     assert contract.image_model_capabilities.aspect_ratios == ["1:1", "16:9", "9:16"]
     assert contract.scene_image_ratio is None
