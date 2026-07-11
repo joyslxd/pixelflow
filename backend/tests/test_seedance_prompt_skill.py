@@ -14,7 +14,12 @@ def test_vendored_seedance_skill_targets_the_whole_model_family():
     assert "name: seedance-prompt" in skill_text
     assert "Seedance 系列" in skill_text
     assert "任意" in skill_text or "所有" in skill_text
+    assert "Seedance 2.0" not in skill_text
     assert "仅适用于 Seedance 2.0" not in skill_text
+    assert "Seedance 2.0 核心能力" not in skill_text
+    assert "### 平台参数" not in skill_text
+    assert "2K" not in skill_text
+    assert "分辨率480p-720p" not in skill_text
     assert "4-15" in skill_text
     assert "秒级时间码" in skill_text
     assert "@asset_id" in skill_text
@@ -61,4 +66,35 @@ def test_build_seedance_shot_prompt_contains_current_model_and_final_contract(vi
     assert "@scene-office" in prompt
     assert "@prop-backpack" in prompt
     assert "最多 9" in prompt
+    assert "只允许使用上述 @asset_id" in prompt
+    assert "不要使用未声明素材" in prompt
+    assert "镜头描述必须是一整段中文" in prompt
+
+
+@pytest.mark.parametrize(
+    ("start_second", "end_second"),
+    [
+        (10.5, 15.5),
+        (10, 14.5),
+    ],
+)
+def test_build_seedance_shot_prompt_rejects_non_integer_second_ranges(
+    start_second: float,
+    end_second: float,
+):
+    with pytest.raises(ValueError):
+        build_seedance_shot_prompt(
+            scene_index=1,
+            start_second=start_second,
+            end_second=end_second,
+            plan_markdown="## 创作目标\n展示产品卖点。",
+            storyline="产品在真实场景中完成演示",
+            narration="清晰展示核心能力。",
+            visual_style="电影写实",
+            available_asset_ids=["prop-product"],
+            video_ratio="9:16",
+            video_model="seedance-1.5-pro",
+            include_guidance=False,
+            include_plan=False,
+        )
 

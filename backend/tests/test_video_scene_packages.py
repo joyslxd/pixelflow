@@ -34,6 +34,7 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert result["global_assets"]["props"][0]["name"] == "苹果降噪耳机 Pro"
     assert [scene["scene_id"] for scene in result["scene_packages"]] == ["scene-1", "scene-2", "scene-3"]
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 30_000
+    assert all(scene["duration_ms"] % 1000 == 0 for scene in result["scene_packages"])
     assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
     assert "苹果降噪耳机 Pro" in result["scene_packages"][0]["prompt"]
     assert "引流直播间" in result["scene_packages"][-1]["narration"]
@@ -86,6 +87,7 @@ def test_prepare_video_scene_packages_supports_300_seconds_without_legacy_scene_
     durations = [scene["duration_ms"] for scene in result["scene_packages"]]
     assert len(durations) == 30
     assert sum(durations) == 300_000
+    assert all(duration % 1000 == 0 for duration in durations)
     assert all(4_000 <= duration <= 15_000 for duration in durations)
 
 
@@ -238,6 +240,7 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
     assert result["global_assets"]["props"][0]["name"] == "智能洗地机 X9"
     assert len(result["scene_packages"]) == 9
     assert sum(scene["duration_ms"] for scene in result["scene_packages"]) == 90_000
+    assert all(scene["duration_ms"] % 1000 == 0 for scene in result["scene_packages"])
     assert all(4_000 <= scene["duration_ms"] <= 15_000 for scene in result["scene_packages"])
     assert result["scene_packages"][0]["storyline"] == "LLM 故事线 1"
     assert result["scene_packages"][0]["prompt"] == "LLM 分镜提示词 1"
