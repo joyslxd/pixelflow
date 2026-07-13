@@ -41,12 +41,9 @@ export function PlanRevisionDialog({ open, feedback, onConfirm, onCancel }: Plan
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/25 p-5">
-      <div className="w-full max-w-[600px] rounded-2xl border border-line bg-surface p-6 shadow-xl">
+      <div className="flex max-h-[calc(100dvh-2.5rem)] w-full max-w-[600px] flex-col overflow-hidden rounded-2xl border border-line bg-surface p-6 shadow-xl">
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-[20px] font-semibold text-ink">你希望如何处理这次修改？</h2>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-soft">修改意见：{feedback}</p>
-          </div>
+          <h2 className="text-[20px] font-semibold text-ink">你希望如何处理这次修改？</h2>
           <button
             type="button"
             onClick={onCancel}
@@ -57,7 +54,15 @@ export function PlanRevisionDialog({ open, feedback, onConfirm, onCancel }: Plan
           </button>
         </div>
 
-        <div className="mt-5 space-y-3" role="radiogroup" aria-label="Plan 修改方式">
+        <div
+          aria-label="修改意见"
+          className="mt-3 min-h-0 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] leading-relaxed text-ink-soft overscroll-contain"
+        >
+          <span className="font-medium text-ink">修改意见：</span>
+          {feedback}
+        </div>
+
+        <div className="mt-5 shrink-0 space-y-3" role="radiogroup" aria-label="Plan 修改方式">
           {OPTIONS.map((option) => {
             const selected = mode === option.value;
             const Icon = option.icon;
@@ -87,7 +92,7 @@ export function PlanRevisionDialog({ open, feedback, onConfirm, onCancel }: Plan
         <button
           type="button"
           onClick={() => onConfirm(mode)}
-          className="mt-6 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-brand text-[14px] font-medium text-white hover:opacity-90"
+          className="mt-6 flex h-12 w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-brand text-[14px] font-medium text-white hover:opacity-90"
         >
           <Check size={18} />
           确认修改方式

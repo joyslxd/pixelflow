@@ -182,6 +182,9 @@ test("plan revision defaults to modifying the current creative and only regenera
   assert.match(planRevisionDialogSource, /useState<PlanRevisionMode>\("extend_current"\)/, "current-creative modification must be the default");
   assert.match(planRevisionDialogSource, /在当前创意基础上扩展\/修改/, "dialog must explain current creative modification");
   assert.match(planRevisionDialogSource, /放弃当前创意，重新生成新创意/, "dialog must explain creative regeneration");
+  assert.match(planRevisionDialogSource, /max-h-48/, "long revision feedback must have a bounded preview height");
+  assert.match(planRevisionDialogSource, /overflow-y-auto/, "long revision feedback must scroll inside the dialog");
+  assert.match(planRevisionDialogSource, /max-h-\[calc\(100dvh-2\.5rem\)\]/, "revision dialog must stay within the viewport");
   assert.match(workspaceSource, /api\.revisePlanMarkdown/, "extend-current mode must call the Plan revision endpoint");
   assert.match(workspaceSource, /mode === "regenerate_directions"[\s\S]*startDirectionJob/, "only regenerate mode may call the directions job");
   assert.match(apiSource, /planning\/plan\/revise/, "api client must expose Plan revision");
