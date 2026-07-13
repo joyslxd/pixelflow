@@ -49,3 +49,29 @@ def test_make_request_does_not_retry_quota_insufficient(monkeypatch):
 
     assert result["quota_insufficient"] is True
     assert calls == 1
+
+
+def test_make_request_does_not_retry_model_price_config_business_failure(monkeypatch):
+    calls = 0
+
+    def fake_send(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "error": True,
+            "status_code": 500,
+            "message": "模型价格配置不存在: seedance-2.0-mini",
+            "details": {
+                "success": False,
+                "message": "模型价格配置不存在: seedance-2.0-mini",
+            },
+        }
+
+    monkeypatch.setattr(run_generation, "_send_request", fake_send)
+    monkeypatch.setattr(run_generation, "_apply_auth_header", lambda headers: headers)
+    monkeypatch.setattr(run_generation.time, "sleep", lambda _seconds: None)
+
+    result = run_generation.make_request("/video/text-to-video", {"prompt": "x"})
+
+    assert result["non_retryable"] is True
+    assert calls == 1

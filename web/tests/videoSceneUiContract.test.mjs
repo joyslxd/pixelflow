@@ -62,6 +62,8 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
   assert.match(sceneMentionEditorSource, /group-hover:block/);
   assert.doesNotMatch(sceneMentionEditorSource, /<textarea/);
   assert.match(messageBubbleSource, /failed_scenes|失败场景/);
+  assert.match(messageBubbleSource, /查看失败原因/);
+  assert.match(messageBubbleSource, /sceneAssetFailureDetails/);
   assert.match(workspaceSource, /generatedSceneVideos\.failed_scenes|failed_scenes/);
 });
 

@@ -102,10 +102,7 @@ def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(mo
             "review_timeout_sec": None,
             "target_duration_ms": kwargs["target_duration_ms"],
             "global_assets": {"characters": [], "scenes": [], "props": []},
-            "scene_packages": [
-                {"scene_id": f"scene-{index}", "scene_index": index, "duration_ms": 10_000, "prompt": f"分镜 {index}"}
-                for index in range(1, 19)
-            ],
+            "scene_packages": [{"scene_id": f"scene-{index}", "scene_index": index, "duration_ms": 10_000, "prompt": f"分镜 {index}"} for index in range(1, 19)],
         }
 
     monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
@@ -149,7 +146,11 @@ def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(mo
     assert response.status_code == 200
     assert captured["target_duration_ms"] == 180_000
     assert captured["form_values"]["video_ratio"] == "9:16"
-    assert response.json()["creation_contract"] == creation_contract
+    returned_contract = response.json()["creation_contract"]
+    assert returned_contract["video_model"] == creation_contract["video_model"]
+    assert returned_contract["video_size"] == creation_contract["video_size"]
+    assert returned_contract["video_model_capabilities"]["generation_types"] == creation_contract["video_model_capabilities"]["generation_types"]
+    assert returned_contract["video_model_capabilities"]["sizes"] == []
 
 
 def test_provider_video_duration_uses_exact_integer_seconds():
@@ -680,10 +681,7 @@ def test_video_router_rejects_more_than_nine_mention_reference_images(monkeypatc
                         "prompt": "参考图太多",
                         "shot_description": {
                             "text": "0-8秒: 参考太多。",
-                            "mentions": [
-                                {"asset_id": f"asset-{index}", "image_url": f"https://x/ref-{index}.png"}
-                                for index in range(10)
-                            ],
+                            "mentions": [{"asset_id": f"asset-{index}", "image_url": f"https://x/ref-{index}.png"} for index in range(10)],
                         },
                     }
                 ],
@@ -695,6 +693,209 @@ def test_video_router_rejects_more_than_nine_mention_reference_images(monkeypatc
     assert data["ok"] is False
     assert data["failed_scenes"][0]["scene_id"] == "scene-1"
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
+
+
+def test_video_router_allows_exactly_nine_reference_images(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(
+                ok=True,
+                task_id="nine-reference-task",
+                url="https://x/nine-reference.mp4",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "九张参考图生成镜头",
+                        "image_urls": [f"https://x/ref-{index}.png" for index in range(9)],
+                        "generation_mode": "reference_mode_video",
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert len(calls) == 1
+    assert len(calls[0]["image_urls"]) == 9
+
+
+def test_video_router_does_not_retry_content_app_validation_failure(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    attempts = 0
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return GenerationResult(
+                ok=False,
+                error="参数验证失败: imageUrls 图片URL集合不能超过9张",
+                raw={
+                    "error": True,
+                    "status_code": 400,
+                    "message": "参数验证失败",
+                    "data": {"imageUrls": "个数必须在0和9之间"},
+                },
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "参数验证失败场景",
+                        "image_urls": ["https://x/ref.png"],
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    failure = response.json()["failed_scenes"][0]
+    assert attempts == 1
+    assert failure["attempts"] == 1
+    assert failure["raw"]["data"]["imageUrls"] == "个数必须在0和9之间"
+
+
+def test_video_router_does_not_retry_real_person_content_rejection(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    attempts = 0
+
+    class FakeVideoSkill:
+        async def reference_mode_video(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return GenerationResult(
+                ok=False,
+                error="Task failed because input image may contain real person",
+                raw={
+                    "error": True,
+                    "message": "Task failed because input image may contain real person",
+                },
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 4000,
+                        "prompt": "产品特写",
+                        "image_urls": ["https://x/real-person.png"],
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    failure = response.json()["failed_scenes"][0]
+    assert attempts == 1
+    assert failure["attempts"] == 1
+    assert failure["error"] == "Task failed because input image may contain real person"
+
+
+@pytest.mark.parametrize("model", ["seedance-2.0-mini", "seedance-2.0-fast"])
+def test_video_router_uses_dynamic_720p_for_compact_seedance_models(monkeypatch, model):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(
+                ok=True,
+                task_id=f"{model}-task",
+                url=f"https://x/{model}.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+    contract = {
+        "video_duration_sec": 4,
+        "video_ratio": "9:16",
+        "video_model": model,
+        "video_model_capabilities": {
+            "generation_types": ["文生视频", "首尾帧", "全能参考"],
+            "upload_file_types": ["JPG", "PNG", "MP4"],
+            "aspect_ratios": ["9:16", "16:9", "1:1"],
+            "sizes": ["480p", "720p"],
+            "sound_options": ["on", "off"],
+            "durations_sec": list(range(4, 16)),
+        },
+        "video_size": "720p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {"aspect_ratios": ["9:16"], "sizes": ["4K"]},
+        "video_usage": "产品宣传",
+    }
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 4000,
+                        "prompt": "产品特写",
+                        "generation_mode": "text_to_video",
+                    }
+                ],
+                "creation_contract": contract,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls[0]["model"] == model
+    assert calls[0]["size"] == "720p"
 
 
 def test_video_router_generates_scene_videos_in_parallel_and_aggregates_quota_once(monkeypatch):
@@ -977,6 +1178,7 @@ def test_video_router_scene_video_mode_selection_and_reference_limit(monkeypatch
     assert calls[5][1]["video_url"] == "https://x/source.mp4"
     assert data["failed_scenes"][0]["scene_id"] == "scene-7"
     assert "最多只能选择9张参考图" in data["failed_scenes"][0]["error"]
+
 
 def test_generate_scene_videos_prefers_generation_reference_url_over_display_image(monkeypatch):
     from app.gateway.routers import pixelflow_video

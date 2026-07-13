@@ -255,6 +255,119 @@ def test_generate_scene_assets_falls_back_to_text_to_image_when_reference_fails(
     assert result["global_assets"]["props"][0]["images"] == ["https://x/prop-fallback.png"]
 
 
+def test_generate_scene_assets_preserves_readable_failure_context_for_each_asset():
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="参数验证失败",
+                raw={
+                    "message": "参数验证失败",
+                    "details": {
+                        "success": False,
+                        "message": "参数验证失败",
+                        "data": {"size": "当前模型不支持4K"},
+                    },
+                    "status_code": 400,
+                },
+            )
+
+        async def reference_image(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="参考图生成失败",
+                raw={"message": "参考图生成失败", "status_code": 500},
+            )
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "scenes": [
+                    {
+                        "asset_id": "scene-bedroom",
+                        "name": "阳光卧室",
+                        "image_prompt": "阳光卧室场景图",
+                    }
+                ]
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[{"url": "https://x/product.png", "mediaType": "image"}],
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is False
+    failure = result["failed_assets"][0]
+    assert failure["asset_id"] == "scene-bedroom"
+    assert failure["asset_name"] == "阳光卧室"
+    assert failure["asset_type"] == "scene_image"
+    assert failure["scene_id"] == "scene-1"
+    assert failure["scene_index"] == 1
+    assert failure["endpoint"] == "/api/picture/text_to_image"
+    assert failure["model"] == "gpt-image-2"
+    assert failure["ratio"] == "9:16"
+    assert failure["size"] == "4K"
+    assert failure["error"] == "参数验证失败；size：当前模型不支持4K"
+    assert [attempt["endpoint"] for attempt in failure["attempts"]] == [
+        "/api/picture/multi_reference_image_generation",
+        "/api/picture/text_to_image",
+    ]
+
+
+def test_generate_scene_assets_reports_missing_prompt_instead_of_silently_skipping():
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            raise AssertionError("缺少提示词时不应调用生图接口")
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("缺少提示词时不应调用参考生图接口")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={"characters": [{"asset_id": "character-presenter", "name": "主播"}]},
+            scene_packages=[
+                {
+                    "scene_id": "scene-1",
+                    "scene_index": 1,
+                    "reference_asset_ids": ["character-presenter"],
+                }
+            ],
+            image_ratio="9:16",
+            image_size="2K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["failed_assets"] == [
+        {
+            "asset_id": "character-presenter",
+            "asset_name": "主播",
+            "asset_type": "character",
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "related_scene_ids": ["scene-1"],
+            "related_scene_indexes": [1],
+            "generation_mode": "not_started",
+            "endpoint": "",
+            "model": "gpt-image-2",
+            "ratio": "9:16",
+            "size": "2K",
+            "reference_urls": [],
+            "error": "素材缺少图片生成提示词",
+            "attempts": [],
+            "quota_insufficient": False,
+            "raw": None,
+        }
+    ]
+
+
 def test_generate_scene_assets_falls_back_to_text_to_image_without_materials():
     class FakeImageSkill:
         async def text_to_image(self, **kwargs):

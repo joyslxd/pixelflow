@@ -635,9 +635,7 @@ async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> G
             scene_packages=result.get("scene_packages") or [],
             failed_assets=result.get("failed_assets") or [],
             quota_insufficient=True,
-            message=quota_resume_message(
-                (result.get("failed_assets") or [{}])[-1].get("error") if result.get("failed_assets") else None
-            ),
+            message=quota_resume_message((result.get("failed_assets") or [{}])[-1].get("error") if result.get("failed_assets") else None),
         )
     return GenerateSceneAssetsResponse(
         ok=bool(result.get("ok")),
@@ -822,6 +820,15 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         mode = mode_override or _select_scene_video_mode(scene, image_urls, creation_contract=contract)
         prompt = _build_scene_video_prompt(scene)
         duration = _provider_video_duration_seconds(scene.duration_ms, video_model)
+        _validate_scene_video_request(
+            mode=mode,
+            prompt=prompt,
+            image_urls=image_urls,
+            video_urls=_dedupe_urls(scene.video_urls),
+            audio_urls=_dedupe_urls(scene.audio_urls),
+            duration=duration,
+            creation_contract=contract,
+        )
         result = await _run_scene_video_generation(
             skill=skill,
             mode=mode,
@@ -890,17 +897,11 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 if _is_unsupported_task_type_failure(item):
                     # 旧合同没有实时能力快照时保留 legacy 首次选择；供应商明确拒绝 task_type 后，
                     # 自动场景只改试一次语义安全的文生视频，不再重复同一个无效 r2v。
-                    if (
-                        scene.generation_mode is None
-                        and mode_override is None
-                        and item.get("mode") == "reference_mode_video"
-                        and (
-                            supported_generation_types is None
-                            or _video_mode_is_supported("text_to_video", supported_generation_types)
-                        )
-                    ):
+                    if scene.generation_mode is None and mode_override is None and item.get("mode") == "reference_mode_video" and (supported_generation_types is None or _video_mode_is_supported("text_to_video", supported_generation_types)):
                         mode_override = "text_to_video"
                         continue
+                    return item
+                if _is_non_retryable_scene_failure(item):
                     return item
             return last_failure or {
                 "scene_id": scene.scene_id,
@@ -1269,15 +1270,9 @@ def _select_scene_video_mode(
 
     # 自动场景中的图片是角色/场景/道具参考，不是首尾帧。模型没有全能参考能力时，
     # 只能在实时配置明确支持文生视频时使用同一 Seedance Skill 提示词降级。
-    if (
-        scene.generation_mode is None
-        and requested_mode == "reference_mode_video"
-        and _video_mode_is_supported("text_to_video", supported_types)
-    ):
+    if scene.generation_mode is None and requested_mode == "reference_mode_video" and _video_mode_is_supported("text_to_video", supported_types):
         return "text_to_video"
-    raise SceneVideoCapabilityError(
-        f"视频模型不支持当前生成模式 {requested_mode}；实时能力={sorted(supported_types)}"
-    )
+    raise SceneVideoCapabilityError(f"视频模型不支持当前生成模式 {requested_mode}；实时能力={sorted(supported_types)}")
 
 
 def _video_generation_types(
@@ -1308,13 +1303,62 @@ def _validate_scene_video_mode_materials(
         raise SceneVideoCapabilityError("image_to_video 至少需要 1 张首帧图片")
     if mode == "two_image_to_video" and len(image_urls) < 2:
         raise SceneVideoCapabilityError("two_image_to_video 至少需要首帧和尾帧 2 张图片")
+    if mode == "reference_mode_video" and not image_urls and not video_urls:
+        raise SceneVideoCapabilityError("reference_mode_video 至少需要 1 张参考图或 1 个参考视频")
     if mode in {"edit_video", "extend_video"} and not video_urls:
         raise SceneVideoCapabilityError(f"{mode} 至少需要 1 个参考视频")
+
+
+def _validate_scene_video_request(
+    *,
+    mode: DirectVideoMode,
+    prompt: str,
+    image_urls: list[str],
+    video_urls: list[str],
+    audio_urls: list[str],
+    duration: int,
+    creation_contract: VideoCreationContract | None,
+) -> None:
+    """调用 content-app 前按当前合同完成一次可解释校验。"""
+    if len(prompt) > 2500:
+        raise SceneVideoCapabilityError(f"分镜提示词最多2500个字符，当前为{len(prompt)}个字符")
+    if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
+        raise SceneVideoCapabilityError(f"最多只能选择{_MAX_REFERENCE_IMAGE_COUNT}张参考图，当前选择了{len(image_urls)}张")
+    if len(video_urls) > 3:
+        raise SceneVideoCapabilityError(f"参考视频最多3个，当前为{len(video_urls)}个")
+    if len(audio_urls) > 3:
+        raise SceneVideoCapabilityError(f"参考音频最多3个，当前为{len(audio_urls)}个")
+    _validate_scene_video_mode_materials(mode, image_urls, video_urls)
+    if creation_contract is None:
+        return
+    supported_durations = creation_contract.video_model_capabilities.durations_sec
+    if supported_durations and duration not in supported_durations:
+        raise SceneVideoCapabilityError(f"视频模型 {creation_contract.video_model} 不支持 {duration} 秒分镜；实时支持时长={supported_durations}")
 
 
 def _is_unsupported_task_type_failure(item: dict[str, Any]) -> bool:
     text = f"{item.get('error') or ''} {item.get('raw') or ''}".lower()
     return "task_type" in text and any(token in text for token in ("does not support", "not valid", "unsupported", "不支持"))
+
+
+def _is_non_retryable_scene_failure(item: dict[str, Any]) -> bool:
+    raw = item.get("raw")
+    status_code = raw.get("status_code") if isinstance(raw, dict) else None
+    if isinstance(status_code, int) and 400 <= status_code < 500 and status_code not in {408, 425, 429}:
+        return True
+    text = f"{item.get('error') or ''} {raw or ''}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "参数验证失败",
+            "模型价格配置不存在",
+            "validation failed",
+            "unsupported ratio",
+            "unsupported image quality",
+            "input image may contain real person",
+            "参考图可能包含真人",
+        )
+    )
 
 
 def _provider_video_duration_seconds(duration_ms: int, model: str | None) -> int:
@@ -1520,11 +1564,7 @@ def _scene_image_size(contract: VideoCreationContract | None) -> str:
 
 
 def _asset_count(global_assets: dict[str, Any]) -> int:
-    return (
-        len(_list_of_dicts(global_assets.get("characters")))
-        + len(_list_of_dicts(global_assets.get("scenes")))
-        + len(_list_of_dicts(global_assets.get("props")))
-    )
+    return len(_list_of_dicts(global_assets.get("characters"))) + len(_list_of_dicts(global_assets.get("scenes"))) + len(_list_of_dicts(global_assets.get("props")))
 
 
 def _record_video_job_failure(

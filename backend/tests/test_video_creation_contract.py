@@ -65,6 +65,49 @@ def test_build_video_creation_contract_normalizes_confirmed_form() -> None:
     assert contract.scene_image_size is None
 
 
+@pytest.mark.parametrize("model", ["seedance-2.0-mini", "seedance-2.0-fast"])
+def test_creation_contract_accepts_dynamic_720p_capability_for_compact_seedance_models(model: str) -> None:
+    contract = build_video_creation_contract(
+        {
+            **VALID_VIDEO_FORM,
+            "video_model": model,
+            "video_size": "720p",
+            "video_model_capabilities": {
+                "generation_types": ["文生视频", "首尾帧", "全能参考"],
+                "upload_file_types": ["JPG", "PNG", "MP4"],
+                "aspect_ratios": ["9:16", "16:9", "1:1"],
+                "sizes": ["480p", "720p"],
+                "sound_options": ["on", "off"],
+                "durations_sec": list(range(4, 16)),
+            },
+        }
+    )
+
+    assert contract.video_model == model
+    assert contract.video_size == "720p"
+    assert contract.video_model_capabilities.sizes == ["480p", "720p"]
+
+
+@pytest.mark.parametrize("model", ["seedance-2.0-mini", "seedance-2.0-fast"])
+def test_creation_contract_rejects_1080p_outside_dynamic_model_capabilities(model: str) -> None:
+    with pytest.raises(ValidationError, match="1080p.*480p.*720p"):
+        build_video_creation_contract(
+            {
+                **VALID_VIDEO_FORM,
+                "video_model": model,
+                "video_size": "1080p",
+                "video_model_capabilities": {
+                    "generation_types": ["文生视频", "首尾帧", "全能参考"],
+                    "upload_file_types": ["JPG", "PNG", "MP4"],
+                    "aspect_ratios": ["9:16", "16:9", "1:1"],
+                    "sizes": ["480p", "720p"],
+                    "sound_options": ["on", "off"],
+                    "durations_sec": list(range(4, 16)),
+                },
+            }
+        )
+
+
 @pytest.mark.parametrize("invalid", [3, 301, 9.5, "180", True])
 def test_creation_contract_rejects_out_of_range_or_non_integer_duration(invalid: object) -> None:
     with pytest.raises((ValidationError, ValueError)):

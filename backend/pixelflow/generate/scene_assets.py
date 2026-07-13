@@ -164,6 +164,100 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _failure_detail_parts(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            parts.extend(_failure_detail_parts(child, child_prefix))
+        return parts
+    if isinstance(value, list):
+        return _failure_detail_parts("、".join(str(item) for item in value if item), prefix)
+    if value in (None, "", True, False):
+        return []
+    text = str(value).strip()
+    return [f"{prefix}：{text}" if prefix else text] if text else []
+
+
+def _failure_validation_details(value: Any) -> Any:
+    """提取 content-app 返回的字段级校验详情。
+
+    HTTP 层会把业务响应放到 ``details`` 中，因此需要同时兼容
+    ``data`` 以及 ``details.data`` 两种结构。
+    """
+    if not isinstance(value, dict):
+        return None
+    for key in ("data", "errors", "fieldErrors", "detail"):
+        candidate = value.get(key)
+        if not isinstance(candidate, (dict, list)) or not candidate:
+            continue
+        nested = _failure_validation_details(candidate)
+        return nested or candidate
+    nested_details = value.get("details")
+    if isinstance(nested_details, dict):
+        return _failure_validation_details(nested_details)
+    return None
+
+
+def _failure_reason(result: Any, default: str = "图片生成失败") -> str:
+    raw = getattr(result, "raw", None)
+    raw_record = raw if isinstance(raw, dict) else {}
+    candidates = [
+        getattr(result, "error", None),
+        raw_record.get("message"),
+        raw_record.get("msg"),
+    ]
+    parts: list[str] = []
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    details = _failure_validation_details(raw_record)
+    for detail in _failure_detail_parts(details):
+        if detail not in parts:
+            parts.append(detail)
+    return "；".join(parts)[:1000] or default
+
+
+def _failure_attempt(result: Any, endpoint: str) -> dict[str, Any]:
+    return {
+        "endpoint": endpoint,
+        "task_id": getattr(result, "task_id", None),
+        "error": _failure_reason(result),
+        "raw": getattr(result, "raw", None),
+    }
+
+
+def _asset_context(
+    target: dict[str, Any],
+    *,
+    asset_type: str,
+    scene_packages: list[dict[str, Any]],
+    scene_id: str = "",
+    scene_index: Any = None,
+) -> dict[str, Any]:
+    asset_id = str(target.get("asset_id") or target.get("id") or "").strip()
+    asset_name = str(target.get("name") or target.get("title") or target.get("description") or asset_id).strip()
+    related_scenes = [scene for scene in scene_packages if asset_id and asset_id in [str(item) for item in scene.get("reference_asset_ids") or []]]
+    if not related_scenes and scene_id:
+        related_scenes = [scene for scene in scene_packages if str(scene.get("scene_id") or "") == scene_id]
+    if not related_scenes and len(scene_packages) == 1:
+        related_scenes = scene_packages[:1]
+    related_scene_ids = [str(scene.get("scene_id") or "") for scene in related_scenes if scene.get("scene_id")]
+    related_scene_indexes = [scene.get("scene_index") for scene in related_scenes if scene.get("scene_index") is not None]
+    resolved_scene_id = scene_id or (related_scene_ids[0] if related_scene_ids else "")
+    resolved_scene_index = scene_index if scene_index is not None else (related_scene_indexes[0] if related_scene_indexes else None)
+    return {
+        "asset_id": asset_id,
+        "asset_name": asset_name or "未命名参考图",
+        "asset_type": asset_type,
+        "scene_id": resolved_scene_id,
+        "scene_index": resolved_scene_index,
+        "related_scene_ids": related_scene_ids,
+        "related_scene_indexes": related_scene_indexes,
+    }
+
+
 async def generate_scene_assets(
     *,
     image_skill: ImageSkill,
@@ -190,6 +284,7 @@ async def generate_scene_assets(
         asset_type = str(context.get("asset_type") or "")
         use_reference = _uses_reference_image(asset_type, reference_urls)
         generation_mode = "reference_image" if use_reference else "text_to_image"
+        attempts: list[dict[str, Any]] = []
         generation_modes.add(generation_mode)
         if use_reference:
             result = await image_skill.reference_image(
@@ -202,6 +297,7 @@ async def generate_scene_assets(
             )
             endpoint = REFERENCE_IMAGE_ENDPOINT
             if not result.ok:
+                attempts.append(_failure_attempt(result, endpoint))
                 quota_insufficient = quota_checker(getattr(result, "raw", None)) or quota_checker(getattr(result, "error", None))
                 if not quota_insufficient:
                     generation_modes.add("text_to_image")
@@ -212,11 +308,12 @@ async def generate_scene_assets(
                         model=model,
                         num_images=1,
                     )
+                    endpoint = TEXT_TO_IMAGE_ENDPOINT
+                    generation_mode = "text_to_image_fallback"
                     if fallback.ok:
                         result = fallback
-                        generation_mode = "text_to_image_fallback"
-                        endpoint = TEXT_TO_IMAGE_ENDPOINT
                     else:
+                        attempts.append(_failure_attempt(fallback, endpoint))
                         result = fallback
         else:
             result = await image_skill.text_to_image(
@@ -227,14 +324,21 @@ async def generate_scene_assets(
                 num_images=1,
             )
             endpoint = TEXT_TO_IMAGE_ENDPOINT
+            if not result.ok:
+                attempts.append(_failure_attempt(result, endpoint))
         if not result.ok:
             quota_insufficient = quota_checker(getattr(result, "raw", None)) or quota_checker(getattr(result, "error", None))
             failed_assets.append(
                 {
                     **context,
                     "generation_mode": generation_mode,
+                    "endpoint": endpoint,
+                    "model": model,
+                    "ratio": ratio,
+                    "size": image_size,
                     "reference_urls": (reference_urls if use_reference else []),
-                    "error": result.error or "图片生成失败",
+                    "error": _failure_reason(result),
+                    "attempts": attempts or [_failure_attempt(result, endpoint)],
                     "quota_insufficient": quota_insufficient,
                     "raw": getattr(result, "raw", None),
                 }
@@ -242,46 +346,103 @@ async def generate_scene_assets(
             return [], quota_insufficient, endpoint
         urls = _extract_image_urls(result)
         if not urls:
+            no_url_error = "图片生成结果没有URL"
             failed_assets.append(
                 {
                     **context,
                     "generation_mode": generation_mode,
+                    "endpoint": endpoint,
+                    "model": model,
+                    "ratio": ratio,
+                    "size": image_size,
                     "reference_urls": (reference_urls if use_reference else []),
-                    "error": "图片生成结果没有URL",
+                    "error": no_url_error,
+                    "attempts": [
+                        {
+                            "endpoint": endpoint,
+                            "task_id": getattr(result, "task_id", None),
+                            "error": no_url_error,
+                            "raw": getattr(result, "raw", None),
+                        }
+                    ],
+                    "quota_insufficient": False,
                     "raw": getattr(result, "raw", None),
                 }
             )
         return urls, False, endpoint
 
     asset_jobs: list[tuple[dict[str, Any], str, str, str, dict[str, Any]]] = []
+
+    def queue_asset(
+        target: dict[str, Any],
+        field_name: str,
+        prompt: str,
+        ratio: str,
+        context: dict[str, Any],
+    ) -> None:
+        if prompt:
+            asset_jobs.append((target, field_name, prompt, ratio, context))
+            return
+        # 已有可用图片的素材无需再生成；无图且无提示词时必须显式报错。
+        if target.get(field_name):
+            return
+        failed_assets.append(
+            {
+                **context,
+                "generation_mode": "not_started",
+                "endpoint": "",
+                "model": model,
+                "ratio": ratio,
+                "size": image_size,
+                "reference_urls": [],
+                "error": "素材缺少图片生成提示词",
+                "attempts": [],
+                "quota_insufficient": False,
+                "raw": None,
+            }
+        )
+
     if assets:
         for character in _list_of_dicts(assets.get("characters")):
             prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
-            if prompt:
-                asset_jobs.append((character, "three_view_images", prompt, image_ratio, {"asset_id": character.get("asset_id"), "asset_type": "character"}))
+            queue_asset(character, "three_view_images", prompt, image_ratio, _asset_context(character, asset_type="character", scene_packages=enriched))
         for scene_image in _list_of_dicts(assets.get("scenes")):
             prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
-            if prompt:
-                asset_jobs.append((scene_image, "images", prompt, image_ratio, {"asset_id": scene_image.get("asset_id"), "asset_type": "scene_image"}))
+            queue_asset(scene_image, "images", prompt, image_ratio, _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched))
         for prop_image in _list_of_dicts(assets.get("props")):
             prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
-            if prompt:
-                asset_jobs.append((prop_image, "images", prompt, image_ratio, {"asset_id": prop_image.get("asset_id"), "asset_type": "prop_image"}))
+            queue_asset(prop_image, "images", prompt, image_ratio, _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched))
     else:
         for scene in enriched:
             scene_id = str(scene.get("scene_id") or "")
+            scene_index = scene.get("scene_index")
             for character in _list_of_dicts(scene.get("characters")):
                 prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
-                if prompt:
-                    asset_jobs.append((character, "three_view_images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "character"}))
+                queue_asset(
+                    character,
+                    "three_view_images",
+                    prompt,
+                    image_ratio,
+                    _asset_context(character, asset_type="character", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
+                )
             for scene_image in _list_of_dicts(scene.get("scene_images")):
                 prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
-                if prompt:
-                    asset_jobs.append((scene_image, "images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "scene_image"}))
+                queue_asset(
+                    scene_image,
+                    "images",
+                    prompt,
+                    image_ratio,
+                    _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
+                )
             for prop_image in _list_of_dicts(scene.get("prop_images")):
                 prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
-                if prompt:
-                    asset_jobs.append((prop_image, "images", prompt, image_ratio, {"scene_id": scene_id, "asset_type": "prop_image"}))
+                queue_asset(
+                    prop_image,
+                    "images",
+                    prompt,
+                    image_ratio,
+                    _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
+                )
 
     for target, field_name, prompt, ratio, context in asset_jobs:
         urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)

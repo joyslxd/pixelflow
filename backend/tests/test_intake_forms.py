@@ -96,7 +96,17 @@ def test_validate_video_form_builds_confirmed_creation_contract() -> None:
             "video_duration_sec": 180,
             "video_ratio": "16:9",
             "video_model_mode": "manual",
-            "video_model": "seedance-2.0",
+            "video_model": "seedance-2.0-mini",
+            "video_model_capabilities": {
+                "generation_types": ["文生视频", "首尾帧", "全能参考"],
+                "upload_file_types": ["JPG", "PNG", "MP4"],
+                "aspect_ratios": ["9:16", "16:9"],
+                "sizes": ["480p", "720p"],
+                "sound_options": ["on", "off"],
+                "durations_sec": list(range(4, 16)),
+            },
+            "video_size": "720p",
+            "video_sound": "off",
             "image_model": "gpt-image-2",
             "image_model_capabilities": {
                 "aspect_ratios": ["1:1", "16:9", "9:16"],
@@ -110,9 +120,38 @@ def test_validate_video_form_builds_confirmed_creation_contract() -> None:
     assert result.is_complete is True
     assert result.values["video_duration_sec"] == 180
     assert result.values["video_ratio"] == "16:9"
-    assert result.values["video_model"] == "seedance-2.0"
+    assert result.values["video_model"] == "seedance-2.0-mini"
+    assert result.values["video_model_capabilities"]["sizes"] == ["480p", "720p"]
+    assert result.values["video_size"] == "720p"
+    assert result.values["video_sound"] == "off"
     assert result.values["image_model"] == "gpt-image-2"
     assert result.values["image_model_capabilities"]["sizes"] == ["1080p", "2K", "4K"]
+
+
+def test_validate_video_form_requires_realtime_video_model_capabilities() -> None:
+    result = validate_form(
+        "video",
+        {
+            "product_info": "AuroraFit 智能健康戒指",
+            "product_category": "数码3C",
+            "target_audience": "25-35 岁健康管理人群",
+            "conversion_goal": "引流直播间",
+            "video_duration_sec": 30,
+            "video_ratio": "9:16",
+            "video_model_mode": "manual",
+            "video_model": "seedance-2.0-mini",
+            "image_model": "gpt-image-2",
+            "image_model_capabilities": {
+                "aspect_ratios": ["1:1", "16:9", "9:16"],
+                "sizes": ["1080p", "2K", "4K"],
+            },
+            "video_usage": "新品宣传",
+        },
+    )
+
+    assert result.is_complete is False
+    assert "video_model" in result.missing_fields
+    assert "实时能力" in result.message
 
 
 def test_validate_video_form_rejects_invalid_custom_duration() -> None:

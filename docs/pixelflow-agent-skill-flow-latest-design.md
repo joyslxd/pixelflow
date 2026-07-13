@@ -166,7 +166,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 
 | Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
 | --- | --- | --- | --- |
-| VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型、画幅和 `modelGenerateTypeList/uploadFileTypeList`；展示 content-app 返回的所有启用 Seedance，并把用户所选模型的实时能力固化到创作合同；系统推荐优先 `seedance-2.0` |
+| VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型及 `aspectRatioList/sizeList/onSoundList/videoDurationList/modelGenerateTypeList/uploadFileTypeList`；展示 content-app 返回的所有启用 Seedance，并把用户所选模型的完整实时能力固化到创作合同；系统推荐优先 `seedance-2.0` |
 | SceneImageModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/image_generate` | 查询场景资产图片模型及其比例/清晰度能力；用户只选模型，能力范围随表单提交给 Plan Agent |
 | ScenePackageSkill | `backend/pixelflow/generate/scene_packages.py` | LLM + 本地规则 | 生成可编辑场景包 |
 | SeedanceShotPromptSkill | `backend/pixelflow/generate/seedance_prompt.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 无 | 对 Seedance 全系列通用；按实际 `video_model` 生成秒级镜头描述，并保留 `@asset_id`、mentions 和最多 9 张参考图 |
@@ -186,7 +186,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 视频表单保留产品信息、品类、目标人群、转化目标，并新增/明确：总时长、视频画幅、视频模型、图片模型、视频用途、视觉风格。
 - `video_duration_sec` 预设为 30/60/90/180 秒；选择“自定义”后只能提交 4-300 的自然数。前端和 Python 后端都校验。
 - 视频模型配置来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认解析为 `seedance-2.0`，界面仍展示实际推荐结果。2.0 只是推荐默认值，不是 `seedance-prompt` 的调用开关。
-- `seedance-prompt` 对 Seedance 全系列通用；场景包 Prompt 显式携带用户确认的 `video_model`。前端把该模型实时 `modelGenerateTypeList/uploadFileTypeList` 保存为 `video_model_capabilities`，后端只按合同能力选择文生、首尾帧、全能参考、编辑或延伸端点，不按 Seedance 型号名称猜测能力。
+- `seedance-prompt` 对 Seedance 全系列通用；场景包 Prompt 显式携带用户确认的 `video_model`。前端把该模型实时画幅、清晰度、声音、单分镜时长和端点能力完整保存为 `video_model_capabilities`，新采集表单的快照不完整时后端阻止进入创意生成；只有恢复历史对话时兼容旧合同。后端只按合同能力选择参数和端点，不按 Seedance 型号名称猜测能力。
+- 视频清晰度下拉只展示当前模型 `sizeList`。切换模型时，已选清晰度不受支持则优先选择 `1080p -> 720p -> 480p` 中当前模型可用的最高档；例如 `seedance-2.0-mini` 和 `seedance-2.0-fast` 当前只支持 `480p/720p`，不得继续携带 `1080p`，否则 content-app 价格配置无法命中。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 保留两个输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 图片模型配置来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择图片比例和清晰度；前端把所选模型支持的比例/清晰度列表作为只读能力数据交给 Plan Agent。
 - 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
@@ -200,7 +201,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 镜头描述 `shot_description.text` 是一整段文本，时间范围统一使用秒级表达，例如 `0-10秒`、`10-15秒`；后端会归一化 LLM 返回的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
 - 场景视频 job 内部并行调用 content-app 视频接口，当前最大并发数为 100。并行只是提升同一批分镜的生成效率，整体阶段仍必须等所有分镜都成功、失败或额度暂停后，才进入汇总、重试或合并判断。
 - 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。合并失败时 job 必须返回 `status=failed`，并保留 `result.error`、`result.message`、`result.raw.details` 中的 content-app 原始错误，前端据此展示“视频合并失败”。
-- 单个分镜出现普通异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
+- 单个分镜出现可恢复网络或服务异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。HTTP 4xx 参数校验、模型价格配置缺失和实时能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 的 `status_code/data/details`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
 - 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`；如果同一条消息里存在有效上传图片素材，前端改走 `/agent/flows/image/fuse-asset`，后端调用 `MultiImageFusionSkill` 把引用素材图和上传图片融合成新图。进入 job 前前端会先展示图片编辑模型/比例/清晰度确认卡，默认模型 `gpt-image-2`，比例优先保持原素材比例。两条链路成功后只展示候选新图，必须用户点击确认后才替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`；点击重新编辑会基于当前候选图继续弹参数确认卡，不重新走 intake。
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
@@ -209,6 +210,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start` 启动 Python job，后端在同一个 job 内顺序完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即保存 `pendingScenePackageJob` / `pending_scene_package_job` 到 conversation context；用户切换历史对话、切到创作页、离开 iframe 或刷新后，只继续查询 `/agent/flows/video/prepare-scene-packages/jobs/{job_id}`，不重复启动。
 - 场景包卡片上的继续/重新生成参考图调用 `/agent/flows/video/generate-scene-assets/start`，保存同一类 `pendingScenePackageJob`，恢复时只查询 `/agent/flows/video/generate-scene-assets/jobs/{job_id}`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
 - 场景包 job 状态使用 `stage=prepare_scene_packages | generate_scene_assets | completed`；参考图额度不足时状态为 `quota_paused`，result 保留 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
+- `sceneAssetFailures` 是可恢复失败合同，不是简单计数。每条失败必须标明素材 ID/名称/类型、所属分镜、实际调用端点、图片模型/比例/清晰度、最终原因、供应商原始响应和尝试链；场景包卡片提供“查看失败原因”逐项展开。参考图接口失败后若回退文生图，两次失败都必须可见，并随 conversation context 持久化，刷新或切换对话后不能丢失。
 - 场景视频生成、失败分镜重试和视频修改重生成启动后，前端必须把 Python job 的 `job_id`、原始请求、来源 artifact 和所属 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时，只允许继续轮询 `/agent/flows/video/generate-scenes/jobs/{job_id}`；如果 job 不存在或已过期，不自动重新启动，避免重复计费。
 
 最终生产合同示例：
@@ -221,6 +223,14 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
   "video_ratio": "9:16",
   "video_model_mode": "system_recommended",
   "video_model": "seedance-2.0",
+  "video_model_capabilities": {
+    "generation_types": ["文生视频", "首尾帧", "全能参考"],
+    "upload_file_types": ["JPG", "PNG", "MP4"],
+    "aspect_ratios": ["1:1", "3:4", "4:3", "16:9", "9:16", "21:9"],
+    "sizes": ["480p", "720p", "1080p"],
+    "sound_options": ["on", "off"],
+    "durations_sec": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  },
   "video_size": "1080p",
   "video_sound": "on",
   "image_model": "gpt-image-2",
@@ -592,7 +602,7 @@ Plan 审核与版本规则：
 | 自动场景只有“首尾帧”等不兼容能力 | 返回不可重试的能力不匹配；角色/场景/道具资产不能冒充首尾帧 |
 | 旧合同没有能力快照 | 保持 legacy 首次选择；供应商明确返回 `task_type` 不兼容时，仅自动改试一次 `text_to_video`，不再重复无效 r2v |
 
-`image_to_video` 必须有首帧，`two_image_to_video` 必须有用户明确提供的首帧和尾帧，`edit_video/extend_video` 必须有参考视频；素材不足时直接返回能力错误，不再偷偷改走 `reference_mode_video`。
+`image_to_video` 必须有首帧，`two_image_to_video` 必须有用户明确提供的首帧和尾帧，`reference_mode_video` 必须至少有参考图或参考视频，`edit_video/extend_video` 必须有参考视频；素材不足时直接返回能力错误，不再偷偷改走 `reference_mode_video`。调用前还会校验提示词、最多 9 张参考图、最多 3 个参考视频/音频及模型实时单分镜时长。
 
 五类 content-app 请求体合同：
 
@@ -651,7 +661,7 @@ flowchart TD
 - 异常或网络失败：在 Borgrise Client 层按配置重试，默认 `max_retries=3`。
 - `/api/task/{taskId}/status` 状态轮询遇到可恢复网络错误时，除单次请求重试外，还会继续状态轮询最多 3 次；401、402、额度不足和非重试业务错误不进入恢复轮询。
 - 场景视频部分失败：返回 `failed_scenes`，前端展示失败原因，并允许用户回到上一步重新生成当前阶段。
-- 场景资产图部分失败：返回 `failed_assets`，前端允许重试资产图生成。
+- 场景资产图部分失败：返回 `failed_assets`，前端允许重试资产图生成。缺少生图提示词、content-app 调用失败、生成结果无 URL 都要逐图保留素材名称、所属分镜、模型参数、接口、尝试链和可读原因；场景包卡片提供“查看失败原因”展开项，不只显示失败数量。
 - 图片、视频、PPT 的表单弹窗如果被用户点击右上角 `X` 关闭，视为取消当前流程；前端清空 pending 表单上下文并将会话阶段记录为 `form_cancelled`。
 - 当前对话有阶段正在生成或处理时，所有 artifact 操作按钮都禁用，避免切换对话或返回旧卡片后重复触发。阶段结束后只允许最新可操作 artifact 继续；失败或额度暂停时只保留当前可恢复 artifact 的重试入口。
 

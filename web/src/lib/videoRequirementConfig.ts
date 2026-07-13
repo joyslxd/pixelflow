@@ -21,6 +21,10 @@ export interface ImageModelCapabilities {
 export interface VideoModelCapabilities {
   generation_types: string[];
   upload_file_types: string[];
+  aspect_ratios: string[];
+  sizes: string[];
+  sound_options: Array<"on" | "off">;
+  durations_sec: number[];
 }
 
 export const FALLBACK_VIDEO_MODEL_CONFIG: GenerateModelParamConfig = {
@@ -77,7 +81,34 @@ export function videoModelCapabilities(config: GenerateModelParamConfig): VideoM
   return {
     generation_types: normalizedOptions(config.paramConfig?.modelGenerateTypeList, []),
     upload_file_types: normalizedOptions(config.paramConfig?.uploadFileTypeList, []),
+    aspect_ratios: normalizedOptions(config.paramConfig?.aspectRatioList, []),
+    sizes: normalizedOptions(config.paramConfig?.sizeList, []),
+    sound_options: normalizedSoundOptions(config.paramConfig?.onSoundList),
+    durations_sec: normalizedDurations(config.paramConfig?.videoDurationList),
   };
+}
+
+export function preferredVideoSize(config: GenerateModelParamConfig, current = ""): string {
+  const sizes = videoModelCapabilities(config).sizes;
+  const selected = supportedOption(current, sizes);
+  if (selected) return selected;
+  for (const preferred of ["1080p", "720p", "480p"]) {
+    const supported = supportedOption(preferred, sizes);
+    if (supported) return supported;
+  }
+  return sizes[0] || current.trim() || "720p";
+}
+
+export function preferredVideoSound(config: GenerateModelParamConfig, current: "on" | "off" = "on"): "on" | "off" {
+  const options = videoModelCapabilities(config).sound_options;
+  return options.includes(current) ? current : (options[0] || current);
+}
+
+export function hasCompleteVideoModelCapabilities(capabilities: VideoModelCapabilities): boolean {
+  return capabilities.generation_types.length > 0
+    && capabilities.aspect_ratios.length > 0
+    && capabilities.sizes.length > 0
+    && capabilities.durations_sec.length > 0;
 }
 
 export function imageModelCapabilities(config: GenerateModelParamConfig): ImageModelCapabilities {
@@ -111,4 +142,31 @@ function normalizedOptions(values: string[] | undefined, fallback: string[]): st
     if (normalized && !result.includes(normalized)) result.push(normalized);
   }
   return result.length > 0 ? result : [...fallback];
+}
+
+function normalizedSoundOptions(values: string[] | undefined): Array<"on" | "off"> {
+  const result: Array<"on" | "off"> = [];
+  for (const value of values || []) {
+    const normalized = String(value || "").trim().toLowerCase();
+    let option: "on" | "off" | null = null;
+    if (["on", "yes", "true", "1", "开启", "有声"].includes(normalized)) option = "on";
+    if (["off", "no", "false", "0", "关闭", "静音"].includes(normalized)) option = "off";
+    if (option && !result.includes(option)) result.push(option);
+  }
+  return result;
+}
+
+function normalizedDurations(values: string[] | undefined): number[] {
+  const result: number[] = [];
+  for (const value of values || []) {
+    const duration = Number(value);
+    if (Number.isInteger(duration) && duration > 0 && !result.includes(duration)) result.push(duration);
+  }
+  return result;
+}
+
+function supportedOption(value: string, options: string[]): string | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return options.find((option) => option.toLowerCase() === normalized);
 }

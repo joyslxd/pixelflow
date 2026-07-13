@@ -22,6 +22,7 @@ VIDEO_GOALS = ["直接购买", "品牌曝光", "种草引流", "引流直播间"
 VIDEO_DURATION_OPTIONS = ["30", "60", "90", "180", "自定义"]
 VIDEO_RATIOS = ["9:16", "16:9", "1:1"]
 VIDEO_MODEL_MODES = ["system_recommended", "manual"]
+VIDEO_CONTRACT_METADATA_FIELDS = ("video_model_capabilities", "video_size", "video_sound")
 DEFAULT_IMAGE_MODEL_CAPABILITIES = {
     "aspect_ratios": ["1:1", "16:9", "9:16"],
     "sizes": ["1080p", "2K", "4K"],
@@ -205,7 +206,11 @@ def validate_form(intent: CreationIntent, values: dict[str, Any] | None, intake_
     if intent == "video" and not missing:
         try:
             creation_contract = build_video_creation_contract(normalized)
-            normalized.update(creation_contract.model_dump(exclude_none=True))
+            if not _has_complete_video_model_capabilities(normalized.get("video_model_capabilities")):
+                missing.append("video_model")
+                video_contract_error = "视频模型实时能力读取不完整，请重新选择视频模型或刷新后重试。"
+            else:
+                normalized.update(creation_contract.model_dump(exclude_none=True))
         except (ValidationError, ValueError) as exc:
             video_contract_error = _video_contract_error_message(exc)
             for field_id in _video_contract_error_fields(exc):
@@ -331,7 +336,22 @@ def _normalize_values(schema: FormSchema, values: dict[str, Any]) -> dict[str, A
             normalized[form_field.id] = raw.strip() if isinstance(raw, str) else raw
     if schema.output_type == "image" and _has(values.get("image_count")):
         normalized["image_count"] = _normalize_image_count(values.get("image_count"))
+    if schema.output_type == "video":
+        # 这三项由视频需求弹窗根据 content-app 实时模型配置生成，不作为普通表单字段展示，
+        # 但必须穿过采集校验进入创作合同，否则 mini/fast 会错误回退到 1080p。
+        for field_id in VIDEO_CONTRACT_METADATA_FIELDS:
+            if field_id not in values:
+                continue
+            raw = values[field_id]
+            normalized[field_id] = raw.strip() if isinstance(raw, str) else raw
     return normalized
+
+
+def _has_complete_video_model_capabilities(value: Any) -> bool:
+    """新采集流程必须固化 content-app 的实时能力快照。"""
+    if not isinstance(value, dict):
+        return False
+    return all(isinstance(value.get(key), list) and bool(value[key]) for key in ("generation_types", "aspect_ratios", "sizes", "durations_sec"))
 
 
 def _video_contract_error_fields(exc: ValidationError | ValueError) -> list[str]:

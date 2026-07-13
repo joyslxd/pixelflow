@@ -4,6 +4,7 @@ import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
+import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
 import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 
@@ -250,6 +251,7 @@ export function MessageBubble({
   const videoAnalysisStoryboards = records(msg.artifact?.videoAnalysis?.storyboards);
   const messageMaterials = records(msg.materials);
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
+  const sceneAssetFailureItems = sceneAssetFailureDetails(msg.artifact?.sceneAssetFailures);
   const imageQuotaPaused = quotaInsufficient(msg.artifact?.imageResult);
   const mergeQuotaPaused = quotaInsufficient(msg.artifact?.mergedVideo);
   const sceneAssetFailed = Boolean(msg.artifact?.sceneAssetFailures?.length);
@@ -269,6 +271,7 @@ export function MessageBubble({
   const pptFileDone = Boolean(msg.artifact?.pptDone);
   const progressText = showProgressLoading ? progressDescription(msg.content) : "";
   const [loadingDots, setLoadingDots] = useState(0);
+  const [sceneAssetFailureDetailsOpen, setSceneAssetFailureDetailsOpen] = useState(false);
   const [selectedImageEditModel, setSelectedImageEditModel] = useState("");
   const [selectedImageEditRatio, setSelectedImageEditRatio] = useState("");
   const [selectedImageEditSize, setSelectedImageEditSize] = useState("");
@@ -806,8 +809,50 @@ export function MessageBubble({
               </span>
             </div>
             {msg.artifact.sceneAssetFailures?.length ? (
-              <div className="mx-3 mb-3 rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
-                {sceneAssetQuotaPaused ? "参考图生成因额度不足暂停，充值后可继续。" : `${msg.artifact.sceneAssetFailures.length} 个参考图生成失败，可进入分镜检查。`}
+              <div className="mx-3 mb-3 overflow-hidden rounded-xl border border-amber/30 bg-amber/10 text-[12px] text-ink">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                  <span>
+                    {sceneAssetQuotaPaused ? "参考图生成因额度不足暂停，充值后可继续。" : `${msg.artifact.sceneAssetFailures.length} 个参考图生成失败，可进入分镜检查。`}
+                  </span>
+                  <button
+                    type="button"
+                    aria-expanded={sceneAssetFailureDetailsOpen}
+                    onClick={() => setSceneAssetFailureDetailsOpen((open) => !open)}
+                    className="flex items-center gap-1 font-medium text-amber hover:text-ink"
+                  >
+                    {sceneAssetFailureDetailsOpen ? "收起失败原因" : "查看失败原因"}
+                    <ChevronDown size={14} className={cn("transition-transform", sceneAssetFailureDetailsOpen && "rotate-180")} />
+                  </button>
+                </div>
+                {sceneAssetFailureDetailsOpen ? (
+                  <div className="divide-y divide-amber/20 border-t border-amber/20 bg-white/50">
+                    {sceneAssetFailureItems.map((failure, index) => (
+                      <div key={failure.id} className="space-y-1.5 px-3 py-2.5">
+                        <div className="flex flex-wrap items-center gap-1.5 font-medium text-ink">
+                          <span>{index + 1}. {failure.title}</span>
+                          <span className="rounded bg-amber/10 px-1.5 py-0.5 text-[11px] text-amber">{failure.typeLabel}</span>
+                          <span className="text-[11px] font-normal text-ink-soft">{failure.sceneLabel}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-soft">
+                          {failure.model ? <span>模型：{failure.model}</span> : null}
+                          {failure.ratio ? <span>比例：{failure.ratio}</span> : null}
+                          {failure.size ? <span>清晰度：{failure.size}</span> : null}
+                          {failure.endpoint ? <span className="break-all">接口：{failure.endpoint}</span> : null}
+                        </div>
+                        <div className="break-words text-[12px] leading-relaxed text-amber">失败原因：{failure.error}</div>
+                        {failure.attempts && failure.attempts.length > 1 ? (
+                          <div className="space-y-1 text-[11px] leading-relaxed text-ink-soft">
+                            {failure.attempts.map((attempt, attemptIndex) => (
+                              <div key={`${failure.id}-attempt-${attemptIndex}`}>
+                                尝试 {attemptIndex + 1}：{attempt.endpoint || "未知接口"} · {attempt.error || "未返回原因"}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : null}
             {isLatestVideoScenePackage ? (

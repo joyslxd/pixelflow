@@ -92,6 +92,15 @@ QUOTA_INSUFFICIENT_KEYWORDS = (
     "payment required",
     "not enough quota",
 )
+NON_RETRYABLE_BUSINESS_FAILURE_KEYWORDS = (
+    "参数验证失败",
+    "模型价格配置不存在",
+    "validation failed",
+    "unsupported ratio",
+    "unsupported image quality",
+    "input image may contain real person",
+    "参考图可能包含真人",
+)
 
 
 def _effective_poll_timeout(default_timeout: int) -> int:
@@ -296,6 +305,12 @@ def is_quota_insufficient(value: Any) -> bool:
     return any(keyword.lower() in text for keyword in QUOTA_INSUFFICIENT_KEYWORDS)
 
 
+def _is_non_retryable_business_failure(value: Any) -> bool:
+    """识别重试不会改变结果的确定性业务失败。"""
+    text = str(value or "").lower()
+    return any(keyword.lower() in text for keyword in NON_RETRYABLE_BUSINESS_FAILURE_KEYWORDS)
+
+
 def _safe_json_loads(text: str) -> Any:
     try:
         return json.loads(text)
@@ -447,6 +462,9 @@ def _make_request_impl(endpoint: str, data: dict | None = None, method: str = "P
             if result.get("quota_insufficient"):
                 return result
             if not result.get("error"):
+                return result
+            if _is_non_retryable_business_failure(result):
+                result["non_retryable"] = True
                 return result
 
             status_code = result.get("status_code")

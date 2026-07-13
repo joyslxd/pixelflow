@@ -6,7 +6,10 @@ import {
   FALLBACK_IMAGE_MODEL_CONFIG,
   FALLBACK_VIDEO_MODEL_CONFIG,
   filterSeedanceConfigs,
+  hasCompleteVideoModelCapabilities,
   imageModelCapabilities,
+  preferredVideoSize,
+  preferredVideoSound,
   resolveImageModel,
   resolveVideoModel,
   videoModelCapabilities,
@@ -129,8 +132,25 @@ function initialVideoModelCapabilities(values: Record<string, unknown>): VideoMo
     const uploadFileTypes = Array.isArray(capabilities.upload_file_types)
       ? capabilities.upload_file_types.map(String).filter(Boolean)
       : [];
+    const aspectRatios = Array.isArray(capabilities.aspect_ratios)
+      ? capabilities.aspect_ratios.map(String).filter(Boolean)
+      : [];
+    const sizes = Array.isArray(capabilities.sizes) ? capabilities.sizes.map(String).filter(Boolean) : [];
+    const soundOptions = Array.isArray(capabilities.sound_options)
+      ? capabilities.sound_options.map(String).filter((value): value is "on" | "off" => value === "on" || value === "off")
+      : [];
+    const durationsSec = Array.isArray(capabilities.durations_sec)
+      ? capabilities.durations_sec.map(Number).filter((value) => Number.isInteger(value) && value > 0)
+      : [];
     if (generationTypes.length > 0) {
-      return { generation_types: generationTypes, upload_file_types: uploadFileTypes };
+      return {
+        generation_types: generationTypes,
+        upload_file_types: uploadFileTypes,
+        aspect_ratios: aspectRatios,
+        sizes,
+        sound_options: soundOptions,
+        durations_sec: durationsSec,
+      };
     }
   }
   return videoModelCapabilities(FALLBACK_VIDEO_MODEL_CONFIG);
@@ -329,13 +349,15 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
         video_model: selectedVideoConfig.modelType,
         video_model_capabilities: selectedVideoCapabilities,
         video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+        video_size: preferredVideoSize(selectedVideoConfig, current.video_size),
+        video_sound: preferredVideoSound(selectedVideoConfig, current.video_sound),
         image_model: selectedImageConfig.modelType,
         image_model_capabilities: imageModelCapabilities(selectedImageConfig),
       }));
       if (
         results.some((result) => result.status === "rejected")
         || availableVideoConfigs.length === 0
-        || selectedVideoCapabilities.generation_types.length === 0
+        || !hasCompleteVideoModelCapabilities(selectedVideoCapabilities)
       ) {
         setModelConfigsError("视频模型实时能力读取失败或不完整，暂不能提交，请刷新后重试。");
       }
@@ -360,7 +382,13 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
           && validVideoDuration
           && video.video_ratio
           && video.video_model
-          && video.video_model_capabilities.generation_types.length > 0
+          && hasCompleteVideoModelCapabilities(video.video_model_capabilities)
+          && video.video_model_capabilities.aspect_ratios.includes(video.video_ratio)
+          && video.video_model_capabilities.sizes.includes(video.video_size)
+          && (
+            video.video_model_capabilities.sound_options.length === 0
+            || video.video_model_capabilities.sound_options.includes(video.video_sound)
+          )
           && video.image_model
           && video.image_model_capabilities.aspect_ratios.length > 0
           && video.image_model_capabilities.sizes.length > 0
@@ -412,6 +440,8 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       video_model: selected.modelType,
       video_model_capabilities: videoModelCapabilities(selected),
       video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+      video_size: preferredVideoSize(selected, current.video_size),
+      video_sound: preferredVideoSound(selected, current.video_sound),
     }));
   };
 
@@ -424,6 +454,8 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
       video_model: selected.modelType,
       video_model_capabilities: videoModelCapabilities(selected),
       video_ratio: ratios.includes(current.video_ratio) ? current.video_ratio : ratios[0],
+      video_size: preferredVideoSize(selected, current.video_size),
+      video_sound: preferredVideoSound(selected, current.video_sound),
     }));
   };
 
@@ -584,7 +616,21 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                     {video.video_model_mode === "system_recommended" ? `系统推荐结果：${video.video_model}` : `已选择：${video.video_model}`}
                   </div>
                 </FieldBlock>
-                <FieldBlock index={8} label="图片模型">
+                <FieldBlock index={8} label="视频清晰度">
+                  <select
+                    className={selectCls}
+                    value={video.video_size}
+                    onChange={(event) => setVideo((current) => ({ ...current, video_size: event.target.value }))}
+                  >
+                    {video.video_model_capabilities.sizes.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-[12px] text-ink-soft">清晰度来自当前视频模型的实时能力配置。</div>
+                </FieldBlock>
+                <FieldBlock index={9} label="图片模型">
                   <select className={selectCls} value={video.image_model} onChange={(event) => updateImageModel(event.target.value)}>
                     {imageModelConfigs.map((config) => (
                       <option key={config.modelType} value={config.modelType}>
@@ -594,7 +640,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                   </select>
                   <div className="text-[12px] text-ink-soft">角色、场景和道具图片将使用该模型；图片比例与清晰度由 plan.md 在模型支持范围内自动规划。</div>
                 </FieldBlock>
-                <FieldBlock index={9} label="视频用途">
+                <FieldBlock index={10} label="视频用途">
                   <input
                     className={inputCls}
                     value={video.video_usage}
@@ -602,7 +648,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                     placeholder="例如：品牌宣传、产品介绍、活动预热"
                   />
                 </FieldBlock>
-                <FieldBlock index={10} label="视觉风格">
+                <FieldBlock index={11} label="视觉风格">
                   <input
                     className={inputCls}
                     value={video.visual_style}

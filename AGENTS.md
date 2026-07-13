@@ -287,7 +287,7 @@ SmartPPT接口：
 - 视频粗略需求必须先展示表单。必填项除原产品信息、产品品类、目标人群、转化目标外，还包含 `video_duration_sec`、`video_ratio`、`video_model`、`image_model`、`video_usage`；`visual_style` 可由 LLM 预填并允许用户修改。
 - `video_duration_sec` 预设 30/60/90/180；选择自定义后只能提交 4-300 的自然数。前端和 Pydantic 都必须校验。
 - 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认 `seedance-2.0` 并展示解析结果。2.0 只是推荐默认值，不是 `seedance-prompt` 的调用开关；画幅下拉只展示当前视频模型支持值。
-- 模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准，不得按型号名称在 PixelFlow 中自行假设。
+- 模型特有的画幅、清晰度、声音、单分镜时长和参考素材能力以 content-app 实时配置与实际生成 API 为准，不得按型号名称在 PixelFlow 中自行假设。`video_model_capabilities` 必须完整保存 `aspect_ratios/sizes/sound_options/durations_sec/generation_types/upload_file_types`；新的采集表单缺少完整实时快照时必须阻止提交，只有历史对话恢复可按旧合同兼容。切换模型后必须把不支持的旧清晰度改成当前模型支持值，不能让 `seedance-2.0-mini/fast` 携带 `1080p`。
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择场景资产图片比例和清晰度；前端把所选模型支持的 `aspect_ratios/sizes` 作为 `image_model_capabilities` 提交。
 - 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
@@ -319,13 +319,14 @@ SmartPPT接口：
 - 场景视频和合并视频生成完成后，前端会把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。用户继续点击原来的“查看分镜”时仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
 - 场景视频 job 内部按 `scene_index` 排序后并行调用 content-app 视频接口，当前最大并发数为 100；必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge/start` 启动可恢复视频合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，不能按完成先后顺序合并；如果只有 1 个分镜，merge job 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
 - 多个分镜的视频合并由 Python merge job 调用 content-app `/api/video/merge`。content-app 该接口本身是同步等待下载、ffmpeg 合并和上传完成，不走 `/api/task/{taskId}/status` 轮询；PixelFlow 前端不能直接长连接等待，只能保存 `pendingVideoJob.kind="video_merge"` 并轮询 Python job。后端必须使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制 content-app 读等待，默认 1 小时，不能复用普通 HTTP 30 秒超时。若 content-app 返回业务失败或网络异常，Python job 必须标记 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端不能把失败合并展示成“合并完成”。
-- 场景视频并行生成时，每个分镜最多尝试 3 次；普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
+- 场景视频并行生成时，每个分镜的可恢复异常最多尝试 3 次；HTTP 4xx 参数校验、模型价格配置缺失和能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 原始字段错误。普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
 - 场景视频失败或额度暂停后，前端再次点击同一场景包的“确认并生成视频”时，只把 `generatedSceneVideos.failed_scenes` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`，已成功的分镜视频从 `generatedSceneVideos.scene_videos` 复用；补齐后再按 `scene_index` 合并完整视频。
 - 用户在原场景包的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge/start` 合并新版最终视频，并再次回填原场景包卡片。
 - 视频 plan.md 同意后，前端必须调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 内部顺序执行“生成可编辑场景包 -> 生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后必须立即写入 conversation context 的 `pendingScenePackageJob` / `pending_scene_package_job`，字段包含 `job_id`、`conversation_id`、`kind`、`started_at`、`request`、`artifact`、`source_message_id`。
 - 场景资产图片必须使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`；分镜视频必须使用 `video_model/video_ratio/video_size/video_sound`。图片模型不能传给视频接口，视频模型也不能传给图片接口。
 - `pendingScenePackageJob.kind` 固定为 `scene_package_generation` 或 `scene_asset_generation`。用户离开再返回同一对话时，只继续查询已有 `/prepare-scene-packages/jobs/{job_id}` 或 `/generate-scene-assets/jobs/{job_id}`，不能重新调用 `/start`。job 404 或过期时只提示用户从最新 plan 或场景包卡片手动重试，避免重复计费。
 - 场景包主链路 job 的 `stage` 包含 `prepare_scene_packages`、`generate_scene_assets`、`completed`。参考图额度不足时 job 状态为 `quota_paused`，result 必须保留已生成的 `videoScenePackages` 和 `sceneAssetFailures`，前端展示可继续的 `video_scene_packages` 卡片。
+- 每个 `sceneAssetFailures` 条目必须保留 `asset_id/asset_name/asset_type`、所属 `scene_id/scene_index`、`endpoint/model/ratio/size`、最终 `error`、`attempts` 和供应商 `raw`。场景包卡片除失败数量外必须提供“查看失败原因”，逐张展示失败素材和真实原因；参考生成回退文生图时要同时展示两次尝试。素材缺少生图提示词、调用失败、成功响应没有 URL 都必须生成明确失败条目，不能静默留下“待生成”占位，也不能折叠成泛化的“图片生成失败”。
 
 场景视频接口选择：
 
