@@ -1,12 +1,11 @@
-"""brief_constraint_validator — pure-logic hard-constraint enforcement (PRD §9.5).
+"""Brief 硬约束校验器，纯逻辑实现（PRD §9.5）。
 
-No LLM here. Given a generated :class:`Brief`, run the eight hard-constraint
-checks and auto-fix what can be fixed deterministically. Checks that need
-semantic judgement (forbidden elements in free text, product authenticity)
-cannot be safely auto-fixed in pure logic, so they are surfaced as ``warn``
-issues for the human Brief-review gate / a downstream AI rewrite.
+这里不调用 LLM。输入一个 LLM 生成的 ``Brief``，按 PRD 的八条硬约束逐条检查。
+可以用确定性逻辑安全修复的地方会直接修复；需要语义判断的地方，比如自由文本
+里是否真的包含禁止元素、商品是否真实呈现，只标成 ``warn``，交给 Brief 人工
+确认或后续 AI 改写。
 
-Returns the (possibly mutated) Brief plus a list of issue records::
+返回值包含修复后的 Brief 和问题列表，问题结构为::
 
     {"rule": str, "level": "fixed" | "warn", "shot_id": str | None, "message": str}
 """
@@ -17,9 +16,9 @@ import re
 
 from .models import Brief, HardConstraints, Shot, ShotAudio
 
-# Tolerance (seconds) for the total-duration check. PRD §9.5 uses ±2s.
+# 总时长校验容忍度，PRD §9.5 要求允许 ±2 秒。
 DURATION_TOLERANCE_SEC = 2.0
-# A hook shot should grab attention fast; PRD §9.5 caps its length.
+# hook 镜头需要快速抓注意力，PRD §9.5 将它限制在 3 秒内。
 MAX_HOOK_DURATION_SEC = 3.0
 
 
@@ -28,11 +27,11 @@ def _issue(rule: str, level: str, message: str, shot_id: str | None = None) -> d
 
 
 def _check_first_is_hook(brief: Brief, issues: list[dict]) -> None:
-    """Rule 1a: 开头是 hook — first shot must be a hook (reorder, or warn)."""
+    """规则 1a：第一镜必须是 hook；能前移已有 hook 就自动前移，否则 warn。"""
     shots = brief.shots
     if not shots or shots[0].scene_type == "hook":
         return
-    # Reorder: pull the first hook shot to the front if one exists.
+    # 如果 Brief 中已经有 hook 镜头，只是位置不对，则把第一个 hook 前移到首位。
     hook_idx = next((i for i, s in enumerate(shots) if s.scene_type == "hook"), None)
     if hook_idx is not None:
         shot = shots.pop(hook_idx)
@@ -43,8 +42,10 @@ def _check_first_is_hook(brief: Brief, issues: list[dict]) -> None:
 
 
 def _clamp_hook_duration(brief: Brief, issues: list[dict]) -> None:
-    """Rule 1b: hook ≤3s. Runs AFTER duration scaling so the clamp is final
-    (otherwise proportional scaling could silently push the hook back over 3s)."""
+    """规则 1b：hook 时长必须 ≤3 秒。
+
+    这个函数必须在总时长缩放之后执行，否则缩放可能又把 hook 拉回 3 秒以上。
+    """
     shots = brief.shots
     if not shots or shots[0].scene_type != "hook" or shots[0].duration <= MAX_HOOK_DURATION_SEC:
         return
@@ -54,7 +55,7 @@ def _clamp_hook_duration(brief: Brief, issues: list[dict]) -> None:
 
 
 def _check_last_is_cta(brief: Brief, issues: list[dict]) -> None:
-    """Rule 2: 结尾是 cta — auto-append a CTA shot when missing."""
+    """规则 2：最后一镜必须是 cta；缺失时自动补一个行动号召镜头。"""
     shots = brief.shots
     if shots and shots[-1].scene_type == "cta":
         return
@@ -79,7 +80,7 @@ def _check_last_is_cta(brief: Brief, issues: list[dict]) -> None:
 
 
 def _check_total_duration(brief: Brief, issues: list[dict]) -> None:
-    """Rule 3: 总时长匹配 — scale shot durations to hit duration_sec within ±2s."""
+    """规则 3：总时长要匹配目标时长；超出容忍度时按比例缩放各镜头。"""
     shots = brief.shots
     target = float(brief.duration_sec)
     total = sum(s.duration for s in shots)
@@ -92,7 +93,7 @@ def _check_total_duration(brief: Brief, issues: list[dict]) -> None:
 
 
 def _check_text_lengths(brief: Brief, issues: list[dict]) -> None:
-    """Rules 4 & 5: 旁白≤50字 / 花字≤20字 — truncate overflow."""
+    """规则 4 和 5：旁白 ≤50 字、花字 ≤20 字；超长时直接截断。"""
     hc: HardConstraints = brief.hard_constraints
     for s in brief.shots:
         if len(s.narration_text) > hc.max_narration_length:
@@ -104,7 +105,10 @@ def _check_text_lengths(brief: Brief, issues: list[dict]) -> None:
 
 
 def _check_forbidden_elements(brief: Brief, issues: list[dict]) -> None:
-    """Rule 6: 无禁止元素 — flag (semantic rewrite is out of pure-logic scope)."""
+    """规则 6：不能出现禁止元素。
+
+    禁止元素的语义改写不适合在纯逻辑里做，所以这里只做命中提示。
+    """
     forbidden = [t.strip() for t in brief.global_visual.forbidden_elements.replace("，", ",").split(",") if t.strip()]
     if not forbidden:
         return
@@ -115,8 +119,8 @@ def _check_forbidden_elements(brief: Brief, issues: list[dict]) -> None:
 
 
 _SUBTITLE_MARKER = "no text, no caption, no watermark"
-# generation_prompt is English (per the brief_generate system prompt); match on
-# word boundaries so "texture"/"context" don't false-positive on "text".
+# ``generation_prompt`` 按系统提示要求可能是英文，因此这里用英文单词边界匹配
+# text/caption/subtitle/watermark，避免 texture/context 这类词误命中 text。
 _SUBTITLE_EN = re.compile(r"\b(text|caption|subtitles?|watermark)\b", re.IGNORECASE)
 _SUBTITLE_ZH = ("画面生成文字", "生成字幕")
 
@@ -126,17 +130,20 @@ def _wants_onscreen_text(prompt: str) -> bool:
 
 
 def _check_subtitle_strategy(brief: Brief, issues: list[dict]) -> None:
-    """Rule 7: 字幕策略合规 — generation_prompt must not ask the model to render text."""
+    """规则 7：字幕策略合规，生成模型不能直接在画面里渲染文字。"""
     for s in brief.shots:
         if _SUBTITLE_MARKER in s.generation_prompt:
-            continue  # already negated — idempotent on re-validation
+            continue  # 已经注入过负向约束，重复校验时保持幂等。
         if _wants_onscreen_text(s.generation_prompt):
             s.generation_prompt = f"{s.generation_prompt.rstrip('. ')}. {_SUBTITLE_MARKER}"
             issues.append(_issue("subtitle_strategy", "fixed", "提示词要求画面生成文字，已注入负向约束", s.shot_id))
 
 
 def _check_product_authenticity(brief: Brief, issues: list[dict], product_info: dict | None) -> None:
-    """Rule 8: 商品真实性 — warn only; requires human confirmation."""
+    """规则 8：商品真实性。
+
+    是否真实呈现商品需要结合视觉语义判断，纯逻辑只能提示人工确认。
+    """
     if not product_info:
         return
     name = product_info.get("name") or product_info.get("product_name")
@@ -147,17 +154,17 @@ def _check_product_authenticity(brief: Brief, issues: list[dict], product_info: 
 
 
 def validate_and_fix(brief: Brief, product_info: dict | None = None) -> tuple[Brief, list[dict]]:
-    """Run all eight hard-constraint checks, auto-fixing in place where safe.
+    """运行所有硬约束校验，并在安全时自动修复。
 
-    The Brief is mutated and returned alongside the issue list. ``brief_valid``
-    is the absence of any ``warn``-level issue (fixed issues are resolved).
+    为避免污染调用方原始对象，这里先深拷贝 Brief，再返回修复副本和问题列表。
+    上层用“是否存在 warn 级问题”来计算 ``brief_valid``；fixed 级问题代表已解决。
     """
     fixed = brief.model_copy(deep=True)
     issues: list[dict] = []
     _check_first_is_hook(fixed, issues)
     _check_last_is_cta(fixed, issues)
     _check_total_duration(fixed, issues)
-    _clamp_hook_duration(fixed, issues)  # after scaling: the clamp is the final word
+    _clamp_hook_duration(fixed, issues)  # 放在缩放之后，确保 hook 的 3 秒限制最终生效。
     _check_text_lengths(fixed, issues)
     _check_forbidden_elements(fixed, issues)
     _check_subtitle_strategy(fixed, issues)

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 
-router = APIRouter(prefix="/api", tags=["models"])
+router = APIRouter(prefix="/agent", tags=["models"])
 
 
 class ModelResponse(BaseModel):

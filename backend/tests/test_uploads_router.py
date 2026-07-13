@@ -109,16 +109,13 @@ def test_upload_files_does_not_upload_non_images_to_borgrise(tmp_path):
     upload_mock.assert_not_awaited()
 
 
-def test_upload_image_to_borgrise_refreshes_cached_token(monkeypatch, tmp_path):
+def test_upload_image_to_borgrise_uses_request_authorization_context(monkeypatch, tmp_path):
     image_path = tmp_path / "product.jpg"
     image_path.write_bytes(b"jpg-bytes")
-    monkeypatch.setenv("BORGRISE_API_TOKEN", "fresh-token")
     monkeypatch.setattr(uploads, "BACKEND_ENV_PATH", tmp_path / "missing.env")
-    monkeypatch.setattr(uploads.run_generation, "API_TOKEN", "stale-token")
 
     def fake_upload(file_path: str) -> dict[str, str | bool]:
         assert file_path == str(image_path)
-        assert uploads.run_generation.API_TOKEN == "fresh-token"
         return {"success": True, "url": "https://tos.example.com/product.webp"}
 
     with patch.object(uploads.run_generation, "upload_file", side_effect=fake_upload):
@@ -760,7 +757,7 @@ def test_upload_limits_endpoint_requires_thread_access():
     app.include_router(uploads.router)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-local/uploads/limits")
+        response = client.get("/agent/threads/thread-local/uploads/limits")
 
     assert response.status_code == 404
 

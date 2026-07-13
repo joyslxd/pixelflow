@@ -19,7 +19,7 @@
 | `apiModelParamObj` | JSON string | 模型参数配置 | `{"size":"720p"}` |
 | `duration` | int (string) | 时长(秒)，视频填实际秒数，图片填 `1` | `5` |
 
-> **注意**: `channelId` 不需要传，后端自动路由。生图/生视频接口建议带 `projectId` 参数。
+> **注意**: `channelId` 和 `projectId` 都不需要传，后端会根据登录态自动路由和归属项目。
 
 ---
 
@@ -47,7 +47,7 @@
 
 ---
 
-### POST /api/picture/multi_reference_image_generation?projectId=1 — 参考图生图
+### POST /api/picture/multi_reference_image_generation — 参考图生图
 
 使用一张或多张参考图生成新图片。**有参考图时必须用这个接口**。
 
@@ -132,7 +132,7 @@
 
 ---
 
-### POST /api/video/reference-mode-video?projectId=1 — 参考模式生视频
+### POST /api/video/reference-mode-video — 参考模式生视频
 
 使用参考图片/视频/音频生成视频。参考素材通过 `imageUrls`/`videoUrls`/`audioUrls` 传入。
 
@@ -156,7 +156,7 @@
 
 ---
 
-### POST /api/video/extend-video?projectId=108 — 视频延长
+### POST /api/video/extend-video — 视频延长
 
 延长已有视频。
 
@@ -188,7 +188,6 @@
 **请求体**:
 ```json
 {
-  "projectId": 108,
   "videoUrls": [
     "https://example.com/segment1.mp4",
     "https://example.com/segment2.mp4"

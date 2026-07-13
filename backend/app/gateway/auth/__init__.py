@@ -1,42 +1,30 @@
-"""Authentication module for DeerFlow.
+"""认证兼容包。
 
-This module provides:
-- JWT-based authentication
-- Provider Factory pattern for extensible auth methods
-- UserRepository interface for storage backends (SQLite)
+PixelFlow 运行时登录已经统一交给 content-app，网关只接收
+``Authorization: Bearer <content-app-jwt>``。这里仅保留错误响应和用户模型等
+少量兼容导出，避免 ``app.gateway.auth.errors`` 这类 import 顺手加载旧的本地
+密码登录、SQLite 用户仓库或 reset-admin 逻辑。
+
+不要在新代码里从本包恢复本地登录/注册/cookie session；需要当前用户时请走
+``app.gateway.content_app_auth`` 或 ``app.gateway.deps.get_current_user_from_request``。
 """
 
-from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
-from app.gateway.auth.jwt import TokenPayload, create_access_token, decode_token
-from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.models import User, UserResponse
+from app.gateway.auth.jwt import create_access_token, decode_token
 from app.gateway.auth.password import hash_password, verify_password
-from app.gateway.auth.providers import AuthProvider
-from app.gateway.auth.repositories.base import UserRepository
 
 __all__ = [
-    # Config
-    "AuthConfig",
-    "get_auth_config",
-    "set_auth_config",
-    # Errors
+    # 错误响应：AuthMiddleware/deps 仍复用这些结构返回稳定 JSON。
     "AuthErrorCode",
     "AuthErrorResponse",
     "TokenError",
-    # JWT
-    "TokenPayload",
-    "create_access_token",
-    "decode_token",
-    # Password
-    "hash_password",
-    "verify_password",
-    # Models
+    # 用户模型：authz.AuthContext 仍把它作为类型使用。
     "User",
     "UserResponse",
-    # Providers
-    "AuthProvider",
-    "LocalAuthProvider",
-    # Repository
-    "UserRepository",
+    # 与原 auth 包兼容：单测和部分历史模块仍从该入口导入认证原语。
+    "create_access_token",
+    "decode_token",
+    "hash_password",
+    "verify_password",
 ]

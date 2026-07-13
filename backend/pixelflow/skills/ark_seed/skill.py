@@ -41,7 +41,14 @@ def _to_generation_result(raw: dict[str, Any], task_id: str | None = None) -> Ge
 def _to_image_result(raw: dict[str, Any], task_id: str | None = None) -> ImageGenerationResult:
     urls = extract_urls(raw)
     if urls:
-        return ImageGenerationResult(ok=True, urls=urls, url=urls[0], task_id=task_id or extract_task_id(raw), raw=raw)
+        return ImageGenerationResult(
+            ok=True,
+            images=[{"url": url} for url in urls],
+            urls=urls,
+            url=urls[0],
+            task_id=task_id or extract_task_id(raw),
+            raw=raw,
+        )
     return ImageGenerationResult(ok=False, task_id=task_id or extract_task_id(raw), error="Ark returned no image url", raw=raw)
 
 

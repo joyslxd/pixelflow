@@ -1,25 +1,21 @@
-"""brief_generate — 纯 Claude shot-planning (PRD §9.4).
+"""Brief 生成器：用 LLM 产出结构化分镜方案（PRD §9.4）。
 
-Turns product info + video params + a creative direction into an authoritative
-:class:`Brief` via the harness's config-driven chat model with structured
-output. Three creative modes per the PRD:
+输入商品信息、视频参数、创意方向和可选参考视频分析，输出权威 ``Brief`` DTO。
+模型由 harness 的 ``create_chat_model`` 创建，凭证、模型选择、追踪都走配置，
+不在业务代码里硬编码 SDK。
 
-* ``original``  — pure original创意 (no reference)
-* ``reference`` — single reference video as structural inspiration
-* ``attribution`` — multi-reference attribution / remix
+当前支持三种创意模式：
 
-The model is selected through ``deerflow.models.create_chat_model`` so model
-choice, credentials and tracing stay config-driven (no hardcoded SDK).
+* ``original``：无参考视频，完全原创。
+* ``reference``：单个参考视频，主要复刻结构和节奏。
+* ``attribution``：多个参考视频，做归因融合和混剪式创意。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, Literal
-
-from langchain_core.messages import BaseMessage
 
 from deerflow.models import create_chat_model
 
@@ -42,9 +38,6 @@ _SYSTEM_PROMPT = """你是资深电商短视频导演与分镜策划。根据给
 只输出符合 schema 的结构化数据，不要额外解释。"""
 
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-
-
 def _build_human_prompt(
     *,
     product_info: dict[str, Any],
@@ -64,52 +57,6 @@ def _build_human_prompt(
     return "\n\n".join(parts)
 
 
-def _message_text(message: BaseMessage | Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
-    return str(content)
-
-
-def _extract_json_object(text: str) -> dict[str, Any]:
-    fenced = _JSON_FENCE_RE.search(text)
-    candidate = fenced.group(1) if fenced else text
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        parsed = json.loads(candidate[start : end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("Brief response JSON must be an object")
-    return parsed
-
-
-async def _brief_generate_via_json_text(model: Any, human: str) -> Brief:
-    schema = Brief.model_json_schema()
-    prompt = (
-        f"{human}\n\n"
-        "请严格只输出一个 JSON object，不要输出 Markdown、解释文字或代码块。\n"
-        "JSON 必须符合以下 schema，字段名必须完全一致：\n"
-        f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
-    )
-    response = await model.ainvoke([("system", _SYSTEM_PROMPT), ("human", prompt)])
-    data = _extract_json_object(_message_text(response))
-    return Brief.model_validate(data)
-
-
 async def brief_generate(
     *,
     product_info: dict[str, Any],
@@ -118,10 +65,10 @@ async def brief_generate(
     reference_analysis: dict[str, Any] | None = None,
     creative_mode: CreativeMode = "original",
 ) -> Brief:
-    """Generate a structured :class:`Brief`. Raises on LLM/config failure.
+    """生成结构化 ``Brief``。
 
-    The caller (``creative_node``) is responsible for catching failures and
-    degrading gracefully so the pipeline stays runnable offline.
+    如果模型或配置不可用会抛出异常；上层 ``creative_node`` 负责捕获并降级，
+    保证离线或配置缺失时整条流水线仍能给出可解释状态。
     """
     model = create_chat_model(thinking_enabled=False)
     structured = model.with_structured_output(Brief)
@@ -141,9 +88,25 @@ async def brief_generate(
             raise
         logger.warning("[pixelflow] structured brief output unsupported, falling back to JSON text parsing: %s", message)
         brief = await _brief_generate_via_json_text(model, human)
-    # Backfill the output params from video_params so downstream nodes are exact.
+    # 用 video_params 回填输出参数，确保下游节点拿到的是用户最终确认的精确值。
     brief.platform = video_params.get("platform", brief.platform)
     brief.duration_sec = int(video_params.get("duration_sec", brief.duration_sec))
     brief.ratio = video_params.get("ratio", brief.ratio)
     brief.size = video_params.get("size", brief.size)
     return brief
+
+
+async def _brief_generate_via_json_text(model: Any, human: str) -> Brief:
+    response = await model.ainvoke(
+        [
+            ("system", f"{_SYSTEM_PROMPT}\n只返回 JSON 对象，不要使用 Markdown 代码块。"),
+            ("human", human),
+        ]
+    )
+    content = response.content if hasattr(response, "content") else response
+    if isinstance(content, list):
+        content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content)
+    raw = str(content).strip()
+    if raw.startswith("```"):
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return Brief.model_validate(json.loads(raw))

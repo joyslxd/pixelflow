@@ -42,7 +42,7 @@ def test_export_memory_route_returns_current_memory() -> None:
 
     with patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory):
         with TestClient(app) as client:
-            response = client.get("/api/memory/export")
+            response = client.get("/agent/memory/export")
 
     assert response.status_code == 200
     assert response.json()["facts"] == exported_memory["facts"]
@@ -66,7 +66,7 @@ def test_import_memory_route_returns_imported_memory() -> None:
 
     with patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory):
         with TestClient(app) as client:
-            response = client.post("/api/memory/import", json=imported_memory)
+            response = client.post("/agent/memory/import", json=imported_memory)
 
     assert response.status_code == 200
     assert response.json()["facts"] == imported_memory["facts"]
@@ -91,7 +91,7 @@ def test_export_memory_route_preserves_source_error() -> None:
 
     with patch("app.gateway.routers.memory.get_memory_data", return_value=exported_memory):
         with TestClient(app) as client:
-            response = client.get("/api/memory/export")
+            response = client.get("/agent/memory/export")
 
     assert response.status_code == 200
     assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
@@ -116,7 +116,7 @@ def test_import_memory_route_preserves_source_error() -> None:
 
     with patch("app.gateway.routers.memory.import_memory_data", return_value=imported_memory):
         with TestClient(app) as client:
-            response = client.post("/api/memory/import", json=imported_memory)
+            response = client.post("/agent/memory/import", json=imported_memory)
 
     assert response.status_code == 200
     assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
@@ -128,7 +128,7 @@ def test_clear_memory_route_returns_cleared_memory() -> None:
 
     with patch("app.gateway.routers.memory.clear_memory_data", return_value=_sample_memory()):
         with TestClient(app) as client:
-            response = client.delete("/api/memory")
+            response = client.delete("/agent/memory")
 
     assert response.status_code == 200
     assert response.json()["facts"] == []
@@ -153,7 +153,7 @@ def test_create_memory_fact_route_returns_updated_memory() -> None:
     with patch("app.gateway.routers.memory.create_memory_fact", return_value=updated_memory):
         with TestClient(app) as client:
             response = client.post(
-                "/api/memory/facts",
+                "/agent/memory/facts",
                 json={
                     "content": "User prefers concise code reviews.",
                     "category": "preference",
@@ -183,7 +183,7 @@ def test_delete_memory_fact_route_returns_updated_memory() -> None:
 
     with patch("app.gateway.routers.memory.delete_memory_fact", return_value=updated_memory):
         with TestClient(app) as client:
-            response = client.delete("/api/memory/facts/fact_delete")
+            response = client.delete("/agent/memory/facts/fact_delete")
 
     assert response.status_code == 200
     assert response.json()["facts"] == updated_memory["facts"]
@@ -195,7 +195,7 @@ def test_delete_memory_fact_route_returns_404_for_missing_fact() -> None:
 
     with patch("app.gateway.routers.memory.delete_memory_fact", side_effect=KeyError("fact_missing")):
         with TestClient(app) as client:
-            response = client.delete("/api/memory/facts/fact_missing")
+            response = client.delete("/agent/memory/facts/fact_missing")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Memory fact 'fact_missing' not found."
@@ -220,7 +220,7 @@ def test_update_memory_fact_route_returns_updated_memory() -> None:
     with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory):
         with TestClient(app) as client:
             response = client.patch(
-                "/api/memory/facts/fact_edit",
+                "/agent/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",
                     "category": "workflow",
@@ -251,7 +251,7 @@ def test_update_memory_fact_route_preserves_omitted_fields() -> None:
     with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory) as update_fact:
         with TestClient(app) as client:
             response = client.patch(
-                "/api/memory/facts/fact_edit",
+                "/agent/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",
                 },
@@ -275,7 +275,7 @@ def test_update_memory_fact_route_returns_404_for_missing_fact() -> None:
     with patch("app.gateway.routers.memory.update_memory_fact", side_effect=KeyError("fact_missing")):
         with TestClient(app) as client:
             response = client.patch(
-                "/api/memory/facts/fact_missing",
+                "/agent/memory/facts/fact_missing",
                 json={
                     "content": "User prefers spaces",
                     "category": "workflow",
@@ -294,7 +294,7 @@ def test_update_memory_fact_route_returns_specific_error_for_invalid_confidence(
     with patch("app.gateway.routers.memory.update_memory_fact", side_effect=ValueError("confidence")):
         with TestClient(app) as client:
             response = client.patch(
-                "/api/memory/facts/fact_edit",
+                "/agent/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",
                     "confidence": 0.91,

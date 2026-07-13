@@ -143,4 +143,3 @@ def score_brief(
         **checks,
     }
     return BriefScore(score=score, passed=passed, metrics=metrics, issues=validator_issues)
-

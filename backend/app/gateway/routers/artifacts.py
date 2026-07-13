@@ -12,7 +12,7 @@ from app.gateway.path_utils import resolve_thread_virtual_path
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["artifacts"])
+router = APIRouter(prefix="/agent", tags=["artifacts"])
 
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
@@ -131,8 +131,8 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
             is always downloaded regardless of this flag.
 
     Example:
-        - Get text file inline: `/api/threads/abc123/artifacts/mnt/user-data/outputs/notes.txt`
-        - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
+        - Get text file inline: `/agent/threads/abc123/artifacts/mnt/user-data/outputs/notes.txt`
+        - Download file: `/agent/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
         - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
     """
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)

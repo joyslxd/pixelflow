@@ -66,7 +66,7 @@ def test_stream_existing_run_exposes_distinct_get_and_post(openapi_spec: dict) -
     LangGraph SDK ``joinStream`` uses GET while ``useStream``'s stop button uses POST, so
     both methods must remain registered with their own ``operationId``.
     """
-    path = "/api/threads/{thread_id}/runs/{run_id}/stream"
+    path = "/agent/threads/{thread_id}/runs/{run_id}/stream"
     path_item = openapi_spec["paths"].get(path)
     assert path_item is not None, f"Expected {path} to be present in the OpenAPI spec"
 

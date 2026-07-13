@@ -1,16 +1,14 @@
-"""Segment planning for the GENERATE phase (pure logic).
+"""GENERATE 阶段的 segment 规划，纯逻辑实现。
 
-seedance-2.0 generates a coherent clip up to 15s in a single call, so a short
-video should NOT be fragmented into one generation per shot (independent clips
-hard-cut together, and N×min-duration costs more than one continuous clip).
+Seedance v2 skill 当前限制单次生成最长 10 秒。短视频不应该拆成“每个 shot 调一次
+生成”：独立片段硬拼会破坏连贯性，且每段都有最小时长成本。
 
-``plan_segments`` groups consecutive Brief shots into the fewest segments that
-each fit the vendor's single-call ceiling; ``build_segment_prompt`` fuses a
-segment's shots into one time-coded prompt (global visual stated once). A ≤15s
-video becomes a single segment / single call; longer videos become several
-segments generated in parallel and concatenated downstream.
+``plan_segments`` 会把连续 Brief shots 贪心合并成尽量少的 segment，并保证每个
+segment 不超过调用方传入的第三方单次时长上限。``build_segment_prompt`` 再把一个
+segment 内的多个 shot 融合成带时间码的 prompt，global visual 只描述一次。短视频
+通常是单 segment/单调用，较长视频会拆为多个 segment 并行生成，再交给 EDIT 拼接。
 
-Pure and deterministic: no I/O, fully testable offline.
+这是纯逻辑，不做 I/O，输出完全由入参决定，方便离线单测。
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 _NO_TEXT = "无字幕、无水印、无画面生成文字"
-_MAX_CHARS = 2000  # Seedance per-prompt character ceiling
+_MAX_CHARS = 2000  # Seedance 单条 prompt 的字符上限。
 
 
 def _join(sep: str, parts: list) -> str:
@@ -26,12 +24,12 @@ def _join(sep: str, parts: list) -> str:
 
 
 def plan_segments(shots: list[dict], max_sec: float) -> list[dict[str, Any]]:
-    """Group consecutive shots into segments that each fit ``max_sec``.
+    """把连续 shots 合并为每段不超过 ``max_sec`` 的 segments。
 
-    Greedy: extend the current segment until the next shot would overflow, then
-    start a new one. A single shot longer than ``max_sec`` still gets its own
-    segment (the caller clamps the generation duration). Returns a list of
-    ``{"index", "shot_indices", "shots", "duration"}`` in playback order.
+    算法是贪心：能放进当前 segment 就继续放；下一个 shot 会超长时，就结算当前
+    segment 并开启新 segment。单个 shot 自身超过 ``max_sec`` 时仍会单独成段，
+    由调用方负责夹取合法生成时长。返回值按播放顺序排列，字段包含
+    ``index``、``shot_indices``、``shots``、``duration``。
     """
     segments: list[dict[str, Any]] = []
     current: list[int] = []
@@ -55,12 +53,11 @@ def _segment(index: int, shot_indices: list[int], shots: list[dict]) -> dict[str
 
 
 def build_segment_prompt(shots: list[dict], global_visual: dict | None = None, *, max_chars: int = _MAX_CHARS) -> str:
-    """Fuse a segment's shots into one Seedance prompt.
+    """把一个 segment 内的多个 shots 融合成一条 Seedance prompt。
 
-    The shared ``global_visual`` (style/lighting/environment/continuity/forbidden)
-    is stated once; each shot becomes a cumulative time-coded action line so the
-    model produces one continuous multi-scene clip. The negative-constraints line
-    is always present (at minimum forbidding on-screen text).
+    共享的 ``global_visual``（风格、光线、环境、连续性、禁止元素）只写一次；
+    每个 shot 转成累计时间码动作行，让模型生成一段连续的多场景视频。负向约束行
+    始终存在，至少禁止画面文字/字幕/水印。
     """
     gv = global_visual or {}
     style = _join("，", [gv.get("overall_style"), gv.get("lighting"), gv.get("environment")])

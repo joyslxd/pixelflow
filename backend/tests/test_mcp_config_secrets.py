@@ -1,7 +1,7 @@
 """Tests for MCP config secret masking and preservation.
 
-Verifies that GET /api/mcp/config masks sensitive fields (env values,
-header values, OAuth secrets) and that PUT /api/mcp/config correctly
+Verifies that GET /agent/mcp/config masks sensitive fields (env values,
+header values, OAuth secrets) and that PUT /agent/mcp/config correctly
 preserves existing secrets when the frontend round-trips masked values.
 """
 

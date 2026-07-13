@@ -1,20 +1,18 @@
-"""PromptEngine — expand a Brief shot into a Seedance video prompt (pure logic).
+"""PromptEngine：把 Brief 的单个 shot 扩写成 Seedance 视频 prompt。
 
-The CREATIVE LLM already produces structured shots (action, camera, scene) plus
-a Brief-level ``global_visual`` (style, lighting, environment, continuity,
-forbidden elements). This assembles those fields into Seedance 2.0's preferred
-prompt shape — composition + time-coded action/camera + style + continuity +
-negative constraints — so the generation call gets a well-formed prompt without
-another LLM round-trip.
+CREATIVE 阶段的 LLM 已经产出了结构化 shot，包括动作、镜头、场景，以及 Brief
+级别的 ``global_visual``（风格、光线、环境、连续性、禁止元素）。这里只是把
+这些字段拼成 Seedance 2.0 更容易理解的 prompt 形态：构图/动作、时间段镜头、
+风格、一致性、负向约束。
 
-Deterministic and offline-testable. A future LLM-based PromptEngine could swap
-in behind the same signature if richer prose expansion is needed.
+这是纯逻辑，不再额外调用 LLM，所以可以离线测试。未来如果需要更强的文案扩写，
+可以在保持同样函数签名的前提下替换为 LLM 版本。
 """
 
 from __future__ import annotations
 
 _NO_TEXT = "无字幕、无水印、无画面生成文字"
-_MAX_CHARS = 2000  # Seedance per-prompt character ceiling
+_MAX_CHARS = 2000  # Seedance 单条 prompt 的字符上限。
 
 
 def _join(sep: str, parts: list) -> str:
@@ -22,11 +20,10 @@ def _join(sep: str, parts: list) -> str:
 
 
 def build_seedance_prompt(shot: dict, global_visual: dict | None = None, duration: float = 0.0, *, max_chars: int = _MAX_CHARS) -> str:
-    """Build a structured Seedance prompt for one shot.
+    """为单个 shot 构造结构化 Seedance prompt。
 
-    Empty fields are skipped; the negative-constraints line is always present
-    (per the Seedance methodology) and at minimum forbids on-screen text. The
-    result is capped at ``max_chars``.
+    空字段会被跳过；负向约束行始终存在，至少禁止画面文字/字幕/水印。最终结果会
+    截断到 ``max_chars``，避免第三方接口拒收过长 prompt。
     """
     gv = global_visual or {}
     core = (shot.get("generation_prompt") or shot.get("visual_description") or "").strip()

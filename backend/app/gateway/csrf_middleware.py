@@ -1,7 +1,6 @@
-"""CSRF protection middleware for FastAPI.
+"""FastAPI 的 CSRF 防护中间件。
 
-Per RFC-001:
-State-changing operations require CSRF protection.
+按 RFC-001：会改变状态的请求都需要 CSRF 防护。
 """
 
 import os
@@ -16,55 +15,55 @@ from starlette.types import ASGIApp
 
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
-CSRF_TOKEN_LENGTH = 64  # bytes
+CSRF_TOKEN_LENGTH = 64  # 字节
 
 
 def is_secure_request(request: Request) -> bool:
-    """Detect whether the original client request was made over HTTPS."""
+    """判断原始客户端请求是否通过 HTTPS 发起。"""
     return _request_scheme(request) == "https"
 
 
 def generate_csrf_token() -> str:
-    """Generate a secure random CSRF token."""
+    """生成安全随机 CSRF token。"""
     return secrets.token_urlsafe(CSRF_TOKEN_LENGTH)
 
 
 def should_check_csrf(request: Request) -> bool:
-    """Determine if a request needs CSRF validation.
+    """判断请求是否需要 CSRF 校验。
 
-    CSRF is checked for state-changing methods (POST, PUT, DELETE, PATCH).
-    GET, HEAD, OPTIONS, and TRACE are exempt per RFC 7231.
+    只对会改变状态的方法校验：POST、PUT、DELETE、PATCH。GET、HEAD、OPTIONS、
+    TRACE 按 RFC 7231 豁免。
     """
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
         return False
 
     path = request.url.path.rstrip("/")
-    # Exempt /api/v1/auth/me endpoint
-    if path == "/api/v1/auth/me":
+    # /agent/auth/me 不改变状态，豁免。
+    if path == "/agent/auth/me":
         return False
     return True
 
 
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
     {
-        "/api/v1/auth/login/local",
-        "/api/v1/auth/logout",
-        "/api/v1/auth/register",
-        "/api/v1/auth/initialize",
+        "/agent/auth/login/local",
+        "/agent/auth/logout",
+        "/agent/auth/register",
+        "/agent/auth/initialize",
     }
 )
 
 
 def is_auth_endpoint(request: Request) -> bool:
-    """Check if the request is to an auth endpoint.
+    """判断请求是否打到认证端点。
 
-    Auth endpoints don't need CSRF validation on first call (no token).
+    登录/注册/初始化这类认证端点首次调用时还没有 CSRF token，因此走 Origin 兜底。
     """
     return request.url.path.rstrip("/") in _AUTH_EXEMPT_PATHS
 
 
 def _host_with_optional_port(hostname: str, port: int | None, scheme: str) -> str:
-    """Return normalized host[:port], omitting default ports."""
+    """返回标准化 host[:port]，默认端口会省略。"""
     host = hostname.lower()
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -75,7 +74,7 @@ def _host_with_optional_port(hostname: str, port: int | None, scheme: str) -> st
 
 
 def _normalize_origin(origin: str) -> str | None:
-    """Return a normalized scheme://host[:port] origin, or None for invalid input."""
+    """标准化 ``scheme://host[:port]`` origin；非法输入返回 None。"""
     try:
         parsed = urlsplit(origin.strip())
         port = parsed.port
@@ -86,7 +85,7 @@ def _normalize_origin(origin: str) -> str | None:
     if scheme not in {"http", "https"} or not parsed.hostname:
         return None
 
-    # Browser Origin is only scheme/host/port. Reject URL-shaped or credentialed values.
+    # 浏览器 Origin 只包含 scheme/host/port；带路径、query、账号密码的值一律拒绝。
     if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
         return None
 
@@ -94,7 +93,7 @@ def _normalize_origin(origin: str) -> str | None:
 
 
 def _configured_cors_origins() -> set[str]:
-    """Return explicit configured browser origins that may call auth routes."""
+    """返回显式配置的、允许调用 auth 路由的浏览器 origin。"""
     origins = set()
     for raw_origin in os.environ.get("GATEWAY_CORS_ORIGINS", "").split(","):
         origin = raw_origin.strip()
@@ -107,12 +106,12 @@ def _configured_cors_origins() -> set[str]:
 
 
 def get_configured_cors_origins() -> set[str]:
-    """Return normalized explicit browser origins from GATEWAY_CORS_ORIGINS."""
+    """从 GATEWAY_CORS_ORIGINS 返回标准化后的显式浏览器 origin。"""
     return _configured_cors_origins()
 
 
 def _first_header_value(value: str | None) -> str | None:
-    """Return the first value from a comma-separated proxy header."""
+    """从逗号分隔的代理头中取第一个值。"""
     if not value:
         return None
     first = value.split(",", 1)[0].strip()
@@ -120,7 +119,7 @@ def _first_header_value(value: str | None) -> str | None:
 
 
 def _forwarded_param(request: Request, name: str) -> str | None:
-    """Extract a parameter from the first RFC 7239 Forwarded header entry."""
+    """从第一个 RFC 7239 Forwarded 头条目中提取参数。"""
     forwarded = _first_header_value(request.headers.get("forwarded"))
     if not forwarded:
         return None
@@ -133,13 +132,13 @@ def _forwarded_param(request: Request, name: str) -> str | None:
 
 
 def _request_scheme(request: Request) -> str:
-    """Resolve the original request scheme from trusted proxy headers."""
+    """从可信代理头中解析原始请求 scheme。"""
     scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
     return scheme.lower()
 
 
 def _request_origin(request: Request) -> str | None:
-    """Build the origin for the URL the browser is targeting."""
+    """构造浏览器实际访问目标的 origin。"""
     scheme = _request_scheme(request)
     host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
 
@@ -151,13 +150,12 @@ def _request_origin(request: Request) -> str | None:
 
 
 def is_allowed_auth_origin(request: Request) -> bool:
-    """Allow auth POSTs only from the same origin or explicit configured origins.
+    """只允许同源或显式配置 origin 发起 auth POST。
 
-    Login/register/initialize are exempt from the double-submit token because
-    first-time browser clients do not have a CSRF token yet. They still create
-    a session cookie, so browser requests with a hostile Origin header must be
-    rejected to prevent login CSRF / session fixation. Requests without Origin
-    are allowed for non-browser clients such as curl and mobile integrations.
+    login/register/initialize 豁免 double-submit token，因为首次浏览器请求还没有
+    CSRF token。但这些请求会创建 session cookie，因此带恶意 Origin 的浏览器请求
+    仍必须拒绝，避免登录 CSRF / session fixation。没有 Origin 的请求允许通过，
+    用于 curl、移动端等非浏览器客户端。
     """
     origin = request.headers.get("origin")
     if not origin:
@@ -172,7 +170,7 @@ def is_allowed_auth_origin(request: Request) -> bool:
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
-    """Middleware that implements CSRF protection using Double Submit Cookie pattern."""
+    """使用 Double Submit Cookie 模式实现 CSRF 防护的中间件。"""
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
@@ -204,15 +202,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # For auth endpoints that set up session, also set CSRF cookie
+        # 认证端点创建 session 时，同步下发 CSRF cookie。
         if _is_auth and request.method == "POST":
-            # Generate a new CSRF token for the session
+            # 为当前 session 生成新的 CSRF token。
             csrf_token = generate_csrf_token()
             is_https = is_secure_request(request)
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
-                httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
+                httponly=False,  # Double Submit Cookie 需要前端 JS 读取后放入请求头。
                 secure=is_https,
                 samesite="strict",
             )
@@ -221,9 +219,8 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
 
 def get_csrf_token(request: Request) -> str | None:
-    """Get the CSRF token from the current request's cookies.
+    """从当前请求 cookie 中读取 CSRF token。
 
-    This is useful for server-side rendering where you need to embed
-    token in forms or headers.
+    服务端渲染页面需要把 token 写入表单或请求头时会用到。
     """
     return request.cookies.get(CSRF_COOKIE_NAME)

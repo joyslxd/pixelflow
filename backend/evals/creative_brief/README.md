@@ -49,4 +49,3 @@ Samples are JSON objects with:
 
 Keep train/val/test split stable. SkillOpt can train on `train`, accept edits
 only on `val`, and report final quality on `test`.
-

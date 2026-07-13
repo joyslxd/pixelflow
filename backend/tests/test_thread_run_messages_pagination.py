@@ -1,4 +1,4 @@
-"""Tests for paginated GET /api/threads/{thread_id}/runs/{run_id}/messages endpoint."""
+"""Tests for paginated GET /agent/threads/{thread_id}/runs/{run_id}/messages endpoint."""
 
 from __future__ import annotations
 
@@ -65,11 +65,11 @@ def _make_store_only_run_manager() -> RunManager:
 
 
 def test_returns_paginated_envelope():
-    """GET /api/threads/{tid}/runs/{rid}/messages returns {data: [...], has_more: bool}."""
+    """GET /agent/threads/{tid}/runs/{rid}/messages returns {data: [...], has_more: bool}."""
     rows = [_make_message(i) for i in range(1, 4)]
     app = _make_app(event_store=_make_event_store(rows))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+        response = client.get("/agent/threads/thread-1/runs/run-1/messages")
     assert response.status_code == 200
     body = response.json()
     assert "data" in body
@@ -84,7 +84,7 @@ def test_has_more_true_when_extra_row_returned():
     rows = [_make_message(i) for i in range(1, 52)]  # 51 rows
     app = _make_app(event_store=_make_event_store(rows))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-2/runs/run-2/messages")
+        response = client.get("/agent/threads/thread-2/runs/run-2/messages")
     assert response.status_code == 200
     body = response.json()
     assert body["has_more"] is True
@@ -99,7 +99,7 @@ def test_default_page_keeps_newest_messages_when_extra_row_returned():
     with TestClient(app) as client:
         assert_run_message_page(
             client,
-            "/api/threads/thread-2/runs/run-2/messages",
+            "/agent/threads/thread-2/runs/run-2/messages",
             expected_seq=list(range(17, 67)),
         )
 
@@ -111,7 +111,7 @@ def test_before_seq_page_keeps_newest_side_when_extra_row_returned():
     with TestClient(app) as client:
         assert_run_message_page(
             client,
-            "/api/threads/thread-2/runs/run-2/messages?before_seq=18&limit=16",
+            "/agent/threads/thread-2/runs/run-2/messages?before_seq=18&limit=16",
             expected_seq=list(range(2, 18)),
         )
 
@@ -123,7 +123,7 @@ def test_after_seq_page_keeps_oldest_side_when_extra_row_returned():
     with TestClient(app) as client:
         assert_run_message_page(
             client,
-            "/api/threads/thread-2/runs/run-2/messages?after_seq=10",
+            "/agent/threads/thread-2/runs/run-2/messages?after_seq=10",
             expected_seq=list(range(11, 61)),
         )
 
@@ -134,7 +134,7 @@ def test_after_seq_forwarded_to_event_store():
     event_store = _make_event_store(rows)
     app = _make_app(event_store=event_store)
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-3/runs/run-3/messages?after_seq=5")
+        response = client.get("/agent/threads/thread-3/runs/run-3/messages?after_seq=5")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-3",
@@ -151,7 +151,7 @@ def test_before_seq_forwarded_to_event_store():
     event_store = _make_event_store(rows)
     app = _make_app(event_store=event_store)
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-4/runs/run-4/messages?before_seq=10")
+        response = client.get("/agent/threads/thread-4/runs/run-4/messages?before_seq=10")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-4",
@@ -168,7 +168,7 @@ def test_custom_limit_forwarded_to_event_store():
     event_store = _make_event_store(rows)
     app = _make_app(event_store=event_store)
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-5/runs/run-5/messages?limit=10")
+        response = client.get("/agent/threads/thread-5/runs/run-5/messages?limit=10")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-5",
@@ -183,7 +183,7 @@ def test_empty_data_when_no_messages():
     """Returns empty data list with has_more=False when no messages exist."""
     app = _make_app(event_store=_make_event_store([]))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-6/runs/run-6/messages")
+        response = client.get("/agent/threads/thread-6/runs/run-6/messages")
     assert response.status_code == 200
     body = response.json()
     assert body["data"] == []
@@ -191,10 +191,10 @@ def test_empty_data_when_no_messages():
 
 
 def test_get_run_hydrates_store_only_run():
-    """GET /api/threads/{tid}/runs/{rid} should read historical store rows."""
+    """GET /agent/threads/{tid}/runs/{rid} should read historical store rows."""
     app = _make_app(run_manager=_make_store_only_run_manager())
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-store/runs/store-only-run")
+        response = client.get("/agent/threads/thread-store/runs/store-only-run")
 
     assert response.status_code == 200
     body = response.json()
@@ -207,7 +207,7 @@ def test_cancel_store_only_run_returns_409():
     """Store-only runs are readable but not cancellable by this worker."""
     app = _make_app(run_manager=_make_store_only_run_manager())
     with TestClient(app) as client:
-        response = client.post("/api/threads/thread-store/runs/store-only-run/cancel")
+        response = client.post("/agent/threads/thread-store/runs/store-only-run/cancel")
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
@@ -217,7 +217,7 @@ def test_join_store_only_run_returns_409():
     """join endpoint should return 409 for store-only runs (no local stream state)."""
     app = _make_app(run_manager=_make_store_only_run_manager())
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-store/runs/store-only-run/join")
+        response = client.get("/agent/threads/thread-store/runs/store-only-run/join")
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
@@ -227,7 +227,7 @@ def test_stream_store_only_run_returns_409():
     """stream endpoint (action=None) should return 409 for store-only runs."""
     app = _make_app(run_manager=_make_store_only_run_manager())
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-store/runs/store-only-run/stream")
+        response = client.get("/agent/threads/thread-store/runs/store-only-run/stream")
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]

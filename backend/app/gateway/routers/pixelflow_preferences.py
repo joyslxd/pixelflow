@@ -1,4 +1,4 @@
-"""PixelFlow structured user preference API."""
+"""PixelFlow 结构化用户偏好 API。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_current_user
+from app.gateway.pixelflow_memory import power_mem_service, record_power_mem_background
 from pixelflow.preferences import UserPreferenceStore
 
-router = APIRouter(prefix="/api/users", tags=["pixelflow-preferences"])
+router = APIRouter(prefix="/agent/users", tags=["pixelflow-preferences"])
 
 
 class PreferenceResponse(BaseModel):
@@ -42,10 +43,18 @@ def _store(request: Request) -> UserPreferenceStore:
     return store
 
 
+def _preference_payload(request: Request, pref: Any) -> dict[str, Any]:
+    data = pref.to_dict()
+    service = power_mem_service(request)
+    if service is not None:
+        data["semantic_memory"] = service.status_snapshot()
+    return data
+
+
 async def _require_self(path_user_id: str, request: Request) -> str:
     current = await get_current_user(request)
     if current is None:
-        # Auth may be disabled in local dev; allow the explicit path id.
+        # 本地开发可能关闭鉴权；此时允许使用路径里的显式 user_id。
         return path_user_id
     if path_user_id != current:
         raise HTTPException(status_code=403, detail="Cannot access another user's PixelFlow preferences")
@@ -56,7 +65,7 @@ async def _require_self(path_user_id: str, request: Request) -> str:
 async def get_preferences(user_id: str, request: Request) -> PreferenceResponse:
     resolved = await _require_self(user_id, request)
     pref = await _store(request).get(resolved)
-    return PreferenceResponse(**pref.to_dict())
+    return PreferenceResponse(**_preference_payload(request, pref))
 
 
 @router.put("/{user_id}/preferences", response_model=PreferenceResponse)
@@ -70,11 +79,45 @@ async def update_preferences(user_id: str, body: PreferenceUpdateRequest, reques
             "defaults": body.defaults,
         },
     )
-    return PreferenceResponse(**pref.to_dict())
+    service = power_mem_service(request)
+    if service is not None:
+        record_power_mem_background(
+            service,
+            user_id=resolved,
+            content=_preference_update_summary(body),
+            category="preference",
+            source_agent="preference_api",
+            metadata={"source": "preferences_update"},
+            memory_type="preference",
+        )
+    return PreferenceResponse(**_preference_payload(request, pref))
 
 
 @router.post("/{user_id}/preferences/feedback", response_model=PreferenceResponse)
 async def append_preference_feedback(user_id: str, body: PreferenceFeedbackRequest, request: Request) -> PreferenceResponse:
     resolved = await _require_self(user_id, request)
     pref = await _store(request).append_feedback(resolved, body.feedback, task_id=body.task_id, metadata=body.metadata)
-    return PreferenceResponse(**pref.to_dict())
+    service = power_mem_service(request)
+    if service is not None:
+        record_power_mem_background(
+            service,
+            user_id=resolved,
+            content=body.feedback,
+            category="preference",
+            source_agent="preference_api",
+            metadata={"source": "preferences_feedback", "task_id": body.task_id, **body.metadata},
+            memory_type="preference",
+            run_id=body.task_id,
+        )
+    return PreferenceResponse(**_preference_payload(request, pref))
+
+
+def _preference_update_summary(body: PreferenceUpdateRequest) -> str:
+    parts: list[str] = []
+    if body.style_preferences:
+        parts.append(f"风格偏好：{body.style_preferences}")
+    if body.negative_rules:
+        parts.append(f"负向规则：{body.negative_rules}")
+    if body.defaults:
+        parts.append(f"默认参数：{body.defaults}")
+    return "；".join(parts)

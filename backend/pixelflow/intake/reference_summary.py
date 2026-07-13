@@ -1,12 +1,12 @@
-"""summarize_storyboards — compact reference-video analysis for the Brief prompt (pure logic).
+"""参考视频 storyboard 摘要，纯逻辑实现。
 
-Normalizes the vendor storyboards attached to ``reference_videos`` (by the
-decompose skill) into the ``reference_analysis`` structure ``brief_generate``
-consumes. Vendor field names vary, so each shot is mapped tolerantly onto
-{index, duration, description, camera} and capped per video to keep the prompt
-bounded.
+参考视频拆解 skill 返回的字段名可能来自不同供应商，格式并不完全稳定。这里把
+``reference_videos`` 中的 vendor storyboard 宽松归一到 ``brief_generate`` 能
+消费的 ``reference_analysis`` 结构：每个 shot 尽量保留 index、duration、
+description、camera、narration 等信息。
 
-Pure and deterministic: no I/O, fully testable offline.
+这是纯函数，不做 I/O，输出完全由入参决定，方便离线单测。每个视频最多保留
+``MAX_SHOTS_PER_VIDEO`` 个镜头，避免把 Brief prompt 撑得过大。
 """
 
 from __future__ import annotations
@@ -52,7 +52,10 @@ def _shot(raw: Any, index: int) -> dict[str, Any]:
 
 
 def summarize_storyboards(reference_videos: list | None) -> dict[str, Any] | None:
-    """Build ``reference_analysis`` from parsed reference videos; None when nothing usable."""
+    """从已拆解的参考视频中构造 ``reference_analysis``。
+
+    没有可用 storyboard 时返回 None，表示后续策划走原创模式。
+    """
     videos: list[dict[str, Any]] = []
     for ref in reference_videos or []:
         ref = ref or {}

@@ -36,7 +36,7 @@ from pixelflow.skills.borgrise import run_generation
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
+router = APIRouter(prefix="/agent/threads/{thread_id}/uploads", tags=["uploads"])
 
 UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
@@ -207,9 +207,6 @@ async def _upload_image_to_borgrise(file_path: os.PathLike[str] | str) -> str:
     """Upload an image to Borgrise/TOS and return the public URL."""
     if BACKEND_ENV_PATH.exists():
         load_dotenv(BACKEND_ENV_PATH, override=True)
-    run_generation.API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
-    run_generation.BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
-    run_generation.BORGRISE_PASSWORD = os.environ.get("BORGRISE_PASSWORD", "")
     run_generation.BASE_URL = os.environ.get("BORGRISE_BASE_URL", run_generation.BASE_URL)
     result = await asyncio.to_thread(run_generation.upload_file, str(file_path))
     if result.get("error"):

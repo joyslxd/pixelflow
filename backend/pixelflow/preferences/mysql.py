@@ -1,4 +1,4 @@
-"""PixelFlow preference MySQL bootstrap."""
+"""PixelFlow 用户偏好 MySQL 初始化。"""
 
 from __future__ import annotations
 

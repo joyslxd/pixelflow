@@ -3,4 +3,3 @@
 from .scorer import BriefScore, score_brief
 
 __all__ = ["BriefScore", "score_brief"]
-

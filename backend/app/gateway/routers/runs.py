@@ -21,7 +21,7 @@ from app.gateway.services import sse_consumer, start_run, wait_for_run_completio
 from deerflow.runtime import serialize_channel_values
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/runs", tags=["runs"])
+router = APIRouter(prefix="/agent/runs", tags=["runs"])
 
 
 def _resolve_thread_id(body: RunCreateRequest) -> str:
@@ -52,7 +52,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
+            "Content-Location": f"/agent/threads/{thread_id}/runs/{record.run_id}",
         },
     )
 

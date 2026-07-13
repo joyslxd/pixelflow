@@ -1,11 +1,10 @@
-"""build_draft_plan — flatten a Timeline IR into a DraftPlan (pure logic).
+"""把 Timeline IR 扁平化为 DraftPlan，纯逻辑实现。
 
-Resolves the pixel canvas from ``timeline.size`` ("WxH") and lays the clips
-end-to-end on the main track, accumulating absolute start offsets. A concrete
-render skill (剪映 / FFmpeg) then translates the plan one segment at a time
-without doing any timing math itself.
+函数会从 ``timeline.size``（如 "1080x1920"）解析像素画布，并把片段按顺序铺到
+主轨上，累加出每个片段的绝对开始时间。具体 render skill（剪映 / FFmpeg）拿到
+DraftPlan 后只需要逐段翻译，不需要再做时间轴数学。
 
-Pure and deterministic: no I/O, fully testable offline.
+这是纯逻辑，不做 I/O，输出完全由入参决定，方便离线单测。
 """
 
 from __future__ import annotations
@@ -24,8 +23,7 @@ def _parse_size(size: str) -> tuple[int, int]:
 
 
 def build_draft_plan(timeline: dict, fps: int = 30) -> DraftPlan:
-    """Translate an assembled :class:`~pixelflow.edit.models.Timeline` (as a dict)
-    into a :class:`DraftPlan` with absolute clip offsets."""
+    """把已装配的 ``Timeline`` dict 转成带绝对片段偏移的 ``DraftPlan``。"""
     width, height = _parse_size(timeline.get("size", "1080x1920"))
 
     segments: list[DraftSegment] = []

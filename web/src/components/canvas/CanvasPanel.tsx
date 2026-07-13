@@ -1,19 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
-import { GitBranch, LayoutPanelLeft, ListChecks, PanelsTopLeft, PlaySquare, X } from "lucide-react";
+import { LayoutPanelLeft, X } from "lucide-react";
 import { BriefCard } from "./BriefCard";
-import { StoryboardPreview } from "./StoryboardPreview";
-import { VideoResultGrid } from "./VideoResultGrid";
-import { WorkflowCanvas } from "./WorkflowCanvas";
+import { FlowTimeline } from "./FlowTimeline";
+import { VideoPreviewPanel } from "./VideoPreviewPanel";
 import type { CanvasState } from "@/lib/chat";
-import { cn } from "@/lib/utils";
+import type { VideoResult } from "@/lib/types";
 
 interface CanvasPanelProps {
   state: CanvasState;
   onApprove: () => void;
-  onConfirmStoryboard?: () => void;
   onRevise: () => void;
   onConfirmStage?: (stage: "segments" | "edit" | "qc", approved: boolean) => void;
   onClose?: () => void;
+  onSelectVideo?: (video: VideoResult | null) => void;
   briefConfirmed?: boolean;
 }
 
@@ -22,7 +20,6 @@ const PHASE_LABEL: Record<string, string> = {
   intake: "采集中",
   creative: "策划中",
   brief_review: "Brief 待确认",
-  storyboard_review: "分镜待确认",
   generate: "生成中",
   edit: "剪辑中",
   qc: "质检中",
@@ -38,32 +35,25 @@ const REVIEW_COPY = {
   qc_review: { stage: "qc", title: "质检结果已就绪", approve: "确认通过,完成任务", reject: "重新生成" },
 } as const;
 
-type CanvasTab = "workflow" | "brief" | "storyboard" | "results";
-
-export function CanvasPanel({ state, onApprove, onConfirmStoryboard, onRevise, onConfirmStage, onClose, briefConfirmed = false }: CanvasPanelProps) {
-  const { phase, brief, results, qcReport, estCost, actualCost, productImageUrl, productName } = state;
+export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, onSelectVideo, briefConfirmed = false }: CanvasPanelProps) {
+  const { phase, brief, selectedVideo, qcReport, timeline, estCost, actualCost } = state;
+  // 只有 Brief 阶段、后端已返回 Brief、且用户尚未确认时，才展示审核卡。
+  // 其他 review 阶段展示对应确认卡；没有内容时展示空画布。
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
   const review = phase in REVIEW_COPY ? REVIEW_COPY[phase as keyof typeof REVIEW_COPY] : null;
-  const preferredTab = useMemo<CanvasTab>(() => {
-    if (phase === "storyboard_review" && brief) return "storyboard";
-    if (phase === "brief_review" && brief && !briefConfirmed) return "brief";
-    if (results.length > 0 || review) return "results";
-    if (phase !== "idle") return "workflow";
-    return "brief";
-  }, [brief, briefConfirmed, phase, results.length, review]);
-  const [activeTab, setActiveTab] = useState<CanvasTab>(preferredTab);
-
-  useEffect(() => {
-    setActiveTab(preferredTab);
-  }, [preferredTab]);
-
-  const tabs = [
-    { id: "workflow" as const, label: "Workflow", icon: GitBranch, disabled: phase === "idle" && !brief && results.length === 0 },
-    { id: "brief" as const, label: "Brief", icon: ListChecks, disabled: !brief },
-    { id: "storyboard" as const, label: "Storyboard", icon: PanelsTopLeft, disabled: !brief },
-    { id: "results" as const, label: "Results", icon: PlaySquare, disabled: results.length === 0 && !review && !qcReport },
-  ];
-
+  if (selectedVideo) {
+    return (
+      <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
+        <VideoPreviewPanel
+          video={selectedVideo}
+          onBack={() => {
+            onSelectVideo?.(null);
+            onClose?.();
+          }}
+        />
+      </div>
+    );
+  }
   return (
     <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
       <div className="flex h-12 shrink-0 items-center justify-between px-5">
@@ -92,46 +82,14 @@ export function CanvasPanel({ state, onApprove, onConfirmStoryboard, onRevise, o
         </div>
       </div>
 
-      <div className="flex shrink-0 gap-1 px-5 pb-3">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              disabled={tab.disabled}
-              onClick={() => setActiveTab(tab.id)}
-              className={cn(
-                "flex h-8 items-center gap-1.5 rounded-md px-3 text-[12px] font-medium transition-colors",
-                activeTab === tab.id ? "bg-brand text-white" : "text-ink-soft hover:bg-white hover:text-ink",
-                tab.disabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-ink-soft",
-              )}
-            >
-              <Icon size={14} />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6">
-        {activeTab === "workflow" ? (
-          <WorkflowCanvas state={state} />
-        ) : activeTab === "brief" && canReviewBrief ? (
+        <FlowTimeline entries={timeline} />
+        {canReviewBrief ? (
           <BriefCard brief={brief!} onApprove={onApprove} onRevise={onRevise} />
-        ) : activeTab === "brief" && brief ? (
+        ) : brief && phase === "brief_review" ? (
           <BriefCard brief={brief} onApprove={onApprove} onRevise={onRevise} readonly />
-        ) : activeTab === "storyboard" && brief ? (
-          <StoryboardPreview
-            brief={brief}
-            productImageUrl={productImageUrl}
-            productName={productName}
-            onConfirm={() => onConfirmStoryboard?.()}
-            onBackToBrief={() => setActiveTab("brief")}
-          />
-        ) : activeTab === "results" && (review || results.length > 0 || qcReport) ? (
+        ) : review ? (
           <div className="space-y-3">
-            {results.length > 0 && <VideoResultGrid results={results} />}
             {phase === "qc_review" && qcReport && (
               <div className="rounded-card border border-line bg-surface p-4">
                 <div className="flex items-center justify-between">
@@ -158,34 +116,32 @@ export function CanvasPanel({ state, onApprove, onConfirmStoryboard, onRevise, o
                 </div>
               </div>
             )}
-            {review && (
-              <div className="rounded-card border border-line bg-surface p-4">
-                <div className="text-[14px] font-semibold text-ink">{review.title}</div>
-                <p className="mt-1 text-[12px] text-ink-soft">请人工确认后再继续下一步。</p>
-                <div className="mt-4 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onConfirmStage?.(review.stage, true)}
-                    className="flex-1 rounded-xl bg-brand py-2.5 text-[14px] font-medium text-white hover:opacity-90"
-                  >
-                    {review.approve}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onConfirmStage?.(review.stage, false)}
-                    className="rounded-xl border border-line px-4 py-2.5 text-[14px] font-medium text-ink hover:bg-canvas"
-                  >
-                    {review.reject}
-                  </button>
-                </div>
+            <div className="rounded-card border border-line bg-surface p-4">
+              <div className="text-[14px] font-semibold text-ink">{review.title}</div>
+              <p className="mt-1 text-[12px] text-ink-soft">请人工确认后再继续下一步。</p>
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => onConfirmStage?.(review.stage, true)}
+                  className="flex-1 rounded-xl bg-brand py-2.5 text-[14px] font-medium text-white hover:opacity-90"
+                >
+                  {review.approve}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onConfirmStage?.(review.stage, false)}
+                  className="rounded-xl border border-line px-4 py-2.5 text-[14px] font-medium text-ink hover:bg-canvas"
+                >
+                  {review.reject}
+                </button>
               </div>
-            )}
+            </div>
           </div>
         ) : (
           <div className="flex h-full flex-col items-center justify-center text-center text-ink-soft">
             <LayoutPanelLeft size={28} className="mb-2 opacity-40" />
             <p className="text-[14px]">画布</p>
-            <p className="mt-1 text-[12px]">Brief、Workflow 与成片会展示在这里。</p>
+            <p className="mt-1 text-[12px]">Brief、生成进度与成片会展示在这里。</p>
           </div>
         )}
       </div>

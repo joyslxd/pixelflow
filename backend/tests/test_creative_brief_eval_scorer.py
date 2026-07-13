@@ -88,4 +88,3 @@ def test_reference_mode_requires_reference_or_mixed_strategy():
 
     assert not result.passed
     assert not result.metrics["reference_strategy"]
-

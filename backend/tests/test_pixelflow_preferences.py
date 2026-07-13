@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import pytest
+from uuid import UUID
 
+import pytest
+from fastapi.testclient import TestClient
+
+from app.gateway.auth.models import User
 from pixelflow.preferences import MemoryUserPreferenceStore, extract_structured_preferences
+from tests._router_auth_helpers import make_authed_test_app
 
 
 def test_extract_structured_preferences_negative_and_defaults():
@@ -38,5 +43,54 @@ def test_pixelflow_preferences_router_imports():
     from app.gateway.routers import pixelflow_preferences
 
     paths = {route.path for route in pixelflow_preferences.router.routes}
-    assert "/api/users/{user_id}/preferences" in paths
-    assert "/api/users/{user_id}/preferences/feedback" in paths
+    assert pixelflow_preferences.router.prefix == "/agent/users"
+    assert "/agent/users/{user_id}/preferences" in paths
+    assert "/agent/users/{user_id}/preferences/feedback" in paths
+
+
+def _stable_user() -> User:
+    return User(
+        email="pixelflow-preferences@example.com",
+        password_hash="x",
+        system_role="user",
+        id=UUID("00000000-0000-0000-0000-000000000321"),
+    )
+
+
+def test_preferences_feedback_records_power_mem_and_returns_status():
+    from app.gateway.routers import pixelflow_preferences
+
+    class FakePowerMemService:
+        def __init__(self):
+            self.records = []
+
+        def status_snapshot(self):
+            return {"enabled": True, "provider": "powermem", "status": "configured", "write_enabled": True}
+
+        async def record(self, **kwargs):
+            self.records.append(kwargs)
+            return True
+
+    service = FakePowerMemService()
+    user_id = str(_stable_user().id)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_preference_store = MemoryUserPreferenceStore()
+    app.state.pixelflow_power_mem_service = service
+    app.include_router(pixelflow_preferences.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/agent/users/{user_id}/preferences/feedback",
+            json={"feedback": "以后默认真实摄影风格，不要价格文字", "task_id": "task-1"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["semantic_memory"]["provider"] == "powermem"
+    assert data["semantic_memory"]["status"] == "configured"
+    assert service.records[0]["user_id"] == user_id
+    assert service.records[0]["category"] == "preference"
+    assert service.records[0]["memory_type"] == "preference"
+    assert service.records[0]["source_agent"] == "preference_api"
+    assert service.records[0]["infer"] is True
+    assert "真实摄影" in service.records[0]["content"]

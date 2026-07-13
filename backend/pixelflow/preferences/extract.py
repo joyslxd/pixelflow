@@ -1,7 +1,7 @@
-"""Best-effort structured preference extraction for P0.
+"""P0 结构化偏好的保守抽取器。
 
-This deliberately stays conservative and deterministic. Rich semantic memory
-and LLM extraction are reserved for the P1 mem0/Qdrant layer.
+这里故意保持保守和确定性：只用正则和关键词从用户反馈中抽取少量可解释偏好。
+更丰富的语义记忆、向量检索和 LLM 抽取由 PowerMem 侧车服务承接。
 """
 
 from __future__ import annotations

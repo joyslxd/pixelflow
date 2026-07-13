@@ -57,4 +57,3 @@ For most e-commerce clips, prefer:
 
 Every shot should earn its place. Avoid generic filler, abstract mood shots, and
 creative ideas that cannot be rendered from the provided assets.
-

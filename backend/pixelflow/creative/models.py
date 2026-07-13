@@ -1,9 +1,8 @@
-"""Brief schema — authoritative per PRD §9.4.
+"""Brief 数据合同，对应 PRD §9.4。
 
-This is the contract between CREATIVE and every downstream phase (GENERATE,
-EDIT, QC, local-retouch). Keep the field set aligned with the PRD; downstream
-nodes read ``shots[].generation_prompt``, ``shots[].duration``,
-``shots[].asset_strategy`` etc. directly.
+Brief 是 CREATIVE 阶段交给后续 GENERATE、EDIT、QC 的权威 DTO。下游节点会直接
+读取 ``shots[].generation_prompt``、``shots[].duration``、
+``shots[].asset_strategy`` 等字段，因此字段名和含义要和 PRD 保持一致。
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ AssetStrategy = Literal["use_real_asset", "generate_asset", "use_reference_struc
 
 
 class GlobalVisual(BaseModel):
-    """Cross-shot visual constants that keep the video coherent."""
+    """跨镜头视觉常量，用来保证整条视频的主体和风格一致。"""
 
     subject_type: str  # 人物/主体设定
     environment: str  # 场景环境

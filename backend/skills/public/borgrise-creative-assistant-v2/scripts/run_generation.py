@@ -22,7 +22,6 @@ Environment Variables:
     BORGRISE_USERNAME: Borgrise username for automatic token refresh
     BORGRISE_PASSWORD: Borgrise password for automatic token refresh
     BORGRISE_BASE_URL: API base URL (default: https://test-video.borgrise.com/api)
-    BORGRISE_PROJECT_ID: Project ID for generation APIs (default: 1)
 """
 
 import os
@@ -46,7 +45,6 @@ BASE_URL = os.environ.get("BORGRISE_BASE_URL", "https://test-video.borgrise.com/
 API_TOKEN = os.environ.get("BORGRISE_API_TOKEN", "")
 BORGRISE_USERNAME = os.environ.get("BORGRISE_USERNAME", "")
 BORGRISE_PASSWORD = os.environ.get("BORGRISE_PASSWORD", "")
-PROJECT_ID = os.environ.get("BORGRISE_PROJECT_ID", "1")
 SKIP_SSL_VERIFY = os.environ.get("BORGRISE_SKIP_SSL_VERIFY", "").lower() in {"1", "true", "yes", "on"}
 SSL_CONTEXT = ssl._create_unverified_context() if SKIP_SSL_VERIFY else None
 
@@ -55,22 +53,25 @@ DEFAULT_IMAGE_MODEL = "seeddream-5.0"
 DEFAULT_VIDEO_MODEL = "seedance-2.0"
 SUPPORTED_RATIOS = {"1:1", "9:16", "16:9"}
 SUPPORTED_IMAGE_QUALITIES = {"all", "480p", "720p", "1080p", "2K", "3K", "4K", "5K", "6K", "7K", "8K"}
-SEEDANCE_MAX_SEGMENT_DURATION = 10
+SEEDANCE_MIN_SEGMENT_DURATION = 4
+SEEDANCE_MAX_SEGMENT_DURATION = 15
 SAFE_MAX_LONG_VIDEO_DURATION = 30
 
 # Polling settings
 POLL_INTERVAL = 5  # seconds
-POLL_TIMEOUT = int(os.environ.get("BORGRISE_POLL_TIMEOUT", "600"))  # seconds (10 min default)
-_cli_poll_timeout: Optional[int] = None  # overridden by --poll-timeout CLI flag
+VIDEO_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_POLL_TIMEOUT", "3600"))  # video generation: 1 hour
+IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  # image generation: 10 minutes
+VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "1200"))  # video analysis/decompose: 20 minutes
+_cli_poll_timeout: Optional[int] = None  # overridden by --poll-timeout CLI flag for the current command
 
 # Retry settings
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
-def _effective_poll_timeout() -> int:
-    """Return the CLI-overridden poll timeout if set, else the env/default."""
-    return _cli_poll_timeout if _cli_poll_timeout is not None else POLL_TIMEOUT
+def _effective_poll_timeout(default_timeout: int) -> int:
+    """Return the CLI-overridden poll timeout if set, else the business-specific timeout."""
+    return _cli_poll_timeout if _cli_poll_timeout is not None else default_timeout
 
 
 def validate_ratio(ratio: str) -> Optional[Dict]:
@@ -116,18 +117,31 @@ def validate_image_quality(size: str) -> Optional[Dict]:
 
 def validate_video_duration(duration: int, model: str) -> Optional[Dict]:
     """Keep single video calls within known model limits."""
-    if duration <= 0:
-        return {"error": True, "message": "Duration must be a positive integer"}
-    if model == "seedance-2.0" and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        return {"error": True, "message": "Duration must be an integer"}
+    is_seedance = "seedance" in str(model or "").lower()
+    if is_seedance and duration < SEEDANCE_MIN_SEGMENT_DURATION:
         return {
             "error": True,
             "message": (
-                f"seedance-2.0 supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
-                "Use long-reference-mode-video with exact 10s segment prompts for longer videos."
+                f"Seedance supports video durations from {SEEDANCE_MIN_SEGMENT_DURATION}s "
+                f"to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call."
+            ),
+            "requested_duration": duration,
+            "min_single_call_duration": SEEDANCE_MIN_SEGMENT_DURATION,
+        }
+    if is_seedance and duration > SEEDANCE_MAX_SEGMENT_DURATION:
+        return {
+            "error": True,
+            "message": (
+                f"Seedance supports up to {SEEDANCE_MAX_SEGMENT_DURATION}s per single call. "
+                "Split longer videos into multiple scene calls."
             ),
             "requested_duration": duration,
             "max_single_call_duration": SEEDANCE_MAX_SEGMENT_DURATION,
         }
+    if duration <= 0:
+        return {"error": True, "message": "Duration must be a positive integer"}
     return None
 
 
@@ -191,14 +205,6 @@ def get_headers(model: str = "", bill_type: int = 0,
     api_param = {"size": size}
     headers["apiModelParamObj"] = json.dumps(api_param)
     return headers
-
-
-def with_project(endpoint: str, project_id: str = PROJECT_ID) -> str:
-    """Append projectId like the Borgrise test frontend does for generation APIs."""
-    if not project_id or "projectId=" in endpoint:
-        return endpoint
-    separator = "&" if "?" in endpoint else "?"
-    return f"{endpoint}{separator}projectId={project_id}"
 
 
 def _extract_token(payload: Dict[str, Any]) -> Optional[str]:
@@ -435,15 +441,17 @@ def make_multipart_request(endpoint: str, file_field: str, file_path: str,
     return last_error or {"error": True, "message": "All upload retries exhausted"}
 
 
-def poll_task(task_id: str, timeout: Optional[int] = None) -> Dict:
+def poll_task(task_id: str, timeout: Optional[int] = None, *, default_timeout: Optional[int] = None) -> Dict:
     """Poll task status until completion or timeout.
 
     Args:
         task_id: The Borgrise task ID to poll.
-        timeout: Max seconds to wait. Falls back to --poll-timeout CLI flag,
-                 then BORGRISE_POLL_TIMEOUT env var, then 600s default.
+        timeout: Explicit max seconds for this call, with highest priority.
+        default_timeout: Business-specific max seconds. Video, image, and video
+                 analysis tasks pass different defaults; missing value means video.
     """
-    effective_timeout = timeout if timeout is not None else _effective_poll_timeout()
+    business_default = default_timeout if default_timeout is not None else VIDEO_POLL_TIMEOUT
+    effective_timeout = timeout if timeout is not None else _effective_poll_timeout(business_default)
     start_time = time.time()
     last_status = None
 
@@ -653,8 +661,7 @@ def create_virtual_human_asset(asset_name: str,
                                sex: str = "female",
                                age: str = "20",
                                price: float = 0.5,
-                               visibility: int = 0,
-                               project_id: str = PROJECT_ID) -> Dict:
+                               visibility: int = 0) -> Dict:
     """Create a virtual human asset and return an asset:// reference."""
     if not image_url and not image_file:
         return {"error": True, "message": "Provide either image_url or image_file"}
@@ -695,7 +702,6 @@ def create_virtual_human_asset(asset_name: str,
     asset_record_data = {
         "assetType": "xnszr",
         "assetSource": "upload",
-        "projectId": int(project_id),
         "name": asset_name,
         "sex": sex,
         "age": age,
@@ -759,6 +765,9 @@ def resolve_asset_urls(asset_ids: List[str]) -> Dict:
 def image_to_video(image_url: str, prompt: Optional[str] = None,
                    duration: int = 10, ratio: str = "9:16",
                    model: str = DEFAULT_VIDEO_MODEL,
+                   size: str = "720p",
+                   sound: str = "on",
+                   video_count: int = 1,
                    product_description: Optional[str] = None,
                    auto_poll: bool = True) -> Dict:
     """Generate video from image."""
@@ -775,11 +784,12 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     request_data = {
         "image_url": image_url,
         "prompt": prompt,
-        "negative_prompt": "blurry, distorted, low quality, watermark, text overlay, shaky camera",
         "model": model,
         "duration": duration,
         "ratio": ratio,
-        "seed": None
+        "size": size,
+        "sound": sound,
+        "videoCount": video_count,
     }
 
     print(f"\n{'='*60}")
@@ -790,8 +800,8 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     print(f"Ratio: {ratio}")
     print(f"{'='*60}\n")
 
-    headers = get_headers(model=model, bill_type=3, duration=duration, size="720p", model_header="modelType")
-    result = make_request(with_project("/video/image-to-video"), request_data, custom_headers=headers)
+    headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
+    result = make_request("/video/image-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -813,7 +823,7 @@ def image_to_video(image_url: str, prompt: Optional[str] = None,
     print(f"Task created: {task_id}")
     print(f"Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -865,7 +875,7 @@ def text_to_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/text-to-video"), request_data, custom_headers=headers)
+    result = make_request("/video/text-to-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -887,7 +897,7 @@ def text_to_video(prompt: str,
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -954,7 +964,7 @@ def reference_mode_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/reference-mode-video"), request_data, custom_headers=headers)
+    result = make_request("/video/reference-mode-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -976,7 +986,7 @@ def reference_mode_video(prompt: str,
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -1069,14 +1079,12 @@ def extend_video(video_url: str, duration: int = 10,
                  sound: str = "on",
                  auto_poll: bool = True,
                  max_total_duration: Optional[int] = None,
-                 current_cumulative_duration: int = 0,
-                 project_id: str = PROJECT_ID) -> Dict:
+                 current_cumulative_duration: int = 0) -> Dict:
     """Extend an existing video using the correct API format.
 
     The extend-video API requires:
     - refVideoList: array of video URLs
     - prompt: must include "@filename" to reference the video
-    - projectId: optional query parameter
 
     Duration safety (Critical):
     - max_total_duration: when set, the function will refuse to extend
@@ -1133,7 +1141,7 @@ def extend_video(video_url: str, duration: int = 10,
     }
 
     print(f"\n{'='*60}")
-    print(f"POST /api/video/extend-video?projectId={project_id}")
+    print("POST /api/video/extend-video")
     print(f"{'='*60}")
     print(f"Model: {model}")
     print(f"Duration: {duration}s")
@@ -1144,7 +1152,7 @@ def extend_video(video_url: str, duration: int = 10,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request(with_project("/video/extend-video", project_id=project_id), request_data, custom_headers=headers)
+    result = make_request("/video/extend-video", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -1166,7 +1174,7 @@ def extend_video(video_url: str, duration: int = 10,
     print(f"Task created: {task_id}")
     print(f"Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=VIDEO_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -1190,21 +1198,20 @@ def extend_video(video_url: str, duration: int = 10,
 
 
 def merge_videos(video_urls: List[str],
-                 project_id: str = "108",
                  model: str = DEFAULT_VIDEO_MODEL,
                  duration: int = 30,
                  size: str = "1080p") -> Dict:
     """Merge video pieces into a single deliverable.
 
-    Swagger defines VideoMergeRequest as projectId + videoUrls. The older
-    snake_case video_urls field is rejected by the backend.
+    Swagger defines VideoMergeRequest with videoUrls. The older snake_case
+    video_urls field is rejected by the backend; project ownership is resolved
+    by content-app from the current login context.
     """
 
     if len(video_urls) < 2:
         return {"error": True, "message": "At least two video URLs are required for merge"}
 
     request_data = {
-        "projectId": int(project_id),
         "videoUrls": video_urls
     }
 
@@ -1212,7 +1219,6 @@ def merge_videos(video_urls: List[str],
     print("POST /api/video/merge")
     print(f"{'='*60}")
     print(f"Videos: {len(video_urls)}")
-    print(f"Project ID: {project_id}")
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
@@ -1635,7 +1641,6 @@ def long_reference_mode_video(prompts: List[str],
             auto_poll=True,
             max_total_duration=total_duration,
             current_cumulative_duration=elapsed,
-            project_id=PROJECT_ID,
         )
         if extend_result.get("error"):
             return {
@@ -1895,7 +1900,6 @@ def resume_long_reference_mode_video(progress_file: str,
             auto_poll=True,
             max_total_duration=total_duration,
             current_cumulative_duration=elapsed,
-            project_id=PROJECT_ID,
         )
         if extend_result.get("error"):
             return {
@@ -2010,7 +2014,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request(with_project("/picture/text_to_image"), request_data, custom_headers=headers)
+    result = make_request("/picture/text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2022,7 +2026,7 @@ def text_to_image(prompt: Optional[str] = None, ratio: str = "1:1",
     print(f"Task created: {task_id}")
     print(f"Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2121,7 +2125,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
 
     header_duration = 1 if model in {"gpt-image-2", "nanobanana-pro"} else max_images
     headers = get_headers(model=model, bill_type=2, duration=header_duration, size=quality)
-    result = make_request(with_project("/picture/multi_reference_image_generation"), request_data, custom_headers=headers)
+    result = make_request("/picture/multi_reference_image_generation", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2133,7 +2137,7 @@ def reference_image(reference_images: List[str], prompt: str, ratio: str = "1:1"
     print(f"Task created: {task_id}")
     print("Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2191,7 +2195,7 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size="1080p")
-    result = make_request(with_project("/picture/image_edit"), request_data, custom_headers=headers)
+    result = make_request("/picture/image_edit", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2203,7 +2207,7 @@ def image_edit(image_url: str, prompt: str, model: str = DEFAULT_IMAGE_MODEL) ->
     print(f"Task created: {task_id}")
     print(f"Polling for result...\n")
 
-    poll_result = poll_task(task_id)
+    poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
 
     if poll_result.get("error"):
         return poll_result
@@ -2259,7 +2263,7 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request(with_project("/picture/batch_text_to_image"), request_data, custom_headers=headers)
+    result = make_request("/picture/batch_text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2281,7 +2285,7 @@ def batch_text_to_image(prompts: List[str], ratio: str = "1:1",
     results = []
     for task_id in task_ids:
         print(f"Polling task {task_id}...")
-        poll_result = poll_task(task_id)
+        poll_result = poll_task(task_id, default_timeout=IMAGE_POLL_TIMEOUT)
         if not poll_result.get("error"):
             final_data = poll_result.get("data", poll_result)
             img_url = final_data.get("result", {}).get("url") or final_data.get("url")
@@ -2322,8 +2326,11 @@ def main():
     p_i2v.add_argument("--product-description", help="Product description (will craft prompt)")
     p_i2v.add_argument("--duration", type=int, default=10, help="Video duration in seconds")
     p_i2v.add_argument("--ratio", default="9:16", help="Aspect ratio")
+    p_i2v.add_argument("--size", default="720p", help="Video size (720p, 1080p)")
+    p_i2v.add_argument("--sound", default="on", help="Sound setting, usually on/off")
+    p_i2v.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_i2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # text-to-video
     p_t2v = subparsers.add_parser("text-to-video", help="Generate video from a text-only prompt")
@@ -2334,7 +2341,7 @@ def main():
     p_t2v.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_t2v.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_t2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_t2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_t2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # reference-mode-video
     p_ref_video = subparsers.add_parser("reference-mode-video", help="Generate video from reference images/audio/videos")
@@ -2348,7 +2355,7 @@ def main():
     p_ref_video.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_ref_video.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_ref_video.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # native-audio-reference-video
     p_native_ref_video = subparsers.add_parser(
@@ -2365,7 +2372,7 @@ def main():
     p_native_ref_video.add_argument("--sound", default="on", help="Sound setting, keep on for native audio")
     p_native_ref_video.add_argument("--video-count", type=int, default=1, help="Number of videos to generate")
     p_native_ref_video.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_native_ref_video.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_native_ref_video.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # extend-video
     p_extend = subparsers.add_parser("extend-video", help="Extend an existing video")
@@ -2378,7 +2385,7 @@ def main():
     p_extend.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_extend.add_argument("--max-total-duration", type=int, help="Refuse extend if cumulative duration would exceed this")
     p_extend.add_argument("--current-cumulative", type=int, default=0, help="Total duration already generated so far")
-    p_extend.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_extend.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # long-image-to-video
     p_long_i2v = subparsers.add_parser("long-image-to-video", help="Generate a long video by image-to-video + repeated extend-video")
@@ -2393,7 +2400,7 @@ def main():
     p_long_i2v.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
     p_long_i2v.add_argument("--allow-long", action="store_true", help="Bypass 30s safe-max limit after user confirmation")
     p_long_i2v.add_argument("--progress-file", help="Save segment progress to this JSON file")
-    p_long_i2v.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_i2v.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # long-reference-mode-video
     p_long_ref = subparsers.add_parser("long-reference-mode-video", help="Generate a long video by reference-mode-video + extend-video with final duration verification")
@@ -2409,7 +2416,7 @@ def main():
     p_long_ref.add_argument("--progress-file", help="Save segment progress to this JSON file")
     p_long_ref.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # long-native-audio-reference-video
     p_long_native_ref = subparsers.add_parser(
@@ -2428,7 +2435,7 @@ def main():
     p_long_native_ref.add_argument("--progress-file", help="Save segment progress to this JSON file")
     p_long_native_ref.add_argument("--sound", default="on", help="Sound setting, keep on for native audio")
     p_long_native_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_long_native_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_long_native_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # resume-long-reference-mode-video
     p_resume_long_ref = subparsers.add_parser(
@@ -2441,7 +2448,7 @@ def main():
     p_resume_long_ref.add_argument("--size", default="720p", help="Video size (720p, 1080p, 4K)")
     p_resume_long_ref.add_argument("--sound", default="on", help="Sound setting, usually on/off")
     p_resume_long_ref.add_argument("--model", default=DEFAULT_VIDEO_MODEL, help="Model to use")
-    p_resume_long_ref.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_resume_long_ref.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # text-to-image
     p_t2i = subparsers.add_parser("text-to-image", help="Generate image from text")
@@ -2479,7 +2486,7 @@ def main():
     # poll
     p_poll = subparsers.add_parser("poll", help="Poll task status")
     p_poll.add_argument("--task-id", required=True, help="Task ID to poll")
-    p_poll.add_argument("--poll-timeout", type=int, help="Override poll timeout in seconds (env: BORGRISE_POLL_TIMEOUT)")
+    p_poll.add_argument("--poll-timeout", type=int, help="Override this command's poll timeout in seconds")
 
     # upload-file
     p_upload = subparsers.add_parser("upload-file", help="Upload a local file and return its Borgrise URL")
@@ -2498,7 +2505,6 @@ def main():
     p_virtual_asset.add_argument("--age", default="20", help="Asset age metadata")
     p_virtual_asset.add_argument("--price", type=float, default=0.5, help="Asset price metadata")
     p_virtual_asset.add_argument("--visibility", type=int, default=0, help="0 private, 1 public")
-    p_virtual_asset.add_argument("--project-id", default=PROJECT_ID, help="Borgrise project id")
 
     # resolve-assets
     p_resolve_assets = subparsers.add_parser("resolve-assets", help="Resolve Borgrise asset ids to URLs")
@@ -2536,6 +2542,9 @@ def main():
                 duration=args.duration,
                 ratio=args.ratio,
                 model=args.model,
+                size=args.size,
+                sound=args.sound,
+                video_count=args.video_count,
                 product_description=args.product_description
             )
         elif args.command == "text-to-video":
@@ -2687,8 +2696,7 @@ def main():
                 sex=args.sex,
                 age=args.age,
                 price=args.price,
-                visibility=args.visibility,
-                project_id=args.project_id
+                visibility=args.visibility
             )
         elif args.command == "resolve-assets":
             result = resolve_asset_urls(json.loads(args.asset_ids))

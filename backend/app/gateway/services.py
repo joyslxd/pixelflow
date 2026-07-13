@@ -1,8 +1,8 @@
-"""Run lifecycle service layer.
+"""Run 生命周期服务层。
 
-Centralizes the business logic for creating runs, formatting SSE
-frames, and consuming stream bridge events.  Router modules
-(``thread_runs``, ``runs``) are thin HTTP handlers that delegate here.
+这里集中处理创建 run、组装 SSE 帧、消费 StreamBridge 事件等通用逻辑。Router
+模块（``thread_runs``、``runs``）只保留薄 HTTP 处理，把真正的 run 生命周期
+逻辑委托到这里。
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
-from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -40,16 +39,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# SSE formatting
+# SSE 格式化
 # ---------------------------------------------------------------------------
 
 
 def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
-    """Format a single SSE frame.
+    """格式化单条 SSE 帧。
 
-    Field order: ``event:`` -> ``data:`` -> ``id:`` (optional) -> blank line.
-    This matches the LangGraph Platform wire format consumed by the
-    ``useStream`` React hook and the Python ``langgraph-sdk`` SSE decoder.
+    字段顺序是 ``event:`` -> ``data:`` -> 可选 ``id:`` -> 空行。这个格式要和
+    LangGraph Platform 的 wire format 保持一致，前端 ``useStream`` hook 和
+    Python ``langgraph-sdk`` 的 SSE decoder 都按这个格式解析。
     """
     payload = json.dumps(data, default=str, ensure_ascii=False)
     parts = [f"event: {event}", f"data: {payload}"]
@@ -61,14 +60,14 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Input / config helpers
+# 输入和配置辅助函数
 # ---------------------------------------------------------------------------
 
 
 def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
-    """Normalize the stream_mode parameter to a list.
+    """把 stream_mode 参数归一为列表。
 
-    Default matches what ``useStream`` expects: values + messages-tuple.
+    默认值按当前网关约定返回 ``values``，满足前端消费状态更新的主路径。
     """
     if raw is None:
         return ["values"]
@@ -78,18 +77,16 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
 
 
 def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert LangGraph Platform input format to LangChain state dict.
+    """把 LangGraph Platform 输入格式转换成 LangChain 状态 dict。
 
-    Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
-    so that ``additional_kwargs`` (e.g. uploaded-file metadata — gh #3132), ``id``,
-    ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
-    hand-rolled version only forwarded ``content`` and collapsed every role to
-    ``HumanMessage``, which silently stripped frontend-supplied attachments.
+    dict -> message 的转换委托给 ``convert_to_messages``，以保留
+    ``additional_kwargs``（如上传文件元数据）、``id``、``name`` 以及 ai/system/tool
+    等非 human 角色。旧的手写转换只保留 ``content``，并把所有角色压成
+    ``HumanMessage``，会静默丢掉前端上传附件。
 
-    Malformed message dicts (missing ``role``/``type``/``content``, unsupported
-    role, etc.) raise ``HTTPException(400)`` with the offending index, instead
-    of bubbling up as a 500.  The gateway is a system boundary, so per-entry
-    validation errors are the right shape for clients to retry against.
+    格式错误的 message dict（缺 ``role``/``type``/``content``、角色不支持等）
+    会抛 ``HTTPException(400)`` 并带上出错下标，而不是冒泡成 500。网关是系统
+    边界，客户端需要可重试、可定位的 400 错误。
     """
     if raw_input is None:
         return {}
@@ -116,12 +113,10 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 _DEFAULT_ASSISTANT_ID = "lead_agent"
 
 
-# Whitelist of run-context keys that the langgraph-compat layer forwards from
-# ``body.context`` into the run config. ``config["context"]`` exists in
-# LangGraph >=0.6, but these values must be written to both ``configurable``
-# (for legacy ``_get_runtime_config`` consumers) and ``context`` because
-# LangGraph >=1.1.9 no longer makes ``ToolRuntime.context`` fall back to
-# ``configurable`` for consumers like ``setup_agent``.
+# run-context 白名单：langgraph-compat 层只会把这些 key 从 ``body.context`` 转进
+# run config。LangGraph >=0.6 引入了 ``config["context"]``，但为了兼容旧的
+# ``_get_runtime_config`` 消费方，以及 LangGraph >=1.1.9 中不再从 configurable
+# 回退读取的 ``ToolRuntime.context``，这些值需要同时写入 configurable 和 context。
 _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     {
         "model_name",
@@ -138,16 +133,13 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 
 
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
-    """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
-    and ``config['context']`` so they are visible to legacy configurable readers and
-    to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
-    see issue #2677).
+    """把 ``body.context`` 的白名单字段合并到 run config。
 
-    ``user_id`` is intentionally propagated into ``config['context']`` in addition to
-    the whitelisted keys, so non-web callers (e.g. IM channels) that supply identity in
-    ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
-    ``setdefault`` so a server-authenticated id stamped by
-    :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+    字段会同时写入 ``config['configurable']`` 和 ``config['context']``，让旧版
+    configurable 读取方和新版 ``ToolRuntime.context`` 消费方都能看到。
+
+    ``user_id`` 也会被传播到 ``context``，用于 IM 等非 Web 调用方传身份；这里用
+    ``setdefault``，保证服务器鉴权写入的 user_id 永远优先于客户端传入值。
     """
     if not context:
         return
@@ -164,19 +156,15 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
-    """Stamp the authenticated user into the run context for background tools.
+    """把服务端鉴权用户写入 run context，供后台工具使用。
 
-    Tool execution may happen after the request handler has returned, so tools
-    that persist user-scoped files should not rely only on ambient ContextVars.
-    The value comes from server-side auth state, never from client context.
+    工具执行可能发生在 HTTP handler 返回之后，所以写用户隔离文件的工具不能只依赖
+    当前请求的 ContextVars。这里的值来自服务端鉴权状态，不信任客户端 context。
     """
 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
-        return
-
-    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
         return
 
     runtime_context = config.setdefault("context", {})
@@ -185,13 +173,11 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
 
 
 def resolve_agent_factory(assistant_id: str | None):
-    """Resolve the agent factory callable from config.
+    """根据 assistant_id 解析 agent factory。
 
-    Custom agents are implemented as ``lead_agent`` + an ``agent_name``
-    injected into ``configurable`` or ``context`` — see
-    :func:`build_run_config`.  All ``assistant_id`` values therefore map to the
-    same factory; the routing happens inside ``make_lead_agent`` when it reads
-    ``cfg["agent_name"]``.
+    自定义 agent 的实现方式是 ``lead_agent`` + 注入 ``configurable`` 或 ``context``
+    的 ``agent_name``。因此所有 ``assistant_id`` 都映射到同一个 factory，真正路由
+    发生在 ``make_lead_agent`` 读取 ``cfg["agent_name"]`` 时。
     """
     from deerflow.agents.lead_agent.agent import make_lead_agent
 
@@ -205,26 +191,22 @@ def build_run_config(
     *,
     assistant_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build a RunnableConfig dict for the agent.
+    """构建 agent 运行所需的 RunnableConfig。
 
-    When *assistant_id* refers to a custom agent (anything other than
-    ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
-    whichever runtime options container is active: ``context`` for
-    LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    当 ``assistant_id`` 指向自定义 agent（非 ``"lead_agent"`` / ``None``）时，
+    会把它作为 ``agent_name`` 写入当前启用的运行时参数容器：LangGraph >=0.6.0
+    请求使用 ``context``，否则使用 ``configurable``。``make_lead_agent`` 会读取
+    这个 key 加载对应的 ``agents/<name>/SOUL.md`` 和配置；缺失时会静默退回默认
+    lead agent。
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic so that
-    the LangGraph Platform-compatible HTTP API and the IM channel path behave
-    identically.
+    这和 channel manager 的 ``_resolve_run_params`` 保持一致，保证兼容 LangGraph
+    Platform 的 HTTP API 和 IM 通道路由行为一致。
     """
     config: dict[str, Any] = {"recursion_limit": 100}
     if request_config:
-        # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
-        # pass thread-level data and rejects requests that include both
-        # ``configurable`` and ``context``.  If the caller already sends
-        # ``context``, honour it and skip our own ``configurable`` dict.
+        # LangGraph >=0.6.0 推荐用 ``context`` 传线程级数据，并拒绝同时带
+        # ``configurable`` 和 ``context`` 的请求。如果调用方已传 context，则尊重它，
+        # 不再生成自己的 configurable。
         if "context" in request_config:
             if "configurable" in request_config:
                 logger.warning(
@@ -250,8 +232,8 @@ def build_run_config(
     else:
         config["configurable"] = {"thread_id": thread_id}
 
-    # Inject custom agent name when the caller specified a non-default assistant.
-    # Honour an explicit agent_name in the active runtime options container.
+    # 调用方指定非默认 assistant 时注入自定义 agent 名；如果运行时容器里已有
+    # agent_name，则尊重显式值。
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
         normalized = assistant_id.strip().lower().replace("_", "-")
         if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
@@ -271,7 +253,7 @@ def build_run_config(
 
 
 # ---------------------------------------------------------------------------
-# Run lifecycle
+# Run 生命周期
 # ---------------------------------------------------------------------------
 
 
@@ -280,17 +262,13 @@ async def start_run(
     thread_id: str,
     request: Request,
 ) -> RunRecord:
-    """Create a RunRecord and launch the background agent task.
+    """创建 ``RunRecord`` 并启动后台 agent 任务。
 
-    Parameters
-    ----------
-    body : RunCreateRequest
-        The validated request body (typed as Any to avoid circular import
-        with the router module that defines the Pydantic model).
-    thread_id : str
-        Target thread.
-    request : Request
-        FastAPI request — used to retrieve singletons from ``app.state``.
+    参数：
+        body: 已校验的 ``RunCreateRequest``。这里标成 Any 是为了避免和定义
+            Pydantic model 的 router 模块循环 import。
+        thread_id: 目标 thread。
+        request: FastAPI request，用于从 ``app.state`` 读取运行时单例。
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -301,11 +279,11 @@ async def start_run(
     body_context = getattr(body, "context", None) or {}
     model_name = body_context.get("model_name")
 
-    # Coerce non-string model_name values to str before truncation.
+    # model_name 可能来自 JSON；不是字符串时先转字符串再校验。
     if model_name is not None and not isinstance(model_name, str):
         model_name = str(model_name)
 
-    # Validate model against the allowlist when a model_name is provided.
+    # 提供 model_name 时必须命中 allowlist，避免客户端任意指定未配置模型。
     if model_name:
         app_config = get_app_config()
         resolved = app_config.get_model_config(model_name)
@@ -330,9 +308,8 @@ async def start_run(
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-    # Upsert thread metadata so the thread appears in /threads/search,
-    # even for threads that were never explicitly created via POST /threads
-    # (e.g. stateless runs).
+    # upsert thread 元数据，确保即使没有显式 POST /threads 创建过的线程
+    # （例如 stateless runs）也能出现在 /threads/search 中。
     try:
         existing = await run_ctx.thread_store.get(thread_id)
         if existing is None:
@@ -350,10 +327,9 @@ async def start_run(
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
-    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-    # The ``context`` field is a custom extension for the langgraph-compat layer
-    # that carries agent configuration (model_name, thinking_enabled, etc.).
-    # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+    # 把 DeerFlow 专用 context 覆盖项写入 configurable 和 context。context 是
+    # langgraph-compat 层的扩展字段，用于携带模型、thinking_enabled 等 agent 配置。
+    # 这里只转发和 agent 相关的白名单 key，忽略 thread_id 等未知 key。
     merge_run_context_overrides(config, getattr(body, "context", None))
     inject_authenticated_user_context(config, request)
 
@@ -376,9 +352,8 @@ async def start_run(
     )
     record.task = task
 
-    # Title sync is handled by worker.py's finally block which reads the
-    # title from the checkpoint and calls thread_store.update_display_name
-    # after the run completes.
+    # 标题同步由 worker.py 的 finally 块处理：run 完成后从 checkpoint 读取标题，
+    # 再调用 thread_store.update_display_name。
 
     return record
 
@@ -389,11 +364,11 @@ async def sse_consumer(
     request: Request,
     run_mgr: RunManager,
 ):
-    """Async generator that yields SSE frames from the bridge.
+    """从 StreamBridge 读取事件并产出 SSE 帧的异步生成器。
 
-    The ``finally`` block implements ``on_disconnect`` semantics:
-    - ``cancel``: abort the background task on client disconnect.
-    - ``continue``: let the task run; events are discarded.
+    ``finally`` 块实现 ``on_disconnect`` 语义：
+    - ``cancel``：客户端断开时取消后台任务。
+    - ``continue``：后台任务继续跑，只是丢弃事件。
     """
     last_event_id = request.headers.get("Last-Event-ID")
     try:
@@ -423,41 +398,33 @@ async def wait_for_run_completion(
     request: Request,
     run_mgr: RunManager,
 ) -> bool:
-    """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+    """等待 run 发布 ``END_SENTINEL``，并遵守 on_disconnect 语义。
 
-    The non-streaming ``/wait`` endpoints used to ``await record.task``
-    directly with no disconnect handling.  When the client (or an
-    intermediate HTTP proxy) timed out during a long tool call such as
-    ``pip install``, the handler would swallow ``CancelledError`` and
-    serialize whatever checkpoint happened to exist — masking a half-finished
-    run as a normal completion (issue #3265).
+    非流式 ``/wait`` 端点曾经直接 ``await record.task``，没有处理断连。长工具调用
+    （如 ``pip install``）期间，如果客户端或中间 HTTP 代理超时，handler 可能吞掉
+    ``CancelledError`` 并序列化当时存在的 checkpoint，把半完成 run 伪装成正常完成。
 
-    This helper consumes the same bridge that ``sse_consumer`` does so the
-    wait path shares its disconnect semantics: each wake-up polls
-    ``request.is_disconnected()``; on a real disconnect it cancels the
-    background run when ``record.on_disconnect`` is ``cancel``.  The bridge's
-    heartbeat sentinels guarantee at least one wake-up per
-    ``heartbeat_interval`` even when the agent emits no events for a while.
+    这个辅助函数消费和 ``sse_consumer`` 相同的 bridge，让 wait 路径共享同一套断连
+    语义：每次唤醒都检查 ``request.is_disconnected()``；真实断连且
+    ``record.on_disconnect`` 为 ``cancel`` 时取消后台 run。bridge 的 heartbeat
+    sentinel 保证即使 agent 一段时间没有事件，也会按 heartbeat_interval 唤醒。
 
-    Returns:
-        ``True`` when ``END_SENTINEL`` was observed (run reached a terminal
-        state), ``False`` when the loop exited because the client
-        disconnected.  Callers must skip checkpoint serialization on
-        ``False`` so a partial checkpoint is not returned as a normal
-        response.
+    返回：
+        观察到 ``END_SENTINEL`` 时返回 True，表示 run 到达终态；因为客户端断开而
+        退出时返回 False。调用方在 False 时必须跳过 checkpoint 序列化，避免把
+        半成品 checkpoint 当正常响应返回。
     """
     completed = False
     try:
         async for entry in bridge.subscribe(record.run_id):
-            # END_SENTINEL means the run reached a terminal state; honour it
-            # even if the client just disconnected so the caller still serializes
-            # the real final checkpoint.
+            # END_SENTINEL 表示 run 已到终态；即使客户端刚断开也要尊重它，让调用方
+            # 仍然可以序列化真实最终 checkpoint。
             if entry is END_SENTINEL:
                 completed = True
                 return True
             if await request.is_disconnected():
                 break
-            # Heartbeats and regular events: keep waiting for END_SENTINEL.
+            # heartbeat 和普通事件只用于唤醒循环，继续等待 END_SENTINEL。
         return completed
     finally:
         if not completed and record.status in (RunStatus.pending, RunStatus.running):

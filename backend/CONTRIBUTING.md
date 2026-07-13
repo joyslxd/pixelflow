@@ -1,423 +1,345 @@
-# Contributing to DeerFlow Backend
+# PixelFlow 后端贡献说明
 
-Thank you for your interest in contributing to DeerFlow! This document provides guidelines and instructions for contributing to the backend codebase.
+这份文档给后续维护 PixelFlow 后端、前端联调和 content-app 联动的人看。用户主要是 Java 后端开发，所以这里会尽量用 Java/Spring 的思路解释 Python、FastAPI、React 和 Agent 工作流。
 
-## Table of Contents
+## 目录
 
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [Project Structure](#project-structure)
-- [Code Style](#code-style)
-- [Making Changes](#making-changes)
-- [Testing](#testing)
-- [Pull Request Process](#pull-request-process)
-- [Architecture Guidelines](#architecture-guidelines)
+- [项目定位](#项目定位)
+- [本地启动](#本地启动)
+- [content-app 鉴权联动](#content-app-鉴权联动)
+- [前端本地测试 Authorization](#前端本地测试-authorization)
+- [目录和分层](#目录和分层)
+- [新增接口规则](#新增接口规则)
+- [新增 content-app 调用规则](#新增-content-app-调用规则)
+- [配置文件规则](#配置文件规则)
+- [代码注释规则](#代码注释规则)
+- [测试和验证](#测试和验证)
+- [提交前检查清单](#提交前检查清单)
 
-## Getting Started
+## 项目定位
 
-### Prerequisites
+PixelFlow 是电商带货短视频生成 AI Agent 平台。它不是单纯聊天机器人，而是一个阶段化视频生成流水线。
 
-- Python 3.12 or higher
-- [uv](https://docs.astral.sh/uv/) package manager
-- Git
-- Docker (optional, for Docker sandbox testing)
+核心链路：
 
-### Fork and Clone
+```text
+intake 采集需求
+  -> creative 生成 Brief
+  -> brief_review 人工确认
+  -> generate 生成视频片段
+  -> edit 剪辑和渲染
+  -> qc 质检
+  -> done 产物完成
+```
 
-1. Fork the repository on GitHub
-2. Clone your fork locally:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/deer-flow.git
-   cd deer-flow
-   ```
+Java 类比：
 
-## Development Setup
+| PixelFlow 概念 | Java/Spring 类比 | 说明 |
+| --- | --- | --- |
+| FastAPI Router | Controller | 接收 HTTP 请求、做参数校验、返回响应 |
+| Pydantic Model | DTO/VO | 定义请求和响应字段，并做基础校验 |
+| LangGraph Node | Service 方法 | 每个节点处理一个业务阶段 |
+| TaskState | 流程上下文 DTO | 在整条 Agent 流程里传递商品、Brief、视频资产等信息 |
+| Store/Repository | Repository/DAO | 保存任务、事件、资产、偏好 |
+| Skill | 第三方 Client | 适配 Borgrise/content-app、剪映、FFmpeg 等外部能力 |
+| Middleware | Filter/Interceptor | 全局鉴权、上下文注入、请求拦截 |
+| React Component | 前端页面/组件 | 前端工作台、画布、时间线、参数弹窗 |
 
-### Install Dependencies
+## 本地启动
+
+后端默认使用 `config.dev.yml`。
 
 ```bash
-# From project root
-cp config.example.yaml config.yaml
-
-# Install backend dependencies
 cd backend
-make install
-```
-
-### Configure Environment
-
-Set up your API keys for testing:
-
-```bash
-export OPENAI_API_KEY="your-api-key"
-# Add other keys as needed
-```
-
-### Run the Development Server
-
-```bash
-# Gateway API + embedded agent runtime
+uv sync
 make dev
 ```
 
-## Project Structure
-
-```
-backend/src/
-├── agents/                  # Agent system
-│   ├── lead_agent/         # Main agent implementation
-│   │   └── agent.py        # Agent factory and creation
-│   ├── middlewares/        # Agent middlewares
-│   │   ├── thread_data_middleware.py
-│   │   ├── sandbox_middleware.py
-│   │   ├── title_middleware.py
-│   │   ├── uploads_middleware.py
-│   │   ├── view_image_middleware.py
-│   │   └── clarification_middleware.py
-│   └── thread_state.py     # Thread state definition
-│
-├── gateway/                 # FastAPI Gateway
-│   ├── app.py              # FastAPI application
-│   └── routers/            # Route handlers
-│       ├── models.py       # /api/models endpoints
-│       ├── mcp.py          # /api/mcp endpoints
-│       ├── skills.py       # /api/skills endpoints
-│       ├── artifacts.py    # /api/threads/.../artifacts
-│       └── uploads.py      # /api/threads/.../uploads
-│
-├── sandbox/                 # Sandbox execution
-│   ├── __init__.py         # Sandbox interface
-│   ├── local.py            # Local sandbox provider
-│   └── tools.py            # Sandbox tools (bash, file ops)
-│
-├── tools/                   # Agent tools
-│   └── builtins/           # Built-in tools
-│       ├── present_file_tool.py
-│       ├── ask_clarification_tool.py
-│       └── view_image_tool.py
-│
-├── mcp/                     # MCP integration
-│   └── manager.py          # MCP server management
-│
-├── models/                  # Model system
-│   └── factory.py          # Model factory
-│
-├── skills/                  # Skills system
-│   └── loader.py           # Skills loader
-│
-├── config/                  # Configuration
-│   ├── app_config.py       # Main app config
-│   ├── extensions_config.py # Extensions config
-│   └── summarization_config.py
-│
-├── community/               # Community tools
-│   ├── tavily/             # Tavily web search
-│   ├── jina/               # Jina web fetch
-│   ├── firecrawl/          # Firecrawl scraping
-│   └── aio_sandbox/        # Docker sandbox
-│
-├── reflection/              # Dynamic loading
-│   └── __init__.py         # Module resolution
-│
-└── utils/                   # Utilities
-    └── __init__.py
-```
-
-## Code Style
-
-### Linting and Formatting
-
-We use `ruff` for both linting and formatting:
+生产配置启动：
 
 ```bash
-# Check for issues
-make lint
-
-# Auto-fix and format
-make format
+cd backend
+make prod
 ```
 
-### Style Guidelines
-
-- **Line length**: 240 characters maximum
-- **Python version**: 3.12+ features allowed
-- **Type hints**: Use type hints for function signatures
-- **Quotes**: Double quotes for strings
-- **Indentation**: 4 spaces (no tabs)
-- **Imports**: Group by standard library, third-party, local
-
-### Docstrings
-
-Use docstrings for public functions and classes:
-
-```python
-def create_chat_model(name: str, thinking_enabled: bool = False) -> BaseChatModel:
-    """Create a chat model instance from configuration.
-
-    Args:
-        name: The model name as defined in config.yaml
-        thinking_enabled: Whether to enable extended thinking
-
-    Returns:
-        A configured LangChain chat model instance
-
-    Raises:
-        ValueError: If the model name is not found in configuration
-    """
-    ...
-```
-
-## Making Changes
-
-### Branch Naming
-
-Use descriptive branch names:
-
-- `feature/add-new-tool` - New features
-- `fix/sandbox-timeout` - Bug fixes
-- `docs/update-readme` - Documentation
-- `refactor/config-system` - Code refactoring
-
-### Commit Messages
-
-Write clear, concise commit messages:
-
-```
-feat: add support for Claude 3.5 model
-
-- Add model configuration in config.yaml
-- Update model factory to handle Claude-specific settings
-- Add tests for new model
-```
-
-Prefix types:
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `docs:` - Documentation
-- `refactor:` - Code refactoring
-- `test:` - Tests
-- `chore:` - Build/config changes
-
-## Testing
-
-### Running Tests
+前端启动：
 
 ```bash
-uv run pytest
+cd web
+pnpm install
+pnpm dev
 ```
 
-### Writing Tests
+常用访问地址：
 
-Place tests in the `tests/` directory mirroring the source structure:
+| 地址 | 说明 |
+| --- | --- |
+| `http://localhost:5273/` | PixelFlow 前端工作台 |
+| `http://localhost:5273/auth-token` | 本地调试 Authorization 设置页 |
+| `http://localhost:8001/agent/docs` | FastAPI Swagger/OpenAPI 页面 |
+| `http://localhost:8001/agent/openapi.json` | OpenAPI 3 JSON |
 
+## content-app 鉴权联动
+
+PixelFlow 自身登录体系已经废弃。登录统一发生在同级 `content-app` 项目，PixelFlow 只识别 content-app 传来的请求头：
+
+```http
+Authorization: Bearer <content-app-jwt>
 ```
-tests/
-├── test_models/
-│   └── test_factory.py
-├── test_sandbox/
-│   └── test_local.py
-└── test_gateway/
-    └── test_models_router.py
+
+后端处理顺序：
+
+1. `AuthMiddleware` 读取 `Authorization`。
+2. `content_app_auth.py` 只读取 JWT payload 里的 `sub` 字段，作为 PixelFlow 内部的 `user_id`。
+3. 再调用 content-app `/api/auth/verify` 做远程实时校验，由 content-app 判断 token 真伪、过期状态和用户是否被禁用。
+4. 校验通过后，把用户写入 `request.state.user` 和 `deerflow.runtime.user_context`。
+5. 同时把原始 `Authorization` 写入 `content_app_auth_context.py` 的 `ContextVar`。
+6. 后续 Skill 调 content-app/Borgrise 生成图片或视频时，从 `ContextVar` 里取同一个 `Authorization` 透传。
+
+这样做的原因：
+
+- content-app 才是真正的用户系统，PixelFlow 不再维护用户名、密码、cookie session。
+- content-app 的生成视频、生成图片接口需要按登录用户扣费，必须透传真实用户 token。
+- PixelFlow 本地只读取用户名，token 真伪、过期和“用户被禁用”都以远程 `/api/auth/verify` 为准。
+- SSE 是长连接，中间件只能在建连时校验一次，所以 SSE 生成器里还会周期性调用 `/api/auth/verify`。
+
+开发时必须遵守：
+
+- 不要新增 PixelFlow 本地登录、注册、初始化管理员、改密码、cookie session 或 CSRF 登录态。
+- 不要把用户 token、用户名、密码写进 `config.dev.yml`、`config.prod.yml`、`.env` 或代码。
+- 需要当前用户时，走 `get_current_user_from_request()` 或 `get_current_user()`。
+- 需要把 token 传给 content-app/Borgrise 时，走 `content_app_auth_context.require_current_authorization()`。
+- 新增、删除、改名或改参数任何 content-app 接口调用时，都要同步更新根目录 `CONTENT_APP_API_CALLS.md` 和本小节。
+- 新增任何调用 content-app 的 Client/Skill 时，都要补测试，至少覆盖“透传 Authorization”和“缺 token 失败”。
+
+## 前端本地测试 Authorization
+
+正式联动时，content-app 前端应该在进入 PixelFlow 时提供 Authorization。当前 PixelFlow 前端支持两种方式：
+
+| 方式 | 适用场景 | 说明 |
+| --- | --- | --- |
+| `window.__CONTENT_APP_AUTHORIZATION__` | content-app 宿主页面集成 | 宿主页面直接注入完整 `Bearer xxx` |
+| `localStorage.Authorization` | 本地独立调试 | 打开 `/auth-token` 页面保存一次，后续请求自动携带 |
+
+本地调试步骤：
+
+1. 先在 content-app 登录，拿到登录 token。
+2. 启动 PixelFlow 后端和前端。
+3. 打开 `http://localhost:5273/auth-token`。
+4. 粘贴 token。可以粘贴完整 `Bearer xxx`，也可以只粘贴原始 JWT。
+5. 点击“保存并验证”。
+6. 页面会调用 `/agent/auth/me`，如果返回用户名，说明前端到 Python 后端的 Authorization 链路已打通。
+7. 回到工作台后，创建任务、确认 Brief、订阅 SSE、拉取资产都会自动带同一个 `Authorization`。
+
+前端读取优先级：
+
+```text
+window.__CONTENT_APP_AUTHORIZATION__
+  -> localStorage 中的 Authorization / authorization / contentAppAuthorization / content_app_authorization / token / access_token
+  -> sessionStorage 中的同名 key
 ```
 
-Example test:
+前端统一封装位置：
+
+| 文件 | 说明 |
+| --- | --- |
+| `web/src/lib/authStorage.ts` | 负责保存、清除、读取、归一化 Authorization |
+| `web/src/lib/api.ts` | 统一 API Client，每个请求都会自动带 Authorization |
+| `web/src/pages/AuthTokenPage.tsx` | 本地调试 Authorization 页面 |
+
+## 目录和分层
+
+主要目录：
+
+```text
+backend/
+├── app/gateway/                 # FastAPI 网关层，类似 Spring Boot Controller + Filter + 启动配置
+│   ├── app.py                    # FastAPI 应用创建、路由挂载、中间件挂载
+│   ├── auth_middleware.py        # 全局 Authorization 鉴权中间件
+│   ├── content_app_auth.py       # 读取 content-app JWT 用户名并远程 verify
+│   ├── content_app_auth_context.py # 请求级 Authorization 上下文，供 Skill 透传 token
+│   └── routers/                  # HTTP Controller
+├── pixelflow/                    # PixelFlow 业务核心
+│   ├── state.py                  # TaskState，全流程上下文 DTO
+│   ├── graph.py                  # LangGraph 状态机
+│   ├── nodes.py                  # 各阶段 Service 方法
+│   ├── tasks/                    # 任务、事件、资产持久化
+│   ├── preferences/              # 用户偏好
+│   └── skills/                   # 第三方能力 Client/Adapter
+├── packages/harness/deerflow/    # DeerFlow/LangGraph 基础设施
+└── tests/                        # 后端测试
+```
+
+前端目录：
+
+```text
+web/src/
+├── pages/                        # 页面入口，如 WorkspacePage、AuthTokenPage
+├── components/                   # 页面组件，如侧边栏、画布、聊天面板
+├── lib/api.ts                    # 后端 API Client
+├── lib/authStorage.ts            # Authorization 本地调试存储工具
+└── lib/types.ts                  # 前端类型定义
+```
+
+分层规则：
+
+| 要做的事 | 应放位置 |
+| --- | --- |
+| HTTP 入参、出参、状态码 | `backend/app/gateway/routers/` |
+| 全局鉴权、请求上下文 | `backend/app/gateway/auth_middleware.py`、`content_app_auth*.py` |
+| PixelFlow 阶段编排 | `backend/pixelflow/nodes.py`、`graph.py` |
+| 纯逻辑校验和转换 | `backend/pixelflow/intake/`、`creative/`、`generate/`、`edit/`、`qc/` |
+| 第三方 API 调用 | `backend/pixelflow/skills/` |
+| 任务和资产存储 | `backend/pixelflow/tasks/` |
+| 前端 API 调用 | `web/src/lib/api.ts` |
+| 前端页面 | `web/src/pages/` |
+
+## 新增接口规则
+
+PixelFlow 对前端或第三方暴露的新接口必须满足：
+
+- 路径必须以 `/agent` 开头。
+- PixelFlow 主业务流程统一放在 `/agent/flows` 下。
+- 不要再新增 `/api/tasks`、`/api/users` 这类旧路径。
+- 非公开接口默认需要 `Authorization`。
+- 公开接口只能是健康检查、接口文档这类无用户数据的入口。
+- Router 只做 HTTP 边界工作，不要把复杂业务逻辑直接写进 Router。
+
+新增接口建议流程：
+
+1. 在 `backend/app/gateway/routers/` 创建或修改 Router。
+2. 用 Pydantic Model 定义请求和响应 DTO。
+3. 调用 `backend/pixelflow/` 下的业务 Service/Store/Skill。
+4. 在 `backend/app/gateway/app.py` 挂载 Router。
+5. 写测试覆盖成功、参数错误、未认证、无权限等关键路径。
+6. 如果接口给前端用，同步更新 `web/src/lib/api.ts` 和 TypeScript 类型。
+7. 如果接口属于重要业务链路，同步更新 README、AGENTS 或项目说明文档。
+
+## 新增 content-app 调用规则
+
+content-app 调用一般发生在 Skill/Client 层，不要散落在 Router 或节点里。
+
+必须遵守：
+
+- 使用当前请求透传的 `Authorization`。
+- 不要读取 `BORGRISE_API_TOKEN` 作为用户身份。
+- 不要写死用户名、密码、token。
+- 请求失败要在 Skill 边界转换成清晰错误，避免上层看到零散的第三方异常。
+- 新增接口后同步更新 `CONTENT_APP_API_CALLS.md`。
+
+示例：
 
 ```python
-import pytest
-from deerflow.models.factory import create_chat_model
+from app.gateway.content_app_auth_context import require_current_authorization
 
-def test_create_chat_model_with_valid_name():
-    """Test that a valid model name creates a model instance."""
-    model = create_chat_model("gpt-4")
-    assert model is not None
 
-def test_create_chat_model_with_invalid_name():
-    """Test that an invalid model name raises ValueError."""
-    with pytest.raises(ValueError):
-        create_chat_model("nonexistent-model")
-```
+def build_headers() -> dict[str, str]:
+    """构造调用 content-app 的请求头。
 
-## Pull Request Process
-
-### Before Submitting
-
-1. **Ensure tests pass**: `uv run pytest`
-2. **Run linter**: `make lint`
-3. **Format code**: `make format`
-4. **Update documentation** if needed
-
-### PR Description
-
-Include in your PR description:
-
-- **What**: Brief description of changes
-- **Why**: Motivation for the change
-- **How**: Implementation approach
-- **Testing**: How you tested the changes
-
-### Review Process
-
-1. Submit PR with clear description
-2. Address review feedback
-3. Ensure CI passes
-4. Maintainer will merge when approved
-
-## Architecture Guidelines
-
-### Adding New Tools
-
-1. Create tool in `packages/harness/deerflow/tools/builtins/` or `packages/harness/deerflow/community/`:
-
-```python
-# packages/harness/deerflow/tools/builtins/my_tool.py
-from langchain_core.tools import tool
-
-@tool
-def my_tool(param: str) -> str:
-    """Tool description for the agent.
-
-    Args:
-        param: Description of the parameter
-
-    Returns:
-        Description of return value
+    这里必须使用入口请求透传来的 Authorization，不能写死测试 token。
+    content-app 会根据这个 token 识别用户、扣费、写历史记录。
     """
-    return f"Result: {param}"
-```
-
-2. Register in `config.yaml`:
-
-```yaml
-tools:
-  - name: my_tool
-    group: my_group
-    use: deerflow.tools.builtins.my_tool:my_tool
-```
-
-### Adding New Middleware
-
-1. Create middleware in `packages/harness/deerflow/agents/middlewares/`:
-
-```python
-# packages/harness/deerflow/agents/middlewares/my_middleware.py
-from langchain.agents.middleware import BaseMiddleware
-from langchain_core.runnables import RunnableConfig
-
-class MyMiddleware(BaseMiddleware):
-    """Middleware description."""
-
-    def transform_state(self, state: dict, config: RunnableConfig) -> dict:
-        """Transform the state before agent execution."""
-        # Modify state as needed
-        return state
-```
-
-2. Register in `packages/harness/deerflow/agents/lead_agent/agent.py`:
-
-```python
-middlewares = [
-    ThreadDataMiddleware(),
-    SandboxMiddleware(),
-    MyMiddleware(),  # Add your middleware
-    TitleMiddleware(),
-    ClarificationMiddleware(),
-]
-```
-
-### Adding New API Endpoints
-
-1. Create router in `app/gateway/routers/`:
-
-```python
-# app/gateway/routers/my_router.py
-from fastapi import APIRouter
-
-router = APIRouter(prefix="/my-endpoint", tags=["my-endpoint"])
-
-@router.get("/")
-async def get_items():
-    """Get all items."""
-    return {"items": []}
-
-@router.post("/")
-async def create_item(data: dict):
-    """Create a new item."""
-    return {"created": data}
-```
-
-2. Register in `app/gateway/app.py`:
-
-```python
-from app.gateway.routers import my_router
-
-app.include_router(my_router.router)
-```
-
-### Configuration Changes
-
-When adding new configuration options:
-
-1. Update `packages/harness/deerflow/config/app_config.py` with new fields
-2. Add default values in `config.example.yaml`
-3. Document in `docs/CONFIGURATION.md`
-
-### MCP Server Integration
-
-To add support for a new MCP server:
-
-1. Add configuration in `extensions_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "my-server": {
-      "enabled": true,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@my-org/mcp-server"],
-      "description": "My MCP Server"
+    return {
+        "Authorization": require_current_authorization(),
+        "Content-Type": "application/json",
     }
-  }
-}
 ```
 
-2. Update `extensions_config.example.json` with the new server
+## 配置文件规则
 
-### Skills Development
+配置文件分两份：
 
-To create a new skill:
+| 文件 | 说明 |
+| --- | --- |
+| `backend/config.dev.yml` | 本地开发、测试环境配置 |
+| `backend/config.prod.yml` | 生产环境配置 |
 
-1. Create directory in `skills/public/` or `skills/custom/`:
+规则：
 
+- 普通环境差异放进 YAML，例如端口、数据库地址、content-app 地址、超时、开关。
+- 用户登录 token 不允许放进 YAML、`.env` 或代码。
+- 不要在 PixelFlow 配置 content-app 的 token 签名密钥；token 真伪统一交给 content-app `/api/auth/verify` 判断。
+- `borgrise.remote_verify_enabled` 默认开启，除非本地离线调试才临时关闭；它只控制 `/api/auth/verify` 登录态校验。
+- `borgrise.verify_timeout_seconds` 只控制登录态实时校验，默认 10 秒；它不是生成任务轮询超时。
+- Borgrise 异步任务轮询必须按业务类型选择配置：视频生成用 `borgrise.video_poll_timeout`，默认 1 小时；图片生成用 `borgrise.image_poll_timeout`，默认 10 分钟；视频分析/参考视频拆解用 `borgrise.video_analysis_poll_timeout`，默认 15 分钟；视频合并是 content-app 同步接口，用 `borgrise.video_merge_request_timeout` 控制读等待，默认 1 小时。
+- `pixelflow.media_skill` 是图片生成、视频生成、参考视频拆解共用的媒体供应商开关；当前仅支持 `borgrise`，对应外部 Client 参数写在 `borgrise.*`。
+- `pixelflow.edit_skill` 是剪辑/渲染开关，和媒体供应商不是同一类能力；当前支持 `jianying` 和 `ffmpeg`。
+- 新增配置项必须写中文注释，说明用途、默认值和影响范围。
+
+## 代码注释规则
+
+本项目面向不熟悉 Python 和前端的 Java 开发维护，所以注释要更偏“解释业务意图”，不要只翻译语法。
+
+后端注释要求：
+
+- 公共函数、类、复杂私有函数都写中文 docstring。
+- 关键变量说明它代表的业务含义，而不是只写类型。
+- 调用 content-app、Borgrise、FFmpeg、剪映等外部系统时，说明为什么这样传参。
+- 涉及异步、线程、`ContextVar`、SSE、LangGraph interrupt 的地方，要补充 Java 类比或流程说明。
+- 不确定的逻辑不要瞎写注释；先读调用链或查资料。
+
+前端注释要求：
+
+- API Client、SSE、Blob 播放、本地 Authorization 存储等容易踩坑的地方要写中文注释。
+- 页面组件内只在关键流程处写注释，不要给每个 JSX 标签写无意义注释。
+- 用户可见文案要简洁，不要把大段技术说明塞进界面。
+
+示例：
+
+```python
+async def stream_task_events(task_id: str, request: Request):
+    """把任务事件表转换成 SSE 推给前端。
+
+    Java 类比：这相当于一个持续写响应的 Controller。中间件只在建连时校验一次，
+    所以这里每轮循环还要远程 verify content-app token，保证禁用用户立刻断开。
+    """
 ```
-skills/public/my-skill/
-└── SKILL.md
+
+## 测试和验证
+
+后端常用验证：
+
+```bash
+cd backend
+uv run pytest tests/test_content_app_auth.py tests/test_content_app_auth_middleware.py tests/test_borgrise_authorization_passthrough.py -q
+uv run ruff check .
 ```
 
-2. Write `SKILL.md` with YAML front matter:
+如果本机 `uv` 不在 PATH，可使用项目虚拟环境：
 
-```markdown
----
-name: My Skill
-description: What this skill does
-license: MIT
-allowed-tools:
-  - read_file
-  - write_file
-  - bash
----
-
-# My Skill
-
-Instructions for the agent when this skill is enabled...
+```bash
+cd backend
+./.venv/bin/python -m pytest tests/test_content_app_auth.py tests/test_content_app_auth_middleware.py tests/test_borgrise_authorization_passthrough.py -q
+./.venv/bin/python -m ruff check .
 ```
 
-## Questions?
+前端常用验证：
 
-If you have questions about contributing:
+```bash
+cd web
+./node_modules/.bin/tsc --noEmit
+./node_modules/.bin/vite build
+```
 
-1. Check existing documentation in `docs/`
-2. Look for similar issues or PRs on GitHub
-3. Open a discussion or issue on GitHub
+Authorization 存储工具测试：
 
-Thank you for contributing to DeerFlow!
+```bash
+cd web
+rm -rf /tmp/pixelflow-auth-storage-test
+./node_modules/.bin/tsc src/lib/authStorage.ts --target ES2022 --module ES2022 --moduleResolution bundler --outDir /tmp/pixelflow-auth-storage-test --skipLibCheck --strict
+AUTH_STORAGE_TEST_MODULE=file:///tmp/pixelflow-auth-storage-test/authStorage.js node --test tests/authStorage.test.mjs
+```
+
+## 提交前检查清单
+
+提交前至少确认：
+
+- 新增或修改的后端接口都以 `/agent` 开头。
+- 需要登录的接口都依赖 content-app `Authorization`。
+- Skill 调 content-app/Borgrise 时透传当前请求 token，没有写死 token。
+- 新增 content-app 接口调用已更新 `CONTENT_APP_API_CALLS.md`。
+- 新增配置项已写入 `config.dev.yml` 和 `config.prod.yml`，并有中文注释。
+- 新增复杂逻辑有中文注释，注释解释业务原因和调用关系。
+- 后端相关测试通过。
+- 前端 TypeScript 编译和构建通过。
+- 没有清理或回滚用户已有的无关改动。

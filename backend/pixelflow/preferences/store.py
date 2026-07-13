@@ -1,4 +1,8 @@
-"""Structured preference storage for PixelFlow P0."""
+"""PixelFlow P0 结构化偏好存储。
+
+Store 负责保存用户风格偏好、负向规则、默认视频参数和最近反馈。它不是语义记忆
+系统；``semantic_memory`` 字段默认只返回 disabled 状态，启用 PowerMem 时由网关覆盖。
+"""
 
 from __future__ import annotations
 
@@ -38,15 +42,17 @@ class UserPreferenceRecord:
             "defaults": self.defaults,
             "recent_feedback": self.recent_feedback,
             "updated_at": self.updated_at,
-            "semantic_memory": {"enabled": False, "provider": "mem0", "status": "reserved_for_p1"},
+            "semantic_memory": {"enabled": False, "provider": "none", "status": "disabled"},
         }
 
 
 class PreferencePatch(dict):
-    """Plain dict marker for preference update payloads."""
+    """偏好更新 payload 的轻量标记类型，实际结构仍是普通 dict。"""
 
 
 class UserPreferenceStore(Protocol):
+    """用户偏好 Store 接口，SQL 和内存实现都遵循这个合同。"""
+
     async def get(self, user_id: str) -> UserPreferenceRecord: ...
     async def update(self, user_id: str, patch: dict[str, Any]) -> UserPreferenceRecord: ...
     async def append_feedback(self, user_id: str, feedback: str, *, task_id: str | None = None, metadata: dict[str, Any] | None = None) -> UserPreferenceRecord: ...

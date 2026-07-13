@@ -1,7 +1,7 @@
 """Tests for GATEWAY_ENABLE_DOCS configuration toggle.
 
-Verifies that Swagger UI (/docs), ReDoc (/redoc), and the OpenAPI schema
-(/openapi.json) can be disabled via the GATEWAY_ENABLE_DOCS environment
+    Verifies that Swagger UI (/agent/docs), ReDoc (/agent/redoc), and the OpenAPI schema
+    (/agent/openapi.json) can be disabled via the GATEWAY_ENABLE_DOCS environment
 variable for production deployments.
 """
 
@@ -84,7 +84,7 @@ def test_enable_docs_unexpected_value_disables():
 
 
 def test_docs_endpoints_available_by_default():
-    """With enable_docs=True (default), /docs, /redoc, /openapi.json return 200."""
+    """With enable_docs=True (default), /agent docs endpoints return 200."""
     with patch.dict(os.environ, {}, clear=False):
         if "GATEWAY_ENABLE_DOCS" in os.environ:
             del os.environ["GATEWAY_ENABLE_DOCS"]
@@ -93,22 +93,24 @@ def test_docs_endpoints_available_by_default():
 
         app = create_app()
         client = TestClient(app)
-        assert client.get("/docs").status_code == 200
-        assert client.get("/redoc").status_code == 200
-        assert client.get("/openapi.json").status_code == 200
+        assert client.get("/agent/docs").status_code == 200
+        assert client.get("/agent/redoc").status_code == 200
+        assert client.get("/agent/openapi.json").status_code == 200
+        # 旧的 FastAPI 默认入口不再公开；AuthMiddleware 会先按受保护路径返回 401。
+        assert client.get("/docs").status_code == 401
 
 
 def test_docs_endpoints_disabled_when_false():
-    """With GATEWAY_ENABLE_DOCS=false, /docs, /redoc, /openapi.json return 404."""
+    """With GATEWAY_ENABLE_DOCS=false, /agent docs endpoints return 404."""
     with patch.dict(os.environ, {"GATEWAY_ENABLE_DOCS": "false"}):
         _reset_gateway_config()
         from app.gateway.app import create_app
 
         app = create_app()
         client = TestClient(app)
-        assert client.get("/docs").status_code == 404
-        assert client.get("/redoc").status_code == 404
-        assert client.get("/openapi.json").status_code == 404
+        assert client.get("/agent/docs").status_code == 404
+        assert client.get("/agent/redoc").status_code == 404
+        assert client.get("/agent/openapi.json").status_code == 404
 
 
 def test_health_still_works_when_docs_disabled():

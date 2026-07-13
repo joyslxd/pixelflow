@@ -36,7 +36,7 @@ def test_thread_token_usage_returns_stable_shape():
     app = _make_app(run_store)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/token-usage")
+        response = client.get("/agent/threads/thread-1/token-usage")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -74,7 +74,7 @@ def test_thread_token_usage_can_include_active_runs():
     app = _make_app(run_store)
 
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-1/token-usage?include_active=true")
+        response = client.get("/agent/threads/thread-1/token-usage?include_active=true")
 
     assert response.status_code == 200
     assert response.json()["total_tokens"] == 175

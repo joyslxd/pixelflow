@@ -1,4 +1,10 @@
-"""Persistence abstraction for PixelFlow business tasks."""
+"""PixelFlow 业务任务持久化抽象。
+
+LangGraph checkpoint 保存的是运行时状态；这里的 Store 保存的是前端和业务 API
+更容易消费的任务视图、事件流和资产列表。可以把它理解成业务侧 Repository：
+``pixelflow_tasks`` 是任务主表，``pixelflow_task_events`` 是进度事件表，
+``pixelflow_assets`` 是生成/剪辑产物表。
+"""
 
 from __future__ import annotations
 
@@ -6,18 +12,64 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from pixelflow.tasks.model import PixelFlowAssetRow, PixelFlowSessionContextRow, PixelFlowTaskEventRow, PixelFlowTaskRow
+from deerflow.utils.time import coerce_iso
+from pixelflow.tasks.model import (
+    PixelFlowAssetRow,
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
+    PixelFlowConversationTraceEventRow,
+    PixelFlowSessionContextRow,
+    PixelFlowTaskEventRow,
+    PixelFlowTaskRow,
+)
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _to_datetime(value: datetime | str | None) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _dt(value: datetime | str | None) -> str:
-    return value.isoformat() if isinstance(value, datetime) else (value or "")
+    return coerce_iso(value)
+
+
+def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop legacy chat snapshots; persisted messages are the source of truth."""
+    if not value:
+        return {}
+    return {key: item for key, item in value.items() if key != "messages"}
+
+
+def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+    if not cursor or "|" not in cursor:
+        return None
+    raw_created_at, conversation_id = cursor.rsplit("|", 1)
+    created_at = _to_datetime(raw_created_at)
+    if created_at is None:
+        return None
+    return created_at, conversation_id
+
+
+def _conversation_cursor(record: PixelFlowConversationRecord) -> str:
+    return f"{record.created_at}|{record.conversation_id}"
 
 
 @dataclass
@@ -98,7 +150,59 @@ class PixelFlowAssetRecord:
         }
 
 
+@dataclass
+class PixelFlowConversationRecord:
+    conversation_id: str
+    user_id: str | None
+    title: str = ""
+    current_task_id: str | None = None
+    last_phase: str = "idle"
+    context: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "conversation_id": self.conversation_id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "current_task_id": self.current_task_id,
+            "last_phase": self.last_phase,
+            "context": self.context,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class PixelFlowConversationMessageRecord:
+    message_id: str
+    conversation_id: str
+    user_id: str | None
+    role: str
+    content: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "conversation_id": self.conversation_id,
+            "user_id": self.user_id,
+            "role": self.role,
+            "content": self.content,
+            "payload": self.payload,
+            "created_at": self.created_at,
+        }
+
+
 class PixelFlowTaskStore(Protocol):
+    """业务任务 Store 接口。
+
+    SQL 实现用于真实持久化；Memory 实现适合本地开发和测试。所有方法都带可选
+    ``user_id`` 过滤，避免不同用户读取彼此任务。
+    """
+
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord: ...
     async def get(self, task_id: str, *, user_id: str | None = None) -> PixelFlowTaskRecord | None: ...
     async def list(self, *, user_id: str | None = None, limit: int = 50) -> list[PixelFlowTaskRecord]: ...
@@ -110,6 +214,31 @@ class PixelFlowTaskStore(Protocol):
     async def get_session_context(self, task_id: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None: ...
     async def list_session_contexts(self, *, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]: ...
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
+    async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord: ...
+    async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None: ...
+    async def list_conversations(
+        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
+    ) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
+    async def update_conversation(
+        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    ) -> PixelFlowConversationRecord | None: ...
+    async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord: ...
+    async def update_conversation_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        user_id: str | None = None,
+        content: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> PixelFlowConversationMessageRecord | None: ...
+    async def list_conversation_messages(
+        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
+    ) -> list[PixelFlowConversationMessageRecord]: ...
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]: ...
 
 
 def _row_to_record(row: PixelFlowTaskRow) -> PixelFlowTaskRecord:
@@ -150,6 +279,31 @@ def _asset_row_to_record(row: PixelFlowAssetRow) -> PixelFlowAssetRecord:
         error=row.error,
         created_at=_dt(row.created_at),
         updated_at=_dt(row.updated_at),
+    )
+
+
+def _conversation_row_to_record(row: PixelFlowConversationRow) -> PixelFlowConversationRecord:
+    return PixelFlowConversationRecord(
+        conversation_id=row.conversation_id,
+        user_id=row.user_id,
+        title=row.title or "",
+        current_task_id=row.current_task_id,
+        last_phase=row.last_phase or "idle",
+        context=_conversation_context(row.context_json),
+        created_at=_dt(row.created_at),
+        updated_at=_dt(row.updated_at),
+    )
+
+
+def _conversation_message_row_to_record(row: PixelFlowConversationMessageRow) -> PixelFlowConversationMessageRecord:
+    return PixelFlowConversationMessageRecord(
+        message_id=row.message_id,
+        conversation_id=row.conversation_id,
+        user_id=row.user_id,
+        role=row.role,
+        content=row.content or "",
+        payload=row.payload_json or {},
+        created_at=_dt(row.created_at),
     )
 
 
@@ -243,6 +397,31 @@ class SQLPixelFlowTaskStore:
             rows = (await session.execute(stmt)).scalars().all()
             return [_event_to_dict(r) for r in rows]
 
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        async with self._sf() as session:
+            row = PixelFlowConversationTraceEventRow(conversation_id=conversation_id, user_id=user_id, event=event, data_json=data)
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _trace_event_to_dict(row)
+
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        async with self._sf() as session:
+            stmt = (
+                select(PixelFlowConversationTraceEventRow)
+                .where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id)
+                .order_by(PixelFlowConversationTraceEventRow.id.asc())
+                .limit(limit)
+            )
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationTraceEventRow.user_id == user_id)
+            if after_id is not None:
+                stmt = stmt.where(PixelFlowConversationTraceEventRow.id > after_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_trace_event_to_dict(r) for r in rows]
+
     async def upsert_asset(self, asset: PixelFlowAssetRecord) -> PixelFlowAssetRecord:
         async with self._sf() as session:
             row = await session.get(PixelFlowAssetRow, asset.asset_id)
@@ -312,9 +491,181 @@ class SQLPixelFlowTaskStore:
             await session.refresh(row)
             return {"task_id": row.task_id, "user_id": row.user_id, "context": row.context_json or {}, "updated_at": _dt(row.updated_at)}
 
+    async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord:
+        async with self._sf() as session:
+            created_at = _to_datetime(record.created_at) or _now()
+            updated_at = _to_datetime(record.updated_at) or created_at
+            row = PixelFlowConversationRow(
+                conversation_id=record.conversation_id,
+                user_id=record.user_id,
+                title=record.title,
+                current_task_id=record.current_task_id,
+                last_phase=record.last_phase,
+                context_json=_conversation_context(record.context),
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _conversation_row_to_record(row)
+
+    async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None:
+        async with self._sf() as session:
+            stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id)
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _conversation_row_to_record(row) if row else None
+
+    async def list_conversations(
+        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
+    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+        async with self._sf() as session:
+            stmt = (
+                select(PixelFlowConversationRow)
+                .order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc())
+                .limit(limit + 1)
+            )
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+            parsed = _parse_cursor(cursor)
+            if parsed is not None:
+                created_at, conversation_id = parsed
+                stmt = stmt.where(
+                    or_(
+                        PixelFlowConversationRow.created_at < created_at,
+                        and_(
+                            PixelFlowConversationRow.created_at == created_at,
+                            PixelFlowConversationRow.conversation_id < conversation_id,
+                        ),
+                    )
+                )
+            rows = (await session.execute(stmt)).scalars().all()
+            records = [_conversation_row_to_record(r) for r in rows[:limit]]
+            next_cursor = _conversation_cursor(records[-1]) if len(rows) > limit and records else None
+            return records, next_cursor
+
+    async def update_conversation(
+        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    ) -> PixelFlowConversationRecord | None:
+        async with self._sf() as session:
+            stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id)
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return None
+            mapping = {
+                "title": "title",
+                "current_task_id": "current_task_id",
+                "last_phase": "last_phase",
+                "context": "context_json",
+            }
+            for key, value in fields.items():
+                attr = mapping.get(key)
+                if attr:
+                    if key == "context":
+                        value = _conversation_context(value)
+                    setattr(row, attr, value)
+            row.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return _conversation_row_to_record(row)
+
+    async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
+        async with self._sf() as session:
+            existing = await session.get(PixelFlowConversationMessageRow, message.message_id)
+            if existing is not None:
+                if existing.conversation_id != message.conversation_id:
+                    raise ValueError("conversation message_id collision across conversations")
+                return _conversation_message_row_to_record(existing)
+            conversation = await session.get(PixelFlowConversationRow, message.conversation_id)
+            row = PixelFlowConversationMessageRow(
+                message_id=message.message_id,
+                conversation_id=message.conversation_id,
+                user_id=message.user_id,
+                role=message.role,
+                content=message.content,
+                payload_json=message.payload,
+            )
+            session.add(row)
+            if conversation is not None:
+                conversation.updated_at = _now()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.get(PixelFlowConversationMessageRow, message.message_id)
+                if existing is not None and existing.conversation_id == message.conversation_id:
+                    return _conversation_message_row_to_record(existing)
+                raise
+            await session.refresh(row)
+            return _conversation_message_row_to_record(row)
+
+    async def update_conversation_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        user_id: str | None = None,
+        content: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> PixelFlowConversationMessageRecord | None:
+        async with self._sf() as session:
+            stmt = select(PixelFlowConversationMessageRow).where(PixelFlowConversationMessageRow.conversation_id == conversation_id)
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationMessageRow.user_id == user_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if item.message_id == message_id or (item.payload_json or {}).get("client_message_id") == message_id
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            if content is not None:
+                row.content = content
+            if payload is not None:
+                row.payload_json = payload
+            conversation = await session.get(PixelFlowConversationRow, conversation_id)
+            if conversation is not None:
+                conversation.updated_at = _now()
+            await session.commit()
+            await session.refresh(row)
+            return _conversation_message_row_to_record(row)
+
+    async def list_conversation_messages(
+        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
+    ) -> list[PixelFlowConversationMessageRecord]:
+        async with self._sf() as session:
+            stmt = (
+                select(PixelFlowConversationMessageRow)
+                .where(PixelFlowConversationMessageRow.conversation_id == conversation_id)
+                .order_by(PixelFlowConversationMessageRow.created_at.asc(), PixelFlowConversationMessageRow.message_id.asc())
+                .limit(limit)
+            )
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowConversationMessageRow.user_id == user_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_conversation_message_row_to_record(r) for r in rows]
+
 
 def _event_to_dict(row: PixelFlowTaskEventRow) -> dict[str, Any]:
     return {"id": row.id, "task_id": row.task_id, "event": row.event, "data": row.data_json or {}, "created_at": _dt(row.created_at)}
+
+
+def _trace_event_to_dict(row: PixelFlowConversationTraceEventRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "event": row.event,
+        "data": row.data_json or {},
+        "created_at": _dt(row.created_at),
+    }
 
 
 class MemoryPixelFlowTaskStore:
@@ -323,7 +674,11 @@ class MemoryPixelFlowTaskStore:
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._assets: dict[str, PixelFlowAssetRecord] = {}
         self._contexts: dict[str, dict[str, Any]] = {}
+        self._conversations: dict[str, PixelFlowConversationRecord] = {}
+        self._conversation_messages: dict[str, list[PixelFlowConversationMessageRecord]] = {}
+        self._trace_events: dict[str, list[dict[str, Any]]] = {}
         self._next_event_id = 1
+        self._next_trace_event_id = 1
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         stamp = _dt(_now())
@@ -364,6 +719,20 @@ class MemoryPixelFlowTaskStore:
             rows = [r for r in rows if r["id"] > after_id]
         return rows[:limit]
 
+    async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+        row = {"id": self._next_trace_event_id, "conversation_id": conversation_id, "event": event, "data": data, "created_at": _dt(_now())}
+        self._next_trace_event_id += 1
+        self._trace_events.setdefault(conversation_id, []).append(row)
+        return row
+
+    async def list_trace_events(
+        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        rows = list(self._trace_events.get(conversation_id, []))
+        if after_id is not None:
+            rows = [r for r in rows if r["id"] > after_id]
+        return rows[:limit]
+
     async def upsert_asset(self, asset: PixelFlowAssetRecord) -> PixelFlowAssetRecord:
         stamp = _dt(_now())
         asset.created_at = asset.created_at or stamp
@@ -397,3 +766,103 @@ class MemoryPixelFlowTaskStore:
         row.update({"user_id": user_id, "context": context, "updated_at": stamp})
         self._contexts[task_id] = row
         return row
+
+    async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord:
+        stamp = _dt(_now())
+        record.created_at = record.created_at or stamp
+        record.updated_at = record.updated_at or stamp
+        record.context = _conversation_context(record.context)
+        self._conversations[record.conversation_id] = record
+        return record
+
+    async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None:
+        record = self._conversations.get(conversation_id)
+        if record and (user_id is None or record.user_id == user_id):
+            return record
+        return None
+
+    async def list_conversations(
+        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
+    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+        rows = [r for r in self._conversations.values() if user_id is None or r.user_id == user_id]
+        rows = sorted(rows, key=lambda r: (r.created_at, r.conversation_id), reverse=True)
+        parsed = _parse_cursor(cursor)
+        if parsed is not None:
+            created_at, conversation_id = parsed
+            cursor_key = (_dt(created_at), conversation_id)
+            rows = [r for r in rows if (r.created_at, r.conversation_id) < cursor_key]
+        page = rows[:limit]
+        next_cursor = _conversation_cursor(page[-1]) if len(rows) > limit and page else None
+        return page, next_cursor
+
+    async def update_conversation(
+        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    ) -> PixelFlowConversationRecord | None:
+        record = await self.get_conversation(conversation_id, user_id=user_id)
+        if record is None:
+            return None
+        for key in ("title", "current_task_id", "last_phase", "context"):
+            if key in fields:
+                value = _conversation_context(fields[key]) if key == "context" else fields[key]
+                setattr(record, key, value)
+        record.updated_at = _dt(_now())
+        return record
+
+    async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
+        existing = next(
+            (
+                item
+                for rows in self._conversation_messages.values()
+                for item in rows
+                if item.message_id == message.message_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.conversation_id != message.conversation_id:
+                raise ValueError("conversation message_id collision across conversations")
+            return existing
+        message.created_at = message.created_at or _dt(_now())
+        self._conversation_messages.setdefault(message.conversation_id, []).append(message)
+        conversation = self._conversations.get(message.conversation_id)
+        if conversation is not None:
+            conversation.updated_at = message.created_at
+        return message
+
+    async def update_conversation_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        user_id: str | None = None,
+        content: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> PixelFlowConversationMessageRecord | None:
+        rows = self._conversation_messages.get(conversation_id, [])
+        record = next(
+            (
+                item
+                for item in rows
+                if (user_id is None or item.user_id == user_id)
+                and (item.message_id == message_id or item.payload.get("client_message_id") == message_id)
+            ),
+            None,
+        )
+        if record is None:
+            return None
+        if content is not None:
+            record.content = content
+        if payload is not None:
+            record.payload = payload
+        conversation = self._conversations.get(conversation_id)
+        if conversation is not None:
+            conversation.updated_at = _dt(_now())
+        return record
+
+    async def list_conversation_messages(
+        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
+    ) -> list[PixelFlowConversationMessageRecord]:
+        rows = list(self._conversation_messages.get(conversation_id, []))
+        if user_id is not None:
+            rows = [r for r in rows if r.user_id == user_id]
+        return sorted(rows, key=lambda r: (r.created_at, r.message_id))[:limit]

@@ -425,7 +425,7 @@ def disabled_agent_client(tmp_path):
 
 class TestAgentsAPI:
     def test_list_agents_empty(self, agent_client):
-        response = agent_client.get("/api/agents")
+        response = agent_client.get("/agent/agents")
         assert response.status_code == 200
         data = response.json()
         assert data["agents"] == []
@@ -436,7 +436,7 @@ class TestAgentsAPI:
             "description": "Reviews code",
             "soul": "You are a code reviewer.",
         }
-        response = agent_client.post("/api/agents", json=payload)
+        response = agent_client.post("/agent/agents", json=payload)
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
@@ -445,79 +445,79 @@ class TestAgentsAPI:
 
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
-        response = agent_client.post("/api/agents", json=payload)
+        response = agent_client.post("/agent/agents", json=payload)
         assert response.status_code == 422
 
     def test_create_duplicate_agent_409(self, agent_client):
         payload = {"name": "my-agent", "soul": "test"}
-        agent_client.post("/api/agents", json=payload)
+        agent_client.post("/agent/agents", json=payload)
 
         # Second create should fail
-        response = agent_client.post("/api/agents", json=payload)
+        response = agent_client.post("/agent/agents", json=payload)
         assert response.status_code == 409
 
     def test_list_agents_after_create(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "agent-one", "soul": "p1"})
-        agent_client.post("/api/agents", json={"name": "agent-two", "soul": "p2"})
+        agent_client.post("/agent/agents", json={"name": "agent-one", "soul": "p1"})
+        agent_client.post("/agent/agents", json={"name": "agent-two", "soul": "p2"})
 
-        response = agent_client.get("/api/agents")
+        response = agent_client.get("/agent/agents")
         assert response.status_code == 200
         names = [a["name"] for a in response.json()["agents"]]
         assert "agent-one" in names
         assert "agent-two" in names
 
     def test_list_agents_includes_soul(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "soul-agent", "soul": "My soul content"})
+        agent_client.post("/agent/agents", json={"name": "soul-agent", "soul": "My soul content"})
 
-        response = agent_client.get("/api/agents")
+        response = agent_client.get("/agent/agents")
         assert response.status_code == 200
         agents = response.json()["agents"]
         soul_agent = next(a for a in agents if a["name"] == "soul-agent")
         assert soul_agent["soul"] == "My soul content"
 
     def test_get_agent(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "test-agent", "soul": "Hello world"})
+        agent_client.post("/agent/agents", json={"name": "test-agent", "soul": "Hello world"})
 
-        response = agent_client.get("/api/agents/test-agent")
+        response = agent_client.get("/agent/agents/test-agent")
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "test-agent"
         assert data["soul"] == "Hello world"
 
     def test_get_missing_agent_404(self, agent_client):
-        response = agent_client.get("/api/agents/nonexistent")
+        response = agent_client.get("/agent/agents/nonexistent")
         assert response.status_code == 404
 
     def test_update_agent_soul(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
+        agent_client.post("/agent/agents", json={"name": "update-me", "soul": "original"})
 
-        response = agent_client.put("/api/agents/update-me", json={"soul": "updated"})
+        response = agent_client.put("/agent/agents/update-me", json={"soul": "updated"})
         assert response.status_code == 200
         assert response.json()["soul"] == "updated"
 
     def test_update_agent_description(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "desc-agent", "description": "old desc", "soul": "p"})
+        agent_client.post("/agent/agents", json={"name": "desc-agent", "description": "old desc", "soul": "p"})
 
-        response = agent_client.put("/api/agents/desc-agent", json={"description": "new desc"})
+        response = agent_client.put("/agent/agents/desc-agent", json={"description": "new desc"})
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
     def test_update_missing_agent_404(self, agent_client):
-        response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
+        response = agent_client.put("/agent/agents/ghost-agent", json={"soul": "new"})
         assert response.status_code == 404
 
     def test_delete_agent(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "del-me", "soul": "bye"})
+        agent_client.post("/agent/agents", json={"name": "del-me", "soul": "bye"})
 
-        response = agent_client.delete("/api/agents/del-me")
+        response = agent_client.delete("/agent/agents/del-me")
         assert response.status_code == 204
 
         # Verify it's gone
-        response = agent_client.get("/api/agents/del-me")
+        response = agent_client.get("/agent/agents/del-me")
         assert response.status_code == 404
 
     def test_delete_missing_agent_404(self, agent_client):
-        response = agent_client.delete("/api/agents/does-not-exist")
+        response = agent_client.delete("/agent/agents/does-not-exist")
         assert response.status_code == 404
 
     def test_create_agent_with_model_and_tool_groups(self, agent_client):
@@ -528,14 +528,14 @@ class TestAgentsAPI:
             "tool_groups": ["file:read", "bash"],
             "soul": "You are specialized.",
         }
-        response = agent_client.post("/api/agents", json=payload)
+        response = agent_client.post("/agent/agents", json=payload)
         assert response.status_code == 201
         data = response.json()
         assert data["model"] == "deepseek-v3"
         assert data["tool_groups"] == ["file:read", "bash"]
 
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
-        agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
+        agent_client.post("/agent/agents", json={"name": "disk-check", "soul": "disk soul"})
 
         # tests/conftest.py installs an autouse fixture that sets the
         # contextvar to "test-user-autouse", so the agent is persisted under
@@ -547,11 +547,11 @@ class TestAgentsAPI:
         assert (agent_dir / "SOUL.md").read_text() == "disk soul"
 
     def test_delete_removes_files_from_disk(self, agent_client, tmp_path):
-        agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})
+        agent_client.post("/agent/agents", json={"name": "remove-me", "soul": "bye"})
         agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "remove-me"
         assert agent_dir.exists()
 
-        agent_client.delete("/api/agents/remove-me")
+        agent_client.delete("/agent/agents/remove-me")
         assert not agent_dir.exists()
 
     def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
@@ -562,7 +562,7 @@ class TestAgentsAPI:
         (legacy_dir / "config.yaml").write_text("name: legacy-agent\n", encoding="utf-8")
         (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
 
-        response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
+        response = agent_client.post("/agent/agents", json={"name": "legacy-agent", "soul": "x"})
         assert response.status_code == 409
 
 
@@ -573,13 +573,13 @@ class TestAgentsAPI:
 
 class TestUserProfileAPI:
     def test_get_user_profile_empty(self, agent_client):
-        response = agent_client.get("/api/user-profile")
+        response = agent_client.get("/agent/user-profile")
         assert response.status_code == 200
         assert response.json()["content"] is None
 
     def test_put_user_profile(self, agent_client, tmp_path):
         content = "# User Profile\n\nI am a developer."
-        response = agent_client.put("/api/user-profile", json={"content": content})
+        response = agent_client.put("/agent/user-profile", json={"content": content})
         assert response.status_code == 200
         assert response.json()["content"] == content
 
@@ -590,47 +590,47 @@ class TestUserProfileAPI:
 
     def test_get_user_profile_after_put(self, agent_client):
         content = "# Profile\n\nI work on data science."
-        agent_client.put("/api/user-profile", json={"content": content})
+        agent_client.put("/agent/user-profile", json={"content": content})
 
-        response = agent_client.get("/api/user-profile")
+        response = agent_client.get("/agent/user-profile")
         assert response.status_code == 200
         assert response.json()["content"] == content
 
     def test_put_empty_user_profile_returns_none(self, agent_client):
-        response = agent_client.put("/api/user-profile", json={"content": ""})
+        response = agent_client.put("/agent/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
 
 
 class TestAgentsApiDisabled:
     def test_agents_list_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.get("/api/agents")
+        response = disabled_agent_client.get("/agent/agents")
         assert response.status_code == 403
         assert "agents_api.enabled=true" in response.json()["detail"]
 
     def test_agent_get_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.get("/api/agents/example-agent")
+        response = disabled_agent_client.get("/agent/agents/example-agent")
         assert response.status_code == 403
 
     def test_agent_name_check_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.get("/api/agents/check", params={"name": "example-agent"})
+        response = disabled_agent_client.get("/agent/agents/check", params={"name": "example-agent"})
         assert response.status_code == 403
 
     def test_agent_create_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
+        response = disabled_agent_client.post("/agent/agents", json={"name": "example-agent", "soul": "blocked"})
         assert response.status_code == 403
 
     def test_agent_update_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})
+        response = disabled_agent_client.put("/agent/agents/example-agent", json={"description": "blocked"})
         assert response.status_code == 403
 
     def test_agent_delete_returns_403(self, disabled_agent_client):
-        response = disabled_agent_client.delete("/api/agents/example-agent")
+        response = disabled_agent_client.delete("/agent/agents/example-agent")
         assert response.status_code == 403
 
     def test_user_profile_routes_return_403(self, disabled_agent_client):
-        get_response = disabled_agent_client.get("/api/user-profile")
-        put_response = disabled_agent_client.put("/api/user-profile", json={"content": "blocked"})
+        get_response = disabled_agent_client.get("/agent/user-profile")
+        put_response = disabled_agent_client.put("/agent/user-profile", json={"content": "blocked"})
 
         assert get_response.status_code == 403
         assert put_response.status_code == 403

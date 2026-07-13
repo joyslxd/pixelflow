@@ -1,4 +1,4 @@
-"""Tests for GET /api/runs/{run_id}/messages and GET /api/runs/{run_id}/feedback endpoints."""
+"""Tests for GET /agent/runs/{run_id}/messages and GET /agent/runs/{run_id}/feedback endpoints."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def _make_message(seq: int) -> dict:
 
 
 def test_run_messages_returns_envelope():
-    """GET /api/runs/{run_id}/messages returns {data: [...], has_more: bool}."""
+    """GET /agent/runs/{run_id}/messages returns {data: [...], has_more: bool}."""
     rows = [_make_message(i) for i in range(1, 4)]
     run_record = {"run_id": "run-1", "thread_id": "thread-1"}
     app = _make_app(
@@ -62,7 +62,7 @@ def test_run_messages_returns_envelope():
         event_store=_make_event_store(rows),
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-1/messages")
+        response = client.get("/agent/runs/run-1/messages")
     assert response.status_code == 200
     body = response.json()
     assert "data" in body
@@ -78,7 +78,7 @@ def test_run_messages_404_when_run_not_found():
         event_store=_make_event_store([]),
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/missing-run/messages")
+        response = client.get("/agent/runs/missing-run/messages")
     assert response.status_code == 404
     assert "missing-run" in response.json()["detail"]
 
@@ -93,7 +93,7 @@ def test_run_messages_has_more_true_when_extra_row_returned():
         event_store=_make_event_store(rows),
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-2/messages")
+        response = client.get("/agent/runs/run-2/messages")
     assert response.status_code == 200
     body = response.json()
     assert body["has_more"] is True
@@ -110,7 +110,7 @@ def test_run_messages_default_page_keeps_newest_messages_when_extra_row_returned
         event_store=_make_event_store(rows),
     )
     with TestClient(app) as client:
-        assert_run_message_page(client, "/api/runs/run-2/messages", expected_seq=list(range(17, 67)))
+        assert_run_message_page(client, "/agent/runs/run-2/messages", expected_seq=list(range(17, 67)))
 
 
 def test_run_messages_before_seq_page_keeps_newest_side_when_extra_row_returned():
@@ -124,7 +124,7 @@ def test_run_messages_before_seq_page_keeps_newest_side_when_extra_row_returned(
     with TestClient(app) as client:
         assert_run_message_page(
             client,
-            "/api/runs/run-2/messages?before_seq=18&limit=16",
+            "/agent/runs/run-2/messages?before_seq=18&limit=16",
             expected_seq=list(range(2, 18)),
         )
 
@@ -140,7 +140,7 @@ def test_run_messages_after_seq_page_keeps_oldest_side_when_extra_row_returned()
     with TestClient(app) as client:
         assert_run_message_page(
             client,
-            "/api/runs/run-2/messages?after_seq=10",
+            "/agent/runs/run-2/messages?after_seq=10",
             expected_seq=list(range(11, 61)),
         )
 
@@ -155,7 +155,7 @@ def test_run_messages_passes_after_seq_to_event_store():
         event_store=event_store,
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-3/messages?after_seq=5")
+        response = client.get("/agent/runs/run-3/messages?after_seq=5")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-3",
@@ -176,7 +176,7 @@ def test_run_messages_respects_custom_limit():
         event_store=event_store,
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-4/messages?limit=10")
+        response = client.get("/agent/runs/run-4/messages?limit=10")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-4",
@@ -197,7 +197,7 @@ def test_run_messages_passes_before_seq_to_event_store():
         event_store=event_store,
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-5/messages?before_seq=10")
+        response = client.get("/agent/runs/run-5/messages?before_seq=10")
     assert response.status_code == 200
     event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-5",
@@ -216,7 +216,7 @@ def test_run_messages_empty_data():
         event_store=_make_event_store([]),
     )
     with TestClient(app) as client:
-        response = client.get("/api/runs/run-6/messages")
+        response = client.get("/agent/runs/run-6/messages")
     assert response.status_code == 200
     body = response.json()
     assert body["data"] == []
@@ -241,7 +241,7 @@ def _make_feedback(run_id: str, idx: int) -> dict:
 
 class TestRunFeedback:
     def test_returns_list_of_feedback_dicts(self):
-        """GET /api/runs/{run_id}/feedback returns a list of feedback dicts."""
+        """GET /agent/runs/{run_id}/feedback returns a list of feedback dicts."""
         run_record = {"run_id": "run-fb-1", "thread_id": "thread-fb-1"}
         rows = [_make_feedback("run-fb-1", i) for i in range(3)]
         app = _make_app(
@@ -249,7 +249,7 @@ class TestRunFeedback:
             feedback_repo=_make_feedback_repo(rows),
         )
         with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-1/feedback")
+            response = client.get("/agent/runs/run-fb-1/feedback")
         assert response.status_code == 200
         body = response.json()
         assert isinstance(body, list)
@@ -262,7 +262,7 @@ class TestRunFeedback:
             feedback_repo=_make_feedback_repo([]),
         )
         with TestClient(app) as client:
-            response = client.get("/api/runs/missing-run/feedback")
+            response = client.get("/agent/runs/missing-run/feedback")
         assert response.status_code == 404
         assert "missing-run" in response.json()["detail"]
 
@@ -274,7 +274,7 @@ class TestRunFeedback:
             feedback_repo=_make_feedback_repo([]),
         )
         with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-2/feedback")
+            response = client.get("/agent/runs/run-fb-2/feedback")
         assert response.status_code == 200
         assert response.json() == []
 
@@ -287,5 +287,5 @@ class TestRunFeedback:
         # Explicitly set feedback_repo to None to simulate missing DB
         app.state.feedback_repo = None
         with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-3/feedback")
+            response = client.get("/agent/runs/run-fb-3/feedback")
         assert response.status_code == 503

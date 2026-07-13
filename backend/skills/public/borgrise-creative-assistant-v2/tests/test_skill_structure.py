@@ -18,6 +18,8 @@ class SkillStructureTest(unittest.TestCase):
             ROOT / "references" / "creative-generation.md",
             ROOT / "references" / "api-reference.md",
             ROOT / "references" / "scene-playbook.md",
+            ROOT / "skills" / "seedance-prompt" / "SKILL.md",
+            ROOT / "skills" / "seedance-prompt" / "THIRD_PARTY_NOTICE.md",
         ]
 
         for path in expected_files:
@@ -89,9 +91,21 @@ class SkillStructureTest(unittest.TestCase):
             "scripts/run_generation.py",
             "references/api-reference.md",
             "references/scene-playbook.md",
+            "skills/seedance-prompt/SKILL.md",
+            "templates/plan_video.md",
+            "templates/plan_image.md",
             "tests/",
         ]:
             self.assertIn(resource, router)
+
+    def test_seedance_notice_records_both_sources_and_license_boundaries(self):
+        notice = (ROOT / "skills" / "seedance-prompt" / "THIRD_PARTY_NOTICE.md").read_text(encoding="utf-8")
+
+        self.assertIn("songguoxs/seedance-prompt-skill", notice)
+        self.assertIn("BGEC-SD2-book-prompts-skill.zip", notice)
+        self.assertIn("D1B24E9C412B95BBFB1D4CE3677EC36255E374B8A251784020FC6DE193078D94", notice)
+        self.assertIn("未整段复制", notice)
+        self.assertIn("MIT", notice)
 
     def test_package_has_no_generated_or_empty_delivery_artifacts(self):
         for cache_dir in ROOT.rglob("__pycache__"):

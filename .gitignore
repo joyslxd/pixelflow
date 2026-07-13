@@ -1,2 +1,19 @@
-# Internal design docs — not published to GitHub.
-docs/
+# Internal design docs. Keep the latest PixelFlow agent/skill flow design tracked
+# because future agent-flow changes must update it together with code.
+docs/*
+!docs/
+!docs/pixelflow-agent-skill-flow-latest-design.md
+
+# IntelliJ IDEA / PyCharm local project metadata.
+.idea/
+
+# Local DeerFlow/Pixelflow runtime data.
+.deer-flow/
+
+# Local Codex helper logs.
+**/.codex-*.log
+
+.claude/
+
+.understand-anything/
+__pycache__/

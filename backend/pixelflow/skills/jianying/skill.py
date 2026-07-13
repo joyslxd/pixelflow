@@ -1,15 +1,12 @@
-"""JianYing (剪映) draft-render skill — the EDIT-phase I/O boundary.
+"""剪映草稿渲染 skill：EDIT 阶段的 I/O 边界。
 
-Consumes a :class:`~pixelflow.edit.models.DraftPlan` and emits an editable 剪映
-draft folder via the third-party ``pyJianYingDraft`` library (referenced, not
-vendored). The blocking work — downloading each clip and probing it with the
-native MediaInfo lib — is offloaded to a worker thread so the event loop stays
-free, mirroring the Borgrise generation skill.
+它消费 ``DraftPlan``，通过第三方 ``pyJianYingDraft`` 库产出可编辑剪映草稿目录。
+下载片段、调用本地 MediaInfo 库等都是阻塞 I/O，所以会和 Borgrise skill 一样
+放到 worker thread 中执行，避免阻塞 async event loop。
 
-Runtime deps (only needed when this skill actually runs; absent in offline
-tests): ``pyJianYingDraft`` + ``pymediainfo`` (+ the MediaInfo native binary).
-A missing dep or any vendor error is normalized to ``EditResult(ok=False, ...)``
-so a failure never crashes the EDIT phase.
+运行依赖只在实际使用该 skill 时需要：``pyJianYingDraft``、``pymediainfo`` 以及
+MediaInfo 原生二进制。缺少依赖或供应商库异常都会归一化成
+``EditResult(ok=False, ...)``，避免 EDIT 阶段直接崩溃。
 """
 
 from __future__ import annotations
@@ -32,14 +29,14 @@ _DOWNLOAD_TIMEOUT_SEC = 60.0
 
 
 def _draft_root(output_root: str | None) -> str:
-    """Resolve where draft folders are written, creating the root if needed."""
+    """解析剪映草稿输出目录，并在不存在时创建。"""
     root = output_root or os.environ.get("PIXELFLOW_DRAFT_ROOT") or os.path.join(tempfile.gettempdir(), "pixelflow_drafts")
     os.makedirs(root, exist_ok=True)
     return root
 
 
 def _download(url: str, dest_dir: str, index: int) -> str:
-    """Fetch a clip to ``dest_dir`` and return the local path."""
+    """下载远程视频片段到 ``dest_dir``，返回本地文件路径。"""
     suffix = os.path.splitext(urlparse(url).path)[1] or ".mp4"
     dest = os.path.join(dest_dir, f"clip_{index:03d}{suffix}")
     with httpx.stream("GET", url, timeout=_DOWNLOAD_TIMEOUT_SEC, follow_redirects=True) as resp:
@@ -51,7 +48,10 @@ def _download(url: str, dest_dir: str, index: int) -> str:
 
 
 def _build_draft(plan: DraftPlan, draft_name: str, output_root: str | None) -> EditResult:
-    """Build a 剪映 draft from ``plan`` (blocking; run off-loop)."""
+    """根据 ``DraftPlan`` 构建剪映草稿。
+
+    这是阻塞函数，必须由 async 包装层放到线程里执行。
+    """
     try:
         import pyJianYingDraft as draft
         from pyJianYingDraft import TrackType, trange
@@ -74,7 +74,7 @@ def _build_draft(plan: DraftPlan, draft_name: str, output_root: str | None) -> E
     for i, seg in enumerate(plan.segments):
         local = _download(seg.source_url, assets_dir, i)
         video_segment = draft.VideoSegment(local, trange(f"{seg.start}s", f"{seg.duration}s"))
-        # Transitions attach to the PREVIOUS clip; map by enum name, best-effort.
+        # 剪映转场挂在“前一个片段”上；这里按枚举名尽力映射，映射失败就忽略。
         if prev_segment is not None and seg.transition_in:
             transition_type = getattr(draft.TransitionType, seg.transition_in, None)
             if transition_type is not None:
@@ -90,7 +90,7 @@ def _build_draft(plan: DraftPlan, draft_name: str, output_root: str | None) -> E
 
 
 class JianYingEditSkill:
-    """pyJianYingDraft implementation of ``VideoEditSkill``."""
+    """``VideoEditSkill`` 的 pyJianYingDraft 实现，产出可编辑草稿目录。"""
 
     async def render(self, timeline: dict, *, draft_name: str, output_root: str | None = None) -> EditResult:
         plan = build_draft_plan(timeline)

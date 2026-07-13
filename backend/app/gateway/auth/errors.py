@@ -11,7 +11,12 @@ from pydantic import BaseModel
 
 
 class AuthErrorCode(StrEnum):
-    """Exhaustive list of auth error conditions."""
+    """认证错误码。
+
+    这里保留旧本地登录错误码，是为了兼容少量测试和历史返回结构；新的网关主路径
+    使用 content-app Authorization，重点看 ``NOT_AUTHENTICATED``、``TOKEN_*``、
+    ``USER_DISABLED`` 和 ``AUTH_SERVICE_UNAVAILABLE``。
+    """
 
     INVALID_CREDENTIALS = "invalid_credentials"
     TOKEN_EXPIRED = "token_expired"
@@ -20,6 +25,8 @@ class AuthErrorCode(StrEnum):
     EMAIL_ALREADY_EXISTS = "email_already_exists"
     PROVIDER_NOT_FOUND = "provider_not_found"
     NOT_AUTHENTICATED = "not_authenticated"
+    USER_DISABLED = "user_disabled"
+    AUTH_SERVICE_UNAVAILABLE = "auth_service_unavailable"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
 
 

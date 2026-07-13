@@ -38,6 +38,8 @@ class TestApplyLoggingLevel:
         self._original_handler_levels = {handler: handler.level for handler in self._original_root_handlers}
         self._original_deerflow_level = logging.getLogger("deerflow").level
         self._original_app_level = logging.getLogger("app").level
+        self._original_httpx_level = logging.getLogger("httpx").level
+        self._original_httpcore_level = logging.getLogger("httpcore").level
 
     def teardown_method(self) -> None:
         root = logging.root
@@ -58,6 +60,8 @@ class TestApplyLoggingLevel:
         root.setLevel(self._original_root_level)
         logging.getLogger("deerflow").setLevel(self._original_deerflow_level)
         logging.getLogger("app").setLevel(self._original_app_level)
+        logging.getLogger("httpx").setLevel(self._original_httpx_level)
+        logging.getLogger("httpcore").setLevel(self._original_httpcore_level)
 
     def test_sets_deerflow_app_logger_levels(self) -> None:
         apply_logging_level("debug")
@@ -89,3 +93,12 @@ class TestApplyLoggingLevel:
         apply_logging_level(None)
         assert logging.getLogger("deerflow").level == logging.INFO
         assert logging.getLogger("app").level == logging.INFO
+
+    def test_keeps_http_client_request_logs_at_warning(self) -> None:
+        logging.getLogger("httpx").setLevel(logging.NOTSET)
+        logging.getLogger("httpcore").setLevel(logging.NOTSET)
+
+        apply_logging_level("info")
+
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("httpcore").level == logging.WARNING

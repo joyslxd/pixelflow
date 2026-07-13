@@ -1,0 +1,195 @@
+# PixelFlow 开发/测试环境配置。
+# 启动示例：cd backend && make dev
+# 也可以显式指定：PIXELFLOW_CONFIG_ENV=dev make dev
+
+# 配置文件版本；用于后续升级配置结构时做兼容提示。
+config_version: 1
+
+# 日志级别；开发环境建议 info，需要排查问题时可改成 debug。
+log_level: info
+
+# FastAPI 网关配置；可以类比 Spring Boot 的 server.* 配置。
+gateway:
+  # 网关监听地址；0.0.0.0 表示本机所有网卡都能访问。
+  host: "0.0.0.0"
+  # 网关监听端口；前端 Vite 代理默认转发到这个端口。
+  port: 8001
+  # 是否开启 OpenAPI/Swagger 接口文档；开发环境建议开启。
+  enable_docs: true
+  # 允许跨域访问的前端地址；多个地址用英文逗号分隔，空字符串表示不额外放行。
+  cors_origins: "http://localhost:5273,http://127.0.0.1:5273"
+
+# PixelFlow 业务配置；对应短视频生成 Agent 自己的 Service/Client 参数。
+pixelflow:
+  # PixelFlow 独立业务库 MySQL 连接串；留空时复用 DeerFlow 的 sqlite/内存存储。
+  mysql_url: ""
+  # 是否启用 mem0 记忆能力；当前默认关闭，避免本地缺少外部依赖时报错。
+  mem0_enabled: false
+  # 语义记忆能力；当前第一版使用 PowerMem HTTP sidecar。
+  semantic_memory_enabled: true
+  semantic_memory_provider: "powermem"
+  # 测试环境经 nginx /powermem/ 反向代理到测试服务器本机 127.0.0.1:18848。
+  powermem_base_url: "https://test-video.borgrise.com/powermem"
+  # PowerMem API Key；必须和 PowerMem 服务端 POWERMEM_AUTH_ENABLED/POWERMEM_API_KEYS 保持一致。
+  powermem_api_key: "Lnzw114qV0ibwmUFyKIDcW8BhBm0rxtZ7r8p72G3G6xhxn_KTaAPAHNs5pzY1tbc"
+  # 单次 PowerMem HTTP 超时，单位秒；只用于 search/health 等「同步在请求路径上」的调用，
+  # 失败开放、不阻塞主创作流程。record 写入不共用这个值，避免被 3s 误杀。
+  powermem_timeout_seconds: 3
+  # record 写入专用超时，单位秒。record 全部走后台 asyncio.create_task，不在用户请求路径上，
+  # 因此可以给得更宽松：preference 类记录会用 infer=true，服务端要做 DeepSeek LLM 抽取（实测约 36s）。
+  # 默认 60s，避免中文偏好抽取被中途打断。
+  powermem_record_timeout_seconds: 60
+  # 每个 Agent 阶段默认取回的语义记忆条数。
+  powermem_search_limit: 5
+  # 是否允许 PixelFlow 写入 PowerMem；排查时可临时关闭只读。
+  powermem_write_enabled: true
+  # true 表示 PowerMem 不可用时主流程继续，仅记录 warning。
+  powermem_fail_open: true
+  # 媒体生成/理解供应商；当前仅支持 borgrise。
+  # 目前图片生成、视频生成、参考视频拆解都走 Borgrise/content-app 接口。
+  # 后续如果图片、视频、拆解需要拆成不同供应商，再新增 image_skill/video_skill/decompose_skill 等细分配置。
+  media_skill: "borgrise"
+  # 剪辑能力实现；开发环境用 ffmpeg 更容易直出 mp4，jianying 则生成剪映草稿。
+  edit_skill: "ffmpeg"
+  # 剪映草稿输出目录；留空时使用系统临时目录下的 pixelflow_drafts。
+  draft_root: "../drafts"
+  # FFmpeg 成片输出目录；留空时使用系统临时目录下的 pixelflow_renders。
+  render_root: "../renders"
+  # FFmpeg 字幕/花字字体文件路径；留空时不强制烧录字体。
+  caption_font: "../caption"
+
+# Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
+# 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。
+borgrise:
+  # Borgrise/content-app API 基础地址；代码会用它调用生成接口，也会自动拼接 /auth/verify 做登录态校验。
+  base_url: "https://test-video.borgrise.com/api"
+  # 是否调用 Borgrise/content-app 的 /api/auth/verify 校验 Authorization。
+  # 开启后由 content-app 校验 token 签名、过期和用户启用状态；只有本地离线调试才建议临时设为 false。
+  remote_verify_enabled: true
+  # 登录态校验接口超时时间，单位秒；只影响 /api/auth/verify。
+  # 它只是一次短 HTTP 校验，不是生成任务轮询，所以开发环境默认 10 秒。
+  verify_timeout_seconds: 10
+  # 不配置用户 token：生成/查询接口会透传前端请求里的 content-app Authorization。
+  # 是否跳过 SSL 证书校验；开发环境遇到测试证书问题时可设 true。
+  skip_ssl_verify: false
+  # 视频生成轮询超时时间，单位秒；视频生成可能较慢，默认最多等 1 小时。
+  video_poll_timeout: 3600
+  # 视频合并接口是 content-app 同步合并并上传，长视频合并可能超过普通 HTTP 读超时，默认最多等 1 小时。
+  video_merge_request_timeout: 3600
+  # 图片生成轮询超时时间，单位秒；图片通常比视频快，默认最多等 10 分钟。
+  image_poll_timeout: 600
+  # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 15 分钟。
+  video_analysis_poll_timeout: 900
+  # 第三方请求失败后的最大重试次数。
+  max_retries: 3
+
+# DeerFlow harness 运行路径配置；可以类比平台框架的基础设施配置。
+deerflow:
+  # 当前运行环境名称；会写入 DEER_FLOW_ENV，便于日志/追踪区分环境。
+  environment: "dev"
+  # DeerFlow 可写数据目录；留空时默认使用 backend/.deer-flow。
+  home: "../.deer-flow"
+  # DeerFlow 项目根目录；留空时加载器默认设为当前配置文件所在的 backend 目录。
+  project_root: ""
+  # Docker/宿主机场景下的可见数据目录；本地开发通常留空。
+  host_base_dir: ""
+  # 宿主机上的 skills 目录；本地开发通常留空。
+  host_skills_path: ""
+  # skills 目录；相对路径会按项目根目录解析。
+  skills_path: "skills"
+  # MCP/skills 扩展配置 JSON 路径；留空时自动查找 extensions_config.json/mcp_config.json。
+  extensions_config_path: ""
+  # sandbox 服务绑定地址；只在 AioSandbox/Docker sandbox 场景需要。
+  sandbox_bind_host: ""
+  # sandbox 对外访问主机名；只在 AioSandbox/Docker sandbox 场景需要。
+  sandbox_host: ""
+
+# LLM 模型配置；DeerFlow Agent 使用。这里直接写明文值，不再依赖 .env。
+models:
+  # 默认聊天模型；代码未显式指定 model_name 时会使用列表中的第一个模型。
+  - name: "deepseek-v4-pro"
+    # LangChain 模型 Provider 类路径；DeepSeek 兼容 OpenAI 协议，所以使用 ChatOpenAI 适配器。
+    use: "langchain_openai:ChatOpenAI"
+    # 实际请求给模型供应商的模型名称；需要和供应商控制台支持的名称一致。
+    model: "deepseek-v4-pro"
+    # 模型 API Key；开发环境可直接写明文。
+    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT"
+    # 模型 API Base；这里使用 yunwu.site 的 OpenAI 兼容接口地址。
+    base_url: "https://yunwu.site/v1"
+
+# sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
+sandbox:
+  # sandbox Provider；本地开发用 LocalSandboxProvider，不依赖 Docker。
+  use: "deerflow.sandbox.local:LocalSandboxProvider"
+  # 是否允许工具直接执行宿主机 bash；仅个人可信本地开发可设 true。
+  allow_host_bash: false
+  # bash 工具输出最大字符数；防止一次命令输出过大拖慢页面。
+  bash_output_max_chars: 20000
+  # 读文件工具输出最大字符数；防止超大文件把上下文撑爆。
+  read_file_output_max_chars: 50000
+  # ls 工具输出最大字符数；防止目录太大时输出失控。
+  ls_output_max_chars: 20000
+
+# DeerFlow 持久化配置；保存线程、运行记录、checkpointer 等平台数据。
+database:
+  # 持久化后端；开发环境使用 sqlite，简单且无需单独启动数据库。
+  backend: "sqlite"
+  # sqlite 数据目录；最终文件是 .deer-flow/dev-data/deerflow.db。
+  sqlite_dir: "../.deer-flow/dev-data"
+  # PostgreSQL 连接串；当 backend=postgres 时才需要填写。
+  postgres_url: ""
+  # 是否打印 SQL；排查数据库问题时可设 true。
+  echo_sql: false
+  # PostgreSQL 连接池大小；sqlite 模式不使用。
+  pool_size: 5
+
+# 自定义 Agent 管理 API 配置；保持开启，方便前端/接口文档调试。
+agents_api:
+  # 是否启用自定义 Agent 管理 API。
+  enabled: true
+
+# 技能存储配置；DeerFlow skills 会从这里读取。
+skills:
+  # SkillStorage 实现类；默认本地文件存储。
+  use: "deerflow.skills.storage.local_skill_storage:LocalSkillStorage"
+  # skills 目录；相对项目根目录解析。
+  path: "skills"
+  # sandbox 内挂载 skills 的路径；本地开发通常无需修改。
+  container_path: "/mnt/skills"
+
+# 链路追踪配置；用于接入 LangSmith/Langfuse 观察 LLM 和工具调用。
+tracing:
+  # LangSmith 追踪配置。
+  langsmith:
+    # 是否启用 LangSmith；开发环境默认关闭。
+    enabled: false
+    # LangSmith API Key；启用时填写。
+    api_key: ""
+    # LangSmith 项目名；用于在平台上区分项目。
+    project: "pixelflow-dev"
+    # LangSmith 服务地址；通常保持默认。
+    endpoint: "https://api.smith.langchain.com"
+  # Langfuse 追踪配置。
+  langfuse:
+    # 是否启用 Langfuse；开发环境默认关闭。
+    enabled: false
+    # Langfuse Public Key；启用时填写。
+    public_key: ""
+    # Langfuse Secret Key；启用时填写。
+    secret_key: ""
+    # Langfuse 服务地址；自建时改成自己的地址。
+    base_url: "https://cloud.langfuse.com"
+
+# 常见第三方工具 Key；大模型 key 请直接写到 models.* 的 api_key/base_url。
+third_party:
+  # Serper 搜索 API Key；使用 Google 搜索工具时填写。
+  serper_api_key: ""
+  # Jina API Key；使用 Jina 读取网页/搜索能力时填写。
+  jina_api_key: ""
+  # InfoQuest API Key；使用 InfoQuest 检索能力时填写。
+  infoquest_api_key: ""
+
+# 环境变量直通区；少量非常规 key 可以放这里，加载器会原样写入 os.environ。
+environment:
+  # 自定义环境变量字典；key 必须是环境变量名，value 会转成字符串。
+  variables: {}

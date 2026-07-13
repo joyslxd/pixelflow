@@ -1,8 +1,10 @@
-"""Video-parameter normalization — pure logic (PRD §8.4).
+"""视频参数归一化，纯逻辑实现（PRD §8.4）。
 
-No LLM. Snap duration to a supported bucket, force the MVP resolution, and flag
-an unsupported platform. Returns the normalized params dict plus human-readable
-adjustment notes the Agent can echo back to the user.
+这里不调用 LLM，也不访问第三方服务，只把前端或用户传入的参数修正到当前平台
+支持的范围：时长吸附到支持档位、分辨率固定为 MVP 支持的 1080p、未知平台只
+记录提示而不直接拒绝。
+
+返回值包含两个部分：归一化后的参数 dict，以及可展示给用户的调整说明。
 """
 
 from __future__ import annotations
@@ -11,7 +13,10 @@ from .models import DURATION_BUCKETS, FIXED_RESOLUTION, SUPPORTED_PLATFORMS
 
 
 def normalize_video_params(params: dict | None) -> tuple[dict, list[str]]:
-    """Normalize a (possibly partial) video-params dict in place-safe fashion."""
+    """安全归一化可能不完整的视频参数。
+
+    函数会复制入参再修改，不会原地污染 ``TaskState`` 中已有的 dict。
+    """
     out = dict(params or {})
     notes: list[str] = []
 

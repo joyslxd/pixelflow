@@ -1,9 +1,11 @@
-"""Intake-phase schemas (PRD §8).
+"""INTAKE 阶段的数据模型（PRD §8）。
 
-``ProductInfo`` (§8.1) and ``VideoParams`` (§8.4) are the structured demand the
-采集 phase collects; ``demand_integrity_check`` (§8.7) gates the hand-off to
-CREATIVE. ``ProductInfo.main_image_url`` is the authoritative product-image
-source the GENERATE phase needs for ``use_real_asset`` shots.
+Pydantic ``BaseModel`` 在这里相当于 Java 里的 DTO/VO 加参数校验。采集阶段会
+收集 ``ProductInfo``（商品信息）和 ``VideoParams``（视频参数），再交给
+``demand_integrity_check`` 决定是否允许进入 CREATIVE。
+
+特别注意：``ProductInfo.main_image_url`` 是 GENERATE 阶段使用真实商品图生成
+视频片段的权威图片来源；这个字段缺失时后续生成会失败。
 """
 
 from __future__ import annotations
@@ -12,13 +14,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Video-duration buckets the platform supports (§8.4). Off-bucket values are
-# snapped to the nearest one.
+# 平台支持的视频时长档位（§8.4）。非档位值会在归一化时吸附到最近档位。
 DURATION_BUCKETS = (15, 30, 60, 90)
-# MVP fixes resolution at 1080p (§8.4).
+# 当前 MVP 固定输出 1080p（§8.4）。
 FIXED_RESOLUTION = "1080p"
-# Investment platforms the MVP can target (§8.4). Unknown values are flagged,
-# not rejected outright.
+# 当前 MVP 支持的投放平台（§8.4）。未知平台只提示风险，不直接拒绝任务。
 SUPPORTED_PLATFORMS = ("douyin", "kuaishou", "xiaohongshu", "shipinhao", "taobao")
 
 PromotionType = Literal["limited_discount", "full_reduction", "gift", "flash_sale"]
@@ -31,8 +31,11 @@ class PromotionInfo(BaseModel):
 
 
 class ProductInfo(BaseModel):
-    """Structured product info (§8.1). Most fields may be empty; the integrity
-    check enforces the required ones."""
+    """商品结构化信息（§8.1）。
+
+    大部分字段允许为空，因为信息可能来自商品页抽取、用户补充或后续接口回填。
+    真正“哪些字段必须有”由 ``demand_integrity_check`` 统一判断。
+    """
 
     product_name: str = ""
     price: float | None = None
@@ -46,7 +49,7 @@ class ProductInfo(BaseModel):
 
 
 class VideoParams(BaseModel):
-    """Output/video parameters collected via dialog (§8.4)."""
+    """前端参数弹窗收集到的视频输出参数（§8.4）。"""
 
     platform: str = ""
     business_goal: str = ""
@@ -68,5 +71,5 @@ class IntegrityResult(BaseModel):
     check_results: list[IntegrityItem] = Field(default_factory=list)
 
     def questions(self, limit: int = 3) -> list[str]:
-        """The first ``limit`` follow-up actions for blocking (fail) items."""
+        """取前 ``limit`` 个阻塞项追问动作，供 ``interrupt`` 发给前端。"""
         return [c.action for c in self.check_results if c.status == "fail" and c.action][:limit]

@@ -1,9 +1,12 @@
-"""PixelFlow phase nodes.
+"""PixelFlow 各阶段的 LangGraph node。
 
-These are skeleton implementations: each node advances the pipeline and records
-its phase, leaving the real work (skill calls) as marked TODOs. The control
-flow — phase transitions, the Brief human-in-the-loop gate, and the QC retry
-loop — is fully wired so the graph runs end-to-end with stub logic.
+每个函数可以类比成 Java/Spring 中一个流程型 Service 方法：入参是整条任务的
+``TaskState`` 上下文 DTO，返回值是“本阶段要更新的字段”。LangGraph 会把返回
+值合并回状态，并根据 ``graph.py`` 里的条件边决定下一阶段。
+
+本文件只做阶段编排和异常兜底；纯业务规则放在 ``intake/``、``creative/``、
+``generate/``、``edit/``、``qc/`` 子包，第三方 API 和本地 I/O 放在
+``skills/`` 子包，避免把 Controller、Service、Client 的职责写串。
 """
 
 from __future__ import annotations
@@ -31,12 +34,12 @@ from pixelflow.state import Phase, TaskState
 
 logger = logging.getLogger(__name__)
 
-# Bounds the QC -> GENERATE retry loop so a persistently failing task terminates.
+# 限制 QC -> GENERATE 的重试次数，避免第三方生成持续失败时任务无限循环。
 MAX_QC_ATTEMPTS = 2
-# Bounds the INTAKE follow-up loop so an unanswerable demand can't spin forever.
+# 限制 INTAKE 追问次数，避免用户始终没有补齐信息时任务无限循环。
 MAX_INTAKE_ROUNDS = 3
 # seedance-2.0 单次最长 10s(v2 skill 校验上限)；短分镜按下限生成，>10s 由
-# 多段并行 + concat 承接(plan_segments),EDIT 再裁回精确时长。
+# 多段并行 + concat 承接（plan_segments），EDIT 再裁回精确时长。
 SEEDANCE_MIN_DURATION = 4
 SEEDANCE_MAX_DURATION = 10
 SIGNED_MEDIA_REFRESH_MARGIN = timedelta(minutes=15)
@@ -73,12 +76,15 @@ def _resolve_seed_image_url(image_url: str) -> str:
 
 
 async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
-    """Decompose pending reference videos into storyboards via the decompose skill.
+    """把待处理参考视频拆解为 storyboard。
 
-    Each entry is copied; ones already ``done``/``failed`` (or without a URL)
-    pass through untouched, so loop re-entries and resumes never re-parse.
-    Failure-safe: a vendor error marks the entry ``failed`` (the integrity check
-    treats that as a non-blocking warn) instead of crashing INTAKE.
+    这里调用的是 reference decompose skill，可以理解成第三方 Client。函数会先复制
+    每个参考视频条目，再只处理有 URL 且状态不是 ``done``/``failed`` 的条目。
+    这样 LangGraph 循环重入、任务恢复、用户修改 Brief 后重新进入 INTAKE 时，
+    不会重复拆解已经完成或已经失败的视频。
+
+    第三方失败不会让 INTAKE 崩掉，而是把该参考视频标成 ``failed`` 并写入
+    ``error``。后续完整性检查会把它作为非阻塞 warning 暴露给用户。
     """
     refs = [dict(r or {}) for r in reference_videos or []]
     pending = [r for r in refs if r.get("url") and r.get("status") not in ("done", "failed")]
@@ -98,15 +104,18 @@ async def _parse_reference_videos(reference_videos: list | None, task_id: str | 
 
 
 async def intake_node(state: TaskState) -> TaskState:
-    """采集: extract product info, normalize params, gate on demand integrity.
+    """采集阶段：抽取商品信息、归一化视频参数、检查需求完整性。
 
-    One human-in-the-loop round per invocation: if the demand is incomplete it
-    ``interrupt``s to ask for the missing fields (≤3), merges the answers, and
-    re-checks. While still incomplete the graph loops back here (bounded by
-    ``MAX_INTAKE_ROUNDS``); when complete it advances to CREATIVE.
+    这个 node 的职责类似“需求入参校验 Service”：
 
-    Failure-safe: a product-page fetch/extract failure is logged and the run
-    continues — the integrity gate then asks the user for the missing fields.
+    1. 如果有商品链接且还没有商品名，只抽取一次商品页信息。
+    2. 解析参考视频并把可用 storyboard 写回 ``reference_videos``。
+    3. 将视频参数补默认值/纠偏到平台支持范围。
+    4. 调用完整性检查；缺字段时用 ``interrupt`` 暂停任务，让前端收集用户补充。
+
+    ``interrupt`` 类似“流程挂起等待人工处理”。每次进入本 node 最多追问一轮；
+    如果用户仍未补齐，图会按 ``MAX_INTAKE_ROUNDS`` 的预算决定是否继续回到
+    INTAKE。商品页抓取失败只记录日志，不中断任务，让用户有机会手动补字段。
     """
     task_id = state.get("task_id")
     product_info = dict(state.get("product_info") or {})
@@ -114,12 +123,12 @@ async def intake_node(state: TaskState) -> TaskState:
     rounds = state.get("intake_rounds", 0)
     logger.info("[pixelflow] intake task_id=%s round=%d", task_id, rounds)
 
-    # Extract from a product URL only once (guard on already-having a name so a
-    # loop re-entry / resume doesn't re-fetch).
+    # 商品页抽取只做一次：用 product_name 作为“已经抽取过”的轻量标记，避免
+    # LangGraph 恢复或循环重入时重复请求外部页面。
     if product_info.get("product_url") and not product_info.get("product_name"):
         try:
             extracted = await product_info_extract(product_info["product_url"], product_info.get("user_note", ""))
-            # User-supplied values win over scraped ones.
+            # 用户显式填写的字段优先级更高，不能被爬取结果覆盖。
             product_info = {**extracted.model_dump(), **product_info}
         except Exception:  # noqa: BLE001 - boundary: never crash on a bad link
             logger.exception("[pixelflow] product_info_extract failed task_id=%s", task_id)
@@ -151,16 +160,17 @@ async def intake_node(state: TaskState) -> TaskState:
 
 
 async def creative_node(state: TaskState) -> TaskState:
-    """策划: produce the Brief and validate its hard constraints.
+    """策划阶段：生成 Brief，并执行硬约束校验。
 
-    brief_generate (纯 Claude) drafts the shot plan, then
-    brief_constraint_validator (纯逻辑, PRD §9.5) auto-fixes hard-constraint
-    violations. ``brief_valid`` is False when any unresolved ``warn`` issue
-    remains, so the BRIEF_REVIEW gate can flag it for the user.
+    这一步可以类比成“调用大模型生成业务 DTO，然后再用本地规则校验 DTO”：
 
-    Failure-safe: if the LLM/config is unavailable (e.g. offline), this logs
-    and emits an empty Brief with ``brief_valid=False`` rather than crashing —
-    the human gate then catches it.
+    1. ``brief_generate`` 使用 LLM 产出分镜 Brief。
+    2. ``validate_and_fix`` 是纯逻辑校验器，按 PRD §9.5 自动修复确定性问题。
+    3. 如果仍有 ``warn`` 级问题，``brief_valid`` 会置为 False，前端 Brief 审核
+       卡片可以提示用户人工确认。
+
+    如果 LLM 或配置不可用，node 不直接抛出导致整条图崩溃，而是返回空 Brief 和
+    错误信息，由人工确认阶段承接。
     """
     task_id = state.get("task_id")
     logger.info("[pixelflow] creative task_id=%s", task_id)
@@ -176,8 +186,8 @@ async def creative_node(state: TaskState) -> TaskState:
     cd = state.get("creative_direction") or {}
     direction = cd if isinstance(cd, str) else "；".join(f"{k}: {v}" for k, v in cd.items() if v)
 
-    # 参考视频分析 (纯逻辑摘要) drives the creative mode: 无参考→original,
-    # 单参考→reference (结构复刻), 多参考→attribution (归因融合).
+    # 参考视频分析是纯逻辑摘要：无参考→original，单参考→reference（结构复刻），
+    # 多参考→attribution（归因融合）。这个模式会进入 Brief prompt，影响分镜策略。
     reference_analysis = summarize_storyboards(state.get("reference_videos"))
     video_count = (reference_analysis or {}).get("video_count", 0)
     creative_mode = "original" if video_count == 0 else ("reference" if video_count == 1 else "attribution")
@@ -206,12 +216,11 @@ async def creative_node(state: TaskState) -> TaskState:
 
 
 async def brief_review_node(state: TaskState) -> TaskState:
-    """Human-in-the-loop: pause for the user to approve or revise the Brief.
+    """Brief 人工确认阶段：暂停任务，等待用户批准或退回修改。
 
-    ``interrupt`` suspends the run; the resume payload decides the next phase.
-    Expected payload: ``{"approved": bool}``. Missing/invalid payload is
-    treated as not approved so the pipeline never advances without an explicit
-    user confirmation.
+    ``interrupt`` 会把 LangGraph run 挂起，前端通过 Brief 确认接口恢复它。
+    期望恢复 payload 为 ``{"approved": bool}``。如果 payload 缺失或格式不对，
+    默认视为未批准，避免没有明确用户确认就进入视频生成。
     """
     decision = interrupt({"brief": state.get("brief", {}), "action": "confirm_brief"})
     approved = bool(decision.get("approved", False)) if isinstance(decision, dict) else False
@@ -256,11 +265,14 @@ async def qc_review_node(state: TaskState) -> TaskState:
 
 
 async def _generate_segment(skill, segment: dict, *, image_url: str, global_visual: dict, ratio: str) -> dict:
-    """Generate one segment clip (a group of shots, ≤15s) in a single call.
+    """生成一个 segment 视频片段。
 
-    seedance takes integer seconds in [4, 15]; ceil then clamp the segment's
-    duration so the clip is valid and long enough for EDIT to trim back to the
-    exact length. Returns a normalized asset record keyed by ``segment_index``.
+    segment 是若干连续 shot 的组合。Seedance v2 skill 当前校验单次时长范围为
+    4 到 10 秒，所以这里先向上取整，再夹到 ``SEEDANCE_MIN_DURATION`` 和
+    ``SEEDANCE_MAX_DURATION`` 之间，保证生成片段合法且足够长，后续 EDIT 阶段
+    可以再裁回 Brief 里的精确时长。
+
+    返回值是统一资产记录，使用 ``segment_index`` 作为主索引，方便网关同步任务资产。
     """
     gen_duration = max(SEEDANCE_MIN_DURATION, min(SEEDANCE_MAX_DURATION, math.ceil(segment["duration"])))
     result = await skill.image_to_video(
@@ -336,17 +348,14 @@ async def _refresh_generated_asset_urls(assets: list[dict], task_id: str | None)
 
 
 async def generate_node(state: TaskState) -> TaskState:
-    """生成: segment-based generation via the video-generation skill.
+    """生成阶段：按 segment 调用视频生成 skill。
 
-    seedance-2.0 produces a coherent clip up to 15s per call, so the Brief's
-    shots are grouped into the fewest ≤15s segments (``plan_segments``) and each
-    segment is generated once from a fused multi-scene prompt — a ≤15s video is a
-    single call, longer videos are several segments generated **in parallel** and
-    concatenated in EDIT. The product main image anchors every segment.
+    Brief 中的 shots 会先通过 ``plan_segments`` 合并成尽量少的、每段不超过
+    ``SEEDANCE_MAX_DURATION`` 的 segment。每个 segment 会融合成一个多场景 prompt，
+    再并行调用第三方视频生成能力。商品主图 ``main_image_url`` 是每段生成的视觉锚点。
 
-    With no shots (Brief empty) this is a no-op, keeping the pipeline runnable
-    offline. Failure-safe: a missing image fails all segments with a note rather
-    than crashing; per-segment vendor errors are normalized by the skill.
+    空 Brief 或缺少主图都不会抛异常，而是写入结构化错误，方便任务 API 和前端展示。
+    单个第三方调用失败也会由 skill 归一化为 ``ok=false`` 的资产记录。
     """
     task_id = state.get("task_id")
     brief = state.get("brief") or {}
@@ -385,17 +394,15 @@ async def generate_node(state: TaskState) -> TaskState:
 
 
 async def edit_node(state: TaskState) -> TaskState:
-    """剪辑: assemble generated shots into a Timeline and a 剪映 draft.
+    """剪辑阶段：把生成片段组装为 Timeline，并交给剪辑 skill 渲染。
 
-    ``build_timeline`` (纯逻辑) binds each generated clip to its Brief shot and
-    carries the shot's editing metadata (duration, transitions, narration/花字),
-    skipping shots that produced no usable clip. The edit skill then renders the
-    Timeline — into an editable 剪映 draft folder (``draft_path``) or, with the
-    FFmpeg skill, a finished mp4 (``final_video_url``), routed by ``result.kind``.
+    ``build_timeline`` 是纯逻辑转换：把生成成功的片段和 Brief 中的 shot 信息绑定，
+    同时保留时长、转场、旁白、花字等剪辑元数据；没有可用片段的 shot 会被跳过并
+    写入 ``edit_notes``。
 
-    Failure-safe: with no clips the skill is skipped; a missing render dep or a
-    render error is logged into ``edit_notes`` rather than crashing — so the
-    pipeline still advances to QC (and runs offline).
+    真正的 I/O 渲染由 ``get_video_edit_skill`` 返回的 skill 承接：默认产出可编辑
+    剪映草稿 ``draft_path``，配置为 FFmpeg 时产出 mp4 ``final_video_url``。如果
+    本地依赖缺失或渲染失败，只记录到 ``edit_notes``，让流程继续进入 QC。
     """
     task_id = state.get("task_id")
     brief = state.get("brief") or {}
@@ -431,11 +438,11 @@ async def edit_node(state: TaskState) -> TaskState:
 
 
 async def qc_node(state: TaskState) -> TaskState:
-    """质检: verdict over the produced output; route back to GENERATE on failure.
+    """质检阶段：检查生成覆盖率和剪辑结果，并决定是否回到生成阶段。
 
-    ``qc_check`` (纯逻辑) inspects generation coverage (blocking) and assembled
-    duration (warn). A blocking ``fail`` re-runs GENERATE, bounded by
-    ``MAX_QC_ATTEMPTS`` so a persistently failing task terminates.
+    ``qc_check`` 是纯逻辑校验：生成覆盖率是阻塞项，剪辑总时长偏差是 warning。
+    如果出现阻塞性 ``fail``，图会回到 GENERATE 重试；重试次数由
+    ``MAX_QC_ATTEMPTS`` 限制，避免持续失败时任务无限循环。
     """
     task_id = state.get("task_id")
     attempts = state.get("qc_attempts", 0) + 1
