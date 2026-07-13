@@ -12,16 +12,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
+import mimetypes
+import re
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from langgraph.types import interrupt
 
+from deerflow.uploads.manager import get_uploads_dir
 from pixelflow.creative import brief_generate, validate_and_fix
 from pixelflow.edit import build_timeline
 from pixelflow.generate import build_segment_prompt, plan_segments
 from pixelflow.intake import demand_integrity_check, normalize_video_params, product_info_extract, summarize_storyboards
-from pixelflow.qc import qc_check
+from pixelflow.qc import product_consistency_check, qc_check
 from pixelflow.skills import get_video_decompose_skill, get_video_edit_skill, get_video_skill
 from pixelflow.state import Phase, TaskState
 
@@ -35,6 +42,37 @@ MAX_INTAKE_ROUNDS = 3
 # 多段并行 + concat 承接（plan_segments），EDIT 再裁回精确时长。
 SEEDANCE_MIN_DURATION = 4
 SEEDANCE_MAX_DURATION = 10
+SIGNED_MEDIA_REFRESH_MARGIN = timedelta(minutes=15)
+_UPLOAD_ARTIFACT_RE = re.compile(r"^/api/threads/([^/]+)/artifacts/mnt/user-data/uploads/([^?#]+)")
+
+
+def _resolve_seed_image_url(image_url: str) -> str:
+    """Convert local upload artifact URLs into Ark-compatible data URLs.
+
+    Ark runs server-side and cannot fetch a local relative URL such as
+    ``/api/threads/.../artifacts/...`` from the developer machine.  When the
+    product image came from the built-in upload API, read the uploaded file and
+    inline it as a data URL; public HTTPS URLs pass through unchanged.
+    """
+    raw = str(image_url or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith("data:image/"):
+        return raw
+    path = urlparse(raw).path if raw.startswith(("http://", "https://")) else raw
+    match = _UPLOAD_ARTIFACT_RE.match(path)
+    if not match:
+        return raw
+    thread_id, filename = match.groups()
+    safe_name = Path(unquote(filename)).name
+    file_path = get_uploads_dir(thread_id) / safe_name
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Uploaded product image not found: {safe_name}")
+    mime = mimetypes.guess_type(file_path.name)[0] or "image/png"
+    if not mime.startswith("image/"):
+        raise ValueError(f"Uploaded product asset is not an image: {safe_name}")
+    encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 async def _parse_reference_videos(reference_videos: list | None, task_id: str | None) -> list[dict]:
@@ -254,6 +292,61 @@ async def _generate_segment(skill, segment: dict, *, image_url: str, global_visu
     }
 
 
+def _signed_media_url_needs_refresh(url: str, *, now: datetime | None = None) -> bool:
+    """Return True when an Ark/TOS signed URL is expired or close to expiring."""
+    parsed = urlparse(str(url or ""))
+    query = parse_qs(parsed.query)
+    signed_at = (query.get("X-Tos-Date") or [None])[0]
+    expires_raw = (query.get("X-Tos-Expires") or [None])[0]
+    if not signed_at or not expires_raw:
+        return False
+    try:
+        issued_at = datetime.strptime(signed_at, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+        expires_in = int(expires_raw)
+    except (TypeError, ValueError):
+        return False
+    now = now or datetime.now(UTC)
+    refresh_at = issued_at + timedelta(seconds=expires_in) - SIGNED_MEDIA_REFRESH_MARGIN
+    return now >= refresh_at
+
+
+async def _refresh_generated_asset_urls(assets: list[dict], task_id: str | None) -> list[dict]:
+    """Refresh expiring generated video URLs before EDIT downloads them."""
+    refreshed = [dict(asset or {}) for asset in assets]
+    candidates = [
+        asset
+        for asset in refreshed
+        if asset.get("ok") and asset.get("url") and asset.get("task_id") and _signed_media_url_needs_refresh(str(asset.get("url")))
+    ]
+    if not candidates:
+        return refreshed
+
+    skill = get_video_skill()
+    poll_video_task = getattr(skill, "poll_video_task", None)
+    if not callable(poll_video_task):
+        logger.warning("[pixelflow] edit cannot refresh signed media urls task_id=%s skill=%s", task_id, type(skill).__name__)
+        return refreshed
+
+    async def _refresh_one(asset: dict) -> None:
+        generation_task_id = str(asset.get("task_id") or "")
+        result = await poll_video_task(generation_task_id)
+        if result.ok and result.url:
+            asset["url"] = result.url
+            asset["url_refreshed"] = True
+            asset.pop("url_refresh_error", None)
+            return
+        asset["url_refresh_error"] = result.error or "Ark did not return a refreshed video url"
+        logger.warning(
+            "[pixelflow] edit failed to refresh signed media url task_id=%s generation_task_id=%s error=%s",
+            task_id,
+            generation_task_id,
+            asset["url_refresh_error"],
+        )
+
+    await asyncio.gather(*(_refresh_one(asset) for asset in candidates))
+    return refreshed
+
+
 async def generate_node(state: TaskState) -> TaskState:
     """生成阶段：按 segment 调用视频生成 skill。
 
@@ -277,10 +370,16 @@ async def generate_node(state: TaskState) -> TaskState:
     segments = plan_segments(shots, SEEDANCE_MAX_DURATION)
     logger.info("[pixelflow] generate task_id=%s shots=%d segments=%d", task_id, len(shots), len(segments))
 
-    image_url = product_info.get("main_image_url")
+    image_url = product_info.get("main_image_artifact_url") or product_info.get("main_image_url")
     if not image_url:
         assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": "无可用图源：商品缺少 main_image_url"} for s in segments]
         return {"phase": Phase.GENERATE.value, "generated_assets": assets, "generation_ready": False, "error": "无可用图源：商品缺少 main_image_url"}
+    try:
+        image_url = _resolve_seed_image_url(str(image_url))
+    except Exception as exc:  # noqa: BLE001 - normalize local asset failures into task errors
+        error = f"商品图片不可用：{exc}"
+        assets = [{"segment_index": s["index"], "shot_indices": s["shot_indices"], "duration": s["duration"], "ok": False, "error": error} for s in segments]
+        return {"phase": Phase.GENERATE.value, "generated_assets": assets, "generation_ready": False, "error": error}
 
     skill = get_video_skill()
     assets = await asyncio.gather(*(_generate_segment(skill, s, image_url=image_url, global_visual=global_visual, ratio=ratio) for s in segments))
@@ -307,7 +406,7 @@ async def edit_node(state: TaskState) -> TaskState:
     """
     task_id = state.get("task_id")
     brief = state.get("brief") or {}
-    assets = state.get("generated_assets") or []
+    assets = await _refresh_generated_asset_urls(state.get("generated_assets") or [], task_id)
     timeline, notes = build_timeline(brief, assets)
     logger.info("[pixelflow] edit task_id=%s clips=%d skipped=%d", task_id, len(timeline.clips), len(notes))
 
@@ -329,6 +428,7 @@ async def edit_node(state: TaskState) -> TaskState:
 
     return {
         "phase": Phase.EDIT_REVIEW.value,
+        "generated_assets": assets,
         "timeline": timeline.model_dump(),
         "draft_path": draft_path,
         "final_video_url": final_video_url,
@@ -346,11 +446,32 @@ async def qc_node(state: TaskState) -> TaskState:
     """
     task_id = state.get("task_id")
     attempts = state.get("qc_attempts", 0) + 1
+    brief = state.get("brief") or {}
+    timeline = state.get("timeline") or {}
+    final_video_url = state.get("final_video_url") or ""
+    product_info = state.get("product_info") or {}
+    product_image_url = ""
+    if final_video_url:
+        raw_image_url = product_info.get("main_image_artifact_url") or product_info.get("main_image_url")
+        if raw_image_url:
+            try:
+                product_image_url = _resolve_seed_image_url(str(raw_image_url))
+            except Exception as exc:  # noqa: BLE001 - visual QC is optional
+                logger.warning("[pixelflow] qc product image resolve failed task_id=%s error=%s", task_id, exc)
+    product_consistency = None
+    if product_image_url and final_video_url:
+        product_consistency = await product_consistency_check(
+            product_image_url=product_image_url,
+            final_video_url=final_video_url,
+            brief=brief,
+            video_duration=float(timeline.get("total_duration") or 0.0),
+        )
     result = qc_check(
-        state.get("brief") or {},
+        brief,
         state.get("generated_assets") or [],
-        state.get("timeline") or {},
-        state.get("final_video_url") or "",
+        timeline,
+        final_video_url,
+        product_consistency_item=product_consistency,
     )
     logger.info("[pixelflow] qc task_id=%s attempt=%d passed=%s score=%.2f", task_id, attempts, result.passed, result.score)
     return {

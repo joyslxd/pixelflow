@@ -15,6 +15,7 @@ from pixelflow.qc.video_review import (
     generated_assets_to_scene_videos,
     review_video_quality,
 )
+from pixelflow.qc.visual import product_consistency_check
 
 __all__ = [
     "QCItem",
@@ -25,6 +26,7 @@ __all__ = [
     "brief_to_scene_packages",
     "build_video_qc_request_from_task_state",
     "generated_assets_to_scene_videos",
+    "product_consistency_check",
     "qc_check",
     "review_video_quality",
 ]

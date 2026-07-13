@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from pixelflow.nodes import generate_node
 from pixelflow.skills import GenerationResult
@@ -105,3 +106,42 @@ def test_missing_image_fails_all_segments_without_calling_skill(monkeypatch):
     assert len(assets) == 1  # 5+5=10 <= 15 -> one segment
     assert assets[0]["ok"] is False
     assert "无可用图源" in assets[0]["error"]
+
+
+def test_uploaded_artifact_image_is_inlined_for_seedance(monkeypatch, tmp_path):
+    fake = _FakeSkill()
+    monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "product.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr("pixelflow.nodes.get_uploads_dir", lambda thread_id: Path(upload_dir))
+
+    state = {
+        "brief": {"shots": [_shot(5)]},
+        "product_info": {"main_image_url": "/api/threads/chat-1/artifacts/mnt/user-data/uploads/product.png"},
+    }
+    out = asyncio.run(generate_node(state))
+
+    assert out["phase"] == Phase.SEGMENT_REVIEW.value
+    assert fake.calls[0]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_uploaded_artifact_fallback_wins_over_public_url(monkeypatch, tmp_path):
+    fake = _FakeSkill()
+    monkeypatch.setattr("pixelflow.nodes.get_video_skill", lambda: fake)
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "product.webp").write_bytes(b"RIFFfakeWEBP")
+    monkeypatch.setattr("pixelflow.nodes.get_uploads_dir", lambda thread_id: Path(upload_dir))
+
+    state = {
+        "brief": {"shots": [_shot(5)]},
+        "product_info": {
+            "main_image_url": "https://tos.example.com/product.webp",
+            "main_image_artifact_url": "/api/threads/chat-1/artifacts/mnt/user-data/uploads/product.webp",
+        },
+    }
+    out = asyncio.run(generate_node(state))
+
+    assert out["phase"] == Phase.SEGMENT_REVIEW.value
+    assert fake.calls[0]["image_url"].startswith("data:image/webp;base64,")

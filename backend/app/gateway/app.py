@@ -4,14 +4,32 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.profile_config import load_profile_config
 
+
+def _load_local_env() -> None:
+    """Load developer-only overrides before the profile maps YAML to env."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+        mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "")
+        if any(marker in mysql_url for marker in ("<host>", "<user>", "<password>")):
+            os.environ.pop("PIXELFLOW_MYSQL_URL", None)
+
+
 # 在导入会触发 DeerFlow/Skill 初始化副作用的 router 之前加载 profile YAML，
 # 确保 DeerFlow 使用 DEER_FLOW_CONFIG_PATH，不再回退查找旧 config.yaml。
+_load_local_env()
 load_profile_config()
 
 from app.gateway.auth_middleware import AuthMiddleware

@@ -62,6 +62,68 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     sandbox.update_file.assert_not_called()
 
 
+def test_upload_files_uploads_images_to_borgrise_and_returns_public_url(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_upload_image_to_borgrise", AsyncMock(return_value="https://tos.example.com/product.webp")) as upload_mock,
+    ):
+        file = UploadFile(filename="product.jpg", file=BytesIO(b"jpg-bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    file_info = result.files[0]
+    assert file_info["artifact_url"].startswith("/api/threads/thread-local/artifacts/")
+    assert file_info["public_url"] == "https://tos.example.com/product.webp"
+    assert file_info["tos_url"] == "https://tos.example.com/product.webp"
+    assert file_info["borgrise_url"] == "https://tos.example.com/product.webp"
+    upload_mock.assert_awaited_once()
+    assert upload_mock.await_args.args[0].name == "product.jpg"
+
+
+def test_upload_files_does_not_upload_non_images_to_borgrise(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_upload_image_to_borgrise", AsyncMock()) as upload_mock,
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    assert "public_url" not in result.files[0]
+    upload_mock.assert_not_awaited()
+
+
+def test_upload_image_to_borgrise_uses_request_authorization_context(monkeypatch, tmp_path):
+    image_path = tmp_path / "product.jpg"
+    image_path.write_bytes(b"jpg-bytes")
+    monkeypatch.setattr(uploads, "BACKEND_ENV_PATH", tmp_path / "missing.env")
+
+    def fake_upload(file_path: str) -> dict[str, str | bool]:
+        assert file_path == str(image_path)
+        return {"success": True, "url": "https://tos.example.com/product.webp"}
+
+    with patch.object(uploads.run_generation, "upload_file", side_effect=fake_upload):
+        public_url = asyncio.run(uploads._upload_image_to_borgrise(image_path))
+
+    assert public_url == "https://tos.example.com/product.webp"
+
+
 def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

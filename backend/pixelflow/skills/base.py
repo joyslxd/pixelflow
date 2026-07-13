@@ -85,9 +85,19 @@ class ImageGenerationResult:
 
     ok: bool
     images: list[dict[str, Any]] = field(default_factory=list)
+    urls: list[str] = field(default_factory=list)
+    url: str | None = None
     task_id: str | None = None
     error: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.urls and self.images:
+            self.urls = [str(item.get("url")) for item in self.images if item.get("url")]
+        if not self.images and self.urls:
+            self.images = [{"url": item} for item in self.urls]
+        if self.url is None and self.urls:
+            self.url = self.urls[0]
 
 
 @dataclass
@@ -419,27 +429,34 @@ def get_video_skill() -> VideoGenerationSkill:
     视频生成属于媒体生成能力，读取统一的 ``PIXELFLOW_MEDIA_SKILL``。当前仅支持
     ``borgrise``，它会调用 content-app/Borgrise 的图片转视频、续写视频等接口。
     """
-    impl = _get_media_skill_impl()
+    impl = (os.environ.get("PIXELFLOW_VIDEO_SKILL") or _get_media_skill_impl()).strip().lower()
     if impl == "borgrise":
         return _get_borgrise_media_skill()
-    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+    if impl in {"seedance", "ark_seedance", "ark-seedance"}:
+        from pixelflow.skills.ark_seed import SeedanceSkill
+
+        return SeedanceSkill()
+    raise ValueError(f"Unknown video skill implementation: {impl!r}")
 
 
 def get_image_skill() -> ImageGenerationSkill:
     """返回当前配置的图片生成 skill。"""
-    impl = _get_media_skill_impl()
+    impl = (os.environ.get("PIXELFLOW_IMAGE_SKILL") or _get_media_skill_impl()).strip().lower()
     if impl == "borgrise":
         return _get_borgrise_media_skill()
-    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+    if impl in {"seedream", "ark_seedream", "ark-seedream"}:
+        from pixelflow.skills.ark_seed import SeedreamSkill
+
+        return SeedreamSkill()
+    raise ValueError(f"Unknown image skill implementation: {impl!r}")
 
 
 def get_video_edit_skill() -> VideoEditSkill:
     """返回当前配置的视频剪辑 skill，也就是 EDIT 阶段替换点。
 
-    默认是剪映草稿 skill（pyJianYingDraft）。设置 ``PIXELFLOW_EDIT_SKILL=ffmpeg``
-    时会切到无界面的 FFmpeg 渲染器，直接产出 mp4。
+    默认使用 FFmpeg 直接产出 mp4；需要可编辑草稿时可显式设置为 ``jianying``。
     """
-    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "jianying")
+    impl = os.environ.get("PIXELFLOW_EDIT_SKILL", "ffmpeg").strip().lower()
     if impl == "jianying":
         from pixelflow.skills.jianying import JianYingEditSkill
 
@@ -457,7 +474,7 @@ def get_video_decompose_skill() -> VideoDecomposeSkill:
     参考视频拆解也属于媒体理解/生成供应商能力，和视频生成共用
     ``PIXELFLOW_MEDIA_SKILL``。当前仅支持 ``borgrise``。
     """
-    impl = _get_media_skill_impl()
+    impl = (os.environ.get("PIXELFLOW_DECOMPOSE_SKILL") or _get_media_skill_impl()).strip().lower()
     if impl == "borgrise":
         return _get_borgrise_media_skill()
     raise ValueError(f"Unknown media skill implementation: {impl!r}")

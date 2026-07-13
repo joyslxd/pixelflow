@@ -212,6 +212,7 @@ class PixelFlowTaskStore(Protocol):
     async def upsert_asset(self, asset: PixelFlowAssetRecord) -> PixelFlowAssetRecord: ...
     async def list_assets(self, task_id: str, *, user_id: str | None = None) -> list[PixelFlowAssetRecord]: ...
     async def get_session_context(self, task_id: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None: ...
+    async def list_session_contexts(self, *, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]: ...
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord: ...
     async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None: ...
@@ -467,6 +468,14 @@ class SQLPixelFlowTaskStore:
             if row is None:
                 return None
             return {"task_id": row.task_id, "user_id": row.user_id, "context": row.context_json or {}, "updated_at": _dt(row.updated_at)}
+
+    async def list_session_contexts(self, *, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        async with self._sf() as session:
+            stmt = select(PixelFlowSessionContextRow).order_by(PixelFlowSessionContextRow.updated_at.desc()).limit(limit)
+            if user_id is not None:
+                stmt = stmt.where(PixelFlowSessionContextRow.user_id == user_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [{"task_id": row.task_id, "user_id": row.user_id, "context": row.context_json or {}, "updated_at": _dt(row.updated_at)} for row in rows]
 
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
         async with self._sf() as session:
@@ -744,6 +753,12 @@ class MemoryPixelFlowTaskStore:
         if not rows:
             return None
         return sorted(rows, key=lambda r: r["updated_at"], reverse=True)[0]
+
+    async def list_session_contexts(self, *, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        rows = list(self._contexts.values())
+        if user_id is not None:
+            rows = [r for r in rows if r.get("user_id") == user_id]
+        return sorted(rows, key=lambda r: r["updated_at"], reverse=True)[:limit]
 
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
         stamp = _dt(_now())

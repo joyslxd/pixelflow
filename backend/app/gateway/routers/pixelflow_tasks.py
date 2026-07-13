@@ -26,7 +26,7 @@ from app.gateway.deps import get_checkpointer, get_current_user, get_run_context
 from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import build_run_config, format_sse, inject_authenticated_user_context, merge_run_context_overrides, normalize_input, normalize_stream_modes
-from deerflow.runtime import END_SENTINEL, ConflictError, DisconnectMode, UnsupportedStrategyError, run_agent, serialize_channel_values
+from deerflow.runtime import END_SENTINEL, ConflictError, DisconnectMode, UnsupportedStrategyError, run_agent, serialize_channel_values, serialize_lc_object
 from pixelflow import make_pixelflow_graph
 from pixelflow.memory import memory_context_payload
 from pixelflow.preferences import UserPreferenceStore, extract_structured_preferences
@@ -587,10 +587,29 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
         if checkpoint_tuple is None:
             return []
         checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-        state = serialize_channel_values(checkpoint.get("channel_values", {}))
+        channel_values = checkpoint.get("channel_values", {}) or {}
+        state = serialize_channel_values(channel_values)
+        interrupt_payload = _latest_interrupt_payload(channel_values)
     except Exception:
         logger.debug("Unable to sync PixelFlow task %s from checkpoint", task_id, exc_info=True)
         return []
+    if interrupt_payload:
+        action = interrupt_payload.get("action")
+        if action == "confirm_brief" and interrupt_payload.get("brief"):
+            state["phase"] = "brief_review"
+            state["brief"] = interrupt_payload["brief"]
+        elif action == "confirm_segments":
+            state["phase"] = "segment_review"
+        elif action == "confirm_edit":
+            state["phase"] = "edit_review"
+            if interrupt_payload.get("final_video_url"):
+                state["final_video_url"] = interrupt_payload["final_video_url"]
+            if interrupt_payload.get("draft_path"):
+                state["draft_path"] = interrupt_payload["draft_path"]
+        elif action == "confirm_qc":
+            state["phase"] = "qc_review"
+            if interrupt_payload.get("qc_report"):
+                state["qc_report"] = interrupt_payload["qc_report"]
     phase = str(state.get("phase") or task.phase)
     result = {
         "generated_assets": state.get("generated_assets") or [],
@@ -660,6 +679,18 @@ async def _sync_task_from_checkpoint(task_id: str, user_id: str | None, request:
             )
         )
     return synced_assets
+
+
+def _latest_interrupt_payload(channel_values: dict[str, Any]) -> dict[str, Any]:
+    raw = channel_values.get("__interrupt__")
+    if raw is None:
+        return {}
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    for item in reversed(items):
+        payload = serialize_lc_object(getattr(item, "value", item))
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 async def _watch_run_to_task(

@@ -16,3 +16,4 @@ docs/*
 .claude/
 
 .understand-anything/
+__pycache__/

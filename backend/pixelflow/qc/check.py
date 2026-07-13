@@ -110,7 +110,13 @@ def _has_freeze_frames(path: str) -> bool | None:
     return "freeze_start:" in proc.stderr
 
 
-def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_video_url: str = "") -> QCResult:
+def qc_check(
+    brief: dict,
+    generated_assets: list[dict],
+    timeline: dict,
+    final_video_url: str = "",
+    product_consistency_item: QCItem | None = None,
+) -> QCResult:
     """评估产物是否通过质检。
 
     覆盖率比较的是 Timeline 中已经装配的 clips 和 GENERATE 实际尝试过的
@@ -188,10 +194,11 @@ def qc_check(brief: dict, generated_assets: list[dict], timeline: dict, final_vi
         checks.append(QCItem(item="卡顿/冻结检测", status="warn", message="暂无本地成片，无法自动检测卡顿/冻结"))
 
     checks.append(
-        QCItem(
+        product_consistency_item
+        or QCItem(
             item="产品一致性/变形",
             status="warn",
-            message="当前 P0 未接入视觉语义模型，无法自动判断产品是否变形、颜色/结构是否跑偏；请人工复核，P1 接入 VLM 后自动判定",
+            message="未配置视觉语义模型，无法自动判断产品是否变形、颜色/结构是否跑偏；请人工复核",
         )
     )
 

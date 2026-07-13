@@ -6,3 +6,4 @@ dist-ssr
 .env
 .DS_Store
 vite.config.ts.timestamp-*
+*.tsbuildinfo

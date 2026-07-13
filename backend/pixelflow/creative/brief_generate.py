@@ -80,10 +80,33 @@ async def brief_generate(
         creative_mode=creative_mode,
     )
     logger.info("[pixelflow] brief_generate mode=%s", creative_mode)
-    brief = await structured.ainvoke([("system", _SYSTEM_PROMPT), ("human", human)])
+    try:
+        brief = await structured.ainvoke([("system", _SYSTEM_PROMPT), ("human", human)])
+    except Exception as exc:
+        message = str(exc)
+        if "json_schema" not in message and "response_format" not in message:
+            raise
+        logger.warning("[pixelflow] structured brief output unsupported, falling back to JSON text parsing: %s", message)
+        brief = await _brief_generate_via_json_text(model, human)
     # 用 video_params 回填输出参数，确保下游节点拿到的是用户最终确认的精确值。
     brief.platform = video_params.get("platform", brief.platform)
     brief.duration_sec = int(video_params.get("duration_sec", brief.duration_sec))
     brief.ratio = video_params.get("ratio", brief.ratio)
     brief.size = video_params.get("size", brief.size)
     return brief
+
+
+async def _brief_generate_via_json_text(model: Any, human: str) -> Brief:
+    response = await model.ainvoke(
+        [
+            ("system", f"{_SYSTEM_PROMPT}\n只返回 JSON 对象，不要使用 Markdown 代码块。"),
+            ("human", human),
+        ]
+    )
+    content = response.content if hasattr(response, "content") else response
+    if isinstance(content, list):
+        content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content)
+    raw = str(content).strip()
+    if raw.startswith("```"):
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return Brief.model_validate(json.loads(raw))
