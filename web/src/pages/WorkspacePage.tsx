@@ -65,7 +65,9 @@ import {
   globalAssetsContainAsset,
   globalSceneAssetRatioFromMetadata,
   inferGlobalSceneAssetRatioFromMetadata,
+  mergeSceneAssetRetryFailures,
   nearestSupportedAspectRatio,
+  sceneAssetRetryTargets,
   sceneGenerationPayloadFromPackage,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
@@ -75,6 +77,7 @@ import {
   type GlobalSceneAssetGroup,
   type SceneGlobalAssetReference,
   type SceneGlobalAssetReplacement,
+  type SceneAssetRetryTarget,
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
@@ -661,6 +664,7 @@ interface SceneAssetsJobRequest {
   image_size?: string;
   model?: string | null;
   creation_contract?: VideoCreationContract;
+  target_assets?: SceneAssetRetryTarget[];
 }
 
 interface PendingScenePackageJob {
@@ -4113,8 +4117,14 @@ export function WorkspacePage() {
       message: sceneAssets.ok ? videoScenePackages.message : sceneAssets.message,
     };
     const quotaPaused = Boolean(sceneAssets.quota_insufficient) || isQuotaInsufficientPayload(sceneAssets);
-    if (!sceneAssets.ok || quotaPaused) releaseArtifactAction(processedKey);
-    pushArtifact(sceneAssets.ok ? "场景参考图已继续生成完成，请确认后生成视频。" : "场景参考图继续生成失败，请查看失败项。", {
+    const retryTargets = (pendingScenePackageJob.request as SceneAssetsJobRequest).target_assets;
+    const sceneAssetFailures = retryTargets
+      ? mergeSceneAssetRetryFailures(artifact.sceneAssetFailures, sceneAssets.failed_assets, retryTargets)
+      : sceneAssets.failed_assets;
+    const retryCompleted = sceneAssets.ok && sceneAssetFailures.length === 0 && !quotaPaused;
+    nextPackages.message = retryCompleted ? videoScenePackages.message : sceneAssets.message;
+    if (!retryCompleted) releaseArtifactAction(processedKey);
+    pushArtifact(retryCompleted ? "失败的场景参考图已重新生成完成，请确认后生成视频。" : "场景参考图重试仍有失败项，请查看失败素材。", {
       type: "video_scene_packages",
       title: "视频场景包",
       description: quotaPaused
@@ -4123,7 +4133,7 @@ export function WorkspacePage() {
       actionLabel: quotaPaused ? "继续" : "确认",
       videoScenePackages: nextPackages,
       originalVideoScenePackages: artifact.originalVideoScenePackages || videoScenePackages,
-      sceneAssetFailures: sceneAssets.failed_assets,
+      sceneAssetFailures,
       intent: "video",
       formValues: artifact.formValues,
       intakeContext: artifact.intakeContext,
@@ -4134,8 +4144,8 @@ export function WorkspacePage() {
 
     await clearPendingScenePackageJob(
       targetConversationId,
-      sceneAssets.ok ? "scene_package_ready" : quotaPaused ? "scene_asset_quota_paused" : "scene_asset_failed",
-      scenePackageContext(artifact, nextPackages, sceneAssets.failed_assets),
+      retryCompleted ? "scene_package_ready" : quotaPaused ? "scene_asset_quota_paused" : "scene_asset_failed",
+      scenePackageContext(artifact, nextPackages, sceneAssetFailures),
     ).catch(() => {});
   };
 
@@ -6596,7 +6606,14 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
-    pushAssistant("正在继续生成场景参考图…", targetConversationId);
+    const targetAssets = sceneAssetRetryTargets(artifact.sceneAssetFailures);
+    if (!targetAssets.length) {
+      releaseArtifactAction(processedKey);
+      setBusyForConversation(targetConversationId, false);
+      pushAssistant("失败记录缺少可重试的素材标识，请从最新 plan 或场景包重新生成。", targetConversationId);
+      return;
+    }
+    pushAssistant(`正在重新生成 ${targetAssets.length} 个失败的场景参考图…`, targetConversationId);
     try {
       const request: SceneAssetsJobRequest = {
         global_assets: videoScenePackages.global_assets,
@@ -6606,6 +6623,7 @@ export function WorkspacePage() {
         image_size: videoScenePackages.creation_contract?.scene_image_size || "1080p",
         model: videoScenePackages.creation_contract?.image_model || "gpt-image-2",
         creation_contract: videoScenePackages.creation_contract || undefined,
+        target_assets: targetAssets,
       };
       const started = await api.startSceneAssetsJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {

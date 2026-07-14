@@ -31,6 +31,14 @@ function handleApprovePlanSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handleRetrySceneAssetsSource() {
+  const start = workspaceSource.indexOf("const handleRetrySceneAssets = async");
+  const end = workspaceSource.indexOf("const handleRevisePlan =", start);
+  assert.notEqual(start, -1, "handleRetrySceneAssets must exist");
+  assert.notEqual(end, -1, "handleRevisePlan must follow scene asset retry");
+  return workspaceSource.slice(start, end);
+}
+
 function applyConversationSource() {
   const start = workspaceSource.indexOf("const applyConversation = async");
   const end = workspaceSource.indexOf("const taskId = snapshot.taskId", start);
@@ -859,6 +867,14 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.notEqual(pollIndex, -1, "video approval must poll the persisted job");
   assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "scene package job id must be persisted before polling starts");
   assert.match(source, /kind:\s*"scene_package_generation"/, "scene package generation must record its pending job kind");
+});
+
+test("scene reference image retry only submits failed asset targets", () => {
+  const source = handleRetrySceneAssetsSource();
+  assert.match(source, /sceneAssetRetryTargets\(artifact\.sceneAssetFailures\)/, "retry must derive stable targets from failed assets");
+  assert.match(source, /target_assets:\s*targetAssets/, "retry request must carry only failed asset targets");
+  assert.match(workspaceSource, /mergeSceneAssetRetryFailures\(/, "retry completion must preserve failures not completed by this retry");
+  assert.match(apiSource, /target_assets\?: SceneAssetRetryTarget\[\]/, "scene asset API DTO must expose the target whitelist");
 });
 
 test("video plan contract drives scene package assets videos and recoverable jobs", () => {
