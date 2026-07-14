@@ -320,9 +320,9 @@ SmartPPT接口：
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
 - 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。最终视频卡片不再展示“查看分镜”。
 - 场景视频和合并视频生成完成后，前端会把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。用户继续点击原来的“查看分镜”时仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
-- 场景视频 job 内部按 `scene_index` 排序后并行调用 content-app 视频接口，当前最大并发数为 100；必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge/start` 启动可恢复视频合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，不能按完成先后顺序合并；如果只有 1 个分镜，merge job 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
+- 场景视频 job 内部仍可并发调度多个分镜，但 `run_generation.py` 对所有会创建 content-app 计费生成任务的 POST 使用进程内串行闸门：前一个创建接口返回 taskId 并完成 content-app 扣费确认后，才提交下一个图片或视频创建任务；`/api/task/{taskId}/status` 轮询不加锁，可以并行等待结果。必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge/start` 启动可恢复视频合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，不能按完成先后顺序合并；如果只有 1 个分镜，merge job 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
 - 多个分镜的视频合并由 Python merge job 调用 content-app `/api/video/merge`。content-app 该接口本身是同步等待下载、ffmpeg 合并和上传完成，不走 `/api/task/{taskId}/status` 轮询；PixelFlow 前端不能直接长连接等待，只能保存 `pendingVideoJob.kind="video_merge"` 并轮询 Python job。后端必须使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制 content-app 读等待，默认 1 小时，不能复用普通 HTTP 30 秒超时。若 content-app 返回业务失败或网络异常，Python job 必须标记 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端不能把失败合并展示成“合并完成”。
-- 场景视频并行生成时，每个分镜的可恢复异常最多尝试 3 次；HTTP 4xx 参数校验、模型价格配置缺失和能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 原始字段错误。普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
+- 场景视频生成时，每个分镜的可恢复异常最多尝试 3 次；HTTP 4xx 参数校验、模型价格配置缺失和能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 原始字段错误。普通异常重试耗尽后写入 `failed_scenes`，字段至少包含 `scene_id`、`scene_index`、`error`、`attempts`。额度不足不对每个分镜重复刷屏，整批只提示一次额度不足，同时保留具体额度暂停分镜到 `failed_scenes`。
 - 场景视频失败或额度暂停后，前端再次点击同一场景包的“确认并生成视频”时，只把 `generatedSceneVideos.failed_scenes` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`，已成功的分镜视频从 `generatedSceneVideos.scene_videos` 复用；补齐后再按 `scene_index` 合并完整视频。
 - 用户在原场景包的 `StoryboardPanel` 里修改单个分镜故事线、镜头描述、旁白或 @参考图时，前端必须记录 `videoScenePackageEditedSceneIds`。再次点击“确认并生成视频”时只把这些已修改分镜提交到 `/agent/flows/video/generate-scenes/start`；未修改分镜复用旧 `generatedSceneVideos.scene_videos`，随后按 `scene_index` 重新调用 `/agent/flows/video/merge/start` 合并新版最终视频，并再次回填原场景包卡片。
 - 视频 plan.md 同意后，前端必须调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 内部顺序执行“生成可编辑场景包 -> 生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后必须立即写入 conversation context 的 `pendingScenePackageJob` / `pending_scene_package_job`，字段包含 `job_id`、`conversation_id`、`kind`、`started_at`、`request`、`artifact`、`source_message_id`。
@@ -335,7 +335,7 @@ SmartPPT接口：
 
 - 如果片段显式给了 `generation_mode`，以后端传入为准。
 - 否则 `pixelflow_video.py` 根据图片、视频、音频素材和提示词选择 `text_to_video`、`image_to_video`、`two_image_to_video`、`reference_mode_video`、`edit_video` 或 `extend_video`。
-- 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞；job 内部可以并行生成多个分镜视频，但对前端仍表现为一个可恢复 job。
+- 场景视频生成使用异步 job，前端轮询 job 状态，避免网关长时间阻塞；job 内部可以并发调度多个分镜视频，但 content-app 创建任务必须经 `run_generation.py` 串行提交，对前端仍表现为一个可恢复 job。
 - 场景视频生成和视频修改重生成启动后，前端必须把 `job_id`、原始请求、来源 artifact 和 `conversation_id` 写入 conversation context 的 `pendingVideoJob` / `pending_video_job`。用户离开再返回同一对话时只继续查询 `/agent/flows/video/generate-scenes/jobs/{job_id}`，不能重新调用 `/start`，避免重复生成和重复计费。
 - 视频 QAAgent QC 必须走 `/agent/flows/video/quality-review/start` 和 `/agent/flows/video/quality-review/jobs/{job_id}`；如果 content-app 返回业务失败或模型网关错误，Python job 状态必须是 `failed`，并保留 `result.error/message/raw.details`，前端展示“视频质检失败”而不是“质检完成”。content-app 侧会对长视频生成低码率质检预览再送入模型，避免 300 秒级成片直接 base64 后超过模型请求体限制。
 
@@ -346,7 +346,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - PPT 表单字段在 `intake/forms.py`，包含 `ppt_topic`、`ppt_style`、`attachments`；`ppt_style` 预设含“自定义”，用户选中后前端展示文本框，并把输入内容作为 `ppt_style` 传给 SmartPPT。
 - PPT 附件只允许 Word、Excel、PDF，前端上传仍走 content-app `/api/upload`。
 - PPT 行业补充复用 `resolve_industry_profile()`：先查项目内垂类模板，未命中就调用当前项目 LLM `deepseek-v4-pro` 生成同结构行业画像，LLM 失败时才使用通用电商兜底。
-- SmartPPT 的大纲、更新大纲、转 JSON、生成页面图、生成文件都经 `/agent/flows/ppt/*/start` 启动异步 job，再由前端轮询 `/agent/flows/ppt/jobs/{job_id}`。
+- SmartPPT 的大纲、更新大纲、转 JSON、生成页面图、生成文件都经 `/agent/flows/ppt/*/start` 启动异步 job，再由前端轮询 `/agent/flows/ppt/jobs/{job_id}`；多页图片生成可以并发调度页面任务，但 content-app 创建任务同样由 `run_generation.py` 串行提交，轮询结果可并行等待。
 - PPT 页面图片阶段会先展示所有页面格子为“图片生成中...”，省略号动态循环；后端每生成一页更新一次 job result，前端把 partial status 原地写回同一张卡片。
 - PPT 单页图片 `running` 时不展示重新生成按钮；已生成或失败后才允许重试。重试单页时必须把原小格子切回生成中并原位更新，不能追加新的整组 PPT 图片卡片；所有页面都完成且无失败时才展示“开始生成PPT附件”。
 - 任意 SmartPPT 阶段如果遇到额度不足，需要进入可恢复暂停；用户充值后回到同一对话可以继续点击上一阶段按钮重新执行。

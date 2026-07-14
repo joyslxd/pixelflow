@@ -430,7 +430,39 @@ test("applyGlobalSceneAssetReplacement stores digital human references without m
   assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, "asset://asset-123");
 
   const payload = sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets);
-  assert.deepEqual(payload.image_urls, ["asset://asset-123"]);
+  assert.deepEqual(payload.image_urls, [
+    "asset://asset-123",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
+});
+
+test("scene generation merges partial mention references with global assets and normalizes @asset_id names", () => {
+  const [scene] = sampleScenes();
+  const mixedScene = {
+    ...scene,
+    image_urls: [],
+    prompt: "@character-host 在 @scene-desk 展示 @prop-product。",
+    shot_description: {
+      text: "0-8秒：@character-host 在 @scene-desk 展示 @prop-product。",
+      mentions: [
+        { asset_id: "character-host", name: "讲解者", image_url: "https://x/role-mention.png" },
+        { asset_id: "scene-desk", name: "桌面场景" },
+        { asset_id: "prop-product", name: "蓝牙耳机" },
+      ],
+    },
+  };
+
+  const payload = sceneGenerationPayloadFromPackage(mixedScene, sampleGlobalAssets());
+
+  assert.deepEqual(payload.image_urls, [
+    "https://x/role-mention.png",
+    "https://x/global-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
+  assert.equal(payload.prompt, "@讲解者 在 @桌面场景 展示 @蓝牙耳机。");
+  assert.equal(payload.shot_description.text, "0-8秒：@讲解者 在 @桌面场景 展示 @蓝牙耳机。");
 });
 
 test("applyGlobalSceneAssetReplacement stores image asset references as normal image urls", () => {
@@ -463,7 +495,11 @@ test("applyGlobalSceneAssetReplacement stores image asset references as normal i
   assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, "https://x/asset-library-scene.png");
 
   const payload = sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets);
-  assert.deepEqual(payload.image_urls, ["https://x/asset-library-scene.png"]);
+  assert.deepEqual(payload.image_urls, [
+    "https://x/asset-library-scene.png",
+    "https://x/global-role.png",
+    "https://x/global-prop.png",
+  ]);
 });
 
 test("plain global asset image edits clear stale digital human generation references", () => {
@@ -501,7 +537,11 @@ test("plain global asset image edits clear stale digital human generation refere
 
   assert.equal(updated.global_assets.characters[0].generation_reference_url, undefined);
   assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, undefined);
-  assert.deepEqual(sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets).image_urls, ["https://x/edited-role.png"]);
+  assert.deepEqual(sceneGenerationPayloadFromPackage(updated.scene_packages[0], updated.global_assets).image_urls, [
+    "https://x/edited-role.png",
+    "https://x/global-scene.png",
+    "https://x/global-prop.png",
+  ]);
 });
 
 test("global scene asset edit ratio prefers metadata before fallback", () => {
