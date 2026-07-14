@@ -18,6 +18,12 @@ export interface SceneMentionCandidate extends SceneMention {
   group: "characters" | "scenes" | "props";
 }
 
+const MENTION_GROUP_SEARCH_TERMS: Record<SceneMentionCandidate["group"], readonly string[]> = {
+  characters: ["角色", "人物", "出场角色"],
+  scenes: ["场景", "地点"],
+  props: ["道具", "商品", "产品"],
+};
+
 export function buildMentionCandidates(globalAssets?: GlobalSceneAssets): SceneMentionCandidate[] {
   if (!globalAssets) return [];
   return [
@@ -25,6 +31,15 @@ export function buildMentionCandidates(globalAssets?: GlobalSceneAssets): SceneM
     ...candidatesFromGroup(globalAssets.scenes, "scenes", "scene"),
     ...candidatesFromGroup(globalAssets.props, "props", "prop"),
   ];
+}
+
+export function filterMentionCandidates(candidates: SceneMentionCandidate[], query: string): SceneMentionCandidate[] {
+  const keyword = query.replace(/^@/, "").trim().toLowerCase();
+  return candidates.filter((candidate) => {
+    if (!keyword) return true;
+    return [candidate.name, candidate.asset_id, candidate.type, ...MENTION_GROUP_SEARCH_TERMS[candidate.group]]
+      .some((value) => value.toLowerCase().includes(keyword));
+  });
 }
 
 export function normalizeShotMentions(

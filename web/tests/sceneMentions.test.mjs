@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "SCENE_MENTIONS_TEST_MODULE must point to the compiled scen
 const {
   buildMentionCandidates,
   collectMentionImageUrls,
+  filterMentionCandidates,
   normalizeShotMentions,
   upsertShotMention,
 } = await import(moduleUrl);
@@ -65,6 +66,27 @@ test("buildMentionCandidates uses generated asset images before stale direct url
       ["prop-product", "https://x/generated-product.png"],
     ],
   );
+});
+
+test("filterMentionCandidates supports Chinese asset group queries", () => {
+  const candidates = buildMentionCandidates(globalAssets);
+
+  assert.deepEqual(filterMentionCandidates(candidates, "@角色").map((item) => item.asset_id), ["character-host"]);
+  assert.deepEqual(filterMentionCandidates(candidates, "@场景").map((item) => item.asset_id), ["scene-desk"]);
+  assert.deepEqual(filterMentionCandidates(candidates, "@道具").map((item) => item.asset_id), ["prop-product"]);
+});
+
+test("filterMentionCandidates keeps props reachable after the first eight candidates", () => {
+  const candidates = buildMentionCandidates({
+    characters: Array.from({ length: 2 }, (_item, index) => ({ asset_id: `character-${index}`, name: `角色${index}` })),
+    scenes: Array.from({ length: 6 }, (_item, index) => ({ asset_id: `scene-${index}`, name: `场景${index}` })),
+    props: [{ asset_id: "prop-product", name: "商品" }],
+  });
+  const filtered = filterMentionCandidates(candidates, "@");
+
+  assert.equal(filtered.length, 9);
+  assert.equal(filtered.at(-1)?.asset_id, "prop-product");
+  assert.notEqual(filtered, candidates);
 });
 
 test("normalizeShotMentions migrates legacy reference ids and caps at nine image mentions", () => {
