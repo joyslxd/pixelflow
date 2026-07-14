@@ -258,6 +258,14 @@ def _asset_context(
     }
 
 
+def _scene_asset_target_key(value: dict[str, Any]) -> tuple[str, str] | None:
+    asset_id = str(value.get("asset_id") or "").strip()
+    asset_type = str(value.get("asset_type") or "").strip()
+    if not asset_id or asset_type not in {"character", "scene_image", "prop_image"}:
+        return None
+    return asset_type, asset_id
+
+
 async def generate_scene_assets(
     *,
     image_skill: ImageSkill,
@@ -268,6 +276,7 @@ async def generate_scene_assets(
     image_size: str = "1080p",
     model: str | None = None,
     quota_checker: Any,
+    target_assets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """生成场景参考图；props / scenes 在用户有上传图片时走参考生图。"""
     enriched = [dict(scene) for scene in scene_packages if isinstance(scene, dict)]
@@ -444,10 +453,72 @@ async def generate_scene_assets(
                     _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
                 )
 
-    for target, field_name, prompt, ratio, context in asset_jobs:
+    if target_assets is not None:
+        requested_targets: dict[tuple[str, str], dict[str, Any]] = {}
+        for target_asset in target_assets:
+            if not isinstance(target_asset, dict):
+                continue
+            target_key = _scene_asset_target_key(target_asset)
+            if target_key is not None:
+                requested_targets.setdefault(target_key, target_asset)
+        available_target_keys = {
+            target_key
+            for *_job, context in asset_jobs
+            if (target_key := _scene_asset_target_key(context)) is not None
+        }
+        available_target_keys.update(
+            target_key
+            for failure in failed_assets
+            if (target_key := _scene_asset_target_key(failure)) is not None
+        )
+        failed_assets = [
+            failure
+            for failure in failed_assets
+            if (target_key := _scene_asset_target_key(failure)) is not None and target_key in requested_targets
+        ]
+        for target_key, target_asset in requested_targets.items():
+            if target_key in available_target_keys:
+                continue
+            failed_assets.append(
+                {
+                    "asset_id": target_asset.get("asset_id"),
+                    "asset_type": target_asset.get("asset_type"),
+                    "error": "指定的失败素材不存在或缺少生成提示词",
+                    "error_code": "scene_asset_retry_target_not_found",
+                    "quota_insufficient": False,
+                }
+            )
+        asset_jobs = [
+            job
+            for job in asset_jobs
+            if (target_key := _scene_asset_target_key(job[4])) is not None and target_key in requested_targets
+        ]
+
+    for job_index, (target, field_name, prompt, ratio, context) in enumerate(asset_jobs):
         urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)
-        target[field_name] = urls
+        if urls:
+            target[field_name] = urls
         if quota_insufficient:
+            failed_target_keys = {
+                target_key
+                for failure in failed_assets
+                if (target_key := _scene_asset_target_key(failure)) is not None
+            }
+            for *_pending_job, pending_context in asset_jobs[job_index + 1 :]:
+                pending_key = _scene_asset_target_key(pending_context)
+                if pending_key is not None and pending_key in failed_target_keys:
+                    continue
+                if pending_key is not None:
+                    failed_target_keys.add(pending_key)
+                failed_assets.append(
+                    {
+                        **pending_context,
+                        "error": "本轮因额度不足尚未生成",
+                        "error_code": "scene_asset_retry_pending",
+                        "quota_insufficient": True,
+                        "retry_pending": True,
+                    }
+                )
             return {
                 "ok": False,
                 "endpoint": resolve_scene_asset_endpoint(generation_modes),

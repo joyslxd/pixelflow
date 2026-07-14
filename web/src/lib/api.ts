@@ -1,6 +1,7 @@
 /** PixelFlow 后端 API Client，对齐 /agent/flows 契约。开发环境下 /agent 由 Vite 代理到后端。 */
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
+import type { SceneAssetRetryTarget } from "@/lib/scenePackages";
 
 const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
@@ -1606,6 +1607,7 @@ export const api = {
     image_size?: string;
     model?: string | null;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
+    target_assets?: SceneAssetRetryTarget[];
   }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
 
   startSceneAssetsJob: (body: {
@@ -1616,6 +1618,7 @@ export const api = {
     image_size?: string;
     model?: string | null;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
+    target_assets?: SceneAssetRetryTarget[];
   }) =>
     req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
       method: "POST",

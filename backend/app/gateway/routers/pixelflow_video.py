@@ -104,6 +104,11 @@ class PrepareScenePackagesResponse(BaseModel):
     creation_contract: dict[str, Any] | None = None
 
 
+class SceneAssetTarget(BaseModel):
+    asset_id: str = Field(min_length=1)
+    asset_type: Literal["character", "scene_image", "prop_image"]
+
+
 class GenerateSceneAssetsRequest(BaseModel):
     global_assets: dict[str, Any] = Field(default_factory=dict)
     scene_packages: list[dict[str, Any]]
@@ -112,6 +117,7 @@ class GenerateSceneAssetsRequest(BaseModel):
     image_size: str = "1080p"
     model: str | None = None
     creation_contract: VideoCreationContract | None = None
+    target_assets: list[SceneAssetTarget] | None = Field(default=None, min_length=1, max_length=100)
 
 
 class GenerateSceneAssetsResponse(BaseModel):
@@ -626,6 +632,7 @@ async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> G
         image_size=_scene_image_size(contract) if contract is not None else body.image_size,
         model=contract.image_model if contract is not None else body.model,
         quota_checker=is_quota_insufficient,
+        target_assets=[target.model_dump() for target in body.target_assets] if body.target_assets is not None else None,
     )
     if result.get("quota_insufficient"):
         return GenerateSceneAssetsResponse(

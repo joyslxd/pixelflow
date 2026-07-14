@@ -21,6 +21,8 @@ const {
   nearestSupportedAspectRatio,
   replaceGlobalSceneAssetImage,
   sceneGenerationPayloadFromPackage,
+  mergeSceneAssetRetryFailures,
+  sceneAssetRetryTargets,
   sceneIdsForRevision,
   scenePackagesWithRevisionContract,
   scenePackagesWithoutRevisionContract,
@@ -29,6 +31,44 @@ const {
   updateScenePackageField,
   uploadedReferenceMaterials,
 } = await import(moduleUrl);
+
+test("scene asset retry targets include only stable failed assets", () => {
+  assert.deepEqual(
+    sceneAssetRetryTargets([
+      { asset_id: "scene-office", asset_type: "scene_image", error: "failed" },
+      { asset_id: "scene-office", asset_type: "scene_image", error: "duplicate" },
+      { asset_id: "prop-product", asset_type: "prop_image", error: "failed" },
+      { error: "missing identity" },
+    ]),
+    [
+      { asset_id: "scene-office", asset_type: "scene_image" },
+      { asset_id: "prop-product", asset_type: "prop_image" },
+    ],
+  );
+});
+
+test("scene asset retry failure merge removes successes and preserves untargetable failures", () => {
+  const targets = [{ asset_id: "scene-office", asset_type: "scene_image" }];
+  assert.deepEqual(
+    mergeSceneAssetRetryFailures(
+      [
+        { asset_id: "scene-office", asset_type: "scene_image", error: "old failure" },
+        { error: "legacy failure without identity" },
+      ],
+      [],
+      targets,
+    ),
+    [{ error: "legacy failure without identity" }],
+  );
+  assert.deepEqual(
+    mergeSceneAssetRetryFailures(
+      [{ asset_id: "scene-office", asset_type: "scene_image", error: "old failure" }],
+      [{ asset_id: "scene-office", asset_type: "scene_image", error: "new failure" }],
+      targets,
+    ),
+    [{ asset_id: "scene-office", asset_type: "scene_image", error: "new failure" }],
+  );
+});
 
 function sampleScenes() {
   return [

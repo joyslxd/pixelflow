@@ -397,6 +397,60 @@ def test_video_router_generates_scene_asset_images(monkeypatch):
     assert data["global_assets"]["props"][0]["images"] == ["https://x/prop.png"]
 
 
+def test_video_router_scene_asset_target_whitelist_only_calls_failed_asset(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/scene-retried.png"}], raw={})
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: FakeImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scene-assets",
+            json={
+                "global_assets": {
+                    "characters": [
+                        {
+                            "asset_id": "character-presenter",
+                            "three_view_prompt": "讲解者角色三视图",
+                            "three_view_images": ["https://x/role-completed.png"],
+                        }
+                    ],
+                    "scenes": [{"asset_id": "scene-desk", "image_prompt": "桌面场景图", "images": []}],
+                    "props": [
+                        {
+                            "asset_id": "prop-product",
+                            "image_prompt": "耳机道具图",
+                            "images": ["https://x/prop-completed.png"],
+                        }
+                    ],
+                },
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+                "target_assets": [{"asset_id": "scene-desk", "asset_type": "scene_image"}],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert calls == ["桌面场景图"]
+    assert data["global_assets"]["characters"][0]["three_view_images"] == ["https://x/role-completed.png"]
+    assert data["global_assets"]["scenes"][0]["images"] == ["https://x/scene-retried.png"]
+    assert data["global_assets"]["props"][0]["images"] == ["https://x/prop-completed.png"]
+
+
 def test_video_router_generates_prop_assets_with_reference_images(monkeypatch):
     from app.gateway.routers import pixelflow_video
     from pixelflow.skills import ImageGenerationResult

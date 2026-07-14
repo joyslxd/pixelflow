@@ -5,6 +5,56 @@ export const DEFAULT_TARGET_DURATION_MS = 30_000;
 
 export type SceneAssetCollection = "characters" | "scene_images" | "prop_images";
 export type GlobalSceneAssetGroup = "characters" | "scenes" | "props";
+export type SceneAssetRetryType = "character" | "scene_image" | "prop_image";
+
+export interface SceneAssetRetryTarget {
+  asset_id: string;
+  asset_type: SceneAssetRetryType;
+}
+
+const SCENE_ASSET_RETRY_TYPES = new Set<SceneAssetRetryType>(["character", "scene_image", "prop_image"]);
+
+export function sceneAssetRetryTargets(
+  failures: Array<Record<string, unknown>> | null | undefined,
+): SceneAssetRetryTarget[] {
+  const targets: SceneAssetRetryTarget[] = [];
+  const seen = new Set<string>();
+  for (const failure of failures || []) {
+    const assetId = firstString(failure, "asset_id", "assetId");
+    const assetType = firstString(failure, "asset_type", "assetType") as SceneAssetRetryType;
+    if (!assetId || !SCENE_ASSET_RETRY_TYPES.has(assetType)) continue;
+    const key = `${assetType}:${assetId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push({ asset_id: assetId, asset_type: assetType });
+  }
+  return targets;
+}
+
+export function mergeSceneAssetRetryFailures(
+  previousFailures: Array<Record<string, unknown>> | null | undefined,
+  retryFailures: Array<Record<string, unknown>> | null | undefined,
+  targets: SceneAssetRetryTarget[],
+): Array<Record<string, unknown>> {
+  const targetKeys = new Set(targets.map((target) => `${target.asset_type}:${target.asset_id}`));
+  const merged = (previousFailures || []).filter((failure) => {
+    const assetId = firstString(failure, "asset_id", "assetId");
+    const assetType = firstString(failure, "asset_type", "assetType");
+    return !assetId || !assetType || !targetKeys.has(`${assetType}:${assetId}`);
+  });
+  const seen = new Set(
+    merged.map((failure) => `${firstString(failure, "asset_type", "assetType")}:${firstString(failure, "asset_id", "assetId")}`),
+  );
+  for (const failure of retryFailures || []) {
+    const assetId = firstString(failure, "asset_id", "assetId");
+    const assetType = firstString(failure, "asset_type", "assetType");
+    const key = assetId && assetType ? `${assetType}:${assetId}` : "";
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    merged.push(failure);
+  }
+  return merged;
+}
 
 export interface SceneGlobalAssetReference extends Record<string, unknown> {
   source: "scene_global_asset";

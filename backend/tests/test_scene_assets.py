@@ -144,6 +144,128 @@ def test_generate_scene_assets_uses_plan_image_contract_for_every_asset_call():
     assert all(call["model"] == "gpt-image-2" for call in calls)
 
 
+def test_generate_scene_assets_only_retries_target_assets_and_preserves_completed_images():
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/scene-retried.png"}], raw={})
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [
+                    {
+                        "asset_id": "character-presenter",
+                        "three_view_prompt": "讲解者人物三视图",
+                        "three_view_images": ["https://x/role-completed.png"],
+                    }
+                ],
+                "scenes": [{"asset_id": "scene-office", "image_prompt": "办公室场景图", "images": []}],
+                "props": [
+                    {
+                        "asset_id": "prop-product",
+                        "image_prompt": "产品道具图",
+                        "images": ["https://x/prop-completed.png"],
+                    }
+                ],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[],
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+            target_assets=[{"asset_id": "scene-office", "asset_type": "scene_image"}],
+        )
+    )
+
+    assert result["ok"] is True
+    assert calls == ["办公室场景图"]
+    assert result["global_assets"]["characters"][0]["three_view_images"] == ["https://x/role-completed.png"]
+    assert result["global_assets"]["scenes"][0]["images"] == ["https://x/scene-retried.png"]
+    assert result["global_assets"]["props"][0]["images"] == ["https://x/prop-completed.png"]
+
+
+def test_generate_scene_assets_keeps_unattempted_retry_targets_after_quota_pause():
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            return ImageGenerationResult(
+                ok=False,
+                error="用户没有有效的额度",
+                raw={"quota_insufficient": True},
+            )
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "scenes": [{"asset_id": "scene-office", "image_prompt": "办公室场景图", "images": []}],
+                "props": [{"asset_id": "prop-product", "image_prompt": "产品道具图", "images": []}],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[],
+            quota_checker=lambda value: isinstance(value, dict) and value.get("quota_insufficient") is True,
+            target_assets=[
+                {"asset_id": "scene-office", "asset_type": "scene_image"},
+                {"asset_id": "prop-product", "asset_type": "prop_image"},
+            ],
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["quota_insufficient"] is True
+    assert calls == ["办公室场景图"]
+    assert [(item["asset_id"], item.get("retry_pending", False)) for item in result["failed_assets"]] == [
+        ("scene-office", False),
+        ("prop-product", True),
+    ]
+
+
+def test_generate_scene_assets_records_unattempted_initial_assets_after_quota_pause():
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=False,
+                error="用户没有有效的额度",
+                raw={"quota_insufficient": True},
+            )
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [{"asset_id": "character-presenter", "three_view_prompt": "讲解者人物三视图"}],
+                "scenes": [{"asset_id": "scene-office", "image_prompt": "办公室场景图"}],
+                "props": [{"asset_id": "prop-product", "image_prompt": "产品道具图"}],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            quota_checker=lambda value: isinstance(value, dict) and value.get("quota_insufficient") is True,
+        )
+    )
+
+    assert [item["asset_id"] for item in result["failed_assets"]] == [
+        "character-presenter",
+        "scene-office",
+        "prop-product",
+    ]
+    assert all(item.get("retry_pending") is True for item in result["failed_assets"][1:])
+
+
 def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_materials_present():
     calls: list[str] = []
 
