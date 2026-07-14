@@ -1,6 +1,8 @@
 import { ImageIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import {
+  filterMentionCandidates,
   normalizeShotMentions,
   type SceneMention,
   type SceneMentionCandidate,
@@ -18,11 +20,26 @@ interface ActiveMentionQuery {
   text: string;
   left: number;
   top: number;
+  width: number;
+  placement: "above" | "below";
+  listMaxHeight: number;
 }
+
+const MENTION_MENU_MARGIN = 8;
+const MENTION_MENU_MAX_WIDTH = 440;
+const MENTION_MENU_MAX_LIST_HEIGHT = 224;
+const MENTION_MENU_HEADER_HEIGHT = 38;
+
+const MENTION_CANDIDATE_GROUPS: Array<{ group: SceneMentionCandidate["group"]; label: string }> = [
+  { group: "characters", label: "角色" },
+  { group: "scenes", label: "场景" },
+  { group: "props", label: "道具" },
+];
 
 export function SceneMentionEditor({ text, shotDescription, candidates, onChange }: SceneMentionEditorProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const queryRangeRef = useRef<Range | null>(null);
   const lastDomKeyRef = useRef("");
   const [activeQuery, setActiveQuery] = useState<ActiveMentionQuery | null>(null);
@@ -30,16 +47,18 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
   const mentionedAssetIds = useMemo(() => new Set(mentions.map((mention) => mention.asset_id)), [mentions]);
   const canAddNewReference = mentions.length < MAX_REFERENCE_IMAGE_COUNT;
   const filteredCandidates = useMemo(() => {
-    const keyword = (activeQuery?.text || "").replace(/^@/, "").trim().toLowerCase();
-    return candidates
-      .filter((candidate) => {
-        if (!keyword) return true;
-        return [candidate.name, candidate.asset_id, candidate.type].some((value) => value.toLowerCase().includes(keyword));
-      })
+    return filterMentionCandidates(candidates, activeQuery?.text || "")
       .sort((a, b) => Number(mentionedAssetIds.has(b.asset_id)) - Number(mentionedAssetIds.has(a.asset_id)));
   }, [activeQuery?.text, candidates, mentionedAssetIds]);
+  const groupedCandidates = MENTION_CANDIDATE_GROUPS
+    .map(({ group, label }) => ({
+      group,
+      label,
+      candidates: filteredCandidates.filter((candidate) => candidate.group === group),
+    }))
+    .filter(({ candidates: groupCandidates }) => groupCandidates.length > 0);
   const canSelectCandidate = (candidate: SceneMentionCandidate) => canAddNewReference || mentionedAssetIds.has(candidate.asset_id);
-  const firstSelectableCandidate = filteredCandidates.find(canSelectCandidate);
+  const firstSelectableCandidate = groupedCandidates.flatMap(({ candidates: groupCandidates }) => groupCandidates).find(canSelectCandidate);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -49,6 +68,24 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
     renderEditorContent(editor, text, mentions);
     lastDomKeyRef.current = key;
   }, [mentions, text]);
+
+  useEffect(() => {
+    if (!activeQuery) return;
+    const closeMenu = () => {
+      queryRangeRef.current = null;
+      setActiveQuery(null);
+    };
+    const closeOnExternalScroll = (event: Event) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+      closeMenu();
+    };
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeOnExternalScroll, true);
+    return () => {
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeOnExternalScroll, true);
+    };
+  }, [activeQuery]);
 
   const emitFromEditor = () => {
     const editor = editorRef.current;
@@ -61,7 +98,14 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
   const updateMentionQuery = () => {
     const query = readActiveMentionQuery(wrapperRef.current, editorRef.current);
     queryRangeRef.current = query?.range || null;
-    setActiveQuery(query ? { text: query.text, left: query.left, top: query.top } : null);
+    setActiveQuery(query ? {
+      text: query.text,
+      left: query.left,
+      top: query.top,
+      width: query.width,
+      placement: query.placement,
+      listMaxHeight: query.listMaxHeight,
+    } : null);
   };
 
   const handleInput = () => {
@@ -113,6 +157,60 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
     emitFromEditor();
   };
 
+  const mentionMenu = activeQuery && filteredCandidates.length > 0 && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          ref={menuRef}
+          data-scene-mention-menu
+          className="fixed z-[100] overflow-hidden rounded-xl border border-line bg-white shadow-xl"
+          style={{
+            left: activeQuery.left,
+            top: activeQuery.top,
+            width: activeQuery.width,
+            transform: activeQuery.placement === "above" ? "translateY(-100%)" : undefined,
+          }}
+        >
+          <div className="border-b border-line px-3 py-2 text-[12px] text-ink-soft">
+            选择素材进行关联
+            {!canAddNewReference ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
+          </div>
+          <div className="overflow-y-auto px-1.5 pb-1.5" style={{ maxHeight: activeQuery.listMaxHeight }}>
+            {groupedCandidates.map(({ group, label, candidates: groupCandidates }) => (
+              <Fragment key={group}>
+                <div className="sticky top-0 z-10 bg-white px-2 py-1 text-[11px] font-medium text-ink-soft">{label} ({groupCandidates.length})</div>
+                {groupCandidates.map((candidate) => {
+                  const selectable = canSelectCandidate(candidate);
+                  return (
+                    <button
+                      key={candidate.asset_id}
+                      type="button"
+                      disabled={!selectable}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => selectCandidate(candidate)}
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {candidate.image_url ? (
+                        <img src={candidate.image_url} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
+                      ) : (
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas text-ink-soft">
+                          <ImageIcon size={15} />
+                        </span>
+                      )}
+                      <span className="min-w-0">
+                        <span className="block truncate text-[13px] font-medium text-ink">@{candidate.name}</span>
+                        <span className="block truncate text-[11px] text-ink-soft">{candidate.asset_id}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </Fragment>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
   return (
     <div ref={wrapperRef} className="relative grid gap-2">
       <div
@@ -132,44 +230,7 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
         className="min-h-44 w-full rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none empty:before:pointer-events-none empty:before:text-ink-soft empty:before:content-[attr(data-placeholder)] focus:border-accent"
       />
 
-      {activeQuery && filteredCandidates.length > 0 ? (
-        <div
-          className="absolute z-30 w-[min(440px,calc(100%-24px))] overflow-hidden rounded-xl border border-line bg-white shadow-xl"
-          style={{ left: activeQuery.left, top: activeQuery.top }}
-        >
-          <div className="border-b border-line px-3 py-2 text-[12px] text-ink-soft">
-            选择素材进行关联
-            {!canAddNewReference ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
-          </div>
-          <div className="max-h-56 overflow-y-auto p-1.5">
-            {filteredCandidates.slice(0, 8).map((candidate) => {
-              const selectable = canSelectCandidate(candidate);
-              return (
-                <button
-                  key={candidate.asset_id}
-                  type="button"
-                  disabled={!selectable}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => selectCandidate(candidate)}
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {candidate.image_url ? (
-                    <img src={candidate.image_url} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
-                  ) : (
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-canvas text-ink-soft">
-                      <ImageIcon size={15} />
-                    </span>
-                  )}
-                  <span className="min-w-0">
-                    <span className="block truncate text-[13px] font-medium text-ink">@{candidate.name}</span>
-                    <span className="block truncate text-[11px] text-ink-soft">{candidate.asset_id}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
+      {mentionMenu}
 
       <div className="text-[12px] text-ink-soft">
         已关联 {mentions.length}/{MAX_REFERENCE_IMAGE_COUNT}
@@ -198,11 +259,30 @@ function readActiveMentionQuery(wrapper: HTMLDivElement | null, editor: HTMLDivE
   queryRange.setEnd(textNode, range.startOffset);
   const rect = queryRange.getBoundingClientRect();
   const wrapperRect = wrapper.getBoundingClientRect();
+  const viewportWidth = Math.max(160, window.innerWidth - MENTION_MENU_MARGIN * 2);
+  const width = Math.min(
+    MENTION_MENU_MAX_WIDTH,
+    Math.max(280, wrapperRect.width - MENTION_MENU_MARGIN * 2),
+    viewportWidth,
+  );
+  const left = Math.max(
+    MENTION_MENU_MARGIN,
+    Math.min(wrapperRect.left + MENTION_MENU_MARGIN, window.innerWidth - width - MENTION_MENU_MARGIN),
+  );
+  const availableBelow = Math.max(0, window.innerHeight - rect.bottom - MENTION_MENU_MARGIN);
+  const availableAbove = Math.max(0, rect.top - MENTION_MENU_MARGIN);
+  const desiredHeight = MENTION_MENU_HEADER_HEIGHT + MENTION_MENU_MAX_LIST_HEIGHT;
+  const placement: ActiveMentionQuery["placement"] =
+    availableBelow >= desiredHeight || availableBelow >= availableAbove ? "below" : "above";
+  const availableHeight = placement === "below" ? availableBelow : availableAbove;
   return {
     text: queryText,
     range: queryRange,
-    left: Math.max(8, Math.min(rect.left - wrapperRect.left, wrapperRect.width - 460)),
-    top: Math.max(36, rect.bottom - wrapperRect.top + 8),
+    left,
+    top: placement === "below" ? rect.bottom + MENTION_MENU_MARGIN : rect.top - MENTION_MENU_MARGIN,
+    width,
+    placement,
+    listMaxHeight: Math.max(80, Math.min(MENTION_MENU_MAX_LIST_HEIGHT, availableHeight - MENTION_MENU_HEADER_HEIGHT)),
   };
 }
 
