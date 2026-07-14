@@ -453,7 +453,7 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 - 每个 `character` 必须有 `three_view_prompt`，生成的是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、球、书包、床垫等非人物主体放到 `props`。
 - `shot_description.text` 是一整段文本，不能拆成多个 UI 字段。
-- `shot_description.mentions` 是前端 @ 选择后提交的图片引用集合，后端生成视频时提取其中的 URL。
+- `shot_description.mentions` 是前端 @ 选择后提交的图片引用集合。生成视频请求会合并分镜已有 `image_urls`、mentions 中的生成引用，以及 `reference_asset_ids` 对应的全局人物/场景/道具素材；任一 mention 已有图片时也不能跳过其余全局素材。提交前会把镜头文本和提示词中的 `@asset_id` 统一替换为对应素材名称，参考图仍按稳定顺序去重并最多保留 9 张。
 - `visual_style` 是文字约束，不作为图片 mention。
 
 ## 7. 图片流程
