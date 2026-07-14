@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
@@ -47,6 +47,10 @@ import {
   planMessageResumeDelayMs,
   resumePlanMessageJobStep,
 } from "@/lib/planMessageRecovery";
+
+const PlanMarkdownEditor = lazy(() =>
+  import("@/components/canvas/PlanMarkdownEditor").then((module) => ({ default: module.PlanMarkdownEditor })),
+);
 import {
   appendVisibleConversationMessage,
   messageConversationId,
@@ -1581,6 +1585,8 @@ export function WorkspacePage() {
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [selectedStoryboardMessageId, setSelectedStoryboardMessageId] = useState("");
+  const [selectedPlanEditorMessageId, setSelectedPlanEditorMessageId] = useState("");
+  const [savingPlanEdit, setSavingPlanEdit] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
@@ -6597,6 +6603,66 @@ export function WorkspacePage() {
     }
   };
 
+  const handleEditPlan = (msg: ChatMessage) => {
+    if (!msg.artifact?.plan || !isCreationIntent(msg.artifact.intent)) return;
+    setSelectedStoryboardMessageId("");
+    setSelectedPlanEditorMessageId(msg.id);
+    setCanvasOpen(true);
+  };
+
+  const handlePublishPlanEdit = async (msg: ChatMessage, editedMarkdown: string) => {
+    const artifact = msg.artifact;
+    if (!artifact?.plan || !isCreationIntent(artifact.intent) || !artifact.formValues || !artifact.selectedDirection) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    setSavingPlanEdit(true);
+    setBusyForConversation(targetConversationId, true);
+    try {
+      const plan = await api.savePlanMarkdownEdit({
+        intent: artifact.intent,
+        edited_plan_markdown: editedMarkdown,
+        current_plan_version: artifact.plan.plan_version || 1,
+        plan_history: artifact.plan.plan_history || [],
+        creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
+        scene_durations_sec: artifact.plan.scene_durations_sec || [],
+      });
+      await persistPlanArtifactForConversation(
+        createPlanArtifactMessage(
+          plan,
+          artifact.selectedDirection,
+          {
+            intent: artifact.intent,
+            formValues: artifact.formValues,
+            materials: artifact.materials || [],
+            coreMessage: artifact.coreMessage || pendingCore,
+            intakeContext: artifact.intakeContext,
+          },
+          targetConversationId,
+        ),
+        targetConversationId,
+        {
+          type: "plan_save",
+          last_phase: "plan_review",
+          processed_key: processedKey,
+          success_message: `用户编辑内容已发布为 plan.md v${plan.plan_version}，请确认后继续。`,
+          context: {
+            ...makeSnapshot(targetConversationId),
+            plan_approved: false,
+          } as unknown as Record<string, unknown>,
+        },
+      );
+      setCanvasOpen(false);
+      setSelectedPlanEditorMessageId("");
+    } catch (err) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(`plan.md 编辑发布失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      setSavingPlanEdit(false);
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
   const handleRetrySceneAssets = async (msg: ChatMessage) => {
     const artifact = msg.artifact;
     const videoScenePackages = artifact?.videoScenePackages;
@@ -7352,6 +7418,9 @@ export function WorkspacePage() {
   const selectedStoryboardMessage = selectedStoryboardMessageId
     ? messages.find((message) => message.id === selectedStoryboardMessageId && message.artifact?.videoScenePackages)
     : undefined;
+  const selectedPlanEditorMessage = selectedPlanEditorMessageId
+    ? messages.find((message) => message.id === selectedPlanEditorMessageId && message.artifact?.type === "plan" && message.artifact.plan)
+    : undefined;
 
   return (
     <div className="flex h-full min-h-0">
@@ -7365,6 +7434,7 @@ export function WorkspacePage() {
         onSelectDirection={handleSelectDirection}
         onRegenerateDirections={handleRegenerateDirections}
         onApprovePlan={handleApprovePlan}
+        onEditPlan={handleEditPlan}
         onRevisePlan={handleRevisePlan}
         onRollbackPlan={handleRollbackPlan}
         onGenerateImage={handleGenerateImage}
@@ -7389,6 +7459,7 @@ export function WorkspacePage() {
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
+          setSelectedPlanEditorMessageId("");
           if (msg.artifact.type === "video_scene_packages") {
             setSelectedStoryboardMessageId(msg.id);
             return;
@@ -7406,7 +7477,20 @@ export function WorkspacePage() {
           }
         }}
       />
-      {canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
+      {canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (
+        <Suspense fallback={<aside className="flex h-full w-[52vw] min-w-[680px] items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft">正在加载 Markdown 编辑器…</aside>}>
+          <PlanMarkdownEditor
+            planVersion={selectedPlanEditorMessage.artifact.plan.plan_version || 1}
+            initialMarkdown={selectedPlanEditorMessage.artifact.plan.plan_markdown}
+            saving={savingPlanEdit}
+            onConfirm={(markdown) => handlePublishPlanEdit(selectedPlanEditorMessage, markdown)}
+            onClose={() => {
+              setCanvasOpen(false);
+              setSelectedPlanEditorMessageId("");
+            }}
+          />
+        </Suspense>
+      ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
         <StoryboardPanel
           msg={selectedStoryboardMessage}
           onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
@@ -7418,6 +7502,7 @@ export function WorkspacePage() {
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
+            setSelectedPlanEditorMessageId("");
           }}
         />
       ) : canvasOpen && (
@@ -7430,6 +7515,7 @@ export function WorkspacePage() {
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
+            setSelectedPlanEditorMessageId("");
           }}
           briefConfirmed={briefConfirmed}
         />

@@ -126,6 +126,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 | PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/duration.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒及精确总时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 在当前创意内修订 Plan，生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
+| PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布直接编辑完整 Markdown；不调用 LLM，校验后原样发布为下一 Plan 版本并保留权威合同快照 |
 
 plan.md 模板路径：
 

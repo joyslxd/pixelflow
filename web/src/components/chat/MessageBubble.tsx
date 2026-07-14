@@ -17,6 +17,7 @@ interface MessageBubbleProps {
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
+  onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
@@ -211,6 +212,7 @@ export function MessageBubble({
   onSelectDirection,
   onRegenerateDirections,
   onApprovePlan,
+  onEditPlan,
   onRevisePlan,
   onRollbackPlan,
   onGenerateImage,
@@ -571,11 +573,19 @@ export function MessageBubble({
               </button>
               <button
                 type="button"
-                onClick={() => onRevisePlan?.(msg)}
+                onClick={() => onEditPlan?.(msg)}
                 className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
               >
                 <Pencil size={15} />
-                继续修改
+                编辑
+              </button>
+              <button
+                type="button"
+                onClick={() => onRevisePlan?.(msg)}
+                className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+              >
+                <Sparkles size={15} />
+                Agent 修改
               </button>
             </div>
           </div>

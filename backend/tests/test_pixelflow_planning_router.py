@@ -28,6 +28,7 @@ def test_pixelflow_planning_router_prefix_and_paths():
     assert "/agent/flows/planning/plan" in paths
     assert "/agent/flows/planning/plan/revise" in paths
     assert "/agent/flows/planning/plan/restore" in paths
+    assert "/agent/flows/planning/plan/save-edit" in paths
 
 
 def _stable_user() -> User:

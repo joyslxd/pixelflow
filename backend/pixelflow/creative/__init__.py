@@ -13,6 +13,7 @@ from .plan_markdown import (
     PlanMarkdownResult,
     build_plan_markdown,
     build_plan_markdown_with_llm,
+    publish_manual_plan_edit,
     restore_plan_version,
     revise_plan_markdown_with_llm,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "brief_generate",
     "build_plan_markdown",
     "build_plan_markdown_with_llm",
+    "publish_manual_plan_edit",
     "restore_plan_version",
     "revise_plan_markdown_with_llm",
     "validate_and_fix",

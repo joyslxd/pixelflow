@@ -252,6 +252,7 @@ export interface PlanMarkdownResponse {
     version: number;
     plan_markdown: string;
     restored_from_version?: number;
+    change_source?: "manual_edit" | string;
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
   }>;
@@ -1471,6 +1472,15 @@ export const api = {
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/revise`, { method: "POST", body: JSON.stringify(body) }),
+
+  savePlanMarkdownEdit: (body: {
+    intent: CreationIntent;
+    edited_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    creation_contract?: Record<string, unknown>;
+    scene_durations_sec?: number[];
+  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
 
   restorePlanMarkdown: (body: {
     intent: CreationIntent;

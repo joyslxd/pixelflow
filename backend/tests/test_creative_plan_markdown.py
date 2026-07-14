@@ -10,6 +10,7 @@ from pixelflow.creative.plan_markdown import (
     PlanMarkdownResult,
     build_plan_markdown,
     build_plan_markdown_with_llm,
+    publish_manual_plan_edit,
     restore_plan_version,
 )
 
@@ -446,3 +447,39 @@ def test_next_version_uses_history_max_after_restore():
     assert [item["version"] for item in revised.plan_history] == [1, 2, 3]
     assert revised.plan_history[-1]["creation_contract"] == creation_contract
     assert revised.plan_history[-1]["scene_durations_sec"] == [10, 10]
+
+
+def test_publish_manual_plan_edit_preserves_user_markdown_and_contract_snapshot():
+    original = build_plan_markdown("video", VIDEO_FORM, {"title": "原始方向"})
+    edited_markdown = "# 用户修改后的方案\n\n## 任意自定义章节\n\n必须突出戒指的睡眠监测能力。"
+
+    published = publish_manual_plan_edit(
+        intent="video",
+        edited_plan_markdown=edited_markdown,
+        current_plan_version=1,
+        plan_history=original.plan_history,
+        creation_contract=original.creation_contract,
+        scene_durations_sec=original.scene_durations_sec,
+    )
+
+    assert published.plan_markdown == edited_markdown
+    assert published.plan_version == 2
+    assert published.creation_contract == original.creation_contract
+    assert published.scene_durations_sec == original.scene_durations_sec
+    assert published.plan_history[-1]["change_source"] == "manual_edit"
+    assert published.llm_used is False
+
+
+def test_publish_manual_plan_edit_uses_history_max_after_restore():
+    published = publish_manual_plan_edit(
+        intent="image",
+        edited_plan_markdown="# 手工编辑 v3",
+        current_plan_version=1,
+        plan_history=[
+            {"version": 1, "plan_markdown": "# v1"},
+            {"version": 2, "plan_markdown": "# v2"},
+        ],
+    )
+
+    assert published.plan_version == 3
+    assert [item["version"] for item in published.plan_history] == [1, 2, 3]

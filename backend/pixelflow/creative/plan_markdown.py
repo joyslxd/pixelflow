@@ -86,6 +86,7 @@ class PlanMarkdownResult:
         llm_used: bool | None = None,
         error: str | None = None,
         creation_contract: dict[str, Any] | None = None,
+        change_source: str | None = None,
     ) -> PlanMarkdownResult:
         history = _normalized_history(plan_history or self.plan_history)
         history_max = max((int(item["version"]) for item in history), default=0)
@@ -101,6 +102,7 @@ class PlanMarkdownResult:
                 restored_from_version,
                 creation_contract=next_contract,
                 scene_durations_sec=next_durations,
+                change_source=change_source,
             )
         )
         return replace(
@@ -116,6 +118,52 @@ class PlanMarkdownResult:
         )
 
 
+def publish_manual_plan_edit(
+    *,
+    intent: CreationIntent,
+    edited_plan_markdown: str,
+    current_plan_version: int,
+    plan_history: list[dict[str, Any]],
+    creation_contract: dict[str, Any] | None = None,
+    scene_durations_sec: list[int] | None = None,
+) -> PlanMarkdownResult:
+    """把用户编辑稿原样发布为新的权威 Plan 版本，不调用 LLM。"""
+    markdown = str(edited_plan_markdown or "").strip()
+    if not markdown:
+        raise ValueError("plan.md 内容不能为空")
+
+    contract = copy.deepcopy(creation_contract or {})
+    durations = copy.deepcopy(scene_durations_sec or [])
+    if intent == "video":
+        validated_contract = VideoCreationContract.model_validate(contract)
+        contract = validated_contract.model_dump(exclude_none=True)
+        expected_duration = validated_contract.video_duration_sec
+        if not durations:
+            durations = split_video_duration(expected_duration)
+        if (
+            any(not isinstance(value, int) or isinstance(value, bool) or not 4 <= value <= 15 for value in durations)
+            or sum(durations) != expected_duration
+        ):
+            raise ValueError("当前 Plan 的分镜时长快照与制作合同不一致，请重新生成 Plan")
+
+    base = PlanMarkdownResult(
+        output_type=intent,
+        plan_markdown=markdown,
+        template_path=_template_path(intent),
+        plan_version=max(1, current_plan_version),
+        plan_history=_normalized_history(plan_history),
+        creation_contract=contract,
+        scene_durations_sec=durations,
+        llm_used=False,
+    )
+    return base.next_version(
+        plan_markdown=markdown,
+        plan_history=plan_history,
+        current_version=current_plan_version,
+        creation_contract=contract,
+        change_source="manual_edit",
+        llm_used=False,
+    )
 def build_plan_markdown(
     intent: CreationIntent,
     form_values: dict[str, Any],
@@ -625,6 +673,7 @@ def _history_entry(
     *,
     creation_contract: dict[str, Any] | None = None,
     scene_durations_sec: list[int] | None = None,
+    change_source: str | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "version": version,
@@ -634,6 +683,8 @@ def _history_entry(
     }
     if restored_from_version is not None:
         item["restored_from_version"] = restored_from_version
+    if change_source:
+        item["change_source"] = change_source
     return item
 
 
