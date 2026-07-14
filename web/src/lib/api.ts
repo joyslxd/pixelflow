@@ -241,6 +241,25 @@ export interface CreativeDirectionsJobStatusResponse {
   message: string;
 }
 
+export interface PlanSceneBlueprint extends Record<string, unknown> {
+  scene_id: string;
+  scene_index: number;
+  title: string;
+  structure_role: string;
+  start_sec: number;
+  end_sec: number;
+  duration_sec: number;
+  storyline: string;
+  shot_description: string;
+  narration: string;
+  transition: string;
+  asset_requirements: {
+    characters: string[];
+    scenes: string[];
+    props: string[];
+  };
+}
+
 export interface PlanMarkdownResponse {
   output_type: CreationIntent;
   plan_markdown: string;
@@ -254,9 +273,11 @@ export interface PlanMarkdownResponse {
     restored_from_version?: number;
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
+    scene_blueprints?: PlanSceneBlueprint[];
   }>;
   creation_contract: Record<string, unknown>;
   scene_durations_sec: number[];
+  scene_blueprints: PlanSceneBlueprint[];
   llm_used: boolean;
   model_name: string;
   error: string | null;
@@ -1467,6 +1488,7 @@ export const api = {
     plan_history: PlanMarkdownResponse["plan_history"];
     revision_feedback: string;
     creation_contract?: Record<string, unknown>;
+    scene_blueprints?: PlanSceneBlueprint[];
     product_creative_profile?: Record<string, unknown>;
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
@@ -1480,6 +1502,7 @@ export const api = {
     restore_version: number;
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
+    scene_blueprints?: PlanSceneBlueprint[];
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/restore`, { method: "POST", body: JSON.stringify(body) }),
 
   prepareImageGeneration: (body: {
@@ -1579,6 +1602,7 @@ export const api = {
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
+    scene_blueprints?: PlanSceneBlueprint[];
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
   startPrepareScenePackagesJob: (body: {
@@ -1588,6 +1612,7 @@ export const api = {
     materials?: Array<Record<string, unknown>>;
     target_duration_ms?: number;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
+    scene_blueprints?: PlanSceneBlueprint[];
   }) =>
     req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
       method: "POST",

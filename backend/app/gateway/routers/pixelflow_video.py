@@ -68,6 +68,7 @@ class SceneGenerationItem(BaseModel):
     storyline: str = ""
     shot_description: dict[str, Any] = Field(default_factory=dict)
     narration: str = ""
+    transition: str = ""
     generation_mode: DirectVideoMode | None = None
     image_urls: list[str] = Field(default_factory=list)
     video_urls: list[str] = Field(default_factory=list)
@@ -91,6 +92,7 @@ class PrepareScenePackagesRequest(BaseModel):
     target_duration_ms: int = 30_000
     intake_context: dict[str, Any] = Field(default_factory=dict)
     creation_contract: VideoCreationContract | None = None
+    scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PrepareScenePackagesResponse(BaseModel):
@@ -470,6 +472,7 @@ async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) ->
         selected_direction=body.selected_direction,
         materials=body.materials,
         target_duration_ms=target_duration_ms,
+        scene_blueprints=body.scene_blueprints,
     )
     result["creation_contract"] = contract.model_dump() if contract is not None else None
     return PrepareScenePackagesResponse(**result)
@@ -1386,6 +1389,8 @@ def _build_scene_video_prompt(scene: SceneGenerationItem) -> str:
         pieces.append(f"镜头描述：{_shot_description_text(scene.shot_description)}")
     if scene.narration:
         pieces.append(f"旁白：{scene.narration}")
+    if scene.transition:
+        pieces.append(f"转场：{scene.transition}")
     return "\n".join(piece for piece in pieces if piece).strip()
 
 
@@ -1540,17 +1545,12 @@ def _with_video_memory(body: PrepareScenePackagesRequest, memories: list[Any]) -
     if memory_summary:
         selected_direction["semantic_memory"] = intake_context["semantic_memory"]
         selected_direction.setdefault("product_creative_profile", profile)
-    plan_markdown = body.plan_markdown
-    if memory_summary and memory_summary not in plan_markdown:
-        plan_markdown = f"{plan_markdown}\n\n长期记忆约束：{memory_summary}".strip()
-    return PrepareScenePackagesRequest(
-        form_values=body.form_values,
-        plan_markdown=plan_markdown,
-        selected_direction=selected_direction,
-        materials=body.materials,
-        target_duration_ms=body.target_duration_ms,
-        intake_context=intake_context,
-        creation_contract=body.creation_contract,
+    # 记忆只作为内部决策上下文，不能改写用户已审核的 plan.md；基于原模型更新也能保留新增合同字段。
+    return body.model_copy(
+        update={
+            "selected_direction": selected_direction,
+            "intake_context": intake_context,
+        }
     )
 
 

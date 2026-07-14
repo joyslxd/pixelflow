@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from pixelflow.creative.contract import VideoCreationContract, build_video_creation_contract, resolve_scene_image_spec
-from pixelflow.creative.duration import scene_time_ranges, split_video_duration
+from pixelflow.creative.duration import scene_time_ranges
 from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME, ModelFactory, generate_plan_payload, revise_plan_payload
-from pixelflow.memory import semantic_memory_text
+from pixelflow.creative.scene_blueprint import (
+    fallback_scene_blueprints,
+    normalize_scene_blueprints,
+    render_scene_blueprints_markdown,
+    repair_scene_blueprints_schedule,
+    scene_blueprint_durations,
+)
 
 CreationIntent = Literal["video", "image"]
 
@@ -38,6 +45,7 @@ class PlanMarkdownResult:
     plan_history: list[dict[str, Any]] = field(default_factory=list)
     creation_contract: dict[str, Any] = field(default_factory=dict)
     scene_durations_sec: list[int] = field(default_factory=list)
+    scene_blueprints: list[dict[str, Any]] = field(default_factory=list)
     llm_used: bool = False
     model_name: str = PLAN_LLM_MODEL_NAME
     error: str | None = None
@@ -55,6 +63,7 @@ class PlanMarkdownResult:
                         self.restored_from_version,
                         creation_contract=self.creation_contract,
                         scene_durations_sec=self.scene_durations_sec,
+                        scene_blueprints=self.scene_blueprints,
                     )
                 ],
             )
@@ -70,6 +79,7 @@ class PlanMarkdownResult:
             "plan_history": self.plan_history,
             "creation_contract": self.creation_contract,
             "scene_durations_sec": self.scene_durations_sec,
+            "scene_blueprints": self.scene_blueprints,
             "llm_used": self.llm_used,
             "model_name": self.model_name,
             "error": self.error,
@@ -86,14 +96,16 @@ class PlanMarkdownResult:
         llm_used: bool | None = None,
         error: str | None = None,
         creation_contract: dict[str, Any] | None = None,
+        scene_blueprints: list[dict[str, Any]] | None = None,
     ) -> PlanMarkdownResult:
         history = _normalized_history(plan_history or self.plan_history)
         history_max = max((int(item["version"]) for item in history), default=0)
         version = max(1, int(current_version or self.plan_version), history_max) + 1
-        next_contract = copy.deepcopy(
-            creation_contract if creation_contract is not None else self.creation_contract
-        )
+        next_contract = copy.deepcopy(creation_contract if creation_contract is not None else self.creation_contract)
         next_durations = copy.deepcopy(self.scene_durations_sec)
+        next_blueprints = copy.deepcopy(scene_blueprints if scene_blueprints is not None else self.scene_blueprints)
+        if next_blueprints:
+            next_durations = scene_blueprint_durations(next_blueprints)
         history.append(
             _history_entry(
                 version,
@@ -101,6 +113,7 @@ class PlanMarkdownResult:
                 restored_from_version,
                 creation_contract=next_contract,
                 scene_durations_sec=next_durations,
+                scene_blueprints=next_blueprints,
             )
         )
         return replace(
@@ -113,6 +126,7 @@ class PlanMarkdownResult:
             error=error,
             creation_contract=next_contract,
             scene_durations_sec=next_durations,
+            scene_blueprints=next_blueprints,
         )
 
 
@@ -129,7 +143,11 @@ def build_plan_markdown(
     profile = _merged_profile(product_creative_profile or {}, intake_context or {})
     issues = _consistency_issues(intent, form_values, selected_direction)
     if intent == "video":
-        contract, durations, corrections = _video_contract_and_durations(form_values)
+        contract, blueprints, corrections = _video_contract_and_blueprints(
+            form_values,
+            selected_direction,
+        )
+        durations = scene_blueprint_durations(blueprints)
         markdown = _fallback_video_plan(
             form_values,
             selected_direction,
@@ -138,6 +156,7 @@ def build_plan_markdown(
             intake_context or {},
             contract,
             durations,
+            blueprints,
         )
         return PlanMarkdownResult(
             output_type=intent,
@@ -146,6 +165,7 @@ def build_plan_markdown(
             consistency_issues=[*issues, *corrections],
             creation_contract=contract.model_dump(exclude_none=True),
             scene_durations_sec=durations,
+            scene_blueprints=blueprints,
         )
     markdown = _fallback_image_plan(form_values, selected_direction, profile, materials or [], intake_context or {})
     return PlanMarkdownResult(
@@ -174,12 +194,10 @@ async def build_plan_markdown_with_llm(
     issues = _consistency_issues(intent, form_values, selected_direction)
     contract: VideoCreationContract | None = None
     durations: list[int] = []
-    scene_timeline: list[dict[str, int]] = []
+    blueprints: list[dict[str, Any]] = []
     creation_contract = _image_creation_contract(form_values, context)
     if intent == "video":
         contract = build_video_creation_contract(form_values)
-        durations = split_video_duration(contract.video_duration_sec)
-        scene_timeline = _scene_timeline(durations)
         creation_contract = contract.model_dump(exclude_none=True)
     try:
         payload = await generate_plan_payload(
@@ -191,20 +209,42 @@ async def build_plan_markdown_with_llm(
             materials=materials or [],
             intake_context=context,
             creation_contract=creation_contract,
-            scene_timeline=scene_timeline,
             model_name=model_name,
             model_factory=model_factory,
         )
         markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, context)
         corrections: list[str] = []
         if contract is not None:
-            contract, corrections = resolve_scene_image_spec(
+            try:
+                blueprints = normalize_scene_blueprints(
+                    payload.get("scene_blueprints"),
+                    total_duration_sec=contract.video_duration_sec,
+                )
+            except ValueError as exc:
+                try:
+                    blueprints = repair_scene_blueprints_schedule(
+                        payload.get("scene_blueprints"),
+                        total_duration_sec=contract.video_duration_sec,
+                    )
+                    corrections.append(f"Plan LLM 分镜时长已按创作合同重新调度：{exc}")
+                except ValueError as repair_exc:
+                    blueprints = _fallback_blueprints(form_values, selected_direction, contract)
+                    corrections.append(f"Plan LLM 分镜蓝图已使用规则修正：{repair_exc}")
+            durations = scene_blueprint_durations(blueprints)
+            contract, image_corrections = resolve_scene_image_spec(
                 contract,
                 _text(payload.get("scene_image_ratio")),
                 _text(payload.get("scene_image_size")),
             )
+            corrections.extend(image_corrections)
             creation_contract = contract.model_dump(exclude_none=True)
-        markdown = _with_execution_contract(intent, markdown, creation_contract, durations)
+        markdown = _with_execution_contract(
+            intent,
+            markdown,
+            creation_contract,
+            durations,
+            scene_blueprints=blueprints,
+        )
         return PlanMarkdownResult(
             output_type=intent,
             plan_markdown=markdown,
@@ -212,6 +252,7 @@ async def build_plan_markdown_with_llm(
             consistency_issues=[*issues, *corrections],
             creation_contract=creation_contract,
             scene_durations_sec=durations,
+            scene_blueprints=blueprints,
             llm_used=True,
             model_name=model_name,
         )
@@ -230,6 +271,7 @@ async def revise_plan_markdown_with_llm(
     plan_history: list[dict[str, Any]],
     revision_feedback: str,
     creation_contract: dict[str, Any] | None = None,
+    current_scene_blueprints: list[dict[str, Any]] | None = None,
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> PlanMarkdownResult:
@@ -237,12 +279,18 @@ async def revise_plan_markdown_with_llm(
     base = build_plan_markdown(intent, form_values, selected_direction)
     contract: VideoCreationContract | None = None
     durations: list[int] = []
-    timeline: list[dict[str, int]] = []
+    blueprints: list[dict[str, Any]] = []
     authoritative_contract = dict(creation_contract or base.creation_contract)
     if intent == "video":
         contract = VideoCreationContract.model_validate(authoritative_contract or build_video_creation_contract(form_values).model_dump())
-        durations = split_video_duration(contract.video_duration_sec)
-        timeline = _scene_timeline(durations)
+        try:
+            blueprints = normalize_scene_blueprints(
+                current_scene_blueprints,
+                total_duration_sec=contract.video_duration_sec,
+            )
+        except ValueError:
+            blueprints = _fallback_blueprints(form_values, selected_direction, contract)
+        durations = scene_blueprint_durations(blueprints)
     try:
         payload = await revise_plan_payload(
             intent=intent,
@@ -252,26 +300,49 @@ async def revise_plan_markdown_with_llm(
             form_values=form_values,
             selected_direction=selected_direction,
             creation_contract=authoritative_contract,
-            scene_timeline=timeline,
+            current_scene_blueprints=blueprints,
             model_name=model_name,
             model_factory=model_factory,
         )
         markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, {})
         corrections: list[str] = []
         if contract is not None:
-            contract, corrections = resolve_scene_image_spec(
+            try:
+                blueprints = normalize_scene_blueprints(
+                    payload.get("scene_blueprints"),
+                    total_duration_sec=contract.video_duration_sec,
+                )
+            except ValueError as exc:
+                try:
+                    blueprints = repair_scene_blueprints_schedule(
+                        payload.get("scene_blueprints"),
+                        total_duration_sec=contract.video_duration_sec,
+                    )
+                    corrections.append(f"Plan LLM 修订分镜时长已按创作合同重新调度：{exc}")
+                except ValueError as repair_exc:
+                    corrections.append(f"Plan LLM 修订分镜蓝图已保留上一版本：{repair_exc}")
+            durations = scene_blueprint_durations(blueprints)
+            contract, image_corrections = resolve_scene_image_spec(
                 contract,
                 _text(payload.get("scene_image_ratio")) or contract.scene_image_ratio,
                 _text(payload.get("scene_image_size")) or contract.scene_image_size,
             )
+            corrections.extend(image_corrections)
             authoritative_contract = contract.model_dump(exclude_none=True)
-        markdown = _with_execution_contract(intent, markdown, authoritative_contract, durations)
+        markdown = _with_execution_contract(
+            intent,
+            markdown,
+            authoritative_contract,
+            durations,
+            scene_blueprints=blueprints,
+        )
         revised = replace(
             base,
             template_path=template_path,
             consistency_issues=corrections,
             creation_contract=authoritative_contract,
             scene_durations_sec=durations,
+            scene_blueprints=blueprints,
             llm_used=True,
             model_name=model_name,
         )
@@ -281,10 +352,17 @@ async def revise_plan_markdown_with_llm(
             current_version=current_plan_version,
             llm_used=True,
             creation_contract=authoritative_contract,
+            scene_blueprints=blueprints,
         )
     except Exception as exc:  # noqa: BLE001
         markdown = f"{current_plan_markdown.rstrip()}\n\n## 本次修改意见\n\n{revision_feedback.strip()}"
-        markdown = _with_execution_contract(intent, markdown, authoritative_contract, durations)
+        markdown = _with_execution_contract(
+            intent,
+            markdown,
+            authoritative_contract,
+            durations,
+            scene_blueprints=blueprints,
+        )
         return replace(base, error=str(exc), model_name=model_name).next_version(
             plan_markdown=markdown,
             plan_history=plan_history,
@@ -292,6 +370,7 @@ async def revise_plan_markdown_with_llm(
             llm_used=False,
             error=str(exc),
             creation_contract=authoritative_contract,
+            scene_blueprints=blueprints,
         )
 
 
@@ -304,6 +383,7 @@ def restore_plan_version(
     restore_version: int,
     creation_contract: dict[str, Any] | None = None,
     scene_durations_sec: list[int] | None = None,
+    scene_blueprints: list[dict[str, Any]] | None = None,
 ) -> PlanMarkdownResult:
     history = _normalized_history(plan_history)
     source = next((item for item in history if int(item.get("version") or 0) == restore_version), None)
@@ -311,11 +391,8 @@ def restore_plan_version(
         raise ValueError(f"plan.md v{restore_version} 不存在，无法回退")
     source_contract = source.get("creation_contract")
     source_durations = source.get("scene_durations_sec")
-    resolved_contract = (
-        copy.deepcopy(source_contract)
-        if "creation_contract" in source and isinstance(source_contract, dict)
-        else copy.deepcopy(creation_contract or {})
-    )
+    source_blueprints = source.get("scene_blueprints")
+    resolved_contract = copy.deepcopy(source_contract) if "creation_contract" in source and isinstance(source_contract, dict) else copy.deepcopy(creation_contract or {})
     resolved_durations = _resolve_history_scene_durations(
         intent,
         source,
@@ -323,27 +400,56 @@ def restore_plan_version(
         resolved_contract,
         scene_durations_sec,
     )
+    resolved_blueprints = _resolve_history_scene_blueprints(
+        intent,
+        source,
+        source_blueprints,
+        resolved_contract,
+        scene_blueprints,
+    )
+    if resolved_blueprints:
+        resolved_durations = scene_blueprint_durations(resolved_blueprints)
     return PlanMarkdownResult(
         output_type=intent,
-        plan_markdown=str(source.get("plan_markdown") or ""),
+        plan_markdown=_sanitize_user_facing_plan_markdown(str(source.get("plan_markdown") or "")),
         template_path=_template_path(intent),
         plan_version=restore_version,
         plan_history=history,
         creation_contract=resolved_contract,
         scene_durations_sec=resolved_durations,
+        scene_blueprints=resolved_blueprints,
         restored_from_version=restore_version,
     )
 
 
-def _video_contract_and_durations(form_values: dict[str, Any]) -> tuple[VideoCreationContract, list[int], list[str]]:
+def _video_contract_and_blueprints(
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+) -> tuple[VideoCreationContract, list[dict[str, Any]], list[str]]:
     contract = build_video_creation_contract(form_values)
-    durations = split_video_duration(contract.video_duration_sec)
     contract, corrections = resolve_scene_image_spec(
         contract,
         _text(form_values.get("scene_image_ratio")) or contract.video_ratio,
         _text(form_values.get("scene_image_size")) or "4K",
     )
-    return contract, durations, corrections
+    return contract, _fallback_blueprints(form_values, selected_direction, contract), corrections
+
+
+def _fallback_blueprints(
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    contract: VideoCreationContract,
+) -> list[dict[str, Any]]:
+    return fallback_scene_blueprints(
+        total_duration_sec=contract.video_duration_sec,
+        product_name=_text(form_values.get("product_info"), "产品"),
+        direction_description=_text(
+            selected_direction.get("description"),
+            _text(selected_direction.get("title"), "围绕产品完成卖点证明"),
+        ),
+        visual_style=contract.visual_style or "真实广告风格",
+        conversion_goal=_text(form_values.get("conversion_goal"), "完成转化"),
+    )
 
 
 def _fallback_video_plan(
@@ -354,6 +460,7 @@ def _fallback_video_plan(
     intake_context: dict[str, Any],
     contract: VideoCreationContract,
     durations: list[int],
+    blueprints: list[dict[str, Any]],
 ) -> str:
     product = _context_text_value(intake_context, "product_subject") or _text(form_values.get("product_info"), "未命名产品")
     category = _text(form_values.get("product_category"), "未分类")
@@ -363,15 +470,16 @@ def _fallback_video_plan(
     direction_description = _text(selected_direction.get("description"), "围绕产品卖点组织完整方案。")
     visual_style = contract.visual_style or "真实广告风格"
     anchor = _visual_anchor(selected_direction, profile)
-    memory = _memory_summary(profile, intake_context)
-    ranges = scene_time_ranges(durations)
     scene_lines = []
-    for index, ((start, end), duration) in enumerate(zip(ranges, durations, strict=True), start=1):
-        stage = _scene_stage(index, len(durations))
+    for blueprint in blueprints:
+        index = int(blueprint["scene_index"])
         scene_lines.append(
-            f"- 镜头{index}-「{_timecode(start)}-{_timecode(end)}」\n"
-            f"  - 画面：{stage}，围绕 {product} 与 {anchor} 推进，采用 {visual_style}，严格持续 {duration} 秒。\n"
-            f"  - 文案：围绕「{direction_description}」推进当前信息点；旁白与音效服务 {conversion_goal}。"
+            f"- 镜头{index}-「{_timecode(int(blueprint['start_sec']))}-{_timecode(int(blueprint['end_sec']))}」"
+            f"（{blueprint['structure_role']}，{blueprint['duration_sec']}秒）\n"
+            f"  - 故事线：{blueprint['storyline']}\n"
+            f"  - 镜头描述：{blueprint['shot_description']}\n"
+            f"  - 旁白：{blueprint['narration']}\n"
+            f"  - 转场：{blueprint['transition']}"
         )
     markdown = f"""# {product} — {direction_title}
 
@@ -388,7 +496,6 @@ def _fallback_video_plan(
 - **爆点机制**：开场建立冲突，中段完成产品证明，结尾收口到 {conversion_goal}
 - **人群**：{audience}
 - **依据**：{anchor}；素材：{_material_summary(materials)}
-- **长期记忆约束**：{memory or "暂无，按本次表单执行"}
 - **转化逻辑链**：痛点 -> 产品介入 -> 效果证明 -> {conversion_goal}
 
 ## 三、视频规格
@@ -422,7 +529,13 @@ def _fallback_video_plan(
 
 用 {audience} 的高频痛点和明确动作建立悬念，并在 3 秒内让用户理解观看理由。
 """
-    return _with_execution_contract("video", markdown, contract.model_dump(exclude_none=True), durations)
+    return _with_execution_contract(
+        "video",
+        markdown,
+        contract.model_dump(exclude_none=True),
+        durations,
+        scene_blueprints=blueprints,
+    )
 
 
 def _fallback_image_plan(
@@ -441,7 +554,6 @@ def _fallback_image_plan(
     size = _text(form_values.get("image_size"), "自动适配")
     image_type = _text(form_values.get("image_type"), "图片")
     anchor = _visual_anchor(selected_direction, profile)
-    memory = _memory_summary(profile, intake_context)
     count = _context_int_value(intake_context, "requested_output_count") or _positive_int(form_values.get("image_count"), 1)
     original_prompt = _context_text_value(intake_context, "source_prompt")
     industry_type = _context_text_value(intake_context, "industry_type") or "general"
@@ -464,7 +576,6 @@ def _fallback_image_plan(
 - **爆点机制**：主体聚焦、卖点清楚、风格统一
 - **人群与用途**：{usage}
 - **素材依据**：{_material_summary(materials)}
-- **长期记忆约束**：{memory or "暂无，按本次表单执行"}
 
 ## 三、图片规格
 
@@ -507,9 +618,13 @@ def _with_execution_contract(
     markdown: str,
     creation_contract: dict[str, Any],
     durations: list[int],
+    *,
+    scene_blueprints: list[dict[str, Any]] | None = None,
 ) -> str:
-    base = markdown.split("\n## 制作执行合同", 1)[0].rstrip()
+    base = _sanitize_user_facing_plan_markdown(markdown).split("\n## 制作执行合同", 1)[0].rstrip()
     if intent == "video":
+        if scene_blueprints:
+            base = _replace_video_scene_section(base, scene_blueprints)
         ranges = scene_time_ranges(durations)
         timeline = "\n".join(f"- 分镜{index}：{_timecode(start)}-{_timecode(end)}，{duration} 秒" for index, ((start, end), duration) in enumerate(zip(ranges, durations, strict=True), start=1))
         contract_block = f"""## 制作执行合同
@@ -543,6 +658,14 @@ def _with_execution_contract(
     return f"{base}\n\n{contract_block.strip()}\n"
 
 
+def _replace_video_scene_section(markdown: str, scene_blueprints: list[dict[str, Any]]) -> str:
+    """用通过合同校验的蓝图替换 LLM 正文镜头，保证用户只审核一条时间线。"""
+
+    pattern = re.compile(r"(?ms)^##\s*五、镜头列表\s*$.*?(?=^##\s|\Z)")
+    replacement = f"## 五、镜头列表\n\n{render_scene_blueprints_markdown(scene_blueprints)}\n\n"
+    return pattern.sub(replacement, markdown, count=1).rstrip()
+
+
 def _validated_llm_markdown(
     intent: CreationIntent,
     payload: dict[str, Any],
@@ -550,7 +673,7 @@ def _validated_llm_markdown(
     selected_direction: dict[str, Any],
     intake_context: dict[str, Any],
 ) -> str:
-    markdown = _text(payload.get("plan_markdown"))
+    markdown = _sanitize_user_facing_plan_markdown(_text(payload.get("plan_markdown")))
     if not markdown:
         raise ValueError("Plan LLM response is missing plan_markdown")
     missing = [section for section in _REQUIRED_TEMPLATE_SECTIONS[intent] if section not in markdown]
@@ -625,12 +748,14 @@ def _history_entry(
     *,
     creation_contract: dict[str, Any] | None = None,
     scene_durations_sec: list[int] | None = None,
+    scene_blueprints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "version": version,
         "plan_markdown": plan_markdown,
         "creation_contract": copy.deepcopy(creation_contract or {}),
         "scene_durations_sec": copy.deepcopy(scene_durations_sec or []),
+        "scene_blueprints": copy.deepcopy(scene_blueprints or []),
     }
     if restored_from_version is not None:
         item["restored_from_version"] = restored_from_version
@@ -659,21 +784,78 @@ def _resolve_history_scene_durations(
     resolved_contract: dict[str, Any],
     fallback_durations: list[int] | None,
 ) -> list[int]:
+    validated_fallback = _validated_history_duration_fallback(
+        intent,
+        fallback_durations,
+        resolved_contract,
+    )
     if "scene_durations_sec" not in source or not isinstance(source_durations, list):
-        return copy.deepcopy(fallback_durations or [])
+        return validated_fallback
     if intent == "video":
         expected_duration = resolved_contract.get("video_duration_sec")
         is_valid_duration = isinstance(expected_duration, int) and not isinstance(expected_duration, bool)
-        is_valid_scenes = all(
-            isinstance(value, int) and not isinstance(value, bool) and 4 <= value <= 15
-            for value in source_durations
-        )
+        is_valid_scenes = all(isinstance(value, int) and not isinstance(value, bool) and 4 <= value <= 15 for value in source_durations)
         if not is_valid_duration or not is_valid_scenes or sum(source_durations) != expected_duration:
-            return copy.deepcopy(fallback_durations or [])
+            return validated_fallback
     try:
         return [int(value) for value in source_durations]
     except (TypeError, ValueError):
-        return copy.deepcopy(fallback_durations or [])
+        return validated_fallback
+
+
+def _validated_history_duration_fallback(
+    intent: CreationIntent,
+    fallback_durations: list[int] | None,
+    resolved_contract: dict[str, Any],
+) -> list[int]:
+    values = copy.deepcopy(fallback_durations or [])
+    if intent != "video":
+        return values
+    expected_duration = resolved_contract.get("video_duration_sec")
+    if isinstance(expected_duration, bool) or not isinstance(expected_duration, int):
+        return []
+    if not values or not all(isinstance(value, int) and not isinstance(value, bool) and 4 <= value <= 15 for value in values):
+        return []
+    return values if sum(values) == expected_duration else []
+
+
+def _resolve_history_scene_blueprints(
+    intent: CreationIntent,
+    source: dict[str, Any],
+    source_blueprints: Any,
+    resolved_contract: dict[str, Any],
+    fallback_blueprints: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if intent != "video":
+        return []
+    total_duration = resolved_contract.get("video_duration_sec")
+    validated_fallback = _validated_history_blueprint_fallback(fallback_blueprints, total_duration)
+    if "scene_blueprints" not in source or not isinstance(source_blueprints, list):
+        return validated_fallback
+    if isinstance(total_duration, bool) or not isinstance(total_duration, int):
+        return []
+    try:
+        return normalize_scene_blueprints(
+            copy.deepcopy(source_blueprints),
+            total_duration_sec=total_duration,
+        )
+    except ValueError:
+        return validated_fallback
+
+
+def _validated_history_blueprint_fallback(
+    fallback_blueprints: list[dict[str, Any]] | None,
+    total_duration: Any,
+) -> list[dict[str, Any]]:
+    if not fallback_blueprints or isinstance(total_duration, bool) or not isinstance(total_duration, int):
+        return []
+    try:
+        return normalize_scene_blueprints(
+            copy.deepcopy(fallback_blueprints),
+            total_duration_sec=total_duration,
+        )
+    except ValueError:
+        return []
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -718,8 +900,39 @@ def _visual_anchor(selected_direction: dict[str, Any], product_creative_profile:
     return "产品质感、真实使用、转化动作"
 
 
-def _memory_summary(product_creative_profile: dict[str, Any], intake_context: dict[str, Any]) -> str:
-    return semantic_memory_text(product_creative_profile.get("semantic_memory")) or semantic_memory_text(intake_context.get("semantic_memory"))
+def _sanitize_user_facing_plan_markdown(markdown: str) -> str:
+    """保留记忆对策划的隐式影响，但不把内部记忆与运行日志展示给用户。"""
+
+    if not markdown:
+        return markdown
+    cleaned = re.sub(
+        r"(?ms)^#{1,6}\s*(?:长期记忆约束|内部记忆|PowerMem[^\n]*)\s*$.*?(?=^#{1,6}\s|\Z)",
+        "",
+        markdown,
+    )
+    internal_labels = ("长期记忆约束", "PowerMem 记忆", "语义记忆上下文")
+    internal_runtime_markers = (
+        "stage=",
+        "用户创作上下文",
+        "采集 Agent 完成意图识别",
+        "Skill 经验",
+        "Agent 阶段日志",
+    )
+    lines: list[str] = []
+    skipping_internal_item = False
+    for line in cleaned.splitlines():
+        if any(label in line for label in internal_labels):
+            skipping_internal_item = bool(re.match(r"^\s*[-*+]\s+", line))
+            continue
+        if skipping_internal_item:
+            if re.match(r"^\s*(?:[-*+]\s+|#{1,6}\s+)", line):
+                skipping_internal_item = False
+            else:
+                continue
+        if any(marker in line for marker in internal_runtime_markers):
+            continue
+        lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def _material_summary(materials: list[dict[str, Any]]) -> str:

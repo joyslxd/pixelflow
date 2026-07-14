@@ -66,7 +66,7 @@ flowchart TD
   IV --> DIR["生成 3 个创意方向"]
   DIR --> CHOOSE["用户手动选择方向<br/>可重新生成"]
   CHOOSE -->|"不满意，重新生成"| DIR
-  CHOOSE -->|"选择方向"| PLAN["策划 Agent<br/>按图片/视频独立模板调用 LLM 生成 plan.md v1"]
+  CHOOSE -->|"选择方向"| PLAN["策划 Agent<br/>视频加载 Seedance Skill<br/>生成 plan.md v1 + 权威分镜蓝图"]
   PLAN --> REVIEW["人工审核 plan.md<br/>手动同意、修订或回退"]
   REVIEW -->|"当前创意内修改"| REVISE["Plan LLM 修订<br/>生成 v2/v3..."]
   REVISE --> REVIEW
@@ -91,10 +91,10 @@ flowchart TD
 | Agent | Controller / Service | 输入 | 输出 | 备注 |
 | --- | --- | --- | --- | --- |
 | 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py` | 用户提示词、附件 materials、历史上下文 | intent、表单建议值、行业类型、数量、创意方向 | LLM 用 `deepseek-v4-pro`；视频会抽取总时长、画幅、视频模型、图片模型、用途和风格，但必须经用户表单确认后才能进入创意方向 |
-| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、模板路径、版本历史、最终生产合同、一致性问题 | 图片/视频使用独立模板并优先调用 `deepseek-v4-pro`；失败时生成同合同的确定性 Plan |
+| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频 Plan 同时加载 Seedance Skill，由 LLM 自主完成总分总结构、镜头调度和精确时长分配；失败时按叙事职能加权兜底 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景资产和分镜视频严格使用 Plan 合同；镜头描述应用 Seedance Prompt Skill；主流程仍是多场景片段生成后合并 |
+| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
@@ -122,8 +122,9 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
-| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板，调用 LLM 生成具体 plan.md；LLM 失败时按同一合同确定性兜底 |
-| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/duration.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒及精确总时长 |
+| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频同时加载 Seedance Skill，让 LLM 生成 plan.md 与结构化分镜蓝图 |
+| PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用时按叙事职能加权兜底 |
+| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构及精确总时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 在当前创意内修订 Plan，生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
 
@@ -134,7 +135,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
 backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 ```
 
-模板只是章节结构和信息密度范例。策划 Agent 必须结合当前表单、选中创意、行业画像、附件、语义记忆和创作合同重新生成内容，禁止把模板中的示例人物、产品或卖点复制到其他任务。前端统一把两类结果显示为 `plan.md`。
+模板只是章节结构和信息密度范例。策划 Agent 必须结合当前表单、选中创意、行业画像、附件、语义记忆和创作合同重新生成内容，禁止把模板中的示例人物、产品或卖点复制到其他任务。语义记忆只影响内部决策，禁止在 plan.md 中展示“长期记忆约束”、PowerMem、Skill/Agent 日志或记忆原文。前端统一把两类结果显示为 `plan.md`。
 
 ### 5.3 图片类 Skill
 
@@ -341,9 +342,9 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 | --- | --- | --- |
 | 采集意图识别 | 用用户提示词、附件、抽取字段检索 `preference/brand/skill` | 写入 `intake_context.semantic_memory` 和 `values.semantic_memory_context` |
 | 创意方向 | 用表单、行业画像、素材检索 `preference/brand/skill/experience` | 写入 `product_creative_profile.semantic_memory`，进入创意方向 LLM prompt |
-| plan.md | 用表单、创意方向、行业画像、素材检索 | plan.md 增加“长期记忆约束”和注意事项 |
+| plan.md | 用表单、创意方向、行业画像、素材检索 | 仅在 LLM 内部上下文中影响策划，不把记忆标签、原文或运行日志写入 plan.md |
 | 图片 prepare | 用表单、plan、素材、修改意见检索 | 图片 prompt 增加“长期记忆约束”，参与比例/上下文判断 |
-| 视频场景包 | 用表单、plan、素材、场景上下文检索 | 场景包 LLM prompt 和 plan 摘要追加长期记忆约束 |
+| 视频场景包 | 用表单、plan、素材、场景上下文检索 | 记忆只进入场景包 LLM 内部上下文，不改写已审核 plan.md；场景包消费权威蓝图 |
 | PPT 大纲 | 用 PPT 主题、风格、附件检索 | SmartPPT 大纲 topic 追加长期记忆约束 |
 | 旧 LangGraph 任务流 | 创建任务时检索 | 写入初始 state 的 `user_preferences.semantic_memory` |
 
@@ -539,8 +540,8 @@ sequenceDiagram
   FE->>IA: "已确认表单 + creation_contract"
   IA-->>FE: "3 个创意方向"
   U->>FE: "选择方向"
-  FE->>PA: "按 plan_video.md 调用 LLM 生成 plan.md"
-  PA-->>FE: "plan.md v1 + 最终生产合同 + 精确分镜时长"
+  FE->>PA: "按 plan_video.md + Seedance Skill 调用 LLM"
+  PA-->>FE: "plan.md v1 + 最终生产合同 + 权威 scene_blueprints"
   alt "当前创意内修改"
     U->>FE: "修改意见"
     FE->>PA: "POST /agent/flows/planning/plan/revise"
@@ -551,7 +552,7 @@ sequenceDiagram
   end
   FE->>VA: "prepare-scene-packages/start"
   FE->>FE: "保存 pendingScenePackageJob 到 conversation context"
-  VA->>VA: "按 Plan 精确时长和 Seedance Skill 生成 global_assets + scene_packages"
+  VA->>VA: "消费 Plan scene_blueprints，解析 global_assets + @引用"
   VA->>BG: "按合同 image_model/ratio/size 生成角色三视图、场景图、道具图"
   BG-->>VA: "参考图 URL"
   FE->>VA: "轮询 prepare-scene-packages/jobs/{job_id}"
@@ -584,9 +585,9 @@ Plan 审核与版本规则：
 - 重新生成新创意才调用 `/agent/flows/intake/directions` 返回新的 3 个方向。
 - 初始 Plan 是 v1；每次修订创建新版本，回退只直接激活所选历史版本并保持 `plan_history` 不变，不追加重复版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
-- 新版本历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照。回退时恢复所选版本的快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
+- 新版本历史条目保存 `creation_contract`、`scene_durations_sec` 与 `scene_blueprints` 快照。回退时恢复所选版本的快照；旧对话缺少蓝图时才使用兼容兜底。
 - 视频历史时长快照只接受非 `bool` 的整数，每段 4-15 秒且总和必须等于该历史版本合同的 `video_duration_sec`；任一字段非法时整组沿用当前权威分镜时长。图片显式空快照继续合法。
-- 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同与分镜时长，并统一由 `makeSnapshot()` 写入 conversation context，避免 400ms 自动保存覆盖回退结果。
+- 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同、分镜时长与权威蓝图，并统一由 `makeSnapshot()` 写入 conversation context，避免自动保存覆盖回退结果或恢复后重新切镜。
 - Plan 消息以 `conversation_id + client_message_id` 幂等保存；同一对话在网络结果未知后重试只返回既有消息，且必须先确认消息落库再更新 context。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。

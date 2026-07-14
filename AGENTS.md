@@ -291,7 +291,9 @@ SmartPPT接口：
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择场景资产图片比例和清晰度；前端把所选模型支持的 `aspect_ratios/sizes` 作为 `image_model_capabilities` 提交。
 - 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
-- 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。Plan 优先调用 `deepseek-v4-pro` 生成具体内容，失败时才使用同合同的确定性兜底。
+- 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。视频 Plan 优先调用 `deepseek-v4-pro` 并加载 `skills/seedance-prompt/SKILL.md`，由 LLM 自主生成总分总 `scene_blueprints`，不得预先按 10 秒机械切分；失败时才使用同合同的叙事职能加权兜底。
+- `scene_blueprints` 是 Plan 阶段的权威脚本合同，包含叙事职能、连续起止秒、时长、故事线、Seedance 镜头描述、旁白、转场和资产需求。它必须随 Plan artifact、每个历史版本、conversation context 和 `pendingScenePackageJob.request` 持久化。
+- PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
 - 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
 - `/agent/flows/planning/plan/restore` 直接激活所选历史版本并保持既有历史不变，不追加重复版本；回退后的激活版本会持久化到 conversation context，刷新或重新进入对话后继续展示该版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
@@ -301,6 +303,7 @@ SmartPPT接口：
 
 - 每个片段最少 4 秒，最多 15 秒。
 - 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
+- 场景包必须消费当前激活 Plan 的 `scene_blueprints`，不得再按总时长重新切分或重写故事线；只负责生成全局资产并把资产需求解析为 `@asset_id` 和 mentions。历史对话没有蓝图时才允许使用兼容兜底。
 - 全局固定资产：`characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须生成同一人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、卖点物件必须进入 `props`，不能放进 `characters`。

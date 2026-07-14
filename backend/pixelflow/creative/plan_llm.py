@@ -8,6 +8,8 @@ import re
 from collections.abc import Callable
 from typing import Any, Literal
 
+from pixelflow.generate.seedance_prompt import load_seedance_guidance
+
 PLAN_LLM_MODEL_NAME = "deepseek-v4-pro"
 CreationIntent = Literal["video", "image"]
 ModelFactory = Callable[..., Any]
@@ -23,7 +25,6 @@ async def generate_plan_payload(
     materials: list[dict[str, Any]],
     intake_context: dict[str, Any],
     creation_contract: dict[str, Any],
-    scene_timeline: list[dict[str, int]],
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> dict[str, Any]:
@@ -36,7 +37,6 @@ async def generate_plan_payload(
         materials=materials,
         intake_context=intake_context,
         creation_contract=creation_contract,
-        scene_timeline=scene_timeline,
     )
     payload = await asyncio.to_thread(
         _invoke_json_model,
@@ -58,7 +58,7 @@ async def revise_plan_payload(
     form_values: dict[str, Any],
     selected_direction: dict[str, Any],
     creation_contract: dict[str, Any],
-    scene_timeline: list[dict[str, int]],
+    current_scene_blueprints: list[dict[str, Any]] | None = None,
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> dict[str, Any]:
@@ -66,21 +66,44 @@ async def revise_plan_payload(
 只修改当前创意对应的 plan.md，不要生成新的创意方向。
 
 硬约束：
-1. 用户确认过的创作合同不可被擅自覆盖；视频镜头必须严格使用给定时间线。
-2. 视频每个分镜 4-15 秒，总和必须等于 video_duration_sec。
+1. 用户确认过的创作合同不可被擅自覆盖。
+2. 视频每个分镜 4-15 秒，总和必须等于 video_duration_sec；根据修改后的内容重新调度时长，不得机械按 10 秒等分。
 3. scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 4. 模板中的苹果PRO、林晓、赵总监等内容只是结构示例，禁止复制到当前方案。
-5. 返回 JSON，不要 Markdown 代码围栏。
+5. 视频必须返回完整 scene_blueprints，并形成开场、展开、证明/高潮、收束的总分总结构。
+6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill。
+7. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
+8. 返回 JSON，不要 Markdown 代码围栏。
 
 输出：
-{{"plan_markdown":"完整修订版 plan.md","scene_image_ratio":"仅视频返回","scene_image_size":"仅视频返回"}}
+{{
+  "plan_markdown":"完整修订版 plan.md",
+  "scene_image_ratio":"仅视频返回",
+  "scene_image_size":"仅视频返回",
+  "scene_blueprints":[{{
+    "scene_id":"scene-1",
+    "scene_index":1,
+    "title":"分镜标题",
+    "structure_role":"opening|development|climax|conclusion",
+    "start_sec":0,
+    "end_sec":6,
+    "duration_sec":6,
+    "storyline":"故事线",
+    "shot_description":"0-6秒: 整段镜头描述",
+    "narration":"旁白或本分镜无旁白",
+    "transition":"转场",
+    "asset_requirements":{{"characters":[],"scenes":[],"props":[]}}
+  }}]
+}}
 
 产物类型：{intent}
 修改意见：{revision_feedback.strip()}
 表单：{_json(form_values)}
 当前创意：{_json(selected_direction)}
 创作合同：{_json(creation_contract)}
-精确镜头时间线：{_json(scene_timeline)}
+当前分镜蓝图：{_json(current_scene_blueprints or [])}
+Seedance Skill：
+{load_seedance_guidance() if intent == "video" else "图片任务不适用"}
 模板结构示例：
 {template_markdown}
 
@@ -108,15 +131,21 @@ def _generation_prompt(
     materials: list[dict[str, Any]],
     intake_context: dict[str, Any],
     creation_contract: dict[str, Any],
-    scene_timeline: list[dict[str, int]],
 ) -> str:
     video_rules = ""
     if intent == "video":
-        video_rules = """
-- 必须严格采用“精确镜头时间线”，不得增加、删除、重叠或改变任何镜头时长。
-- 每个镜头时长必须是 4-15 秒，总时长必须精确等于 video_duration_sec。
+        video_rules = f"""
+- 你负责在 Plan 阶段自主决定分镜数量和每个分镜时长，不会收到预先按 10 秒切好的时间线。
+- 每个镜头时长必须是 4-15 秒整数，总时长必须精确等于 video_duration_sec；根据故事密度、动作复杂度、旁白长度和转场合理分配，禁止机械等分。
+- 输出前必须检查 `4 * 分镜数 <= video_duration_sec <= 15 * 分镜数`，开场和结尾/CTA 也不得少于 4 秒。
+- 整片采用总分总结构：开场建立钩子，展开推进因果，证明/高潮完成卖点验证，结尾收束结果和转化。
+- 返回完整 scene_blueprints；全局 start_sec/end_sec 必须从 0 开始连续，shot_description 使用当前分镜内部的局部秒段。
+- 每个蓝图包含 scene_id、scene_index、title、structure_role、start_sec、end_sec、duration_sec、storyline、shot_description、narration、transition、asset_requirements。
+- asset_requirements 只写语义名称，人物放 characters，环境放 scenes，商品/包装/工具放 props；此阶段不虚构图片 URL。
 - plan.md 必须写明视频模型、图片模型、图片比例、图片清晰度。
 - scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
+\nSeedance Skill 强制指导：
+{load_seedance_guidance()}
 """
     return f"""你是 PixelFlow 策划 Agent 的 PlanTemplateFillSkill。
 请根据当前用户数据，参照给定模板的章节结构和信息密度，生成一份全新的 plan.md。
@@ -125,11 +154,12 @@ def _generation_prompt(
 1. 模板是结构示例，不是当前业务数据。苹果PRO、林晓、赵总监、周洋以及示例卖点不得出现在结果中，除非当前用户数据明确包含。
 2. 用户表单和 creation_contract 是权威合同；不得按模板里的 180 秒、9:16 或示例模型擅自猜测。
 3. 后续图片、分镜资产和视频都会严格按此 plan.md 执行，因此内容必须完整、具体、无占位符。
-4. 只返回 JSON，不要解释，不要 Markdown 代码围栏。
+4. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
+5. 只返回 JSON，不要解释，不要 Markdown 代码围栏。
 {video_rules}
 
 输出：
-{{"plan_markdown":"完整 plan.md","scene_image_ratio":"仅视频返回","scene_image_size":"仅视频返回"}}
+{{"plan_markdown":"完整 plan.md","scene_image_ratio":"仅视频返回","scene_image_size":"仅视频返回","scene_blueprints":"视频任务返回完整分镜蓝图数组"}}
 
 产物类型：{intent}
 用户表单：{_json(form_values)}
@@ -138,7 +168,6 @@ def _generation_prompt(
 采集上下文：{_json(intake_context)}
 附件摘要：{_json(materials)}
 创作合同：{_json(creation_contract)}
-精确镜头时间线：{_json(scene_timeline)}
 
 模板结构示例：
 {template_markdown}

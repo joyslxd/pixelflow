@@ -98,6 +98,7 @@ export interface ScenePackageRecord {
   storyline?: string;
   prompt: string;
   narration?: string;
+  transition?: string;
   shot_description?: Record<string, unknown>;
   revision_contract?: string;
   reference_asset_ids?: string[];
@@ -115,6 +116,7 @@ export interface ScenePackagePatch {
   storyline?: string;
   prompt?: string;
   narration?: string;
+  transition?: string;
   duration_ms?: number | string;
   shot_description?: Record<string, unknown>;
   reference_asset_ids?: string[];
@@ -136,6 +138,7 @@ export interface SceneGenerationPayloadLike {
   storyline?: string;
   shot_description?: Record<string, unknown>;
   narration?: string;
+  transition?: string;
   generation_mode?: string | null;
   image_urls?: string[];
   video_urls?: string[];
@@ -446,6 +449,7 @@ export function sceneGenerationPayloadFromPackage(
     storyline: scene.storyline,
     shot_description: scene.shot_description,
     narration: scene.narration,
+    transition: scene.transition,
     generation_mode: scene.generation_mode,
     image_urls: options.edited ? collectExplicitSceneGenerationImageUrls(scene, globalAssets) : collectSceneGenerationImageUrls(scene, globalAssets),
     video_urls: scene.video_urls || [],
@@ -673,6 +677,7 @@ function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch
   if (patch.storyline !== undefined) normalized.storyline = patch.storyline;
   if (patch.prompt !== undefined) normalized.prompt = patch.prompt;
   if (patch.narration !== undefined) normalized.narration = patch.narration;
+  if (patch.transition !== undefined) normalized.transition = patch.transition;
   if (patch.shot_description !== undefined) normalized.shot_description = patch.shot_description;
   if (patch.reference_asset_ids !== undefined) normalized.reference_asset_ids = patch.reference_asset_ids;
   if (patch.generation_mode !== undefined) normalized.generation_mode = patch.generation_mode;

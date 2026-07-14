@@ -66,6 +66,7 @@ class PlanMarkdownResponse(BaseModel):
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
+    scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
     llm_used: bool = False
     model_name: str = "deepseek-v4-pro"
     error: str | None = None
@@ -78,6 +79,7 @@ class PlanRevisionRequest(PlanMarkdownRequest):
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     revision_feedback: str = Field(min_length=1)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
+    scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PlanRestoreRequest(BaseModel):
@@ -88,6 +90,7 @@ class PlanRestoreRequest(BaseModel):
     restore_version: int = Field(ge=1)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
+    scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -149,6 +152,7 @@ async def revise_plan_markdown(body: PlanRevisionRequest, request: Request) -> P
         plan_history=body.plan_history,
         revision_feedback=body.revision_feedback,
         creation_contract=body.creation_contract,
+        current_scene_blueprints=body.scene_blueprints,
     )
     record_power_mem_background(
         power_mem_service(request),
@@ -176,5 +180,6 @@ async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownRespons
         restore_version=body.restore_version,
         creation_contract=body.creation_contract,
         scene_durations_sec=body.scene_durations_sec,
+        scene_blueprints=body.scene_blueprints,
     )
     return PlanMarkdownResponse(**result.to_dict())

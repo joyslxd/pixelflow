@@ -85,6 +85,9 @@ def test_planning_router_creates_reviewable_plan_markdown():
     assert data["plan_version"] == 1
     assert data["creation_contract"]["video_duration_sec"] == 180
     assert sum(data["scene_durations_sec"]) == 180
+    assert data["scene_blueprints"]
+    assert [item["duration_sec"] for item in data["scene_blueprints"]] == data["scene_durations_sec"]
+    assert data["plan_history"][0]["scene_blueprints"] == data["scene_blueprints"]
 
 
 def test_planning_router_preserves_complete_intake_context_for_image_plan():
@@ -309,7 +312,7 @@ def test_planning_router_preserves_explicit_empty_image_snapshots():
     assert data["scene_durations_sec"] == []
 
 
-def test_planning_router_uses_power_mem_context_in_plan():
+def test_planning_router_uses_power_mem_context_without_exposing_internal_memory():
     from app.gateway.routers import pixelflow_planning
     from pixelflow.memory import SemanticMemoryItem
 
@@ -346,4 +349,6 @@ def test_planning_router_uses_power_mem_context_in_plan():
         )
 
     assert response.status_code == 200
-    assert "品牌长期偏好：真实摄影，高级感，不要价格文字。" in response.json()["plan_markdown"]
+    plan_markdown = response.json()["plan_markdown"]
+    assert "长期记忆约束" not in plan_markdown
+    assert "品牌长期偏好：真实摄影，高级感，不要价格文字。" not in plan_markdown

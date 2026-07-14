@@ -80,6 +80,7 @@ function sampleScenes() {
       storyline: "旧故事线",
       prompt: "旧提示词",
       narration: "旧旁白",
+      transition: "动作匹配剪辑到下一镜。",
       image_urls: ["https://x/material.png"],
       shot_description: {
         time_range: "00:00-00:08",
@@ -282,6 +283,7 @@ test("sceneGenerationPayloadFromPackage keeps original package behavior for uned
   const payload = sceneGenerationPayloadFromPackage(scene, sampleGlobalAssets());
 
   assert.equal(payload.prompt, scene.prompt);
+  assert.equal(payload.transition, "动作匹配剪辑到下一镜。");
   assert.deepEqual(payload.image_urls, [
     "https://x/material.png",
     "https://x/global-role.png",

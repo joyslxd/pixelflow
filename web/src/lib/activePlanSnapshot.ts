@@ -1,9 +1,12 @@
+import type { PlanSceneBlueprint } from "./api";
+
 export interface ActivePlanHistoryEntry {
   version: number;
   plan_markdown: string;
   restored_from_version?: number;
   creation_contract?: Record<string, unknown>;
   scene_durations_sec?: number[];
+  scene_blueprints?: PlanSceneBlueprint[];
 }
 
 export interface ActivePlanSnapshot {
@@ -13,6 +16,7 @@ export interface ActivePlanSnapshot {
   plan_history: ActivePlanHistoryEntry[];
   creation_contract: Record<string, unknown>;
   scene_durations_sec: number[];
+  scene_blueprints: PlanSceneBlueprint[];
   restored_from_version: number | null;
 }
 
@@ -28,6 +32,7 @@ interface PlanSnapshotMessage {
       plan_history: ActivePlanHistoryEntry[];
       creation_contract: Record<string, unknown>;
       scene_durations_sec: number[];
+      scene_blueprints?: PlanSceneBlueprint[];
       restored_from_version: number | null;
     };
   };
@@ -57,6 +62,7 @@ export function activePlanSnapshotForConversation(
       plan_history: snapshotClone(plan.plan_history),
       creation_contract: snapshotClone(plan.creation_contract),
       scene_durations_sec: snapshotClone(plan.scene_durations_sec),
+      scene_blueprints: snapshotClone(plan.scene_blueprints || []),
       restored_from_version: plan.restored_from_version,
     };
   }

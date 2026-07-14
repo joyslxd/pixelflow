@@ -9,7 +9,7 @@ const moduleUrl = process.env.ACTIVE_PLAN_SNAPSHOT_TEST_MODULE
 
 const { activePlanSnapshotForConversation } = await import(moduleUrl);
 
-function planMessage({ id, conversationId, version, history, contract, durations, restoredFromVersion = null }) {
+function planMessage({ id, conversationId, version, history, contract, durations, blueprints = [], restoredFromVersion = null }) {
   return {
     id,
     conversationId,
@@ -32,6 +32,7 @@ function planMessage({ id, conversationId, version, history, contract, durations
         plan_history: history,
         creation_contract: contract,
         scene_durations_sec: durations,
+        scene_blueprints: blueprints,
         llm_used: true,
         model_name: "deepseek-v4-pro",
         error: null,
@@ -70,6 +71,7 @@ test("回退后的最后一条 Plan artifact 派生完整 active Plan 自动保�
       history,
       contract: { video_duration_sec: 20, video_model: "seedance-1.5-pro" },
       durations: [10, 10],
+      blueprints: [{ scene_id: "scene-1", duration_sec: 10 }, { scene_id: "scene-2", duration_sec: 10 }],
       restoredFromVersion: 1,
     }),
   ];
@@ -83,6 +85,7 @@ test("回退后的最后一条 Plan artifact 派生完整 active Plan 自动保�
     plan_history: history,
     creation_contract: { video_duration_sec: 20, video_model: "seedance-1.5-pro" },
     scene_durations_sec: [10, 10],
+    scene_blueprints: [{ scene_id: "scene-1", duration_sec: 10 }, { scene_id: "scene-2", duration_sec: 10 }],
     restored_from_version: 1,
   });
 });
