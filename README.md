@@ -18,7 +18,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
-| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md，支持版本化修订与回退；LLM 失败时按同一创作合同兜底 |
+| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频 Plan 同时应用 Seedance Skill 生成权威分镜蓝图，支持版本化修订与回退 |
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
@@ -85,7 +85,7 @@ flowchart TD
   E --> J["按当前 Plan 和创作合同生成可编辑视频场景包"]
   J --> K["按 Plan 指定图片模型、比例、清晰度生成角色三视图、场景图、道具图"]
   K --> L["前端编辑故事线、镜头描述、旁白和 @参考图"]
-  L --> M["按 Seedance Prompt 和视频合同并行生成场景视频"]
+  L --> M["按 Seedance Prompt 和视频合同串行创建场景视频任务"]
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
   F --> P["返回分析结果"]
@@ -252,8 +252,9 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认解析成 `seedance-2.0`，并向用户展示实际结果。这里的 2.0 只是推荐默认值，不是 Seedance Prompt Skill 的调用开关。
 - 模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准，PixelFlow 不根据型号名称自行推断能力。
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。表单不展示图片比例和清晰度，只把所选模型及其能力范围提交给 Plan Agent。
-- Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`。不合法输出会被后端修正为合法值，并记录一致性提示。
+- Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`，并应用 Seedance Skill 自主规划 `scene_blueprints`。每个蓝图包含叙事职能、精确时长、故事线、镜头描述、旁白、转场和资产需求；不再预先按 10 秒机械切分。
 - 优先级固定为“用户确认值 > LLM 预填值 > 系统默认值”。Plan、场景包、场景资产和场景视频只读取当前激活 Plan 的最终 `creation_contract`。
+- PowerMem 长期记忆只作为 LLM 的内部决策上下文，不得把“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文展示在 plan.md 中。
 
 图片和视频分别使用：
 
@@ -262,7 +263,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
 ```
 
-Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重新生成新创意”才重新返回 3 个方向。`/agent/flows/planning/plan/restore` 回退时直接激活所选历史版本并保持既有历史不变，不追加重复版本。回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。每个新历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
+Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重新生成新创意”才重新返回 3 个方向。`/agent/flows/planning/plan/restore` 回退时直接激活所选历史版本并保持既有历史不变，不追加重复版本。回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。每个新历史条目保存 `creation_contract`、`scene_durations_sec` 和 `scene_blueprints` 快照；旧对话缺少蓝图时才按当前合同使用规则兜底。
 
 ## 视频场景包规则
 
@@ -270,6 +271,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 
 - 每个场景片段最少 4 秒，最多 15 秒。
 - 所有分镜整数秒时长总和必须精确等于用户确认的 `video_duration_sec`；300 秒任务允许产生超过 18 个分镜。
+- 场景包直接消费当前 Plan 的权威 `scene_blueprints`，保留其故事线、镜头描述、旁白、转场和时长，只负责把语义资产需求解析成全局素材及 `@asset_id`；不得重新编写另一套故事。
 - 全局固定资产是 `characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、书包、球、床垫等非人物主体放到 `props`。
@@ -288,7 +290,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时配置为准，Python 侧不再用硬编码模型白名单拦截用户已确认的参数。content-app 图片编辑请求里 `size` 表示比例，`imageSize` 表示清晰度，网关会保持两者分离。图片编辑失败后，重新生成会先回到模型、尺寸和清晰度确认卡，避免继续复用失败参数。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
 - 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。生成结果会同步回填到原 `video_scene_packages` 卡片；用户继续点击原来的“查看分镜”时，右侧 `StoryboardPanel` 的镜头预览优先展示已生成的分镜视频。用户只修改某几个分镜后再次确认生成时，仅重生成这些已修改分镜，未修改分镜复用旧视频，再按分镜顺序重新合并并回填原场景包。
-- 场景视频生成 job 内部会并行生成分镜视频，当前最多 100 个分镜同时调用 content-app；所有分镜都结束后再统一判断。全部成功时按 `scene_index` 合并；前端通过 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，并把 `pendingVideoJob.kind="video_merge"` 写入对话上下文，用户切走或刷新后只恢复轮询已有 job；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`；多个分镜合并时 content-app 会同步完成下载、ffmpeg 合并和上传，PixelFlow 使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并接口读等待，默认 1 小时；合并异常时 job 返回 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端据此展示“视频合并失败”而不是“合并完成”；部分异常时返回 `failed_scenes` 和每个失败原因，重试只提交失败分镜；部分额度不足时整批只提示一次额度不足，充值后同样只重试额度暂停或异常分镜。
+- 场景视频生成 job 内部可以并发调度多个分镜，但所有会创建 content-app 计费生成任务的 POST 都经 `run_generation.py` 串行提交；前一个创建接口返回 taskId 并完成 content-app 扣费确认后，才创建下一个图片或视频任务，后续 `/api/task/{taskId}/status` 轮询可以并行等待。所有分镜都结束后再统一判断。全部成功时按 `scene_index` 合并；前端通过 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，并把 `pendingVideoJob.kind="video_merge"` 写入对话上下文，用户切走或刷新后只恢复轮询已有 job；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`；多个分镜合并时 content-app 会同步完成下载、ffmpeg 合并和上传，PixelFlow 使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并接口读等待，默认 1 小时；合并异常时 job 返回 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端据此展示“视频合并失败”而不是“合并完成”；部分异常时返回 `failed_scenes` 和每个失败原因，重试只提交失败分镜；部分额度不足时整批只提示一次额度不足，充值后同样只重试额度暂停或异常分镜。
 - 视频 QAAgent QC 通过 `/agent/flows/video/quality-review/start` 启动异步 job，再轮询 `/agent/flows/video/quality-review/jobs/{job_id}`，避免浏览器或网关长连接超时。QC 失败时 job 返回 `status=failed` 并保留 content-app 原始错误；content-app 会把长视频压成完整时序的低码率质检预览再送入模型，避免 300 秒级成片直接 base64 后超过模型请求体限制。
 - 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 连续完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即把 `pendingScenePackageJob` / `pending_scene_package_job` 写入 conversation context；用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/jobs/{job_id}`，不会重复启动生成。参考图失败或额度不足时，job 返回已生成场景包和 `sceneAssetFailures`，前端展示可继续的场景包卡片。
 - 场景包卡片上的“继续生成参考图/重新生成参考图”调用 `/agent/flows/video/generate-scene-assets/start`，同样保存 `pendingScenePackageJob` 并恢复轮询；网关重启导致 job 404 时只提示手动重试，不自动重启，避免重复计费。

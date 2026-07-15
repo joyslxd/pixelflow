@@ -19,6 +19,7 @@ from pixelflow.creative.duration import (
     scene_time_ranges,
     split_video_duration,
 )
+from pixelflow.creative.scene_blueprint import normalize_scene_blueprints
 from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_seedance_guidance
 
 DEFAULT_TARGET_DURATION_MS = 30_000
@@ -34,11 +35,15 @@ def prepare_video_scene_packages(
     selected_direction: dict[str, Any] | None = None,
     materials: list[dict[str, Any]] | None = None,
     target_duration_ms: int = DEFAULT_TARGET_DURATION_MS,
+    scene_blueprints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
-    duration_ms, durations = _exact_scene_durations_ms(target_duration_ms)
+    duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
+        target_duration_ms,
+        scene_blueprints,
+    )
     scene_count = len(durations)
 
     product_name = _first_text(
@@ -65,22 +70,35 @@ def prepare_video_scene_packages(
     elapsed_ms = 0
     for index, duration in enumerate(durations, start=1):
         stage = stage_templates[index - 1]
-        storyline = (
-            f"{stage['story_prefix']}：围绕{product_name}，面向{target_audience}，"
-            f"结合{direction_title}表达{plan_summary}"
-        )
-        narration = stage["narration"].format(
-            product_name=product_name,
-            product_category=product_category,
-            conversion_goal=conversion_goal,
+        blueprint = authoritative_blueprints[index - 1] if authoritative_blueprints else None
+        storyline = str(blueprint["storyline"]) if blueprint else (f"{stage['story_prefix']}：围绕{product_name}，面向{target_audience}，结合{direction_title}表达{plan_summary}")
+        narration = (
+            str(blueprint["narration"])
+            if blueprint
+            else stage["narration"].format(
+                product_name=product_name,
+                product_category=product_category,
+                conversion_goal=conversion_goal,
+            )
         )
         reference_asset_ids = _default_reference_asset_ids(global_assets, stage["asset_id"])
-        shot_description = _default_shot_description(
-            stage=stage,
-            start_ms=elapsed_ms,
-            duration_ms=duration,
-            reference_asset_ids=reference_asset_ids,
-            global_assets=global_assets,
+        shot_description = (
+            _normalize_shot_description(
+                {"text": str(blueprint["shot_description"])},
+                stage=stage,
+                start_ms=elapsed_ms,
+                duration_ms=duration,
+                reference_asset_ids=reference_asset_ids,
+                global_assets=global_assets,
+            )
+            if blueprint
+            else _default_shot_description(
+                stage=stage,
+                start_ms=elapsed_ms,
+                duration_ms=duration,
+                reference_asset_ids=reference_asset_ids,
+                global_assets=global_assets,
+            )
         )
         prompt = _build_scene_prompt(
             product_name=product_name,
@@ -100,13 +118,14 @@ def prepare_video_scene_packages(
             {
                 "scene_id": f"scene-{index}",
                 "scene_index": index,
-                "title": stage["name"],
+                "title": str(blueprint["title"]) if blueprint else stage["name"],
                 "duration_ms": duration,
                 "storyline": storyline,
                 "shot_description": shot_description,
                 "reference_asset_ids": reference_asset_ids,
                 "prompt": prompt,
                 "narration": narration,
+                "transition": str(blueprint["transition"]) if blueprint else "按动作完成点衔接下一镜头。",
                 "image_urls": material_urls,
                 "video_urls": [],
                 "audio_urls": [],
@@ -131,6 +150,7 @@ async def prepare_video_scene_packages_with_llm(
     selected_direction: dict[str, Any] | None = None,
     materials: list[dict[str, Any]] | None = None,
     target_duration_ms: int = DEFAULT_TARGET_DURATION_MS,
+    scene_blueprints: list[dict[str, Any]] | None = None,
     *,
     model_name: str = SCENE_PACKAGE_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
@@ -138,7 +158,10 @@ async def prepare_video_scene_packages_with_llm(
     """用 LLM 生成视频场景包，失败时降级到规则版场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
-    duration_ms, durations = _exact_scene_durations_ms(target_duration_ms)
+    duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
+        target_duration_ms,
+        scene_blueprints,
+    )
     scene_count = len(durations)
     try:
         payload = await asyncio.to_thread(
@@ -150,13 +173,22 @@ async def prepare_video_scene_packages_with_llm(
                 materials=materials,
                 target_duration_ms=duration_ms,
                 durations=durations,
+                scene_blueprints=authoritative_blueprints,
             ),
             model_name,
             model_factory or _default_model_factory,
         )
         stage_templates = _stage_templates(scene_count)
         global_assets = _normalize_llm_global_assets(payload, form_values, selected_direction, stage_templates)
-        scenes = _normalize_llm_scene_packages(payload, durations, form_values, selected_direction, materials, global_assets)
+        scenes = _normalize_llm_scene_packages(
+            payload,
+            durations,
+            form_values,
+            selected_direction,
+            materials,
+            global_assets,
+            scene_blueprints=authoritative_blueprints,
+        )
         if len(scenes) != scene_count:
             raise ValueError(f"LLM scene package count mismatch: expected {scene_count}, got {len(scenes)}")
         return {
@@ -177,6 +209,7 @@ async def prepare_video_scene_packages_with_llm(
             selected_direction=selected_direction,
             materials=materials,
             target_duration_ms=duration_ms,
+            scene_blueprints=authoritative_blueprints,
         )
         fallback["message"] = f"{fallback['message']} LLM 场景包生成失败，已使用规则兜底：{exc}"
         fallback["llm_used"] = False
@@ -224,6 +257,7 @@ def _scene_package_prompt(
     materials: list[dict[str, Any]],
     target_duration_ms: int,
     durations: list[int],
+    scene_blueprints: list[dict[str, Any]],
 ) -> str:
     duration_seconds = [duration // 1000 for duration in durations]
     time_ranges = scene_time_ranges(duration_seconds)
@@ -268,7 +302,7 @@ def _scene_package_prompt(
 
 硬性要求：
 1. 必须返回 {len(durations)} 个 scene_packages，顺序和 durations_ms 完全对应。
-2. 每个片段时长必须在 {MIN_SCENE_DURATION_SEC} 到 {MAX_SCENE_DURATION_SEC} 秒之间，并严格使用下面逐分镜执行合同的秒段。
+2. 每个片段时长必须在 {MIN_SCENE_DURATION_SEC} 到 {MAX_SCENE_DURATION_SEC} 秒之间，并严格使用下面权威 Plan 分镜蓝图的秒段。
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
 4. global_assets.characters 只能是人物角色，不能放产品、商品、道具或场景；每个角色必须提供 three_view_prompt，用来生成当前人物的正面、侧面、背面三视图。
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
@@ -278,6 +312,7 @@ def _scene_package_prompt(
 9. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。
 10. 产品主体、商品、工具、包装、卖点物件一律放在 global_assets.props，不允许放进 global_assets.characters。
 11. 只返回 JSON，不要 Markdown，不要解释。
+12. 权威 Plan 分镜蓝图非空时，title、storyline、shot_description、narration、transition、顺序和时长均不得重写；只把 asset_requirements 落成 global_assets，并为镜头描述补充合法 @asset_id 和 mentions。
 
 输出格式：
 {{"global_assets":{{
@@ -310,6 +345,7 @@ def _scene_package_prompt(
 目标总时长秒：{target_duration_ms // 1000}
 片段 durations_sec：{json.dumps(duration_seconds, ensure_ascii=False)}
 视频画幅：{video_ratio}
+权威 Plan 分镜蓝图：{json.dumps(scene_blueprints, ensure_ascii=False)}
 逐分镜 Seedance 执行合同：
 {shot_contract_text}
 表单数据：{json.dumps(form_values, ensure_ascii=False)}
@@ -326,22 +362,27 @@ def _normalize_llm_scene_packages(
     selected_direction: dict[str, Any],
     materials: list[dict[str, Any]],
     global_assets: dict[str, Any],
+    *,
+    scene_blueprints: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     raw_scenes = payload.get("scene_packages") if isinstance(payload, dict) else payload
-    if not isinstance(raw_scenes, list):
+    if not isinstance(raw_scenes, list) and not scene_blueprints:
         return []
+    if not isinstance(raw_scenes, list):
+        raw_scenes = []
     material_urls = _extract_material_image_urls(materials)
     normalized: list[dict[str, Any]] = []
     elapsed_ms = 0
     stage_templates = _stage_templates(len(durations))
     for index, duration in enumerate(durations, start=1):
         raw = raw_scenes[index - 1] if index - 1 < len(raw_scenes) and isinstance(raw_scenes[index - 1], dict) else {}
-        storyline = _first_text(raw.get("storyline"), raw.get("story"), raw.get("story_line"))
-        narration = _first_text(raw.get("narration"), raw.get("voiceover"), raw.get("voice_over"))
+        blueprint = scene_blueprints[index - 1] if scene_blueprints else None
+        storyline = str(blueprint["storyline"]) if blueprint else _first_text(raw.get("storyline"), raw.get("story"), raw.get("story_line"))
+        narration = str(blueprint["narration"]) if blueprint else _first_text(raw.get("narration"), raw.get("voiceover"), raw.get("voice_over"))
         stage = stage_templates[index - 1]
         reference_asset_ids = _normalize_reference_asset_ids(raw.get("reference_asset_ids"), global_assets, stage["asset_id"])
         shot_description = _normalize_shot_description(
-            raw.get("shot_description"),
+            {"text": str(blueprint["shot_description"])} if blueprint else raw.get("shot_description"),
             stage=stage,
             start_ms=elapsed_ms,
             duration_ms=duration,
@@ -356,9 +397,9 @@ def _normalize_llm_scene_packages(
         )
         if not storyline or not shot_description.get("text") or not prompt:
             return []
-        title = _first_text(raw.get("title"), f"场景 {index}")
+        title = str(blueprint["title"]) if blueprint else _first_text(raw.get("title"), f"场景 {index}")
         return_scene = {
-            "scene_id": f"scene-{index}",
+            "scene_id": str(blueprint["scene_id"]) if blueprint else f"scene-{index}",
             "scene_index": index,
             "title": title,
             "duration_ms": duration,
@@ -367,6 +408,7 @@ def _normalize_llm_scene_packages(
             "reference_asset_ids": reference_asset_ids,
             "prompt": prompt,
             "narration": narration,
+            "transition": str(blueprint["transition"]) if blueprint else _first_text(raw.get("transition")),
             "image_urls": material_urls,
             "video_urls": [],
             "audio_urls": [],
@@ -579,7 +621,37 @@ def _normalize_shot_description(
     if not text:
         text = _legacy_shot_description_text(value, fallback["text"])
     mentions = _normalize_shot_mentions(value.get("mentions"), reference_asset_ids, global_assets)
-    return {"text": _normalize_shot_text(text), "mentions": mentions}
+    normalized_text = _ensure_reference_asset_tokens(
+        _normalize_shot_text(text),
+        reference_asset_ids,
+        global_assets,
+    )
+    return {"text": normalized_text, "mentions": mentions}
+
+
+def _ensure_reference_asset_tokens(
+    text: str,
+    reference_asset_ids: list[str],
+    global_assets: dict[str, Any],
+) -> str:
+    """确保引用图片既有结构化 mentions，也在可编辑镜头文本中可见。"""
+
+    lookup = _global_image_asset_lookup(global_assets)
+    missing: list[str] = []
+    result = text
+    for asset_id in reference_asset_ids[:9]:
+        token = f"@{asset_id}"
+        asset_name = _first_text(lookup.get(asset_id, {}).get("name"))
+        if token in result or (asset_name and f"@{asset_name}" in result):
+            continue
+        if asset_name and asset_name in result:
+            result = result.replace(asset_name, token, 1)
+            continue
+        missing.append(token)
+    if missing:
+        suffix = f"参考素材：{'、'.join(missing)}。"
+        result = f"{result.rstrip()} {suffix}".strip()
+    return result
 
 
 def _normalize_shot_mentions(value: Any, reference_asset_ids: list[str], global_assets: dict[str, Any]) -> list[dict[str, Any]]:
@@ -854,6 +926,21 @@ def _exact_scene_durations_ms(target_duration_ms: Any) -> tuple[int, list[int]]:
     return duration_ms, durations
 
 
+def _resolve_scene_schedule(
+    target_duration_ms: Any,
+    scene_blueprints: list[dict[str, Any]] | None,
+) -> tuple[int, list[int], list[dict[str, Any]]]:
+    duration_ms, fallback_durations = _exact_scene_durations_ms(target_duration_ms)
+    if not scene_blueprints:
+        return duration_ms, fallback_durations, []
+    normalized = normalize_scene_blueprints(
+        scene_blueprints,
+        total_duration_sec=duration_ms // 1000,
+    )
+    durations = [int(item["duration_sec"]) * 1000 for item in normalized]
+    return duration_ms, durations, normalized
+
+
 def _stage_templates(scene_count: int) -> list[dict[str, str]]:
     base = [
         {
@@ -918,11 +1005,7 @@ def _default_shot_description(
     visual_style = global_assets.get("visual_style")
     visual_style_name = _first_text(visual_style.get("name") if isinstance(visual_style, dict) else None, "真实摄影电商广告")
     return {
-        "text": (
-            f"{time_range}: 地点:@{location_id} 中,"
-            f"角色:{character_text} {stage.get('shot_action') or stage['scene_description']},"
-            f"道具:{prop_text} 保持清晰可见。景别:{stage.get('shot_size', '中景')}。视觉风格:{visual_style_name}。"
-        ),
+        "text": (f"{time_range}: 地点:@{location_id} 中,角色:{character_text} {stage.get('shot_action') or stage['scene_description']},道具:{prop_text} 保持清晰可见。景别:{stage.get('shot_size', '中景')}。视觉风格:{visual_style_name}。"),
         "mentions": _shot_mentions(reference_asset_ids, global_assets),
     }
 

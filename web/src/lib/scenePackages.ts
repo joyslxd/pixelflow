@@ -98,6 +98,7 @@ export interface ScenePackageRecord {
   storyline?: string;
   prompt: string;
   narration?: string;
+  transition?: string;
   shot_description?: Record<string, unknown>;
   revision_contract?: string;
   reference_asset_ids?: string[];
@@ -115,6 +116,7 @@ export interface ScenePackagePatch {
   storyline?: string;
   prompt?: string;
   narration?: string;
+  transition?: string;
   duration_ms?: number | string;
   shot_description?: Record<string, unknown>;
   reference_asset_ids?: string[];
@@ -136,6 +138,7 @@ export interface SceneGenerationPayloadLike {
   storyline?: string;
   shot_description?: Record<string, unknown>;
   narration?: string;
+  transition?: string;
   generation_mode?: string | null;
   image_urls?: string[];
   video_urls?: string[];
@@ -438,14 +441,16 @@ export function sceneGenerationPayloadFromPackage(
   globalAssets?: GlobalSceneAssets,
   options: { edited?: boolean } = {},
 ): SceneGenerationPayloadLike {
+  const normalizedScene = normalizeSceneAssetMentionsForGeneration(scene, globalAssets);
   return {
     scene_id: scene.scene_id,
     scene_index: scene.scene_index,
     duration_ms: durationMsForSubmit(scene.duration_ms),
-    prompt: options.edited ? editedSceneGenerationPrompt(scene) : scene.prompt,
-    storyline: scene.storyline,
-    shot_description: scene.shot_description,
-    narration: scene.narration,
+    prompt: options.edited ? editedSceneGenerationPrompt(normalizedScene) : normalizedScene.prompt,
+    storyline: normalizedScene.storyline,
+    shot_description: normalizedScene.shot_description,
+    narration: normalizedScene.narration,
+    transition: normalizedScene.transition,
     generation_mode: scene.generation_mode,
     image_urls: options.edited ? collectExplicitSceneGenerationImageUrls(scene, globalAssets) : collectSceneGenerationImageUrls(scene, globalAssets),
     video_urls: scene.video_urls || [],
@@ -581,13 +586,13 @@ function collectSceneGenerationImageUrls(
   const urls = new Set(stringArray(scene.image_urls));
   const mentionUrls = collectMentionGenerationReferenceUrls(scene.shot_description);
   mentionUrls.forEach((url) => urls.add(url));
-  if (mentionUrls.length > 0) {
-    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
-  }
   if (globalAssets && stringArray(scene.reference_asset_ids).length > 0) {
     stringArray(scene.reference_asset_ids).forEach((assetId) => {
       collectGlobalAssetGenerationUrls(globalAssets, assetId).forEach((url) => urls.add(url));
     });
+    return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+  }
+  if (mentionUrls.length > 0) {
     return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
   }
   const collectFromRecords = (items: unknown, keys: string[]) => {
@@ -606,6 +611,52 @@ function collectSceneGenerationImageUrls(
   collectFromRecords(scene.scene_images, ["images"]);
   collectFromRecords(scene.prop_images, ["images"]);
   return Array.from(urls).slice(0, MAX_REFERENCE_IMAGE_COUNT);
+}
+
+function normalizeSceneAssetMentionsForGeneration(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): ScenePackageRecord {
+  const mentionNames = new Map<string, string>();
+  if (globalAssets) {
+    for (const collection of [globalAssets.characters, globalAssets.scenes, globalAssets.props]) {
+      for (const asset of collection || []) {
+        const assetId = stringValue(asset.asset_id) || stringValue(asset.id);
+        const name = stringValue(asset.name) || stringValue(asset.label) || stringValue(asset.description);
+        if (assetId && name) mentionNames.set(assetId, name);
+      }
+    }
+  }
+  const mentions = scene.shot_description?.mentions;
+  if (Array.isArray(mentions)) {
+    for (const mention of mentions) {
+      if (!mention || typeof mention !== "object") continue;
+      const record = mention as Record<string, unknown>;
+      const assetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
+      const name = stringValue(record.name) || stringValue(record.label);
+      if (assetId && name) mentionNames.set(assetId, name);
+    }
+  }
+  if (mentionNames.size === 0) return scene;
+
+  const normalizeText = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    return Array.from(mentionNames.entries())
+      .sort(([left], [right]) => right.length - left.length)
+      .reduce((text, [assetId, name]) => text.split(`@${assetId}`).join(`@${name}`), value);
+  };
+  const shotDescription = scene.shot_description && typeof scene.shot_description === "object"
+    ? {
+        ...scene.shot_description,
+        text: normalizeText(scene.shot_description.text),
+        description_text: normalizeText(scene.shot_description.description_text),
+        shotText: normalizeText(scene.shot_description.shotText),
+      }
+    : scene.shot_description;
+  return {
+    ...scene,
+    prompt: normalizeText(scene.prompt) as string,
+    storyline: normalizeText(scene.storyline) as string,
+    narration: normalizeText(scene.narration) as string,
+    shot_description: shotDescription,
+  };
 }
 
 function collectExplicitSceneGenerationImageUrls(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): string[] {
@@ -673,6 +724,7 @@ function normalizeScenePackagePatch(patch: ScenePackagePatch): ScenePackagePatch
   if (patch.storyline !== undefined) normalized.storyline = patch.storyline;
   if (patch.prompt !== undefined) normalized.prompt = patch.prompt;
   if (patch.narration !== undefined) normalized.narration = patch.narration;
+  if (patch.transition !== undefined) normalized.transition = patch.transition;
   if (patch.shot_description !== undefined) normalized.shot_description = patch.shot_description;
   if (patch.reference_asset_ids !== undefined) normalized.reference_asset_ids = patch.reference_asset_ids;
   if (patch.generation_mode !== undefined) normalized.generation_mode = patch.generation_mode;

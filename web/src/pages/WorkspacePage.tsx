@@ -260,6 +260,7 @@ interface WorkspaceSnapshot {
   plan_history?: PlanMarkdownResponse["plan_history"];
   creation_contract?: Record<string, unknown>;
   scene_durations_sec?: number[];
+  scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
   restored_from_version?: number | null;
 }
 
@@ -658,6 +659,7 @@ interface PrepareScenePackagesJobRequest {
   materials?: Array<Record<string, unknown>>;
   target_duration_ms?: number;
   creation_contract?: VideoCreationContract;
+  scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
 }
 
 interface SceneAssetsJobRequest {
@@ -6574,6 +6576,7 @@ export function WorkspacePage() {
         materials: artifact.materials || [],
         target_duration_ms: creationContract.video_duration_sec * 1000,
         creation_contract: creationContract,
+        scene_blueprints: artifact.plan.scene_blueprints || [],
       };
       const started = await api.startPrepareScenePackagesJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -6593,6 +6596,7 @@ export function WorkspacePage() {
         plan_markdown: artifact.plan.plan_markdown,
         plan_approved: true,
         creation_contract: creationContract,
+        scene_blueprints: artifact.plan.scene_blueprints || [],
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -6626,6 +6630,7 @@ export function WorkspacePage() {
         plan_history: artifact.plan.plan_history || [],
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
+        scene_blueprints: artifact.plan.scene_blueprints || [],
       });
       await persistPlanArtifactForConversation(
         createPlanArtifactMessage(
@@ -6784,6 +6789,7 @@ export function WorkspacePage() {
         plan_history: artifact.plan.plan_history || [],
         revision_feedback: feedback,
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
+        scene_blueprints: artifact.plan.scene_blueprints || [],
         product_creative_profile: { revision_feedback: feedback },
         intake_context: artifact.intakeContext,
         materials,
@@ -6859,6 +6865,7 @@ export function WorkspacePage() {
         restore_version: version,
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
+        scene_blueprints: artifact.plan.scene_blueprints || [],
       });
       await persistPlanArtifactForConversation(
         createPlanArtifactMessage(

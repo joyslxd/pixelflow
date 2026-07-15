@@ -70,6 +70,76 @@ def test_prepare_video_scene_packages_uses_second_ranges_in_shot_description():
     assert "0-10秒" in shot_text
 
 
+def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "雨水钩子",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 6,
+            "duration_sec": 6,
+            "storyline": "雨水突袭形成冲突。",
+            "shot_description": "0-6秒: 特写雨滴砸向背包，镜头快速推近材质。",
+            "narration": "下雨最怕包里一起遭殃。",
+            "transition": "顺着水滴切到拉链。",
+            "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包"]},
+        },
+        {
+            "scene_id": "scene-2",
+            "scene_index": 2,
+            "title": "防水证明",
+            "structure_role": "climax",
+            "start_sec": 6,
+            "end_sec": 18,
+            "duration_sec": 12,
+            "storyline": "泼水和开包检查证明防水。",
+            "shot_description": "0-12秒: 中景连续泼水后切入拉链特写，打开背包展示干燥内胆。",
+            "narration": "高密防泼水面料，把雨留在外面。",
+            "transition": "由内胆匹配剪辑到办公区。",
+            "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包", "水杯"]},
+        },
+        {
+            "scene_id": "scene-3",
+            "scene_index": 3,
+            "title": "通勤收束",
+            "structure_role": "conclusion",
+            "start_sec": 18,
+            "end_sec": 26,
+            "duration_sec": 8,
+            "storyline": "抵达办公区并完成购买引导。",
+            "shot_description": "0-8秒: 跟拍背包进入办公区，定格完整外观和干燥内胆。",
+            "narration": "全天候通勤，现在就选它。",
+            "transition": "产品定格结束。",
+            "asset_requirements": {"characters": [], "scenes": ["办公区"], "props": ["防水背包"]},
+        },
+    ]
+
+    result = prepare_video_scene_packages(
+        form_values={
+            "product_info": "防水通勤背包",
+            "product_category": "服饰鞋包",
+            "target_audience": "通勤人群",
+            "conversion_goal": "直接购买",
+        },
+        plan_markdown="## 五、镜头列表\n严格执行权威分镜蓝图。",
+        selected_direction={"title": "雨天防水实测"},
+        target_duration_ms=26_000,
+        scene_blueprints=blueprints,
+    )
+
+    assert [scene["duration_ms"] for scene in result["scene_packages"]] == [6_000, 12_000, 8_000]
+    assert [scene["title"] for scene in result["scene_packages"]] == ["雨水钩子", "防水证明", "通勤收束"]
+    assert result["scene_packages"][1]["storyline"] == "泼水和开包检查证明防水。"
+    assert result["scene_packages"][1]["narration"] == "高密防泼水面料，把雨留在外面。"
+    second_scene = result["scene_packages"][1]
+    shot_text = second_scene["shot_description"]["text"]
+    assert "0-12秒" in shot_text
+    assert second_scene["shot_description"]["mentions"]
+    assert all(f"@{asset_id}" in shot_text for asset_id in second_scene["reference_asset_ids"])
+
+
 def test_prepare_video_scene_packages_supports_300_seconds_without_legacy_scene_cap():
     result = prepare_video_scene_packages(
         form_values={
@@ -148,11 +218,7 @@ def test_prepare_video_scene_packages_with_llm_normalizes_millisecond_ranges():
                     "prompt": f"LLM 分镜提示词 {index}",
                     "narration": f"LLM 旁白 {index}",
                     "shot_description": {
-                        "text": (
-                            "0-1000ms: 特写镜头, "
-                            "2000-3000ms: 切至 @scene-office, "
-                            "00:03.000-00:04.000: 固定画面, 角色:@character-presenter 展示 @prop-product。"
-                        ),
+                        "text": ("0-1000ms: 特写镜头, 2000-3000ms: 切至 @scene-office, 00:03.000-00:04.000: 固定画面, 角色:@character-presenter 展示 @prop-product。"),
                     },
                     "reference_asset_ids": ["character-presenter", "scene-office", "prop-product"],
                 }
@@ -207,7 +273,7 @@ def test_prepare_video_scene_packages_with_llm_uses_model_content_for_90s_video(
                     "prompt": f"LLM 分镜提示词 {index}",
                     "narration": f"LLM 旁白 {index}",
                     "shot_description": {
-                            "text": f"0-10秒: 地点：@scene-home 中,角色@character-presenter 展示产品。LLM 镜头描述 {index}",
+                        "text": f"0-10秒: 地点：@scene-home 中,角色@character-presenter 展示产品。LLM 镜头描述 {index}",
                     },
                     "reference_asset_ids": ["character-presenter", "scene-home", "prop-product"],
                 }

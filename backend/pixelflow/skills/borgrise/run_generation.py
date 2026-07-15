@@ -32,6 +32,7 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -72,6 +73,10 @@ IMAGE_POLL_TIMEOUT = int(os.environ.get("BORGRISE_IMAGE_POLL_TIMEOUT", "600"))  
 VIDEO_ANALYSIS_POLL_TIMEOUT = int(os.environ.get("BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT", "900"))  # 视频分析/拆解默认最多等 15 分钟。
 PPT_POLL_TIMEOUT = int(os.environ.get("BORGRISE_PPT_POLL_TIMEOUT", "7200"))  # 智能 PPT 默认最多等 2 小时。
 _cli_poll_timeout: int | None = None  # 由 --poll-timeout 命令行参数临时覆盖当前命令的业务默认值。
+
+# content-app confirms quota after a generation task create endpoint returns. Upper layers may
+# schedule many scenes/pages at once, but the billable create POSTs must enter content-app one by one.
+_GENERATION_CREATE_TASK_LOCK = threading.Lock()
 
 # 重试配置
 MAX_REQUEST_RETRIES = int(os.environ.get("BORGRISE_MAX_RETRIES", "3"))
@@ -409,6 +414,23 @@ def make_request(endpoint: str, data: dict | None = None, method: str = "POST",
         },
     )
     return result
+
+
+def _make_generation_create_request(
+    endpoint: str,
+    data: Any,
+    *,
+    custom_headers: dict[str, str] | None = None,
+    request_timeout: int = 30,
+) -> dict:
+    """Submit billable content-app generation task creates one by one; task polling stays unlocked."""
+    kwargs: dict[str, Any] = {}
+    if custom_headers is not None:
+        kwargs["custom_headers"] = custom_headers
+    if request_timeout != 30:
+        kwargs["request_timeout"] = request_timeout
+    with _GENERATION_CREATE_TASK_LOCK:
+        return make_request(endpoint, data, **kwargs)
 
 
 def _trace_truncate(value: Any, *, max_chars: int = 4000) -> Any:
@@ -1009,7 +1031,7 @@ def _smart_ppt_error(endpoint: str, result: dict | None, *, task_id: str | None 
 
 
 def _submit_and_poll_smart_ppt(endpoint: str, request_data: dict) -> tuple[dict, dict] | dict:
-    result = make_request(endpoint, request_data)
+    result = _make_generation_create_request(endpoint, request_data)
     if not isinstance(result, dict):
         # content-app SmartPPT 偶发返回空/非字典（例如附件解析失败、网关兜底），
         # 不能直接 result.get()，否则会抛 'NoneType' object has no attribute 'get'，
@@ -1223,7 +1245,7 @@ def image_to_video(image_url: str, prompt: str | None = None,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1301,7 +1323,7 @@ def two_image_to_video(first_frame_image_url: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/two-image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/two-image-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1375,7 +1397,7 @@ def text_to_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/text-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/text-to-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1463,7 +1485,7 @@ def reference_mode_video(prompt: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/reference-mode-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/reference-mode-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1541,7 +1563,7 @@ def edit_video(ref_video: str,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/edit-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/edit-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -1726,7 +1748,7 @@ def extend_video(video_url: str, duration: int = 10,
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=3, duration=duration, size=size, model_header="modelType")
-    result = make_request("/video/extend-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
+    result = _make_generation_create_request("/video/extend-video", request_data, custom_headers=headers, request_timeout=VIDEO_CREATE_REQUEST_TIMEOUT)
 
     if result.get("error"):
         return result
@@ -2790,7 +2812,7 @@ def text_to_image(prompt: str | None = None, ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request("/picture/text_to_image", request_data, custom_headers=headers)
+    result = _make_generation_create_request("/picture/text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2901,7 +2923,7 @@ def reference_image(reference_images: list[str], prompt: str, ratio: str = "1:1"
 
     header_duration = 1 if model in {"gpt-image-2", "nanobanana-pro"} else max_images
     headers = get_headers(model=model, bill_type=2, duration=header_duration, size=quality)
-    result = make_request("/picture/multi_reference_image_generation", request_data, custom_headers=headers)
+    result = _make_generation_create_request("/picture/multi_reference_image_generation", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -2997,7 +3019,7 @@ def image_edit(
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request("/picture/image_edit", request_data, custom_headers=headers)
+    result = _make_generation_create_request("/picture/image_edit", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -3081,7 +3103,7 @@ def multi_image_fusion(
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=num_images, size=quality)
-    result = make_request("/picture/multi_image_fusion", request_data, custom_headers=headers)
+    result = _make_generation_create_request("/picture/multi_image_fusion", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result
@@ -3158,7 +3180,7 @@ def batch_text_to_image(prompts: list[str], ratio: str = "1:1",
     print(f"{'='*60}\n")
 
     headers = get_headers(model=model, bill_type=2, duration=1, size=quality)
-    result = make_request("/picture/batch_text_to_image", request_data, custom_headers=headers)
+    result = _make_generation_create_request("/picture/batch_text_to_image", request_data, custom_headers=headers)
 
     if result.get("error"):
         return result

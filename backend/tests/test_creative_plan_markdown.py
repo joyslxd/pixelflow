@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,264 @@ def test_build_video_plan_with_llm_uses_uploaded_template_and_constrains_scene_i
     assert fake_model.prompts
 
 
+def test_build_video_plan_with_llm_uses_seedance_skill_and_llm_scene_schedule() -> None:
+    fake_model = FakeModel(
+        """
+        {
+          "plan_markdown": "# 防水通勤背包雨天实测\\n\\n## 一、选题方向\\n用雨天实测完成卖点证明。\\n\\n## 三、视频规格\\n- 时长：26 秒\\n- 画幅：9:16\\n\\n## 五、镜头列表\\n旧计划把每个镜头固定成10秒。\\n\\n## 背景音乐\\n雨声与节奏鼓点。",
+          "scene_image_ratio": "9:16",
+          "scene_image_size": "4K",
+          "scene_blueprints": [
+            {
+              "scene_id": "scene-1", "scene_index": 1, "title": "雨水钩子", "structure_role": "opening",
+              "start_sec": 0, "end_sec": 6, "duration_sec": 6,
+              "storyline": "雨水突袭形成冲突。", "shot_description": "0-6秒: 特写雨滴砸向背包，镜头快速推近材质。",
+              "narration": "下雨最怕包里一起遭殃。", "transition": "顺着水滴切到拉链。",
+              "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包"]}
+            },
+            {
+              "scene_id": "scene-2", "scene_index": 2, "title": "防水证明", "structure_role": "climax",
+              "start_sec": 6, "end_sec": 18, "duration_sec": 12,
+              "storyline": "泼水和开包检查证明防水。", "shot_description": "0-12秒: 中景连续泼水后切入拉链特写，打开背包展示干燥内胆。",
+              "narration": "高密防泼水面料，把雨留在外面。", "transition": "由内胆匹配剪辑到办公区。",
+              "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包", "水杯"]}
+            },
+            {
+              "scene_id": "scene-3", "scene_index": 3, "title": "通勤收束", "structure_role": "conclusion",
+              "start_sec": 18, "end_sec": 26, "duration_sec": 8,
+              "storyline": "抵达办公区并完成购买引导。", "shot_description": "0-8秒: 跟拍背包进入办公区，定格完整外观和干燥内胆。",
+              "narration": "全天候通勤，现在就选它。", "transition": "产品定格结束。",
+              "asset_requirements": {"characters": [], "scenes": ["办公区"], "props": ["防水背包"]}
+            }
+          ]
+        }
+        """
+    )
+    form = {
+        **VIDEO_FORM,
+        "product_info": "防水通勤背包",
+        "video_duration_sec": 26,
+    }
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            form,
+            {
+                "direction_id": "direction_1",
+                "title": "雨天防水实测",
+                "description": "用雨水冲突、能力证明和通勤结果完成总分总叙事。",
+            },
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    prompt = str(fake_model.prompts[0])
+    assert "一个短分镜只安排一个主要叙事目标" in prompt
+    assert "自主决定分镜数量和每个分镜时长" in prompt
+    assert "总分总" in prompt
+    assert "精确镜头时间线" not in prompt
+    assert result.scene_durations_sec == [6, 12, 8]
+    assert [item["title"] for item in result.scene_blueprints] == ["雨水钩子", "防水证明", "通勤收束"]
+    assert "### 权威分镜创作蓝图" in result.plan_markdown
+    assert "0-12秒: 中景连续泼水" in result.plan_markdown
+    assert "旧计划把每个镜头固定成10秒" not in result.plan_markdown
+    assert result.plan_markdown.count("### 权威分镜创作蓝图") == 1
+    assert "## 背景音乐\n雨声与节奏鼓点" in result.plan_markdown
+
+
+def test_build_video_plan_repairs_invalid_llm_duration_without_replacing_story_content() -> None:
+    raw_blueprints = []
+    cursor = 0
+    for index, (role, duration) in enumerate(
+        zip(["hook", "proof", "proof", "proof", "cta"], [6, 6, 6, 6, 2], strict=True),
+        start=1,
+    ):
+        raw_blueprints.append(
+            {
+                "scene_id": f"scene-{index}",
+                "scene_index": index,
+                "title": f"暴雨实测分镜{index}",
+                "structure_role": role,
+                "start_sec": cursor,
+                "end_sec": cursor + duration,
+                "duration_sec": duration,
+                "storyline": f"第{index}段具体产品证明。",
+                "shot_description": f"0-{duration}秒: 展示第{index}段具体产品动作。",
+                "narration": "本分镜无旁白",
+                "transition": "动作匹配剪辑。" if index < 5 else "",
+                "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包"]},
+            }
+        )
+        cursor += duration
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": "# 防水背包宣传片\n\n## 一、选题方向\n暴雨实测。\n\n## 三、视频规格\n26秒。\n\n## 五、镜头列表\n由蓝图生成。",
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+                "scene_blueprints": raw_blueprints,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            {**VIDEO_FORM, "product_info": "防水通勤背包", "video_duration_sec": 26},
+            {"direction_id": "direction_1", "title": "暴雨实测", "description": "用五段实测完成证明。"},
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert result.llm_used is True
+    assert [item["title"] for item in result.scene_blueprints] == [f"暴雨实测分镜{index}" for index in range(1, 6)]
+    assert sum(result.scene_durations_sec) == 26
+    assert all(4 <= duration <= 15 for duration in result.scene_durations_sec)
+    assert "需求冲突钩子" not in result.plan_markdown
+
+
+def test_plan_memory_is_internal_context_and_never_rendered_to_user() -> None:
+    memory_text = "用户偏好：电影写实风，不展示价格。"
+    fallback = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 26},
+        {
+            "direction_id": "direction_1",
+            "title": "雨天通勤实测",
+            "description": "用真实雨天证明产品能力。",
+        },
+        intake_context={
+            "semantic_memory": {
+                "enabled": True,
+                "items": [{"content": memory_text, "metadata": {"category": "preference"}}],
+            }
+        },
+    )
+
+    assert "长期记忆约束" not in fallback.plan_markdown
+    assert memory_text not in fallback.plan_markdown
+
+    leaked_plan = (
+        "# 防水背包宣传片\n\n## 一、选题方向\n雨天通勤实测。\n\n## 二、选题优势\n"
+        f"- **长期记忆约束**：{memory_text}\n"
+        "  stage=prepare_scene_packages; message=scenes=3 assets=4; ok=True\n"
+        "  用户创作上下文：采集 Agent 完成意图识别；Skill 经验仅供内部决策。\n"
+        "- 产品证明清晰。\n\n## 三、视频规格\n- 时长：26 秒\n\n## 五、镜头列表\n按蓝图执行。"
+    )
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": leaked_plan,
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+            },
+            ensure_ascii=False,
+        )
+    )
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            {**VIDEO_FORM, "video_duration_sec": 26},
+            {
+                "direction_id": "direction_1",
+                "title": "雨天通勤实测",
+                "description": "用真实雨天证明产品能力。",
+            },
+            intake_context={
+                "semantic_memory": {
+                    "enabled": True,
+                    "items": [{"content": memory_text, "metadata": {"category": "preference"}}],
+                }
+            },
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    prompt = str(fake_model.prompts[0])
+    assert memory_text in prompt
+    assert "长期记忆约束" not in result.plan_markdown
+    assert memory_text not in result.plan_markdown
+    assert "stage=prepare_scene_packages" not in result.plan_markdown
+    assert "用户创作上下文" not in result.plan_markdown
+    assert "Skill 经验" not in result.plan_markdown
+    assert "- 产品证明清晰。" in result.plan_markdown
+
+
+def test_plan_blueprint_internal_memory_markers_never_reach_user_or_scene_contract() -> None:
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "雨水钩子",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 6,
+            "duration_sec": 6,
+            "storyline": "长期记忆约束：用户偏好电影写实风。",
+            "shot_description": "0-6秒: 特写雨滴砸向背包。",
+            "narration": "下雨最怕包里一起遭殃。",
+            "transition": "顺着水滴切到拉链。",
+            "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包"]},
+        },
+        {
+            "scene_id": "scene-2",
+            "scene_index": 2,
+            "title": "防水证明",
+            "structure_role": "climax",
+            "start_sec": 6,
+            "end_sec": 18,
+            "duration_sec": 12,
+            "storyline": "泼水和开包检查证明防水。",
+            "shot_description": "0-12秒: 中景连续泼水后展示干燥内胆。",
+            "narration": "PowerMem 记忆：不要展示价格。",
+            "transition": "由内胆匹配剪辑到办公区。",
+            "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包"]},
+        },
+        {
+            "scene_id": "scene-3",
+            "scene_index": 3,
+            "title": "通勤收束",
+            "structure_role": "conclusion",
+            "start_sec": 18,
+            "end_sec": 26,
+            "duration_sec": 8,
+            "storyline": "抵达办公区并完成购买引导。",
+            "shot_description": "0-8秒: 跟拍背包进入办公区。",
+            "narration": "全天候通勤，现在就选它。",
+            "transition": "产品定格结束。",
+            "asset_requirements": {"characters": [], "scenes": ["办公区"], "props": ["防水背包"]},
+        },
+    ]
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": "# 防水背包宣传片\n\n## 一、选题方向\n雨天实测。\n\n## 三、视频规格\n26秒。\n\n## 五、镜头列表\n按蓝图执行。",
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+                "scene_blueprints": blueprints,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            {**VIDEO_FORM, "product_info": "防水通勤背包", "video_duration_sec": 26},
+            {"direction_id": "direction_1", "title": "雨天实测", "description": "证明防水能力。"},
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    serialized_blueprints = json.dumps(result.scene_blueprints, ensure_ascii=False)
+    assert "长期记忆约束" not in result.plan_markdown
+    assert "PowerMem" not in result.plan_markdown
+    assert "长期记忆约束" not in serialized_blueprints
+    assert "PowerMem" not in serialized_blueprints
+
+
 def test_restore_plan_version_activates_history_without_appending():
     history = [
         {
@@ -254,6 +513,75 @@ def test_restore_legacy_history_keeps_current_authoritative_contract():
     assert result.plan_version == 1
     assert result.creation_contract == current_contract
     assert result.scene_durations_sec == [10, 10]
+
+
+def test_restore_legacy_history_rejects_invalid_request_blueprint_fallback() -> None:
+    current_contract = {"video_model": "seedance-2.0", "video_duration_sec": 30}
+
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[
+            {
+                "version": 1,
+                "plan_markdown": "# plan.md v1",
+                "creation_contract": current_contract,
+                "scene_durations_sec": [10, 10, 10],
+            },
+            {"version": 2, "plan_markdown": "# plan.md v2"},
+        ],
+        restore_version=1,
+        creation_contract=current_contract,
+        scene_durations_sec=[10, 10, 10],
+        scene_blueprints=[
+            {
+                "scene_id": "scene-1",
+                "scene_index": 1,
+                "duration_sec": 999,
+            }
+        ],
+    )
+
+    assert result.scene_blueprints == []
+    assert result.scene_durations_sec == [10, 10, 10]
+
+
+def test_restore_legacy_history_rejects_invalid_request_duration_fallback() -> None:
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[{"version": 1, "plan_markdown": "# plan.md v1"}],
+        restore_version=1,
+        creation_contract={"video_model": "seedance-2.0", "video_duration_sec": 30},
+        scene_durations_sec=[3, 27],
+    )
+
+    assert result.scene_durations_sec == []
+
+
+def test_restore_plan_sanitizes_internal_memory_text_from_historical_markdown() -> None:
+    result = restore_plan_version(
+        intent="video",
+        current_plan_markdown="# plan.md v2",
+        current_plan_version=2,
+        plan_history=[
+            {
+                "version": 1,
+                "plan_markdown": "# plan.md v1\n\n## 长期记忆约束\nPowerMem 记忆：内部偏好原文。\n\n## 三、视频规格\n20秒。",
+                "creation_contract": {"video_model": "seedance-2.0", "video_duration_sec": 20},
+                "scene_durations_sec": [10, 10],
+            }
+        ],
+        restore_version=1,
+        creation_contract={"video_model": "seedance-2.0", "video_duration_sec": 20},
+        scene_durations_sec=[10, 10],
+    )
+
+    assert "长期记忆约束" not in result.plan_markdown
+    assert "PowerMem" not in result.plan_markdown
+    assert "内部偏好原文" not in result.plan_markdown
 
 
 def test_restore_image_plan_preserves_explicit_empty_snapshots():
@@ -352,9 +680,7 @@ def test_initial_plan_history_snapshot_deep_copies_nested_contract():
     contract["image_model_capabilities"]["aspect_ratios"].append("9:16")
     result.creation_contract["image_model_capabilities"]["aspect_ratios"].append("16:9")
 
-    assert result.plan_history[0]["creation_contract"] == {
-        "image_model_capabilities": {"aspect_ratios": ["1:1"]}
-    }
+    assert result.plan_history[0]["creation_contract"] == {"image_model_capabilities": {"aspect_ratios": ["1:1"]}}
 
 
 def test_next_version_deep_copies_nested_contract_and_caller_history():
@@ -384,9 +710,7 @@ def test_next_version_deep_copies_nested_contract_and_caller_history():
     next_contract["image_model_capabilities"]["sizes"].append("8K")
     revised.creation_contract["image_model_capabilities"]["sizes"].append("1080p")
 
-    assert revised.plan_history[-1]["creation_contract"] == {
-        "image_model_capabilities": {"sizes": ["4K"]}
-    }
+    assert revised.plan_history[-1]["creation_contract"] == {"image_model_capabilities": {"sizes": ["4K"]}}
     revised.plan_history[0]["creation_contract"]["image_model_capabilities"]["sizes"].append("4K")
     assert caller_history == original_history
 
@@ -460,12 +784,15 @@ def test_publish_manual_plan_edit_preserves_user_markdown_and_contract_snapshot(
         plan_history=original.plan_history,
         creation_contract=original.creation_contract,
         scene_durations_sec=original.scene_durations_sec,
+        scene_blueprints=original.scene_blueprints,
     )
 
     assert published.plan_markdown == edited_markdown
     assert published.plan_version == 2
     assert published.creation_contract == original.creation_contract
     assert published.scene_durations_sec == original.scene_durations_sec
+    assert published.scene_blueprints == original.scene_blueprints
+    assert published.plan_history[-1]["scene_blueprints"] == original.scene_blueprints
     assert published.plan_history[-1]["change_source"] == "manual_edit"
     assert published.llm_used is False
 

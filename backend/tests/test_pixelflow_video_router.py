@@ -153,6 +153,59 @@ def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(mo
     assert returned_contract["video_model_capabilities"]["sizes"] == []
 
 
+def test_video_router_passes_plan_scene_blueprints_to_scene_package_skill(monkeypatch):
+    from app.gateway.routers import pixelflow_video
+
+    captured: dict[str, object] = {}
+
+    async def fake_prepare_video_scene_packages_with_llm(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": kwargs["target_duration_ms"],
+            "global_assets": {"characters": [], "scenes": [], "props": []},
+            "scene_packages": [],
+        }
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "单镜头",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 4,
+            "duration_sec": 4,
+            "storyline": "产品完成一次清晰展示。",
+            "shot_description": "0-4秒: 特写产品外观并稳定定格。",
+            "narration": "四秒看懂核心卖点。",
+            "transition": "产品定格结束。",
+            "asset_requirements": {"characters": [], "scenes": ["产品台"], "props": ["产品"]},
+        }
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/prepare-scene-packages",
+            json={
+                "form_values": {"product_info": "测试产品"},
+                "plan_markdown": "## 五、镜头列表\n单镜头。",
+                "selected_direction": {"title": "产品特写"},
+                "target_duration_ms": 4_000,
+                "scene_blueprints": blueprints,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["scene_blueprints"] == blueprints
+
+
 def test_provider_video_duration_uses_exact_integer_seconds():
     from app.gateway.routers.pixelflow_video import _provider_video_duration_seconds
 
@@ -1449,6 +1502,25 @@ def test_scene_video_auto_mode_uses_realtime_capabilities_not_model_name(model, 
     )
 
     assert _select_scene_video_mode(scene, scene.image_urls, creation_contract=contract) == expected_mode
+
+
+def test_scene_video_prompt_keeps_authoritative_plan_transition() -> None:
+    from app.gateway.routers.pixelflow_video import SceneGenerationItem, _build_scene_video_prompt
+
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=6000,
+        prompt="雨水冲突开场",
+        storyline="雨滴落在背包表面。",
+        shot_description={"text": "0-6秒: 镜头推近背包材质。"},
+        narration="下雨最怕包里一起遭殃。",
+        transition="顺着水滴运动方向切到拉链特写。",
+    )
+
+    prompt = _build_scene_video_prompt(scene)
+
+    assert "转场：顺着水滴运动方向切到拉链特写。" in prompt
 
 
 @pytest.mark.parametrize(
