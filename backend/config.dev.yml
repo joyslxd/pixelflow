@@ -111,11 +111,11 @@ models:
     # LangChain 模型 Provider 类路径；DeepSeek 兼容 OpenAI 协议，所以使用 ChatOpenAI 适配器。
     use: "langchain_openai:ChatOpenAI"
     # 实际请求给模型供应商的模型名称；需要和供应商控制台支持的名称一致。
-    model: "deepseek-v4-pro"
+    model: "deepseek-v4-pro-202606"
     # 模型 API Key；开发环境可直接写明文。
-    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT"
-    # 模型 API Base；这里使用 yunwu.site 的 OpenAI 兼容接口地址。
-    base_url: "https://yunwu.site/v1"
+    api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"
+    # 模型 API Base；这里使用 AIRouter 的 OpenAI 兼容接口地址。
+    base_url: "https://chaomengai.com/v1"
 
 # sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
 sandbox:

@@ -540,11 +540,6 @@ export function MessageBubble({
             <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap rounded-xl bg-canvas p-3 text-[12px] leading-relaxed text-ink">
               {planPreview}
             </pre>
-            {msg.artifact.plan.consistency_issues.length > 0 && (
-              <div className="rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
-                {msg.artifact.plan.consistency_issues.join("；")}
-              </div>
-            )}
             {msg.artifact.plan.plan_history?.length > 1 && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-canvas px-3 py-2">
                 <span className="text-[12px] text-ink-soft">历史版本</span>

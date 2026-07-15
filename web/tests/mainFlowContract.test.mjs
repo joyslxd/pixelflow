@@ -15,6 +15,15 @@ const activePlanSnapshotSource = fs.existsSync(activePlanSnapshotPath) ? fs.read
 const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
 const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
 
+test("plan cards do not expose backend consistency diagnostics to users", () => {
+  assert.match(apiSource, /consistency_issues/, "the API contract must retain internal plan diagnostics");
+  assert.doesNotMatch(
+    messageBubbleSource,
+    /consistency_issues\.join/,
+    "plan cards must not render internal consistency diagnostics",
+  );
+});
+
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
   const end = workspaceSource.indexOf("async function onEvent", start);
