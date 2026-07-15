@@ -11,7 +11,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
-from pixelflow.generate.image_prepare import IMAGE_EDIT_MODEL, ImageMethod, prepare_image_generation
+from pixelflow.generate.image_prepare import (
+    IMAGE_EDIT_MODEL,
+    ImageMethod,
+    prepare_image_generation,
+    validate_final_image_contract,
+)
 from pixelflow.generate.scene_assets import (
     REFERENCE_IMAGE_QUALITY,
     collect_uploaded_reference_image_urls,
@@ -36,6 +41,7 @@ class ImagePrepareRequest(BaseModel):
     form_values: dict[str, Any] = Field(default_factory=dict)
     plan_markdown: str = ""
     selected_direction: dict[str, Any] = Field(default_factory=dict)
+    creation_contract: dict[str, Any] | None = None
     materials: list[dict[str, Any]] = Field(default_factory=list)
     revision_feedback: str | None = None
     intake_context: dict[str, Any] = Field(default_factory=dict)
@@ -174,21 +180,38 @@ class ImageAssetFusionJobStatusResponse(BaseModel):
 
 @router.post("/prepare", response_model=ImagePrepareResponse)
 async def prepare_image(body: ImagePrepareRequest, request: Request) -> ImagePrepareResponse:
+    try:
+        validate_final_image_contract(body.creation_contract)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     user_id, memories = await search_power_mem(
         request,
         source_agent="image_prepare_agent",
-        query_values=[body.form_values, body.plan_markdown, body.selected_direction, body.materials, body.revision_feedback, body.intake_context],
+        query_values=[
+            body.form_values,
+            body.plan_markdown,
+            body.selected_direction,
+            body.creation_contract,
+            body.materials,
+            body.revision_feedback,
+            body.intake_context,
+        ],
         categories=["preference", "brand", "skill", "experience"],
     )
     intake_context, _profile = with_semantic_memory(body.intake_context, memories)
-    result = prepare_image_generation(
-        body.form_values,
-        body.plan_markdown,
-        body.selected_direction,
-        body.materials,
-        body.revision_feedback,
-        intake_context,
-    )
+    try:
+        result = prepare_image_generation(
+            body.form_values,
+            body.plan_markdown,
+            body.selected_direction,
+            body.materials,
+            body.revision_feedback,
+            intake_context,
+            body.creation_contract,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     record_power_mem_background(
         power_mem_service(request),
         user_id=user_id,

@@ -31,6 +31,36 @@ def _stable_user() -> User:
     )
 
 
+def _complete_video_values(product_info: str) -> dict[str, object]:
+    return {
+        "product_info": product_info,
+        "product_category": "数码3C",
+        "target_audience": "25-35",
+        "conversion_goal": "引流直播间",
+        "video_duration_sec": 30,
+        "video_ratio": "9:16",
+        "video_model_mode": "system_recommended",
+        "video_model": "seedance-2.0",
+        "video_model_capabilities": {
+            "generation_types": ["文生视频", "全能参考"],
+            "upload_file_types": ["JPG", "PNG", "MP4"],
+            "aspect_ratios": ["9:16", "16:9"],
+            "sizes": ["1080p"],
+            "sound_options": ["on", "off"],
+            "durations_sec": list(range(4, 16)),
+        },
+        "video_size": "1080p",
+        "video_sound": "on",
+        "image_model": "gpt-image-2",
+        "image_model_capabilities": {
+            "aspect_ratios": ["1:1", "16:9", "9:16"],
+            "sizes": ["1080p", "2K", "4K"],
+        },
+        "video_usage": "新品宣传",
+        "visual_style": "电影写实风",
+    }
+
+
 def test_intake_router_validates_and_returns_three_directions():
     from app.gateway.routers import pixelflow_intake
 
@@ -72,12 +102,7 @@ def test_intake_router_validates_and_returns_three_directions():
             "/agent/flows/intake/directions",
             json={
                 "intent": "video",
-                "values": {
-                    "product_info": "苹果什么什么PRO",
-                    "product_category": "数码3C",
-                    "target_audience": "25-35",
-                    "conversion_goal": "引流直播间",
-                },
+                "values": _complete_video_values("苹果什么什么PRO"),
                 "product_creative_profile": {"visual_anchor_keywords": ["通勤", "质感"]},
             },
         ).json()
@@ -97,12 +122,7 @@ def test_intake_router_accepts_generation_intent_aliases():
             "/agent/flows/intake/directions",
             json={
                 "intent": "generate_video",
-                "values": {
-                    "product_info": "智能健康戒指",
-                    "product_category": "数码3C",
-                    "target_audience": "25-35",
-                    "conversion_goal": "引流直播间",
-                },
+                "values": _complete_video_values("智能健康戒指"),
             },
         )
 

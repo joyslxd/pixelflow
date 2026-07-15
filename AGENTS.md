@@ -295,6 +295,13 @@ SmartPPT接口：
 - `scene_blueprints` 是 Plan 阶段的权威脚本合同，包含叙事职能、连续起止秒、时长、故事线、Seedance 镜头描述、旁白、转场和资产需求。它必须随 Plan artifact、每个历史版本、conversation context 和 `pendingScenePackageJob.request` 持久化。
 - PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
 - 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
+- 用户在右侧编辑器直接修改完整 plan.md 后，`/planning/plan/save-edit` 也必须调用 Plan 修订 LLM，把编辑稿重新对齐 `creation_contract` 与视频 `scene_blueprints`；合同字段白名单只能来自当前稿与编辑稿的确定性文本差异，完整稿仅供 LLM 重写内容和蓝图，禁止借机修改用户未编辑字段。三者同时校验通过才发布 `manual_edit` 新版本，失败时保留当前版本，禁止只保存 Markdown 并沿用旧合同。
+- 当前创意内修订必须先合并结构化合同补丁，再调用 LLM 重写 Plan。优先级是“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；未提及字段不得变化。修订 LLM 的上下文必须包含当前 Plan、表单、选中创意、垂类补充、附件、采集上下文和 PowerMem 检索结果。
+- “视频总时长延长/缩短 N 秒”按当前合同计算增量，“把片子改成 N 秒”等自然说法按新的绝对总时长处理。Plan 修订阶段没有新模型的实时能力快照，因此不能直接修改视频模型或图片模型；用户需要返回需求表单重新选择模型并确认能力。
+- 修订候选合同或分镜蓝图第一次校验失败时，只允许把原因反馈给 LLM 再修正 1 次；第二次仍失败必须保留当前 Plan、合同、蓝图和历史，前端显示失败原因，不能发布带错误合同的新版本。
+- “用户明确修改”只允许从指向合同字段的语句提取：单分镜时长、画面中的数量或否定式“不要改/保持不变”不能误改总时长、图片数量或风格。LLM 生成的候选合同与蓝图校验失败时，只携带具体校验反馈再修正 1 次；第二次仍失败必须保留当前版本、历史、合同和蓝图，不得发布脏版本。
+- 视频修订后的 `video_duration_sec` 必须重新约束 `scene_blueprints`，每镜 4-15 秒且总和精确相等；图片修订后的 `image_goal/image_type/image_usage/image_style/image_size/image_count` 是后续 prepare 的权威输入，即使最终数量为 1 也必须覆盖旧采集上下文中的多图数量。
+- 图片最终合同必须先于 PowerMem 检索和 content-app 调用完成严格校验；目标、类型、用途、风格、尺寸必须是非空字符串，数量为 1-10，比例只能精确匹配 `1:1/16:9/9:16/自动适配`。历史对话的空合同 `{}` 按缺失合同兼容。
 - `/agent/flows/planning/plan/restore` 直接激活所选历史版本并保持既有历史不变，不追加重复版本；回退后的激活版本会持久化到 conversation context，刷新或重新进入对话后继续展示该版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
 - 每个新历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长。
@@ -303,7 +310,8 @@ SmartPPT接口：
 
 - 每个片段最少 4 秒，最多 15 秒。
 - 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
-- 场景包必须消费当前激活 Plan 的 `scene_blueprints`，不得再按总时长重新切分或重写故事线；只负责生成全局资产并把资产需求解析为 `@asset_id` 和 mentions。历史对话没有蓝图时才允许使用兼容兜底。
+- 场景包必须消费当前激活 Plan 的 `scene_blueprints`，不得再按总时长重新切分或重写标题、故事线、镜头描述、旁白和转场；只负责把每个蓝图的 `asset_requirements` 补齐成全局资产并映射为 `@asset_id` 和 mentions。场景包 LLM 返回的旧资产和自由 prompt 不能覆盖最终 Plan；历史对话没有蓝图时才允许使用兼容兜底。
+- 权威蓝图中的人物、场景和道具需求必须逐项进入全局资产，四类全局 ID（含 `visual_style.asset_id`）必须唯一；已有 `@asset_id` 不得被名称规范化再次替换。任一分镜引用超过 9 张时直接返回包含分镜编号和引用数的明确错误，不得静默截断。
 - 全局固定资产：`characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须生成同一人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、卖点物件必须进入 `props`，不能放进 `characters`。

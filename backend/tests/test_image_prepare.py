@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pixelflow.generate.image_prepare import prepare_image_generation
 
 
@@ -38,6 +40,135 @@ def test_prepare_image_generation_uses_requested_image_count_for_text_to_image()
     assert result.ok is True
     assert result.method == "text_to_image"
     assert result.params["num_images"] == 3
+
+
+def test_prepare_image_generation_prefers_final_plan_contract_over_initial_form():
+    result = prepare_image_generation(
+        {
+            "image_goal": "旧目标",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+            "image_count": 1,
+        },
+        "## 五、主图方案\n按最终确认的四张横版极简科技方案执行。",
+        {"title": "最终方向", "description": "现代家居科技秩序感"},
+        creation_contract={
+            "intent": "image",
+            "image_goal": "智能音箱横版宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "官网展示",
+            "image_style": "极简科技感",
+            "image_size": "16:9",
+            "image_count": 4,
+        },
+    )
+
+    assert result.params["ratio"] == "16:9"
+    assert result.params["num_images"] == 4
+    assert "图片目标：智能音箱横版宣传图" in result.prompt
+    assert "图片风格：极简科技感" in result.prompt
+
+
+def test_prepare_image_generation_uses_final_contract_count_for_fusion_variants():
+    result = prepare_image_generation(
+        {
+            "image_goal": "旧融合目标",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+            "image_count": 1,
+            "image_operation": "multi_image_fusion",
+        },
+        "## 五、主图方案\n按最终合同生成四张融合变体。",
+        {"title": "融合方案", "description": "融合商品与使用场景"},
+        materials=[
+            {"type": "image", "url": "https://x/a.png"},
+            {"type": "image", "url": "https://x/b.png"},
+        ],
+        creation_contract={
+            "intent": "image",
+            "image_goal": "商品场景融合组图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "16:9",
+            "image_count": 4,
+        },
+    )
+
+    assert result.method == "multi_image_fusion"
+    assert result.params["num_images"] == 4
+
+
+def test_prepare_image_generation_treats_empty_final_contract_as_historical_absence():
+    result = prepare_image_generation(
+        {
+            "image_goal": "历史书包宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "9:16",
+            "image_count": 3,
+        },
+        "历史 plan.md",
+        {"title": "历史方向", "description": "沿用旧对话参数"},
+        creation_contract={},
+    )
+
+    assert result.params["ratio"] == "9:16"
+    assert result.params["num_images"] == 3
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {
+            "intent": "image",
+            "image_goal": "商品宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "16:9",
+            "image_count": 0,
+        },
+        {
+            "intent": "image",
+            "image_goal": "商品宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "3:4",
+            "image_count": 1,
+        },
+        {
+            "intent": "image",
+            "image_goal": "商品宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "16:99",
+            "image_count": 1,
+        },
+    ],
+)
+def test_prepare_image_generation_rejects_invalid_final_contract(contract: dict[str, object]):
+    with pytest.raises(ValueError, match="最终图片合同"):
+        prepare_image_generation(
+            {
+                "image_goal": "旧目标",
+                "image_type": "商品广告图",
+                "image_usage": "社媒发布",
+                "image_style": "真实摄影",
+                "image_size": "1:1",
+                "image_count": 1,
+            },
+            "plan",
+            {"title": "旧方向", "description": "旧描述"},
+            creation_contract=contract,
+        )
 
 
 def test_prepare_image_generation_prompt_uses_intake_context_subject_and_profile():

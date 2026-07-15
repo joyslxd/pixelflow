@@ -5679,6 +5679,7 @@ export function WorkspacePage() {
               planMarkdown: pendingImageRevisionArtifact.plan?.plan_markdown,
               feedback: text,
             }),
+            creation_contract: pendingImageRevisionArtifact.plan?.creation_contract,
             materials: flowMaterials,
             intake_context: pendingImageRevisionArtifact.intakeContext,
           },
@@ -6487,6 +6488,7 @@ export function WorkspacePage() {
           form_values: artifact.formValues,
           plan_markdown: artifact.plan.plan_markdown,
           selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
+          creation_contract: artifact.plan.creation_contract,
           materials: artifact.materials || [],
           intake_context: artifact.intakeContext,
         });
@@ -6625,13 +6627,27 @@ export function WorkspacePage() {
     try {
       const plan = await api.savePlanMarkdownEdit({
         intent: artifact.intent,
+        form_values: artifact.formValues,
+        selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
+        current_plan_markdown: artifact.plan.plan_markdown,
         edited_plan_markdown: editedMarkdown,
         current_plan_version: artifact.plan.plan_version || 1,
         plan_history: artifact.plan.plan_history || [],
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        product_creative_profile: { core_message: artifact.coreMessage || pendingCore },
+        intake_context: artifact.intakeContext,
+        materials: artifact.materials || [],
       });
+      if (plan.error) {
+        releaseArtifactAction(processedKey);
+        pushAssistant(
+          `plan.md 编辑发布失败，已保留当前 v${artifact.plan.plan_version || 1}：${plan.error}`,
+          targetConversationId,
+        );
+        return;
+      }
       await persistPlanArtifactForConversation(
         createPlanArtifactMessage(
           plan,
@@ -6794,6 +6810,14 @@ export function WorkspacePage() {
         intake_context: artifact.intakeContext,
         materials,
       });
+      if (plan.error) {
+        if (pending.processedKey) releaseArtifactAction(pending.processedKey);
+        pushAssistant(
+          `plan.md 修改失败，已保留当前 v${artifact.plan.plan_version || 1}：${plan.error}`,
+          targetConversationId,
+        );
+        return;
+      }
       await persistPlanArtifactForConversation(
         createPlanArtifactMessage(
           plan,

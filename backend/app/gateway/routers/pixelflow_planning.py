@@ -7,14 +7,14 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
+from app.gateway.pixelflow_memory import concise_result_summary, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.creative.plan_markdown import (
     CreationIntent,
     build_plan_markdown_with_llm,
-    publish_manual_plan_edit,
     restore_plan_version,
     revise_plan_markdown_with_llm,
 )
+from pixelflow.creative.revision_contract import build_manual_plan_revision_feedback
 from pixelflow.memory import with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/planning", tags=["pixelflow-flows"])
@@ -99,19 +99,13 @@ class PlanRestoreRequest(BaseModel):
         return PlanMarkdownRequest.normalize_intent_alias(value)
 
 
-class PlanManualEditRequest(BaseModel):
-    intent: CreationIntent
+class PlanManualEditRequest(PlanMarkdownRequest):
+    current_plan_markdown: str = Field(min_length=1, max_length=100_000)
     edited_plan_markdown: str = Field(min_length=1, max_length=100_000)
     current_plan_version: int = Field(default=1, ge=1)
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
-    scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-
-    @field_validator("intent", mode="before")
-    @classmethod
-    def normalize_intent_alias(cls, value: Any) -> Any:
-        return PlanMarkdownRequest.normalize_intent_alias(value)
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
@@ -153,11 +147,24 @@ async def create_plan_markdown(body: PlanMarkdownRequest, request: Request) -> P
 
 @router.post("/plan/revise", response_model=PlanMarkdownResponse)
 async def revise_plan_markdown(body: PlanRevisionRequest, request: Request) -> PlanMarkdownResponse:
-    user_id, _memories = await search_power_mem(
+    user_id, memories = await search_power_mem(
         request,
         source_agent="planning_agent",
-        query_values=[body.form_values, body.selected_direction, body.current_plan_markdown, body.revision_feedback],
+        query_values=[
+            body.form_values,
+            body.selected_direction,
+            body.product_creative_profile,
+            body.intake_context,
+            body.materials,
+            body.current_plan_markdown,
+            body.revision_feedback,
+        ],
         categories=["preference", "brand", "skill", "experience"],
+    )
+    intake_context, product_creative_profile = with_semantic_memory(
+        body.intake_context,
+        memories,
+        product_creative_profile=body.product_creative_profile,
     )
     result = await revise_plan_markdown_with_llm(
         intent=body.intent,
@@ -169,6 +176,9 @@ async def revise_plan_markdown(body: PlanRevisionRequest, request: Request) -> P
         revision_feedback=body.revision_feedback,
         creation_contract=body.creation_contract,
         current_scene_blueprints=body.scene_blueprints,
+        product_creative_profile=product_creative_profile,
+        materials=body.materials,
+        intake_context=intake_context,
     )
     record_power_mem_background(
         power_mem_service(request),
@@ -203,22 +213,46 @@ async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownRespons
 
 @router.post("/plan/save-edit", response_model=PlanMarkdownResponse)
 async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -> PlanMarkdownResponse:
-    result = publish_manual_plan_edit(
+    user_id, memories = await search_power_mem(
+        request,
+        source_agent="planning_agent",
+        query_values=[
+            body.form_values,
+            body.selected_direction,
+            body.product_creative_profile,
+            body.intake_context,
+            body.materials,
+            body.current_plan_markdown,
+            body.edited_plan_markdown,
+        ],
+        categories=["preference", "brand", "skill", "experience"],
+    )
+    intake_context, product_creative_profile = with_semantic_memory(
+        body.intake_context,
+        memories,
+        product_creative_profile=body.product_creative_profile,
+    )
+    result = await revise_plan_markdown_with_llm(
         intent=body.intent,
-        edited_plan_markdown=body.edited_plan_markdown,
+        form_values=body.form_values,
+        selected_direction=body.selected_direction,
+        current_plan_markdown=body.current_plan_markdown,
         current_plan_version=body.current_plan_version,
         plan_history=body.plan_history,
+        revision_feedback=build_manual_plan_revision_feedback(body.current_plan_markdown, body.edited_plan_markdown),
         creation_contract=body.creation_contract,
-        scene_durations_sec=body.scene_durations_sec,
-        scene_blueprints=body.scene_blueprints,
+        current_scene_blueprints=body.scene_blueprints,
+        product_creative_profile=product_creative_profile,
+        materials=body.materials,
+        intake_context=intake_context,
+        change_source="manual_edit",
     )
-    user_id = await current_user_id(request)
     record_power_mem_background(
         power_mem_service(request),
         user_id=user_id,
         content=concise_result_summary(
             "用户手工发布 plan.md",
-            {"intent": body.intent, "message": f"version={result.plan_version}", "ok": True},
+            {"intent": body.intent, "message": f"version={result.plan_version}", "ok": not result.error},
         ),
         category="experience",
         source_agent="planning_agent",

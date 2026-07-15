@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pixelflow.creative.contract import VideoCreationContract, build_video_creation_contract, resolve_scene_image_spec
-from pixelflow.creative.duration import scene_time_ranges, split_video_duration
+from pixelflow.creative.duration import scene_time_ranges
 from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME, ModelFactory, generate_plan_payload, revise_plan_payload
+from pixelflow.creative.revision_contract import contract_form_values, merge_revision_contract, validate_revision_contract
 from pixelflow.creative.scene_blueprint import (
     fallback_scene_blueprints,
     normalize_scene_blueprints,
@@ -132,64 +133,6 @@ class PlanMarkdownResult:
         )
 
 
-def publish_manual_plan_edit(
-    *,
-    intent: CreationIntent,
-    edited_plan_markdown: str,
-    current_plan_version: int,
-    plan_history: list[dict[str, Any]],
-    creation_contract: dict[str, Any] | None = None,
-    scene_durations_sec: list[int] | None = None,
-    scene_blueprints: list[dict[str, Any]] | None = None,
-) -> PlanMarkdownResult:
-    """把用户编辑稿原样发布为新的权威 Plan 版本，不调用 LLM。"""
-    markdown = str(edited_plan_markdown or "").strip()
-    if not markdown:
-        raise ValueError("plan.md 内容不能为空")
-
-    contract = copy.deepcopy(creation_contract or {})
-    durations = copy.deepcopy(scene_durations_sec or [])
-    blueprints = copy.deepcopy(scene_blueprints or [])
-    if intent == "video":
-        validated_contract = VideoCreationContract.model_validate(contract)
-        contract = validated_contract.model_dump(exclude_none=True)
-        expected_duration = validated_contract.video_duration_sec
-        if blueprints:
-            blueprints = normalize_scene_blueprints(
-                blueprints,
-                total_duration_sec=expected_duration,
-            )
-            durations = scene_blueprint_durations(blueprints)
-        elif not durations:
-            durations = split_video_duration(expected_duration)
-        if (
-            any(not isinstance(value, int) or isinstance(value, bool) or not 4 <= value <= 15 for value in durations)
-            or sum(durations) != expected_duration
-        ):
-            raise ValueError("当前 Plan 的分镜时长快照与制作合同不一致，请重新生成 Plan")
-
-    base = PlanMarkdownResult(
-        output_type=intent,
-        plan_markdown=markdown,
-        template_path=_template_path(intent),
-        plan_version=max(1, current_plan_version),
-        plan_history=_normalized_history(plan_history),
-        creation_contract=contract,
-        scene_durations_sec=durations,
-        scene_blueprints=blueprints,
-        llm_used=False,
-    )
-    return base.next_version(
-        plan_markdown=markdown,
-        plan_history=plan_history,
-        current_version=current_plan_version,
-        creation_contract=contract,
-        change_source="manual_edit",
-        scene_blueprints=blueprints,
-        llm_used=False,
-    )
-
-
 def build_plan_markdown(
     intent: CreationIntent,
     form_values: dict[str, Any],
@@ -272,6 +215,7 @@ async def build_plan_markdown_with_llm(
             model_name=model_name,
             model_factory=model_factory,
         )
+        payload = _redact_semantic_memory_payload(payload, profile, context)
         markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, context)
         corrections: list[str] = []
         if contract is not None:
@@ -332,106 +276,244 @@ async def revise_plan_markdown_with_llm(
     revision_feedback: str,
     creation_contract: dict[str, Any] | None = None,
     current_scene_blueprints: list[dict[str, Any]] | None = None,
+    product_creative_profile: dict[str, Any] | None = None,
+    materials: list[dict[str, Any]] | None = None,
+    intake_context: dict[str, Any] | None = None,
+    change_source: str | None = None,
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> PlanMarkdownResult:
     template_path, template_markdown = _load_template(intent)
-    base = build_plan_markdown(intent, form_values, selected_direction)
-    contract: VideoCreationContract | None = None
-    durations: list[int] = []
-    blueprints: list[dict[str, Any]] = []
-    authoritative_contract = dict(creation_contract or base.creation_contract)
-    if intent == "video":
-        contract = VideoCreationContract.model_validate(authoritative_contract or build_video_creation_contract(form_values).model_dump())
-        try:
-            blueprints = normalize_scene_blueprints(
-                current_scene_blueprints,
-                total_duration_sec=contract.video_duration_sec,
-            )
-        except ValueError:
-            blueprints = _fallback_blueprints(form_values, selected_direction, contract)
-        durations = scene_blueprint_durations(blueprints)
+    context = intake_context or {}
+    profile = _merged_profile(product_creative_profile or {}, context)
+    base = build_plan_markdown(intent, form_values, selected_direction, profile, materials, context)
+    original_contract = copy.deepcopy(creation_contract or base.creation_contract)
+    original_blueprints = copy.deepcopy(current_scene_blueprints or base.scene_blueprints)
+    original_durations = scene_blueprint_durations(original_blueprints) if original_blueprints else copy.deepcopy(base.scene_durations_sec)
     try:
-        payload = await revise_plan_payload(
-            intent=intent,
-            template_markdown=template_markdown,
-            current_plan_markdown=current_plan_markdown,
-            revision_feedback=revision_feedback,
-            form_values=form_values,
-            selected_direction=selected_direction,
-            creation_contract=authoritative_contract,
-            current_scene_blueprints=blueprints,
-            model_name=model_name,
-            model_factory=model_factory,
+        authoritative_contract = merge_revision_contract(
+            intent,
+            original_contract,
+            revision_feedback,
         )
-        markdown = _validated_llm_markdown(intent, payload, form_values, selected_direction, {})
-        corrections: list[str] = []
-        if contract is not None:
-            try:
-                blueprints = normalize_scene_blueprints(
-                    payload.get("scene_blueprints"),
-                    total_duration_sec=contract.video_duration_sec,
-                )
-            except ValueError as exc:
+        authoritative_contract = validate_revision_contract(intent, authoritative_contract)
+    except Exception as exc:  # noqa: BLE001 - 非法显式参数不能污染历史版本
+        return _failed_revision_result(
+            base=base,
+            template_path=template_path,
+            current_plan_markdown=current_plan_markdown,
+            current_plan_version=current_plan_version,
+            plan_history=plan_history,
+            creation_contract=original_contract,
+            scene_durations_sec=original_durations,
+            scene_blueprints=original_blueprints,
+            model_name=model_name,
+            error=exc,
+        )
+
+    validation_feedback = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        effective_form_values = {**form_values, **contract_form_values(authoritative_contract)}
+        try:
+            payload = await revise_plan_payload(
+                intent=intent,
+                template_markdown=template_markdown,
+                current_plan_markdown=current_plan_markdown,
+                revision_feedback=revision_feedback,
+                form_values=effective_form_values,
+                selected_direction=selected_direction,
+                creation_contract=authoritative_contract,
+                current_scene_blueprints=original_blueprints,
+                product_creative_profile=profile,
+                materials=materials or [],
+                intake_context=context,
+                validation_feedback=validation_feedback,
+                model_name=model_name,
+                model_factory=model_factory,
+            )
+            payload = _redact_semantic_memory_payload(payload, profile, context)
+            candidate_contract = merge_revision_contract(
+                intent,
+                authoritative_contract,
+                revision_feedback,
+                payload.get("creation_contract_patch") if isinstance(payload.get("creation_contract_patch"), dict) else None,
+            )
+            candidate_contract = validate_revision_contract(intent, candidate_contract)
+            candidate_form_values = {**form_values, **contract_form_values(candidate_contract)}
+            markdown = _validated_llm_markdown(intent, payload, candidate_form_values, selected_direction, context)
+            corrections: list[str] = []
+            blueprints: list[dict[str, Any]] = []
+            durations: list[int] = []
+            if intent == "video":
+                contract = VideoCreationContract.model_validate(candidate_contract)
                 try:
-                    blueprints = repair_scene_blueprints_schedule(
+                    blueprints = normalize_scene_blueprints(
                         payload.get("scene_blueprints"),
                         total_duration_sec=contract.video_duration_sec,
                     )
-                    corrections.append(f"Plan LLM 修订分镜时长已按创作合同重新调度：{exc}")
-                except ValueError as repair_exc:
-                    corrections.append(f"Plan LLM 修订分镜蓝图已保留上一版本：{repair_exc}")
-            durations = scene_blueprint_durations(blueprints)
-            contract, image_corrections = resolve_scene_image_spec(
-                contract,
-                _text(payload.get("scene_image_ratio")) or contract.scene_image_ratio,
-                _text(payload.get("scene_image_size")) or contract.scene_image_size,
+                except ValueError as exc:
+                    raise ValueError(f"分镜蓝图校验失败：{exc}") from exc
+                durations = scene_blueprint_durations(blueprints)
+                contract, image_corrections = resolve_scene_image_spec(
+                    contract,
+                    _text(payload.get("scene_image_ratio")) or contract.scene_image_ratio,
+                    _text(payload.get("scene_image_size")) or contract.scene_image_size,
+                )
+                corrections.extend(image_corrections)
+                candidate_contract = contract.model_dump(exclude_none=True)
+            markdown = _with_execution_contract(
+                intent,
+                markdown,
+                candidate_contract,
+                durations,
+                scene_blueprints=blueprints,
             )
-            corrections.extend(image_corrections)
-            authoritative_contract = contract.model_dump(exclude_none=True)
-        markdown = _with_execution_contract(
-            intent,
-            markdown,
-            authoritative_contract,
-            durations,
-            scene_blueprints=blueprints,
-        )
-        revised = replace(
-            base,
-            template_path=template_path,
-            consistency_issues=corrections,
-            creation_contract=authoritative_contract,
-            scene_durations_sec=durations,
-            scene_blueprints=blueprints,
-            llm_used=True,
-            model_name=model_name,
-        )
-        return revised.next_version(
-            plan_markdown=markdown,
-            plan_history=plan_history,
-            current_version=current_plan_version,
-            llm_used=True,
-            creation_contract=authoritative_contract,
-            scene_blueprints=blueprints,
-        )
-    except Exception as exc:  # noqa: BLE001
-        markdown = f"{current_plan_markdown.rstrip()}\n\n## 本次修改意见\n\n{revision_feedback.strip()}"
-        markdown = _with_execution_contract(
-            intent,
-            markdown,
-            authoritative_contract,
-            durations,
-            scene_blueprints=blueprints,
-        )
-        return replace(base, error=str(exc), model_name=model_name).next_version(
-            plan_markdown=markdown,
-            plan_history=plan_history,
-            current_version=current_plan_version,
-            llm_used=False,
-            error=str(exc),
-            creation_contract=authoritative_contract,
-            scene_blueprints=blueprints,
-        )
+            revised = replace(
+                base,
+                template_path=template_path,
+                consistency_issues=corrections,
+                creation_contract=candidate_contract,
+                scene_durations_sec=durations,
+                scene_blueprints=blueprints,
+                llm_used=True,
+                model_name=model_name,
+            )
+            return revised.next_version(
+                plan_markdown=markdown,
+                plan_history=plan_history,
+                current_version=current_plan_version,
+                llm_used=True,
+                creation_contract=candidate_contract,
+                change_source=change_source,
+                scene_blueprints=blueprints,
+            )
+        except Exception as exc:  # noqa: BLE001 - 第一次反馈给 LLM 修正，第二次保持原版本
+            last_error = exc
+            if attempt == 0:
+                validation_feedback = str(exc)
+                continue
+
+    return _failed_revision_result(
+        base=base,
+        template_path=template_path,
+        current_plan_markdown=current_plan_markdown,
+        current_plan_version=current_plan_version,
+        plan_history=plan_history,
+        creation_contract=original_contract,
+        scene_durations_sec=original_durations,
+        scene_blueprints=original_blueprints,
+        model_name=model_name,
+        error=last_error or ValueError("Plan 修订失败"),
+    )
+
+
+def _failed_revision_result(
+    *,
+    base: PlanMarkdownResult,
+    template_path: Path,
+    current_plan_markdown: str,
+    current_plan_version: int,
+    plan_history: list[dict[str, Any]],
+    creation_contract: dict[str, Any],
+    scene_durations_sec: list[int],
+    scene_blueprints: list[dict[str, Any]],
+    model_name: str,
+    error: Exception,
+) -> PlanMarkdownResult:
+    """修订失败时保留当前权威版本，不创建带非法合同的新历史。"""
+
+    return replace(
+        base,
+        template_path=template_path,
+        plan_markdown=current_plan_markdown,
+        plan_version=current_plan_version,
+        plan_history=copy.deepcopy(plan_history),
+        creation_contract=copy.deepcopy(creation_contract),
+        scene_durations_sec=copy.deepcopy(scene_durations_sec),
+        scene_blueprints=copy.deepcopy(scene_blueprints),
+        llm_used=False,
+        model_name=model_name,
+        error=str(error),
+    )
+
+
+def _redact_semantic_memory_payload(payload: dict[str, Any], *contexts: dict[str, Any]) -> dict[str, Any]:
+    """允许记忆影响 LLM 决策，但删除模型照抄到用户产物中的记忆原文。"""
+
+    fragments = _semantic_memory_fragments(*contexts)
+    if not fragments:
+        return copy.deepcopy(payload)
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if not isinstance(value, str):
+            return copy.deepcopy(value)
+        cleaned = value
+        for fragment in fragments:
+            cleaned = _remove_semantic_memory_fragment(cleaned, fragment)
+        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    return redact(payload)
+
+
+def _remove_semantic_memory_fragment(text: str, fragment: str) -> str:
+    """删除记忆原文及仅增加 Markdown 强调/空白的变体。"""
+
+    cleaned = text.replace(fragment, "")
+    normalized_fragment, _ = _memory_match_view(fragment)
+    if not normalized_fragment:
+        return cleaned
+    while True:
+        normalized_text, positions = _memory_match_view(cleaned)
+        match_start = normalized_text.find(normalized_fragment)
+        if match_start < 0:
+            return cleaned
+        original_start = positions[match_start]
+        original_end = positions[match_start + len(normalized_fragment) - 1] + 1
+        cleaned = cleaned[:original_start] + cleaned[original_end:]
+
+
+def _memory_match_view(value: str) -> tuple[str, list[int]]:
+    """构造忽略 Markdown 强调符和空白的匹配视图，并保留原文索引。"""
+
+    characters: list[str] = []
+    positions: list[int] = []
+    for index, character in enumerate(value):
+        if character.isspace() or character in "*_`~\\":
+            continue
+        characters.append(character)
+        positions.append(index)
+    return "".join(characters), positions
+
+
+def _semantic_memory_fragments(*contexts: dict[str, Any]) -> list[str]:
+    fragments: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            semantic_memory = value.get("semantic_memory")
+            if isinstance(semantic_memory, dict):
+                items = semantic_memory.get("items")
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            content = str(item.get("content") or "").strip()
+                            if content and content not in fragments:
+                                fragments.append(content)
+            for item in value.values():
+                if isinstance(item, (dict, list)):
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    for context in contexts:
+        collect(context)
+    return sorted(fragments, key=len, reverse=True)
 
 
 def restore_plan_version(

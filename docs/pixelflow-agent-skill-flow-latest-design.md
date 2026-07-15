@@ -125,7 +125,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 | PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频同时加载 Seedance Skill，让 LLM 生成 plan.md 与结构化分镜蓝图 |
 | PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用时按叙事职能加权兜底 |
 | PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构及精确总时长 |
-| PlanRevisionSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 在当前创意内修订 Plan，生成新版本并保留历史 |
+| PlanRevisionSkill | `backend/pixelflow/creative/revision_contract.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 先合并白名单 `creation_contract_patch`，再结合当前 Plan、表单、垂类补充、附件、采集上下文和 PowerMem 重写 Plan；生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
 | PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布直接编辑完整 Markdown；不调用 LLM，校验后原样发布为下一 Plan 版本并保留权威合同快照 |
 
@@ -583,6 +583,14 @@ Plan 审核与版本规则：
 
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
 - 当前创意内修改只调用 `/agent/flows/planning/plan/revise`，不得返回创意方向列表。
+- 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
+- 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。
+- 候选合同或分镜蓝图校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。
+- 修订值优先级固定为“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；用户未提及字段不得变化。
+- 用户意见解析只接受明确指向合同字段的修改。单分镜时长、画面中的数量，以及“不要改/保持不变”等否定式表达不得误改总时长、图片数量、风格或模型。
+- 候选合同与蓝图校验失败时，系统把具体校验原因回传给 Plan LLM 修正 1 次；第二次仍失败时返回错误并完整保留当前 Plan、版本历史、合同与蓝图，不新增版本。
+- 视频合同发生变化后必须重新校验分镜蓝图，每镜 4-15 秒且总和精确等于新版 `video_duration_sec`；图片合同发生变化后，最终目标、类型、用途、风格、尺寸和数量直接覆盖初始表单与采集上下文并进入图片 prepare。
+- 图片最终合同在 PowerMem 检索和 content-app 调用前校验：文本字段必须为非空字符串、数量为 1-10、比例精确匹配支持值；历史空合同 `{}` 按缺失合同兼容。
 - 重新生成新创意才调用 `/agent/flows/intake/directions` 返回新的 3 个方向。
 - 初始 Plan 是 v1；每次修订创建新版本，回退只直接激活所选历史版本并保持 `plan_history` 不变，不追加重复版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
@@ -591,7 +599,8 @@ Plan 审核与版本规则：
 - 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同、分镜时长与权威蓝图，并统一由 `makeSnapshot()` 写入 conversation context，避免自动保存覆盖回退结果或恢复后重新切镜。
 - Plan 消息以 `conversation_id + client_message_id` 幂等保存；同一对话在网络结果未知后重试只返回既有消息，且必须先确认消息落库再更新 context。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
-- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。
+- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包还必须逐项消费该版本 `scene_blueprints[].asset_requirements`，补齐人物、场景和道具并重建 `@asset_id`/mentions；不得使用场景包 LLM 返回的旧方案资产或自由 prompt 覆盖最终 Plan。
+- 场景包的 `characters/scenes/props/visual_style` 四类全局 ID 必须唯一；规范化前先保护已有 `@asset_id`，避免二次替换。任一分镜引用超过 9 张时返回包含分镜标识和引用数量的错误，不允许截断后继续生成。
 
 场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：
 

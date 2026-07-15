@@ -1497,12 +1497,18 @@ export const api = {
 
   savePlanMarkdownEdit: (body: {
     intent: CreationIntent;
+    form_values: Record<string, unknown>;
+    selected_direction: Record<string, unknown>;
+    current_plan_markdown: string;
     edited_plan_markdown: string;
     current_plan_version: number;
     plan_history: PlanMarkdownResponse["plan_history"];
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
     scene_blueprints?: PlanSceneBlueprint[];
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
 
   restorePlanMarkdown: (body: {
@@ -1520,6 +1526,7 @@ export const api = {
     form_values: Record<string, unknown>;
     plan_markdown: string;
     selected_direction: Record<string, unknown>;
+    creation_contract?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     revision_feedback?: string | null;
     intake_context?: Record<string, unknown>;

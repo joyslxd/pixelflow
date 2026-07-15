@@ -59,6 +59,10 @@ async def revise_plan_payload(
     selected_direction: dict[str, Any],
     creation_contract: dict[str, Any],
     current_scene_blueprints: list[dict[str, Any]] | None = None,
+    product_creative_profile: dict[str, Any] | None = None,
+    materials: list[dict[str, Any]] | None = None,
+    intake_context: dict[str, Any] | None = None,
+    validation_feedback: str = "",
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> dict[str, Any]:
@@ -66,7 +70,7 @@ async def revise_plan_payload(
 只修改当前创意对应的 plan.md，不要生成新的创意方向。
 
 硬约束：
-1. 用户确认过的创作合同不可被擅自覆盖。
+1. 当前创作合同是修订基线；只能按用户本次修改意见返回 creation_contract_patch，未提及字段不得改动。
 2. 视频每个分镜 4-15 秒，总和必须等于 video_duration_sec；根据修改后的内容重新调度时长，不得机械按 10 秒等分。
 3. scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 4. 模板中的苹果PRO、林晓、赵总监等内容只是结构示例，禁止复制到当前方案。
@@ -78,6 +82,7 @@ async def revise_plan_payload(
 输出：
 {{
   "plan_markdown":"完整修订版 plan.md",
+  "creation_contract_patch":{{"仅返回用户明确要求修改的合同字段":"新值"}},
   "scene_image_ratio":"仅视频返回",
   "scene_image_size":"仅视频返回",
   "scene_blueprints":[{{
@@ -102,6 +107,10 @@ async def revise_plan_payload(
 当前创意：{_json(selected_direction)}
 创作合同：{_json(creation_contract)}
 当前分镜蓝图：{_json(current_scene_blueprints or [])}
+行业与垂类补充：{_json(product_creative_profile or {})}
+采集上下文：{_json(intake_context or {})}
+附件摘要：{_json(materials or [])}
+上次结构校验反馈：{validation_feedback or "无"}
 Seedance Skill：
 {load_seedance_guidance() if intent == "video" else "图片任务不适用"}
 模板结构示例：

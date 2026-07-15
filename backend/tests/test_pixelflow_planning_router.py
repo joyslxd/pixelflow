@@ -243,6 +243,154 @@ def test_planning_router_revises_current_plan_without_regenerating_directions(mo
     assert "增加开学季氛围" in data["plan_markdown"]
 
 
+def test_planning_revision_passes_complete_context_and_semantic_memory(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+    from pixelflow.memory import SemanticMemoryItem
+
+    captured: dict[str, object] = {}
+
+    class FakePowerMemService:
+        async def search(self, **kwargs):
+            captured["memory_query"] = kwargs["query"]
+            return [
+                SemanticMemoryItem(
+                    memory_id="revision-memory",
+                    content="品牌长期偏好：真实摄影，避免夸张特效。",
+                    score=0.9,
+                    metadata={"category": "preference"},
+                )
+            ]
+
+    initial = build_plan_markdown(
+        "video",
+        {
+            "product_info": "防水背包",
+            "product_category": "服饰鞋包",
+            "target_audience": "通勤人群",
+            "conversion_goal": "直接购买",
+            "video_duration_sec": 30,
+        },
+        {"direction_id": "direction_1", "title": "雨夜通勤", "description": "突出防水能力。"},
+    )
+
+    async def fake_revise_plan_markdown_with_llm(**kwargs):
+        captured["revision_kwargs"] = kwargs
+        return initial.next_version(
+            plan_markdown=f"{kwargs['current_plan_markdown']}\n\n修改意见：{kwargs['revision_feedback']}",
+            plan_history=kwargs["plan_history"],
+            current_version=kwargs["current_plan_version"],
+        )
+
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", fake_revise_plan_markdown_with_llm)
+    monkeypatch.setattr(pixelflow_planning, "record_power_mem_background", lambda *_args, **_kwargs: None)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_power_mem_service = FakePowerMemService()
+    app.include_router(pixelflow_planning.router)
+
+    material = {"name": "背包参考图", "url": "https://example.com/backpack.png"}
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/revise",
+            json={
+                "intent": "video",
+                "form_values": {
+                    "product_info": "防水背包",
+                    "product_category": "服饰鞋包",
+                    "target_audience": "通勤人群",
+                    "conversion_goal": "直接购买",
+                    "video_duration_sec": 30,
+                },
+                "selected_direction": {"direction_id": "direction_1", "title": "雨夜通勤", "description": "突出防水能力。"},
+                "product_creative_profile": {"core_message": "雨夜通勤仍保持从容"},
+                "intake_context": {"source_prompt": "制作防水背包通勤视频", "industry_type": "服饰鞋包"},
+                "materials": [material],
+                "current_plan_markdown": initial.plan_markdown,
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "revision_feedback": "把视频总时长改为60秒",
+                "creation_contract": initial.creation_contract,
+                "scene_blueprints": initial.scene_blueprints,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "雨夜通勤仍保持从容" in str(captured["memory_query"])
+    assert "制作防水背包通勤视频" in str(captured["memory_query"])
+    assert "https://example.com/backpack.png" in str(captured["memory_query"])
+    revision_kwargs = captured["revision_kwargs"]
+    assert isinstance(revision_kwargs, dict)
+    assert revision_kwargs["materials"] == [material]
+    assert revision_kwargs["intake_context"]["semantic_memory"]["enabled"] is True
+    assert revision_kwargs["product_creative_profile"]["semantic_memory"]["enabled"] is True
+
+
+def test_manual_plan_edit_uses_llm_reconciliation_and_complete_context(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+
+    captured: dict[str, object] = {}
+    initial = build_plan_markdown(
+        "image",
+        {
+            "image_goal": "书包宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+        },
+        {"direction_id": "direction_1", "title": "通学主视觉", "description": "突出护脊和收纳。"},
+    )
+
+    async def fake_revise_plan_markdown_with_llm(**kwargs):
+        captured.update(kwargs)
+        return initial.next_version(
+            plan_markdown="# 书包横版宣传图\n\n## 一、选题方向\n通学。\n\n## 三、图片规格\n16:9。\n\n## 五、主图方案\n横版构图。",
+            plan_history=kwargs["plan_history"],
+            current_version=kwargs["current_plan_version"],
+            creation_contract={**initial.creation_contract, "image_size": "16:9"},
+            change_source="manual_edit",
+        )
+
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", fake_revise_plan_markdown_with_llm)
+    monkeypatch.setattr(pixelflow_planning, "record_power_mem_background", lambda *_args, **_kwargs: None)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+    material = {"name": "书包参考图", "url": "https://example.com/backpack.png"}
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/save-edit",
+            json={
+                "intent": "image",
+                "form_values": {
+                    "image_goal": "书包宣传图",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "1:1",
+                },
+                "selected_direction": {"direction_id": "direction_1", "title": "通学主视觉", "description": "突出护脊和收纳。"},
+                "product_creative_profile": {"core_message": "轻量护脊"},
+                "intake_context": {"source_prompt": "制作书包宣传图"},
+                "materials": [material],
+                "current_plan_markdown": initial.plan_markdown,
+                "edited_plan_markdown": initial.plan_markdown.replace("1:1", "16:9"),
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "creation_contract": initial.creation_contract,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["plan_version"] == 2
+    assert str(captured["revision_feedback"]).startswith("【完整手工编辑稿】")
+    assert captured["current_plan_markdown"] == initial.plan_markdown
+    assert captured["materials"] == [material]
+    assert captured["intake_context"]["source_prompt"] == "制作书包宣传图"
+    assert captured["product_creative_profile"]["core_message"] == "轻量护脊"
+
+
 @pytest.mark.parametrize("intent", ["image", "video"])
 def test_planning_router_restores_history_without_creating_version(intent: str):
     from app.gateway.routers import pixelflow_planning
