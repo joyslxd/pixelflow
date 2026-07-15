@@ -502,6 +502,37 @@ test("applyGlobalSceneAssetReplacement stores image asset references as normal i
   ]);
 });
 
+test("applyGlobalSceneAssetReplacement stores local upload references as normal image urls", () => {
+  const [scene] = sampleScenes();
+  const sceneWithMentions = {
+    ...scene,
+    image_urls: [],
+    shot_description: {
+      text: "产品：@蓝牙耳机",
+      mentions: [{ asset_id: "prop-product", name: "蓝牙耳机", image_url: "https://x/global-prop.png" }],
+    },
+  };
+
+  const updated = applyGlobalSceneAssetReplacement(sampleGlobalAssets(), [sceneWithMentions], {
+    assetId: "prop-product",
+    assetGroup: "props",
+    replacement: {
+      source: "local_upload",
+      displayImageUrl: "https://x/local-upload.png",
+      generationReferenceUrl: "https://x/local-upload.png",
+      assetType: "image",
+      assetName: "local-upload.png",
+    },
+  });
+
+  assert.equal(updated.global_assets.props[0].images[0], "https://x/local-upload.png");
+  assert.equal(updated.global_assets.props[0].generation_reference_url, "https://x/local-upload.png");
+  assert.equal(updated.global_assets.props[0].replacement_source, "local_upload");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].image_url, "https://x/local-upload.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].generation_reference_url, "https://x/local-upload.png");
+  assert.equal(updated.scene_packages[0].shot_description.mentions[0].replacement_source, "local_upload");
+});
+
 test("plain global asset image edits clear stale digital human generation references", () => {
   const [scene] = sampleScenes();
   const sceneWithDigitalHuman = {
