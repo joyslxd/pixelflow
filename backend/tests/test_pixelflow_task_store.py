@@ -347,6 +347,98 @@ async def test_memory_jianying_draft_state_is_monotonic_for_stale_same_storyboar
 
 
 @pytest.mark.asyncio
+async def test_memory_jianying_draft_only_allows_new_job_after_succeeded_record_expires():
+    store = MemoryPixelFlowTaskStore()
+    storyboard_id = "storyboard-expiration"
+    for suffix, expire_at in (
+        ("future", "2099-01-01T00:00:00Z"),
+        ("missing", None),
+        ("invalid", "not-a-date"),
+    ):
+        conversation_id = f"c-jianying-memory-{suffix}"
+        record = _jianying_record("succeeded", f"job-{suffix}-old", storyboard_id)
+        if expire_at is not None:
+            record["expire_at"] = expire_at
+        await store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=conversation_id,
+                user_id="u1",
+                title="有效剪映草稿",
+                last_phase="jianying_draft_succeeded",
+                context={
+                    "pendingJianyingDraftJob": None,
+                    "pending_jianying_draft_job": None,
+                    "jianyingDraftRecords": {storyboard_id: record},
+                    "jianying_draft_records": {storyboard_id: record},
+                },
+            )
+        )
+        await store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id=f"job-{suffix}-new",
+            pending_job=_jianying_pending(f"job-{suffix}-new", conversation_id, storyboard_id),
+            records={},
+            last_phase="jianying_draft_running",
+        )
+        restored = await store.get_conversation(conversation_id, user_id="u1")
+        assert restored is not None
+        assert restored.context["pendingJianyingDraftJob"] is None
+        assert restored.context["jianyingDraftRecords"][storyboard_id]["job_id"] == f"job-{suffix}-old"
+        assert restored.last_phase == "jianying_draft_succeeded"
+
+    conversation_id = "c-jianying-memory-expired"
+    expired_record = {
+        **_jianying_record("succeeded", "job-expired-old", storyboard_id),
+        "expire_at": "2000-01-01T00:00:00Z",
+    }
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id="u1",
+            title="过期剪映草稿",
+            last_phase="jianying_draft_succeeded",
+            context={
+                "pendingJianyingDraftJob": None,
+                "pending_jianying_draft_job": None,
+                "jianyingDraftRecords": {storyboard_id: expired_record},
+                "jianying_draft_records": {storyboard_id: expired_record},
+            },
+        )
+    )
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-expired-new",
+        pending_job=_jianying_pending("job-expired-new", conversation_id, storyboard_id),
+        records={},
+        last_phase="jianying_draft_running",
+    )
+    running = await store.get_conversation(conversation_id, user_id="u1")
+    assert running is not None
+    assert running.context["pendingJianyingDraftJob"]["job_id"] == "job-expired-new"
+    assert running.last_phase == "jianying_draft_running"
+
+    replacement = {
+        **_jianying_record("succeeded", "job-expired-new", storyboard_id),
+        "expire_at": "2099-01-01T00:00:00Z",
+    }
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-expired-new",
+        pending_job=None,
+        records={storyboard_id: replacement},
+        last_phase="jianying_draft_succeeded",
+    )
+    restored = await store.get_conversation(conversation_id, user_id="u1")
+    assert restored is not None
+    assert restored.context["pendingJianyingDraftJob"] is None
+    assert restored.context["jianyingDraftRecords"][storyboard_id] == replacement
+    assert restored.last_phase == "jianying_draft_succeeded"
+
+
+@pytest.mark.asyncio
 async def test_memory_jianying_draft_allows_explicit_new_job_after_failed_result():
     store = MemoryPixelFlowTaskStore()
     conversation_id = "c-jianying-memory-retry"
@@ -772,6 +864,104 @@ async def test_two_sql_stores_keep_jianying_draft_succeeded_state_monotonic_for_
         assert restored.context["pendingJianyingDraftJob"] is None
         assert restored.context["jianyingDraftRecords"][storyboard_id]["status"] == "succeeded"
         assert restored.last_phase == "jianying_draft_succeeded"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_sql_stores_allow_replacing_only_expired_succeeded_jianying_draft(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow-jianying-expiration.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first_store = SQLPixelFlowTaskStore(session_factory)
+        second_store = SQLPixelFlowTaskStore(session_factory)
+        storyboard_id = "storyboard-expiration"
+
+        valid_conversation_id = "c-jianying-sql-valid"
+        valid_record = {
+            **_jianying_record("succeeded", "job-valid-old", storyboard_id),
+            "expire_at": "2099-01-01T00:00:00Z",
+        }
+        await first_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=valid_conversation_id,
+                user_id="u1",
+                title="有效剪映草稿",
+                last_phase="jianying_draft_succeeded",
+                context={
+                    "pendingJianyingDraftJob": None,
+                    "pending_jianying_draft_job": None,
+                    "jianyingDraftRecords": {storyboard_id: valid_record},
+                    "jianying_draft_records": {storyboard_id: valid_record},
+                },
+            )
+        )
+        await second_store.patch_jianying_draft_conversation_context(
+            valid_conversation_id,
+            user_id="u1",
+            expected_job_id="job-valid-new",
+            pending_job=_jianying_pending("job-valid-new", valid_conversation_id, storyboard_id),
+            records={},
+            last_phase="jianying_draft_running",
+        )
+        valid_restored = await first_store.get_conversation(valid_conversation_id, user_id="u1")
+        assert valid_restored is not None
+        assert valid_restored.context["pendingJianyingDraftJob"] is None
+        assert valid_restored.context["jianyingDraftRecords"][storyboard_id]["job_id"] == "job-valid-old"
+
+        expired_conversation_id = "c-jianying-sql-expired"
+        expired_record = {
+            **_jianying_record("succeeded", "job-expired-old", storyboard_id),
+            "expire_at": "2000-01-01T00:00:00Z",
+        }
+        await first_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=expired_conversation_id,
+                user_id="u1",
+                title="过期剪映草稿",
+                last_phase="jianying_draft_succeeded",
+                context={
+                    "pendingJianyingDraftJob": None,
+                    "pending_jianying_draft_job": None,
+                    "jianyingDraftRecords": {storyboard_id: expired_record},
+                    "jianying_draft_records": {storyboard_id: expired_record},
+                },
+            )
+        )
+        await second_store.patch_jianying_draft_conversation_context(
+            expired_conversation_id,
+            user_id="u1",
+            expected_job_id="job-expired-new",
+            pending_job=_jianying_pending("job-expired-new", expired_conversation_id, storyboard_id),
+            records={},
+            last_phase="jianying_draft_running",
+        )
+        expired_running = await first_store.get_conversation(expired_conversation_id, user_id="u1")
+        assert expired_running is not None
+        assert expired_running.context["pendingJianyingDraftJob"]["job_id"] == "job-expired-new"
+
+        replacement = {
+            **_jianying_record("succeeded", "job-expired-new", storyboard_id),
+            "expire_at": "2099-01-01T00:00:00Z",
+        }
+        await first_store.patch_jianying_draft_conversation_context(
+            expired_conversation_id,
+            user_id="u1",
+            expected_job_id="job-expired-new",
+            pending_job=None,
+            records={storyboard_id: replacement},
+            last_phase="jianying_draft_succeeded",
+        )
+        expired_restored = await second_store.get_conversation(expired_conversation_id, user_id="u1")
+        assert expired_restored is not None
+        assert expired_restored.context["pendingJianyingDraftJob"] is None
+        assert expired_restored.context["jianyingDraftRecords"][storyboard_id] == replacement
     finally:
         await engine.dispose()
 

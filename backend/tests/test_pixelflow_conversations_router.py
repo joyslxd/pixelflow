@@ -260,6 +260,108 @@ def test_jianying_draft_context_patch_rejects_stale_job_state_and_requires_match
         assert mismatched_record.status_code == 422
 
 
+def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record_expires():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        storyboard_id = "storyboard-expiration"
+        valid = client.post(
+            "/agent/conversations",
+            json={
+                "title": "有效剪映草稿",
+                "last_phase": "jianying_draft_succeeded",
+                "context": {
+                    "jianyingDraftRecords": {
+                        storyboard_id: {
+                            "status": "succeeded",
+                            "job_id": "job-valid-old",
+                            "storyboard_version_id": storyboard_id,
+                            "expire_at": "2099-01-01T00:00:00Z",
+                        }
+                    }
+                },
+            },
+        ).json()
+        valid_conversation_id = valid["conversation_id"]
+        valid_pending = {
+            "job_id": "job-valid-new",
+            "conversation_id": valid_conversation_id,
+            "storyboard_version_id": storyboard_id,
+        }
+        valid_retry = client.patch(
+            f"/agent/conversations/{valid_conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_running",
+                "expected_job_id": "job-valid-new",
+                "pendingJianyingDraftJob": valid_pending,
+                "jianyingDraftRecords": {},
+            },
+        )
+        assert valid_retry.status_code == 200
+        assert valid_retry.json()["context"]["pendingJianyingDraftJob"] is None
+        assert valid_retry.json()["last_phase"] == "jianying_draft_succeeded"
+
+        expired = client.post(
+            "/agent/conversations",
+            json={
+                "title": "过期剪映草稿",
+                "last_phase": "jianying_draft_succeeded",
+                "context": {
+                    "jianyingDraftRecords": {
+                        storyboard_id: {
+                            "status": "succeeded",
+                            "job_id": "job-expired-old",
+                            "storyboard_version_id": storyboard_id,
+                            "expire_at": "2000-01-01T00:00:00Z",
+                        }
+                    }
+                },
+            },
+        ).json()
+        expired_conversation_id = expired["conversation_id"]
+        expired_pending = {
+            "job_id": "job-expired-new",
+            "conversation_id": expired_conversation_id,
+            "storyboard_version_id": storyboard_id,
+        }
+        expired_retry = client.patch(
+            f"/agent/conversations/{expired_conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_running",
+                "expected_job_id": "job-expired-new",
+                "pendingJianyingDraftJob": expired_pending,
+                "jianyingDraftRecords": {},
+            },
+        )
+        assert expired_retry.status_code == 200
+        assert expired_retry.json()["context"]["pendingJianyingDraftJob"]["job_id"] == "job-expired-new"
+
+        replacement = {
+            "status": "succeeded",
+            "job_id": "job-expired-new",
+            "storyboard_version_id": storyboard_id,
+            "expire_at": "2099-01-01T00:00:00Z",
+        }
+        completed_retry = client.patch(
+            f"/agent/conversations/{expired_conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_succeeded",
+                "expected_job_id": "job-expired-new",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {storyboard_id: replacement},
+            },
+        )
+        assert completed_retry.status_code == 200
+        completed = completed_retry.json()
+        assert completed["context"]["pendingJianyingDraftJob"] is None
+        assert completed["context"]["jianyingDraftRecords"][storyboard_id] == replacement
+        assert completed["last_phase"] == "jianying_draft_succeeded"
+
+
 def test_jianying_draft_context_patch_checks_conversation_owner():
     from app.gateway.routers import pixelflow_conversations
 

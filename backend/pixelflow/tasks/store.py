@@ -101,12 +101,25 @@ def _jianying_draft_status(value: Any) -> str | None:
     return status if isinstance(status, str) and status else None
 
 
+def _jianying_draft_succeeded_is_valid(value: Any, *, now: datetime) -> bool:
+    if _jianying_draft_status(value) != "succeeded" or not isinstance(value, dict):
+        return False
+    raw_expire_at = value.get("expire_at")
+    if not isinstance(raw_expire_at, (datetime, str)):
+        return True
+    expire_at = _to_datetime(raw_expire_at)
+    if expire_at is None:
+        return True
+    return expire_at > now
+
+
 def _merge_jianying_draft_record(
     current_record: Any,
     incoming_record: Any,
     *,
     expected_job_id: str,
     current_pending_job_id: str | None,
+    now: datetime,
 ) -> tuple[dict[str, Any] | None, bool]:
     current = dict(current_record) if isinstance(current_record, dict) else None
     incoming = dict(incoming_record) if isinstance(incoming_record, dict) else None
@@ -118,7 +131,7 @@ def _merge_jianying_draft_record(
     current_status = _jianying_draft_status(current)
     incoming_status = _jianying_draft_status(incoming)
     current_job_id = _jianying_draft_job_id(current)
-    if current_status == "succeeded":
+    if current_status == "succeeded" and _jianying_draft_succeeded_is_valid(current, now=now):
         return current, current_job_id == expected_job_id and incoming_status == "succeeded"
     if incoming_status == "succeeded":
         return incoming, True
@@ -143,6 +156,7 @@ def _can_set_jianying_draft_pending(
     expected_job_id: str,
     current_pending_job_id: str | None,
     records: dict[str, Any],
+    now: datetime,
 ) -> bool:
     if _jianying_draft_job_id(pending_job) != expected_job_id:
         return False
@@ -153,7 +167,7 @@ def _can_set_jianying_draft_pending(
         return False
     record = records.get(storyboard_version_id)
     record_status = _jianying_draft_status(record)
-    if record_status == "succeeded":
+    if record_status == "succeeded" and _jianying_draft_succeeded_is_valid(record, now=now):
         return False
     return not (
         _jianying_draft_job_id(record) == expected_job_id
@@ -209,6 +223,7 @@ def _patch_jianying_draft_context(
     if camel_pending is not None:
         current_pending = camel_pending
     current_pending_job_id = _jianying_draft_job_id(current_pending)
+    patch_time = _now()
     request_authorized = False
     for storyboard_version_id, incoming_record in records.items():
         merged_record, record_authorized = _merge_jianying_draft_record(
@@ -216,6 +231,7 @@ def _patch_jianying_draft_context(
             incoming_record,
             expected_job_id=expected_job_id,
             current_pending_job_id=current_pending_job_id,
+            now=patch_time,
         )
         if merged_record is not None:
             merged_records[storyboard_version_id] = merged_record
@@ -231,6 +247,7 @@ def _patch_jianying_draft_context(
         expected_job_id=expected_job_id,
         current_pending_job_id=current_pending_job_id,
         records=merged_records,
+        now=patch_time,
     ):
         resolved_pending = dict(pending_job)
         request_authorized = True
