@@ -5,6 +5,7 @@ from pixelflow.jianying_draft.models import (
     JianyingDraftRequest,
     JianyingDraftResult,
     JianyingDraftScene,
+    JianyingDraftStatus,
     compute_storyboard_version_id,
 )
 
@@ -160,3 +161,19 @@ def test_request_rejects_mismatched_storyboard_version():
 
 def test_result_does_not_expose_raw_provider_payload():
     assert "raw" not in JianyingDraftResult.model_fields
+
+
+@pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/draft.zip"])
+def test_result_rejects_non_http_download_url(url: str):
+    with pytest.raises(ValidationError):
+        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED, download_url=url)
+
+
+def test_result_serializes_https_download_url():
+    result = JianyingDraftResult(
+        status=JianyingDraftStatus.SUCCEEDED,
+        download_url="https://cdn.example.com/draft.zip",
+    )
+
+    assert result.download_url is not None
+    assert "https://cdn.example.com/draft.zip" in result.model_dump_json()

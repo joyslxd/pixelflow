@@ -90,7 +90,7 @@ class JianyingDraftResult(BaseModel):
     provider_task_id: str | None = None
     conversation_id: str | None = None
     storyboard_version_id: str | None = None
-    download_url: str | None = None
+    download_url: AnyHttpUrl | None = None
     file_name: str | None = None
     expire_at: datetime | None = None
     message: str = ""
