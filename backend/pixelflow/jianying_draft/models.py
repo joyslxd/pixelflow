@@ -33,6 +33,13 @@ class JianyingDraftScene(BaseModel):
 def compute_storyboard_version_id(scenes: Sequence[JianyingDraftScene]) -> str:
     """按固定规范为有效分镜集合计算稳定的 FNV-1a 64 位版本 ID。"""
 
+    if not scenes:
+        raise ValueError("scenes cannot be empty")
+
+    scene_indexes = [scene.scene_index for scene in scenes]
+    if len(scene_indexes) != len(set(scene_indexes)):
+        raise ValueError("scene_index values must be unique")
+
     ordered = sorted(scenes, key=lambda item: item.scene_index)
     payload = [
         {
@@ -67,13 +74,6 @@ class JianyingDraftRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_storyboard(self) -> JianyingDraftRequest:
-        if not self.scenes:
-            raise ValueError("scenes cannot be empty")
-
-        scene_indexes = [scene.scene_index for scene in self.scenes]
-        if len(scene_indexes) != len(set(scene_indexes)):
-            raise ValueError("scene_index values must be unique")
-
         expected_version_id = compute_storyboard_version_id(self.scenes)
         if self.storyboard_version_id != expected_version_id:
             raise ValueError(

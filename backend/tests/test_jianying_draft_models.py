@@ -91,6 +91,25 @@ def test_storyboard_version_matches_fixed_fnv1a64_value():
     assert compute_storyboard_version_id(scenes) == "storyboard-459f6271da98fbff"
 
 
+def test_compute_storyboard_version_rejects_empty_scenes():
+    with pytest.raises(ValueError):
+        compute_storyboard_version_id([])
+
+
+def test_compute_storyboard_version_rejects_duplicate_scene_indexes():
+    scenes = [
+        JianyingDraftScene(
+            scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"
+        ),
+        JianyingDraftScene(
+            scene_id="scene-2", scene_index=1, video_url="https://cdn/2.mp4"
+        ),
+    ]
+
+    with pytest.raises(ValueError):
+        compute_storyboard_version_id(scenes)
+
+
 @pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/1.mp4"])
 def test_scene_rejects_non_http_video_url(url: str):
     with pytest.raises(ValidationError):
@@ -119,7 +138,7 @@ def test_request_rejects_duplicate_scene_indexes():
     with pytest.raises(ValidationError):
         JianyingDraftRequest(
             conversation_id="conversation-1",
-            storyboard_version_id=compute_storyboard_version_id(scenes),
+            storyboard_version_id="storyboard-invalid",
             scenes=scenes,
         )
 
