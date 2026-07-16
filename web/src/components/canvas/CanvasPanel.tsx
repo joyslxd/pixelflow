@@ -12,6 +12,7 @@ interface CanvasPanelProps {
   onConfirmStage?: (stage: "segments" | "edit" | "qc", approved: boolean) => void;
   onClose?: () => void;
   onSelectVideo?: (video: VideoResult | null) => void;
+  onDownloadVideo?: (video: VideoResult, sourceMessageId?: string) => void;
   briefConfirmed?: boolean;
 }
 
@@ -35,8 +36,8 @@ const REVIEW_COPY = {
   qc_review: { stage: "qc", title: "质检结果已就绪", approve: "确认通过,完成任务", reject: "重新生成" },
 } as const;
 
-export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, onSelectVideo, briefConfirmed = false }: CanvasPanelProps) {
-  const { phase, brief, selectedVideo, qcReport, timeline, estCost, actualCost } = state;
+export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClose, onSelectVideo, onDownloadVideo, briefConfirmed = false }: CanvasPanelProps) {
+  const { phase, brief, selectedVideo, selectedVideoSourceMessageId, qcReport, timeline, estCost, actualCost } = state;
   // 只有 Brief 阶段、后端已返回 Brief、且用户尚未确认时，才展示审核卡。
   // 其他 review 阶段展示对应确认卡；没有内容时展示空画布。
   const canReviewBrief = phase === "brief_review" && Boolean(brief) && !briefConfirmed;
@@ -46,6 +47,7 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
       <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
         <VideoPreviewPanel
           video={selectedVideo}
+          onDownload={(video) => onDownloadVideo?.(video, selectedVideoSourceMessageId)}
           onBack={() => {
             onSelectVideo?.(null);
             onClose?.();

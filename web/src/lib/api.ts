@@ -514,6 +514,8 @@ export interface PrepareScenePackagesJobStatusResponse {
   message: string;
 }
 
+export type PrepareScenePackagesJobStatusCallback = (status: PrepareScenePackagesJobStatusResponse) => void | Promise<void>;
+
 export interface GenerateSceneAssetsJobStartResponse {
   ok: boolean;
   job_id: string;
@@ -1188,12 +1190,14 @@ async function pollImageAssetFusionJob(
 async function pollPrepareScenePackagesJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
+  onStatus?: PrepareScenePackagesJobStatusCallback,
 ): Promise<PrepareScenePackagesJobResult | null> {
   const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!shouldContinue()) return null;
     const status = await req<PrepareScenePackagesJobStatusResponse>(`${FLOW_BASE}/video/prepare-scene-packages/jobs/${encodeURIComponent(jobId)}`);
     if (!shouldContinue()) return null;
+    await onStatus?.(status);
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
     if (status.status === "failed") {
       return {
