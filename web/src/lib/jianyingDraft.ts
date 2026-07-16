@@ -198,10 +198,14 @@ function hasUsableVideoUrl(scene: DraftButtonScene): boolean {
   }
 }
 
-function isExpired(result: JianyingDraftJobResponse, now: Date): boolean {
-  if (!result.expire_at) return false;
+export function isJianyingDraftSucceededResultValid(
+  result: Pick<JianyingDraftJobResponse, "status" | "expire_at"> | null | undefined,
+  now = new Date(),
+): boolean {
+  if (result?.status !== "succeeded") return false;
+  if (!result.expire_at) return true;
   const expireAt = Date.parse(result.expire_at);
-  return Number.isFinite(expireAt) && expireAt <= now.getTime();
+  return !Number.isFinite(expireAt) || expireAt > now.getTime();
 }
 
 /** Resolves the final-video draft action without coupling it to Workspace state. */
@@ -229,7 +233,7 @@ export function draftButtonState({
     return { enabled: false, label: "生成剪映草稿", reason: "存在缺少视频地址的分镜" };
   }
   if (result?.status === "succeeded") {
-    if (isExpired(result, now)) {
+    if (!isJianyingDraftSucceededResultValid(result, now)) {
       return { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" };
     }
     return result.download_url

@@ -439,6 +439,70 @@ async def test_memory_jianying_draft_only_allows_new_job_after_succeeded_record_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["failed", "timeout"])
+async def test_memory_jianying_draft_rejects_old_success_after_retry_reaches_terminal(terminal_status):
+    store = MemoryPixelFlowTaskStore()
+    conversation_id = f"c-jianying-memory-late-old-{terminal_status}"
+    storyboard_id = "storyboard-late-old"
+    old_record = {
+        **_jianying_record("succeeded", "job-old", storyboard_id),
+        "expire_at": "2000-01-01T00:00:00Z",
+    }
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id="u1",
+            title="剪映草稿旧任务迟到",
+            last_phase="jianying_draft_succeeded",
+            context={
+                "pendingJianyingDraftJob": None,
+                "pending_jianying_draft_job": None,
+                "jianyingDraftRecords": {storyboard_id: old_record},
+                "jianying_draft_records": {storyboard_id: old_record},
+            },
+        )
+    )
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-new",
+        pending_job=_jianying_pending("job-new", conversation_id, storyboard_id),
+        records={},
+        last_phase="jianying_draft_running",
+    )
+    new_terminal = _jianying_record(terminal_status, "job-new", storyboard_id)
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-new",
+        pending_job=None,
+        records={storyboard_id: new_terminal},
+        last_phase=f"jianying_draft_{terminal_status}",
+    )
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-old",
+        pending_job=None,
+        records={
+            storyboard_id: {
+                **_jianying_record("succeeded", "job-old", storyboard_id),
+                "expire_at": "2099-01-01T00:00:00Z",
+            }
+        },
+        last_phase="jianying_draft_succeeded",
+    )
+
+    restored = await store.get_conversation(conversation_id, user_id="u1")
+    assert restored is not None
+    assert restored.context["pendingJianyingDraftJob"] is None
+    assert restored.context["jianyingDraftRecords"][storyboard_id] == new_terminal
+    assert restored.context["jianying_draft_records"][storyboard_id] == new_terminal
+    assert restored.last_phase == f"jianying_draft_{terminal_status}"
+
+
+@pytest.mark.asyncio
 async def test_memory_jianying_draft_allows_explicit_new_job_after_failed_result():
     store = MemoryPixelFlowTaskStore()
     conversation_id = "c-jianying-memory-retry"
@@ -962,6 +1026,81 @@ async def test_two_sql_stores_allow_replacing_only_expired_succeeded_jianying_dr
         assert expired_restored is not None
         assert expired_restored.context["pendingJianyingDraftJob"] is None
         assert expired_restored.context["jianyingDraftRecords"][storyboard_id] == replacement
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_sql_stores_reject_old_success_after_retry_failure_clears_pending(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow-jianying-late-old.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first_store = SQLPixelFlowTaskStore(session_factory)
+        second_store = SQLPixelFlowTaskStore(session_factory)
+        conversation_id = "c-jianying-sql-late-old"
+        storyboard_id = "storyboard-late-old"
+        old_record = {
+            **_jianying_record("succeeded", "job-old", storyboard_id),
+            "expire_at": "2000-01-01T00:00:00Z",
+        }
+        await first_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=conversation_id,
+                user_id="u1",
+                title="剪映草稿旧任务迟到",
+                last_phase="jianying_draft_succeeded",
+                context={
+                    "pendingJianyingDraftJob": None,
+                    "pending_jianying_draft_job": None,
+                    "jianyingDraftRecords": {storyboard_id: old_record},
+                    "jianying_draft_records": {storyboard_id: old_record},
+                },
+            )
+        )
+
+        await second_store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-new",
+            pending_job=_jianying_pending("job-new", conversation_id, storyboard_id),
+            records={},
+            last_phase="jianying_draft_running",
+        )
+        new_terminal = _jianying_record("failed", "job-new", storyboard_id)
+        await first_store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-new",
+            pending_job=None,
+            records={storyboard_id: new_terminal},
+            last_phase="jianying_draft_failed",
+        )
+        await second_store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-old",
+            pending_job=None,
+            records={
+                storyboard_id: {
+                    **_jianying_record("succeeded", "job-old", storyboard_id),
+                    "expire_at": "2099-01-01T00:00:00Z",
+                }
+            },
+            last_phase="jianying_draft_succeeded",
+        )
+
+        restored = await first_store.get_conversation(conversation_id, user_id="u1")
+        assert restored is not None
+        assert restored.context["pendingJianyingDraftJob"] is None
+        assert restored.context["jianyingDraftRecords"][storyboard_id] == new_terminal
+        assert restored.context["jianying_draft_records"][storyboard_id] == new_terminal
+        assert restored.last_phase == "jianying_draft_failed"
     finally:
         await engine.dispose()
 

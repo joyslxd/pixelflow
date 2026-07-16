@@ -131,6 +131,8 @@ def _merge_jianying_draft_record(
     current_status = _jianying_draft_status(current)
     incoming_status = _jianying_draft_status(incoming)
     current_job_id = _jianying_draft_job_id(current)
+    if current_job_id != expected_job_id and current_pending_job_id != expected_job_id:
+        return current, False
     if current_status == "succeeded" and _jianying_draft_succeeded_is_valid(current, now=now):
         return current, current_job_id == expected_job_id and incoming_status == "succeeded"
     if incoming_status == "succeeded":

@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "JIANYING_DRAFT_TEST_MODULE must point to the compiled jian
 const {
   JianyingDraftStartGuard,
   draftButtonState,
+  isJianyingDraftSucceededResultValid,
   patchJianyingDraftTargetConversation,
   patchJianyingDraftConversationContext,
   storyboardVersionId,
@@ -107,6 +108,28 @@ test("button offers download for a current draft and regeneration for an expired
     }),
     { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" },
   );
+});
+
+test("succeeded result validity is conservative and permits only explicitly expired retries", () => {
+  const now = new Date("2026-07-16T00:00:00.000Z");
+
+  assert.equal(
+    isJianyingDraftSucceededResultValid(
+      { status: "succeeded", expire_at: "2026-07-16T01:00:00.000Z" },
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    isJianyingDraftSucceededResultValid(
+      { status: "succeeded", expire_at: "2026-07-15T23:59:59.000Z" },
+      now,
+    ),
+    false,
+  );
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: null }, now), true);
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: "invalid" }, now), true);
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "failed", expire_at: null }, now), false);
 });
 
 test("start guard lets concurrent clicks start one job for the same conversation and storyboard", async () => {

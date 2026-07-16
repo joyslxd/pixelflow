@@ -92,6 +92,7 @@ import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 import {
+  isJianyingDraftSucceededResultValid,
   JianyingDraftStartGuard,
   patchJianyingDraftTargetConversation,
   storyboardVersionId,
@@ -7448,7 +7449,8 @@ export function WorkspacePage() {
       void resumePendingJianyingDraftJob(existingPending);
       return;
     }
-    if (jianyingDraftRecordsForConversation(targetConversationId)[storyboard_version_id]?.status === "succeeded") return;
+    const existingRecord = jianyingDraftRecordsForConversation(targetConversationId)[storyboard_version_id];
+    if (isJianyingDraftSucceededResultValid(existingRecord)) return;
     if (!jianyingDraftStartGuardRef.current.tryAcquire(targetConversationId, storyboard_version_id)) return;
     try {
       let capability: JianyingDraftCapability;

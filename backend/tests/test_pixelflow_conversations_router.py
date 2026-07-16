@@ -362,6 +362,88 @@ def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record
         assert completed["last_phase"] == "jianying_draft_succeeded"
 
 
+def test_jianying_draft_context_patch_rejects_late_old_success_after_retry_timeout():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        storyboard_id = "storyboard-late-old"
+        created = client.post(
+            "/agent/conversations",
+            json={
+                "title": "剪映草稿旧任务迟到",
+                "last_phase": "jianying_draft_succeeded",
+                "context": {
+                    "jianyingDraftRecords": {
+                        storyboard_id: {
+                            "status": "succeeded",
+                            "job_id": "job-old",
+                            "storyboard_version_id": storyboard_id,
+                            "expire_at": "2000-01-01T00:00:00Z",
+                        }
+                    }
+                },
+            },
+        ).json()
+        conversation_id = created["conversation_id"]
+
+        retry_running = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_running",
+                "expected_job_id": "job-new",
+                "pendingJianyingDraftJob": {
+                    "job_id": "job-new",
+                    "conversation_id": conversation_id,
+                    "storyboard_version_id": storyboard_id,
+                },
+                "jianyingDraftRecords": {},
+            },
+        )
+        assert retry_running.status_code == 200
+        retry_timeout_record = {
+            "status": "timeout",
+            "job_id": "job-new",
+            "storyboard_version_id": storyboard_id,
+        }
+        retry_timeout = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_timeout",
+                "expected_job_id": "job-new",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {storyboard_id: retry_timeout_record},
+            },
+        )
+        assert retry_timeout.status_code == 200
+
+        late_old_success = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_succeeded",
+                "expected_job_id": "job-old",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {
+                    storyboard_id: {
+                        "status": "succeeded",
+                        "job_id": "job-old",
+                        "storyboard_version_id": storyboard_id,
+                        "expire_at": "2099-01-01T00:00:00Z",
+                    }
+                },
+            },
+        )
+        assert late_old_success.status_code == 200
+        final = late_old_success.json()
+        assert final["context"]["pendingJianyingDraftJob"] is None
+        assert final["context"]["jianyingDraftRecords"][storyboard_id] == retry_timeout_record
+        assert final["context"]["jianying_draft_records"][storyboard_id] == retry_timeout_record
+        assert final["last_phase"] == "jianying_draft_timeout"
+
+
 def test_jianying_draft_context_patch_checks_conversation_owner():
     from app.gateway.routers import pixelflow_conversations
 

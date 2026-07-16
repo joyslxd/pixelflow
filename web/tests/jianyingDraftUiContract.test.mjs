@@ -55,6 +55,18 @@ test("草稿启动 guard 在 capability 查询前建立，并在 finally 中释�
   assert.match(generateSource, /finally[\s\S]*?jianyingDraftStartGuardRef\.current\.release\(targetConversationId, storyboard_version_id\)/);
 });
 
+test("草稿生成 handler 仅跳过仍有效的成功记录，过期成功允许重新启动", () => {
+  const generateMatch = workspaceSource.match(
+    /const handleGenerateJianyingDraft[\s\S]*?(?=\n\s{2}const \w|\n\s{2}async function|\n\s{2}function)/,
+  );
+
+  assert.ok(generateMatch, "handleGenerateJianyingDraft must exist");
+  const generateSource = generateMatch[0];
+  assert.match(generateSource, /const existingRecord = jianyingDraftRecordsForConversation\(targetConversationId\)\[storyboard_version_id\]/);
+  assert.match(generateSource, /if \(isJianyingDraftSucceededResultValid\(existingRecord\)\) return/);
+  assert.doesNotMatch(generateSource, /\?\.status === "succeeded"\) return/);
+});
+
 test("跨会话持久化使用后端原子 PATCH，不再执行 GET 加全量 PUT", () => {
   const targetPatchMatch = workspaceSource.match(
     /const patchJianyingDraftConversationContextForTarget[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
