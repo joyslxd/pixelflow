@@ -151,6 +151,33 @@ class ToggleCapabilityResultFakeSkill(ResultFakeSkill):
         )
 
 
+class FailThenBlockingFakeSkill:
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.release = asyncio.Event()
+
+    async def capability(self) -> JianyingDraftCapability:
+        return JianyingDraftCapability(available=True)
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        self.call_count += 1
+        if self.call_count == 1:
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.FAILED,
+                message="provider failure",
+            )
+        await self.release.wait()
+        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+
+
+def test_default_timeout_is_thirty_minutes():
+    service = JianyingDraftService(
+        skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+    )
+
+    assert service._timeout_seconds == 1800.0
+
+
 @pytest.mark.asyncio
 async def test_unavailable_skill_does_not_create_job():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
@@ -510,6 +537,36 @@ async def test_full_running_job_store_does_not_remove_running_jobs():
     skill.release.set()
     await asyncio.gather(
         *(_wait_for_terminal(service, job.job_id) for job in jobs if job.job_id is not None)
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_its_failed_job_slot_when_store_is_full():
+    skill = FailThenBlockingFakeSkill()
+    service = JianyingDraftService(skill=skill)
+
+    failed = await service.start(_request(1))
+    assert failed.job_id is not None
+    failed_result = await _wait_for_terminal(service, failed.job_id)
+    running_jobs = [await service.start(_request(number)) for number in range(2, 101)]
+    await asyncio.sleep(0)
+    retried = await service.start(_request(1), retry_failed=True)
+
+    assert service.job_count == 100
+    assert retried.job_id is not None
+    assert retried.job_id != failed.job_id
+    old_result = await service.get_job(failed.job_id)
+    assert old_result == failed_result
+    assert "replaced_by_job_id" not in old_result.model_dump()
+    assert await service._get_replaced_by_job_id(failed.job_id) == retried.job_id
+    skill.release.set()
+    await _wait_for_terminal(service, retried.job_id)
+    await asyncio.gather(
+        *(
+            _wait_for_terminal(service, job.job_id)
+            for job in running_jobs
+            if job.job_id is not None
+        )
     )
 
 

@@ -14,7 +14,7 @@ from .skill import JianyingDraftSkill
 logger = logging.getLogger(__name__)
 
 _MAX_JOBS = 100
-_DEFAULT_TIMEOUT_SECONDS = 60.0
+_DEFAULT_TIMEOUT_SECONDS = 1800.0
 _TERMINAL_STATUSES = {
     JianyingDraftStatus.SUCCEEDED,
     JianyingDraftStatus.FAILED,
@@ -37,6 +37,12 @@ class _JianyingDraftJob:
     task: asyncio.Task[None] | None = None
 
 
+@dataclass
+class _ReplacedJianyingDraftJob:
+    result: JianyingDraftResult
+    replaced_by_job_id: str
+
+
 class JianyingDraftService:
     """管理同一对话分镜版本的单个可恢复生成任务。"""
 
@@ -50,6 +56,7 @@ class JianyingDraftService:
         self._timeout_seconds = timeout_seconds
         self._jobs: dict[str, _JianyingDraftJob] = {}
         self._job_ids_by_key: dict[tuple[str, str], str] = {}
+        self._replaced_jobs: dict[str, _ReplacedJianyingDraftJob] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -113,10 +120,13 @@ class JianyingDraftService:
             ):
                 replaced_job = previous
 
-            preserved_job_id = (
+            recyclable_job_id = (
                 replaced_job.result.job_id if replaced_job is not None else None
             )
-            if not self._make_room_for_new_job(preserved_job_id=preserved_job_id):
+            has_room, reclaimed_job = self._make_room_for_new_job(
+                recyclable_job_id=recyclable_job_id
+            )
+            if not has_room:
                 return JianyingDraftResult(
                     status=JianyingDraftStatus.FAILED,
                     message="剪映草稿任务繁忙，请稍后重试",
@@ -136,7 +146,15 @@ class JianyingDraftService:
             self._jobs[job_id] = job
             self._job_ids_by_key[key] = job_id
             if replaced_job is not None:
-                replaced_job.replaced_by_job_id = job_id
+                if reclaimed_job is replaced_job:
+                    previous_job_id = replaced_job.result.job_id
+                    if previous_job_id is not None:
+                        self._replaced_jobs[previous_job_id] = _ReplacedJianyingDraftJob(
+                            result=replaced_job.result.model_copy(deep=True),
+                            replaced_by_job_id=job_id,
+                        )
+                else:
+                    replaced_job.replaced_by_job_id = job_id
             job.task = asyncio.create_task(self._run(job_id, request))
             return result.model_copy(deep=True)
 
@@ -157,13 +175,25 @@ class JianyingDraftService:
         """查询任务当前状态；不存在或已清理时返回 ``None``。"""
         async with self._lock:
             job = self._jobs.get(job_id)
-            return job.result.model_copy(deep=True) if job is not None else None
+            if job is not None:
+                return job.result.model_copy(deep=True)
+            replaced_job = self._replaced_jobs.get(job_id)
+            return (
+                replaced_job.result.model_copy(deep=True)
+                if replaced_job is not None
+                else None
+            )
 
     async def _get_replaced_by_job_id(self, job_id: str) -> str | None:
         """仅供 Service 内部测试读取失败任务的替代关系。"""
         async with self._lock:
             job = self._jobs.get(job_id)
-            return job.replaced_by_job_id if job is not None else None
+            if job is not None:
+                return job.replaced_by_job_id
+            replaced_job = self._replaced_jobs.get(job_id)
+            return (
+                replaced_job.replaced_by_job_id if replaced_job is not None else None
+            )
 
     def _get_current_job(self, key: tuple[str, str]) -> _JianyingDraftJob | None:
         job_id = self._job_ids_by_key.get(key)
@@ -189,23 +219,30 @@ class JianyingDraftService:
             return False
         return datetime.now(result.expire_at.tzinfo) >= result.expire_at
 
-    def _make_room_for_new_job(self, *, preserved_job_id: str | None) -> bool:
+    def _make_room_for_new_job(
+        self,
+        *,
+        recyclable_job_id: str | None,
+    ) -> tuple[bool, _JianyingDraftJob | None]:
+        reclaimed_job: _JianyingDraftJob | None = None
         while len(self._jobs) >= _MAX_JOBS:
             terminal_jobs = [
                 (job_id, job)
                 for job_id, job in self._jobs.items()
-                if job_id != preserved_job_id and job.completed_at is not None
+                if job.completed_at is not None
             ]
             if not terminal_jobs:
-                return False
+                return False, None
             job_id, job = min(
                 terminal_jobs,
                 key=lambda item: item[1].completed_at,
             )
             self._jobs.pop(job_id)
+            if job_id == recyclable_job_id:
+                reclaimed_job = job
             if self._job_ids_by_key.get(job.key) == job_id:
                 self._job_ids_by_key.pop(job.key)
-        return True
+        return True, reclaimed_job
 
     async def _run(self, job_id: str, request: JianyingDraftRequest) -> None:
         await self._set_running(job_id)
