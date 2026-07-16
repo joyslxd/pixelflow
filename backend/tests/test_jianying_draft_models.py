@@ -8,6 +8,19 @@ from pixelflow.jianying_draft.models import (
     JianyingDraftStatus,
     compute_storyboard_version_id,
 )
+from pixelflow.jianying_draft.skill import JianyingDraftCapability
+
+
+def test_capability_exposes_positive_poll_interval_with_stable_default():
+    capability = JianyingDraftCapability(available=False)
+
+    assert capability.model_dump() == {
+        "available": False,
+        "reason": "",
+        "poll_interval_seconds": 2.0,
+    }
+    with pytest.raises(ValidationError):
+        JianyingDraftCapability(available=True, poll_interval_seconds=0)
 
 
 def test_storyboard_version_is_stable_after_input_reordering():

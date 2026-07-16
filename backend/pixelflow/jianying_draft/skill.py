@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
 
@@ -14,6 +14,7 @@ class JianyingDraftCapability(BaseModel):
 
     available: bool
     reason: str = ""
+    poll_interval_seconds: float = Field(default=2.0, gt=0)
 
 
 class JianyingDraftSkill(Protocol):
@@ -35,3 +36,11 @@ class UnavailableJianyingDraftSkill:
             status=JianyingDraftStatus.NOT_CONFIGURED,
             message="剪映草稿服务待接入",
         )
+
+
+class DisabledJianyingDraftSkill(UnavailableJianyingDraftSkill):
+    """内部开关关闭时装配的安全 Skill。"""
+
+
+class MissingProviderJianyingDraftSkill(UnavailableJianyingDraftSkill):
+    """已开启但真实 Provider 尚未接入时装配的安全 Skill。"""

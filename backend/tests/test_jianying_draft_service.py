@@ -213,7 +213,20 @@ async def test_capability_delegates_to_skill():
     assert capability == JianyingDraftCapability(
         available=False,
         reason="剪映草稿服务待接入",
+        poll_interval_seconds=2.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_capability_overrides_skill_poll_interval_with_service_runtime_value():
+    service = JianyingDraftService(
+        skill=UnavailableJianyingDraftSkill(),
+        poll_interval_seconds=1.5,
+    )
+
+    capability = await service.capability()
+
+    assert capability.poll_interval_seconds == 1.5
 
 
 @pytest.mark.asyncio

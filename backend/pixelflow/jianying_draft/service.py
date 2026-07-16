@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from .config import DEFAULT_MAX_RETRIES
+from .config import DEFAULT_MAX_RETRIES, DEFAULT_POLL_INTERVAL_SECONDS
 from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
 from .skill import JianyingDraftCapability, JianyingDraftSkill
 
@@ -57,12 +58,16 @@ class JianyingDraftService:
         skill: JianyingDraftSkill,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
+        if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be a finite positive number")
         self._skill = skill
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
+        self._poll_interval_seconds = poll_interval_seconds
         self._jobs: dict[str, _JianyingDraftJob] = {}
         self._job_ids_by_key: dict[tuple[str, str], str] = {}
         self._replaced_jobs: OrderedDict[str, _ReplacedJianyingDraftJob] = OrderedDict()
@@ -82,8 +87,12 @@ class JianyingDraftService:
                 return JianyingDraftCapability(
                     available=False,
                     reason="剪映草稿服务暂不可用",
+                    poll_interval_seconds=self._poll_interval_seconds,
                 )
-        return await self._skill.capability()
+        capability = await self._skill.capability()
+        return capability.model_copy(
+            update={"poll_interval_seconds": self._poll_interval_seconds}
+        )
 
     async def aclose(self) -> None:
         """拒绝新任务，并取消等待中的后台生成任务。"""

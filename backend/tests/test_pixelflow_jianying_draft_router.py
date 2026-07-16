@@ -108,7 +108,11 @@ def test_jianying_draft_capability_reports_unavailable_by_default():
         response = client.get("/agent/flows/video/jianying-draft/capability")
 
     assert response.status_code == 200
-    assert response.json() == {"available": False, "reason": "剪映草稿服务待接入"}
+    assert response.json() == {
+        "available": False,
+        "reason": "剪映草稿服务待接入",
+        "poll_interval_seconds": 2.0,
+    }
 
 
 def test_jianying_draft_start_does_not_create_placeholder_job():

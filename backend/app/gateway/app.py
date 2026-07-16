@@ -59,24 +59,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _build_jianying_draft_skill(runtime_config):
+    """按内部开关选择安全装配路径，真实 Provider 后续仅在此边界接入。"""
+
+    from pixelflow.jianying_draft import (
+        DisabledJianyingDraftSkill,
+        MissingProviderJianyingDraftSkill,
+    )
+
+    if not runtime_config.enabled:
+        return DisabledJianyingDraftSkill()
+
+    logger.warning(
+        "PixelFlow Jianying draft is enabled but no Provider is configured; using unavailable skill"
+    )
+    return MissingProviderJianyingDraftSkill()
+
+
 def _configure_jianying_draft_service(app: FastAPI) -> None:
     """按 profile 环境变量注入剪映草稿 Service 与轮询合同参数。"""
 
     from pixelflow.jianying_draft import (
         JianyingDraftService,
-        UnavailableJianyingDraftSkill,
         load_jianying_draft_runtime_config,
     )
 
     runtime_config = load_jianying_draft_runtime_config()
-    if runtime_config.enabled:
-        logger.warning(
-            "PixelFlow Jianying draft is enabled but no Provider is configured; using unavailable skill"
-        )
     app.state.pixelflow_jianying_draft_service = JianyingDraftService(
-        skill=UnavailableJianyingDraftSkill(),
+        skill=_build_jianying_draft_skill(runtime_config),
         timeout_seconds=runtime_config.timeout_seconds,
         max_retries=runtime_config.max_retries,
+        poll_interval_seconds=runtime_config.poll_interval_seconds,
     )
     app.state.jianying_draft_poll_interval_seconds = runtime_config.poll_interval_seconds
 
