@@ -112,7 +112,7 @@ async def get_jianying_draft_job(job_id: str, request: Request) -> JianyingDraft
             category="experience",
             source_agent="jianying_draft_agent",
             metadata={
-                "source": "jianying_draft_job",
+                "source": "video_jianying_draft_job",
                 "job_id": job_id,
                 "status": result.status.value,
             },

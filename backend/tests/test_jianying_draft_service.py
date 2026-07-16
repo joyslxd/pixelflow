@@ -230,6 +230,24 @@ async def test_capability_overrides_skill_poll_interval_with_service_runtime_val
 
 
 @pytest.mark.asyncio
+async def test_capability_returns_unavailable_when_service_closes_during_provider_probe():
+    skill = BlockingCapabilityFakeSkill()
+    service = JianyingDraftService(skill=skill)
+    capability_task = asyncio.create_task(service.capability())
+    await skill.entered_capability.wait()
+
+    await service.aclose()
+    skill.release_capability.set()
+    capability = await capability_task
+
+    assert capability == JianyingDraftCapability(
+        available=False,
+        reason="剪映草稿服务暂不可用",
+        poll_interval_seconds=2.0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_aclose_cancels_running_task_and_rejects_new_start():
     skill = BlockingFakeSkill()
     service = JianyingDraftService(skill=skill)

@@ -90,6 +90,13 @@ class JianyingDraftService:
                     poll_interval_seconds=self._poll_interval_seconds,
                 )
         capability = await self._skill.capability()
+        async with self._lock:
+            if self._closed:
+                return JianyingDraftCapability(
+                    available=False,
+                    reason="剪映草稿服务暂不可用",
+                    poll_interval_seconds=self._poll_interval_seconds,
+                )
         return capability.model_copy(
             update={"poll_interval_seconds": self._poll_interval_seconds}
         )

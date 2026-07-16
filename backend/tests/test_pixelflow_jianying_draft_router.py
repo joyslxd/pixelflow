@@ -185,6 +185,7 @@ def test_jianying_draft_terminal_job_records_one_safe_powermem_experience(monkey
     assert record["category"] == "experience"
     assert record["source_agent"] == "jianying_draft_agent"
     assert record["infer"] is False
+    assert record["metadata"]["source"] == "video_jianying_draft_job"
     assert "secret-token" not in str(record["content"])
     assert "provider response" not in str(record["content"])
 
