@@ -27,7 +27,7 @@ _TERMINAL_STATUSES = {
 class _JianyingDraftJob:
     key: tuple[str, str]
     result: JianyingDraftResult
-    created_at: datetime
+    completed_at: datetime | None = None
     task: asyncio.Task[None] | None = None
 
 
@@ -58,7 +58,17 @@ class JianyingDraftService:
         retry_failed: bool = False,
     ) -> JianyingDraftResult:
         """复用已有任务，或为一个新的分镜版本启动后台生成。"""
-        capability = await self._skill.capability()
+        try:
+            capability = await self._skill.capability()
+        except Exception as exc:  # noqa: BLE001 - provider boundary must not leak details
+            logger.error(
+                "[pixelflow] jianying draft capability check failed error_type=%s",
+                type(exc).__name__,
+            )
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.NOT_CONFIGURED,
+                message="剪映草稿服务暂不可用，请稍后重试",
+            )
         if not capability.available:
             return JianyingDraftResult(
                 status=JianyingDraftStatus.NOT_CONFIGURED,
@@ -68,13 +78,22 @@ class JianyingDraftService:
         key = (request.conversation_id, request.storyboard_version_id)
         async with self._lock:
             previous = self._get_current_job(key)
+            replaced_job: _JianyingDraftJob | None = None
             if previous is not None:
                 previous_result = previous.result
                 if self._should_reuse(previous_result, retry_failed=retry_failed):
                     return previous_result.model_copy(deep=True)
-                self._job_ids_by_key.pop(key, None)
+                if (
+                    retry_failed
+                    and previous_result.status
+                    in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}
+                ):
+                    replaced_job = previous
 
-            if not self._make_room_for_new_job():
+            preserved_job_id = (
+                replaced_job.result.job_id if replaced_job is not None else None
+            )
+            if not self._make_room_for_new_job(preserved_job_id=preserved_job_id):
                 return JianyingDraftResult(
                     status=JianyingDraftStatus.FAILED,
                     message="剪映草稿任务繁忙，请稍后重试",
@@ -90,10 +109,13 @@ class JianyingDraftService:
             job = _JianyingDraftJob(
                 key=key,
                 result=result,
-                created_at=datetime.now(),
             )
             self._jobs[job_id] = job
             self._job_ids_by_key[key] = job_id
+            if replaced_job is not None:
+                replaced_job.result = replaced_job.result.model_copy(
+                    update={"replaced_by_job_id": job_id}
+                )
             job.task = asyncio.create_task(self._run(job_id, request))
             return result.model_copy(deep=True)
 
@@ -127,16 +149,19 @@ class JianyingDraftService:
             return False
         return datetime.now(result.expire_at.tzinfo) >= result.expire_at
 
-    def _make_room_for_new_job(self) -> bool:
+    def _make_room_for_new_job(self, *, preserved_job_id: str | None) -> bool:
         while len(self._jobs) >= _MAX_JOBS:
             terminal_jobs = [
                 (job_id, job)
                 for job_id, job in self._jobs.items()
-                if job.result.status in _TERMINAL_STATUSES
+                if job_id != preserved_job_id and job.completed_at is not None
             ]
             if not terminal_jobs:
                 return False
-            job_id, job = min(terminal_jobs, key=lambda item: item[1].created_at)
+            job_id, job = min(
+                terminal_jobs,
+                key=lambda item: item[1].completed_at,
+            )
             self._jobs.pop(job_id)
             if self._job_ids_by_key.get(job.key) == job_id:
                 self._job_ids_by_key.pop(job.key)
@@ -192,3 +217,5 @@ class JianyingDraftService:
                     "storyboard_version_id": request.storyboard_version_id,
                 }
             )
+            if job.result.status in _TERMINAL_STATUSES:
+                job.completed_at = datetime.now()

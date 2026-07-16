@@ -93,4 +93,5 @@ class JianyingDraftResult(BaseModel):
     download_url: AnyHttpUrl | None = None
     file_name: str | None = None
     expire_at: datetime | None = None
+    replaced_by_job_id: str | None = None
     message: str = ""

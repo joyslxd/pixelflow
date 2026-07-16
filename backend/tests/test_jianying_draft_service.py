@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -87,6 +89,35 @@ class RaisingFakeSkill:
         raise RuntimeError("provider secret diagnostic")
 
 
+class RaisingCapabilityFakeSkill:
+    def __init__(self) -> None:
+        self.generate_count = 0
+
+    async def capability(self) -> JianyingDraftCapability:
+        raise RuntimeError("capability secret diagnostic")
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        self.generate_count += 1
+        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+
+
+class CompletionOrderFakeSkill:
+    def __init__(self) -> None:
+        self._release_events: dict[int, asyncio.Event] = {}
+
+    async def capability(self) -> JianyingDraftCapability:
+        return JianyingDraftCapability(available=True)
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        number = int(request.conversation_id.rsplit("-", maxsplit=1)[-1])
+        if number != 1 and number != 100:
+            await self._release_events.setdefault(number, asyncio.Event()).wait()
+        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+
+    def release(self, number: int) -> None:
+        self._release_events.setdefault(number, asyncio.Event()).set()
+
+
 @pytest.mark.asyncio
 async def test_unavailable_skill_does_not_create_job():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
@@ -96,6 +127,22 @@ async def test_unavailable_skill_does_not_create_job():
     assert result.status == JianyingDraftStatus.NOT_CONFIGURED
     assert result.message == "剪映草稿服务待接入"
     assert service.job_count == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_exception_returns_public_not_configured_without_job(caplog):
+    skill = RaisingCapabilityFakeSkill()
+    service = JianyingDraftService(skill=skill)
+    caplog.set_level(logging.ERROR, logger="pixelflow.jianying_draft.service")
+
+    result = await service.start(_request())
+
+    assert result.status == JianyingDraftStatus.NOT_CONFIGURED
+    assert result.message == "剪映草稿服务暂不可用，请稍后重试"
+    assert service.job_count == 0
+    assert skill.generate_count == 0
+    assert "RuntimeError" in caplog.text
+    assert "capability secret diagnostic" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -153,7 +200,31 @@ async def test_terminal_failure_requires_explicit_retry(
     assert reused.job_id == first.job_id
     assert retried.job_id is not None
     assert retried.job_id != first.job_id
+    replaced = await service.get_job(first.job_id)
+    assert replaced is not None
+    assert replaced.replaced_by_job_id == retried.job_id
     await _wait_for_terminal(service, retried.job_id)
+    assert skill.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_expired_succeeded_job_creates_a_new_job():
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=JianyingDraftStatus.SUCCEEDED,
+            expire_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    first = await service.start(_request())
+    assert first.job_id is not None
+    await _wait_for_terminal(service, first.job_id)
+    replacement = await service.start(_request())
+
+    assert replacement.job_id is not None
+    assert replacement.job_id != first.job_id
+    await _wait_for_terminal(service, replacement.job_id)
     assert skill.call_count == 2
 
 
@@ -196,6 +267,37 @@ async def test_terminal_jobs_are_pruned_to_one_hundred():
     assert service.job_count == 100
     assert await service.get_job(job_ids[0]) is None
     assert await service.get_job(job_ids[-1]) is not None
+
+
+@pytest.mark.asyncio
+async def test_terminal_job_pruning_uses_completion_order_not_creation_order():
+    skill = CompletionOrderFakeSkill()
+    service = JianyingDraftService(skill=skill)
+
+    first = await service.start(_request(0))
+    second = await service.start(_request(1))
+    running_jobs = [await service.start(_request(number)) for number in range(2, 100)]
+    assert first.job_id is not None
+    assert second.job_id is not None
+    await _wait_for_terminal(service, second.job_id)
+    skill.release(0)
+    await _wait_for_terminal(service, first.job_id)
+
+    replacement = await service.start(_request(100))
+    assert replacement.job_id is not None
+    await _wait_for_terminal(service, replacement.job_id)
+
+    assert await service.get_job(second.job_id) is None
+    assert await service.get_job(first.job_id) is not None
+    for number in range(2, 100):
+        skill.release(number)
+    await asyncio.gather(
+        *(
+            _wait_for_terminal(service, job.job_id)
+            for job in running_jobs
+            if job.job_id is not None
+        )
+    )
 
 
 @pytest.mark.asyncio
