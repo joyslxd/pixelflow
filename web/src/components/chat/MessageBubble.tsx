@@ -1091,13 +1091,13 @@ export function MessageBubble({
                   const downloadUrl = image.download_url || image.url || "";
                   return (
                     <div key={image.asset_id || image.url || index} className="group/image relative overflow-hidden rounded-xl border border-line bg-canvas">
-                      <a href={image.url || downloadUrl || undefined} target="_blank" rel="noreferrer" aria-label={`预览生成图片 ${index + 1}`}>
+                      <div>
                         {image.url ? (
                           <img src={image.url} alt={`生成图片 ${index + 1}`} className="mx-auto block max-h-[420px] max-w-full object-contain" />
                         ) : (
                           <div className="flex aspect-square items-center justify-center text-[12px] text-ink-soft">无图片 URL</div>
                         )}
-                      </a>
+                      </div>
                       {downloadUrl ? (
                         <a
                           href={downloadUrl}
