@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/chat";
 import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
+import type { JianyingDraftCapability, JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -38,6 +39,11 @@ interface ChatPanelProps {
   onGeneratePptFile?: (msg: ChatMessage) => void;
   onAcceptPptFile?: (msg: ChatMessage) => void;
   onRegeneratePptFile?: (msg: ChatMessage) => void;
+  onGenerateJianyingDraft?: (msg: ChatMessage) => void;
+  onDownloadJianyingDraft?: (msg: ChatMessage) => void;
+  jianyingDraftCapability?: JianyingDraftCapability;
+  getJianyingDraftResult?: (msg: ChatMessage) => JianyingDraftJobResponse | null;
+  isJianyingDraftRunning?: (msg: ChatMessage) => boolean;
   busy?: boolean;
 }
 
@@ -92,6 +98,11 @@ export function ChatPanel({
   onGeneratePptFile,
   onAcceptPptFile,
   onRegeneratePptFile,
+  onGenerateJianyingDraft,
+  onDownloadJianyingDraft,
+  jianyingDraftCapability,
+  getJianyingDraftResult,
+  isJianyingDraftRunning,
   busy,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -100,7 +111,7 @@ export function ChatPanel({
     .find((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages)?.id;
   const latestActionableMessageId = [...messages]
     .reverse()
-    .find((message) => message.role === "assistant" && message.artifact)?.id;
+    .find((message) => message.role === "assistant" && message.artifact?.type !== "jianying_draft" && message.artifact)?.id;
   const latestAssistantMessage = [...messages]
     .reverse()
     .find((message) => message.role === "assistant");
@@ -166,6 +177,11 @@ export function ChatPanel({
                 onGeneratePptFile={onGeneratePptFile}
                 onAcceptPptFile={onAcceptPptFile}
                 onRegeneratePptFile={onRegeneratePptFile}
+                onGenerateJianyingDraft={onGenerateJianyingDraft}
+                onDownloadJianyingDraft={onDownloadJianyingDraft}
+                jianyingDraftCapability={jianyingDraftCapability}
+                jianyingDraftResult={getJianyingDraftResult?.(m) || null}
+                jianyingDraftRunning={Boolean(isJianyingDraftRunning?.(m))}
               />
             );
           })

@@ -82,6 +82,12 @@ class JianyingDraftRequest(BaseModel):
         return self
 
 
+class JianyingDraftStartRequest(JianyingDraftRequest):
+    """网关启动 DTO；仅用户明确重试失败任务时传递 ``retry_failed``。"""
+
+    retry_failed: bool = False
+
+
 class JianyingDraftResult(BaseModel):
     """剪映草稿任务对 Service/API 暴露的统一结果。"""
 

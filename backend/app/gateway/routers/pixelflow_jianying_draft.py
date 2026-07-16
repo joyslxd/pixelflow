@@ -14,8 +14,8 @@ from app.gateway.pixelflow_memory import (
 )
 from pixelflow.jianying_draft import (
     JianyingDraftCapability,
-    JianyingDraftRequest,
     JianyingDraftResult,
+    JianyingDraftStartRequest,
     JianyingDraftStatus,
 )
 
@@ -70,7 +70,7 @@ async def get_jianying_draft_capability(request: Request) -> JianyingDraftCapabi
 
 @router.post("/start", response_model=JianyingDraftResult)
 async def start_jianying_draft(
-    body: JianyingDraftRequest,
+    body: JianyingDraftStartRequest,
     request: Request,
 ) -> JianyingDraftResult:
     """验证对话归属后，启动或复用当前分镜版本的剪映草稿任务。"""
@@ -78,7 +78,7 @@ async def start_jianying_draft(
     service = _jianying_draft_service(request)
     user_id = await current_user_id(request)
     await _require_owned_conversation(request, body.conversation_id, user_id)
-    result = await service.start(body)
+    result = await service.start(body, retry_failed=body.retry_failed)
     if result.status == JianyingDraftStatus.NOT_CONFIGURED:
         raise HTTPException(status_code=503, detail=result.model_dump(mode="json"))
     return result

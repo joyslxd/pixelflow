@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceSource = fs.readFileSync(path.resolve(testDirectory, "../src/pages/WorkspacePage.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve(testDirectory, "../src/lib/api.ts"), "utf8");
+const jianyingDraftSource = fs.readFileSync(path.resolve(testDirectory, "../src/lib/jianyingDraft.ts"), "utf8");
+const chatPanelSource = fs.readFileSync(path.resolve(testDirectory, "../src/components/chat/ChatPanel.tsx"), "utf8");
+const messageBubbleSource = fs.readFileSync(path.resolve(testDirectory, "../src/components/chat/MessageBubble.tsx"), "utf8");
 
 test("剪映草稿任务状态进入对话快照并按来源对话恢复", () => {
   assert.match(workspaceSource, /pendingJianyingDraftJob/);
@@ -138,4 +141,57 @@ test("恢复已有剪映草稿任务只查询状态而不启动新任务", () =>
   const resumeSource = resumeMatch[0];
   assert.match(resumeSource, /getJianyingDraftJob/);
   assert.doesNotMatch(resumeSource, /startJianyingDraftJob/);
+});
+
+test("最终视频卡片透传剪映草稿 handler，并保持原视频结果作为可操作消息", () => {
+  assert.match(chatPanelSource, /onGenerateJianyingDraft/);
+  assert.match(chatPanelSource, /onDownloadJianyingDraft/);
+  assert.match(messageBubbleSource, /onGenerateJianyingDraft/);
+  assert.match(messageBubbleSource, /onDownloadJianyingDraft/);
+  assert.match(chatPanelSource, /message\.artifact\?\.type !== "jianying_draft"/);
+  assert.match(chatPanelSource, /latestActionableMessageId/);
+});
+
+test("最终视频提供三按钮、历史入口与运行锁定", () => {
+  const videoResultBranch = messageBubbleSource.match(
+    /msg\.artifact\?\.type === "video_result"[\s\S]*?(?=\n        \) : msg\.artifact \?)/,
+  );
+  assert.ok(videoResultBranch, "video result branch must exist");
+  const source = videoResultBranch[0];
+  assert.match(source, /sm:grid-cols-3/);
+  assert.match(source, /无意见，结束/);
+  assert.match(source, /生成剪映草稿/);
+  assert.match(source, /提出修改意见/);
+  assert.match(source, /videoAccepted/);
+  assert.match(source, /草稿生成中/);
+  assert.match(source, /disabled=/);
+  assert.match(source, /剪映草稿服务待接入/);
+  assert.match(source, /title=\{.*剪映草稿服务待接入/);
+});
+
+test("剪映草稿结果卡提供下载、失败重试且不用伪下载", () => {
+  assert.match(messageBubbleSource, /msg\.artifact\?\.type === "jianying_draft"/);
+  assert.match(messageBubbleSource, /剪映草稿已生成/);
+  assert.match(messageBubbleSource, /FileArchive/);
+  assert.match(messageBubbleSource, /LoaderCircle/);
+  assert.match(messageBubbleSource, /下载剪映草稿/);
+  assert.match(messageBubbleSource, /重新生成剪映草稿/);
+  assert.match(messageBubbleSource, /href=\{jianyingDraftDownloadUrl\}/);
+  assert.doesNotMatch(messageBubbleSource, /URL\.createObjectURL/);
+});
+
+test("失败重试、not_configured 终态和 job 级消息幂等均有明确合同", () => {
+  const completeMatch = workspaceSource.match(
+    /const completeJianyingDraftJob[\s\S]*?(?=\n\s{2}const clearExpiredJianyingDraftJob)/,
+  );
+  const resumeMatch = workspaceSource.match(
+    /const resumePendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const resumePendingImageJob)/,
+  );
+  const generateMatch = workspaceSource.match(/const handleGenerateJianyingDraft[\s\S]*?\n  const handleGenerateVideoFromScenePackages/);
+  assert.ok(completeMatch && resumeMatch && generateMatch);
+  assert.match(completeMatch[0], /pendingJob\.job_id/);
+  assert.match(completeMatch[0], /existingRecord\.job_id !== boundResult\.job_id/);
+  assert.match(resumeMatch[0], /result\.status === "not_configured"/);
+  assert.match(generateMatch[0], /retry_failed/);
+  assert.match(jianyingDraftSource, /retry_failed\?: boolean/);
 });

@@ -128,6 +128,41 @@ def test_jianying_draft_start_does_not_create_placeholder_job():
     assert service.job_count == 0
 
 
+def test_jianying_draft_start_passes_explicit_retry_failed_to_service():
+    class CapturingService:
+        def __init__(self) -> None:
+            self.retry_flags: list[bool] = []
+
+        async def start(
+            self,
+            request: JianyingDraftRequest,
+            *,
+            retry_failed: bool = False,
+        ) -> JianyingDraftResult:
+            self.retry_flags.append(retry_failed)
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.FAILED,
+                job_id="failed-job",
+                conversation_id=request.conversation_id,
+                storyboard_version_id=request.storyboard_version_id,
+            )
+
+    service = CapturingService()
+    app = _make_router_app(service=service)
+    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+
+    with TestClient(app) as client:
+        ordinary = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
+        retry = client.post(
+            "/agent/flows/video/jianying-draft/start",
+            json={**_payload(), "retry_failed": True},
+        )
+
+    assert ordinary.status_code == 200
+    assert retry.status_code == 200
+    assert service.retry_flags == [False, True]
+
+
 def test_jianying_draft_unknown_job_returns_404():
     app = _make_router_app(service=JianyingDraftService(skill=UnavailableJianyingDraftSkill()))
 

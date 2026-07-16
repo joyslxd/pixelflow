@@ -8,6 +8,7 @@ from .models import (
     JianyingDraftRequest,
     JianyingDraftResult,
     JianyingDraftScene,
+    JianyingDraftStartRequest,
     JianyingDraftStatus,
     compute_storyboard_version_id,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "JianyingDraftResult",
     "JianyingDraftRuntimeConfig",
     "JianyingDraftScene",
+    "JianyingDraftStartRequest",
     "JianyingDraftCapability",
     "JianyingDraftService",
     "JianyingDraftSkill",

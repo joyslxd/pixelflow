@@ -19,6 +19,7 @@ export interface JianyingDraftStartRequest {
   scenes: JianyingDraftScene[];
   video_task_id?: string | null;
   project_name?: string | null;
+  retry_failed?: boolean;
 }
 
 export interface JianyingDraftJobResponse {

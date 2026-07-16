@@ -1624,6 +1624,12 @@ export function WorkspacePage() {
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
   const [pendingPlanRevisionChoice, setPendingPlanRevisionChoice] = useState<PendingPlanRevisionChoice | null>(null);
+  const [jianyingDraftCapability, setJianyingDraftCapability] = useState<JianyingDraftCapability>({
+    available: false,
+    reason: "剪映草稿服务待接入",
+    poll_interval_seconds: 2,
+  });
+  const [, setJianyingDraftUiRevision] = useState(0);
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
   useEffect(() => {
@@ -1693,6 +1699,20 @@ export function WorkspacePage() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    let disposed = false;
+    void api.getJianyingDraftCapability()
+      .then((capability) => {
+        if (!disposed) setJianyingDraftCapability(capability);
+      })
+      .catch(() => {
+        if (!disposed) setJianyingDraftCapability({ available: false, reason: "剪映草稿服务待接入", poll_interval_seconds: 2 });
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   const isPptDoneForConversation = (targetConversationId: string) => {
     return Boolean(targetConversationId && pptDoneConversationIdsRef.current.has(targetConversationId));
@@ -3202,6 +3222,7 @@ export function WorkspacePage() {
   const setJianyingDraftRecordsForConversation = (targetConversationId: string, records: JianyingDraftRecordMap) => {
     if (!targetConversationId) return;
     jianyingDraftRecordsByConversationRef.current.set(targetConversationId, records);
+    setJianyingDraftUiRevision((revision) => revision + 1);
   };
 
   const patchJianyingDraftConversationContextForTarget = async (
@@ -3256,6 +3277,7 @@ export function WorkspacePage() {
     if (!targetConversationId) return;
     if (conversationIdRef.current === targetConversationId) {
       pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
+      setJianyingDraftUiRevision((revision) => revision + 1);
     }
     await patchJianyingDraftConversationContextForTarget(
       targetConversationId,
@@ -4697,7 +4719,7 @@ export function WorkspacePage() {
   };
 
   const jianyingDraftArtifactMessageId = (pendingJob: PendingJianyingDraftJob) =>
-    `jianying-draft:${pendingJob.source_message_id}:${pendingJob.storyboard_version_id}`;
+    `jianying-draft:${pendingJob.source_message_id}:${pendingJob.storyboard_version_id}:${pendingJob.job_id}`;
 
   const completeJianyingDraftJob = async (
     pendingJob: PendingJianyingDraftJob,
@@ -4718,7 +4740,9 @@ export function WorkspacePage() {
     };
     setJianyingDraftRecordsForConversation(targetConversationId, records);
 
-    if (!existingRecord || existingRecord.status !== boundResult.status) {
+    if (boundResult.status === "not_configured") {
+      pushAssistant("剪映草稿服务待接入", targetConversationId);
+    } else if (!existingRecord || existingRecord.status !== boundResult.status || existingRecord.job_id !== boundResult.job_id) {
       const succeeded = boundResult.status === "succeeded";
       pushArtifact(
         succeeded ? "剪映草稿已生成，可在消息卡片中下载。" : `剪映草稿生成${boundResult.status === "timeout" ? "超时" : "失败"}，可从结果卡片重新生成。`,
@@ -4785,7 +4809,15 @@ export function WorkspacePage() {
     try {
       if (!shouldContinuePolling()) return;
       const capability: JianyingDraftCapability = await api.getJianyingDraftCapability();
+      setJianyingDraftCapability(capability);
       if (!shouldContinuePolling()) return;
+      if (!capability.available) {
+        await completeJianyingDraftJob(pendingJob, {
+          ...failedResult("剪映草稿服务待接入"),
+          status: "not_configured",
+        });
+        return;
+      }
       const pollIntervalSeconds = Number(capability.poll_interval_seconds);
       if (!Number.isFinite(pollIntervalSeconds) || pollIntervalSeconds <= 0) {
         await completeJianyingDraftJob(pendingJob, failedResult("剪映草稿服务未返回有效轮询间隔。"));
@@ -4803,7 +4835,7 @@ export function WorkspacePage() {
           const result = await api.getJianyingDraftJob(pendingJob.job_id);
           if (!shouldContinuePolling()) return;
           retryCount = 0;
-          if (result.status === "succeeded" || result.status === "failed" || result.status === "timeout") {
+          if (result.status === "succeeded" || result.status === "failed" || result.status === "timeout" || result.status === "not_configured") {
             await completeJianyingDraftJob(pendingJob, result);
             return;
           }
@@ -7411,10 +7443,13 @@ export function WorkspacePage() {
   }
 
   const handleGenerateJianyingDraft = async (msg: ChatMessage) => {
-    const latestMessage = messagesRef.current.find((message) => message.id === msg.id) || msg;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const sourceMessageId = msg.artifact?.type === "jianying_draft" ? msg.artifact.pendingJianyingDraftJob?.source_message_id : msg.id;
+    const latestMessage = messagesRef.current.find(
+      (message) => message.id === sourceMessageId && messageConversationId(message, targetConversationId) === targetConversationId,
+    ) || msg;
     const artifact = latestMessage.artifact;
     if (!artifact?.mergedVideo?.ok || !artifact.generatedSceneVideos?.ok || !artifact.videoScenePackages?.ok) return;
-    const targetConversationId = messageConversationId(latestMessage, conversationIdRef.current);
     if (!targetConversationId) return;
 
     const generatedSceneVideos = artifact.generatedSceneVideos;
@@ -7451,11 +7486,13 @@ export function WorkspacePage() {
     }
     const existingRecord = jianyingDraftRecordsForConversation(targetConversationId)[storyboard_version_id];
     if (isJianyingDraftSucceededResultValid(existingRecord)) return;
+    const retry_failed = msg.artifact?.type === "jianying_draft" && (existingRecord?.status === "failed" || existingRecord?.status === "timeout");
     if (!jianyingDraftStartGuardRef.current.tryAcquire(targetConversationId, storyboard_version_id)) return;
     try {
       let capability: JianyingDraftCapability;
       try {
         capability = await api.getJianyingDraftCapability();
+        setJianyingDraftCapability(capability);
       } catch (err) {
         pushAssistant(`无法读取剪映草稿服务状态:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
         return;
@@ -7467,6 +7504,7 @@ export function WorkspacePage() {
         scenes: successfulScenes,
         video_task_id: artifact.mergedVideo.task_id || null,
         project_name: artifact.plan?.plan_markdown ? String(artifact.plan.plan_markdown.split("\n")[0] || "") : null,
+        retry_failed,
       };
       const started = await api.startJianyingDraftJob(request);
       if (!started.job_id) {
@@ -7494,8 +7532,6 @@ export function WorkspacePage() {
       jianyingDraftStartGuardRef.current.release(targetConversationId, storyboard_version_id);
     }
   };
-  // Task 6 将把该处理器透传给最终视频卡片；此处先完成可恢复任务编排。
-  void handleGenerateJianyingDraft;
 
   const handleGenerateVideoFromScenePackages = async (msg: ChatMessage) => {
     const latestMessage =
@@ -7805,6 +7841,42 @@ export function WorkspacePage() {
     ? messages.find((message) => message.id === selectedPlanEditorMessageId && message.artifact?.type === "plan" && message.artifact.plan)
     : undefined;
 
+  const jianyingDraftVersionForMessage = (msg: ChatMessage): string => {
+    if (msg.artifact?.type === "jianying_draft") return msg.artifact.pendingJianyingDraftJob?.storyboard_version_id || "";
+    const scenes = (msg.artifact?.generatedSceneVideos?.scene_videos || []).map((scene) => ({
+      scene_id: scene.scene_id,
+      scene_index: scene.scene_index,
+      task_id: scene.task_id || null,
+      video_url: scene.video_url,
+    }));
+    try {
+      return scenes.length > 0 ? storyboardVersionId(scenes) : "";
+    } catch {
+      return "";
+    }
+  };
+
+  const getJianyingDraftResult = (msg: ChatMessage): JianyingDraftJobResponse | null => {
+    if (msg.artifact?.type === "jianying_draft") return msg.artifact.jianyingDraft || null;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const storyboardVersionId = jianyingDraftVersionForMessage(msg);
+    return storyboardVersionId ? jianyingDraftRecordsForConversation(targetConversationId)[storyboardVersionId] || null : null;
+  };
+
+  const isJianyingDraftRunning = (msg: ChatMessage): boolean => {
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const storyboardVersionId = jianyingDraftVersionForMessage(msg);
+    const pending = pendingJianyingDraftJobRef.current;
+    return Boolean(
+      storyboardVersionId && pending?.conversation_id === targetConversationId && pending.storyboard_version_id === storyboardVersionId,
+    );
+  };
+
+  const handleDownloadJianyingDraft = (msg: ChatMessage) => {
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    if (targetConversationId) pushAssistant("剪映草稿已开始下载。", targetConversationId);
+  };
+
   return (
     <div className="flex h-full min-h-0">
       <ChatPanel
@@ -7839,6 +7911,11 @@ export function WorkspacePage() {
         onGeneratePptFile={handleGeneratePptFile}
         onAcceptPptFile={handleAcceptPptFile}
         onRegeneratePptFile={handleRegeneratePptFile}
+        onGenerateJianyingDraft={handleGenerateJianyingDraft}
+        onDownloadJianyingDraft={handleDownloadJianyingDraft}
+        jianyingDraftCapability={jianyingDraftCapability}
+        getJianyingDraftResult={getJianyingDraftResult}
+        isJianyingDraftRunning={isJianyingDraftRunning}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
