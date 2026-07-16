@@ -109,6 +109,7 @@ export interface ChatMessage {
     mergedVideo?: MergeSceneVideosResponse;
     jianyingDraft?: JianyingDraftJobResponse;
     pendingJianyingDraftJob?: PendingJianyingDraftJobPayload;
+    jianyingDraftSceneCount?: number;
     videoScenePackageEditedSceneIds?: string[];
     videoQualityReview?: VideoQualityReviewResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
