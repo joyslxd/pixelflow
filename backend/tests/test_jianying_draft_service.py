@@ -44,6 +44,7 @@ async def _wait_for_terminal(
             JianyingDraftStatus.SUCCEEDED,
             JianyingDraftStatus.FAILED,
             JianyingDraftStatus.TIMEOUT,
+            JianyingDraftStatus.NOT_CONFIGURED,
         }:
             return result
         await asyncio.sleep(0.001)
@@ -337,6 +338,37 @@ async def test_background_exception_becomes_public_failure():
     assert result.status == JianyingDraftStatus.FAILED
     assert result.message == "剪映草稿生成失败，请稍后重试"
     assert "secret" not in result.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_message"),
+    [
+        (JianyingDraftStatus.FAILED, "剪映草稿生成失败，请稍后重试。"),
+        (JianyingDraftStatus.TIMEOUT, "剪映草稿生成超时，请重试。"),
+        (JianyingDraftStatus.NOT_CONFIGURED, "剪映草稿服务待接入"),
+    ],
+)
+async def test_provider_terminal_messages_are_replaced_with_public_messages(
+    status: JianyingDraftStatus,
+    expected_message: str,
+):
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=status,
+            message="https://provider.example.com/?token=secret-token",
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.status == status
+    assert result.message == expected_message
+    assert "secret-token" not in result.model_dump_json()
+    assert "provider.example.com" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio

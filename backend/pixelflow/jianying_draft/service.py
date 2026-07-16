@@ -21,6 +21,11 @@ _TERMINAL_STATUSES = {
     JianyingDraftStatus.TIMEOUT,
     JianyingDraftStatus.NOT_CONFIGURED,
 }
+_PUBLIC_PROVIDER_MESSAGES = {
+    JianyingDraftStatus.FAILED: "剪映草稿生成失败，请稍后重试。",
+    JianyingDraftStatus.TIMEOUT: "剪映草稿生成超时，请重试。",
+    JianyingDraftStatus.NOT_CONFIGURED: "剪映草稿服务待接入",
+}
 
 
 @dataclass
@@ -218,9 +223,16 @@ class JianyingDraftService:
                 message="剪映草稿生成失败，请稍后重试",
             )
         else:
-            result = generated
+            result = self._public_provider_result(generated)
 
         await self._store_result(job_id, request, result)
+
+    @staticmethod
+    def _public_provider_result(result: JianyingDraftResult) -> JianyingDraftResult:
+        message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
+        if message is None:
+            return result
+        return result.model_copy(update={"message": message})
 
     async def _set_running(self, job_id: str) -> None:
         async with self._lock:
