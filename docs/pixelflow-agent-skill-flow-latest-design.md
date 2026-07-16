@@ -123,11 +123,11 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
 | PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频同时加载 Seedance Skill，让 LLM 生成 plan.md 与结构化分镜蓝图 |
-| PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用时按叙事职能加权兜底 |
-| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构及精确总时长 |
+| PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用或镜头描述二次校验仍不完整时，按叙事职能使用八维增强规则兜底 |
+| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构、精确总时长，以及地点/主体/动作/景别/运镜/光影/声音/收束八维完整度 |
 | PlanRevisionSkill | `backend/pixelflow/creative/revision_contract.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 先合并白名单 `creation_contract_patch`，再结合当前 Plan、表单、垂类补充、附件、采集上下文和 PowerMem 重写 Plan；生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
-| PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布直接编辑完整 Markdown；不调用 LLM，校验后原样发布为下一 Plan 版本并保留权威合同快照 |
+| PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布编辑完整 Markdown 后复用 Plan 修订 LLM，对齐权威合同、分镜蓝图和镜头完整度；全部校验通过才发布下一版本 |
 
 plan.md 模板路径：
 
@@ -194,6 +194,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 图片模型配置来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择图片比例和清晰度；前端把所选模型支持的比例/清晰度列表作为只读能力数据交给 Plan Agent。
 - 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
 - Plan LLM 只能在 `image_model_capabilities` 范围内选择 `scene_image_ratio` 和 `scene_image_size`。非法输出按确定性规则修正；最终值写入 plan.md 和生产合同，场景资产生成阶段直接使用，不再猜测。
+- 视频 Plan 的每个镜头描述必须同时覆盖地点、主体、动作、景别、运镜、光影、声音和收束，内部秒段还必须从 0 秒连续覆盖到当前分镜时长。初次生成缺项时，系统把具体分镜和缺失维度交给专用 Plan LLM 修正 1 次，并只合并失败分镜返回的 `shot_description`；修正后仍缺项时，仅对不合格镜头使用八维增强模板，其他 Plan 字段保持不变。Plan 修订与手工编辑候选同样只定向修正镜头描述，失败时不发布新版本。
+- 场景包恢复历史 Plan 时对旧的全局镜头时间段做兼容换算，只把时间码平移为当前分镜的 `0-N秒`，不改写故事线、旁白、资产或其他权威字段；新 Plan 候选不走兼容分支。
 - 主流程不因“文生视频/编辑视频/首帧图生视频”等入口类型而绕过场景包。
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
 - 每段片段最少 4 秒，最多 15 秒。
@@ -585,7 +587,7 @@ Plan 审核与版本规则：
 - 当前创意内修改只调用 `/agent/flows/planning/plan/revise`，不得返回创意方向列表。
 - 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
 - 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。
-- 候选合同或分镜蓝图校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。
+- 候选合同、分镜时间线或镜头描述八维完整度校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。
 - 修订值优先级固定为“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；用户未提及字段不得变化。
 - 用户意见解析只接受明确指向合同字段的修改。单分镜时长、画面中的数量，以及“不要改/保持不变”等否定式表达不得误改总时长、图片数量、风格或模型。
 - 候选合同与蓝图校验失败时，系统把具体校验原因回传给 Plan LLM 修正 1 次；第二次仍失败时返回错误并完整保留当前 Plan、版本历史、合同与蓝图，不新增版本。

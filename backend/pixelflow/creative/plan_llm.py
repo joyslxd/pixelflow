@@ -75,9 +75,10 @@ async def revise_plan_payload(
 3. scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 4. 模板中的苹果PRO、林晓、赵总监等内容只是结构示例，禁止复制到当前方案。
 5. 视频必须返回完整 scene_blueprints，并形成开场、展开、证明/高潮、收束的总分总结构。
-6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill。
+6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束八个维度；如果一镜包含多个局部时间段，必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 7. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
 8. 返回 JSON，不要 Markdown 代码围栏。
+9. 如果“上次结构校验反馈”不为空，本次只修正反馈指出的问题；未被反馈指出的 Plan 内容、合同字段和已合格分镜保持不变。
 
 输出：
 {{
@@ -94,7 +95,7 @@ async def revise_plan_payload(
     "end_sec":6,
     "duration_sec":6,
     "storyline":"故事线",
-    "shot_description":"0-6秒: 整段镜头描述",
+    "shot_description":"0-6秒: 地点：...；主体：...；动作：...；景别：...；运镜：...；光影：...；声音：...；收束：...。",
     "narration":"旁白或本分镜无旁白",
     "transition":"转场",
     "asset_requirements":{{"characters":[],"scenes":[],"props":[]}}
@@ -130,6 +131,50 @@ Seedance Skill：
     return payload
 
 
+async def repair_plan_shot_descriptions(
+    *,
+    scene_blueprints: list[dict[str, Any]],
+    quality_issues: list[str],
+    selected_direction: dict[str, Any],
+    creation_contract: dict[str, Any],
+    visual_style: str,
+    model_name: str = PLAN_LLM_MODEL_NAME,
+    model_factory: ModelFactory | None = None,
+) -> dict[str, Any]:
+    """只修正 Plan 蓝图中的镜头描述，避免质量重试改写其他权威字段。"""
+    prompt = f"""你是 PixelFlow 策划 Agent 的 Seedance 镜头描述质检修正 Skill。
+当前 Plan 蓝图的结构、时间线、故事线、旁白、转场和资产需求已经确定，只允许修正校验指出的 shot_description。
+
+硬约束：
+1. 每个待修正镜头必须同时写清地点、主体、动作、景别、运镜、光影、声音和收束，建议显式使用这八个标签，不能只堆砌形容词。
+2. 保留当前分镜内部的 0-N 秒范围，禁止毫秒；如果包含多个局部时间段，必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec；描述必须是一整段可执行中文镜头指令。
+3. 动作要有起点、过程和结果；运镜要有起止；光影要说明方向或作用；声音要说明环境声、动作音效、对白或明确无旁白；收束要说明镜尾停在哪里以及如何进入下一镜或结束。
+4. 只返回被指出分镜的 scene_index 和 shot_description，不得返回或修改其他字段。
+5. 返回 JSON，不要 Markdown 代码围栏。
+
+输出格式：
+{{"scene_blueprints":[{{"scene_index":1,"shot_description":"0-6秒: 地点：...；主体：...；动作：...；景别：...；运镜：...；光影：...；声音：...；收束：...。"}}]}}
+
+缺项报告：{_json(quality_issues)}
+当前蓝图：{_json(scene_blueprints)}
+当前创意：{_json(selected_direction)}
+创作合同：{_json(creation_contract)}
+视觉风格：{visual_style or "真实广告风格"}
+
+Seedance Skill：
+{load_seedance_guidance()}
+"""
+    payload = await asyncio.to_thread(
+        _invoke_json_model,
+        prompt,
+        model_name,
+        model_factory or _default_model_factory,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Plan shot repair LLM response must be a JSON object")
+    return payload
+
+
 def _generation_prompt(
     *,
     intent: CreationIntent,
@@ -148,8 +193,9 @@ def _generation_prompt(
 - 每个镜头时长必须是 4-15 秒整数，总时长必须精确等于 video_duration_sec；根据故事密度、动作复杂度、旁白长度和转场合理分配，禁止机械等分。
 - 输出前必须检查 `4 * 分镜数 <= video_duration_sec <= 15 * 分镜数`，开场和结尾/CTA 也不得少于 4 秒。
 - 整片采用总分总结构：开场建立钩子，展开推进因果，证明/高潮完成卖点验证，结尾收束结果和转化。
-- 返回完整 scene_blueprints；全局 start_sec/end_sec 必须从 0 开始连续，shot_description 使用当前分镜内部的局部秒段。
+- 返回完整 scene_blueprints；全局 start_sec/end_sec 必须从 0 开始连续，shot_description 使用当前分镜内部的局部秒段，多段描述必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 - 每个蓝图包含 scene_id、scene_index、title、structure_role、start_sec、end_sec、duration_sec、storyline、shot_description、narration、transition、asset_requirements。
+- 每个 shot_description 必须是一整段可执行镜头指令，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束；动作、运镜与收束都要有明确起止，不能只写“展示产品”或堆砌风格词。
 - asset_requirements 只写语义名称，人物放 characters，环境放 scenes，商品/包装/工具放 props；此阶段不虚构图片 URL。
 - plan.md 必须写明视频模型、图片模型、图片比例、图片清晰度。
 - scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。

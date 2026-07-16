@@ -197,7 +197,11 @@ def _revision_blueprints(total_duration_sec: int) -> list[dict[str, object]]:
                 "end_sec": cursor + 10,
                 "duration_sec": 10,
                 "storyline": f"新版故事线{index}，严格服务最终确认方案。",
-                "shot_description": f"0-10秒: 围绕最终确认方案执行第{index}段镜头。",
+                "shot_description": (
+                    f"0-10秒: 地点：现代客厅；主体：体验者与智能空调；动作：体验者执行第{index}段使用动作并观察反馈；"
+                    "景别：中景切产品特写；运镜：稳定跟拍后缓慢推近；光影：柔和自然光突出产品轮廓；"
+                    "声音：保留空调运行声并配合旁白；收束：停在本段结果细节并沿视线衔接下一镜。"
+                ),
                 "narration": f"新版旁白{index}。",
                 "transition": "动作匹配转场。" if index < scene_count else "定格收束。",
                 "asset_requirements": {
@@ -386,12 +390,7 @@ def test_revise_video_plan_updates_contract_and_exact_scene_total_from_feedback(
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能空调 180 秒体验片\n\n"
-                    "## 一、选题方向\n在当前创意基础上扩展完整体验过程。\n\n"
-                    "## 三、视频规格\n- 时长：180 秒\n- 画幅：9:16\n\n"
-                    "## 五、镜头列表\n严格按新版蓝图执行。"
-                ),
+                "plan_markdown": ("# 智能空调 180 秒体验片\n\n## 一、选题方向\n在当前创意基础上扩展完整体验过程。\n\n## 三、视频规格\n- 时长：180 秒\n- 画幅：9:16\n\n## 五、镜头列表\n严格按新版蓝图执行。"),
                 "creation_contract_patch": {"video_duration_sec": 180},
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
@@ -440,12 +439,7 @@ def test_revise_image_plan_updates_final_execution_contract() -> None:
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能音箱横版组图\n\n"
-                    "## 一、选题方向\n延续家居氛围并增加科技秩序感。\n\n"
-                    "## 三、图片规格\n- 尺寸：16:9\n- 数量：4 张\n\n"
-                    "## 五、主图方案\n生成四张不同家居时段的横版画面。"
-                ),
+                "plan_markdown": ("# 智能音箱横版组图\n\n## 一、选题方向\n延续家居氛围并增加科技秩序感。\n\n## 三、图片规格\n- 尺寸：16:9\n- 数量：4 张\n\n## 五、主图方案\n生成四张不同家居时段的横版画面。"),
                 "creation_contract_patch": {
                     "image_style": "极简科技感",
                     "image_size": "16:9",
@@ -486,12 +480,7 @@ def test_revise_video_plan_keeps_current_version_when_retried_blueprint_is_inval
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能空调 60 秒体验片\n\n"
-                    "## 一、选题方向\n延续舒适体验创意并扩展完整使用旅程。\n\n"
-                    "## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n"
-                    "## 五、镜头列表\n由权威分镜蓝图承载完整调度。"
-                ),
+                "plan_markdown": ("# 智能空调 60 秒体验片\n\n## 一、选题方向\n延续舒适体验创意并扩展完整使用旅程。\n\n## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n## 五、镜头列表\n由权威分镜蓝图承载完整调度。"),
                 "creation_contract_patch": {"video_duration_sec": 60},
                 # 模拟 LLM 忘记扩充分镜，仍返回旧版 30 秒调度。
                 "scene_blueprints": _revision_blueprints(30),
@@ -531,12 +520,7 @@ def test_revise_video_plan_ignores_llm_patch_for_unmentioned_fields() -> None:
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能空调 60 秒体验片\n\n"
-                    "## 一、选题方向\n延续原创意。\n\n"
-                    "## 三、视频规格\n- 时长：60 秒\n\n"
-                    "## 五、镜头列表\n严格按蓝图执行。"
-                ),
+                "plan_markdown": ("# 智能空调 60 秒体验片\n\n## 一、选题方向\n延续原创意。\n\n## 三、视频规格\n- 时长：60 秒\n\n## 五、镜头列表\n严格按蓝图执行。"),
                 "creation_contract_patch": {
                     "video_duration_sec": 60,
                     "visual_style": "赛博朋克",
@@ -748,7 +732,8 @@ def test_build_video_plan_with_llm_uses_seedance_skill_and_llm_scene_schedule() 
     assert result.scene_durations_sec == [6, 12, 8]
     assert [item["title"] for item in result.scene_blueprints] == ["雨水钩子", "防水证明", "通勤收束"]
     assert "### 权威分镜创作蓝图" in result.plan_markdown
-    assert "0-12秒: 中景连续泼水" in result.plan_markdown
+    assert "地点：雨中街道" in result.plan_markdown
+    assert "声音：" in result.plan_markdown
     assert "旧计划把每个镜头固定成10秒" not in result.plan_markdown
     assert result.plan_markdown.count("### 权威分镜创作蓝图") == 1
     assert "## 背景音乐\n雨声与节奏鼓点" in result.plan_markdown
@@ -878,13 +863,7 @@ def test_plan_removes_exact_semantic_memory_text_without_internal_marker() -> No
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 防水背包宣传片\n\n"
-                    "## 一、选题方向\n雨天通勤实测。\n\n"
-                    f"## 二、选题优势\n{memory_text}\n产品证明清晰。\n\n"
-                    "## 三、视频规格\n- 时长：26 秒\n\n"
-                    "## 五、镜头列表\n按蓝图执行。"
-                ),
+                "plan_markdown": (f"# 防水背包宣传片\n\n## 一、选题方向\n雨天通勤实测。\n\n## 二、选题优势\n{memory_text}\n产品证明清晰。\n\n## 三、视频规格\n- 时长：26 秒\n\n## 五、镜头列表\n按蓝图执行。"),
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
             },
@@ -917,13 +896,7 @@ def test_plan_removes_semantic_memory_even_when_llm_adds_markdown_formatting() -
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 防水背包宣传片\n\n"
-                    "## 一、选题方向\n雨天通勤实测。\n\n"
-                    "## 二、选题优势\n品牌长期偏好：**真实摄影**，避免夸张特效。\n产品证明清晰。\n\n"
-                    "## 三、视频规格\n- 时长：26 秒\n\n"
-                    "## 五、镜头列表\n按蓝图执行。"
-                ),
+                "plan_markdown": ("# 防水背包宣传片\n\n## 一、选题方向\n雨天通勤实测。\n\n## 二、选题优势\n品牌长期偏好：**真实摄影**，避免夸张特效。\n产品证明清晰。\n\n## 三、视频规格\n- 时长：26 秒\n\n## 五、镜头列表\n按蓝图执行。"),
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
             },
@@ -1350,12 +1323,7 @@ def test_manual_video_plan_edit_reconciles_markdown_contract_and_blueprints_with
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能空调 60 秒体验片\n\n"
-                    "## 一、选题方向\n保留当前创意并扩展完整使用旅程。\n\n"
-                    "## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n"
-                    "## 五、镜头列表\n严格按新版蓝图执行。"
-                ),
+                "plan_markdown": ("# 智能空调 60 秒体验片\n\n## 一、选题方向\n保留当前创意并扩展完整使用旅程。\n\n## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n## 五、镜头列表\n严格按新版蓝图执行。"),
                 "creation_contract_patch": {"video_duration_sec": 60},
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
@@ -1404,12 +1372,7 @@ def test_manual_image_plan_edit_allows_llm_to_update_every_contract_field():
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能音箱横版组图\n\n"
-                    "## 一、选题方向\n升级为极简科技风横版组图。\n\n"
-                    "## 三、图片规格\n- 尺寸：16:9\n- 数量：3 张\n\n"
-                    "## 五、主图方案\n生成三张不同家居时段的画面。"
-                ),
+                "plan_markdown": ("# 智能音箱横版组图\n\n## 一、选题方向\n升级为极简科技风横版组图。\n\n## 三、图片规格\n- 尺寸：16:9\n- 数量：3 张\n\n## 五、主图方案\n生成三张不同家居时段的画面。"),
                 "creation_contract_patch": {
                     "image_style": "极简科技感",
                     "image_size": "16:9",
@@ -1458,12 +1421,7 @@ def test_manual_image_plan_edit_ignores_llm_contract_fields_not_changed_by_user(
     fake_model = FakeModel(
         json.dumps(
             {
-                "plan_markdown": (
-                    "# 智能音箱宣传图\n\n"
-                    "## 一、选题方向\n重点突出音箱旋钮的金属细节。\n\n"
-                    "## 三、图片规格\n维持原规格。\n\n"
-                    "## 五、主图方案\n强化旋钮细节。"
-                ),
+                "plan_markdown": ("# 智能音箱宣传图\n\n## 一、选题方向\n重点突出音箱旋钮的金属细节。\n\n## 三、图片规格\n维持原规格。\n\n## 五、主图方案\n强化旋钮细节。"),
                 "creation_contract_patch": {
                     "image_style": "插画风",
                     "image_size": "16:9",

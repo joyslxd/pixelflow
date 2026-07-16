@@ -84,11 +84,7 @@ def prepare_video_scene_packages(
                 conversion_goal=conversion_goal,
             )
         )
-        reference_asset_ids = (
-            _blueprint_reference_asset_ids(blueprint, global_assets)
-            if blueprint
-            else _default_reference_asset_ids(global_assets, stage["asset_id"])
-        )
+        reference_asset_ids = _blueprint_reference_asset_ids(blueprint, global_assets) if blueprint else _default_reference_asset_ids(global_assets, stage["asset_id"])
         shot_description = (
             _normalize_shot_description(
                 {"text": str(blueprint["shot_description"])},
@@ -393,11 +389,7 @@ def _normalize_llm_scene_packages(
         storyline = str(blueprint["storyline"]) if blueprint else _first_text(raw.get("storyline"), raw.get("story"), raw.get("story_line"))
         narration = str(blueprint["narration"]) if blueprint else _first_text(raw.get("narration"), raw.get("voiceover"), raw.get("voice_over"))
         stage = stage_templates[index - 1]
-        reference_asset_ids = (
-            _blueprint_reference_asset_ids(blueprint, global_assets)
-            if blueprint
-            else _normalize_reference_asset_ids(raw.get("reference_asset_ids"), global_assets, stage["asset_id"])
-        )
+        reference_asset_ids = _blueprint_reference_asset_ids(blueprint, global_assets) if blueprint else _normalize_reference_asset_ids(raw.get("reference_asset_ids"), global_assets, stage["asset_id"])
         shot_description = _normalize_shot_description(
             {"text": str(blueprint["shot_description"])} if blueprint else raw.get("shot_description"),
             stage=stage,
@@ -489,11 +481,7 @@ def _align_global_assets_to_blueprints(
     for collection, asset_type in (("characters", "character"), ("scenes", "scene"), ("props", "prop")):
         existing = global_assets.get(collection)
         existing_items = existing if isinstance(existing, list) else []
-        existing_by_name = {
-            _asset_name_key(item.get("name")): item
-            for item in existing_items
-            if isinstance(item, dict) and _asset_name_key(item.get("name"))
-        }
+        existing_by_name = {_asset_name_key(item.get("name")): item for item in existing_items if isinstance(item, dict) and _asset_name_key(item.get("name"))}
         aligned_assets: list[dict[str, Any]] = []
         for name in requirements[collection]:
             asset = _blueprint_asset(
@@ -862,10 +850,7 @@ def _ensure_reference_asset_tokens(
     missing: list[str] = []
     result = text
     named_assets = sorted(
-        (
-            (asset_id, _first_text(lookup.get(asset_id, {}).get("name")))
-            for asset_id in reference_asset_ids[:9]
-        ),
+        ((asset_id, _first_text(lookup.get(asset_id, {}).get("name"))) for asset_id in reference_asset_ids[:9]),
         key=lambda item: len(item[1]),
         reverse=True,
     )
@@ -1184,6 +1169,7 @@ def _resolve_scene_schedule(
     normalized = normalize_scene_blueprints(
         scene_blueprints,
         total_duration_sec=duration_ms // 1000,
+        allow_legacy_global_shot_ranges=True,
     )
     durations = [int(item["duration_sec"]) * 1000 for item in normalized]
     return duration_ms, durations, normalized

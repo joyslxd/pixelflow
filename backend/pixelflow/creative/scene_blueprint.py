@@ -9,8 +9,7 @@ from typing import Any
 
 from pixelflow.creative.duration import MAX_SCENE_DURATION_SEC, MIN_SCENE_DURATION_SEC
 
-_SECOND_RANGE_PATTERN = re.compile(r"\d+\s*[-~—至]\s*\d+\s*秒")
-_CAPTURED_SECOND_RANGE_PATTERN = re.compile(r"(?P<start>\d+)\s*(?:[-~—至])\s*(?P<end>\d+)\s*秒")
+_TIMELINE_RANGE_PATTERN = re.compile(r"(?P<prefix>^|[\n。；;！？!?】])(?P<spacing>\s*)(?P<start>\d+)\s*(?:[-~—至])\s*(?P<end>\d+)\s*秒")
 _MILLISECOND_PATTERN = re.compile(r"(?:ms|毫秒|\d{1,2}:\d{2}\.\d+)", flags=re.IGNORECASE)
 _INTERNAL_CONTEXT_MARKERS = (
     "长期记忆约束",
@@ -21,6 +20,16 @@ _INTERNAL_CONTEXT_MARKERS = (
     "采集 Agent 完成意图识别",
     "Skill 经验",
     "Agent 阶段日志",
+)
+_SHOT_DESCRIPTION_DIMENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("地点", ("地点", "室内", "室外", "街道", "客厅", "卧室", "厨房", "办公室", "走廊", "商场", "门店", "户外", "车内", "台面", "桌面")),
+    ("主体", ("主体", "角色", "人物", "用户", "模特")),
+    ("动作", ("动作", "拿起", "握住", "放下", "走入", "进入", "离开", "转身", "抬手", "打开", "关闭", "按下", "擦去", "倒入", "泼向", "砸向", "操作", "使用", "穿上", "戴上", "展开", "收起", "旋转", "流动", "点亮", "启动")),
+    ("景别", ("景别", "全景", "远景", "中景", "近景", "特写", "微距", "大特写", "半身", "俯拍", "仰拍", "航拍", "过肩", "主观镜头")),
+    ("运镜", ("运镜", "推近", "推镜", "拉远", "拉镜", "摇镜", "横摇", "移镜", "跟拍", "环绕", "升降", "变焦", "手持", "固定镜头", "镜头跟随", "镜头切", "轨道", "稳定器")),
+    ("光影", ("光影", "光线", "光源", "照明", "自然光", "逆光", "侧光", "柔光", "硬光", "顶光", "轮廓光", "冷光", "暖光", "高光", "阴影", "色温", "曝光", "明暗", "冷色调", "暖色调")),
+    ("声音", ("声音", "音效", "环境声", "对白", "音乐", "节拍", "静音", "无声", "雨声", "脚步声", "水声", "机械声", "呼吸声", "提示音", "开合声", "运行声")),
+    ("收束", ("收束", "结尾", "镜尾", "定格", "停在", "停留", "落版", "淡出", "衔接下一镜", "切入下一镜", "进入下一镜", "动作完成", "离开画面")),
 )
 _ROLE_ALIASES = {
     "opening": "opening",
@@ -45,7 +54,12 @@ _ROLE_ALIASES = {
 }
 
 
-def normalize_scene_blueprints(raw_blueprints: Any, *, total_duration_sec: int) -> list[dict[str, Any]]:
+def normalize_scene_blueprints(
+    raw_blueprints: Any,
+    *,
+    total_duration_sec: int,
+    allow_legacy_global_shot_ranges: bool = False,
+) -> list[dict[str, Any]]:
     """规范化 LLM 分镜，并拒绝任何违反生产合同的时间线。"""
     _validate_total_duration(total_duration_sec)
     if not isinstance(raw_blueprints, list) or not raw_blueprints:
@@ -70,7 +84,13 @@ def normalize_scene_blueprints(raw_blueprints: Any, *, total_duration_sec: int) 
             raise ValueError(f"分镜 {position} 时间线不连续，应为 {cursor}-{cursor + duration} 秒")
 
         role = _normalize_role(raw.get("structure_role"), position)
-        shot_description = _shot_description_text(raw.get("shot_description"), position)
+        shot_description = _shot_description_text(
+            raw.get("shot_description"),
+            position,
+            duration,
+            scene_start_sec=start_sec,
+            allow_legacy_global_ranges=allow_legacy_global_shot_ranges,
+        )
         normalized.append(
             {
                 # 分镜 ID 是前端更新和后端重试的主键，不能信任 LLM 返回的重复值。
@@ -160,26 +180,30 @@ def fallback_scene_blueprints(
             visual_style=style,
             goal=goal,
         )
-        blueprints.append(
-            {
-                "scene_id": f"scene-{index}",
-                "scene_index": index,
-                "title": title,
-                "structure_role": role,
-                "start_sec": cursor,
-                "end_sec": cursor + duration,
-                "duration_sec": duration,
-                "storyline": storyline,
-                "shot_description": f"0-{duration}秒: {shot_action}",
-                "narration": narration,
-                "transition": transition,
-                "asset_requirements": {
-                    "characters": ["目标用户"] if role in {"opening", "development"} else [],
-                    "scenes": ["真实使用场景"],
-                    "props": [product],
-                },
-            }
+        blueprint = {
+            "scene_id": f"scene-{index}",
+            "scene_index": index,
+            "title": title,
+            "structure_role": role,
+            "start_sec": cursor,
+            "end_sec": cursor + duration,
+            "duration_sec": duration,
+            "storyline": storyline,
+            "shot_description": "",
+            "narration": narration,
+            "transition": transition,
+            "asset_requirements": {
+                "characters": ["目标用户"] if role in {"opening", "development"} else [],
+                "scenes": ["真实使用场景"],
+                "props": [product],
+            },
+        }
+        blueprint["shot_description"] = _rich_fallback_shot_description(
+            blueprint,
+            visual_style=style,
+            action_hint=shot_action,
         )
+        blueprints.append(blueprint)
         cursor += duration
     return normalize_scene_blueprints(blueprints, total_duration_sec=total_duration_sec)
 
@@ -187,6 +211,66 @@ def fallback_scene_blueprints(
 def scene_blueprint_durations(blueprints: list[dict[str, Any]]) -> list[int]:
     """提取已经校验过的分镜时长数组。"""
     return [int(item["duration_sec"]) for item in blueprints]
+
+
+def shot_description_quality_issues(blueprints: list[dict[str, Any]]) -> list[str]:
+    """返回每个分镜镜头描述缺失的创作维度，供 Plan LLM 定向修正。"""
+    issues: list[str] = []
+    for position, blueprint in enumerate(blueprints, start=1):
+        description = _text(blueprint.get("shot_description"))
+        missing = [label for label, markers in _SHOT_DESCRIPTION_DIMENSIONS if not _shot_dimension_present(label, markers, description, blueprint)]
+        if missing:
+            scene_index = blueprint.get("scene_index")
+            index = scene_index if isinstance(scene_index, int) and not isinstance(scene_index, bool) else position
+            issues.append(f"分镜 {index} 镜头描述缺少：{'、'.join(missing)}")
+    return issues
+
+
+def validate_shot_description_quality(blueprints: list[dict[str, Any]]) -> None:
+    """拒绝缺少关键摄影信息的候选 Plan 蓝图。"""
+    issues = shot_description_quality_issues(blueprints)
+    if issues:
+        raise ValueError("；".join(issues))
+
+
+def enrich_incomplete_shot_descriptions(
+    blueprints: list[dict[str, Any]],
+    *,
+    visual_style: str,
+) -> list[dict[str, Any]]:
+    """只替换不完整镜头描述，不改写 Plan 的叙事、时长和资产合同。"""
+    enriched = copy.deepcopy(blueprints)
+    for blueprint in enriched:
+        if shot_description_quality_issues([blueprint]):
+            blueprint["shot_description"] = _rich_fallback_shot_description(
+                blueprint,
+                visual_style=visual_style,
+            )
+    return enriched
+
+
+def apply_shot_description_repairs(
+    blueprints: list[dict[str, Any]],
+    repairs: Any,
+    *,
+    total_duration_sec: int,
+) -> list[dict[str, Any]]:
+    """只采纳 LLM 返回的镜头描述，忽略其对其他权威字段的潜在改写。"""
+    if not isinstance(repairs, list) or not repairs:
+        raise ValueError("Plan LLM 未返回镜头描述修正结果")
+    descriptions: dict[int, str] = {}
+    for item in repairs:
+        if not isinstance(item, dict):
+            continue
+        scene_index = item.get("scene_index")
+        if isinstance(scene_index, int) and not isinstance(scene_index, bool):
+            descriptions[scene_index] = _text(item.get("shot_description"))
+    repaired = copy.deepcopy(blueprints)
+    for blueprint in repaired:
+        scene_index = int(blueprint["scene_index"])
+        if scene_index in descriptions and shot_description_quality_issues([blueprint]):
+            blueprint["shot_description"] = descriptions[scene_index]
+    return normalize_scene_blueprints(repaired, total_duration_sec=total_duration_sec)
 
 
 def render_scene_blueprints_markdown(blueprints: list[dict[str, Any]]) -> str:
@@ -290,15 +374,123 @@ def _fallback_content(*, role: str, product: str, direction: str, visual_style: 
     )
 
 
-def _shot_description_text(value: Any, position: int) -> str:
+def _shot_dimension_present(
+    label: str,
+    markers: tuple[str, ...],
+    description: str,
+    blueprint: dict[str, Any],
+) -> bool:
+    if _dimension_label_has_content(label, description):
+        return True
+    if any(marker != label and marker.lower() in description.lower() for marker in markers):
+        return True
+    assets = blueprint.get("asset_requirements")
+    if not isinstance(assets, dict):
+        return False
+    if label == "地点":
+        candidates = assets.get("scenes")
+    elif label == "主体":
+        candidates = [*(assets.get("characters") or []), *(assets.get("props") or [])]
+    else:
+        return False
+    return any(_text(candidate) and _text(candidate) in description for candidate in candidates or [])
+
+
+def _rich_fallback_shot_description(
+    blueprint: dict[str, Any],
+    *,
+    visual_style: str,
+    action_hint: str = "",
+) -> str:
+    duration = _strict_int(blueprint.get("duration_sec"), field_name="规则兜底 duration_sec")
+    assets = blueprint.get("asset_requirements") if isinstance(blueprint.get("asset_requirements"), dict) else {}
+    locations = _dedupe_texts(assets.get("scenes")) or ["与故事线一致的真实使用场景"]
+    subjects = [*_dedupe_texts(assets.get("characters")), *_dedupe_texts(assets.get("props"))] or ["核心视觉主体"]
+    role = _normalize_role(blueprint.get("structure_role"), int(blueprint.get("scene_index") or 1))
+    storyline = _text(blueprint.get("storyline")) or "推进当前分镜的核心信息"
+    narration = _text(blueprint.get("narration")) or "本分镜无旁白"
+    style = _text(visual_style) or "真实广告风格"
+    role_directions = {
+        "opening": (
+            "中近景切关键细节特写",
+            "稳定跟拍主体建立空间后快速推近冲突细节",
+            "用有方向的自然光与冷暖反差勾勒主体轮廓和关键高光",
+            "停在冲突或产品关键细节，并沿动作方向衔接下一镜",
+        ),
+        "development": (
+            "中景交代关系并切操作近景",
+            "沿主体动作平稳侧移，随后推近当前信息点",
+            "以柔和主光配合环境辅光，保持层次和材质可读性",
+            "停在本步骤动作完成点，并以同方向运动衔接下一镜",
+        ),
+        "climax": (
+            "中景切产品特写与结果大特写",
+            "先环绕展示使用关系，再推近证据细节并稳定停住",
+            "以高对比主光和轮廓光强化产品材质、动作结果与前后差异",
+            "停在可验证的结果特写，并匹配剪辑进入最终使用状态",
+        ),
+        "conclusion": (
+            "完整中景切产品定格特写",
+            "跟随主体进入完成状态后缓慢拉稳，最终固定镜头",
+            "使用干净柔光和清晰轮廓光统一品牌色与产品高光",
+            "定格产品、结果和行动信息，完成落版并结束",
+        ),
+    }
+    shot_size, camera, lighting, closure = role_directions[role]
+    action = _text(action_hint) or f"围绕“{storyline}”完成一个有明确起点、过程和结果的连续动作"
+    sound = "保留符合地点的环境声与关键动作音效，本镜头无旁白" if narration in {"本分镜无旁白", "无旁白"} else f"保留符合地点的环境声和关键动作音效，并清晰承载旁白“{narration}”"
+    return f"0-{duration}秒: 地点：{'、'.join(locations)}；主体：{'、'.join(subjects)}；动作：{action}；景别：{shot_size}；运镜：{camera}；光影：按{style}使用{lighting}；声音：{sound}；收束：{closure}。"
+
+
+def _dimension_label_has_content(label: str, description: str) -> bool:
+    pattern = re.compile(rf"{re.escape(label)}\s*[:：]\s*(?P<content>[^；;。\n]*)")
+    return any(re.search(r"[0-9A-Za-z\u4e00-\u9fff]", match.group("content")) for match in pattern.finditer(description))
+
+
+def _shot_description_text(
+    value: Any,
+    position: int,
+    duration_sec: int,
+    *,
+    scene_start_sec: int,
+    allow_legacy_global_ranges: bool,
+) -> str:
     if isinstance(value, dict):
         value = value.get("text")
     text = _public_required_text(value, f"分镜 {position} shot_description")
     if _MILLISECOND_PATTERN.search(text):
         raise ValueError(f"分镜 {position} 镜头描述不能使用毫秒时间码")
-    if not _SECOND_RANGE_PATTERN.search(text):
+    matches = list(_TIMELINE_RANGE_PATTERN.finditer(text))
+    ranges = [(int(match.group("start")), int(match.group("end"))) for match in matches]
+    if not ranges:
         raise ValueError(f"分镜 {position} 镜头描述必须包含秒级时间范围")
-    return text
+    if _ranges_cover(ranges, start_sec=0, end_sec=duration_sec):
+        return text
+    if allow_legacy_global_ranges and _ranges_cover(
+        ranges,
+        start_sec=scene_start_sec,
+        end_sec=scene_start_sec + duration_sec,
+    ):
+        return _shift_timeline_ranges(text, offset_sec=scene_start_sec)
+    raise ValueError(f"分镜 {position} 镜头描述时间范围必须从 0 秒连续覆盖到 {duration_sec} 秒")
+
+
+def _ranges_cover(ranges: list[tuple[int, int]], *, start_sec: int, end_sec: int) -> bool:
+    cursor = start_sec
+    for range_start, range_end in ranges:
+        if range_start != cursor or range_end <= range_start:
+            return False
+        cursor = range_end
+    return cursor == end_sec
+
+
+def _shift_timeline_ranges(text: str, *, offset_sec: int) -> str:
+    def replace_range(match: re.Match[str]) -> str:
+        start = int(match.group("start")) - offset_sec
+        end = int(match.group("end")) - offset_sec
+        return f"{match.group('prefix')}{match.group('spacing')}{start}-{end}秒"
+
+    return _TIMELINE_RANGE_PATTERN.sub(replace_range, text)
 
 
 def _source_scene_duration(raw: dict[str, Any]) -> int:
@@ -314,7 +506,7 @@ def _source_scene_duration(raw: dict[str, Any]) -> int:
     shot_description = raw.get("shot_description")
     if isinstance(shot_description, dict):
         shot_description = shot_description.get("text")
-    ends = [int(match.group("end")) for match in _CAPTURED_SECOND_RANGE_PATTERN.finditer(_text(shot_description))]
+    ends = [int(match.group("end")) for match in _TIMELINE_RANGE_PATTERN.finditer(_text(shot_description))]
     return max(ends, default=MIN_SCENE_DURATION_SEC)
 
 
@@ -325,7 +517,7 @@ def _rescale_shot_description(value: Any, *, source_duration: int, target_durati
     if not text:
         return text
 
-    matches = list(_CAPTURED_SECOND_RANGE_PATTERN.finditer(text))
+    matches = list(_TIMELINE_RANGE_PATTERN.finditer(text))
     if not matches:
         return f"0-{target_duration}秒: {text}"
     scale_base = max(source_duration, max(int(match.group("end")) for match in matches), 1)
@@ -339,9 +531,9 @@ def _rescale_shot_description(value: Any, *, source_duration: int, target_durati
             if start >= target_duration:
                 start = max(0, target_duration - 1)
             end = min(target_duration, start + 1)
-        return f"{start}-{end}秒"
+        return f"{match.group('prefix')}{match.group('spacing')}{start}-{end}秒"
 
-    return _CAPTURED_SECOND_RANGE_PATTERN.sub(replace_range, text)
+    return _TIMELINE_RANGE_PATTERN.sub(replace_range, text)
 
 
 def _normalize_asset_requirements(value: Any) -> dict[str, list[str]]:
