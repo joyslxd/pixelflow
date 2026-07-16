@@ -94,4 +94,3 @@ class JianyingDraftResult(BaseModel):
     file_name: str | None = None
     expire_at: datetime | None = None
     message: str = ""
-    raw: dict[str, object] | None = None
