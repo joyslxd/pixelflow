@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceSource = fs.readFileSync(path.resolve(testDirectory, "../src/pages/WorkspacePage.tsx"), "utf8");
+const apiSource = fs.readFileSync(path.resolve(testDirectory, "../src/lib/api.ts"), "utf8");
 
 test("剪映草稿任务状态进入对话快照并按来源对话恢复", () => {
   assert.match(workspaceSource, /pendingJianyingDraftJob/);
@@ -36,7 +37,7 @@ test("当前对话启动任务会立即写入 pending ref，并持久化两种 r
   );
   assert.match(
     targetPatchSource,
-    /await api\.getConversation\(targetConversationId\)[\s\S]*?conversationIdRef\.current === targetConversationId[\s\S]*?pendingJianyingDraftJobRef\.current = pendingJianyingDraftJob/,
+    /await patchJianyingDraftTargetConversation\([\s\S]*?isCurrentConversation: \(conversationId\) => conversationIdRef\.current === conversationId/,
   );
   assert.match(targetPatchSource, /setJianyingDraftRecordsForConversation\(\s*targetConversationId/);
   assert.match(workspaceSource, /snapshot\.jianyingDraftRecords \|\| snapshot\.jianying_draft_records/);
@@ -54,7 +55,7 @@ test("草稿启动 guard 在 capability 查询前建立，并在 finally 中释�
   assert.match(generateSource, /finally[\s\S]*?jianyingDraftStartGuardRef\.current\.release\(targetConversationId, storyboard_version_id\)/);
 });
 
-test("跨会话持久化只补丁目标对话的剪映字段", () => {
+test("跨会话持久化使用后端原子 PATCH，不再执行 GET 加全量 PUT", () => {
   const targetPatchMatch = workspaceSource.match(
     /const patchJianyingDraftConversationContextForTarget[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
   );
@@ -66,13 +67,16 @@ test("跨会话持久化只补丁目标对话的剪映字段", () => {
   assert.ok(persistMatch, "persistPendingJianyingDraftJob must exist");
   const targetPatchSource = targetPatchMatch[0];
   const persistSource = persistMatch[0];
-  assert.match(targetPatchSource, /api\.getConversation\(targetConversationId\)/);
-  assert.doesNotMatch(targetPatchSource, /if \(!targetContext\)/);
-  assert.doesNotMatch(targetPatchSource, /jianyingDraftContextByConversationRef\.current\.get/);
-  assert.match(targetPatchSource, /patchJianyingDraftConversationContext\(/);
+  assert.match(targetPatchSource, /api\.patchJianyingDraftConversationContext\(/);
+  assert.match(targetPatchSource, /patchJianyingDraftTargetConversation\(/);
+  assert.doesNotMatch(targetPatchSource, /api\.getConversation\(/);
+  assert.doesNotMatch(targetPatchSource, /api\.updateConversation\(/);
   assert.doesNotMatch(targetPatchSource, /makeSnapshot\(targetConversationId\)/);
   assert.match(persistSource, /patchJianyingDraftConversationContextForTarget/);
   assert.doesNotMatch(persistSource, /makeSnapshot\(targetConversationId\)/);
+  assert.match(apiSource, /patchJianyingDraftConversationContext/);
+  assert.match(apiSource, /\/conversations\/\$\{encodeURIComponent\(conversationId\)\}\/jianying-draft-context/);
+  assert.match(apiSource, /method: "PATCH"/);
 });
 
 test("过期任务保留恢复错误，capability 后只使用捕获的目标对话", () => {

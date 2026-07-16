@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from uuid import UUID
 
@@ -17,10 +18,151 @@ def test_pixelflow_conversations_router_prefix_and_paths():
     assert pixelflow_conversations.router.prefix == "/agent/conversations"
     assert "/agent/conversations" in paths
     assert "/agent/conversations/{conversation_id}" in paths
+    assert "/agent/conversations/{conversation_id}/jianying-draft-context" in paths
     assert "/agent/conversations/{conversation_id}/messages" in paths
     assert "/agent/conversations/{conversation_id}/messages/start" in paths
     assert "/agent/conversations/{conversation_id}/messages/jobs/{job_id}" in paths
     assert "/agent/conversations/{conversation_id}/resume" in paths
+
+
+def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/agent/conversations",
+            json={
+                "title": "剪映草稿",
+                "context": {
+                    "brand_name": "A 品牌",
+                    "concurrent_server_field": "保留",
+                    "jianying_draft_records": {"storyboard-0": {"status": "succeeded"}},
+                },
+            },
+        ).json()
+        conversation_id = created["conversation_id"]
+        pending_job = {"job_id": "job-1", "conversation_id": conversation_id}
+
+        running = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_running",
+                "pendingJianyingDraftJob": pending_job,
+                "jianyingDraftRecords": {"storyboard-1": {"status": "running"}},
+            },
+        )
+        assert running.status_code == 200
+        running_context = running.json()["context"]
+        assert running_context["brand_name"] == "A 品牌"
+        assert running_context["concurrent_server_field"] == "保留"
+        assert running_context["pendingJianyingDraftJob"] == pending_job
+        assert running_context["pending_jianying_draft_job"] == pending_job
+        assert set(running_context["jianyingDraftRecords"]) == {"storyboard-0", "storyboard-1"}
+        assert running_context["jianying_draft_records"] == running_context["jianyingDraftRecords"]
+
+        stale_put = client.put(
+            f"/agent/conversations/{conversation_id}",
+            json={
+                "context": {
+                    "brand_name": "A 品牌",
+                    "concurrent_server_field": "保留",
+                    "generic_concurrent_field": "普通更新已保存",
+                    "pendingJianyingDraftJob": None,
+                    "pending_jianying_draft_job": None,
+                    "jianyingDraftRecords": {},
+                    "jianying_draft_records": {},
+                }
+            },
+        )
+        assert stale_put.status_code == 200
+        stale_put_context = stale_put.json()["context"]
+        assert stale_put_context["generic_concurrent_field"] == "普通更新已保存"
+        assert stale_put_context["pendingJianyingDraftJob"] == pending_job
+        assert set(stale_put_context["jianyingDraftRecords"]) == {"storyboard-0", "storyboard-1"}
+
+        expired = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_job_expired",
+                "pending_jianying_draft_job": None,
+                "jianying_draft_records": {"storyboard-1": {"status": "failed"}},
+                "jianying_draft_job_resume_error": "任务已过期",
+            },
+        )
+        assert expired.status_code == 200
+        expired_context = expired.json()["context"]
+        assert expired_context["pendingJianyingDraftJob"] is None
+        assert expired_context["pending_jianying_draft_job"] is None
+        assert expired_context["jianyingDraftRecords"]["storyboard-1"]["status"] == "failed"
+        assert expired_context["jianying_draft_job_resume_error"] == "任务已过期"
+
+        omitted_error = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_failed",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {},
+            },
+        )
+        assert omitted_error.status_code == 200
+        assert omitted_error.json()["context"]["jianying_draft_job_resume_error"] == "任务已过期"
+
+        cleared_error = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_running",
+                "pendingJianyingDraftJob": pending_job,
+                "jianyingDraftRecords": {},
+                "jianying_draft_job_resume_error": None,
+            },
+        )
+        assert cleared_error.status_code == 200
+        assert cleared_error.json()["context"]["jianying_draft_job_resume_error"] is None
+
+        extra_field = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "forbidden",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {},
+                "brand_name": "禁止覆盖",
+            },
+        )
+        assert extra_field.status_code == 422
+
+
+def test_jianying_draft_context_patch_checks_conversation_owner():
+    from app.gateway.routers import pixelflow_conversations
+
+    store = MemoryPixelFlowTaskStore()
+    asyncio.run(
+        store.create_conversation(
+            pixelflow_conversations.PixelFlowConversationRecord(
+                conversation_id="other-user-conversation",
+                user_id="other-user",
+                title="其他用户",
+            )
+        )
+    )
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = store
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/agent/conversations/other-user-conversation/jianying-draft-context",
+            json={
+                "last_phase": "forbidden",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {},
+            },
+        )
+
+    assert response.status_code == 404
 
 
 def _stable_user() -> User:

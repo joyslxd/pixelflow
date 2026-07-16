@@ -8,11 +8,14 @@ LangGraph checkpoint 保存的是运行时状态；这里的 Store 保存的是�
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,6 +59,90 @@ def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:
     if not value:
         return {}
     return {key: item for key, item in value.items() if key != "messages"}
+
+
+class _UnsetJianyingDraftResumeError:
+    pass
+
+
+_UNSET_JIANYING_DRAFT_RESUME_ERROR = _UnsetJianyingDraftResumeError()
+type JianyingDraftResumeErrorPatch = str | None | _UnsetJianyingDraftResumeError
+_JIANYING_DRAFT_CONTEXT_KEYS = (
+    "pendingJianyingDraftJob",
+    "pending_jianying_draft_job",
+    "jianyingDraftRecords",
+    "jianying_draft_records",
+    "jianying_draft_job_resume_error",
+)
+_CONVERSATION_LOCK_STRIPE_COUNT = 64
+
+
+def _jianying_draft_records(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _patch_jianying_draft_context(
+    context: dict[str, Any] | None,
+    *,
+    pending_job: dict[str, Any] | None,
+    records: dict[str, Any],
+    resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
+) -> dict[str, Any]:
+    current = _conversation_context(context)
+    merged_records = {
+        **_jianying_draft_records(current.get("jianying_draft_records")),
+        **_jianying_draft_records(current.get("jianyingDraftRecords")),
+        **records,
+    }
+    patched = {
+        **current,
+        "pendingJianyingDraftJob": pending_job,
+        "pending_jianying_draft_job": pending_job,
+        "jianyingDraftRecords": merged_records,
+        "jianying_draft_records": merged_records,
+    }
+    if not isinstance(resume_error, _UnsetJianyingDraftResumeError):
+        patched["jianying_draft_job_resume_error"] = resume_error
+    return patched
+
+
+def _replace_context_preserving_jianying_draft_fields(
+    current_context: dict[str, Any] | None,
+    replacement_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current = _conversation_context(current_context)
+    replacement = _conversation_context(replacement_context)
+    for key in _JIANYING_DRAFT_CONTEXT_KEYS:
+        if key in current:
+            replacement[key] = current[key]
+        else:
+            replacement.pop(key, None)
+    return replacement
+
+
+def _new_conversation_locks() -> tuple[asyncio.Lock, ...]:
+    return tuple(asyncio.Lock() for _ in range(_CONVERSATION_LOCK_STRIPE_COUNT))
+
+
+def _conversation_lock(locks: tuple[asyncio.Lock, ...], conversation_id: str) -> asyncio.Lock:
+    return locks[hash(conversation_id) % len(locks)]
+
+
+@asynccontextmanager
+async def _conversation_write_transaction(session: AsyncSession) -> AsyncIterator[None]:
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite 不支持行锁，提前获取数据库写锁以覆盖多 Store/多进程并发。
+        await session.execute(text("BEGIN IMMEDIATE"))
+        try:
+            yield
+        except BaseException:
+            await session.rollback()
+            raise
+        else:
+            await session.commit()
+        return
+    async with session.begin():
+        yield
 
 
 def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
@@ -221,6 +308,16 @@ class PixelFlowTaskStore(Protocol):
     async def update_conversation(
         self, conversation_id: str, *, user_id: str | None = None, **fields: Any
     ) -> PixelFlowConversationRecord | None: ...
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
+    ) -> PixelFlowConversationRecord | None: ...
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord: ...
     async def update_conversation_message(
         self,
@@ -309,6 +406,7 @@ def _conversation_message_row_to_record(row: PixelFlowConversationMessageRow) ->
 class SQLPixelFlowTaskStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._sf = session_factory
+        self._conversation_locks = _new_conversation_locks()
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         async with self._sf() as session:
@@ -540,29 +638,70 @@ class SQLPixelFlowTaskStore:
     async def update_conversation(
         self, conversation_id: str, *, user_id: str | None = None, **fields: Any
     ) -> PixelFlowConversationRecord | None:
-        async with self._sf() as session:
-            stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id)
-            if user_id is not None:
-                stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                return None
-            mapping = {
-                "title": "title",
-                "current_task_id": "current_task_id",
-                "last_phase": "last_phase",
-                "context": "context_json",
-            }
-            for key, value in fields.items():
-                attr = mapping.get(key)
-                if attr:
-                    if key == "context":
-                        value = _conversation_context(value)
-                    setattr(row, attr, value)
-            row.updated_at = _now()
-            await session.commit()
-            await session.refresh(row)
-            return _conversation_row_to_record(row)
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            async with self._sf() as session:
+                async with _conversation_write_transaction(session):
+                    stmt = (
+                        select(PixelFlowConversationRow)
+                        .where(PixelFlowConversationRow.conversation_id == conversation_id)
+                        .with_for_update()
+                    )
+                    if user_id is not None:
+                        stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        return None
+                    mapping = {
+                        "title": "title",
+                        "current_task_id": "current_task_id",
+                        "last_phase": "last_phase",
+                        "context": "context_json",
+                    }
+                    for key, value in fields.items():
+                        attr = mapping.get(key)
+                        if attr:
+                            if key == "context":
+                                value = _replace_context_preserving_jianying_draft_fields(row.context_json, value)
+                            setattr(row, attr, value)
+                    row.updated_at = _now()
+                    await session.flush()
+                    return _conversation_row_to_record(row)
+
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
+    ) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            async with self._sf() as session:
+                async with _conversation_write_transaction(session):
+                    stmt = (
+                        select(PixelFlowConversationRow)
+                        .where(PixelFlowConversationRow.conversation_id == conversation_id)
+                        .with_for_update()
+                    )
+                    if user_id is not None:
+                        stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        return None
+                    row.context_json = _patch_jianying_draft_context(
+                        row.context_json,
+                        pending_job=pending_job,
+                        records=records,
+                        resume_error=resume_error,
+                    )
+                    row.last_phase = last_phase
+                    row.updated_at = _now()
+                    await session.flush()
+                    return _conversation_row_to_record(row)
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         async with self._sf() as session:
@@ -668,6 +807,7 @@ class MemoryPixelFlowTaskStore:
         self._conversations: dict[str, PixelFlowConversationRecord] = {}
         self._conversation_messages: dict[str, list[PixelFlowConversationMessageRecord]] = {}
         self._trace_events: dict[str, list[dict[str, Any]]] = {}
+        self._conversation_locks = _new_conversation_locks()
         self._next_event_id = 1
         self._next_trace_event_id = 1
 
@@ -783,15 +923,45 @@ class MemoryPixelFlowTaskStore:
     async def update_conversation(
         self, conversation_id: str, *, user_id: str | None = None, **fields: Any
     ) -> PixelFlowConversationRecord | None:
-        record = await self.get_conversation(conversation_id, user_id=user_id)
-        if record is None:
-            return None
-        for key in ("title", "current_task_id", "last_phase", "context"):
-            if key in fields:
-                value = _conversation_context(fields[key]) if key == "context" else fields[key]
-                setattr(record, key, value)
-        record.updated_at = _dt(_now())
-        return record
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            record = await self.get_conversation(conversation_id, user_id=user_id)
+            if record is None:
+                return None
+            for key in ("title", "current_task_id", "last_phase", "context"):
+                if key in fields:
+                    if key == "context":
+                        value = _replace_context_preserving_jianying_draft_fields(record.context, fields[key])
+                    else:
+                        value = fields[key]
+                    setattr(record, key, value)
+            record.updated_at = _dt(_now())
+            return record
+
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
+    ) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            record = await self.get_conversation(conversation_id, user_id=user_id)
+            if record is None:
+                return None
+            record.context = _patch_jianying_draft_context(
+                record.context,
+                pending_job=pending_job,
+                records=records,
+                resume_error=resume_error,
+            )
+            record.last_phase = last_phase
+            record.updated_at = _dt(_now())
+            return record
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         existing = next(

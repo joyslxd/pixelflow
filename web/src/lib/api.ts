@@ -172,6 +172,13 @@ export interface ConversationDetailResponse {
   messages: ConversationMessageResponse[];
 }
 
+export interface JianyingDraftConversationContextPatchRequest {
+  last_phase: string;
+  pendingJianyingDraftJob: unknown | null;
+  jianyingDraftRecords: Record<string, JianyingDraftJobResponse>;
+  jianying_draft_job_resume_error?: string | null;
+}
+
 export interface ConversationTraceEvent {
   id: number;
   conversation_id: string;
@@ -1412,6 +1419,15 @@ export const api = {
     conversationId: string,
     body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> },
   ) => req<ConversationSummaryResponse>(`/conversations/${encodeURIComponent(conversationId)}`, { method: "PUT", body: JSON.stringify(body) }),
+
+  patchJianyingDraftConversationContext: (
+    conversationId: string,
+    body: JianyingDraftConversationContextPatchRequest,
+  ) =>
+    req<ConversationSummaryResponse>(`/conversations/${encodeURIComponent(conversationId)}/jianying-draft-context`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
 
   appendConversationMessage: (
     conversationId: string,

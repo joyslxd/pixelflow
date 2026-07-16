@@ -75,6 +75,26 @@ export class JianyingDraftStartGuard {
   }
 }
 
+export interface PatchJianyingDraftTargetConversationOptions<T> {
+  targetConversationId: string;
+  isCurrentConversation: (conversationId: string) => boolean;
+  syncCurrentConversation: (result?: T) => void;
+  patchTargetConversation: (conversationId: string) => Promise<T>;
+}
+
+/** 将异步持久化始终绑定到触发任务的对话，并在 await 后重新校验当前对话。 */
+export async function patchJianyingDraftTargetConversation<T>({
+  targetConversationId,
+  isCurrentConversation,
+  syncCurrentConversation,
+  patchTargetConversation,
+}: PatchJianyingDraftTargetConversationOptions<T>): Promise<T> {
+  if (isCurrentConversation(targetConversationId)) syncCurrentConversation();
+  const result = await patchTargetConversation(targetConversationId);
+  if (isCurrentConversation(targetConversationId)) syncCurrentConversation(result);
+  return result;
+}
+
 export interface JianyingDraftConversationContextPatch {
   pendingJianyingDraftJob: unknown | null;
   jianyingDraftRecords: Record<string, JianyingDraftJobResponse>;

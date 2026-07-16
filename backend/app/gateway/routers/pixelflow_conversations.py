@@ -12,7 +12,7 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
@@ -36,6 +36,42 @@ class ConversationUpdateRequest(BaseModel):
     current_task_id: str | None = None
     last_phase: str | None = None
     context: dict[str, Any] | None = None
+
+
+class JianyingDraftConversationContextPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_phase: str = Field(min_length=1)
+    pendingJianyingDraftJob: dict[str, Any] | None = None
+    pending_jianying_draft_job: dict[str, Any] | None = None
+    jianyingDraftRecords: dict[str, Any] | None = None
+    jianying_draft_records: dict[str, Any] | None = None
+    jianying_draft_job_resume_error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_dual_fields(self) -> JianyingDraftConversationContextPatchRequest:
+        fields = self.model_fields_set
+        pending_fields = {"pendingJianyingDraftJob", "pending_jianying_draft_job"}
+        record_fields = {"jianyingDraftRecords", "jianying_draft_records"}
+        if not fields.intersection(pending_fields):
+            raise ValueError("pendingJianyingDraftJob or pending_jianying_draft_job is required")
+        if not fields.intersection(record_fields):
+            raise ValueError("jianyingDraftRecords or jianying_draft_records is required")
+        if pending_fields.issubset(fields) and self.pendingJianyingDraftJob != self.pending_jianying_draft_job:
+            raise ValueError("pending camelCase and snake_case values must match")
+        if record_fields.issubset(fields) and self.jianyingDraftRecords != self.jianying_draft_records:
+            raise ValueError("records camelCase and snake_case values must match")
+        return self
+
+    def pending_job(self) -> dict[str, Any] | None:
+        if "pendingJianyingDraftJob" in self.model_fields_set:
+            return self.pendingJianyingDraftJob
+        return self.pending_jianying_draft_job
+
+    def records(self) -> dict[str, Any]:
+        if "jianyingDraftRecords" in self.model_fields_set:
+            return self.jianyingDraftRecords or {}
+        return self.jianying_draft_records or {}
 
 
 class ConversationMessageCreateRequest(BaseModel):
@@ -178,6 +214,29 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
     user_id = await get_current_user(request)
     fields = body.model_dump(exclude_unset=True)
     updated = await _task_store(request).update_conversation(conversation_id, user_id=user_id, **fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return _conversation_response(updated)
+
+
+@router.patch("/{conversation_id}/jianying-draft-context", response_model=ConversationResponse)
+async def patch_jianying_draft_conversation_context(
+    conversation_id: str,
+    body: JianyingDraftConversationContextPatchRequest,
+    request: Request,
+) -> ConversationResponse:
+    user_id = await get_current_user(request)
+    optional_fields: dict[str, Any] = {}
+    if "jianying_draft_job_resume_error" in body.model_fields_set:
+        optional_fields["resume_error"] = body.jianying_draft_job_resume_error
+    updated = await _task_store(request).patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id=user_id,
+        pending_job=body.pending_job(),
+        records=body.records(),
+        last_phase=body.last_phase,
+        **optional_fields,
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return _conversation_response(updated)

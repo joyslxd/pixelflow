@@ -196,6 +196,81 @@ async def test_memory_conversation_store_concurrent_duplicate_message_returns_ex
 
 
 @pytest.mark.asyncio
+async def test_memory_conversation_store_atomically_merges_concurrent_jianying_draft_context():
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="c-jianying-memory",
+            user_id="u1",
+            title="剪映草稿",
+            context={
+                "brand_name": "A 品牌",
+                "concurrent_server_field": "保留",
+                "jianying_draft_records": {"storyboard-0": {"status": "succeeded"}},
+            },
+        )
+    )
+
+    first, second, generic_update = await asyncio.gather(
+        store.patch_jianying_draft_conversation_context(
+            "c-jianying-memory",
+            user_id="u1",
+            pending_job={"job_id": "job-1", "conversation_id": "c-jianying-memory"},
+            records={"storyboard-1": {"status": "running"}},
+            last_phase="jianying_draft_running",
+        ),
+        store.patch_jianying_draft_conversation_context(
+            "c-jianying-memory",
+            user_id="u1",
+            pending_job=None,
+            records={"storyboard-2": {"status": "failed"}},
+            last_phase="jianying_draft_failed",
+            resume_error="任务已过期",
+        ),
+        store.update_conversation(
+            "c-jianying-memory",
+            user_id="u1",
+            context={
+                "brand_name": "A 品牌",
+                "concurrent_server_field": "保留",
+                "generic_concurrent_field": "普通更新已保存",
+                "pendingJianyingDraftJob": {"job_id": "stale-job"},
+                "pending_jianying_draft_job": {"job_id": "stale-job"},
+                "jianyingDraftRecords": {},
+                "jianying_draft_records": {},
+            },
+        ),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert generic_update is not None
+    restored = await store.get_conversation("c-jianying-memory", user_id="u1")
+    assert restored is not None
+    assert restored.context["brand_name"] == "A 品牌"
+    assert restored.context["concurrent_server_field"] == "保留"
+    assert restored.context["generic_concurrent_field"] == "普通更新已保存"
+    assert set(restored.context["jianyingDraftRecords"]) == {
+        "storyboard-0",
+        "storyboard-1",
+        "storyboard-2",
+    }
+    assert restored.context["jianying_draft_records"] == restored.context["jianyingDraftRecords"]
+    assert restored.context["pending_jianying_draft_job"] == restored.context["pendingJianyingDraftJob"]
+    assert restored.context["jianying_draft_job_resume_error"] == "任务已过期"
+    assert (
+        await store.patch_jianying_draft_conversation_context(
+            "c-jianying-memory",
+            user_id="other",
+            pending_job=None,
+            records={},
+            last_phase="forbidden",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_memory_conversation_store_sorts_by_created_at_not_updated_at():
     from datetime import UTC, datetime, timedelta
 
@@ -417,6 +492,78 @@ async def test_sql_conversation_store_concurrent_duplicate_message_returns_exist
         messages = await store.list_conversation_messages("c-plan-sql", user_id="u1")
         assert len(messages) == 1
         assert messages[0].content in {"plan.md 首次写入", "重试不应重复插入"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_conversation_store_atomically_merges_concurrent_jianying_draft_context(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow-jianying.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first_store = SQLPixelFlowTaskStore(session_factory)
+        second_store = SQLPixelFlowTaskStore(session_factory)
+        await first_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="c-jianying-sql",
+                user_id="u1",
+                title="剪映草稿",
+                context={
+                    "brand_name": "A 品牌",
+                    "concurrent_server_field": "保留",
+                    "jianyingDraftRecords": {"storyboard-0": {"status": "succeeded"}},
+                },
+            )
+        )
+
+        await asyncio.gather(
+            first_store.patch_jianying_draft_conversation_context(
+                "c-jianying-sql",
+                user_id="u1",
+                pending_job={"job_id": "job-1", "conversation_id": "c-jianying-sql"},
+                records={"storyboard-1": {"status": "running"}},
+                last_phase="jianying_draft_running",
+            ),
+            second_store.patch_jianying_draft_conversation_context(
+                "c-jianying-sql",
+                user_id="u1",
+                pending_job=None,
+                records={"storyboard-2": {"status": "succeeded"}},
+                last_phase="jianying_draft_succeeded",
+            ),
+            second_store.update_conversation(
+                "c-jianying-sql",
+                user_id="u1",
+                context={
+                    "brand_name": "A 品牌",
+                    "concurrent_server_field": "保留",
+                    "generic_concurrent_field": "普通更新已保存",
+                    "pendingJianyingDraftJob": {"job_id": "stale-job"},
+                    "pending_jianying_draft_job": {"job_id": "stale-job"},
+                    "jianyingDraftRecords": {},
+                    "jianying_draft_records": {},
+                },
+            ),
+        )
+
+        restored = await first_store.get_conversation("c-jianying-sql", user_id="u1")
+        assert restored is not None
+        assert restored.context["brand_name"] == "A 品牌"
+        assert restored.context["concurrent_server_field"] == "保留"
+        assert restored.context["generic_concurrent_field"] == "普通更新已保存"
+        assert set(restored.context["jianyingDraftRecords"]) == {
+            "storyboard-0",
+            "storyboard-1",
+            "storyboard-2",
+        }
+        assert restored.context["jianying_draft_records"] == restored.context["jianyingDraftRecords"]
+        assert restored.context["pending_jianying_draft_job"] == restored.context["pendingJianyingDraftJob"]
     finally:
         await engine.dispose()
 

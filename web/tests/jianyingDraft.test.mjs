@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "JIANYING_DRAFT_TEST_MODULE must point to the compiled jian
 const {
   JianyingDraftStartGuard,
   draftButtonState,
+  patchJianyingDraftTargetConversation,
   patchJianyingDraftConversationContext,
   storyboardVersionId,
 } = await import(moduleUrl);
@@ -188,4 +189,34 @@ test("target conversation patch keeps A context intact after the UI switches to 
     brand_name: "B 品牌",
     selected_direction: { title: "B 创意" },
   });
+});
+
+test("target-bound orchestration keeps writing A after an awaited patch switches the UI to B", async () => {
+  let activeConversationId = "conversation-a";
+  let releasePatch;
+  const patchDeferred = new Promise((resolve) => {
+    releasePatch = resolve;
+  });
+  const patchedConversationIds = [];
+  const syncedConversationIds = [];
+
+  const pending = patchJianyingDraftTargetConversation({
+    targetConversationId: "conversation-a",
+    isCurrentConversation: (conversationId) => activeConversationId === conversationId,
+    syncCurrentConversation: () => syncedConversationIds.push(activeConversationId),
+    patchTargetConversation: async (conversationId) => {
+      patchedConversationIds.push(conversationId);
+      await patchDeferred;
+      return { conversation_id: conversationId };
+    },
+  });
+
+  assert.deepEqual(syncedConversationIds, ["conversation-a"]);
+  activeConversationId = "conversation-b";
+  releasePatch();
+  const result = await pending;
+
+  assert.deepEqual(result, { conversation_id: "conversation-a" });
+  assert.deepEqual(patchedConversationIds, ["conversation-a"]);
+  assert.deepEqual(syncedConversationIds, ["conversation-a"]);
 });

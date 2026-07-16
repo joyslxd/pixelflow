@@ -93,7 +93,7 @@ import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 import {
   JianyingDraftStartGuard,
-  patchJianyingDraftConversationContext,
+  patchJianyingDraftTargetConversation,
   storyboardVersionId,
   type JianyingDraftScene,
 } from "@/lib/jianyingDraft";
@@ -3210,23 +3210,28 @@ export function WorkspacePage() {
     jianyingDraftRecords: JianyingDraftRecordMap,
     jianyingDraftJobResumeError?: string | null,
   ) => {
-    const detail = await api.getConversation(targetConversationId);
-    const targetContext = { ...(detail.conversation.context || {}) };
-    const patchedContext = patchJianyingDraftConversationContext(targetContext, {
-      pendingJianyingDraftJob,
-      jianyingDraftRecords,
-      jianyingDraftJobResumeError,
-    });
-    setJianyingDraftRecordsForConversation(
+    let resolvedRecords = jianyingDraftRecords;
+    await patchJianyingDraftTargetConversation({
       targetConversationId,
-      patchedContext.jianyingDraftRecords as JianyingDraftRecordMap,
-    );
-    if (conversationIdRef.current === targetConversationId) {
-      pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
-    }
-    await api.updateConversation(targetConversationId, {
-      last_phase: lastPhase,
-      context: patchedContext,
+      isCurrentConversation: (conversationId) => conversationIdRef.current === conversationId,
+      syncCurrentConversation: () => {
+        pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
+        setJianyingDraftRecordsForConversation(targetConversationId, resolvedRecords);
+      },
+      patchTargetConversation: async (conversationId) => {
+        const updated = await api.patchJianyingDraftConversationContext(conversationId, {
+          last_phase: lastPhase,
+          pendingJianyingDraftJob,
+          jianyingDraftRecords,
+          ...(jianyingDraftJobResumeError === undefined
+            ? {}
+            : { jianying_draft_job_resume_error: jianyingDraftJobResumeError }),
+        });
+        const context = updated.context as Partial<WorkspaceSnapshot>;
+        resolvedRecords = context.jianyingDraftRecords || context.jianying_draft_records || {};
+        setJianyingDraftRecordsForConversation(conversationId, resolvedRecords);
+        return updated;
+      },
     });
   };
 
