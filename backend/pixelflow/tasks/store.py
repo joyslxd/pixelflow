@@ -75,35 +75,185 @@ _JIANYING_DRAFT_CONTEXT_KEYS = (
     "jianying_draft_job_resume_error",
 )
 _CONVERSATION_LOCK_STRIPE_COUNT = 64
+_JIANYING_DRAFT_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timeout"})
+_JIANYING_DRAFT_ACTIVE_STATUS_RANK = {"queued": 1, "running": 2}
 
 
 def _jianying_draft_records(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _jianying_draft_pending(value: Any) -> dict[str, Any] | None:
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _jianying_draft_job_id(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    job_id = value.get("job_id")
+    return job_id if isinstance(job_id, str) and job_id else None
+
+
+def _jianying_draft_status(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    return status if isinstance(status, str) and status else None
+
+
+def _merge_jianying_draft_record(
+    current_record: Any,
+    incoming_record: Any,
+    *,
+    expected_job_id: str,
+    current_pending_job_id: str | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    current = dict(current_record) if isinstance(current_record, dict) else None
+    incoming = dict(incoming_record) if isinstance(incoming_record, dict) else None
+    if incoming is None or _jianying_draft_job_id(incoming) != expected_job_id:
+        return current, False
+    if current is None:
+        return incoming, True
+
+    current_status = _jianying_draft_status(current)
+    incoming_status = _jianying_draft_status(incoming)
+    current_job_id = _jianying_draft_job_id(current)
+    if current_status == "succeeded":
+        return current, current_job_id == expected_job_id and incoming_status == "succeeded"
+    if incoming_status == "succeeded":
+        return incoming, True
+    if current_job_id == expected_job_id:
+        if current_status in _JIANYING_DRAFT_TERMINAL_STATUSES:
+            return current, incoming_status == current_status
+        if incoming_status in _JIANYING_DRAFT_TERMINAL_STATUSES:
+            return incoming, True
+        if _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(incoming_status or "", 0) >= _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(
+            current_status or "", 0
+        ):
+            return incoming, True
+        return current, False
+    if current_pending_job_id == expected_job_id:
+        return incoming, True
+    return current, False
+
+
+def _can_set_jianying_draft_pending(
+    pending_job: dict[str, Any],
+    *,
+    expected_job_id: str,
+    current_pending_job_id: str | None,
+    records: dict[str, Any],
+) -> bool:
+    if _jianying_draft_job_id(pending_job) != expected_job_id:
+        return False
+    if current_pending_job_id not in {None, expected_job_id}:
+        return False
+    storyboard_version_id = pending_job.get("storyboard_version_id")
+    if not isinstance(storyboard_version_id, str) or not storyboard_version_id:
+        return False
+    record = records.get(storyboard_version_id)
+    record_status = _jianying_draft_status(record)
+    if record_status == "succeeded":
+        return False
+    return not (
+        _jianying_draft_job_id(record) == expected_job_id
+        and record_status in _JIANYING_DRAFT_TERMINAL_STATUSES
+    )
+
+
+def _jianying_draft_phase_after_patch(
+    current_phase: str,
+    requested_phase: str,
+    *,
+    expected_job_id: str,
+    pending_job: dict[str, Any] | None,
+    merged_records: dict[str, Any],
+    incoming_record_keys: set[str],
+    request_authorized: bool,
+) -> str:
+    if not request_authorized:
+        return current_phase
+    pending_job_id = _jianying_draft_job_id(pending_job)
+    if pending_job_id is not None:
+        return "jianying_draft_running" if pending_job_id == expected_job_id else current_phase
+    effective_statuses = {
+        _jianying_draft_status(merged_records.get(storyboard_version_id))
+        for storyboard_version_id in incoming_record_keys
+    }
+    if "succeeded" in effective_statuses:
+        return "jianying_draft_succeeded"
+    if "failed" in effective_statuses:
+        return "jianying_draft_failed"
+    if "timeout" in effective_statuses:
+        return "jianying_draft_timeout"
+    return requested_phase
+
+
 def _patch_jianying_draft_context(
     context: dict[str, Any] | None,
     *,
+    current_phase: str,
+    requested_phase: str,
+    expected_job_id: str,
     pending_job: dict[str, Any] | None,
     records: dict[str, Any],
     resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     current = _conversation_context(context)
     merged_records = {
         **_jianying_draft_records(current.get("jianying_draft_records")),
         **_jianying_draft_records(current.get("jianyingDraftRecords")),
-        **records,
     }
+    current_pending = _jianying_draft_pending(current.get("pending_jianying_draft_job"))
+    camel_pending = _jianying_draft_pending(current.get("pendingJianyingDraftJob"))
+    if camel_pending is not None:
+        current_pending = camel_pending
+    current_pending_job_id = _jianying_draft_job_id(current_pending)
+    request_authorized = False
+    for storyboard_version_id, incoming_record in records.items():
+        merged_record, record_authorized = _merge_jianying_draft_record(
+            merged_records.get(storyboard_version_id),
+            incoming_record,
+            expected_job_id=expected_job_id,
+            current_pending_job_id=current_pending_job_id,
+        )
+        if merged_record is not None:
+            merged_records[storyboard_version_id] = merged_record
+        request_authorized = request_authorized or record_authorized
+
+    resolved_pending = current_pending
+    if pending_job is None:
+        if current_pending_job_id == expected_job_id:
+            resolved_pending = None
+            request_authorized = True
+    elif _can_set_jianying_draft_pending(
+        pending_job,
+        expected_job_id=expected_job_id,
+        current_pending_job_id=current_pending_job_id,
+        records=merged_records,
+    ):
+        resolved_pending = dict(pending_job)
+        request_authorized = True
+
     patched = {
         **current,
-        "pendingJianyingDraftJob": pending_job,
-        "pending_jianying_draft_job": pending_job,
+        "pendingJianyingDraftJob": resolved_pending,
+        "pending_jianying_draft_job": resolved_pending,
         "jianyingDraftRecords": merged_records,
         "jianying_draft_records": merged_records,
     }
-    if not isinstance(resume_error, _UnsetJianyingDraftResumeError):
+    if request_authorized and not isinstance(resume_error, _UnsetJianyingDraftResumeError):
         patched["jianying_draft_job_resume_error"] = resume_error
-    return patched
+    resolved_phase = _jianying_draft_phase_after_patch(
+        current_phase,
+        requested_phase,
+        expected_job_id=expected_job_id,
+        pending_job=resolved_pending,
+        merged_records=merged_records,
+        incoming_record_keys=set(records),
+        request_authorized=request_authorized,
+    )
+    return patched, resolved_phase
 
 
 def _replace_context_preserving_jianying_draft_fields(
@@ -313,6 +463,7 @@ class PixelFlowTaskStore(Protocol):
         conversation_id: str,
         *,
         user_id: str | None = None,
+        expected_job_id: str,
         pending_job: dict[str, Any] | None,
         records: dict[str, Any],
         last_phase: str,
@@ -673,6 +824,7 @@ class SQLPixelFlowTaskStore:
         conversation_id: str,
         *,
         user_id: str | None = None,
+        expected_job_id: str,
         pending_job: dict[str, Any] | None,
         records: dict[str, Any],
         last_phase: str,
@@ -692,13 +844,15 @@ class SQLPixelFlowTaskStore:
                     row = (await session.execute(stmt)).scalar_one_or_none()
                     if row is None:
                         return None
-                    row.context_json = _patch_jianying_draft_context(
+                    row.context_json, row.last_phase = _patch_jianying_draft_context(
                         row.context_json,
+                        current_phase=row.last_phase,
+                        requested_phase=last_phase,
+                        expected_job_id=expected_job_id,
                         pending_job=pending_job,
                         records=records,
                         resume_error=resume_error,
                     )
-                    row.last_phase = last_phase
                     row.updated_at = _now()
                     await session.flush()
                     return _conversation_row_to_record(row)
@@ -943,6 +1097,7 @@ class MemoryPixelFlowTaskStore:
         conversation_id: str,
         *,
         user_id: str | None = None,
+        expected_job_id: str,
         pending_job: dict[str, Any] | None,
         records: dict[str, Any],
         last_phase: str,
@@ -953,13 +1108,15 @@ class MemoryPixelFlowTaskStore:
             record = await self.get_conversation(conversation_id, user_id=user_id)
             if record is None:
                 return None
-            record.context = _patch_jianying_draft_context(
+            record.context, record.last_phase = _patch_jianying_draft_context(
                 record.context,
+                current_phase=record.last_phase,
+                requested_phase=last_phase,
+                expected_job_id=expected_job_id,
                 pending_job=pending_job,
                 records=records,
                 resume_error=resume_error,
             )
-            record.last_phase = last_phase
             record.updated_at = _dt(_now())
             return record
 

@@ -3206,28 +3206,36 @@ export function WorkspacePage() {
   const patchJianyingDraftConversationContextForTarget = async (
     targetConversationId: string,
     lastPhase: string,
+    expectedJobId: string,
     pendingJianyingDraftJob: PendingJianyingDraftJob | null,
-    jianyingDraftRecords: JianyingDraftRecordMap,
+    jianyingDraftRecordUpdates: JianyingDraftRecordMap,
     jianyingDraftJobResumeError?: string | null,
   ) => {
-    let resolvedRecords = jianyingDraftRecords;
+    let resolvedPendingJob = pendingJianyingDraftJob;
+    let resolvedRecords = {
+      ...jianyingDraftRecordsForConversation(targetConversationId),
+      ...jianyingDraftRecordUpdates,
+    };
     await patchJianyingDraftTargetConversation({
       targetConversationId,
+      expectedJobId,
       isCurrentConversation: (conversationId) => conversationIdRef.current === conversationId,
       syncCurrentConversation: () => {
-        pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
+        pendingJianyingDraftJobRef.current = resolvedPendingJob;
         setJianyingDraftRecordsForConversation(targetConversationId, resolvedRecords);
       },
-      patchTargetConversation: async (conversationId) => {
+      patchTargetConversation: async (conversationId, expectedJobId) => {
         const updated = await api.patchJianyingDraftConversationContext(conversationId, {
           last_phase: lastPhase,
+          expected_job_id: expectedJobId,
           pendingJianyingDraftJob,
-          jianyingDraftRecords,
+          jianyingDraftRecords: jianyingDraftRecordUpdates,
           ...(jianyingDraftJobResumeError === undefined
             ? {}
             : { jianying_draft_job_resume_error: jianyingDraftJobResumeError }),
         });
         const context = updated.context as Partial<WorkspaceSnapshot>;
+        resolvedPendingJob = context.pendingJianyingDraftJob ?? context.pending_jianying_draft_job ?? null;
         resolvedRecords = context.jianyingDraftRecords || context.jianying_draft_records || {};
         setJianyingDraftRecordsForConversation(conversationId, resolvedRecords);
         return updated;
@@ -3239,6 +3247,8 @@ export function WorkspacePage() {
     pendingJianyingDraftJob: PendingJianyingDraftJob | null,
     targetConversationId: string,
     lastPhase: string,
+    expectedJobId: string,
+    jianyingDraftRecordUpdates: JianyingDraftRecordMap = {},
     jianyingDraftJobResumeError?: string | null,
   ) => {
     if (pendingJianyingDraftJob && pendingJianyingDraftJob.conversation_id !== targetConversationId) return;
@@ -3249,8 +3259,9 @@ export function WorkspacePage() {
     await patchJianyingDraftConversationContextForTarget(
       targetConversationId,
       lastPhase,
+      expectedJobId,
       pendingJianyingDraftJob,
-      jianyingDraftRecordsForConversation(targetConversationId),
+      jianyingDraftRecordUpdates,
       pendingJianyingDraftJob ? null : jianyingDraftJobResumeError,
     );
   };
@@ -4692,24 +4703,30 @@ export function WorkspacePage() {
     result: JianyingDraftJobResponse,
   ) => {
     const targetConversationId = pendingJob.conversation_id;
+    const boundResult: JianyingDraftJobResponse = {
+      ...result,
+      job_id: pendingJob.job_id,
+      conversation_id: targetConversationId,
+      storyboard_version_id: pendingJob.storyboard_version_id,
+    };
     const existingRecords = jianyingDraftRecordsForConversation(targetConversationId);
     const existingRecord = existingRecords[pendingJob.storyboard_version_id];
     const records: JianyingDraftRecordMap = {
       ...existingRecords,
-      [pendingJob.storyboard_version_id]: result,
+      [pendingJob.storyboard_version_id]: boundResult,
     };
     setJianyingDraftRecordsForConversation(targetConversationId, records);
 
-    if (!existingRecord || existingRecord.status !== result.status) {
-      const succeeded = result.status === "succeeded";
+    if (!existingRecord || existingRecord.status !== boundResult.status) {
+      const succeeded = boundResult.status === "succeeded";
       pushArtifact(
-        succeeded ? "剪映草稿已生成，可在消息卡片中下载。" : `剪映草稿生成${result.status === "timeout" ? "超时" : "失败"}，可从结果卡片重新生成。`,
+        succeeded ? "剪映草稿已生成，可在消息卡片中下载。" : `剪映草稿生成${boundResult.status === "timeout" ? "超时" : "失败"}，可从结果卡片重新生成。`,
         {
           type: "jianying_draft",
           title: succeeded ? "剪映草稿已生成" : "剪映草稿生成失败",
-          description: result.message || (succeeded ? "剪映草稿已生成。" : "剪映草稿生成失败。"),
+          description: boundResult.message || (succeeded ? "剪映草稿已生成。" : "剪映草稿生成失败。"),
           actionLabel: succeeded ? "下载" : "重新生成",
-          jianyingDraft: result,
+          jianyingDraft: boundResult,
           pendingJianyingDraftJob: pendingJob,
           jianyingDraftSceneCount: pendingJob.request.scenes.length,
         },
@@ -4718,13 +4735,26 @@ export function WorkspacePage() {
       );
     }
 
-    await persistPendingJianyingDraftJob(null, targetConversationId, `jianying_draft_${result.status}`).catch(() => {});
+    await persistPendingJianyingDraftJob(
+      null,
+      targetConversationId,
+      `jianying_draft_${boundResult.status}`,
+      pendingJob.job_id,
+      { [pendingJob.storyboard_version_id]: boundResult },
+    ).catch(() => {});
   };
 
   const clearExpiredJianyingDraftJob = async (pendingJob: PendingJianyingDraftJob, message: string) => {
     const targetConversationId = pendingJob.conversation_id;
     pushAssistant(message, targetConversationId);
-    await persistPendingJianyingDraftJob(null, targetConversationId, "jianying_draft_job_expired", message).catch(() => {});
+    await persistPendingJianyingDraftJob(
+      null,
+      targetConversationId,
+      "jianying_draft_job_expired",
+      pendingJob.job_id,
+      {},
+      message,
+    ).catch(() => {});
   };
 
   const resumePendingJianyingDraftJob = async (pendingJianyingDraftJob: PendingJianyingDraftJob) => {
@@ -7449,7 +7479,12 @@ export function WorkspacePage() {
         started_at: new Date().toISOString(),
         request,
       };
-      await persistPendingJianyingDraftJob(pendingJianyingDraftJob, targetConversationId, "jianying_draft_running");
+      await persistPendingJianyingDraftJob(
+        pendingJianyingDraftJob,
+        targetConversationId,
+        "jianying_draft_running",
+        pendingJianyingDraftJob.job_id,
+      );
       await resumePendingJianyingDraftJob(pendingJianyingDraftJob);
     } catch (err) {
       pushAssistant(`剪映草稿生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);

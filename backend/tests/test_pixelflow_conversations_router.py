@@ -45,14 +45,25 @@ def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics
             },
         ).json()
         conversation_id = created["conversation_id"]
-        pending_job = {"job_id": "job-1", "conversation_id": conversation_id}
+        pending_job = {
+            "job_id": "job-1",
+            "conversation_id": conversation_id,
+            "storyboard_version_id": "storyboard-1",
+        }
 
         running = client.patch(
             f"/agent/conversations/{conversation_id}/jianying-draft-context",
             json={
                 "last_phase": "jianying_draft_running",
+                "expected_job_id": "job-1",
                 "pendingJianyingDraftJob": pending_job,
-                "jianyingDraftRecords": {"storyboard-1": {"status": "running"}},
+                "jianyingDraftRecords": {
+                    "storyboard-1": {
+                        "status": "running",
+                        "job_id": "job-1",
+                        "storyboard_version_id": "storyboard-1",
+                    }
+                },
             },
         )
         assert running.status_code == 200
@@ -88,8 +99,15 @@ def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics
             f"/agent/conversations/{conversation_id}/jianying-draft-context",
             json={
                 "last_phase": "jianying_draft_job_expired",
+                "expected_job_id": "job-1",
                 "pending_jianying_draft_job": None,
-                "jianying_draft_records": {"storyboard-1": {"status": "failed"}},
+                "jianying_draft_records": {
+                    "storyboard-1": {
+                        "status": "failed",
+                        "job_id": "job-1",
+                        "storyboard_version_id": "storyboard-1",
+                    }
+                },
                 "jianying_draft_job_resume_error": "任务已过期",
             },
         )
@@ -104,6 +122,7 @@ def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics
             f"/agent/conversations/{conversation_id}/jianying-draft-context",
             json={
                 "last_phase": "jianying_draft_failed",
+                "expected_job_id": "job-1",
                 "pendingJianyingDraftJob": None,
                 "jianyingDraftRecords": {},
             },
@@ -111,11 +130,17 @@ def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics
         assert omitted_error.status_code == 200
         assert omitted_error.json()["context"]["jianying_draft_job_resume_error"] == "任务已过期"
 
+        retry_pending_job = {
+            "job_id": "job-2",
+            "conversation_id": conversation_id,
+            "storyboard_version_id": "storyboard-1",
+        }
         cleared_error = client.patch(
             f"/agent/conversations/{conversation_id}/jianying-draft-context",
             json={
                 "last_phase": "jianying_draft_running",
-                "pendingJianyingDraftJob": pending_job,
+                "expected_job_id": "job-2",
+                "pendingJianyingDraftJob": retry_pending_job,
                 "jianyingDraftRecords": {},
                 "jianying_draft_job_resume_error": None,
             },
@@ -127,12 +152,112 @@ def test_jianying_draft_context_patch_merges_fields_and_preserves_null_semantics
             f"/agent/conversations/{conversation_id}/jianying-draft-context",
             json={
                 "last_phase": "forbidden",
+                "expected_job_id": "job-2",
                 "pendingJianyingDraftJob": None,
                 "jianyingDraftRecords": {},
                 "brand_name": "禁止覆盖",
             },
         )
         assert extra_field.status_code == 422
+
+
+def test_jianying_draft_context_patch_rejects_stale_job_state_and_requires_matching_condition():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        created = client.post("/agent/conversations", json={"title": "剪映草稿单调状态"}).json()
+        conversation_id = created["conversation_id"]
+        storyboard_id = "storyboard-same"
+        pending = {
+            "job_id": "job-1",
+            "conversation_id": conversation_id,
+            "storyboard_version_id": storyboard_id,
+        }
+        running_body = {
+            "last_phase": "jianying_draft_running",
+            "expected_job_id": "job-1",
+            "pendingJianyingDraftJob": pending,
+            "jianyingDraftRecords": {},
+        }
+        running = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json=running_body,
+        )
+        assert running.status_code == 200
+
+        succeeded = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_succeeded",
+                "expected_job_id": "job-1",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {
+                    storyboard_id: {
+                        "status": "succeeded",
+                        "job_id": "job-1",
+                        "storyboard_version_id": storyboard_id,
+                    }
+                },
+            },
+        )
+        assert succeeded.status_code == 200
+
+        stale_failed = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_failed",
+                "expected_job_id": "job-1",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {
+                    storyboard_id: {
+                        "status": "failed",
+                        "job_id": "job-1",
+                        "storyboard_version_id": storyboard_id,
+                    }
+                },
+            },
+        )
+        assert stale_failed.status_code == 200
+        stale_pending = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json=running_body,
+        )
+        assert stale_pending.status_code == 200
+        final = stale_pending.json()
+        assert final["context"]["pendingJianyingDraftJob"] is None
+        assert final["context"]["jianyingDraftRecords"][storyboard_id]["status"] == "succeeded"
+        assert final["last_phase"] == "jianying_draft_succeeded"
+
+        missing_condition = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={key: value for key, value in running_body.items() if key != "expected_job_id"},
+        )
+        assert missing_condition.status_code == 422
+        mismatched_pending = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={**running_body, "expected_job_id": "job-other"},
+        )
+        assert mismatched_pending.status_code == 422
+        mismatched_record = client.patch(
+            f"/agent/conversations/{conversation_id}/jianying-draft-context",
+            json={
+                "last_phase": "jianying_draft_failed",
+                "expected_job_id": "job-other",
+                "pendingJianyingDraftJob": None,
+                "jianyingDraftRecords": {
+                    storyboard_id: {
+                        "status": "failed",
+                        "job_id": "job-1",
+                        "storyboard_version_id": storyboard_id,
+                    }
+                },
+            },
+        )
+        assert mismatched_record.status_code == 422
 
 
 def test_jianying_draft_context_patch_checks_conversation_owner():
@@ -157,6 +282,7 @@ def test_jianying_draft_context_patch_checks_conversation_owner():
             "/agent/conversations/other-user-conversation/jianying-draft-context",
             json={
                 "last_phase": "forbidden",
+                "expected_job_id": "forbidden-job",
                 "pendingJianyingDraftJob": None,
                 "jianyingDraftRecords": {},
             },

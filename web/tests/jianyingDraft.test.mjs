@@ -193,6 +193,7 @@ test("target conversation patch keeps A context intact after the UI switches to 
 
 test("target-bound orchestration keeps writing A after an awaited patch switches the UI to B", async () => {
   let activeConversationId = "conversation-a";
+  const expectedJobId = "job-a";
   let releasePatch;
   const patchDeferred = new Promise((resolve) => {
     releasePatch = resolve;
@@ -202,12 +203,13 @@ test("target-bound orchestration keeps writing A after an awaited patch switches
 
   const pending = patchJianyingDraftTargetConversation({
     targetConversationId: "conversation-a",
+    expectedJobId,
     isCurrentConversation: (conversationId) => activeConversationId === conversationId,
     syncCurrentConversation: () => syncedConversationIds.push(activeConversationId),
-    patchTargetConversation: async (conversationId) => {
-      patchedConversationIds.push(conversationId);
+    patchTargetConversation: async (conversationId, patchExpectedJobId) => {
+      patchedConversationIds.push([conversationId, patchExpectedJobId]);
       await patchDeferred;
-      return { conversation_id: conversationId };
+      return { conversation_id: conversationId, expected_job_id: patchExpectedJobId };
     },
   });
 
@@ -216,7 +218,7 @@ test("target-bound orchestration keeps writing A after an awaited patch switches
   releasePatch();
   const result = await pending;
 
-  assert.deepEqual(result, { conversation_id: "conversation-a" });
-  assert.deepEqual(patchedConversationIds, ["conversation-a"]);
+  assert.deepEqual(result, { conversation_id: "conversation-a", expected_job_id: "job-a" });
+  assert.deepEqual(patchedConversationIds, [["conversation-a", "job-a"]]);
   assert.deepEqual(syncedConversationIds, ["conversation-a"]);
 });

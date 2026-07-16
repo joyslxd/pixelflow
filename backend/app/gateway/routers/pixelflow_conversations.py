@@ -42,6 +42,7 @@ class JianyingDraftConversationContextPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     last_phase: str = Field(min_length=1)
+    expected_job_id: str = Field(min_length=1)
     pendingJianyingDraftJob: dict[str, Any] | None = None
     pending_jianying_draft_job: dict[str, Any] | None = None
     jianyingDraftRecords: dict[str, Any] | None = None
@@ -61,6 +62,17 @@ class JianyingDraftConversationContextPatchRequest(BaseModel):
             raise ValueError("pending camelCase and snake_case values must match")
         if record_fields.issubset(fields) and self.jianyingDraftRecords != self.jianying_draft_records:
             raise ValueError("records camelCase and snake_case values must match")
+        pending_job = self.pending_job()
+        if pending_job is not None:
+            if pending_job.get("job_id") != self.expected_job_id:
+                raise ValueError("pending job_id must match expected_job_id")
+            if not isinstance(pending_job.get("storyboard_version_id"), str) or not pending_job["storyboard_version_id"]:
+                raise ValueError("pending storyboard_version_id is required")
+        for storyboard_version_id, record in self.records().items():
+            if not isinstance(record, dict) or record.get("job_id") != self.expected_job_id:
+                raise ValueError("record job_id must match expected_job_id")
+            if record.get("storyboard_version_id") != storyboard_version_id:
+                raise ValueError("record storyboard_version_id must match its key")
         return self
 
     def pending_job(self) -> dict[str, Any] | None:
@@ -226,13 +238,17 @@ async def patch_jianying_draft_conversation_context(
     request: Request,
 ) -> ConversationResponse:
     user_id = await get_current_user(request)
+    pending_job = body.pending_job()
+    if pending_job is not None and pending_job.get("conversation_id") != conversation_id:
+        raise HTTPException(status_code=422, detail="Pending Jianying draft job belongs to another conversation")
     optional_fields: dict[str, Any] = {}
     if "jianying_draft_job_resume_error" in body.model_fields_set:
         optional_fields["resume_error"] = body.jianying_draft_job_resume_error
     updated = await _task_store(request).patch_jianying_draft_conversation_context(
         conversation_id,
         user_id=user_id,
-        pending_job=body.pending_job(),
+        expected_job_id=body.expected_job_id,
+        pending_job=pending_job,
         records=body.records(),
         last_phase=body.last_phase,
         **optional_fields,

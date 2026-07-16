@@ -195,6 +195,22 @@ async def test_memory_conversation_store_concurrent_duplicate_message_returns_ex
     assert [message.content for message in messages] == ["plan.md 首次写入"]
 
 
+def _jianying_pending(job_id: str, conversation_id: str, storyboard_version_id: str) -> dict[str, str]:
+    return {
+        "job_id": job_id,
+        "conversation_id": conversation_id,
+        "storyboard_version_id": storyboard_version_id,
+    }
+
+
+def _jianying_record(status: str, job_id: str, storyboard_version_id: str) -> dict[str, str]:
+    return {
+        "status": status,
+        "job_id": job_id,
+        "storyboard_version_id": storyboard_version_id,
+    }
+
+
 @pytest.mark.asyncio
 async def test_memory_conversation_store_atomically_merges_concurrent_jianying_draft_context():
     store = MemoryPixelFlowTaskStore()
@@ -215,15 +231,17 @@ async def test_memory_conversation_store_atomically_merges_concurrent_jianying_d
         store.patch_jianying_draft_conversation_context(
             "c-jianying-memory",
             user_id="u1",
-            pending_job={"job_id": "job-1", "conversation_id": "c-jianying-memory"},
-            records={"storyboard-1": {"status": "running"}},
+            expected_job_id="job-1",
+            pending_job=_jianying_pending("job-1", "c-jianying-memory", "storyboard-1"),
+            records={"storyboard-1": _jianying_record("running", "job-1", "storyboard-1")},
             last_phase="jianying_draft_running",
         ),
         store.patch_jianying_draft_conversation_context(
             "c-jianying-memory",
             user_id="u1",
+            expected_job_id="job-2",
             pending_job=None,
-            records={"storyboard-2": {"status": "failed"}},
+            records={"storyboard-2": _jianying_record("failed", "job-2", "storyboard-2")},
             last_phase="jianying_draft_failed",
             resume_error="任务已过期",
         ),
@@ -262,12 +280,133 @@ async def test_memory_conversation_store_atomically_merges_concurrent_jianying_d
         await store.patch_jianying_draft_conversation_context(
             "c-jianying-memory",
             user_id="other",
+            expected_job_id="forbidden-job",
             pending_job=None,
             records={},
             last_phase="forbidden",
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_jianying_draft_state_is_monotonic_for_stale_same_storyboard_writes():
+    store = MemoryPixelFlowTaskStore()
+    conversation_id = "c-jianying-memory-monotonic"
+    storyboard_id = "storyboard-same"
+    pending = _jianying_pending("job-1", conversation_id, storyboard_id)
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id="u1",
+            title="剪映草稿单调状态",
+            last_phase="jianying_draft_running",
+            context={
+                "pendingJianyingDraftJob": pending,
+                "pending_jianying_draft_job": pending,
+                "jianyingDraftRecords": {},
+                "jianying_draft_records": {},
+            },
+        )
+    )
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-1",
+        pending_job=None,
+        records={storyboard_id: _jianying_record("succeeded", "job-1", storyboard_id)},
+        last_phase="jianying_draft_succeeded",
+    )
+    await asyncio.gather(
+        store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-1",
+            pending_job=None,
+            records={storyboard_id: _jianying_record("failed", "job-1", storyboard_id)},
+            last_phase="jianying_draft_failed",
+            resume_error="旧标签页失败",
+        ),
+        store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-1",
+            pending_job=pending,
+            records={},
+            last_phase="jianying_draft_running",
+        ),
+    )
+
+    restored = await store.get_conversation(conversation_id, user_id="u1")
+    assert restored is not None
+    assert restored.context["pendingJianyingDraftJob"] is None
+    assert restored.context["jianyingDraftRecords"][storyboard_id]["status"] == "succeeded"
+    assert restored.context.get("jianying_draft_job_resume_error") is None
+    assert restored.last_phase == "jianying_draft_succeeded"
+
+
+@pytest.mark.asyncio
+async def test_memory_jianying_draft_allows_explicit_new_job_after_failed_result():
+    store = MemoryPixelFlowTaskStore()
+    conversation_id = "c-jianying-memory-retry"
+    storyboard_id = "storyboard-retry"
+    failed_record = _jianying_record("failed", "job-old", storyboard_id)
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id="u1",
+            title="剪映草稿失败重试",
+            last_phase="jianying_draft_failed",
+            context={
+                "pendingJianyingDraftJob": None,
+                "pending_jianying_draft_job": None,
+                "jianyingDraftRecords": {storyboard_id: failed_record},
+                "jianying_draft_records": {storyboard_id: failed_record},
+            },
+        )
+    )
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-retry",
+        pending_job=_jianying_pending("job-retry", conversation_id, storyboard_id),
+        records={},
+        last_phase="jianying_draft_running",
+    )
+    running = await store.get_conversation(conversation_id, user_id="u1")
+    assert running is not None
+    assert running.context["pendingJianyingDraftJob"]["job_id"] == "job-retry"
+    assert running.last_phase == "jianying_draft_running"
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-old",
+        pending_job=None,
+        records={storyboard_id: _jianying_record("timeout", "job-old", storyboard_id)},
+        last_phase="jianying_draft_timeout",
+    )
+    after_stale_terminal = await store.get_conversation(conversation_id, user_id="u1")
+    assert after_stale_terminal is not None
+    assert after_stale_terminal.context["pendingJianyingDraftJob"]["job_id"] == "job-retry"
+    assert after_stale_terminal.context["jianyingDraftRecords"][storyboard_id]["status"] == "failed"
+    assert after_stale_terminal.last_phase == "jianying_draft_running"
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-retry",
+        pending_job=None,
+        records={storyboard_id: _jianying_record("failed", "job-retry", storyboard_id)},
+        last_phase="jianying_draft_failed",
+    )
+    restored = await store.get_conversation(conversation_id, user_id="u1")
+    assert restored is not None
+    assert restored.context["pendingJianyingDraftJob"] is None
+    assert restored.context["jianyingDraftRecords"][storyboard_id]["job_id"] == "job-retry"
+    assert restored.last_phase == "jianying_draft_failed"
 
 
 @pytest.mark.asyncio
@@ -526,15 +665,17 @@ async def test_sql_conversation_store_atomically_merges_concurrent_jianying_draf
             first_store.patch_jianying_draft_conversation_context(
                 "c-jianying-sql",
                 user_id="u1",
-                pending_job={"job_id": "job-1", "conversation_id": "c-jianying-sql"},
-                records={"storyboard-1": {"status": "running"}},
+                expected_job_id="job-1",
+                pending_job=_jianying_pending("job-1", "c-jianying-sql", "storyboard-1"),
+                records={"storyboard-1": _jianying_record("running", "job-1", "storyboard-1")},
                 last_phase="jianying_draft_running",
             ),
             second_store.patch_jianying_draft_conversation_context(
                 "c-jianying-sql",
                 user_id="u1",
+                expected_job_id="job-2",
                 pending_job=None,
-                records={"storyboard-2": {"status": "succeeded"}},
+                records={"storyboard-2": _jianying_record("succeeded", "job-2", "storyboard-2")},
                 last_phase="jianying_draft_succeeded",
             ),
             second_store.update_conversation(
@@ -564,6 +705,73 @@ async def test_sql_conversation_store_atomically_merges_concurrent_jianying_draf
         }
         assert restored.context["jianying_draft_records"] == restored.context["jianyingDraftRecords"]
         assert restored.context["pending_jianying_draft_job"] == restored.context["pendingJianyingDraftJob"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_sql_stores_keep_jianying_draft_succeeded_state_monotonic_for_same_storyboard(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'pixelflow-jianying-monotonic.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first_store = SQLPixelFlowTaskStore(session_factory)
+        second_store = SQLPixelFlowTaskStore(session_factory)
+        conversation_id = "c-jianying-sql-monotonic"
+        storyboard_id = "storyboard-same"
+        pending = _jianying_pending("job-1", conversation_id, storyboard_id)
+        await first_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=conversation_id,
+                user_id="u1",
+                title="剪映草稿单调状态",
+                last_phase="jianying_draft_running",
+                context={
+                    "pendingJianyingDraftJob": pending,
+                    "pending_jianying_draft_job": pending,
+                    "jianyingDraftRecords": {},
+                    "jianying_draft_records": {},
+                },
+            )
+        )
+        await first_store.patch_jianying_draft_conversation_context(
+            conversation_id,
+            user_id="u1",
+            expected_job_id="job-1",
+            pending_job=None,
+            records={storyboard_id: _jianying_record("succeeded", "job-1", storyboard_id)},
+            last_phase="jianying_draft_succeeded",
+        )
+
+        await asyncio.gather(
+            second_store.patch_jianying_draft_conversation_context(
+                conversation_id,
+                user_id="u1",
+                expected_job_id="job-1",
+                pending_job=None,
+                records={storyboard_id: _jianying_record("timeout", "job-1", storyboard_id)},
+                last_phase="jianying_draft_timeout",
+            ),
+            first_store.patch_jianying_draft_conversation_context(
+                conversation_id,
+                user_id="u1",
+                expected_job_id="job-1",
+                pending_job=pending,
+                records={},
+                last_phase="jianying_draft_running",
+            ),
+        )
+
+        restored = await second_store.get_conversation(conversation_id, user_id="u1")
+        assert restored is not None
+        assert restored.context["pendingJianyingDraftJob"] is None
+        assert restored.context["jianyingDraftRecords"][storyboard_id]["status"] == "succeeded"
+        assert restored.last_phase == "jianying_draft_succeeded"
     finally:
         await engine.dispose()
 

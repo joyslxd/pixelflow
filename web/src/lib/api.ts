@@ -174,6 +174,7 @@ export interface ConversationDetailResponse {
 
 export interface JianyingDraftConversationContextPatchRequest {
   last_phase: string;
+  expected_job_id: string;
   pendingJianyingDraftJob: unknown | null;
   jianyingDraftRecords: Record<string, JianyingDraftJobResponse>;
   jianying_draft_job_resume_error?: string | null;

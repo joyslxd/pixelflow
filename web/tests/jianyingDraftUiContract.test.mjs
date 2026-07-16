@@ -69,14 +69,32 @@ test("跨会话持久化使用后端原子 PATCH，不再执行 GET 加全量 PU
   const persistSource = persistMatch[0];
   assert.match(targetPatchSource, /api\.patchJianyingDraftConversationContext\(/);
   assert.match(targetPatchSource, /patchJianyingDraftTargetConversation\(/);
+  assert.match(targetPatchSource, /expectedJobId/);
+  assert.match(targetPatchSource, /expected_job_id: expectedJobId/);
   assert.doesNotMatch(targetPatchSource, /api\.getConversation\(/);
   assert.doesNotMatch(targetPatchSource, /api\.updateConversation\(/);
   assert.doesNotMatch(targetPatchSource, /makeSnapshot\(targetConversationId\)/);
   assert.match(persistSource, /patchJianyingDraftConversationContextForTarget/);
   assert.doesNotMatch(persistSource, /makeSnapshot\(targetConversationId\)/);
   assert.match(apiSource, /patchJianyingDraftConversationContext/);
+  assert.match(apiSource, /expected_job_id: string/);
   assert.match(apiSource, /\/conversations\/\$\{encodeURIComponent\(conversationId\)\}\/jianying-draft-context/);
   assert.match(apiSource, /method: "PATCH"/);
+});
+
+test("终态与过期写入携带原 pending job 条件，启动写入携带新 job 条件", () => {
+  assert.match(
+    workspaceSource,
+    /persistPendingJianyingDraftJob\([\s\S]*?`jianying_draft_\$\{boundResult\.status\}`,[\s\S]*?pendingJob\.job_id/,
+  );
+  assert.match(
+    workspaceSource,
+    /persistPendingJianyingDraftJob\(\s*null,\s*targetConversationId,\s*"jianying_draft_job_expired",[\s\S]*?pendingJob\.job_id/,
+  );
+  assert.match(
+    workspaceSource,
+    /persistPendingJianyingDraftJob\(\s*pendingJianyingDraftJob,\s*targetConversationId,\s*"jianying_draft_running",[\s\S]*?pendingJianyingDraftJob\.job_id/,
+  );
 });
 
 test("过期任务保留恢复错误，capability 后只使用捕获的目标对话", () => {
@@ -89,11 +107,14 @@ test("过期任务保留恢复错误，capability 后只使用捕获的目标对
 
   assert.ok(expiredMatch, "clearExpiredJianyingDraftJob must exist");
   assert.ok(generateMatch, "handleGenerateJianyingDraft must exist");
-  assert.match(expiredMatch[0], /persistPendingJianyingDraftJob\(null, targetConversationId, "jianying_draft_job_expired", message\)/);
+  assert.match(
+    expiredMatch[0],
+    /persistPendingJianyingDraftJob\(\s*null,\s*targetConversationId,\s*"jianying_draft_job_expired",\s*pendingJob\.job_id,\s*\{\},\s*message/,
+  );
   const afterCapability = generateMatch[0].slice(generateMatch[0].indexOf("await api.getJianyingDraftCapability()"));
   assert.doesNotMatch(afterCapability, /conversationIdRef\.current/);
   assert.match(afterCapability, /conversation_id: targetConversationId/);
-  assert.match(afterCapability, /persistPendingJianyingDraftJob\(pendingJianyingDraftJob, targetConversationId/);
+  assert.match(afterCapability, /persistPendingJianyingDraftJob\(\s*pendingJianyingDraftJob,\s*targetConversationId/);
 });
 
 test("恢复已有剪映草稿任务只查询状态而不启动新任务", () => {
