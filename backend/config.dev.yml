@@ -57,6 +57,14 @@ pixelflow:
   render_root: "../renders"
   # FFmpeg 字幕/花字字体文件路径；留空时不强制烧录字体。
   caption_font: "../caption"
+  # 剪映草稿仅允许内部逐步接入；当前未配置真实 Provider，默认关闭。
+  jianying_draft_enabled: false
+  # 前端轮询建议间隔，单位秒。
+  jianying_draft_poll_interval_seconds: 2
+  # 单个剪映草稿任务最大等待时间，单位秒。
+  jianying_draft_timeout_seconds: 1800
+  # 第三方网络异常的最大重试次数；真实 Provider 接入后生效。
+  jianying_draft_max_retries: 3
 
 # Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
 # 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。

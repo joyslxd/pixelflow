@@ -30,6 +30,7 @@ from app.gateway.routers import (
     pixelflow_conversations,
     pixelflow_image,
     pixelflow_intake,
+    pixelflow_jianying_draft,
     pixelflow_planning,
     pixelflow_ppt,
     pixelflow_preferences,
@@ -317,6 +318,9 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
 
     # PixelFlow 视频生成和分析 API：/agent/flows/video。
     app.include_router(pixelflow_video.router)
+
+    # PixelFlow 剪映草稿 API：/agent/flows/video/jianying-draft。
+    app.include_router(pixelflow_jianying_draft.router)
 
     # PixelFlow 对话历史 API：/agent/conversations。
     app.include_router(pixelflow_conversations.router)
