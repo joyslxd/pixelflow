@@ -64,6 +64,137 @@ def test_image_router_prepares_text_to_image_contract():
     assert "科技感耳机海报" in data["prompt"]
 
 
+def test_image_router_rejects_invalid_final_plan_contract():
+    from app.gateway.routers import pixelflow_image
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/prepare",
+            json={
+                "form_values": {
+                    "image_goal": "旧目标",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "1:1",
+                    "image_count": 1,
+                },
+                "plan_markdown": "plan",
+                "selected_direction": {"title": "旧方向", "description": "旧描述"},
+                "creation_contract": {
+                    "intent": "image",
+                    "image_goal": "最终目标",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "3:4",
+                    "image_count": 1,
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert "最终图片合同" in response.json()["detail"]
+
+
+def test_image_router_rejects_non_exact_final_ratio():
+    from app.gateway.routers import pixelflow_image
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/prepare",
+            json={
+                "form_values": {"image_goal": "旧目标", "image_size": "16:9"},
+                "plan_markdown": "plan",
+                "selected_direction": {"title": "旧方向", "description": "旧描述"},
+                "creation_contract": {
+                    "intent": "image",
+                    "image_goal": "最终目标",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "16:99",
+                    "image_count": 1,
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert "image_size" in response.json()["detail"]
+
+
+def test_image_router_treats_empty_final_contract_as_historical_absence():
+    from app.gateway.routers import pixelflow_image
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/prepare",
+            json={
+                "form_values": {
+                    "image_goal": "历史商品宣传图",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "9:16",
+                    "image_count": 2,
+                },
+                "plan_markdown": "历史 plan.md",
+                "selected_direction": {"title": "历史方向", "description": "沿用旧参数"},
+                "creation_contract": {},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["params"]["ratio"] == "9:16"
+    assert response.json()["params"]["num_images"] == 2
+
+
+def test_image_router_validates_final_contract_before_power_mem(monkeypatch):
+    from app.gateway.routers import pixelflow_image
+
+    search_calls = 0
+
+    async def spy_search_power_mem(*_args, **_kwargs):
+        nonlocal search_calls
+        search_calls += 1
+        return (str(_stable_user().id), [])
+
+    monkeypatch.setattr(pixelflow_image, "search_power_mem", spy_search_power_mem)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_image.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/image/prepare",
+            json={
+                "form_values": {"image_goal": "旧目标", "image_size": "1:1"},
+                "plan_markdown": "plan",
+                "selected_direction": {"title": "旧方向", "description": "旧描述"},
+                "creation_contract": {
+                    "intent": "image",
+                    "image_goal": "最终目标",
+                    "image_type": "商品广告图",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "16:9",
+                    "image_count": 0,
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert search_calls == 0
+
+
 def test_image_router_prepares_prompt_from_complete_intake_context():
     from app.gateway.routers import pixelflow_image
 

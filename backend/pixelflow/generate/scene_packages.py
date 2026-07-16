@@ -7,6 +7,7 @@ Router 合同可以保持不变，只替换本模块内部的生成策略。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -67,6 +68,8 @@ def prepare_video_scene_packages(
         selected_direction=selected_direction,
         stage_templates=stage_templates,
     )
+    if authoritative_blueprints:
+        global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
     elapsed_ms = 0
     for index, duration in enumerate(durations, start=1):
         stage = stage_templates[index - 1]
@@ -81,7 +84,11 @@ def prepare_video_scene_packages(
                 conversion_goal=conversion_goal,
             )
         )
-        reference_asset_ids = _default_reference_asset_ids(global_assets, stage["asset_id"])
+        reference_asset_ids = (
+            _blueprint_reference_asset_ids(blueprint, global_assets)
+            if blueprint
+            else _default_reference_asset_ids(global_assets, stage["asset_id"])
+        )
         shot_description = (
             _normalize_shot_description(
                 {"text": str(blueprint["shot_description"])},
@@ -100,19 +107,23 @@ def prepare_video_scene_packages(
                 global_assets=global_assets,
             )
         )
-        prompt = _build_scene_prompt(
-            product_name=product_name,
-            product_category=product_category,
-            target_audience=target_audience,
-            conversion_goal=conversion_goal,
-            direction_title=direction_title,
-            direction_description=direction_description,
-            storyline=storyline,
-            narration=narration,
-            stage_name=stage["name"],
-            shot_description=shot_description,
-            visual_style=global_assets["visual_style"],
-            video_ratio=_first_text(form_values.get("video_ratio"), "9:16"),
+        prompt = (
+            _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets["visual_style"])
+            if blueprint
+            else _build_scene_prompt(
+                product_name=product_name,
+                product_category=product_category,
+                target_audience=target_audience,
+                conversion_goal=conversion_goal,
+                direction_title=direction_title,
+                direction_description=direction_description,
+                storyline=storyline,
+                narration=narration,
+                stage_name=stage["name"],
+                shot_description=shot_description,
+                visual_style=global_assets["visual_style"],
+                video_ratio=_first_text(form_values.get("video_ratio"), "9:16"),
+            )
         )
         scenes.append(
             {
@@ -180,6 +191,8 @@ async def prepare_video_scene_packages_with_llm(
         )
         stage_templates = _stage_templates(scene_count)
         global_assets = _normalize_llm_global_assets(payload, form_values, selected_direction, stage_templates)
+        if authoritative_blueprints:
+            global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
         scenes = _normalize_llm_scene_packages(
             payload,
             durations,
@@ -380,7 +393,11 @@ def _normalize_llm_scene_packages(
         storyline = str(blueprint["storyline"]) if blueprint else _first_text(raw.get("storyline"), raw.get("story"), raw.get("story_line"))
         narration = str(blueprint["narration"]) if blueprint else _first_text(raw.get("narration"), raw.get("voiceover"), raw.get("voice_over"))
         stage = stage_templates[index - 1]
-        reference_asset_ids = _normalize_reference_asset_ids(raw.get("reference_asset_ids"), global_assets, stage["asset_id"])
+        reference_asset_ids = (
+            _blueprint_reference_asset_ids(blueprint, global_assets)
+            if blueprint
+            else _normalize_reference_asset_ids(raw.get("reference_asset_ids"), global_assets, stage["asset_id"])
+        )
         shot_description = _normalize_shot_description(
             {"text": str(blueprint["shot_description"])} if blueprint else raw.get("shot_description"),
             stage=stage,
@@ -389,11 +406,15 @@ def _normalize_llm_scene_packages(
             reference_asset_ids=reference_asset_ids,
             global_assets=global_assets,
         )
-        prompt = _first_text(
-            raw.get("prompt"),
-            raw.get("creation_prompt"),
-            raw.get("shot_prompt"),
-            _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style")),
+        prompt = (
+            _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style"))
+            if blueprint
+            else _first_text(
+                raw.get("prompt"),
+                raw.get("creation_prompt"),
+                raw.get("shot_prompt"),
+                _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style")),
+            )
         )
         if not storyline or not shot_description.get("text") or not prompt:
             return []
@@ -449,6 +470,207 @@ def _normalize_llm_global_assets(
         ),
         "visual_style": _normalize_visual_style(raw.get("visual_style"), defaults["visual_style"]),
     }
+
+
+def _align_global_assets_to_blueprints(
+    global_assets: dict[str, Any],
+    scene_blueprints: list[dict[str, Any]],
+    form_values: dict[str, Any],
+) -> dict[str, Any]:
+    """权威蓝图存在时，只保留并补齐蓝图声明的固定资产。"""
+
+    requirements = _collect_blueprint_asset_requirements(scene_blueprints, form_values)
+    aligned = {**global_assets}
+    aligned["visual_style"] = _authoritative_visual_style(
+        form_values.get("visual_style"),
+        global_assets.get("visual_style"),
+    )
+    used_asset_ids: set[str] = set()
+    for collection, asset_type in (("characters", "character"), ("scenes", "scene"), ("props", "prop")):
+        existing = global_assets.get(collection)
+        existing_items = existing if isinstance(existing, list) else []
+        existing_by_name = {
+            _asset_name_key(item.get("name")): item
+            for item in existing_items
+            if isinstance(item, dict) and _asset_name_key(item.get("name"))
+        }
+        aligned_assets: list[dict[str, Any]] = []
+        for name in requirements[collection]:
+            asset = _blueprint_asset(
+                name=name,
+                asset_type=asset_type,
+                existing=existing_by_name.get(_asset_name_key(name)),
+                form_values=form_values,
+            )
+            asset["asset_id"] = _unique_blueprint_asset_id(
+                preferred_id=asset["asset_id"],
+                asset_type=asset_type,
+                name=name,
+                used_asset_ids=used_asset_ids,
+            )
+            used_asset_ids.add(asset["asset_id"])
+            aligned_assets.append(asset)
+        aligned[collection] = aligned_assets
+    visual_style = aligned["visual_style"]
+    visual_style["asset_id"] = _unique_blueprint_asset_id(
+        preferred_id=_first_text(visual_style.get("asset_id"), "style-main"),
+        asset_type="style",
+        name=_first_text(visual_style.get("name"), "visual-style"),
+        used_asset_ids=used_asset_ids,
+    )
+    return aligned
+
+
+def _authoritative_visual_style(value: Any, fallback: Any) -> dict[str, Any]:
+    fallback_style = fallback if isinstance(fallback, dict) else {}
+    if isinstance(value, dict):
+        name = _first_text(value.get("name"), value.get("description"), value.get("prompt"))
+        description = _first_text(value.get("description"), value.get("prompt"), name)
+        prompt = _first_text(value.get("prompt"), description, name)
+    else:
+        name = _first_text(value)
+        description = name
+        prompt = name
+    if not name:
+        return fallback_style
+    return {
+        **fallback_style,
+        "asset_id": _first_text(fallback_style.get("asset_id"), "style-main"),
+        "name": name,
+        "description": description,
+        "prompt": prompt,
+    }
+
+
+def _collect_blueprint_asset_requirements(
+    scene_blueprints: list[dict[str, Any]],
+    form_values: dict[str, Any],
+) -> dict[str, list[str]]:
+    collected: dict[str, list[str]] = {"characters": [], "scenes": [], "props": []}
+    seen: dict[str, set[str]] = {key: set() for key in collected}
+    product_name = _first_text(form_values.get("product_info"), form_values.get("product_name"))
+    for blueprint in scene_blueprints:
+        requirements = blueprint.get("asset_requirements")
+        if not isinstance(requirements, dict):
+            continue
+        for collection in collected:
+            values = requirements.get(collection)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                name = _first_text(value)
+                target_collection = collection
+                if collection == "characters" and _looks_like_non_person_asset({"name": name}, product_name):
+                    target_collection = "props"
+                key = _asset_name_key(name)
+                if not key or key in seen[target_collection]:
+                    continue
+                seen[target_collection].add(key)
+                collected[target_collection].append(name)
+    return collected
+
+
+def _blueprint_asset(
+    *,
+    name: str,
+    asset_type: str,
+    existing: dict[str, Any] | None,
+    form_values: dict[str, Any],
+) -> dict[str, Any]:
+    asset = dict(existing or {})
+    asset["asset_id"] = _first_text(asset.get("asset_id"), _stable_blueprint_asset_id(asset_type, name))
+    asset["name"] = name
+    if asset_type == "character":
+        description = _first_text(asset.get("description"), f"{name}，最终 Plan 指定人物角色，造型和身份在全片保持一致")
+        asset["description"] = description
+        asset["three_view_prompt"] = _ensure_three_view_prompt(
+            _first_text(asset.get("three_view_prompt"), asset.get("image_prompt"), asset.get("prompt")),
+            name=name,
+            description=description,
+            product_name=_first_text(form_values.get("product_info"), form_values.get("product_name")),
+            product_category=_first_text(form_values.get("product_category")),
+        )
+        asset.setdefault("three_view_images", [])
+        asset.pop("image_prompt", None)
+        return asset
+
+    asset_label = "场景" if asset_type == "scene" else "道具/商品"
+    description = _first_text(asset.get("description"), f"{name}，最终 Plan 指定{asset_label}，外观和细节在全片保持一致")
+    asset["description"] = description
+    asset["image_prompt"] = _first_text(
+        asset.get("image_prompt"),
+        asset.get("prompt"),
+        f"{name}{asset_label}参考图，主体清晰，构图稳定，细节一致，干净背景，无文字和水印",
+    )
+    asset.setdefault("images", [])
+    asset.pop("three_view_prompt", None)
+    asset.pop("three_view_images", None)
+    return asset
+
+
+def _stable_blueprint_asset_id(asset_type: str, name: str) -> str:
+    readable = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24]
+    suffix = readable or hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+    return f"{asset_type}-{suffix}"
+
+
+def _unique_blueprint_asset_id(
+    *,
+    preferred_id: str,
+    asset_type: str,
+    name: str,
+    used_asset_ids: set[str],
+) -> str:
+    stable_id = _stable_blueprint_asset_id(asset_type, name)
+    candidate = _first_text(preferred_id, stable_id)
+    suffix = 1
+    while candidate in used_asset_ids:
+        candidate = stable_id if suffix == 1 else f"{stable_id}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _asset_name_key(value: Any) -> str:
+    return re.sub(r"\s+", "", _first_text(value)).casefold()
+
+
+def _blueprint_reference_asset_ids(blueprint: dict[str, Any], global_assets: dict[str, Any]) -> list[str]:
+    requirements = blueprint.get("asset_requirements")
+    if not isinstance(requirements, dict):
+        return []
+    lookup: dict[tuple[str, str], str] = {}
+    for collection in ("characters", "scenes", "props"):
+        assets = global_assets.get(collection)
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            name_key = _asset_name_key(asset.get("name"))
+            asset_id = _first_text(asset.get("asset_id"), asset.get("id"))
+            if name_key and asset_id:
+                lookup[(collection, name_key)] = asset_id
+
+    reference_ids: list[str] = []
+    for collection in ("characters", "scenes", "props"):
+        values = requirements.get(collection)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            name_key = _asset_name_key(value)
+            asset_id = lookup.get((collection, name_key))
+            if not asset_id:
+                asset_id = next(
+                    (lookup[(candidate_collection, name_key)] for candidate_collection in ("characters", "scenes", "props") if (candidate_collection, name_key) in lookup),
+                    None,
+                )
+            if asset_id and asset_id not in reference_ids:
+                reference_ids.append(asset_id)
+    if len(reference_ids) > 9:
+        scene_id = _first_text(blueprint.get("scene_id"), "unknown-scene")
+        scene_index = blueprint.get("scene_index")
+        raise ValueError(f"分镜 {scene_id} scene_index={scene_index} 引用资产共 {len(reference_ids)} 个，最多允许 9 个")
+    return reference_ids
 
 
 def _normalize_character_asset_list(
@@ -639,10 +861,36 @@ def _ensure_reference_asset_tokens(
     lookup = _global_image_asset_lookup(global_assets)
     missing: list[str] = []
     result = text
+    named_assets = sorted(
+        (
+            (asset_id, _first_text(lookup.get(asset_id, {}).get("name")))
+            for asset_id in reference_asset_ids[:9]
+        ),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    protected_tokens: dict[str, str] = {}
+    for index, (asset_id, _asset_name) in enumerate(named_assets):
+        token = f"@{asset_id}"
+        if token not in result:
+            continue
+        placeholder = f"\x00pixelflow-asset-token-{index}\x00"
+        result = result.replace(token, placeholder)
+        protected_tokens[placeholder] = token
+    for index, (asset_id, asset_name) in enumerate(named_assets):
+        if asset_name:
+            result = result.replace(f"@{asset_name}", f"@{asset_id}")
+            token = f"@{asset_id}"
+            if token in result:
+                placeholder = f"\x00pixelflow-normalized-token-{index}\x00"
+                result = result.replace(token, placeholder)
+                protected_tokens[placeholder] = token
+    for placeholder, token in protected_tokens.items():
+        result = result.replace(placeholder, token)
     for asset_id in reference_asset_ids[:9]:
         token = f"@{asset_id}"
         asset_name = _first_text(lookup.get(asset_id, {}).get("name"))
-        if token in result or (asset_name and f"@{asset_name}" in result):
+        if token in result:
             continue
         if asset_name and asset_name in result:
             result = result.replace(asset_name, token, 1)

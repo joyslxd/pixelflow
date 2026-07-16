@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+
+import pytest
+
 from pixelflow.generate.scene_packages import prepare_video_scene_packages, prepare_video_scene_packages_with_llm
 
 
@@ -133,11 +137,461 @@ def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
     assert [scene["title"] for scene in result["scene_packages"]] == ["雨水钩子", "防水证明", "通勤收束"]
     assert result["scene_packages"][1]["storyline"] == "泼水和开包检查证明防水。"
     assert result["scene_packages"][1]["narration"] == "高密防泼水面料，把雨留在外面。"
+    assert {item["name"] for item in result["global_assets"]["characters"]} == set()
+    assert {item["name"] for item in result["global_assets"]["scenes"]} == {"雨中街道", "办公区"}
+    assert {item["name"] for item in result["global_assets"]["props"]} == {"防水背包", "水杯"}
     second_scene = result["scene_packages"][1]
     shot_text = second_scene["shot_description"]["text"]
     assert "0-12秒" in shot_text
+    reference_lookup = {
+        item["asset_id"]: item["name"]
+        for collection in ("characters", "scenes", "props")
+        for item in result["global_assets"][collection]
+    }
+    assert {reference_lookup[asset_id] for asset_id in second_scene["reference_asset_ids"]} == {
+        "雨中街道",
+        "防水背包",
+        "水杯",
+    }
     assert second_scene["shot_description"]["mentions"]
     assert all(f"@{asset_id}" in shot_text for asset_id in second_scene["reference_asset_ids"])
+
+
+def test_authoritative_blueprint_moves_product_out_of_characters() -> None:
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "雨中通勤",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 10,
+            "duration_sec": 10,
+            "storyline": "林晓背着防水背包穿过雨幕。",
+            "shot_description": "0-10秒: 林晓在雨中展示防水背包。",
+            "narration": "雨再大，也不怕。",
+            "transition": "动作匹配转场",
+            "asset_requirements": {
+                "characters": ["林晓", "防水背包"],
+                "scenes": ["雨中街道"],
+                "props": [],
+            },
+        }
+    ]
+
+    result = prepare_video_scene_packages(
+        form_values={
+            "product_info": "防水背包",
+            "product_category": "服饰箱包",
+            "target_audience": "通勤人群",
+            "conversion_goal": "直接购买",
+            "video_ratio": "9:16",
+            "visual_style": "真实摄影",
+        },
+        plan_markdown="# 防水背包宣传片",
+        selected_direction={"title": "雨中守护", "description": "真实通勤场景"},
+        target_duration_ms=10_000,
+        scene_blueprints=blueprints,
+    )
+
+    assert [asset["name"] for asset in result["global_assets"]["characters"]] == ["林晓"]
+    assert [asset["name"] for asset in result["global_assets"]["props"]] == ["防水背包"]
+    reference_ids = result["scene_packages"][0]["reference_asset_ids"]
+    assert any(asset_id.startswith("character-") for asset_id in reference_ids)
+    assert any(asset_id.startswith("prop-") for asset_id in reference_ids)
+
+
+def test_scene_package_llm_must_materialize_every_final_plan_asset_requirement():
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeModel:
+        def invoke(self, _prompt):
+            return FakeMessage(
+                __import__("json").dumps(
+                    {
+                        "global_assets": {
+                            "characters": [
+                                {
+                                    "asset_id": "character-presenter",
+                                    "name": "旧主讲人",
+                                    "description": "旧方案人物",
+                                    "three_view_prompt": "旧主讲人正面、侧面、背面三视图",
+                                }
+                            ],
+                            "scenes": [
+                                {
+                                    "asset_id": "scene-studio",
+                                    "name": "旧摄影棚",
+                                    "description": "旧方案场景",
+                                    "image_prompt": "旧摄影棚场景图",
+                                }
+                            ],
+                            "props": [
+                                {
+                                    "asset_id": "prop-product",
+                                    "name": "旧产品",
+                                    "description": "旧方案道具",
+                                    "image_prompt": "旧产品道具图",
+                                }
+                            ],
+                            "visual_style": {"asset_id": "style-main", "name": "写实风", "description": "写实广告"},
+                        },
+                        "scene_packages": [
+                            {
+                                "title": "旧标题",
+                                "storyline": "旧故事线",
+                                "shot_description": {"text": "0-10秒: 旧摄影棚中的旧主讲人展示旧产品。"},
+                                "reference_asset_ids": ["character-presenter", "scene-studio", "prop-product"],
+                                "prompt": "旧方案自由提示词",
+                                "narration": "旧旁白",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "最终雨夜出发",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 10,
+            "duration_sec": 10,
+            "storyline": "林晓在雨夜公交站背起防水背包，准备通勤。",
+            "shot_description": "0-10秒: 中景跟拍林晓在雨夜公交站拿起折叠伞并背上防水背包。",
+            "narration": "下雨，也不耽误从容出发。",
+            "transition": "跟随伞面擦镜转场。",
+            "asset_requirements": {
+                "characters": ["林晓"],
+                "scenes": ["雨夜公交站"],
+                "props": ["防水背包", "折叠伞"],
+            },
+        }
+    ]
+
+    result = __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={
+                "product_info": "防水背包",
+                "product_category": "服饰鞋包",
+                "target_audience": "通勤人群",
+                "conversion_goal": "直接购买",
+                "video_ratio": "9:16",
+                "video_model": "seedance-2.0",
+            },
+            plan_markdown="## 五、镜头列表\n最终版本要求林晓在雨夜公交站使用防水背包和折叠伞。",
+            selected_direction={"title": "雨夜从容通勤"},
+            target_duration_ms=10_000,
+            scene_blueprints=blueprints,
+            model_factory=lambda *_args, **_kwargs: FakeModel(),
+        )
+    )
+
+    assert {item["name"] for item in result["global_assets"]["characters"]} == {"林晓"}
+    assert {item["name"] for item in result["global_assets"]["scenes"]} == {"雨夜公交站"}
+    assert {item["name"] for item in result["global_assets"]["props"]} == {"防水背包", "折叠伞"}
+    scene = result["scene_packages"][0]
+    assert scene["title"] == "最终雨夜出发"
+    assert scene["storyline"] == "林晓在雨夜公交站背起防水背包，准备通勤。"
+    assert scene["narration"] == "下雨，也不耽误从容出发。"
+    assert scene["transition"] == "跟随伞面擦镜转场。"
+    assert "中景跟拍" in scene["shot_description"]["text"]
+    assert "拿起" in scene["shot_description"]["text"]
+    assert "并背上" in scene["shot_description"]["text"]
+    assert "旧摄影棚中的旧主讲人展示旧产品" not in scene["shot_description"]["text"]
+    reference_lookup = {
+        item["asset_id"]: item["name"]
+        for collection in ("characters", "scenes", "props")
+        for item in result["global_assets"][collection]
+    }
+    assert [reference_lookup[asset_id] for asset_id in scene["reference_asset_ids"]] == [
+        "林晓",
+        "雨夜公交站",
+        "防水背包",
+        "折叠伞",
+    ]
+    assert "同一个人物的正面、侧面、背面三视图" in result["global_assets"]["characters"][0]["three_view_prompt"]
+    assert "故事线：林晓在雨夜公交站背起防水背包，准备通勤。" in scene["prompt"]
+    assert "旁白：下雨，也不耽误从容出发。" in scene["prompt"]
+    assert "视觉风格：" in scene["prompt"]
+    assert "最终确认方案" not in scene["prompt"]
+    assert "旧方案自由提示词" not in scene["prompt"]
+    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == scene["reference_asset_ids"]
+    assert all(f"@{asset_id}" in scene["shot_description"]["text"] for asset_id in scene["reference_asset_ids"])
+
+
+def test_authoritative_blueprint_rejects_more_than_nine_deduplicated_scene_assets():
+    blueprint = {
+        "scene_id": "scene-1",
+        "scene_index": 1,
+        "title": "十种产品陈列",
+        "structure_role": "opening",
+        "start_sec": 0,
+        "end_sec": 10,
+        "duration_sec": 10,
+        "storyline": "依次展示十种产品。",
+        "shot_description": "0-10秒: 镜头横移展示全部产品。",
+        "narration": "十种选择，一次看清。",
+        "transition": "产品定格结束。",
+        "asset_requirements": {
+            "characters": [],
+            "scenes": ["产品展台", "产品展台"],
+            "props": [f"产品-{index}" for index in range(1, 10)],
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"scene-1.*scene_index=1.*10"):
+        prepare_video_scene_packages(
+            form_values={"product_info": "产品合集"},
+            plan_markdown="## 权威分镜\n十种产品陈列。",
+            target_duration_ms=10_000,
+            scene_blueprints=[blueprint],
+        )
+
+
+def test_authoritative_blueprint_normalizes_asset_name_mentions_to_asset_ids():
+    blueprint = {
+        "scene_id": "scene-1",
+        "scene_index": 1,
+        "title": "雨夜出发",
+        "structure_role": "opening",
+        "start_sec": 0,
+        "end_sec": 10,
+        "duration_sec": 10,
+        "storyline": "林晓在雨夜公交站背起防水背包。",
+        "shot_description": "0-10秒: 角色:@林晓 在地点:@雨夜公交站 背起道具:@防水背包。",
+        "narration": "雨夜也能从容出发。",
+        "transition": "跟随背包擦镜转场。",
+        "asset_requirements": {
+            "characters": ["林晓"],
+            "scenes": ["雨夜公交站"],
+            "props": ["防水背包"],
+        },
+    }
+
+    result = prepare_video_scene_packages(
+        form_values={"product_info": "防水背包"},
+        plan_markdown="## 权威分镜\n雨夜出发。",
+        target_duration_ms=10_000,
+        scene_blueprints=[blueprint],
+    )
+
+    scene = result["scene_packages"][0]
+    shot_text = scene["shot_description"]["text"]
+    assert "@林晓" not in shot_text
+    assert "@雨夜公交站" not in shot_text
+    assert "@防水背包" not in shot_text
+    assert all(f"@{asset_id}" in shot_text for asset_id in scene["reference_asset_ids"])
+    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == scene["reference_asset_ids"]
+
+
+def test_authoritative_blueprint_preserves_existing_asset_id_mentions():
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeModel:
+        def invoke(self, _prompt):
+            return FakeMessage(
+                __import__("json").dumps(
+                    {
+                        "global_assets": {
+                            "characters": [
+                                {
+                                    "asset_id": "Lin-v1",
+                                    "name": "Lin",
+                                    "description": "通勤女性",
+                                    "three_view_prompt": "Lin 正面、侧面、背面三视图",
+                                }
+                            ],
+                            "scenes": [],
+                            "props": [],
+                            "visual_style": {"asset_id": "style-main", "name": "写实风", "description": "写实风"},
+                        },
+                        "scene_packages": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    blueprint = {
+        "scene_id": "scene-1",
+        "scene_index": 1,
+        "title": "通勤开场",
+        "structure_role": "opening",
+        "start_sec": 0,
+        "end_sec": 10,
+        "duration_sec": 10,
+        "storyline": "Lin 进入通勤场景。",
+        "shot_description": "0-10秒: 角色:@Lin-v1 走入画面。",
+        "narration": "轻松开始通勤。",
+        "transition": "跟随脚步结束。",
+        "asset_requirements": {"characters": ["Lin"], "scenes": [], "props": []},
+    }
+
+    result = __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={"product_info": "通勤服务"},
+            plan_markdown="## 权威分镜\n通勤开场。",
+            target_duration_ms=10_000,
+            scene_blueprints=[blueprint],
+            model_factory=lambda *_args, **_kwargs: FakeModel(),
+        )
+    )
+
+    scene = result["scene_packages"][0]
+    assert "@Lin-v1 " in scene["shot_description"]["text"]
+    assert "@Lin-v1-v1" not in scene["shot_description"]["text"]
+    assert scene["reference_asset_ids"] == ["Lin-v1"]
+    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == ["Lin-v1"]
+
+
+def test_authoritative_blueprint_prefers_final_form_visual_style_over_llm_style():
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeModel:
+        def invoke(self, _prompt):
+            return FakeMessage(
+                __import__("json").dumps(
+                    {
+                        "global_assets": {
+                            "characters": [],
+                            "scenes": [],
+                            "props": [],
+                            "visual_style": {
+                                "asset_id": "style-main",
+                                "name": "LLM 旧复古风",
+                                "description": "LLM 旧复古风",
+                                "prompt": "LLM 旧复古风",
+                            },
+                        },
+                        "scene_packages": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    blueprint = {
+        "scene_id": "scene-1",
+        "scene_index": 1,
+        "title": "科技开场",
+        "structure_role": "opening",
+        "start_sec": 0,
+        "end_sec": 10,
+        "duration_sec": 10,
+        "storyline": "产品在未来空间中亮相。",
+        "shot_description": "0-10秒: 环绕产品并推进至细节特写。",
+        "narration": "让科技触手可及。",
+        "transition": "光线擦镜结束。",
+        "asset_requirements": {"characters": [], "scenes": [], "props": []},
+    }
+
+    result = __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={"product_info": "智能设备", "visual_style": "最终合同科技蓝"},
+            plan_markdown="## 权威分镜\n科技开场。",
+            target_duration_ms=10_000,
+            scene_blueprints=[blueprint],
+            model_factory=lambda *_args, **_kwargs: FakeModel(),
+        )
+    )
+
+    assert result["global_assets"]["visual_style"]["name"] == "最终合同科技蓝"
+    assert result["global_assets"]["visual_style"]["description"] == "最终合同科技蓝"
+    assert "视觉风格：最终合同科技蓝" in result["scene_packages"][0]["prompt"]
+    assert "LLM 旧复古风" not in result["scene_packages"][0]["prompt"]
+
+
+def test_authoritative_blueprint_resolves_repeated_asset_id_collisions_until_unique():
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    scene_name = "雨夜公交站"
+    scene_stable_id = f"scene-{hashlib.sha1(scene_name.encode('utf-8')).hexdigest()[:10]}"
+
+    class FakeModel:
+        def invoke(self, _prompt):
+            return FakeMessage(
+                __import__("json").dumps(
+                    {
+                        "global_assets": {
+                            "characters": [
+                                {
+                                    "asset_id": scene_stable_id,
+                                    "name": "林晓",
+                                    "description": "通勤女性",
+                                    "three_view_prompt": "林晓正面、侧面、背面三视图",
+                                }
+                            ],
+                            "scenes": [
+                                {
+                                    "asset_id": scene_stable_id,
+                                    "name": scene_name,
+                                    "description": "雨夜公交站",
+                                    "image_prompt": "雨夜公交站场景图",
+                                }
+                            ],
+                            "props": [],
+                            "visual_style": {
+                                "asset_id": scene_stable_id,
+                                "name": "写实风",
+                                "description": "写实风",
+                            },
+                        },
+                        "scene_packages": [],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    blueprint = {
+        "scene_id": "scene-1",
+        "scene_index": 1,
+        "title": "雨夜出发",
+        "structure_role": "opening",
+        "start_sec": 0,
+        "end_sec": 10,
+        "duration_sec": 10,
+        "storyline": "林晓从雨夜公交站出发。",
+        "shot_description": "0-10秒: 林晓走出雨夜公交站。",
+        "narration": "雨夜也要准时抵达。",
+        "transition": "跟随脚步转场。",
+        "asset_requirements": {"characters": ["林晓"], "scenes": [scene_name], "props": []},
+    }
+
+    result = __import__("asyncio").run(
+        prepare_video_scene_packages_with_llm(
+            form_values={"product_info": "通勤服务"},
+            plan_markdown="## 权威分镜\n雨夜出发。",
+            target_duration_ms=10_000,
+            scene_blueprints=[blueprint],
+            model_factory=lambda *_args, **_kwargs: FakeModel(),
+        )
+    )
+
+    asset_ids = [
+        item["asset_id"]
+        for collection in ("characters", "scenes", "props")
+        for item in result["global_assets"][collection]
+    ]
+    asset_ids.append(result["global_assets"]["visual_style"]["asset_id"])
+    assert len(asset_ids) == len(set(asset_ids))
+    scene = result["scene_packages"][0]
+    image_asset_ids = {
+        item["asset_id"]
+        for collection in ("characters", "scenes", "props")
+        for item in result["global_assets"][collection]
+    }
+    assert set(scene["reference_asset_ids"]) == image_asset_ids
+    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == scene["reference_asset_ids"]
 
 
 def test_prepare_video_scene_packages_supports_300_seconds_without_legacy_scene_cap():

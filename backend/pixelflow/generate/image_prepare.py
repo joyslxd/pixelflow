@@ -69,15 +69,22 @@ def prepare_image_generation(
     materials: list[dict[str, Any]] | None = None,
     revision_feedback: str | None = None,
     intake_context: dict[str, Any] | None = None,
+    creation_contract: dict[str, Any] | None = None,
 ) -> ImageGenerationPrepareResult:
-    context = intake_context or {}
+    validate_final_image_contract(creation_contract)
+    effective_form_values, context = _apply_final_image_contract(form_values, intake_context, creation_contract)
     image_materials = _image_materials(materials or [])
-    method = _decide_method(form_values, plan_markdown, selected_direction, image_materials, revision_feedback, context)
+    method = _decide_method(effective_form_values, plan_markdown, selected_direction, image_materials, revision_feedback, context)
     endpoint = ENDPOINT_BY_METHOD[method]
-    prompt = _build_prompt(form_values, plan_markdown, selected_direction, revision_feedback, context)
+    prompt = _build_prompt(effective_form_values, plan_markdown, selected_direction, revision_feedback, context)
     negative_prompt = "低清晰度，模糊，水印，错别字，多余文字，畸形手指，变形产品，夸大承诺，违规绝对化表述"
-    ratio = _resolve_ratio(form_values, plan_markdown, selected_direction, context)
-    image_count = _requested_image_count(form_values, plan_markdown, selected_direction, context)
+    ratio = _resolve_ratio(effective_form_values, plan_markdown, selected_direction, context)
+    contract_image_count = _contract_image_count(creation_contract)
+    image_count = (
+        contract_image_count
+        if contract_image_count is not None
+        else _requested_image_count(effective_form_values, plan_markdown, selected_direction, context)
+    )
     reference_urls = [image["url"] for image in image_materials if _text(image.get("url"))]
 
     if method == "multi_image_fusion":
@@ -96,7 +103,7 @@ def prepare_image_generation(
                     "height": height,
                     "model": TEXT_TO_IMAGE_MODEL,
                     "size": TEXT_TO_IMAGE_QUALITY,
-                    "num_images": 1,
+                    "num_images": image_count,
                 },
                 images=[],
                 message="多图融合至少需要上传 2 张图片素材。",
@@ -115,15 +122,15 @@ def prepare_image_generation(
                 "height": height,
                 "model": TEXT_TO_IMAGE_MODEL,
                 "size": TEXT_TO_IMAGE_QUALITY,
-                "num_images": 1,
+                "num_images": image_count,
             },
             images=[],
             message="已准备多图融合参数，下一步可调用博观多图融合接口。",
         )
     if method == "image_edit":
         width, height = _ratio_pair(ratio)
-        model = _resolve_image_model(form_values, context, IMAGE_EDIT_MODEL)
-        quality = _resolve_image_quality(form_values, context, IMAGE_EDIT_QUALITY)
+        model = _resolve_image_model(effective_form_values, context, IMAGE_EDIT_MODEL)
+        quality = _resolve_image_quality(effective_form_values, context, IMAGE_EDIT_QUALITY)
         if not reference_urls:
             return ImageGenerationPrepareResult(
                 ok=False,
@@ -194,6 +201,49 @@ def prepare_image_generation(
         },
         message="已准备文生图参数，下一步可调用博观文生图接口。",
     )
+
+
+def _apply_final_image_contract(
+    form_values: dict[str, Any],
+    intake_context: dict[str, Any] | None,
+    creation_contract: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    effective_form_values = dict(form_values)
+    effective_context = dict(intake_context or {})
+    if not isinstance(creation_contract, dict):
+        return effective_form_values, effective_context
+
+    for key in ("image_goal", "image_type", "image_usage", "image_style", "image_size", "image_count"):
+        if key in creation_contract and creation_contract[key] is not None:
+            effective_form_values[key] = creation_contract[key]
+
+    if "image_goal" in creation_contract and creation_contract["image_goal"] is not None:
+        effective_context["creation_goal"] = creation_contract["image_goal"]
+    if "image_count" in creation_contract and creation_contract["image_count"] is not None:
+        effective_context["requested_output_count"] = creation_contract["image_count"]
+    return effective_form_values, effective_context
+
+
+def validate_final_image_contract(creation_contract: dict[str, Any] | None) -> None:
+    if creation_contract is None or creation_contract == {}:
+        return
+    if not isinstance(creation_contract, dict) or creation_contract.get("intent") != "image":
+        raise ValueError("最终图片合同 intent 必须是 image")
+    for field_name in ("image_goal", "image_type", "image_usage", "image_style"):
+        if not _text(creation_contract.get(field_name)):
+            raise ValueError(f"最终图片合同缺少 {field_name}")
+    count = creation_contract.get("image_count")
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
+        raise ValueError("最终图片合同 image_count 必须是 1-10 的整数")
+    size = _text(creation_contract.get("image_size"))
+    if size not in {*SUPPORTED_OUTPUT_RATIOS, "自动适配"}:
+        raise ValueError("最终图片合同 image_size 必须是 1:1、9:16、16:9 或自动适配")
+
+
+def _contract_image_count(creation_contract: dict[str, Any] | None) -> int | None:
+    if not isinstance(creation_contract, dict) or creation_contract.get("image_count") is None:
+        return None
+    return _normalize_image_count(creation_contract["image_count"])
 
 
 def _decide_method(

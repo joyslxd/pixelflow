@@ -11,8 +11,15 @@ from pixelflow.creative.plan_markdown import (
     PlanMarkdownResult,
     build_plan_markdown,
     build_plan_markdown_with_llm,
-    publish_manual_plan_edit,
     restore_plan_version,
+    revise_plan_markdown_with_llm,
+)
+from pixelflow.creative.revision_contract import (
+    build_manual_plan_revision_feedback,
+    extract_explicit_revision_patch,
+    mentioned_revision_fields,
+    merge_revision_contract,
+    validate_revision_contract,
 )
 
 VIDEO_FORM = {
@@ -161,6 +168,488 @@ class FakeModel:
     def invoke(self, prompt):
         self.prompts.append(prompt)
         return FakeMessage(self.content)
+
+
+class SequenceFakeModel:
+    def __init__(self, contents: list[str]) -> None:
+        self.contents = contents
+        self.prompts: list[object] = []
+
+    def invoke(self, prompt):
+        self.prompts.append(prompt)
+        index = min(len(self.prompts) - 1, len(self.contents) - 1)
+        return FakeMessage(self.contents[index])
+
+
+def _revision_blueprints(total_duration_sec: int) -> list[dict[str, object]]:
+    blueprints: list[dict[str, object]] = []
+    cursor = 0
+    scene_count = total_duration_sec // 10
+    for index in range(1, scene_count + 1):
+        role = "opening" if index == 1 else "conclusion" if index == scene_count else "development"
+        blueprints.append(
+            {
+                "scene_id": f"scene-{index}",
+                "scene_index": index,
+                "title": f"新版分镜{index}",
+                "structure_role": role,
+                "start_sec": cursor,
+                "end_sec": cursor + 10,
+                "duration_sec": 10,
+                "storyline": f"新版故事线{index}，严格服务最终确认方案。",
+                "shot_description": f"0-10秒: 围绕最终确认方案执行第{index}段镜头。",
+                "narration": f"新版旁白{index}。",
+                "transition": "动作匹配转场。" if index < scene_count else "定格收束。",
+                "asset_requirements": {
+                    "characters": ["体验者"],
+                    "scenes": ["现代客厅"],
+                    "props": ["智能空调"],
+                },
+            }
+        )
+        cursor += 10
+    return blueprints
+
+
+@pytest.mark.parametrize(
+    ("feedback", "expected_duration"),
+    [
+        ("把总时长从30秒修改为180秒", 180),
+        ("视频总时长不要改成60秒，保持30秒", 30),
+        ("把视频总时长修改为1分钟30秒", 90),
+    ],
+)
+def test_explicit_revision_patch_uses_final_duration_directive(feedback: str, expected_duration: int) -> None:
+    assert extract_explicit_revision_patch("video", feedback)["video_duration_sec"] == expected_duration
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [
+        "把第2个分镜时长从10秒改成8秒",
+        "镜头1保持5秒，镜头2调整为12秒",
+        "请确认当前视频总时长是30秒吗",
+    ],
+)
+def test_explicit_revision_patch_does_not_treat_scene_duration_as_total(feedback: str) -> None:
+    assert "video_duration_sec" not in extract_explicit_revision_patch("video", feedback)
+
+
+def test_explicit_revision_patch_does_not_treat_poster_assets_as_output_count() -> None:
+    assert "image_count" not in extract_explicit_revision_patch("image", "背景墙里摆放3张海报，主体保持不变")
+
+
+@pytest.mark.parametrize(
+    ("intent", "feedback", "field_name", "expected"),
+    [
+        ("video", "视频模型从 seedance-1.5-pro 改成 seedance-2.0", "video_model", "seedance-2.0"),
+        ("video", "图片模型从 seeddream-4.5 改成 gpt-image-2", "image_model", "gpt-image-2"),
+        ("video", "视频模型从seedance-1.5-pro改成seedance-2.0", "video_model", "seedance-2.0"),
+        ("video", "图片模型从seeddream-4.5改成gpt-image-2", "image_model", "gpt-image-2"),
+    ],
+)
+def test_explicit_revision_patch_uses_new_model_value(
+    intent: str,
+    feedback: str,
+    field_name: str,
+    expected: str,
+) -> None:
+    assert extract_explicit_revision_patch(intent, feedback)[field_name] == expected
+
+
+def test_revision_fields_do_not_open_visual_style_when_user_says_keep_it() -> None:
+    fields = mentioned_revision_fields("video", "风格不要改，只把视频总时长改成60秒")
+
+    assert "video_duration_sec" in fields
+    assert "visual_style" not in fields
+
+
+def test_explicit_revision_patch_uses_final_image_ratio() -> None:
+    patch = extract_explicit_revision_patch("image", "图片尺寸从1:1改成16:9")
+
+    assert patch["image_size"] == "16:9"
+
+
+def test_merge_revision_contract_recognizes_natural_video_duration_phrase() -> None:
+    merged = merge_revision_contract(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        "把片子改成180秒，其他内容保持不变",
+        {"video_duration_sec": 180},
+    )
+
+    assert merged["video_duration_sec"] == 180
+
+
+@pytest.mark.parametrize(
+    ("feedback", "llm_duration", "expected"),
+    [
+        ("视频总时长延长30秒", 60, 60),
+        ("把视频延长30秒", 60, 60),
+        ("视频总时长缩短10秒", 20, 20),
+        ("时长调成180秒", 180, 180),
+        ("做成三分钟", 180, 180),
+    ],
+)
+def test_merge_revision_contract_applies_relative_total_duration(
+    feedback: str,
+    llm_duration: int,
+    expected: int,
+) -> None:
+    merged = merge_revision_contract(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        feedback,
+        {"video_duration_sec": llm_duration},
+    )
+
+    assert merged["video_duration_sec"] == expected
+
+
+def test_merge_image_revision_contract_applies_relative_chinese_output_count() -> None:
+    merged = merge_revision_contract(
+        "image",
+        {
+            "intent": "image",
+            "image_goal": "智能音箱宣传图",
+            "image_type": "商品广告图",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+            "image_count": 1,
+        },
+        "再多出两版，其他不变",
+        {"image_count": 3},
+    )
+
+    assert merged["image_count"] == 3
+
+
+def test_merge_revision_contract_rejects_model_change_without_capability_snapshot() -> None:
+    with pytest.raises(ValueError, match="模型能力"):
+        merge_revision_contract(
+            "video",
+            VIDEO_FORM,
+            "视频模型改成 seedance-2.0-fast",
+            {"video_model": "seedance-2.0-fast"},
+        )
+
+
+def test_validate_image_revision_contract_rejects_malformed_ratio() -> None:
+    with pytest.raises(ValueError, match="图片尺寸"):
+        validate_revision_contract(
+            "image",
+            {
+                "intent": "image",
+                "image_goal": "智能音箱宣传图",
+                "image_type": "商品广告图",
+                "image_usage": "社媒发布",
+                "image_style": "真实摄影",
+                "image_size": "16:99",
+                "image_count": 1,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("image_goal", {"value": "智能音箱宣传图"}),
+        ("image_type", ["商品广告图"]),
+        ("image_usage", 123),
+        ("image_style", {"name": "真实摄影"}),
+        ("image_size", ["1:1"]),
+    ],
+)
+def test_validate_image_revision_contract_rejects_non_string_fields(field_name: str, invalid_value: object) -> None:
+    contract = {
+        "image_goal": "智能音箱宣传图",
+        "image_type": "商品广告图",
+        "image_usage": "社媒发布",
+        "image_style": "真实摄影",
+        "image_size": "1:1",
+        "image_count": 1,
+    }
+    contract[field_name] = invalid_value
+
+    with pytest.raises(ValueError):
+        validate_revision_contract("image", contract)
+
+
+def test_revise_video_plan_updates_contract_and_exact_scene_total_from_feedback() -> None:
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    revised_blueprints = _revision_blueprints(180)
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能空调 180 秒体验片\n\n"
+                    "## 一、选题方向\n在当前创意基础上扩展完整体验过程。\n\n"
+                    "## 三、视频规格\n- 时长：180 秒\n- 画幅：9:16\n\n"
+                    "## 五、镜头列表\n严格按新版蓝图执行。"
+                ),
+                "creation_contract_patch": {"video_duration_sec": 180},
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+                "scene_blueprints": revised_blueprints,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="把视频总时长修改为180秒，其他创意保持不变",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.plan_version == 2
+    assert revised.creation_contract["video_duration_sec"] == 180
+    assert len(revised.scene_blueprints) == 18
+    assert sum(revised.scene_durations_sec) == 180
+    assert all(4 <= duration <= 15 for duration in revised.scene_durations_sec)
+    assert "视频总时长：180 秒" in revised.plan_markdown
+    assert revised.plan_history[-1]["creation_contract"]["video_duration_sec"] == 180
+    assert sum(item["duration_sec"] for item in revised.plan_history[-1]["scene_blueprints"]) == 180
+
+
+def test_revise_image_plan_updates_final_execution_contract() -> None:
+    form_values = {
+        "image_goal": "智能音箱宣传图",
+        "image_type": "商品广告图",
+        "image_usage": "社媒发布",
+        "image_style": "真实摄影",
+        "image_size": "1:1",
+        "image_count": 1,
+    }
+    direction = {"direction_id": "direction_1", "title": "家居氛围", "description": "展示智能音箱融入现代家居。"}
+    original = build_plan_markdown("image", form_values, direction)
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能音箱横版组图\n\n"
+                    "## 一、选题方向\n延续家居氛围并增加科技秩序感。\n\n"
+                    "## 三、图片规格\n- 尺寸：16:9\n- 数量：4 张\n\n"
+                    "## 五、主图方案\n生成四张不同家居时段的横版画面。"
+                ),
+                "creation_contract_patch": {
+                    "image_style": "极简科技感",
+                    "image_size": "16:9",
+                    "image_count": 4,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="image",
+            form_values=form_values,
+            selected_direction=direction,
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="改成16:9极简科技风，并生成4张",
+            creation_contract=original.creation_contract,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.creation_contract["image_style"] == "极简科技感"
+    assert revised.creation_contract["image_size"] == "16:9"
+    assert revised.creation_contract["image_count"] == 4
+    assert "图片尺寸：16:9" in revised.plan_markdown
+    assert "生成数量：4 张" in revised.plan_markdown
+
+
+def test_revise_video_plan_keeps_current_version_when_retried_blueprint_is_invalid() -> None:
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能空调 60 秒体验片\n\n"
+                    "## 一、选题方向\n延续舒适体验创意并扩展完整使用旅程。\n\n"
+                    "## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n"
+                    "## 五、镜头列表\n由权威分镜蓝图承载完整调度。"
+                ),
+                "creation_contract_patch": {"video_duration_sec": 60},
+                # 模拟 LLM 忘记扩充分镜，仍返回旧版 30 秒调度。
+                "scene_blueprints": _revision_blueprints(30),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="把总时长修改为60秒",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.plan_version == original.plan_version
+    assert revised.plan_history == original.plan_history
+    assert revised.creation_contract == original.creation_contract
+    assert revised.scene_blueprints == original.scene_blueprints
+    assert revised.error
+
+
+def test_revise_video_plan_ignores_llm_patch_for_unmentioned_fields() -> None:
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能空调 60 秒体验片\n\n"
+                    "## 一、选题方向\n延续原创意。\n\n"
+                    "## 三、视频规格\n- 时长：60 秒\n\n"
+                    "## 五、镜头列表\n严格按蓝图执行。"
+                ),
+                "creation_contract_patch": {
+                    "video_duration_sec": 60,
+                    "visual_style": "赛博朋克",
+                    "video_model": "seedance-1.5-pro",
+                },
+                "scene_blueprints": _revision_blueprints(60),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="只把总时长修改为60秒，其他内容保持不变",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.creation_contract["video_duration_sec"] == 60
+    assert revised.creation_contract["visual_style"] == VIDEO_FORM["visual_style"]
+    assert revised.creation_contract["video_model"] == VIDEO_FORM["video_model"]
+
+
+def test_revise_video_plan_retries_invalid_contract_then_uses_corrected_patch() -> None:
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    invalid_payload = {
+        "plan_markdown": "# 智能空调体验片\n\n## 一、选题方向\n延续原创意。\n\n## 三、视频规格\n调整时长。\n\n## 五、镜头列表\n按蓝图执行。",
+        "creation_contract_patch": {"video_duration_sec": 500},
+        "scene_blueprints": _revision_blueprints(30),
+    }
+    corrected_payload = {
+        "plan_markdown": "# 智能空调 60 秒体验片\n\n## 一、选题方向\n延续原创意。\n\n## 三、视频规格\n- 时长：60 秒\n\n## 五、镜头列表\n按蓝图执行。",
+        "creation_contract_patch": {"video_duration_sec": 60},
+        "scene_blueprints": _revision_blueprints(60),
+    }
+    fake_model = SequenceFakeModel(
+        [
+            json.dumps(invalid_payload, ensure_ascii=False),
+            json.dumps(corrected_payload, ensure_ascii=False),
+        ]
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="把总时长延长一些",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert len(fake_model.prompts) == 2
+    assert "500" in str(fake_model.prompts[1])
+    assert revised.creation_contract["video_duration_sec"] == 60
+    assert sum(revised.scene_durations_sec) == 60
+
+
+def test_revise_video_plan_does_not_publish_invalid_contract_after_retry() -> None:
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": "# 智能空调体验片\n\n## 一、选题方向\n延续原创意。\n\n## 三、视频规格\n调整时长。\n\n## 五、镜头列表\n按蓝图执行。",
+                "creation_contract_patch": {"video_duration_sec": 500},
+                "scene_blueprints": _revision_blueprints(30),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="把总时长延长一些",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert len(fake_model.prompts) == 2
+    assert revised.plan_version == original.plan_version
+    assert revised.plan_history == original.plan_history
+    assert revised.creation_contract == original.creation_contract
+    assert revised.scene_blueprints == original.scene_blueprints
+    assert revised.error
 
 
 def test_build_video_plan_with_llm_uses_uploaded_template_and_constrains_scene_image_specs() -> None:
@@ -382,6 +871,84 @@ def test_plan_memory_is_internal_context_and_never_rendered_to_user() -> None:
     assert "用户创作上下文" not in result.plan_markdown
     assert "Skill 经验" not in result.plan_markdown
     assert "- 产品证明清晰。" in result.plan_markdown
+
+
+def test_plan_removes_exact_semantic_memory_text_without_internal_marker() -> None:
+    memory_text = "品牌长期偏好：真实摄影，避免夸张特效。"
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 防水背包宣传片\n\n"
+                    "## 一、选题方向\n雨天通勤实测。\n\n"
+                    f"## 二、选题优势\n{memory_text}\n产品证明清晰。\n\n"
+                    "## 三、视频规格\n- 时长：26 秒\n\n"
+                    "## 五、镜头列表\n按蓝图执行。"
+                ),
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            {**VIDEO_FORM, "video_duration_sec": 26},
+            {"direction_id": "direction_1", "title": "雨天实测", "description": "证明防水能力。"},
+            intake_context={
+                "semantic_memory": {
+                    "enabled": True,
+                    "items": [{"content": memory_text, "metadata": {"category": "preference"}}],
+                }
+            },
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert memory_text in str(fake_model.prompts[0])
+    assert memory_text not in result.plan_markdown
+    assert "产品证明清晰。" in result.plan_markdown
+
+
+def test_plan_removes_semantic_memory_even_when_llm_adds_markdown_formatting() -> None:
+    memory_text = "品牌长期偏好：真实摄影，避免夸张特效。"
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 防水背包宣传片\n\n"
+                    "## 一、选题方向\n雨天通勤实测。\n\n"
+                    "## 二、选题优势\n品牌长期偏好：**真实摄影**，避免夸张特效。\n产品证明清晰。\n\n"
+                    "## 三、视频规格\n- 时长：26 秒\n\n"
+                    "## 五、镜头列表\n按蓝图执行。"
+                ),
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            {**VIDEO_FORM, "video_duration_sec": 26},
+            {"direction_id": "direction_1", "title": "雨天实测", "description": "证明防水能力。"},
+            intake_context={
+                "semantic_memory": {
+                    "enabled": True,
+                    "items": [{"content": memory_text, "metadata": {"category": "preference"}}],
+                }
+            },
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert memory_text in str(fake_model.prompts[0])
+    assert memory_text not in result.plan_markdown.replace("**", "")
+    assert "产品证明清晰。" in result.plan_markdown
 
 
 def test_plan_blueprint_internal_memory_markers_never_reach_user_or_scene_contract() -> None:
@@ -773,40 +1340,156 @@ def test_next_version_uses_history_max_after_restore():
     assert revised.plan_history[-1]["scene_durations_sec"] == [10, 10]
 
 
-def test_publish_manual_plan_edit_preserves_user_markdown_and_contract_snapshot():
-    original = build_plan_markdown("video", VIDEO_FORM, {"title": "原始方向"})
-    edited_markdown = "# 用户修改后的方案\n\n## 任意自定义章节\n\n必须突出戒指的睡眠监测能力。"
-
-    published = publish_manual_plan_edit(
-        intent="video",
-        edited_plan_markdown=edited_markdown,
-        current_plan_version=1,
-        plan_history=original.plan_history,
-        creation_contract=original.creation_contract,
-        scene_durations_sec=original.scene_durations_sec,
-        scene_blueprints=original.scene_blueprints,
+def test_manual_video_plan_edit_reconciles_markdown_contract_and_blueprints_with_llm():
+    original = build_plan_markdown(
+        "video",
+        {**VIDEO_FORM, "video_duration_sec": 30},
+        {"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+    )
+    edited_markdown = original.plan_markdown.replace("30 秒", "60 秒")
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能空调 60 秒体验片\n\n"
+                    "## 一、选题方向\n保留当前创意并扩展完整使用旅程。\n\n"
+                    "## 三、视频规格\n- 时长：60 秒\n- 画幅：9:16\n\n"
+                    "## 五、镜头列表\n严格按新版蓝图执行。"
+                ),
+                "creation_contract_patch": {"video_duration_sec": 60},
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+                "scene_blueprints": _revision_blueprints(60),
+            },
+            ensure_ascii=False,
+        )
     )
 
-    assert published.plan_markdown == edited_markdown
-    assert published.plan_version == 2
-    assert published.creation_contract == original.creation_contract
-    assert published.scene_durations_sec == original.scene_durations_sec
-    assert published.scene_blueprints == original.scene_blueprints
-    assert published.plan_history[-1]["scene_blueprints"] == original.scene_blueprints
-    assert published.plan_history[-1]["change_source"] == "manual_edit"
-    assert published.llm_used is False
-
-
-def test_publish_manual_plan_edit_uses_history_max_after_restore():
-    published = publish_manual_plan_edit(
-        intent="image",
-        edited_plan_markdown="# 手工编辑 v3",
-        current_plan_version=1,
-        plan_history=[
-            {"version": 1, "plan_markdown": "# v1"},
-            {"version": 2, "plan_markdown": "# v2"},
-        ],
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values={**VIDEO_FORM, "video_duration_sec": 30},
+            selected_direction={"direction_id": "direction_1", "title": "舒适体验", "description": "展示智能空调带来的舒适变化。"},
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback=build_manual_plan_revision_feedback(original.plan_markdown, edited_markdown),
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            change_source="manual_edit",
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
     )
 
-    assert published.plan_version == 3
-    assert [item["version"] for item in published.plan_history] == [1, 2, 3]
+    assert revised.plan_version == 2
+    assert revised.creation_contract["video_duration_sec"] == 60
+    assert sum(revised.scene_durations_sec) == 60
+    assert len(revised.scene_blueprints) == 6
+    assert "视频总时长：60 秒" in revised.plan_markdown
+    assert revised.llm_used is True
+    assert revised.plan_history[-1]["change_source"] == "manual_edit"
+
+
+def test_manual_image_plan_edit_allows_llm_to_update_every_contract_field():
+    form_values = {
+        "image_goal": "智能音箱宣传图",
+        "image_type": "商品广告图",
+        "image_usage": "社媒发布",
+        "image_style": "真实摄影",
+        "image_size": "1:1",
+        "image_count": 1,
+    }
+    direction = {"direction_id": "direction_1", "title": "家居氛围", "description": "展示智能音箱融入现代家居。"}
+    original = build_plan_markdown("image", form_values, direction)
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能音箱横版组图\n\n"
+                    "## 一、选题方向\n升级为极简科技风横版组图。\n\n"
+                    "## 三、图片规格\n- 尺寸：16:9\n- 数量：3 张\n\n"
+                    "## 五、主图方案\n生成三张不同家居时段的画面。"
+                ),
+                "creation_contract_patch": {
+                    "image_style": "极简科技感",
+                    "image_size": "16:9",
+                    "image_count": 3,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="image",
+            form_values=form_values,
+            selected_direction=direction,
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=1,
+            plan_history=original.plan_history,
+            revision_feedback=build_manual_plan_revision_feedback(
+                original.plan_markdown,
+                original.plan_markdown.replace("真实摄影", "极简科技感").replace("1:1", "16:9").replace("1 张", "3 张"),
+            ),
+            creation_contract=original.creation_contract,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.creation_contract["image_style"] == "极简科技感"
+    assert revised.creation_contract["image_size"] == "16:9"
+    assert revised.creation_contract["image_count"] == 3
+    assert revised.plan_version == 2
+
+
+def test_manual_image_plan_edit_ignores_llm_contract_fields_not_changed_by_user():
+    form_values = {
+        "image_goal": "智能音箱宣传图",
+        "image_type": "商品广告图",
+        "image_usage": "社媒发布",
+        "image_style": "真实摄影",
+        "image_size": "1:1",
+        "image_count": 1,
+    }
+    direction = {"direction_id": "direction_1", "title": "家居氛围", "description": "展示智能音箱融入现代家居。"}
+    original = build_plan_markdown("image", form_values, direction)
+    edited_markdown = original.plan_markdown.replace("展示智能音箱融入现代家居。", "重点突出音箱旋钮的金属细节。")
+    fake_model = FakeModel(
+        json.dumps(
+            {
+                "plan_markdown": (
+                    "# 智能音箱宣传图\n\n"
+                    "## 一、选题方向\n重点突出音箱旋钮的金属细节。\n\n"
+                    "## 三、图片规格\n维持原规格。\n\n"
+                    "## 五、主图方案\n强化旋钮细节。"
+                ),
+                "creation_contract_patch": {
+                    "image_style": "插画风",
+                    "image_size": "16:9",
+                    "image_count": 7,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="image",
+            form_values=form_values,
+            selected_direction=direction,
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=1,
+            plan_history=original.plan_history,
+            revision_feedback=build_manual_plan_revision_feedback(original.plan_markdown, edited_markdown),
+            creation_contract=original.creation_contract,
+            change_source="manual_edit",
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.plan_version == 2
+    assert revised.creation_contract["image_style"] == "真实摄影"
+    assert revised.creation_contract["image_size"] == "1:1"
+    assert revised.creation_contract["image_count"] == 1
