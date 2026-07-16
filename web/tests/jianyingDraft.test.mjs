@@ -4,7 +4,12 @@ import test from "node:test";
 const moduleUrl = process.env.JIANYING_DRAFT_TEST_MODULE;
 assert.ok(moduleUrl, "JIANYING_DRAFT_TEST_MODULE must point to the compiled jianyingDraft module");
 
-const { JianyingDraftStartGuard, draftButtonState, storyboardVersionId } = await import(moduleUrl);
+const {
+  JianyingDraftStartGuard,
+  draftButtonState,
+  patchJianyingDraftConversationContext,
+  storyboardVersionId,
+} = await import(moduleUrl);
 
 function scene(sceneIndex, videoUrl = `https://cdn.example.com/${sceneIndex}.mp4`, taskId = `task-${sceneIndex}`) {
   return {
@@ -127,4 +132,60 @@ test("start guard lets concurrent clicks start one job for the same conversation
 
   assert.equal(starts, 1);
   assert.equal(guard.tryAcquire("conversation-1", "storyboard-1"), true);
+});
+
+test("target conversation patch keeps A context intact after the UI switches to B", () => {
+  const contextA = {
+    brand_name: "A 品牌",
+    selected_direction: { title: "A 创意" },
+    pendingJianyingDraftJob: { job_id: "old-a" },
+    jianying_draft_records: {
+      "storyboard-server": {
+        status: "failed",
+        job_id: "job-server",
+        conversation_id: "conversation-a",
+        storyboard_version_id: "storyboard-server",
+      },
+    },
+    concurrent_server_field: "A 服务端最新值",
+  };
+  const contextB = {
+    brand_name: "B 品牌",
+    selected_direction: { title: "B 创意" },
+  };
+  const records = {
+    "storyboard-a": {
+      status: "succeeded",
+      job_id: "job-a",
+      provider_task_id: null,
+      conversation_id: "conversation-a",
+      storyboard_version_id: "storyboard-a",
+      download_url: "https://cdn.example.com/a.zip",
+      file_name: "a.zip",
+      expire_at: null,
+      message: "完成",
+    },
+  };
+
+  const patchedA = patchJianyingDraftConversationContext(contextA, {
+    pendingJianyingDraftJob: null,
+    jianyingDraftRecords: records,
+    jianyingDraftJobResumeError: "任务已过期",
+  });
+
+  assert.equal(patchedA.brand_name, "A 品牌");
+  assert.deepEqual(patchedA.selected_direction, { title: "A 创意" });
+  assert.equal(patchedA.pendingJianyingDraftJob, null);
+  assert.equal(patchedA.pending_jianying_draft_job, null);
+  assert.equal(patchedA.concurrent_server_field, "A 服务端最新值");
+  assert.deepEqual(patchedA.jianyingDraftRecords, {
+    "storyboard-server": contextA.jianying_draft_records["storyboard-server"],
+    ...records,
+  });
+  assert.deepEqual(patchedA.jianying_draft_records, patchedA.jianyingDraftRecords);
+  assert.equal(patchedA.jianying_draft_job_resume_error, "任务已过期");
+  assert.deepEqual(contextB, {
+    brand_name: "B 品牌",
+    selected_direction: { title: "B 创意" },
+  });
 });

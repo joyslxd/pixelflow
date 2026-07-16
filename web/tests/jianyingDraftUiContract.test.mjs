@@ -21,13 +21,24 @@ test("当前对话启动任务会立即写入 pending ref，并持久化两种 r
   const persistMatch = workspaceSource.match(
     /const persistPendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
   );
+  const targetPatchMatch = workspaceSource.match(
+    /const patchJianyingDraftConversationContextForTarget[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
+  );
 
   assert.ok(persistMatch, "persistPendingJianyingDraftJob must exist");
+  assert.ok(targetPatchMatch, "target-local context patch helper must exist");
   const persistSource = persistMatch[0];
-  assert.match(persistSource, /isCurrentConversation\(targetConversationId\)/);
-  assert.match(persistSource, /pendingJianyingDraftJobRef\.current = pendingJianyingDraftJob/);
-  assert.match(persistSource, /pending_jianying_draft_job: pendingJianyingDraftJob/);
-  assert.match(workspaceSource, /jianying_draft_records: records/);
+  const targetPatchSource = targetPatchMatch[0];
+  assert.match(persistSource, /patchJianyingDraftConversationContextForTarget/);
+  assert.match(
+    persistSource,
+    /conversationIdRef\.current === targetConversationId[\s\S]*?pendingJianyingDraftJobRef\.current = pendingJianyingDraftJob/,
+  );
+  assert.match(
+    targetPatchSource,
+    /await api\.getConversation\(targetConversationId\)[\s\S]*?conversationIdRef\.current === targetConversationId[\s\S]*?pendingJianyingDraftJobRef\.current = pendingJianyingDraftJob/,
+  );
+  assert.match(targetPatchSource, /setJianyingDraftRecordsForConversation\(\s*targetConversationId/);
   assert.match(workspaceSource, /snapshot\.jianyingDraftRecords \|\| snapshot\.jianying_draft_records/);
 });
 
@@ -41,6 +52,44 @@ test("草稿启动 guard 在 capability 查询前建立，并在 finally 中释�
   assert.match(generateSource, /jianyingDraftStartGuardRef\.current\.tryAcquire\(targetConversationId, storyboard_version_id\)/);
   assert.match(generateSource, /tryAcquire\(targetConversationId, storyboard_version_id\)[\s\S]*?await api\.getJianyingDraftCapability\(\)/);
   assert.match(generateSource, /finally[\s\S]*?jianyingDraftStartGuardRef\.current\.release\(targetConversationId, storyboard_version_id\)/);
+});
+
+test("跨会话持久化只补丁目标对话的剪映字段", () => {
+  const targetPatchMatch = workspaceSource.match(
+    /const patchJianyingDraftConversationContextForTarget[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
+  );
+  const persistMatch = workspaceSource.match(
+    /const persistPendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
+  );
+
+  assert.ok(targetPatchMatch, "target-local context patch helper must exist");
+  assert.ok(persistMatch, "persistPendingJianyingDraftJob must exist");
+  const targetPatchSource = targetPatchMatch[0];
+  const persistSource = persistMatch[0];
+  assert.match(targetPatchSource, /api\.getConversation\(targetConversationId\)/);
+  assert.doesNotMatch(targetPatchSource, /if \(!targetContext\)/);
+  assert.doesNotMatch(targetPatchSource, /jianyingDraftContextByConversationRef\.current\.get/);
+  assert.match(targetPatchSource, /patchJianyingDraftConversationContext\(/);
+  assert.doesNotMatch(targetPatchSource, /makeSnapshot\(targetConversationId\)/);
+  assert.match(persistSource, /patchJianyingDraftConversationContextForTarget/);
+  assert.doesNotMatch(persistSource, /makeSnapshot\(targetConversationId\)/);
+});
+
+test("过期任务保留恢复错误，capability 后只使用捕获的目标对话", () => {
+  const expiredMatch = workspaceSource.match(
+    /const clearExpiredJianyingDraftJob[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
+  );
+  const generateMatch = workspaceSource.match(
+    /const handleGenerateJianyingDraft[\s\S]*?(?=\n\s{2}const \w|\n\s{2}async function|\n\s{2}function)/,
+  );
+
+  assert.ok(expiredMatch, "clearExpiredJianyingDraftJob must exist");
+  assert.ok(generateMatch, "handleGenerateJianyingDraft must exist");
+  assert.match(expiredMatch[0], /persistPendingJianyingDraftJob\(null, targetConversationId, "jianying_draft_job_expired", message\)/);
+  const afterCapability = generateMatch[0].slice(generateMatch[0].indexOf("await api.getJianyingDraftCapability()"));
+  assert.doesNotMatch(afterCapability, /conversationIdRef\.current/);
+  assert.match(afterCapability, /conversation_id: targetConversationId/);
+  assert.match(afterCapability, /persistPendingJianyingDraftJob\(pendingJianyingDraftJob, targetConversationId/);
 });
 
 test("恢复已有剪映草稿任务只查询状态而不启动新任务", () => {

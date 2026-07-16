@@ -91,7 +91,12 @@ import {
 import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
-import { JianyingDraftStartGuard, storyboardVersionId, type JianyingDraftScene } from "@/lib/jianyingDraft";
+import {
+  JianyingDraftStartGuard,
+  patchJianyingDraftConversationContext,
+  storyboardVersionId,
+  type JianyingDraftScene,
+} from "@/lib/jianyingDraft";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -3198,26 +3203,51 @@ export function WorkspacePage() {
     jianyingDraftRecordsByConversationRef.current.set(targetConversationId, records);
   };
 
+  const patchJianyingDraftConversationContextForTarget = async (
+    targetConversationId: string,
+    lastPhase: string,
+    pendingJianyingDraftJob: PendingJianyingDraftJob | null,
+    jianyingDraftRecords: JianyingDraftRecordMap,
+    jianyingDraftJobResumeError?: string | null,
+  ) => {
+    const detail = await api.getConversation(targetConversationId);
+    const targetContext = { ...(detail.conversation.context || {}) };
+    const patchedContext = patchJianyingDraftConversationContext(targetContext, {
+      pendingJianyingDraftJob,
+      jianyingDraftRecords,
+      jianyingDraftJobResumeError,
+    });
+    setJianyingDraftRecordsForConversation(
+      targetConversationId,
+      patchedContext.jianyingDraftRecords as JianyingDraftRecordMap,
+    );
+    if (conversationIdRef.current === targetConversationId) {
+      pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
+    }
+    await api.updateConversation(targetConversationId, {
+      last_phase: lastPhase,
+      context: patchedContext,
+    });
+  };
+
   const persistPendingJianyingDraftJob = async (
     pendingJianyingDraftJob: PendingJianyingDraftJob | null,
     targetConversationId: string,
     lastPhase: string,
-    extraContext: Record<string, unknown> = {},
+    jianyingDraftJobResumeError?: string | null,
   ) => {
     if (pendingJianyingDraftJob && pendingJianyingDraftJob.conversation_id !== targetConversationId) return;
-    if (isCurrentConversation(targetConversationId)) {
+    if (!targetConversationId) return;
+    if (conversationIdRef.current === targetConversationId) {
       pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
     }
-    if (!targetConversationId) return;
-    await api.updateConversation(targetConversationId, {
-      last_phase: lastPhase,
-      context: {
-        ...makeSnapshot(targetConversationId),
-        ...extraContext,
-        pendingJianyingDraftJob,
-        pending_jianying_draft_job: pendingJianyingDraftJob,
-      } as unknown as Record<string, unknown>,
-    });
+    await patchJianyingDraftConversationContextForTarget(
+      targetConversationId,
+      lastPhase,
+      pendingJianyingDraftJob,
+      jianyingDraftRecordsForConversation(targetConversationId),
+      pendingJianyingDraftJob ? null : jianyingDraftJobResumeError,
+    );
   };
 
   const persistPendingScenePackageJob = async (
@@ -4683,18 +4713,13 @@ export function WorkspacePage() {
       );
     }
 
-    await persistPendingJianyingDraftJob(null, targetConversationId, `jianying_draft_${result.status}`, {
-      jianyingDraftRecords: records,
-      jianying_draft_records: records,
-    }).catch(() => {});
+    await persistPendingJianyingDraftJob(null, targetConversationId, `jianying_draft_${result.status}`).catch(() => {});
   };
 
   const clearExpiredJianyingDraftJob = async (pendingJob: PendingJianyingDraftJob, message: string) => {
     const targetConversationId = pendingJob.conversation_id;
     pushAssistant(message, targetConversationId);
-    await persistPendingJianyingDraftJob(null, targetConversationId, "jianying_draft_job_expired", {
-      jianying_draft_job_resume_error: message,
-    }).catch(() => {});
+    await persistPendingJianyingDraftJob(null, targetConversationId, "jianying_draft_job_expired", message).catch(() => {});
   };
 
   const resumePendingJianyingDraftJob = async (pendingJianyingDraftJob: PendingJianyingDraftJob) => {

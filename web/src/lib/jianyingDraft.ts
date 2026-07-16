@@ -75,6 +75,44 @@ export class JianyingDraftStartGuard {
   }
 }
 
+export interface JianyingDraftConversationContextPatch {
+  pendingJianyingDraftJob: unknown | null;
+  jianyingDraftRecords: Record<string, JianyingDraftJobResponse>;
+  jianyingDraftJobResumeError?: string | null;
+}
+
+function draftRecordsFromContext(value: unknown): Record<string, JianyingDraftJobResponse> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, JianyingDraftJobResponse>)
+    : {};
+}
+
+/** 仅更新目标对话中的剪映草稿字段，保留其余业务上下文。 */
+export function patchJianyingDraftConversationContext(
+  context: Record<string, unknown>,
+  {
+    pendingJianyingDraftJob,
+    jianyingDraftRecords,
+    jianyingDraftJobResumeError,
+  }: JianyingDraftConversationContextPatch,
+): Record<string, unknown> {
+  const mergedRecords = {
+    ...draftRecordsFromContext(context.jianying_draft_records),
+    ...draftRecordsFromContext(context.jianyingDraftRecords),
+    ...jianyingDraftRecords,
+  };
+  const patchedContext = {
+    ...context,
+    pendingJianyingDraftJob,
+    pending_jianying_draft_job: pendingJianyingDraftJob,
+    jianyingDraftRecords: mergedRecords,
+    jianying_draft_records: mergedRecords,
+  };
+  return jianyingDraftJobResumeError === undefined
+    ? patchedContext
+    : { ...patchedContext, jianying_draft_job_resume_error: jianyingDraftJobResumeError };
+}
+
 function canonicalVideoUrl(value: unknown): string {
   if (typeof value !== "string") throw new TypeError("video_url must be an HTTP(S) URL");
   try {
