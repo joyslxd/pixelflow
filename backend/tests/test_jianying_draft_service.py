@@ -118,6 +118,38 @@ class CompletionOrderFakeSkill:
         self._release_events.setdefault(number, asyncio.Event()).set()
 
 
+class ToggleCapabilityBlockingFakeSkill(BlockingFakeSkill):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capability_call_count = 0
+        self.capability_mode = "available"
+        self.reason = ""
+
+    async def capability(self) -> JianyingDraftCapability:
+        self.capability_call_count += 1
+        if self.capability_mode == "raise":
+            raise RuntimeError("capability secret diagnostic")
+        return JianyingDraftCapability(
+            available=self.capability_mode == "available",
+            reason=self.reason,
+        )
+
+
+class ToggleCapabilityResultFakeSkill(ResultFakeSkill):
+    def __init__(self, result: JianyingDraftResult) -> None:
+        super().__init__(result)
+        self.capability_call_count = 0
+        self.capability_available = True
+        self.reason = ""
+
+    async def capability(self) -> JianyingDraftCapability:
+        self.capability_call_count += 1
+        return JianyingDraftCapability(
+            available=self.capability_available,
+            reason=self.reason,
+        )
+
+
 @pytest.mark.asyncio
 async def test_unavailable_skill_does_not_create_job():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
@@ -126,6 +158,24 @@ async def test_unavailable_skill_does_not_create_job():
 
     assert result.status == JianyingDraftStatus.NOT_CONFIGURED
     assert result.message == "剪映草稿服务待接入"
+    assert service.job_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unavailable_capability_uses_fixed_public_message(caplog):
+    skill = ToggleCapabilityResultFakeSkill(
+        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+    )
+    skill.capability_available = False
+    skill.reason = "https://provider.example.com/?token=secret-token"
+    service = JianyingDraftService(skill=skill)
+
+    result = await service.start(_request())
+
+    assert result.status == JianyingDraftStatus.NOT_CONFIGURED
+    assert result.message == "剪映草稿服务待接入"
+    assert "secret-token" not in result.message
+    assert "secret-token" not in caplog.text
     assert service.job_count == 0
 
 
@@ -162,6 +212,25 @@ async def test_running_job_is_reused_for_same_version():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unavailable", "raise"])
+async def test_running_job_reuse_does_not_probe_changed_capability(mode: str):
+    skill = ToggleCapabilityBlockingFakeSkill()
+    service = JianyingDraftService(skill=skill)
+
+    first = await service.start(_request())
+    assert first.job_id is not None
+    await asyncio.sleep(0)
+    skill.capability_mode = mode
+    skill.reason = "https://provider.example.com/?token=secret-token"
+    reused = await service.start(_request())
+
+    assert reused.job_id == first.job_id
+    assert skill.capability_call_count == 1
+    skill.release.set()
+    await _wait_for_terminal(service, first.job_id)
+
+
+@pytest.mark.asyncio
 async def test_succeeded_job_is_reused_for_same_version():
     skill = ResultFakeSkill(
         JianyingDraftResult(
@@ -180,6 +249,24 @@ async def test_succeeded_job_is_reused_for_same_version():
     assert completed.status == JianyingDraftStatus.SUCCEEDED
     assert second == completed
     assert skill.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_succeeded_job_reuse_does_not_probe_changed_capability():
+    skill = ToggleCapabilityResultFakeSkill(
+        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+    )
+    service = JianyingDraftService(skill=skill)
+
+    first = await service.start(_request())
+    assert first.job_id is not None
+    completed = await _wait_for_terminal(service, first.job_id)
+    skill.capability_available = False
+    skill.reason = "https://provider.example.com/?token=secret-token"
+    reused = await service.start(_request())
+
+    assert reused == completed
+    assert skill.capability_call_count == 1
 
 
 @pytest.mark.asyncio

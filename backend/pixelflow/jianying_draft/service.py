@@ -58,37 +58,54 @@ class JianyingDraftService:
         retry_failed: bool = False,
     ) -> JianyingDraftResult:
         """复用已有任务，或为一个新的分镜版本启动后台生成。"""
+        key = (request.conversation_id, request.storyboard_version_id)
+        async with self._lock:
+            reusable_result = self._reusable_result(
+                key,
+                retry_failed=retry_failed,
+            )
+            if reusable_result is not None:
+                return reusable_result
+
+        capability = None
+        capability_error_type: str | None = None
         try:
             capability = await self._skill.capability()
         except Exception as exc:  # noqa: BLE001 - provider boundary must not leak details
-            logger.error(
-                "[pixelflow] jianying draft capability check failed error_type=%s",
-                type(exc).__name__,
-            )
-            return JianyingDraftResult(
-                status=JianyingDraftStatus.NOT_CONFIGURED,
-                message="剪映草稿服务暂不可用，请稍后重试",
-            )
-        if not capability.available:
-            return JianyingDraftResult(
-                status=JianyingDraftStatus.NOT_CONFIGURED,
-                message=capability.reason,
-            )
+            capability_error_type = type(exc).__name__
 
-        key = (request.conversation_id, request.storyboard_version_id)
         async with self._lock:
+            reusable_result = self._reusable_result(
+                key,
+                retry_failed=retry_failed,
+            )
+            if reusable_result is not None:
+                return reusable_result
+
+            if capability_error_type is not None:
+                logger.error(
+                    "[pixelflow] jianying draft capability check failed error_type=%s",
+                    capability_error_type,
+                )
+                return JianyingDraftResult(
+                    status=JianyingDraftStatus.NOT_CONFIGURED,
+                    message="剪映草稿服务暂不可用，请稍后重试",
+                )
+            if capability is None or not capability.available:
+                return JianyingDraftResult(
+                    status=JianyingDraftStatus.NOT_CONFIGURED,
+                    message="剪映草稿服务待接入",
+                )
+
             previous = self._get_current_job(key)
             replaced_job: _JianyingDraftJob | None = None
-            if previous is not None:
-                previous_result = previous.result
-                if self._should_reuse(previous_result, retry_failed=retry_failed):
-                    return previous_result.model_copy(deep=True)
-                if (
-                    retry_failed
-                    and previous_result.status
-                    in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}
-                ):
-                    replaced_job = previous
+            if (
+                previous is not None
+                and retry_failed
+                and previous.result.status
+                in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}
+            ):
+                replaced_job = previous
 
             preserved_job_id = (
                 replaced_job.result.job_id if replaced_job is not None else None
@@ -118,6 +135,19 @@ class JianyingDraftService:
                 )
             job.task = asyncio.create_task(self._run(job_id, request))
             return result.model_copy(deep=True)
+
+    def _reusable_result(
+        self,
+        key: tuple[str, str],
+        *,
+        retry_failed: bool,
+    ) -> JianyingDraftResult | None:
+        previous = self._get_current_job(key)
+        if previous is None:
+            return None
+        if self._should_reuse(previous.result, retry_failed=retry_failed):
+            return previous.result.model_copy(deep=True)
+        return None
 
     async def get_job(self, job_id: str) -> JianyingDraftResult | None:
         """查询任务当前状态；不存在或已清理时返回 ``None``。"""
