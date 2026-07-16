@@ -268,8 +268,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/agent/flows/video/jianying-draft/capability` | 返回 `available/reason/poll_interval_seconds`，供前端决定按钮状态和轮询间隔 |
-| POST | `/agent/flows/video/jianying-draft/start` | 使用当前版本全部成功、按 `scene_index` 排序的分镜视频启动或复用 job；Provider 未配置时返回 `not_configured`，不创建空任务 |
-| GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源 conversation 归属后查询状态；首次读取终态时按 job ID 幂等写经验摘要 |
+| POST | `/agent/flows/video/jianying-draft/start` | 使用当前版本全部成功、按 `scene_index` 排序且 URL 为 HTTPS 的分镜视频启动或复用 job；Provider 未配置时返回 `not_configured`，不创建空任务 |
+| GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源 conversation 归属后查询状态；首次读取 `succeeded/failed/timeout/not_configured` 终态时按 job ID claim 幂等写经验摘要 |
 
 `JianyingDraftResult` 是 PixelFlow typed DTO，仅含 `status`、`job_id`、`provider_task_id`、`conversation_id`、`storyboard_version_id`、`download_url`、`file_name`、`expire_at`、`message`。不向前端暴露无限制的 `raw`、Provider 原始响应或内部异常；失败只返回可公开消息。
 
@@ -666,11 +666,11 @@ Plan 审核与版本规则：
 
 - 最终视频未结束时，结果卡片固定展示“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成期间三个视频操作都锁定，但对话输入不锁定；成功后不自动下载。
 - 用户点击“无意见，结束”后，视频流程保持结束，但当前版本的草稿下载历史或重新生成入口仍保留。草稿生成或下载不等于接受视频，也不会改变视频结束状态。
-- `storyboard_version_id` 由当前有效分镜的 `scene_id/scene_index/task_id/video_url` 规范化排序后，按 UTF-8 无空白 JSON 计算 FNV-1a 64 位摘要。任一分镜视频、task、顺序或成员变化都会得到新版本；合并视频 URL 不参与版本，也不能作为草稿输入。
+- `storyboard_version_id` 由当前有效分镜的 `scene_id/scene_index/task_id/video_url` 规范化排序后，按 UTF-8 无空白 JSON 计算 FNV-1a 64 位摘要。草稿输入中的每个 `video_url` 必须是 HTTPS；任一分镜视频、task、顺序或成员变化都会得到新版本；合并视频 URL 不参与版本，也不能作为草稿输入。
 - 同一 `conversation_id + storyboard_version_id` 的 `queued/running` 和未过期 `succeeded` job 必须复用。`failed/timeout` 只有用户明确 `retry_failed=true` 才创建替代 job；过期成功结果允许重新生成。历史结果不会被当前新版本复用。
 - 前端按 capability 的 `poll_interval_seconds`（默认 2 秒）轮询，客户端和服务端最长 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误使用 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；切换对话、刷新或离开后只继续查询原 job，不重新调用 `/start`。job 404/过期时只提示用户从视频结果卡手动重试。
 - 草稿结果消息使用 `job_id` 构造稳定消息 ID，重复轮询不会追加重复的成功/失败卡片。下载链接只允许成功结果中的 HTTPS 地址，点击后才开始下载。
-- 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded`、`failed` 或 `timeout` 终态时，才通过 claim 调用 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
+- 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded`、`failed`、`timeout` 或 `not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
 - 当前 Gateway 启动器未配置 `workers`，部署形态是单 Uvicorn worker；`JianyingDraftService` 的 job registry、幂等索引与后台 task 均为进程内状态。未来多 worker、多容器或多副本部署前，必须替换为共享、持久化 job store，否则 job 查询、幂等和终态去重都会失效。
 
 ## 9. 视频修改循环

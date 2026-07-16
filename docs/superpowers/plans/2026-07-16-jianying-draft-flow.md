@@ -84,8 +84,8 @@ def test_storyboard_version_changes_when_scene_video_changes():
     assert compute_storyboard_version_id(before) != compute_storyboard_version_id(after)
 
 
-@pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/1.mp4"])
-def test_scene_rejects_non_http_video_url(url: str):
+@pytest.mark.parametrize("url", ["", "http://cdn/1.mp4", "blob:https://local/1", "file:///tmp/1.mp4"])
+def test_scene_rejects_non_https_video_url(url: str):
     with pytest.raises(ValidationError):
         JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url=url)
 ```
@@ -113,6 +113,13 @@ class JianyingDraftScene(BaseModel):
     scene_index: int = Field(ge=1)
     video_url: AnyHttpUrl
     task_id: str | None = None
+
+    @field_validator("video_url")
+    @classmethod
+    def require_https_video_url(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.scheme != "https":
+            raise ValueError("video_url must use HTTPS")
+        return value
 
 
 def compute_storyboard_version_id(scenes: Sequence[JianyingDraftScene]) -> str:
@@ -306,7 +313,7 @@ async def start_draft(body: JianyingDraftRequest, request: Request) -> JianyingD
     return result
 ```
 
-`GET /jobs/{job_id}` 对未知或已清理任务返回 404。终态后使用 `record_power_mem_background(..., category="experience", source_agent="jianying_draft_agent", infer=False)` 记录安全摘要。
+`GET /jobs/{job_id}` 对未知或已清理任务返回 404。首次读取到 `succeeded/failed/timeout/not_configured` 终态时，以 claim 保证幂等后使用 `record_power_mem_background(..., category="experience", source_agent="jianying_draft_agent", infer=False)` 记录安全摘要；停止轮询不会自行触发写入。
 
 开发和生产配置只增加内部开关、2 秒轮询、1800 秒超时和 3 次重试；不得增加第三方 URL 或密钥。
 
@@ -456,7 +463,7 @@ type JianyingDraftRecordMap = Record<string, JianyingDraftJobResponse>;
 - [ ] **Step 4: 实现启动、轮询和完成处理**
 
 - capability 不可用时，handler 直接返回，不调用 `/start`。
-- 启动前从当前 artifact 的成功分镜计算版本，校验数量和 URL。
+- 启动前从当前 artifact 的成功分镜计算版本，校验数量和 HTTPS URL。
 - 启动后立即把 pending job 写入原 conversation context。
 - 每 2 秒查询一次；隐藏页面时停止主动轮询，恢复可见后继续查询同一 job。
 - 30 分钟后前端显示 timeout，但不自动重启。

@@ -149,8 +149,8 @@ flowchart TD
 | 视频 | POST | `/agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | GET | `/agent/flows/video/quality-review/jobs/{job_id}` | 查询视频 QAAgent QC 质检结果 |
 | 剪映草稿 | GET | `/agent/flows/video/jianying-draft/capability` | 查询剪映草稿 Provider 是否可用及前端轮询间隔 |
-| 剪映草稿 | POST | `/agent/flows/video/jianying-draft/start` | 校验来源对话和当前分镜版本，启动或复用草稿 job；未配置时不创建任务 |
-| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 查询来源对话拥有的剪映草稿 job，并在首次读取终态时记录经验摘要 |
+| 剪映草稿 | POST | `/agent/flows/video/jianying-draft/start` | 校验来源对话、当前版本全部成功且 URL 为 HTTPS 的分镜，启动或复用草稿 job；未配置时不创建任务 |
+| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 查询来源对话拥有的剪映草稿 job，并在首次读取 `succeeded/failed/timeout/not_configured` 终态时 claim 幂等记录经验摘要 |
 | PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -172,7 +172,7 @@ flowchart TD
 
 ## 剪映草稿流程
 
-剪映草稿能力位于最终视频结果确认阶段，输入只能是当前版本全部成功、按 `scene_index` 排序的分镜视频，不能用合并视频替代。`storyboard_version_id` 由 `scene_id`、顺序、视频 URL 和视频 task ID 的规范化摘要计算；同一 `conversation_id + storyboard_version_id` 复用运行中或未过期成功 job，失败或超时必须由用户以 `retry_failed=true` 明确重试。已过期成功结果可以重新生成，历史草稿不会被新版本复用。
+剪映草稿能力位于最终视频结果确认阶段，输入只能是当前版本全部成功、按 `scene_index` 排序且 URL 为 HTTPS 的分镜视频，不能用合并视频替代。`storyboard_version_id` 由 `scene_id`、顺序、视频 URL 和视频 task ID 的规范化摘要计算；同一 `conversation_id + storyboard_version_id` 复用运行中或未过期成功 job，失败或超时必须由用户以 `retry_failed=true` 明确重试。已过期成功结果可以重新生成，历史草稿不会被新版本复用。
 
 后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`UnavailableJianyingDraftSkill` 是当前安全默认 Client。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
 
@@ -180,7 +180,7 @@ flowchart TD
 
 最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
 
-当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。路由在 `GET /jobs/{job_id}` 首次读取到 `succeeded`、`failed` 或 `timeout` 终态时，才通过 claim 幂等地异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要；停止轮询不会自行触发写入。
+当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。路由在 `GET /jobs/{job_id}` 首次读取到 `succeeded`、`failed`、`timeout` 或 `not_configured` 终态时，才通过 claim 幂等地异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要；停止轮询不会自行触发写入。
 
 ## PowerMem 语义记忆
 

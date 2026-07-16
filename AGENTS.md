@@ -134,8 +134,8 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频 | `POST /agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | `GET /agent/flows/video/quality-review/jobs/{job_id}` | 轮询视频 QAAgent QC 质检结果 |
 | 剪映草稿 | `GET /agent/flows/video/jianying-draft/capability` | 查询 Provider 可用性、不可用原因和轮询间隔 |
-| 剪映草稿 | `POST /agent/flows/video/jianying-draft/start` | 校验对话归属与当前分镜版本，启动或复用草稿 job |
-| 剪映草稿 | `GET /agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源对话归属后查询草稿 job；首次读取到终态时按 job claim 幂等写经验 |
+| 剪映草稿 | `POST /agent/flows/video/jianying-draft/start` | 校验对话归属、当前版本全部成功且 URL 为 HTTPS 的分镜，启动或复用草稿 job |
+| 剪映草稿 | `GET /agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源对话归属后查询草稿 job；首次读取到 `succeeded/failed/timeout/not_configured` 终态时按 job claim 幂等写经验 |
 | PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -206,13 +206,13 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 ## 剪映草稿 Agent
 
-剪映草稿位于最终视频确认阶段，输入是当前版本全部成功的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
+剪映草稿位于最终视频确认阶段，输入是当前版本全部成功且 `video_url` 为 HTTPS 的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
 
 当前未取得第三方接口合同，配置默认装配 `UnavailableJianyingDraftSkill`。因此前端草稿按钮始终可见但禁用，tooltip 必须精确为“剪映草稿服务待接入”；不得调用 `/start`，不得伪造 ZIP、下载 URL、Provider 请求字段或响应字段。`JianyingDraftResult` 只允许 `status/job_id/provider_task_id/conversation_id/storyboard_version_id/download_url/file_name/expire_at/message` 等 typed 字段，内部异常和未受限的 `raw` 不得返回给前端。
 
 未结束最终视频卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个按钮。草稿生成期间锁定三项视频操作，但不锁对话输入；前端按 capability 返回的间隔（默认 2 秒）轮询，客户端和服务端最大等待 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误必须通过 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；刷新、离开或切换对话后只能恢复查询原 job，结果消息按 job ID 去重。视频点击“无意见，结束”后，草稿下载/重生历史入口仍保留，成功不自动下载。
 
-路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded/failed/timeout` 终态时，才通过 claim 调用 `record_power_mem_background()` 写 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。不得写入 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。真实第三方合同到位后，只在 Provider 边界新增真实实现和独立第三方调用记录；除非接口确认属于 content-app，否则不要修改 `CONTENT_APP_API_CALLS.md`。
+路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded/failed/timeout/not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 写 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。不得写入 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。真实第三方合同到位后，只在 Provider 边界新增真实实现和独立第三方调用记录；除非接口确认属于 content-app，否则不要修改 `CONTENT_APP_API_CALLS.md`。
 
 当前 `JianyingDraftService` 的 job registry、幂等索引和后台 task 都在单 Uvicorn worker 的进程内。未来部署到多 worker、多容器或多副本前，必须改为共享且持久化的 job store，否则不同进程无法共同保证 job 查询、幂等和终态去重。
 
