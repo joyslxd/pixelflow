@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from copy import deepcopy
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -44,6 +46,7 @@ def _create_conversation(
     *,
     conversation_id: str,
     user: User,
+    context: dict[str, object] | None = None,
 ) -> None:
     asyncio.run(
         store.create_conversation(
@@ -51,6 +54,7 @@ def _create_conversation(
                 conversation_id=conversation_id,
                 user_id=str(user.id),
                 title="剪映草稿测试对话",
+                context=context or {},
             )
         )
     )
@@ -71,21 +75,59 @@ def _make_router_app(
     return app
 
 
-def _payload() -> dict[str, object]:
-    scenes = [
+def _scenes() -> list[dict[str, object]]:
+    return [
         {
             "scene_id": "scene-1",
             "scene_index": 1,
             "video_url": "https://cdn.example.com/scene-1.mp4",
             "task_id": "video-task-1",
-        }
+        },
+        {
+            "scene_id": "scene-2",
+            "scene_index": 2,
+            "video_url": "https://cdn.example.com/scene-2.mp4",
+            "task_id": "video-task-2",
+        },
     ]
+
+
+def _payload(scenes: list[dict[str, object]] | None = None) -> dict[str, object]:
+    scenes = deepcopy(scenes or _scenes())
     storyboard_version_id = compute_storyboard_version_id([JianyingDraftScene(**scene) for scene in scenes])
     return {
         "conversation_id": "conversation-1",
         "storyboard_version_id": storyboard_version_id,
         "scenes": scenes,
-        "video_task_id": "video-task-1",
+        "video_task_id": "video-task-2",
+    }
+
+
+def _current_video_context(
+    scenes: list[dict[str, object]] | None = None,
+    *,
+    merged_ok: bool = True,
+    generated_ok: bool = True,
+    failed_scenes: list[dict[str, object]] | None = None,
+    camel_case: bool = False,
+) -> dict[str, object]:
+    current_scenes = deepcopy(scenes or _scenes())
+    scene_packages = [{"scene_id": scene["scene_id"], "scene_index": scene["scene_index"]} for scene in current_scenes]
+    if camel_case:
+        return {
+            "mergedVideo": {"ok": merged_ok},
+            "videoScenePackages": {"ok": True, "scene_packages": scene_packages},
+            "generatedSceneVideos": {
+                "ok": generated_ok,
+                "scene_videos": current_scenes,
+                "failed_scenes": failed_scenes or [],
+            },
+        }
+    return {
+        "merged_video": {"ok": merged_ok},
+        "scene_packages": scene_packages,
+        "generated_scene_videos": current_scenes,
+        "failed_scenes": failed_scenes or [],
     }
 
 
@@ -116,7 +158,12 @@ def test_jianying_draft_capability_reports_unavailable_by_default():
 def test_jianying_draft_start_does_not_create_placeholder_job():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
     app = _make_router_app(service=service)
-    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(),
+    )
 
     with TestClient(app) as client:
         response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
@@ -147,7 +194,12 @@ def test_jianying_draft_start_passes_explicit_retry_failed_to_service():
 
     service = CapturingService()
     app = _make_router_app(service=service)
-    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(),
+    )
 
     with TestClient(app) as client:
         ordinary = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
@@ -159,6 +211,146 @@ def test_jianying_draft_start_passes_explicit_retry_failed_to_service():
     assert ordinary.status_code == 200
     assert retry.status_code == 200
     assert service.retry_flags == [False, True]
+
+
+def test_jianying_draft_start_accepts_current_snapshot_context():
+    class CapturingService:
+        def __init__(self) -> None:
+            self.requests: list[JianyingDraftRequest] = []
+
+        async def start(
+            self,
+            request: JianyingDraftRequest,
+            *,
+            retry_failed: bool = False,
+        ) -> JianyingDraftResult:
+            self.requests.append(request)
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.QUEUED,
+                job_id="current-storyboard-job",
+                conversation_id=request.conversation_id,
+                storyboard_version_id=request.storyboard_version_id,
+            )
+
+    service = CapturingService()
+    app = _make_router_app(service=service)
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(camel_case=True),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
+
+    assert response.status_code == 200
+    assert len(service.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("context", "payload"),
+    [
+        ({}, _payload()),
+        (_current_video_context(merged_ok=False), _payload()),
+        (_current_video_context(generated_ok=False, camel_case=True), _payload()),
+        (_current_video_context(failed_scenes=[{"scene_id": "scene-1"}]), _payload()),
+        (_current_video_context(), _payload(_scenes()[:1])),
+        (
+            _current_video_context(),
+            _payload(
+                _scenes()
+                + [
+                    {
+                        "scene_id": "scene-3",
+                        "scene_index": 3,
+                        "video_url": "https://cdn.example.com/scene-3.mp4",
+                        "task_id": "video-task-3",
+                    }
+                ]
+            ),
+        ),
+        (
+            _current_video_context(),
+            _payload(
+                [
+                    {
+                        **_scenes()[0],
+                        "video_url": "https://cdn.example.com/replaced.mp4",
+                    },
+                    _scenes()[1],
+                ]
+            ),
+        ),
+        (
+            _current_video_context(),
+            _payload(
+                [
+                    {
+                        **_scenes()[0],
+                        "task_id": "replaced-task",
+                    },
+                    _scenes()[1],
+                ]
+            ),
+        ),
+        (
+            _current_video_context(),
+            _payload(
+                [
+                    {
+                        **_scenes()[0],
+                        "scene_index": 3,
+                    },
+                    _scenes()[1],
+                ]
+            ),
+        ),
+    ],
+    ids=(
+        "empty-context",
+        "merged-failed",
+        "generated-failed",
+        "failed-scenes",
+        "missing-scene",
+        "extra-scene",
+        "replaced-url",
+        "replaced-task",
+        "replaced-index",
+    ),
+)
+def test_jianying_draft_start_rejects_non_current_storyboard_without_calling_service(
+    context: dict[str, object],
+    payload: dict[str, object],
+):
+    class CapturingService:
+        def __init__(self) -> None:
+            self.start_calls = 0
+
+        async def start(
+            self,
+            request: JianyingDraftRequest,
+            *,
+            retry_failed: bool = False,
+        ) -> JianyingDraftResult:
+            self.start_calls += 1
+            raise AssertionError("非当前分镜不得启动剪映草稿任务")
+
+    service = CapturingService()
+    app = _make_router_app(service=service)
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=context,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/jianying-draft/start", json=payload)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "当前视频分镜状态尚未就绪或已发生变化，请刷新后重试"}
+    assert service.start_calls == 0
 
 
 def test_jianying_draft_unknown_job_returns_404():
@@ -193,7 +385,12 @@ def test_jianying_draft_terminal_job_records_one_safe_powermem_experience(monkey
     )
 
     app = _make_router_app(service=service)
-    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(),
+    )
 
     with TestClient(app) as client:
         start_response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
