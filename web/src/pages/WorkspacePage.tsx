@@ -91,7 +91,7 @@ import {
 import { formatClockTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
-import { storyboardVersionId, type JianyingDraftScene } from "@/lib/jianyingDraft";
+import { JianyingDraftStartGuard, storyboardVersionId, type JianyingDraftScene } from "@/lib/jianyingDraft";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -248,6 +248,7 @@ interface WorkspaceSnapshot {
   pendingJianyingDraftJob?: PendingJianyingDraftJob | null;
   pending_jianying_draft_job?: PendingJianyingDraftJob | null;
   jianyingDraftRecords?: JianyingDraftRecordMap;
+  jianying_draft_records?: JianyingDraftRecordMap;
   ppt_done?: boolean;
   image_accepted?: boolean;
   video_accepted?: boolean;
@@ -1671,6 +1672,7 @@ export function WorkspacePage() {
   const activePptJobPollsRef = useRef(new Set<string>());
   const pendingJianyingDraftJobRef = useRef<PendingJianyingDraftJob | null>(null);
   const activeJianyingDraftJobPollsRef = useRef(new Set<string>());
+  const jianyingDraftStartGuardRef = useRef(new JianyingDraftStartGuard());
   const jianyingDraftRecordsByConversationRef = useRef(new Map<string, JianyingDraftRecordMap>());
   const pptDoneConversationIdsRef = useRef(new Set<string>());
   const briefReadyShownRef = useRef(false);
@@ -3203,10 +3205,7 @@ export function WorkspacePage() {
     extraContext: Record<string, unknown> = {},
   ) => {
     if (pendingJianyingDraftJob && pendingJianyingDraftJob.conversation_id !== targetConversationId) return;
-    if (
-      pendingJianyingDraftJobRef.current?.conversation_id === targetConversationId &&
-      (pendingJianyingDraftJob === null || pendingJianyingDraftJob.conversation_id === targetConversationId)
-    ) {
+    if (isCurrentConversation(targetConversationId)) {
       pendingJianyingDraftJobRef.current = pendingJianyingDraftJob;
     }
     if (!targetConversationId) return;
@@ -4686,6 +4685,7 @@ export function WorkspacePage() {
 
     await persistPendingJianyingDraftJob(null, targetConversationId, `jianying_draft_${result.status}`, {
       jianyingDraftRecords: records,
+      jianying_draft_records: records,
     }).catch(() => {});
   };
 
@@ -5252,7 +5252,10 @@ export function WorkspacePage() {
     const pendingJianyingDraftJob = snapshot.pendingJianyingDraftJob || snapshot.pending_jianying_draft_job || null;
     pendingJianyingDraftJobRef.current =
       pendingJianyingDraftJob?.conversation_id === conversationIdRef.current ? pendingJianyingDraftJob : null;
-    setJianyingDraftRecordsForConversation(conversationIdRef.current, snapshot.jianyingDraftRecords || {});
+    setJianyingDraftRecordsForConversation(
+      conversationIdRef.current,
+      snapshot.jianyingDraftRecords || snapshot.jianying_draft_records || {},
+    );
     setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
@@ -5333,6 +5336,7 @@ export function WorkspacePage() {
       pending_jianying_draft_job:
         pendingJianyingDraftJobRef.current?.conversation_id === snapshotConversationId ? pendingJianyingDraftJobRef.current : null,
       jianyingDraftRecords: jianyingDraftRecordsForConversation(snapshotConversationId),
+      jianying_draft_records: jianyingDraftRecordsForConversation(snapshotConversationId),
       ppt_done: isPptDoneForConversation(snapshotConversationId),
       image_accepted: latestImageResultArtifactForConversation(messagesRef.current, snapshotConversationId)?.imageAccepted === true,
       video_accepted: latestVideoResultArtifactForConversation(messagesRef.current, snapshotConversationId)?.videoAccepted === true,
@@ -5406,7 +5410,7 @@ export function WorkspacePage() {
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     const pendingJianyingDraftJob = snapshot.pendingJianyingDraftJob || snapshot.pending_jianying_draft_job || null;
-    const jianyingDraftRecords = snapshot.jianyingDraftRecords || {};
+    const jianyingDraftRecords = snapshot.jianyingDraftRecords || snapshot.jianying_draft_records || {};
     const restoredMessages = detail.messages
       .map((message) => messageFromResponse(message, detail.conversation.conversation_id))
       .filter((m): m is ChatMessage => Boolean(m));
@@ -5446,6 +5450,7 @@ export function WorkspacePage() {
       pending_jianying_draft_job:
         pendingJianyingDraftJob?.conversation_id === detail.conversation.conversation_id ? pendingJianyingDraftJob : null,
       jianyingDraftRecords,
+      jianying_draft_records: jianyingDraftRecords,
       imageEditConfirmedSelections,
       messages: normalizedMessages,
     });
@@ -7351,15 +7356,6 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(latestMessage, conversationIdRef.current);
     if (!targetConversationId) return;
 
-    let capability: JianyingDraftCapability;
-    try {
-      capability = await api.getJianyingDraftCapability();
-    } catch (err) {
-      pushAssistant(`无法读取剪映草稿服务状态:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
-      return;
-    }
-    if (!capability.available) return;
-
     const generatedSceneVideos = artifact.generatedSceneVideos;
     const expectedScenePackages = artifact.videoScenePackages.scene_packages;
     const successfulScenes: JianyingDraftScene[] = generatedSceneVideos.scene_videos.map((scene) => ({
@@ -7393,15 +7389,23 @@ export function WorkspacePage() {
       return;
     }
     if (jianyingDraftRecordsForConversation(targetConversationId)[storyboard_version_id]?.status === "succeeded") return;
-
-    const request: JianyingDraftStartRequest = {
-      conversation_id: targetConversationId,
-      storyboard_version_id,
-      scenes: successfulScenes,
-      video_task_id: artifact.mergedVideo.task_id || null,
-      project_name: artifact.plan?.plan_markdown ? String(artifact.plan.plan_markdown.split("\n")[0] || "") : null,
-    };
+    if (!jianyingDraftStartGuardRef.current.tryAcquire(targetConversationId, storyboard_version_id)) return;
     try {
+      let capability: JianyingDraftCapability;
+      try {
+        capability = await api.getJianyingDraftCapability();
+      } catch (err) {
+        pushAssistant(`无法读取剪映草稿服务状态:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+        return;
+      }
+      if (!capability.available) return;
+      const request: JianyingDraftStartRequest = {
+        conversation_id: targetConversationId,
+        storyboard_version_id,
+        scenes: successfulScenes,
+        video_task_id: artifact.mergedVideo.task_id || null,
+        project_name: artifact.plan?.plan_markdown ? String(artifact.plan.plan_markdown.split("\n")[0] || "") : null,
+      };
       const started = await api.startJianyingDraftJob(request);
       if (!started.job_id) {
         pushAssistant(started.message || "剪映草稿任务未能启动。", targetConversationId);
@@ -7419,6 +7423,8 @@ export function WorkspacePage() {
       await resumePendingJianyingDraftJob(pendingJianyingDraftJob);
     } catch (err) {
       pushAssistant(`剪映草稿生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } finally {
+      jianyingDraftStartGuardRef.current.release(targetConversationId, storyboard_version_id);
     }
   };
   // Task 6 将把该处理器透传给最终视频卡片；此处先完成可恢复任务编排。

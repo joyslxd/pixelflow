@@ -4,7 +4,7 @@ import test from "node:test";
 const moduleUrl = process.env.JIANYING_DRAFT_TEST_MODULE;
 assert.ok(moduleUrl, "JIANYING_DRAFT_TEST_MODULE must point to the compiled jianyingDraft module");
 
-const { draftButtonState, storyboardVersionId } = await import(moduleUrl);
+const { JianyingDraftStartGuard, draftButtonState, storyboardVersionId } = await import(moduleUrl);
 
 function scene(sceneIndex, videoUrl = `https://cdn.example.com/${sceneIndex}.mp4`, taskId = `task-${sceneIndex}`) {
   return {
@@ -101,4 +101,30 @@ test("button offers download for a current draft and regeneration for an expired
     }),
     { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" },
   );
+});
+
+test("start guard lets concurrent clicks start one job for the same conversation and storyboard", async () => {
+  const guard = new JianyingDraftStartGuard();
+  let starts = 0;
+  let releaseCapability;
+  const capability = new Promise((resolve) => {
+    releaseCapability = resolve;
+  });
+  const start = async () => {
+    if (!guard.tryAcquire("conversation-1", "storyboard-1")) return;
+    try {
+      await capability;
+      starts += 1;
+    } finally {
+      guard.release("conversation-1", "storyboard-1");
+    }
+  };
+
+  const first = start();
+  const second = start();
+  releaseCapability();
+  await Promise.all([first, second]);
+
+  assert.equal(starts, 1);
+  assert.equal(guard.tryAcquire("conversation-1", "storyboard-1"), true);
 });

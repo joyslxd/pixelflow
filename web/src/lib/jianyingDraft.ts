@@ -59,6 +59,22 @@ const FNV1A64_OFFSET_BASIS = 0xCBF29CE484222325n;
 const FNV1A64_PRIME = 0x100000001B3n;
 const FNV1A64_BITS = 64;
 
+/** 按对话和分镜版本阻止浏览器端重复启动任务。 */
+export class JianyingDraftStartGuard {
+  private readonly inFlightKeys = new Set<string>();
+
+  tryAcquire(conversationId: string, storyboardVersionId: string): boolean {
+    const key = `${conversationId}\u0000${storyboardVersionId}`;
+    if (this.inFlightKeys.has(key)) return false;
+    this.inFlightKeys.add(key);
+    return true;
+  }
+
+  release(conversationId: string, storyboardVersionId: string): void {
+    this.inFlightKeys.delete(`${conversationId}\u0000${storyboardVersionId}`);
+  }
+}
+
 function canonicalVideoUrl(value: unknown): string {
   if (typeof value !== "string") throw new TypeError("video_url must be an HTTP(S) URL");
   try {
