@@ -642,6 +642,37 @@ async def test_retry_reuses_its_failed_job_slot_when_store_is_full():
 
 
 @pytest.mark.asyncio
+async def test_replaced_job_history_is_bounded_and_evicts_oldest_retry():
+    skill = ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.FAILED))
+    service = JianyingDraftService(skill=skill)
+    requests = [_request(number) for number in range(100)]
+    initial_job_ids: list[str] = []
+
+    for request in requests:
+        started = await service.start(request)
+        assert started.job_id is not None
+        initial_job_ids.append(started.job_id)
+        await _wait_for_terminal(service, started.job_id)
+
+    retry_job_ids: list[str] = []
+    for request in requests:
+        retried = await service.start(request, retry_failed=True)
+        assert retried.job_id is not None
+        retry_job_ids.append(retried.job_id)
+        await _wait_for_terminal(service, retried.job_id)
+
+    latest_retry = await service.start(requests[0], retry_failed=True)
+    assert latest_retry.job_id is not None
+    await _wait_for_terminal(service, latest_retry.job_id)
+
+    assert service.job_count == 100
+    assert await service._replaced_job_count() == 100
+    assert await service.get_job(initial_job_ids[0]) is None
+    assert await service.claim_terminal_experience(initial_job_ids[0]) is False
+    assert await service.get_job(retry_job_ids[0]) is not None
+
+
+@pytest.mark.asyncio
 async def test_concurrent_start_does_not_create_duplicate_jobs():
     skill = BlockingFakeSkill()
     service = JianyingDraftService(skill=skill)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
@@ -14,6 +15,7 @@ from .skill import JianyingDraftCapability, JianyingDraftSkill
 logger = logging.getLogger(__name__)
 
 _MAX_JOBS = 100
+_MAX_REPLACED_JOBS = _MAX_JOBS
 _DEFAULT_TIMEOUT_SECONDS = 1800.0
 _TERMINAL_STATUSES = {
     JianyingDraftStatus.SUCCEEDED,
@@ -58,7 +60,7 @@ class JianyingDraftService:
         self._timeout_seconds = timeout_seconds
         self._jobs: dict[str, _JianyingDraftJob] = {}
         self._job_ids_by_key: dict[tuple[str, str], str] = {}
-        self._replaced_jobs: dict[str, _ReplacedJianyingDraftJob] = {}
+        self._replaced_jobs: OrderedDict[str, _ReplacedJianyingDraftJob] = OrderedDict()
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -188,10 +190,13 @@ class JianyingDraftService:
                 if reclaimed_job is replaced_job:
                     previous_job_id = replaced_job.result.job_id
                     if previous_job_id is not None:
-                        self._replaced_jobs[previous_job_id] = _ReplacedJianyingDraftJob(
-                            result=replaced_job.result.model_copy(deep=True),
-                            replaced_by_job_id=job_id,
-                            terminal_experience_claimed=replaced_job.terminal_experience_claimed,
+                        self._remember_replaced_job(
+                            previous_job_id,
+                            _ReplacedJianyingDraftJob(
+                                result=replaced_job.result.model_copy(deep=True),
+                                replaced_by_job_id=job_id,
+                                terminal_experience_claimed=replaced_job.terminal_experience_claimed,
+                            ),
                         )
                 else:
                     replaced_job.replaced_by_job_id = job_id
@@ -223,6 +228,12 @@ class JianyingDraftService:
                 if replaced_job is not None
                 else None
             )
+
+    async def _replaced_job_count(self) -> int:
+        """仅供测试确认被替换任务历史的容量边界。"""
+
+        async with self._lock:
+            return len(self._replaced_jobs)
 
     async def claim_terminal_experience(self, job_id: str) -> bool:
         """原子领取终态经验写入权，避免并发轮询重复记录 PowerMem。"""
@@ -262,6 +273,18 @@ class JianyingDraftService:
     def _get_current_job(self, key: tuple[str, str]) -> _JianyingDraftJob | None:
         job_id = self._job_ids_by_key.get(key)
         return self._jobs.get(job_id) if job_id is not None else None
+
+    def _remember_replaced_job(
+        self,
+        job_id: str,
+        replaced_job: _ReplacedJianyingDraftJob,
+    ) -> None:
+        """按替换顺序保留有限历史，淘汰后不再可查询或领取经验写入权。"""
+
+        self._replaced_jobs[job_id] = replaced_job
+        self._replaced_jobs.move_to_end(job_id)
+        while len(self._replaced_jobs) > _MAX_REPLACED_JOBS:
+            self._replaced_jobs.popitem(last=False)
 
     def _should_reuse(
         self,
