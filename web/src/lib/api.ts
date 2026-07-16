@@ -2,6 +2,19 @@
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
 import type { SceneAssetRetryTarget } from "@/lib/scenePackages";
+import type {
+  JianyingDraftCapability,
+  JianyingDraftJobResponse,
+  JianyingDraftStartRequest,
+} from "./jianyingDraft";
+
+export type {
+  JianyingDraftCapability,
+  JianyingDraftJobResponse,
+  JianyingDraftScene,
+  JianyingDraftStartRequest,
+  JianyingDraftStatus,
+} from "./jianyingDraft";
 
 const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
@@ -1688,6 +1701,18 @@ export const api = {
 
   getSceneVideosJob: (jobId: string) =>
     req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`),
+
+  getJianyingDraftCapability: () =>
+    req<JianyingDraftCapability>(`${FLOW_BASE}/video/jianying-draft/capability`),
+
+  startJianyingDraftJob: (body: JianyingDraftStartRequest) =>
+    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getJianyingDraftJob: (jobId: string) =>
+    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/jobs/${encodeURIComponent(jobId)}`),
 
   pollSceneVideoJob,
 

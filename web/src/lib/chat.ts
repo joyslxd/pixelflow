@@ -9,6 +9,8 @@ import type {
   ImageGenerateResponse,
   ImageModelParamConfig,
   ImagePrepareResponse,
+  JianyingDraftJobResponse,
+  JianyingDraftStartRequest,
   MergeSceneVideosResponse,
   PlanMarkdownResponse,
   PrepareScenePackagesResponse,
@@ -38,6 +40,17 @@ export interface SceneGlobalAssetEditReview {
   is_fusion?: boolean;
 }
 
+export interface PendingJianyingDraftJobPayload {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  storyboard_version_id: string;
+  started_at: string;
+  request: JianyingDraftStartRequest;
+}
+
+export type JianyingDraftRecordMap = Record<string, JianyingDraftJobResponse>;
+
 export interface ChatMessage {
   id: string;
   conversationId?: string;
@@ -61,6 +74,7 @@ export interface ChatMessage {
       | "video_quality_review"
       | "video_analysis_result"
       | "video_result"
+      | "jianying_draft"
       | "ppt_outline"
       | "ppt_images"
       | "ppt_file";
@@ -93,6 +107,8 @@ export interface ChatMessage {
     sceneAssetFailures?: Array<Record<string, unknown>>;
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;
+    jianyingDraft?: JianyingDraftJobResponse;
+    pendingJianyingDraftJob?: PendingJianyingDraftJobPayload;
     videoScenePackageEditedSceneIds?: string[];
     videoQualityReview?: VideoQualityReviewResponse;
     videoAnalysis?: AnalyzeStoryboardsResponse;
