@@ -6,9 +6,10 @@ import { formatVideoDuration, videoDownloadName } from "./VideoResultCard";
 interface VideoPreviewPanelProps {
   video: VideoResult;
   onBack: () => void;
+  onDownload?: (video: VideoResult) => void;
 }
 
-export function VideoPreviewPanel({ video, onBack }: VideoPreviewPanelProps) {
+export function VideoPreviewPanel({ video, onBack, onDownload }: VideoPreviewPanelProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hasPlaybackStartedRef = useRef(false);
   const [playbackUrl, setPlaybackUrl] = useState(video.url);
@@ -103,6 +104,7 @@ export function VideoPreviewPanel({ video, onBack }: VideoPreviewPanelProps) {
             download={videoDownloadName(video)}
             target="_blank"
             rel="noreferrer"
+            onClick={() => onDownload?.(video)}
             className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-black px-3 text-[14px] font-semibold text-white hover:bg-black/85"
           >
             <Download size={16} />

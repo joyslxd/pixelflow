@@ -21,11 +21,13 @@ export function VideoResultCard({
   className,
   mediaClassName,
   onOpen,
+  onDownload,
 }: {
   result: VideoResult;
   className?: string;
   mediaClassName?: string;
   onOpen?: (result: VideoResult) => void;
+  onDownload?: (result: VideoResult) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [metadataDuration, setMetadataDuration] = useState<number | null>(null);
@@ -117,7 +119,10 @@ export function VideoResultCard({
               aria-label="下载视频"
               title="下载视频"
               className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md bg-black/45 text-white transition-colors hover:bg-black/65 focus:outline-none focus:ring-2 focus:ring-white/70"
-              onClick={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDownload?.(result);
+              }}
             >
               <Download size={16} strokeWidth={2.2} />
             </a>
