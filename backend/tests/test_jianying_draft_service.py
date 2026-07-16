@@ -357,6 +357,11 @@ async def test_provider_terminal_messages_are_replaced_with_public_messages(
         JianyingDraftResult(
             status=status,
             message="https://provider.example.com/?token=secret-token",
+            provider_task_id="provider-task-secret-token",
+            download_url="https://provider.example.com/draft.zip?token=secret-token",
+            file_name="secret-token-draft.zip",
+            expire_at=datetime.now(UTC) + timedelta(hours=1),
+            replaced_by_job_id="provider-replacement-secret-token",
         )
     )
     service = JianyingDraftService(skill=skill)
@@ -367,8 +372,37 @@ async def test_provider_terminal_messages_are_replaced_with_public_messages(
 
     assert result.status == status
     assert result.message == expected_message
+    assert result.provider_task_id is None
+    assert result.download_url is None
+    assert result.file_name is None
+    assert result.expire_at is None
+    assert result.replaced_by_job_id is None
     assert "secret-token" not in result.model_dump_json()
     assert "provider.example.com" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_succeeded_provider_result_keeps_download_fields():
+    expire_at = datetime.now(UTC) + timedelta(hours=1)
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=JianyingDraftStatus.SUCCEEDED,
+            provider_task_id="provider-task",
+            download_url="https://cdn.example.com/draft.zip",
+            file_name="draft.zip",
+            expire_at=expire_at,
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.provider_task_id == "provider-task"
+    assert str(result.download_url) == "https://cdn.example.com/draft.zip"
+    assert result.file_name == "draft.zip"
+    assert result.expire_at == expire_at
 
 
 @pytest.mark.asyncio

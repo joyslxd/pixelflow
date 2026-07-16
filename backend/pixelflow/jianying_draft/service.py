@@ -232,7 +232,7 @@ class JianyingDraftService:
         message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
         if message is None:
             return result
-        return result.model_copy(update={"message": message})
+        return JianyingDraftResult(status=result.status, message=message)
 
     async def _set_running(self, job_id: str) -> None:
         async with self._lock:
