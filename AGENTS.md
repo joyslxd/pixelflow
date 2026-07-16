@@ -27,25 +27,30 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 6. `backend/app/gateway/routers/pixelflow_image.py`
 7. `backend/app/gateway/routers/pixelflow_video.py`
 8. `backend/app/gateway/routers/pixelflow_ppt.py`
-9. `backend/app/gateway/routers/pixelflow_conversations.py`
-10. `backend/pixelflow/intake/llm.py`
-11. `backend/pixelflow/intake/forms.py`
-12. `backend/pixelflow/intake/industry_profile.py`
-13. `backend/pixelflow/creative/plan_markdown.py`
-14. `backend/pixelflow/creative/plan_llm.py`
-15. `backend/pixelflow/creative/contract.py`
-16. `backend/pixelflow/creative/duration.py`
-17. `backend/pixelflow/generate/image_prepare.py`
-18. `backend/pixelflow/generate/scene_packages.py`
-19. `backend/pixelflow/generate/seedance_prompt.py`
-20. `backend/pixelflow/skills/base.py`
-21. `backend/pixelflow/skills/borgrise/skill.py`
-22. `backend/pixelflow/skills/borgrise/run_generation.py`
-23. `web/src/pages/WorkspacePage.tsx`
-24. `web/src/lib/api.ts`
-25. `web/src/components/composer/GenParamsDialog.tsx`
-26. `web/src/components/canvas/StoryboardPanel.tsx`
-27. `web/src/components/canvas/SceneMentionEditor.tsx`
+9. `backend/app/gateway/routers/pixelflow_jianying_draft.py`
+10. `backend/pixelflow/jianying_draft/models.py`
+11. `backend/pixelflow/jianying_draft/skill.py`
+12. `backend/pixelflow/jianying_draft/service.py`
+13. `backend/app/gateway/routers/pixelflow_conversations.py`
+14. `backend/pixelflow/intake/llm.py`
+15. `backend/pixelflow/intake/forms.py`
+16. `backend/pixelflow/intake/industry_profile.py`
+17. `backend/pixelflow/creative/plan_markdown.py`
+18. `backend/pixelflow/creative/plan_llm.py`
+19. `backend/pixelflow/creative/contract.py`
+20. `backend/pixelflow/creative/duration.py`
+21. `backend/pixelflow/generate/image_prepare.py`
+22. `backend/pixelflow/generate/scene_packages.py`
+23. `backend/pixelflow/generate/seedance_prompt.py`
+24. `backend/pixelflow/skills/base.py`
+25. `backend/pixelflow/skills/borgrise/skill.py`
+26. `backend/pixelflow/skills/borgrise/run_generation.py`
+27. `web/src/pages/WorkspacePage.tsx`
+28. `web/src/lib/api.ts`
+29. `web/src/components/chat/MessageBubble.tsx`
+30. `web/src/components/composer/GenParamsDialog.tsx`
+31. `web/src/components/canvas/StoryboardPanel.tsx`
+32. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
@@ -128,6 +133,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频 | `POST /agent/flows/video/quality-review` | 视频 QAAgent QC 质检 |
 | 视频 | `POST /agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | `GET /agent/flows/video/quality-review/jobs/{job_id}` | 轮询视频 QAAgent QC 质检结果 |
+| 剪映草稿 | `GET /agent/flows/video/jianying-draft/capability` | 查询 Provider 可用性、不可用原因和轮询间隔 |
+| 剪映草稿 | `POST /agent/flows/video/jianying-draft/start` | 校验对话归属与当前分镜版本，启动或复用草稿 job |
+| 剪映草稿 | `GET /agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源对话归属后查询草稿 job，并按 job 幂等写终态经验 |
 | PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -158,6 +166,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
+| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py` | JianyingDraftService、JianyingDraftSkill | 只接收当前版本全部成功的分镜视频，校验对话归属与版本，管理异步 job、幂等、超时和安全终态摘要；Router 是 Controller，Service 是业务 Service，Skill 是第三方 Client 接口，`UnavailableJianyingDraftSkill` 是当前默认的不可用 Client 实现 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
 | 语义记忆 | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | PowerMemService | 读取用户/品牌长期偏好，记录 Agent 经验/Skill 沉淀 |
@@ -194,6 +203,18 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - PowerMem 只写业务摘要、偏好和经验，不写用户 token、供应商 key、完整异常堆栈、本地部署目录或原始大段 prompt。
 - `pixelflow_user_preferences` 仍是结构化业务偏好 Store，PowerMem 不替代它，只提供语义检索和跨 Agent 经验复用。
 - 以后新增或修改 Agent、流程、Skill 时，必须按同一套逻辑：读 `PowerMemService` 上下文，写阶段摘要，并同步更新 `docs/pixelflow-agent-skill-flow-latest-design.md`。
+
+## 剪映草稿 Agent
+
+剪映草稿位于最终视频确认阶段，输入是当前版本全部成功的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
+
+当前未取得第三方接口合同，配置默认装配 `UnavailableJianyingDraftSkill`。因此前端草稿按钮始终可见但禁用，tooltip 必须精确为“剪映草稿服务待接入”；不得调用 `/start`，不得伪造 ZIP、下载 URL、Provider 请求字段或响应字段。`JianyingDraftResult` 只允许 `status/job_id/provider_task_id/conversation_id/storyboard_version_id/download_url/file_name/expire_at/message` 等 typed 字段，内部异常和未受限的 `raw` 不得返回给前端。
+
+未结束最终视频卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个按钮。草稿生成期间锁定三项视频操作，但不锁对话输入；前端按 capability 返回的间隔（默认 2 秒）轮询，客户端和服务端最大等待 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误必须通过 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；刷新、离开或切换对话后只能恢复查询原 job，结果消息按 job ID 去重。视频点击“无意见，结束”后，草稿下载/重生历史入口仍保留，成功不自动下载。
+
+剪映草稿 job 首次达到 `succeeded/failed/timeout` 终态时，通过 `record_power_mem_background()` 写 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；不得写入 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。真实第三方合同到位后，只在 Provider 边界新增真实实现和独立第三方调用记录；除非接口确认属于 content-app，否则不要修改 `CONTENT_APP_API_CALLS.md`。
+
+当前 `JianyingDraftService` 的 job registry、幂等索引和后台 task 都在单 Uvicorn worker 的进程内。未来部署到多 worker、多容器或多副本前，必须改为共享且持久化的 job store，否则不同进程无法共同保证 job 查询、幂等和终态去重。
 
 ## Borgrise/content-app 能力
 

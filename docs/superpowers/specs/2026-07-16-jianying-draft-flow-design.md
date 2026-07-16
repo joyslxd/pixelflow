@@ -105,13 +105,17 @@ Java 类比：
 
 统一返回 PixelFlow 结果：
 
-- `provider_task_id`
 - `status`
+- `job_id`
+- `provider_task_id`
+- `conversation_id`
+- `storyboard_version_id`
 - `download_url`
 - `file_name`
 - `expire_at`
 - `message`
-- `raw`（只用于安全诊断，不直接展示敏感内容）
+
+`JianyingDraftResult` 只暴露上述 typed 字段，不提供无限制 `raw` 容器。Provider 原始响应与内部异常只可在服务端按安全日志规则处理，不能经 API 返回或展示给前端。
 
 当前 `UnavailableJianyingDraftSkill` 只返回能力未配置，不进行 HTTP 请求。
 

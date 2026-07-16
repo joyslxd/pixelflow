@@ -23,6 +23,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
 | 视频修改循环 | 可用 | 支持 QAAgent QC 质检、按受影响场景重生并重新合并 |
+| 剪映草稿 Agent | 框架已就绪，Provider 待接入 | 最终视频可生成剪映草稿的异步、版本化入口已具备；当前按钮可见但禁用，不发起第三方调用、不伪造 ZIP 或下载地址 |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
@@ -52,6 +53,7 @@ pixelflow/
 │   │   ├── intake/                  # 意图识别、表单、垂类画像、采集上下文
 │   │   ├── creative/                # 双 Plan 模板、LLM 策划、创作合同、版本和时长分配
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
+│   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
@@ -88,6 +90,7 @@ flowchart TD
   L --> M["按 Seedance Prompt 和视频合同串行创建场景视频任务"]
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
+  O -. "可选：Provider 接入后" .-> JD["剪映草稿 Agent\n生成可下载草稿"]
   F --> P["返回分析结果"]
   Q --> R["SmartPPT 生成/修改大纲"]
   R --> S["大纲转JSON + 生成页面图片"]
@@ -145,6 +148,9 @@ flowchart TD
 | 视频 | POST | `/agent/flows/video/quality-review` | 视频 QAAgent QC 质检，覆盖画面缺陷、商品露出、Prompt 跑偏、字幕、Brief 一致性、黑屏/卡顿和约束合规 |
 | 视频 | POST | `/agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | GET | `/agent/flows/video/quality-review/jobs/{job_id}` | 查询视频 QAAgent QC 质检结果 |
+| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/capability` | 查询剪映草稿 Provider 是否可用及前端轮询间隔 |
+| 剪映草稿 | POST | `/agent/flows/video/jianying-draft/start` | 校验来源对话和当前分镜版本，启动或复用草稿 job；未配置时不创建任务 |
+| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 查询来源对话拥有的剪映草稿 job，并在首次读取终态时记录经验摘要 |
 | PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -163,6 +169,18 @@ flowchart TD
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+## 剪映草稿流程
+
+剪映草稿能力位于最终视频结果确认阶段，输入只能是当前版本全部成功、按 `scene_index` 排序的分镜视频，不能用合并视频替代。`storyboard_version_id` 由 `scene_id`、顺序、视频 URL 和视频 task ID 的规范化摘要计算；同一 `conversation_id + storyboard_version_id` 复用运行中或未过期成功 job，失败或超时必须由用户以 `retry_failed=true` 明确重试。已过期成功结果可以重新生成，历史草稿不会被新版本复用。
+
+后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`UnavailableJianyingDraftSkill` 是当前安全默认 Client。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
+
+当前没有第三方合同，Provider 默认 unavailable。前端仍展示“生成剪映草稿”按钮，但禁用并以精确 tooltip“剪映草稿服务待接入”说明原因；不会调用 `/start`，不会构造 ZIP、下载 URL 或未定义的 Provider 字段。Provider 接入后只新增真实 Provider 实现和独立第三方调用记录；除非接口实际属于 content-app，否则不要写入 `CONTENT_APP_API_CALLS.md`。
+
+最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
+
+当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。剪映草稿 job 首次到达 `succeeded`、`failed` 或 `timeout` 终态时，只异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要。
 
 ## PowerMem 语义记忆
 
