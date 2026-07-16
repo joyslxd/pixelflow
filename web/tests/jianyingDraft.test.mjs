@@ -8,6 +8,7 @@ const {
   JianyingDraftStartGuard,
   draftButtonState,
   isJianyingDraftSucceededResultValid,
+  jianyingDraftPublicErrorMessage,
   patchJianyingDraftTargetConversation,
   patchJianyingDraftConversationContext,
   storyboardVersionId,
@@ -108,6 +109,33 @@ test("button offers download for a current draft and regeneration for an expired
     }),
     { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" },
   );
+});
+
+test("HTTP 草稿下载地址不被视为可下载成功结果", () => {
+  assert.deepEqual(
+    draftButtonState({
+      providerAvailable: true,
+      scenes: [scene(1)],
+      result: {
+        status: "succeeded",
+        download_url: "http://cdn.example.com/draft.zip",
+        expire_at: null,
+      },
+    }),
+    { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿下载地址无效，请重新生成" },
+  );
+  assert.equal(
+    isJianyingDraftSucceededResultValid(
+      { status: "succeeded", download_url: "http://cdn.example.com/draft.zip", expire_at: null },
+    ),
+    false,
+  );
+});
+
+test("剪映草稿公开错误文案不包含供应商或网关异常详情", () => {
+  assert.equal(jianyingDraftPublicErrorMessage("capability"), "暂时无法获取剪映草稿服务状态，请稍后重试。");
+  assert.equal(jianyingDraftPublicErrorMessage("start"), "剪映草稿任务启动失败，请稍后重试。");
+  assert.equal(jianyingDraftPublicErrorMessage("poll"), "继续查询剪映草稿任务失败，请稍后重试。");
 });
 
 test("succeeded result validity is conservative and permits only explicitly expired retries", () => {

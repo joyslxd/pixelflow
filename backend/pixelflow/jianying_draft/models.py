@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_validator
 
 
 class JianyingDraftStatus(StrEnum):
@@ -28,6 +28,13 @@ class JianyingDraftScene(BaseModel):
     scene_index: int = Field(ge=1)
     video_url: AnyHttpUrl
     task_id: str | None = None
+
+    @field_validator("video_url")
+    @classmethod
+    def require_https_video_url(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.scheme != "https":
+            raise ValueError("video_url must use HTTPS")
+        return value
 
 
 def compute_storyboard_version_id(scenes: Sequence[JianyingDraftScene]) -> str:
@@ -100,3 +107,10 @@ class JianyingDraftResult(BaseModel):
     file_name: str | None = None
     expire_at: datetime | None = None
     message: str = ""
+
+    @field_validator("download_url")
+    @classmethod
+    def require_https_download_url(cls, value: AnyHttpUrl | None) -> AnyHttpUrl | None:
+        if value is not None and value.scheme != "https":
+            raise ValueError("download_url must use HTTPS")
+        return value

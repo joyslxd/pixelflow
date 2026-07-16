@@ -137,16 +137,33 @@ export function patchJianyingDraftConversationContext(
 }
 
 function canonicalVideoUrl(value: unknown): string {
-  if (typeof value !== "string") throw new TypeError("video_url must be an HTTP(S) URL");
+  if (typeof value !== "string") throw new TypeError("video_url must be an HTTPS URL");
   try {
     const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      throw new TypeError("video_url must be an HTTP(S) URL");
+    if (url.protocol !== "https:") {
+      throw new TypeError("video_url must be an HTTPS URL");
     }
     return url.href;
   } catch {
-    throw new TypeError("video_url must be an HTTP(S) URL");
+    throw new TypeError("video_url must be an HTTPS URL");
   }
+}
+
+function isHttpsUrl(value: unknown): boolean {
+  try {
+    return typeof value === "string" && new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function jianyingDraftPublicErrorMessage(stage: "capability" | "start" | "poll"): string {
+  const messages = {
+    capability: "暂时无法获取剪映草稿服务状态，请稍后重试。",
+    start: "剪映草稿任务启动失败，请稍后重试。",
+    poll: "继续查询剪映草稿任务失败，请稍后重试。",
+  };
+  return messages[stage];
 }
 
 function normalizedScene(scene: JianyingDraftScene): Required<JianyingDraftScene> {
@@ -200,10 +217,11 @@ function hasUsableVideoUrl(scene: DraftButtonScene): boolean {
 }
 
 export function isJianyingDraftSucceededResultValid(
-  result: Pick<JianyingDraftJobResponse, "status" | "expire_at"> | null | undefined,
+  result: (Pick<JianyingDraftJobResponse, "status" | "expire_at"> & Partial<Pick<JianyingDraftJobResponse, "download_url">>) | null | undefined,
   now = new Date(),
 ): boolean {
   if (result?.status !== "succeeded") return false;
+  if (result.download_url && !isHttpsUrl(result.download_url)) return false;
   if (!result.expire_at) return true;
   const expireAt = Date.parse(result.expire_at);
   return !Number.isFinite(expireAt) || expireAt > now.getTime();
@@ -235,6 +253,9 @@ export function draftButtonState({
   }
   if (result?.status === "succeeded") {
     if (!isJianyingDraftSucceededResultValid(result, now)) {
+      if (result.download_url && !isHttpsUrl(result.download_url)) {
+        return { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿下载地址无效，请重新生成" };
+      }
       return { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" };
     }
     return result.download_url

@@ -195,3 +195,18 @@ test("失败重试、not_configured 终态和 job 级消息幂等均有明确合
   assert.match(generateMatch[0], /retry_failed/);
   assert.match(jianyingDraftSource, /retry_failed\?: boolean/);
 });
+
+test("从视频结果卡重试失败草稿会显式传 retry_failed，错误展示不会拼接响应正文", () => {
+  const resumeMatch = workspaceSource.match(
+    /const resumePendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const resumePendingImageJob)/,
+  );
+  const generateMatch = workspaceSource.match(/const handleGenerateJianyingDraft[\s\S]*?\n  const handleGenerateVideoFromScenePackages/);
+  assert.ok(resumeMatch && generateMatch);
+  assert.match(generateMatch[0], /const retry_failed = existingRecord\?\.status === "failed" \|\| existingRecord\?\.status === "timeout"/);
+  assert.match(generateMatch[0], /retry_failed,/);
+  assert.match(generateMatch[0], /jianyingDraftPublicErrorMessage\("capability"\)/);
+  assert.match(generateMatch[0], /jianyingDraftPublicErrorMessage\("start"\)/);
+  assert.doesNotMatch(generateMatch[0], /err\.message|String\(err\)|started\.message/);
+  assert.match(resumeMatch[0], /jianyingDraftPublicErrorMessage\("poll"\)/);
+  assert.doesNotMatch(resumeMatch[0], /继续查询剪映草稿任务失败:\$\{message\}|err\.message|String\(err\)/);
+});

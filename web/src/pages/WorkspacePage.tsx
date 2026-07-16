@@ -6,6 +6,7 @@ import { StoryboardPanel } from "@/components/canvas/StoryboardPanel";
 import { GenParamsDialog, type CreationIntent, type GenParamsForm } from "@/components/composer/GenParamsDialog";
 import { PlanRevisionDialog, type PlanRevisionMode } from "@/components/composer/PlanRevisionDialog";
 import {
+  ApiError,
   api,
   setActiveConversationId as setActiveConversationIdForTrace,
   subscribeTaskEvents,
@@ -93,6 +94,7 @@ import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 import {
   isJianyingDraftSucceededResultValid,
+  jianyingDraftPublicErrorMessage,
   JianyingDraftStartGuard,
   patchJianyingDraftTargetConversation,
   storyboardVersionId,
@@ -4808,7 +4810,13 @@ export function WorkspacePage() {
     });
     try {
       if (!shouldContinuePolling()) return;
-      const capability: JianyingDraftCapability = await api.getJianyingDraftCapability();
+      let capability: JianyingDraftCapability;
+      try {
+        capability = await api.getJianyingDraftCapability();
+      } catch {
+        await completeJianyingDraftJob(pendingJob, failedResult(jianyingDraftPublicErrorMessage("capability")));
+        return;
+      }
       setJianyingDraftCapability(capability);
       if (!shouldContinuePolling()) return;
       if (!capability.available) {
@@ -4841,8 +4849,7 @@ export function WorkspacePage() {
           }
         } catch (err) {
           if (!shouldContinuePolling()) return;
-          const message = err instanceof Error ? err.message : String(err);
-          if (message.includes("404")) {
+          if (err instanceof ApiError && err.status === 404) {
             await clearExpiredJianyingDraftJob(
               pendingJob,
               "之前的剪映草稿任务不存在或已过期。为避免重复创建，我没有自动重启任务，请从视频结果卡片手动重试。",
@@ -4851,7 +4858,7 @@ export function WorkspacePage() {
           }
           retryCount += 1;
           if (retryCount >= 3) {
-            await completeJianyingDraftJob(pendingJob, failedResult(`继续查询剪映草稿任务失败:${message}`));
+            await completeJianyingDraftJob(pendingJob, failedResult(jianyingDraftPublicErrorMessage("poll")));
             return;
           }
         }
@@ -7475,8 +7482,8 @@ export function WorkspacePage() {
     let storyboard_version_id: string;
     try {
       storyboard_version_id = storyboardVersionId(successfulScenes);
-    } catch (err) {
-      pushAssistant(`当前分镜视频不符合剪映草稿输入要求:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } catch {
+      pushAssistant("当前分镜视频不符合剪映草稿输入要求，请检查分镜视频后重试。", targetConversationId);
       return;
     }
     const existingPending = pendingJianyingDraftJobRef.current;
@@ -7486,15 +7493,15 @@ export function WorkspacePage() {
     }
     const existingRecord = jianyingDraftRecordsForConversation(targetConversationId)[storyboard_version_id];
     if (isJianyingDraftSucceededResultValid(existingRecord)) return;
-    const retry_failed = msg.artifact?.type === "jianying_draft" && (existingRecord?.status === "failed" || existingRecord?.status === "timeout");
+    const retry_failed = existingRecord?.status === "failed" || existingRecord?.status === "timeout";
     if (!jianyingDraftStartGuardRef.current.tryAcquire(targetConversationId, storyboard_version_id)) return;
     try {
       let capability: JianyingDraftCapability;
       try {
         capability = await api.getJianyingDraftCapability();
         setJianyingDraftCapability(capability);
-      } catch (err) {
-        pushAssistant(`无法读取剪映草稿服务状态:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      } catch {
+        pushAssistant(jianyingDraftPublicErrorMessage("capability"), targetConversationId);
         return;
       }
       if (!capability.available) return;
@@ -7508,7 +7515,7 @@ export function WorkspacePage() {
       };
       const started = await api.startJianyingDraftJob(request);
       if (!started.job_id) {
-        pushAssistant(started.message || "剪映草稿任务未能启动。", targetConversationId);
+        pushAssistant(jianyingDraftPublicErrorMessage("start"), targetConversationId);
         return;
       }
       const pendingJianyingDraftJob: PendingJianyingDraftJob = {
@@ -7526,8 +7533,8 @@ export function WorkspacePage() {
         pendingJianyingDraftJob.job_id,
       );
       await resumePendingJianyingDraftJob(pendingJianyingDraftJob);
-    } catch (err) {
-      pushAssistant(`剪映草稿生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    } catch {
+      pushAssistant(jianyingDraftPublicErrorMessage("start"), targetConversationId);
     } finally {
       jianyingDraftStartGuardRef.current.release(targetConversationId, storyboard_version_id);
     }

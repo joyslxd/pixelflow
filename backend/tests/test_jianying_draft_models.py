@@ -124,8 +124,8 @@ def test_compute_storyboard_version_rejects_duplicate_scene_indexes():
         compute_storyboard_version_id(scenes)
 
 
-@pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/1.mp4"])
-def test_scene_rejects_non_http_video_url(url: str):
+@pytest.mark.parametrize("url", ["", "http://cdn.example.com/1.mp4", "blob:https://local/1", "file:///tmp/1.mp4"])
+def test_scene_rejects_non_https_video_url(url: str):
     with pytest.raises(ValidationError):
         JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url=url)
 
@@ -177,8 +177,8 @@ def test_result_does_not_expose_raw_provider_payload():
     assert "replaced_by_job_id" not in JianyingDraftResult.model_fields
 
 
-@pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/draft.zip"])
-def test_result_rejects_non_http_download_url(url: str):
+@pytest.mark.parametrize("url", ["", "http://cdn.example.com/draft.zip", "blob:https://local/1", "file:///tmp/draft.zip"])
+def test_result_rejects_non_https_download_url(url: str):
     with pytest.raises(ValidationError):
         JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED, download_url=url)
 
