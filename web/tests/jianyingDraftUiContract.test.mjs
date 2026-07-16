@@ -180,6 +180,13 @@ test("剪映草稿结果卡提供下载、失败重试且不用伪下载", () =>
   assert.doesNotMatch(messageBubbleSource, /URL\.createObjectURL/);
 });
 
+test("历史无下载地址的成功草稿卡按失败处理并允许重试", () => {
+  assert.match(messageBubbleSource, /jianyingDraftResult\.status === "succeeded" && !jianyingDraftSucceeded/);
+  assert.match(messageBubbleSource, /jianyingDraftSucceeded \? "剪映草稿已生成" : "剪映草稿生成失败"/);
+  assert.match(messageBubbleSource, /\) : jianyingDraftRetryable \? \(/);
+  assert.match(messageBubbleSource, /剪映草稿生成失败，请重新生成。/);
+});
+
 test("失败重试、not_configured 终态和 job 级消息幂等均有明确合同", () => {
   const completeMatch = workspaceSource.match(
     /const completeJianyingDraftJob[\s\S]*?(?=\n\s{2}const clearExpiredJianyingDraftJob)/,
@@ -191,6 +198,9 @@ test("失败重试、not_configured 终态和 job 级消息幂等均有明确合
   assert.ok(completeMatch && resumeMatch && generateMatch);
   assert.match(completeMatch[0], /pendingJob\.job_id/);
   assert.match(completeMatch[0], /existingRecord\.job_id !== boundResult\.job_id/);
+  assert.match(completeMatch[0], /isJianyingDraftSucceededResultValid\(result\)/);
+  assert.match(completeMatch[0], /status: "failed"/);
+  assert.match(completeMatch[0], /剪映草稿生成失败，请重新生成。/);
   assert.match(resumeMatch[0], /result\.status === "not_configured"/);
   assert.match(generateMatch[0], /retry_failed/);
   assert.match(jianyingDraftSource, /retry_failed\?: boolean/);

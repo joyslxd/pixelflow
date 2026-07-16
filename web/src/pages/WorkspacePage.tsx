@@ -4728,8 +4728,19 @@ export function WorkspacePage() {
     result: JianyingDraftJobResponse,
   ) => {
     const targetConversationId = pendingJob.conversation_id;
+    const safeResult: JianyingDraftJobResponse = result.status === "succeeded" && !isJianyingDraftSucceededResultValid(result)
+      ? {
+          ...result,
+          status: "failed",
+          provider_task_id: null,
+          download_url: null,
+          file_name: null,
+          expire_at: null,
+          message: "剪映草稿生成失败，请重新生成。",
+        }
+      : result;
     const boundResult: JianyingDraftJobResponse = {
-      ...result,
+      ...safeResult,
       job_id: pendingJob.job_id,
       conversation_id: targetConversationId,
       storyboard_version_id: pendingJob.storyboard_version_id,

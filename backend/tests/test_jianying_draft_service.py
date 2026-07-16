@@ -34,6 +34,14 @@ def _request(number: int = 1) -> JianyingDraftRequest:
     )
 
 
+def _succeeded_result(**kwargs: object) -> JianyingDraftResult:
+    return JianyingDraftResult(
+        status=JianyingDraftStatus.SUCCEEDED,
+        download_url="https://cdn.example.com/draft.zip",
+        **kwargs,
+    )
+
+
 async def _wait_for_terminal(service: JianyingDraftService, job_id: str) -> JianyingDraftResult:
     for _ in range(100):
         result = await service.get_job(job_id)
@@ -97,7 +105,7 @@ class RaisingCapabilityFakeSkill:
 
     async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
         self.generate_count += 1
-        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+        return _succeeded_result()
 
 
 class CompletionOrderFakeSkill:
@@ -111,7 +119,7 @@ class CompletionOrderFakeSkill:
         number = int(request.conversation_id.rsplit("-", maxsplit=1)[-1])
         if number != 1 and number != 100:
             await self._release_events.setdefault(number, asyncio.Event()).wait()
-        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+        return _succeeded_result()
 
     def release(self, number: int) -> None:
         self._release_events.setdefault(number, asyncio.Event()).set()
@@ -165,12 +173,12 @@ class FailThenBlockingFakeSkill:
                 message="provider failure",
             )
         await self.release.wait()
-        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+        return _succeeded_result()
 
 
 class BlockingCapabilityFakeSkill(ResultFakeSkill):
     def __init__(self) -> None:
-        super().__init__(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+        super().__init__(_succeeded_result())
         self.entered_capability = asyncio.Event()
         self.release_capability = asyncio.Event()
 
@@ -192,7 +200,7 @@ class RaiseThenSucceedFakeSkill:
         self.call_count += 1
         if self.call_count <= self.failures_before_success:
             raise RuntimeError("temporary provider failure")
-        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+        return _succeeded_result()
 
 
 class SlowRaisingFakeSkill(RaiseThenSucceedFakeSkill):
@@ -225,6 +233,29 @@ async def test_capability_overrides_skill_poll_interval_with_service_runtime_val
     capability = await service.capability()
 
     assert capability.poll_interval_seconds == 1.5
+
+
+@pytest.mark.asyncio
+async def test_capability_reason_is_sanitized_before_returning_to_gateway():
+    skill = ToggleCapabilityResultFakeSkill(
+        JianyingDraftResult(
+            status=JianyingDraftStatus.SUCCEEDED,
+            download_url="https://cdn.example.com/draft.zip",
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    skill.capability_available = False
+    skill.reason = "https://provider.example.com/?token=secret-token"
+    unavailable = await service.capability()
+    skill.capability_available = True
+    skill.reason = "provider internal diagnostic: secret-token"
+    available = await service.capability()
+
+    assert unavailable.reason == "剪映草稿服务待接入"
+    assert available.reason == ""
+    assert "secret-token" not in unavailable.model_dump_json()
+    assert "secret-token" not in available.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -277,7 +308,7 @@ async def test_aclose_rejects_start_waiting_for_capability():
 
 @pytest.mark.asyncio
 async def test_claim_terminal_experience_is_atomic_and_kept_with_job():
-    service = JianyingDraftService(skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)))
+    service = JianyingDraftService(skill=ResultFakeSkill(_succeeded_result()))
     started = await service.start(_request())
     assert started.job_id is not None
     await _wait_for_terminal(service, started.job_id)
@@ -327,7 +358,7 @@ async def test_provider_business_failure_is_not_retried():
 
 
 def test_default_timeout_is_thirty_minutes():
-    service = JianyingDraftService(skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)))
+    service = JianyingDraftService(skill=ResultFakeSkill(_succeeded_result()))
 
     assert service._timeout_seconds == 1800.0
 
@@ -345,7 +376,7 @@ async def test_unavailable_skill_does_not_create_job():
 
 @pytest.mark.asyncio
 async def test_unavailable_capability_uses_fixed_public_message(caplog):
-    skill = ToggleCapabilityResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+    skill = ToggleCapabilityResultFakeSkill(_succeeded_result())
     skill.capability_available = False
     skill.reason = "https://provider.example.com/?token=secret-token"
     service = JianyingDraftService(skill=skill)
@@ -432,8 +463,25 @@ async def test_succeeded_job_is_reused_for_same_version():
 
 
 @pytest.mark.asyncio
+async def test_succeeded_without_download_url_becomes_retryable_public_failure():
+    skill = ResultFakeSkill(JianyingDraftResult.model_construct(status=JianyingDraftStatus.SUCCEEDED))
+    service = JianyingDraftService(skill=skill)
+
+    first = await service.start(_request())
+    assert first.job_id is not None
+    completed = await _wait_for_terminal(service, first.job_id)
+    retried = await service.start(_request(), retry_failed=True)
+
+    assert completed.status == JianyingDraftStatus.FAILED
+    assert completed.message == "剪映草稿生成失败，请稍后重试。"
+    assert completed.download_url is None
+    assert retried.job_id is not None
+    assert retried.job_id != first.job_id
+
+
+@pytest.mark.asyncio
 async def test_succeeded_job_reuse_does_not_probe_changed_capability():
-    skill = ToggleCapabilityResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+    skill = ToggleCapabilityResultFakeSkill(_succeeded_result())
     service = JianyingDraftService(skill=skill)
 
     first = await service.start(_request())
@@ -475,12 +523,7 @@ async def test_terminal_failure_requires_explicit_retry(
 
 @pytest.mark.asyncio
 async def test_expired_succeeded_job_creates_a_new_job():
-    skill = ResultFakeSkill(
-        JianyingDraftResult(
-            status=JianyingDraftStatus.SUCCEEDED,
-            expire_at=datetime.now(UTC) - timedelta(seconds=1),
-        )
-    )
+    skill = ResultFakeSkill(_succeeded_result(expire_at=datetime.now(UTC) - timedelta(seconds=1)))
     service = JianyingDraftService(skill=skill)
 
     first = await service.start(_request())
@@ -621,7 +664,7 @@ async def test_provider_non_terminal_result_becomes_retryable_public_failure(
 
 @pytest.mark.asyncio
 async def test_terminal_jobs_are_pruned_to_one_hundred():
-    skill = ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+    skill = ResultFakeSkill(_succeeded_result())
     service = JianyingDraftService(skill=skill)
 
     job_ids = []

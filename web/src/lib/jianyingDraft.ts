@@ -221,7 +221,7 @@ export function isJianyingDraftSucceededResultValid(
   now = new Date(),
 ): boolean {
   if (result?.status !== "succeeded") return false;
-  if (result.download_url && !isHttpsUrl(result.download_url)) return false;
+  if (!isHttpsUrl(result.download_url)) return false;
   if (!result.expire_at) return true;
   const expireAt = Date.parse(result.expire_at);
   return !Number.isFinite(expireAt) || expireAt > now.getTime();
@@ -253,14 +253,12 @@ export function draftButtonState({
   }
   if (result?.status === "succeeded") {
     if (!isJianyingDraftSucceededResultValid(result, now)) {
-      if (result.download_url && !isHttpsUrl(result.download_url)) {
+      if (!isHttpsUrl(result.download_url)) {
         return { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿下载地址无效，请重新生成" };
       }
       return { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿已过期，请重新生成" };
     }
-    return result.download_url
-      ? { enabled: true, label: "下载剪映草稿", reason: "剪映草稿已生成" }
-      : { enabled: false, label: "剪映草稿已生成", reason: "剪映草稿已生成" };
+    return { enabled: true, label: "下载剪映草稿", reason: "剪映草稿已生成" };
   }
   if (result?.status === "failed" || result?.status === "timeout") {
     return {

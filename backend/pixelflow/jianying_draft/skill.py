@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
 
@@ -15,6 +15,11 @@ class JianyingDraftCapability(BaseModel):
     available: bool
     reason: str = ""
     poll_interval_seconds: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def expose_only_public_reason(self) -> JianyingDraftCapability:
+        self.reason = "" if self.available else "剪映草稿服务待接入"
+        return self
 
 
 class JianyingDraftSkill(Protocol):

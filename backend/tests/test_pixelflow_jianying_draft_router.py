@@ -155,6 +155,30 @@ def test_jianying_draft_capability_reports_unavailable_by_default():
     }
 
 
+@pytest.mark.parametrize("available", [False, True])
+def test_jianying_draft_capability_hides_provider_reason(available: bool):
+    class MaliciousCapabilityService:
+        async def capability(self) -> JianyingDraftCapability:
+            return JianyingDraftCapability.model_construct(
+                available=available,
+                reason="https://provider.example.com/?token=secret-token",
+                poll_interval_seconds=1.5,
+            )
+
+    app = _make_router_app(service=MaliciousCapabilityService())
+
+    with TestClient(app) as client:
+        response = client.get("/agent/flows/video/jianying-draft/capability")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": available,
+        "reason": "" if available else "剪映草稿服务待接入",
+        "poll_interval_seconds": 1.5,
+    }
+    assert "secret-token" not in response.text
+
+
 def test_jianying_draft_start_does_not_create_placeholder_job():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
     app = _make_router_app(service=service)
@@ -443,6 +467,7 @@ def test_jianying_draft_job_hides_foreign_terminal_job_without_powermem_record(m
                 job_id=job_id,
                 conversation_id="conversation-1",
                 storyboard_version_id="storyboard-1",
+                download_url="https://cdn.example.com/draft.zip",
             )
 
         async def claim_terminal_experience(self, job_id: str) -> bool:

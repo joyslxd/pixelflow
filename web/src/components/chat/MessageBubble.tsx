@@ -295,6 +295,13 @@ export function MessageBubble({
   const jianyingDraftUnavailable = !jianyingDraftCapability?.available;
   const jianyingDraftDownloadUrl = jianyingDraftResult?.download_url?.startsWith("https://") ? jianyingDraftResult.download_url : "";
   const jianyingDraftSucceeded = isJianyingDraftSucceededResultValid(jianyingDraftResult) && Boolean(jianyingDraftDownloadUrl);
+  const jianyingDraftRetryable = Boolean(
+    jianyingDraftResult && (
+      jianyingDraftResult.status === "failed"
+      || jianyingDraftResult.status === "timeout"
+      || (jianyingDraftResult.status === "succeeded" && !jianyingDraftSucceeded)
+    ),
+  );
   const videoResultActionDisabled = Boolean(actionsDisabled || jianyingDraftRunning);
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
@@ -1474,12 +1481,16 @@ export function MessageBubble({
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-[13px] font-semibold text-ink">
-                  {msg.artifact.jianyingDraft.status === "succeeded" ? "剪映草稿已生成" : "剪映草稿生成失败"}
+                  {jianyingDraftSucceeded ? "剪映草稿已生成" : "剪映草稿生成失败"}
                 </span>
-                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">{msg.artifact.description}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">
+                  {jianyingDraftRetryable && !jianyingDraftSucceeded
+                    ? "剪映草稿生成失败，请重新生成。"
+                    : msg.artifact.description}
+                </span>
               </span>
             </div>
-            {msg.artifact.jianyingDraft.status === "succeeded" && jianyingDraftDownloadUrl ? (
+            {jianyingDraftSucceeded ? (
               <div className="space-y-2 text-[12px] text-ink-soft">
                 <div className="truncate">{msg.artifact.jianyingDraft.file_name || "jianying-draft.zip"}</div>
                 <div>来源分镜：{msg.artifact.jianyingDraftSceneCount || 0} 个</div>
@@ -1494,9 +1505,13 @@ export function MessageBubble({
                   下载剪映草稿
                 </a>
               </div>
-            ) : msg.artifact.jianyingDraft.status === "failed" || msg.artifact.jianyingDraft.status === "timeout" ? (
+            ) : jianyingDraftRetryable ? (
               <div className="space-y-2">
-                <div className="text-[12px] leading-relaxed text-ink-soft">{msg.artifact.jianyingDraft.message}</div>
+                <div className="text-[12px] leading-relaxed text-ink-soft">
+                  {msg.artifact.jianyingDraft.status === "succeeded"
+                    ? "剪映草稿生成失败，请重新生成。"
+                    : msg.artifact.jianyingDraft.message}
+                </div>
                 <button
                   type="button"
                   disabled={actionsDisabled || jianyingDraftRunning || jianyingDraftUnavailable}

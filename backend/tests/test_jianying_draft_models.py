@@ -16,11 +16,25 @@ def test_capability_exposes_positive_poll_interval_with_stable_default():
 
     assert capability.model_dump() == {
         "available": False,
-        "reason": "",
+        "reason": "剪映草稿服务待接入",
         "poll_interval_seconds": 2.0,
     }
     with pytest.raises(ValidationError):
         JianyingDraftCapability(available=True, poll_interval_seconds=0)
+
+
+def test_capability_reason_is_always_public():
+    unavailable = JianyingDraftCapability(
+        available=False,
+        reason="https://provider.example.com/?token=secret-token",
+    )
+    available = JianyingDraftCapability(
+        available=True,
+        reason="provider internal diagnostic: secret-token",
+    )
+
+    assert unavailable.reason == "剪映草稿服务待接入"
+    assert available.reason == ""
 
 
 def test_storyboard_version_is_stable_after_input_reordering():
@@ -167,6 +181,11 @@ def test_result_does_not_expose_raw_provider_payload():
 def test_result_rejects_non_https_download_url(url: str):
     with pytest.raises(ValidationError):
         JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED, download_url=url)
+
+
+def test_succeeded_result_requires_https_download_url():
+    with pytest.raises(ValidationError):
+        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
 
 
 def test_result_serializes_https_download_url():

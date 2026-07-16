@@ -112,3 +112,9 @@ class JianyingDraftResult(BaseModel):
         if value is not None and value.scheme != "https":
             raise ValueError("download_url must use HTTPS")
         return value
+
+    @model_validator(mode="after")
+    def require_download_url_for_succeeded_result(self) -> JianyingDraftResult:
+        if self.status == JianyingDraftStatus.SUCCEEDED and self.download_url is None:
+            raise ValueError("succeeded result requires an HTTPS download_url")
+        return self

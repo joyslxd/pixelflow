@@ -97,7 +97,11 @@ class JianyingDraftService:
                     reason="剪映草稿服务暂不可用",
                     poll_interval_seconds=self._poll_interval_seconds,
                 )
-        return capability.model_copy(update={"poll_interval_seconds": self._poll_interval_seconds})
+        return JianyingDraftCapability(
+            available=capability.available,
+            reason="" if capability.available else "剪映草稿服务待接入",
+            poll_interval_seconds=self._poll_interval_seconds,
+        )
 
     async def aclose(self) -> None:
         """拒绝新任务，并取消等待中的后台生成任务。"""
@@ -288,7 +292,7 @@ class JianyingDraftService:
         if result.status in {JianyingDraftStatus.QUEUED, JianyingDraftStatus.RUNNING}:
             return True
         if result.status == JianyingDraftStatus.SUCCEEDED:
-            return not self._is_expired(result)
+            return self._is_valid_succeeded_result(result) and not self._is_expired(result)
         if result.status in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}:
             return not retry_failed
         return True
@@ -298,6 +302,19 @@ class JianyingDraftService:
         if result.expire_at is None:
             return False
         return datetime.now(result.expire_at.tzinfo) >= result.expire_at
+
+    @staticmethod
+    def _is_valid_succeeded_result(result: JianyingDraftResult) -> bool:
+        if result.status != JianyingDraftStatus.SUCCEEDED:
+            return False
+        try:
+            JianyingDraftResult(
+                status=JianyingDraftStatus.SUCCEEDED,
+                download_url=getattr(result, "download_url", None),
+            )
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def _make_room_for_new_job(
         self,
@@ -368,6 +385,11 @@ class JianyingDraftService:
 
     @staticmethod
     def _public_provider_result(result: JianyingDraftResult) -> JianyingDraftResult:
+        if result.status == JianyingDraftStatus.SUCCEEDED and not JianyingDraftService._is_valid_succeeded_result(result):
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.FAILED,
+                message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
+            )
         message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
         if message is not None:
             return JianyingDraftResult(status=result.status, message=message)

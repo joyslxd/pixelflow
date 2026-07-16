@@ -132,6 +132,22 @@ test("HTTP 草稿下载地址不被视为可下载成功结果", () => {
   );
 });
 
+test("缺少草稿下载地址不被视为成功，允许重新生成", () => {
+  assert.deepEqual(
+    draftButtonState({
+      providerAvailable: true,
+      scenes: [scene(1)],
+      result: {
+        status: "succeeded",
+        download_url: null,
+        expire_at: null,
+      },
+    }),
+    { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿下载地址无效，请重新生成" },
+  );
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", download_url: null, expire_at: null }), false);
+});
+
 test("剪映草稿公开错误文案不包含供应商或网关异常详情", () => {
   assert.equal(jianyingDraftPublicErrorMessage("capability"), "暂时无法获取剪映草稿服务状态，请稍后重试。");
   assert.equal(jianyingDraftPublicErrorMessage("start"), "剪映草稿任务启动失败，请稍后重试。");
@@ -146,7 +162,7 @@ test("succeeded result validity is conservative and permits only explicitly expi
       { status: "succeeded", expire_at: "2026-07-16T01:00:00.000Z" },
       now,
     ),
-    true,
+    false,
   );
   assert.equal(
     isJianyingDraftSucceededResultValid(
@@ -155,8 +171,8 @@ test("succeeded result validity is conservative and permits only explicitly expi
     ),
     false,
   );
-  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: null }, now), true);
-  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: "invalid" }, now), true);
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: null }, now), false);
+  assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", expire_at: "invalid" }, now), false);
   assert.equal(isJianyingDraftSucceededResultValid({ status: "failed", expire_at: null }, now), false);
 });
 

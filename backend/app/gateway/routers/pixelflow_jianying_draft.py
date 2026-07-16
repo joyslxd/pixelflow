@@ -160,7 +160,12 @@ async def get_jianying_draft_capability(request: Request) -> JianyingDraftCapabi
     """查询剪映草稿 Provider 的当前可用性。"""
 
     try:
-        return await _jianying_draft_service(request).capability()
+        capability = await _jianying_draft_service(request).capability()
+        return JianyingDraftCapability(
+            available=capability.available,
+            reason="" if capability.available else "剪映草稿服务待接入",
+            poll_interval_seconds=capability.poll_interval_seconds,
+        )
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001 - Provider 边界不可泄露内部异常
