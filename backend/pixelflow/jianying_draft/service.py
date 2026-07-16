@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
+from .config import DEFAULT_MAX_RETRIES
 from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
 from .skill import JianyingDraftCapability, JianyingDraftSkill
 
@@ -55,9 +56,13 @@ class JianyingDraftService:
         *,
         skill: JianyingDraftSkill,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self._skill = skill
         self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
         self._jobs: dict[str, _JianyingDraftJob] = {}
         self._job_ids_by_key: dict[tuple[str, str], str] = {}
         self._replaced_jobs: OrderedDict[str, _ReplacedJianyingDraftJob] = OrderedDict()
@@ -335,7 +340,7 @@ class JianyingDraftService:
         await self._set_running(job_id)
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                generated = await self._skill.generate(request)
+                generated = await self._generate_with_retries(request)
         except TimeoutError:
             result = JianyingDraftResult(
                 status=JianyingDraftStatus.TIMEOUT,
@@ -355,6 +360,27 @@ class JianyingDraftService:
             result = self._public_provider_result(generated)
 
         await self._store_result(job_id, request, result)
+
+    async def _generate_with_retries(
+        self,
+        request: JianyingDraftRequest,
+    ) -> JianyingDraftResult:
+        """只重试 Provider 异常；业务结果由调用方按状态一次性处理。"""
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await self._skill.generate(request)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - Provider 边界仅记录安全元数据
+                if attempt >= self._max_retries:
+                    raise
+                logger.warning(
+                    "[pixelflow] jianying draft generation retry attempt=%s error_type=%s",
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+        raise RuntimeError("unreachable")
 
     @staticmethod
     def _public_provider_result(result: JianyingDraftResult) -> JianyingDraftResult:

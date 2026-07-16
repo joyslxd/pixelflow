@@ -1,5 +1,9 @@
 """剪映草稿领域模型、Skill 协议与异步任务 Service。"""
 
+from .config import (
+    JianyingDraftRuntimeConfig,
+    load_jianying_draft_runtime_config,
+)
 from .models import (
     JianyingDraftRequest,
     JianyingDraftResult,
@@ -17,6 +21,7 @@ from .skill import (
 __all__ = [
     "JianyingDraftRequest",
     "JianyingDraftResult",
+    "JianyingDraftRuntimeConfig",
     "JianyingDraftScene",
     "JianyingDraftCapability",
     "JianyingDraftService",
@@ -24,4 +29,5 @@ __all__ = [
     "JianyingDraftStatus",
     "UnavailableJianyingDraftSkill",
     "compute_storyboard_version_id",
+    "load_jianying_draft_runtime_config",
 ]

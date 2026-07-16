@@ -59,6 +59,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _configure_jianying_draft_service(app: FastAPI) -> None:
+    """按 profile 环境变量注入剪映草稿 Service 与轮询合同参数。"""
+
+    from pixelflow.jianying_draft import (
+        JianyingDraftService,
+        UnavailableJianyingDraftSkill,
+        load_jianying_draft_runtime_config,
+    )
+
+    runtime_config = load_jianying_draft_runtime_config()
+    if runtime_config.enabled:
+        logger.warning(
+            "PixelFlow Jianying draft is enabled but no Provider is configured; using unavailable skill"
+        )
+    app.state.pixelflow_jianying_draft_service = JianyingDraftService(
+        skill=UnavailableJianyingDraftSkill(),
+        timeout_seconds=runtime_config.timeout_seconds,
+        max_retries=runtime_config.max_retries,
+    )
+    app.state.jianying_draft_poll_interval_seconds = runtime_config.poll_interval_seconds
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI 应用生命周期处理器。"""
@@ -87,20 +109,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("LangGraph runtime initialised")
 
         from deerflow.persistence.engine import get_session_factory
-        from pixelflow.jianying_draft import (
-            JianyingDraftService,
-            UnavailableJianyingDraftSkill,
-        )
         from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
-        # 真实 Provider 尚未接入，按内部默认 1800 秒超时创建不可用 Service，
-        # 不读取或虚构任何第三方连接配置。
-        app.state.pixelflow_jianying_draft_service = JianyingDraftService(
-            skill=UnavailableJianyingDraftSkill()
-        )
+        # 真实 Provider 尚未接入时仍只注入不可用实现，不虚构任何第三方连接配置。
+        _configure_jianying_draft_service(app)
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:

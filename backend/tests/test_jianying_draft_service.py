@@ -182,6 +182,28 @@ class BlockingCapabilityFakeSkill(ResultFakeSkill):
         return JianyingDraftCapability(available=True)
 
 
+class RaiseThenSucceedFakeSkill:
+    def __init__(self, failures_before_success: int) -> None:
+        self.failures_before_success = failures_before_success
+        self.call_count = 0
+
+    async def capability(self) -> JianyingDraftCapability:
+        return JianyingDraftCapability(available=True)
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        self.call_count += 1
+        if self.call_count <= self.failures_before_success:
+            raise RuntimeError("temporary provider failure")
+        return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
+
+
+class SlowRaisingFakeSkill(RaiseThenSucceedFakeSkill):
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        self.call_count += 1
+        await asyncio.sleep(0.02)
+        raise RuntimeError("temporary provider failure")
+
+
 @pytest.mark.asyncio
 async def test_capability_delegates_to_skill():
     service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
@@ -239,6 +261,44 @@ async def test_claim_terminal_experience_is_atomic_and_kept_with_job():
 
     assert claims.count(True) == 1
     assert claims.count(False) == 7
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_retries_up_to_configured_max_retries():
+    skill = RaiseThenSucceedFakeSkill(failures_before_success=3)
+    service = JianyingDraftService(skill=skill, max_retries=3)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.status == JianyingDraftStatus.SUCCEEDED
+    assert skill.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_provider_retries_share_one_timeout_budget():
+    skill = SlowRaisingFakeSkill(failures_before_success=10)
+    service = JianyingDraftService(skill=skill, timeout_seconds=0.01, max_retries=3)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.status == JianyingDraftStatus.TIMEOUT
+    assert skill.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_business_failure_is_not_retried():
+    skill = ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.FAILED))
+    service = JianyingDraftService(skill=skill, max_retries=3)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    await _wait_for_terminal(service, started.job_id)
+
+    assert skill.call_count == 1
 
 
 def test_default_timeout_is_thirty_minutes():
