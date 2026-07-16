@@ -33,6 +33,7 @@ class _JianyingDraftJob:
     key: tuple[str, str]
     result: JianyingDraftResult
     completed_at: datetime | None = None
+    replaced_by_job_id: str | None = None
     task: asyncio.Task[None] | None = None
 
 
@@ -135,9 +136,7 @@ class JianyingDraftService:
             self._jobs[job_id] = job
             self._job_ids_by_key[key] = job_id
             if replaced_job is not None:
-                replaced_job.result = replaced_job.result.model_copy(
-                    update={"replaced_by_job_id": job_id}
-                )
+                replaced_job.replaced_by_job_id = job_id
             job.task = asyncio.create_task(self._run(job_id, request))
             return result.model_copy(deep=True)
 
@@ -159,6 +158,12 @@ class JianyingDraftService:
         async with self._lock:
             job = self._jobs.get(job_id)
             return job.result.model_copy(deep=True) if job is not None else None
+
+    async def _get_replaced_by_job_id(self, job_id: str) -> str | None:
+        """仅供 Service 内部测试读取失败任务的替代关系。"""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            return job.replaced_by_job_id if job is not None else None
 
     def _get_current_job(self, key: tuple[str, str]) -> _JianyingDraftJob | None:
         job_id = self._job_ids_by_key.get(key)
@@ -230,9 +235,14 @@ class JianyingDraftService:
     @staticmethod
     def _public_provider_result(result: JianyingDraftResult) -> JianyingDraftResult:
         message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
-        if message is None:
-            return result
-        return JianyingDraftResult(status=result.status, message=message)
+        if message is not None:
+            return JianyingDraftResult(status=result.status, message=message)
+        if result.status in {JianyingDraftStatus.QUEUED, JianyingDraftStatus.RUNNING}:
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.FAILED,
+                message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
+            )
+        return result
 
     async def _set_running(self, job_id: str) -> None:
         async with self._lock:

@@ -161,6 +161,7 @@ def test_request_rejects_mismatched_storyboard_version():
 
 def test_result_does_not_expose_raw_provider_payload():
     assert "raw" not in JianyingDraftResult.model_fields
+    assert "replaced_by_job_id" not in JianyingDraftResult.model_fields
 
 
 @pytest.mark.parametrize("url", ["", "blob:https://local/1", "file:///tmp/draft.zip"])

@@ -290,7 +290,8 @@ async def test_terminal_failure_requires_explicit_retry(
     assert retried.job_id != first.job_id
     replaced = await service.get_job(first.job_id)
     assert replaced is not None
-    assert replaced.replaced_by_job_id == retried.job_id
+    assert "replaced_by_job_id" not in replaced.model_dump()
+    assert await service._get_replaced_by_job_id(first.job_id) == retried.job_id
     await _wait_for_terminal(service, retried.job_id)
     assert skill.call_count == 2
 
@@ -361,7 +362,6 @@ async def test_provider_terminal_messages_are_replaced_with_public_messages(
             download_url="https://provider.example.com/draft.zip?token=secret-token",
             file_name="secret-token-draft.zip",
             expire_at=datetime.now(UTC) + timedelta(hours=1),
-            replaced_by_job_id="provider-replacement-secret-token",
         )
     )
     service = JianyingDraftService(skill=skill)
@@ -376,7 +376,7 @@ async def test_provider_terminal_messages_are_replaced_with_public_messages(
     assert result.download_url is None
     assert result.file_name is None
     assert result.expire_at is None
-    assert result.replaced_by_job_id is None
+    assert "replaced_by_job_id" not in result.model_dump()
     assert "secret-token" not in result.model_dump_json()
     assert "provider.example.com" not in result.model_dump_json()
 
@@ -403,6 +403,43 @@ async def test_succeeded_provider_result_keeps_download_fields():
     assert str(result.download_url) == "https://cdn.example.com/draft.zip"
     assert result.file_name == "draft.zip"
     assert result.expire_at == expire_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [JianyingDraftStatus.QUEUED, JianyingDraftStatus.RUNNING],
+)
+async def test_provider_non_terminal_result_becomes_retryable_public_failure(
+    status: JianyingDraftStatus,
+):
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=status,
+            message="https://provider.example.com/?token=secret-token",
+            provider_task_id="provider-task-secret-token",
+            download_url="https://provider.example.com/draft.zip?token=secret-token",
+            file_name="secret-token-draft.zip",
+            expire_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+    retried = await service.start(_request(), retry_failed=True)
+
+    assert result.status == JianyingDraftStatus.FAILED
+    assert result.message == "剪映草稿生成失败，请稍后重试。"
+    assert result.provider_task_id is None
+    assert result.download_url is None
+    assert result.file_name is None
+    assert result.expire_at is None
+    assert "secret-token" not in result.model_dump_json()
+    assert service._jobs[started.job_id].completed_at is not None
+    assert retried.job_id is not None
+    assert retried.job_id != started.job_id
 
 
 @pytest.mark.asyncio
