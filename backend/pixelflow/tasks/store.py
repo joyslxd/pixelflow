@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -104,6 +105,15 @@ def _jianying_draft_status(value: Any) -> str | None:
 def _jianying_draft_succeeded_is_valid(value: Any, *, now: datetime) -> bool:
     if _jianying_draft_status(value) != "succeeded" or not isinstance(value, dict):
         return False
+    download_url = value.get("download_url")
+    if not isinstance(download_url, str):
+        return False
+    try:
+        parsed_download_url = urlsplit(download_url)
+    except ValueError:
+        return False
+    if parsed_download_url.scheme.lower() != "https" or not parsed_download_url.netloc:
+        return False
     raw_expire_at = value.get("expire_at")
     if not isinstance(raw_expire_at, (datetime, str)):
         return True
@@ -111,6 +121,13 @@ def _jianying_draft_succeeded_is_valid(value: Any, *, now: datetime) -> bool:
     if expire_at is None:
         return True
     return expire_at > now
+
+
+def _jianying_draft_effective_status(value: Any, *, now: datetime) -> str | None:
+    status = _jianying_draft_status(value)
+    if status == "succeeded" and not _jianying_draft_succeeded_is_valid(value, now=now):
+        return "failed"
+    return status
 
 
 def _merge_jianying_draft_record(
@@ -142,9 +159,7 @@ def _merge_jianying_draft_record(
             return current, incoming_status == current_status
         if incoming_status in _JIANYING_DRAFT_TERMINAL_STATUSES:
             return incoming, True
-        if _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(incoming_status or "", 0) >= _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(
-            current_status or "", 0
-        ):
+        if _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(incoming_status or "", 0) >= _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(current_status or "", 0):
             return incoming, True
         return current, False
     if current_pending_job_id == expected_job_id:
@@ -171,10 +186,7 @@ def _can_set_jianying_draft_pending(
     record_status = _jianying_draft_status(record)
     if record_status == "succeeded" and _jianying_draft_succeeded_is_valid(record, now=now):
         return False
-    return not (
-        _jianying_draft_job_id(record) == expected_job_id
-        and record_status in _JIANYING_DRAFT_TERMINAL_STATUSES
-    )
+    return not (_jianying_draft_job_id(record) == expected_job_id and record_status in _JIANYING_DRAFT_TERMINAL_STATUSES)
 
 
 def _jianying_draft_phase_after_patch(
@@ -186,16 +198,14 @@ def _jianying_draft_phase_after_patch(
     merged_records: dict[str, Any],
     incoming_record_keys: set[str],
     request_authorized: bool,
+    now: datetime,
 ) -> str:
     if not request_authorized:
         return current_phase
     pending_job_id = _jianying_draft_job_id(pending_job)
     if pending_job_id is not None:
         return "jianying_draft_running" if pending_job_id == expected_job_id else current_phase
-    effective_statuses = {
-        _jianying_draft_status(merged_records.get(storyboard_version_id))
-        for storyboard_version_id in incoming_record_keys
-    }
+    effective_statuses = {_jianying_draft_effective_status(merged_records.get(storyboard_version_id), now=now) for storyboard_version_id in incoming_record_keys}
     if "succeeded" in effective_statuses:
         return "jianying_draft_succeeded"
     if "failed" in effective_statuses:
@@ -271,6 +281,7 @@ def _patch_jianying_draft_context(
         merged_records=merged_records,
         incoming_record_keys=set(records),
         request_authorized=request_authorized,
+        now=patch_time,
     )
     return patched, resolved_phase
 

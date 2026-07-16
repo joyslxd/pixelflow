@@ -611,6 +611,7 @@ async def test_succeeded_provider_result_keeps_download_fields():
             download_url="https://cdn.example.com/draft.zip",
             file_name="draft.zip",
             expire_at=expire_at,
+            message="https://provider.example.com/result?token=secret-token",
         )
     )
     service = JianyingDraftService(skill=skill)
@@ -623,6 +624,9 @@ async def test_succeeded_provider_result_keeps_download_fields():
     assert str(result.download_url) == "https://cdn.example.com/draft.zip"
     assert result.file_name == "draft.zip"
     assert result.expire_at == expire_at
+    assert result.message == "剪映草稿已生成"
+    assert "secret-token" not in result.model_dump_json()
+    assert "provider.example.com" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio

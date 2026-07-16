@@ -81,6 +81,9 @@ class JianyingDraftRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_storyboard(self) -> JianyingDraftRequest:
+        scene_indexes = [scene.scene_index for scene in self.scenes]
+        if scene_indexes != sorted(scene_indexes):
+            raise ValueError("scenes must be ordered by strictly ascending scene_index")
         expected_version_id = compute_storyboard_version_id(self.scenes)
         if self.storyboard_version_id != expected_version_id:
             raise ValueError("storyboard_version_id does not match the supplied scenes")

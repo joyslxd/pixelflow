@@ -204,11 +204,14 @@ def _jianying_pending(job_id: str, conversation_id: str, storyboard_version_id: 
 
 
 def _jianying_record(status: str, job_id: str, storyboard_version_id: str) -> dict[str, str]:
-    return {
+    record = {
         "status": status,
         "job_id": job_id,
         "storyboard_version_id": storyboard_version_id,
     }
+    if status == "succeeded":
+        record["download_url"] = "https://cdn.example.com/draft.zip"
+    return record
 
 
 @pytest.mark.asyncio
@@ -436,6 +439,66 @@ async def test_memory_jianying_draft_only_allows_new_job_after_succeeded_record_
     assert restored.context["pendingJianyingDraftJob"] is None
     assert restored.context["jianyingDraftRecords"][storyboard_id] == replacement
     assert restored.last_phase == "jianying_draft_succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_download_url", [None, "http://cdn.example.com/old.zip"])
+async def test_memory_jianying_draft_invalid_succeeded_record_allows_retry_and_new_terminal(
+    invalid_download_url,
+):
+    store = MemoryPixelFlowTaskStore()
+    storyboard_id = "storyboard-invalid-success"
+    conversation_id = f"c-jianying-invalid-success-{invalid_download_url is None}"
+    old_record = _jianying_record("succeeded", "job-old", storyboard_id)
+    if invalid_download_url is None:
+        old_record.pop("download_url")
+    else:
+        old_record["download_url"] = invalid_download_url
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id="u1",
+            title="无效成功剪映草稿",
+            last_phase="jianying_draft_succeeded",
+            context={
+                "pendingJianyingDraftJob": None,
+                "pending_jianying_draft_job": None,
+                "jianyingDraftRecords": {storyboard_id: old_record},
+                "jianying_draft_records": {storyboard_id: old_record},
+            },
+        )
+    )
+
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-new",
+        pending_job=_jianying_pending("job-new", conversation_id, storyboard_id),
+        records={},
+        last_phase="jianying_draft_running",
+    )
+    running = await store.get_conversation(conversation_id, user_id="u1")
+    assert running is not None
+    assert running.context["pendingJianyingDraftJob"]["job_id"] == "job-new"
+    assert running.last_phase == "jianying_draft_running"
+
+    replacement = {
+        **_jianying_record("succeeded", "job-new", storyboard_id),
+        "download_url": "https://cdn.example.com/new.zip",
+    }
+    await store.patch_jianying_draft_conversation_context(
+        conversation_id,
+        user_id="u1",
+        expected_job_id="job-new",
+        pending_job=None,
+        records={storyboard_id: replacement},
+        last_phase="jianying_draft_succeeded",
+    )
+    completed = await store.get_conversation(conversation_id, user_id="u1")
+    assert completed is not None
+    assert completed.context["pendingJianyingDraftJob"] is None
+    assert completed.context["jianyingDraftRecords"][storyboard_id] == replacement
+    assert completed.last_phase == "jianying_draft_succeeded"
 
 
 @pytest.mark.asyncio

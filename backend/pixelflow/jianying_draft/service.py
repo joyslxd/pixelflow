@@ -30,6 +30,7 @@ _PUBLIC_PROVIDER_MESSAGES = {
     JianyingDraftStatus.TIMEOUT: "剪映草稿生成超时，请重试。",
     JianyingDraftStatus.NOT_CONFIGURED: "剪映草稿服务待接入",
 }
+_PUBLIC_SUCCEEDED_MESSAGE = "剪映草稿已生成"
 
 
 @dataclass
@@ -385,11 +386,13 @@ class JianyingDraftService:
 
     @staticmethod
     def _public_provider_result(result: JianyingDraftResult) -> JianyingDraftResult:
-        if result.status == JianyingDraftStatus.SUCCEEDED and not JianyingDraftService._is_valid_succeeded_result(result):
-            return JianyingDraftResult(
-                status=JianyingDraftStatus.FAILED,
-                message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
-            )
+        if result.status == JianyingDraftStatus.SUCCEEDED:
+            if not JianyingDraftService._is_valid_succeeded_result(result):
+                return JianyingDraftResult(
+                    status=JianyingDraftStatus.FAILED,
+                    message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
+                )
+            return result.model_copy(update={"message": _PUBLIC_SUCCEEDED_MESSAGE})
         message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
         if message is not None:
             return JianyingDraftResult(status=result.status, message=message)

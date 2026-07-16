@@ -326,7 +326,10 @@ def test_jianying_draft_start_accepts_current_snapshot_context():
                         **_scenes()[0],
                         "scene_index": 3,
                     },
-                    _scenes()[1],
+                    {
+                        **_scenes()[1],
+                        "scene_index": 4,
+                    },
                 ]
             ),
         ),
@@ -430,6 +433,9 @@ def test_jianying_draft_terminal_job_records_one_safe_powermem_experience(monkey
             time.sleep(0.02)
         assert status_response is not None
         assert status_response.json()["status"] == "succeeded"
+        assert status_response.json()["message"] == "剪映草稿已生成"
+        assert "secret-token" not in status_response.text
+        assert "provider response" not in status_response.text
 
         repeated_response = client.get(f"/agent/flows/video/jianying-draft/jobs/{job_id}")
 
@@ -454,6 +460,26 @@ def test_jianying_draft_start_hides_foreign_conversation_from_other_user():
         response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
 
     assert response.status_code == 404
+    assert service.job_count == 0
+
+
+def test_jianying_draft_start_rejects_descending_scene_order_before_service_call():
+    service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
+    app = _make_router_app(service=service)
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/jianying-draft/start",
+            json=_payload(list(reversed(_scenes()))),
+        )
+
+    assert response.status_code == 422
     assert service.job_count == 0
 
 

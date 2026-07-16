@@ -200,6 +200,7 @@ def test_jianying_draft_context_patch_rejects_stale_job_state_and_requires_match
                         "status": "succeeded",
                         "job_id": "job-1",
                         "storyboard_version_id": storyboard_id,
+                        "download_url": "https://cdn.example.com/draft.zip",
                     }
                 },
             },
@@ -280,6 +281,7 @@ def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record
                             "status": "succeeded",
                             "job_id": "job-valid-old",
                             "storyboard_version_id": storyboard_id,
+                            "download_url": "https://cdn.example.com/valid.zip",
                             "expire_at": "2099-01-01T00:00:00Z",
                         }
                     }
@@ -316,6 +318,7 @@ def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record
                             "status": "succeeded",
                             "job_id": "job-expired-old",
                             "storyboard_version_id": storyboard_id,
+                            "download_url": "https://cdn.example.com/expired.zip",
                             "expire_at": "2000-01-01T00:00:00Z",
                         }
                     }
@@ -344,6 +347,7 @@ def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record
             "status": "succeeded",
             "job_id": "job-expired-new",
             "storyboard_version_id": storyboard_id,
+            "download_url": "https://cdn.example.com/replacement.zip",
             "expire_at": "2099-01-01T00:00:00Z",
         }
         completed_retry = client.patch(
@@ -360,6 +364,70 @@ def test_jianying_draft_context_patch_allows_new_job_only_after_succeeded_record
         assert completed["context"]["pendingJianyingDraftJob"] is None
         assert completed["context"]["jianyingDraftRecords"][storyboard_id] == replacement
         assert completed["last_phase"] == "jianying_draft_succeeded"
+
+
+def test_jianying_draft_context_patch_retries_historical_success_without_https_download():
+    from app.gateway.routers import pixelflow_conversations
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    app.include_router(pixelflow_conversations.router)
+
+    with TestClient(app) as client:
+        for suffix, download_url in (("missing", None), ("http", "http://cdn.example.com/old.zip")):
+            storyboard_id = f"storyboard-invalid-{suffix}"
+            old_record = {
+                "status": "succeeded",
+                "job_id": f"job-{suffix}-old",
+                "storyboard_version_id": storyboard_id,
+            }
+            if download_url is not None:
+                old_record["download_url"] = download_url
+            created = client.post(
+                "/agent/conversations",
+                json={
+                    "title": "无效成功剪映草稿",
+                    "last_phase": "jianying_draft_succeeded",
+                    "context": {"jianyingDraftRecords": {storyboard_id: old_record}},
+                },
+            ).json()
+            conversation_id = created["conversation_id"]
+            new_job_id = f"job-{suffix}-new"
+
+            running = client.patch(
+                f"/agent/conversations/{conversation_id}/jianying-draft-context",
+                json={
+                    "last_phase": "jianying_draft_running",
+                    "expected_job_id": new_job_id,
+                    "pendingJianyingDraftJob": {
+                        "job_id": new_job_id,
+                        "conversation_id": conversation_id,
+                        "storyboard_version_id": storyboard_id,
+                    },
+                    "jianyingDraftRecords": {},
+                },
+            )
+            assert running.status_code == 200
+            assert running.json()["context"]["pendingJianyingDraftJob"]["job_id"] == new_job_id
+
+            replacement = {
+                "status": "succeeded",
+                "job_id": new_job_id,
+                "storyboard_version_id": storyboard_id,
+                "download_url": "https://cdn.example.com/new.zip",
+            }
+            completed = client.patch(
+                f"/agent/conversations/{conversation_id}/jianying-draft-context",
+                json={
+                    "last_phase": "jianying_draft_succeeded",
+                    "expected_job_id": new_job_id,
+                    "pendingJianyingDraftJob": None,
+                    "jianyingDraftRecords": {storyboard_id: replacement},
+                },
+            )
+            assert completed.status_code == 200
+            assert completed.json()["context"]["jianyingDraftRecords"][storyboard_id] == replacement
+            assert completed.json()["last_phase"] == "jianying_draft_succeeded"
 
 
 def test_jianying_draft_context_patch_rejects_late_old_success_after_retry_timeout():
@@ -382,6 +450,7 @@ def test_jianying_draft_context_patch_rejects_late_old_success_after_retry_timeo
                             "status": "succeeded",
                             "job_id": "job-old",
                             "storyboard_version_id": storyboard_id,
+                            "download_url": "https://cdn.example.com/old.zip",
                             "expire_at": "2000-01-01T00:00:00Z",
                         }
                     }

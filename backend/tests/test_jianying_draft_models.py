@@ -172,6 +172,20 @@ def test_request_rejects_mismatched_storyboard_version():
         )
 
 
+def test_request_rejects_scenes_that_are_not_strictly_ascending():
+    scenes = [
+        JianyingDraftScene(scene_id="scene-2", scene_index=2, video_url="https://cdn/2.mp4"),
+        JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"),
+    ]
+
+    with pytest.raises(ValidationError):
+        JianyingDraftRequest(
+            conversation_id="conversation-1",
+            storyboard_version_id=compute_storyboard_version_id(scenes),
+            scenes=scenes,
+        )
+
+
 def test_result_does_not_expose_raw_provider_payload():
     assert "raw" not in JianyingDraftResult.model_fields
     assert "replaced_by_job_id" not in JianyingDraftResult.model_fields
