@@ -9,7 +9,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
-from .skill import JianyingDraftSkill
+from .skill import JianyingDraftCapability, JianyingDraftSkill
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,14 @@ class _JianyingDraftJob:
     completed_at: datetime | None = None
     replaced_by_job_id: str | None = None
     task: asyncio.Task[None] | None = None
+    terminal_experience_claimed: bool = False
 
 
 @dataclass
 class _ReplacedJianyingDraftJob:
     result: JianyingDraftResult
     replaced_by_job_id: str
+    terminal_experience_claimed: bool = False
 
 
 class JianyingDraftService:
@@ -58,11 +60,38 @@ class JianyingDraftService:
         self._job_ids_by_key: dict[tuple[str, str], str] = {}
         self._replaced_jobs: dict[str, _ReplacedJianyingDraftJob] = {}
         self._lock = asyncio.Lock()
+        self._closed = False
 
     @property
     def job_count(self) -> int:
         """当前仍可查询的任务数。"""
         return len(self._jobs)
+
+    async def capability(self) -> JianyingDraftCapability:
+        """查询当前 Provider 能力，关闭后的 Service 不再暴露可用能力。"""
+
+        async with self._lock:
+            if self._closed:
+                return JianyingDraftCapability(
+                    available=False,
+                    reason="剪映草稿服务暂不可用",
+                )
+        return await self._skill.capability()
+
+    async def aclose(self) -> None:
+        """拒绝新任务，并取消等待中的后台生成任务。"""
+
+        async with self._lock:
+            self._closed = True
+            tasks = [
+                job.task
+                for job in self._jobs.values()
+                if job.task is not None and not job.task.done()
+            ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def start(
         self,
@@ -73,6 +102,11 @@ class JianyingDraftService:
         """复用已有任务，或为一个新的分镜版本启动后台生成。"""
         key = (request.conversation_id, request.storyboard_version_id)
         async with self._lock:
+            if self._closed:
+                return JianyingDraftResult(
+                    status=JianyingDraftStatus.NOT_CONFIGURED,
+                    message="剪映草稿服务暂不可用，请稍后重试",
+                )
             reusable_result = self._reusable_result(
                 key,
                 retry_failed=retry_failed,
@@ -83,11 +117,16 @@ class JianyingDraftService:
         capability = None
         capability_error_type: str | None = None
         try:
-            capability = await self._skill.capability()
+            capability = await self.capability()
         except Exception as exc:  # noqa: BLE001 - provider boundary must not leak details
             capability_error_type = type(exc).__name__
 
         async with self._lock:
+            if self._closed:
+                return JianyingDraftResult(
+                    status=JianyingDraftStatus.NOT_CONFIGURED,
+                    message="剪映草稿服务暂不可用，请稍后重试",
+                )
             reusable_result = self._reusable_result(
                 key,
                 retry_failed=retry_failed,
@@ -152,6 +191,7 @@ class JianyingDraftService:
                         self._replaced_jobs[previous_job_id] = _ReplacedJianyingDraftJob(
                             result=replaced_job.result.model_copy(deep=True),
                             replaced_by_job_id=job_id,
+                            terminal_experience_claimed=replaced_job.terminal_experience_claimed,
                         )
                 else:
                     replaced_job.replaced_by_job_id = job_id
@@ -183,6 +223,30 @@ class JianyingDraftService:
                 if replaced_job is not None
                 else None
             )
+
+    async def claim_terminal_experience(self, job_id: str) -> bool:
+        """原子领取终态经验写入权，避免并发轮询重复记录 PowerMem。"""
+
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                if (
+                    job.result.status not in _TERMINAL_STATUSES
+                    or job.terminal_experience_claimed
+                ):
+                    return False
+                job.terminal_experience_claimed = True
+                return True
+
+            replaced_job = self._replaced_jobs.get(job_id)
+            if (
+                replaced_job is None
+                or replaced_job.result.status not in _TERMINAL_STATUSES
+                or replaced_job.terminal_experience_claimed
+            ):
+                return False
+            replaced_job.terminal_experience_claimed = True
+            return True
 
     async def _get_replaced_by_job_id(self, job_id: str) -> str | None:
         """仅供 Service 内部测试读取失败任务的替代关系。"""

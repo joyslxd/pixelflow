@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from uuid import UUID
 
@@ -13,8 +14,10 @@ from pixelflow.jianying_draft import (
     JianyingDraftScene,
     JianyingDraftService,
     JianyingDraftStatus,
+    UnavailableJianyingDraftSkill,
     compute_storyboard_version_id,
 )
+from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 from tests._router_auth_helpers import make_authed_test_app
 
 
@@ -25,6 +28,47 @@ def _stable_user() -> User:
         system_role="user",
         id=UUID("00000000-0000-0000-0000-000000000904"),
     )
+
+
+def _other_user() -> User:
+    return User(
+        email="pixelflow-jianying-draft-other@example.com",
+        password_hash="x",
+        system_role="user",
+        id=UUID("00000000-0000-0000-0000-000000000905"),
+    )
+
+
+def _create_conversation(
+    store: MemoryPixelFlowTaskStore,
+    *,
+    conversation_id: str,
+    user: User,
+) -> None:
+    asyncio.run(
+        store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=conversation_id,
+                user_id=str(user.id),
+                title="剪映草稿测试对话",
+            )
+        )
+    )
+
+
+def _make_router_app(
+    *,
+    user_factory=lambda: _stable_user(),
+    service: JianyingDraftService | object | None = None,
+):
+    from app.gateway.routers import pixelflow_jianying_draft
+
+    app = make_authed_test_app(user_factory=user_factory)
+    app.state.pixelflow_task_store = MemoryPixelFlowTaskStore()
+    if service is not None:
+        app.state.pixelflow_jianying_draft_service = service
+    app.include_router(pixelflow_jianying_draft.router)
+    return app
 
 
 def _payload() -> dict[str, object]:
@@ -58,10 +102,7 @@ def test_jianying_draft_router_prefix_and_paths():
 
 
 def test_jianying_draft_capability_reports_unavailable_by_default():
-    from app.gateway.routers import pixelflow_jianying_draft
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_jianying_draft.router)
+    app = _make_router_app(service=JianyingDraftService(skill=UnavailableJianyingDraftSkill()))
 
     with TestClient(app) as client:
         response = client.get("/agent/flows/video/jianying-draft/capability")
@@ -71,24 +112,20 @@ def test_jianying_draft_capability_reports_unavailable_by_default():
 
 
 def test_jianying_draft_start_does_not_create_placeholder_job():
-    from app.gateway.routers import pixelflow_jianying_draft
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_jianying_draft.router)
+    service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
+    app = _make_router_app(service=service)
+    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
 
     with TestClient(app) as client:
         response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
 
     assert response.status_code == 503
     assert response.json()["detail"]["status"] == "not_configured"
-    assert pixelflow_jianying_draft.get_jianying_draft_service().job_count == 0
+    assert service.job_count == 0
 
 
 def test_jianying_draft_unknown_job_returns_404():
-    from app.gateway.routers import pixelflow_jianying_draft
-
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_jianying_draft.router)
+    app = _make_router_app(service=JianyingDraftService(skill=UnavailableJianyingDraftSkill()))
 
     with TestClient(app) as client:
         response = client.get("/agent/flows/video/jianying-draft/jobs/missing")
@@ -110,18 +147,16 @@ def test_jianying_draft_terminal_job_records_one_safe_powermem_experience(monkey
                 message="provider response token=secret-token",
             )
 
-    records: list[dict[str, object]] = []
     service = JianyingDraftService(skill=CompletedSkill())
-    monkeypatch.setattr(pixelflow_jianying_draft, "_JIANYING_DRAFT_SERVICE", service)
-    monkeypatch.setattr(pixelflow_jianying_draft, "_TERMINAL_EXPERIENCE_JOB_IDS", set())
+    records: list[dict[str, object]] = []
     monkeypatch.setattr(
         pixelflow_jianying_draft,
         "record_power_mem_background",
         lambda *args, **kwargs: records.append(kwargs),
     )
 
-    app = make_authed_test_app(user_factory=_stable_user)
-    app.include_router(pixelflow_jianying_draft.router)
+    app = _make_router_app(service=service)
+    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
 
     with TestClient(app) as client:
         start_response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
@@ -148,6 +183,71 @@ def test_jianying_draft_terminal_job_records_one_safe_powermem_experience(monkey
     assert record["infer"] is False
     assert "secret-token" not in str(record["content"])
     assert "provider response" not in str(record["content"])
+
+
+def test_jianying_draft_start_hides_foreign_conversation_from_other_user():
+    active_user = [_other_user()]
+    service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
+    app = _make_router_app(user_factory=lambda: active_user[0], service=service)
+    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
+
+    assert response.status_code == 404
+    assert service.job_count == 0
+
+
+def test_jianying_draft_job_hides_foreign_terminal_job_without_powermem_record(monkeypatch):
+    from app.gateway.routers import pixelflow_jianying_draft
+
+    class TerminalJobService:
+        async def get_job(self, job_id: str) -> JianyingDraftResult | None:
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.SUCCEEDED,
+                job_id=job_id,
+                conversation_id="conversation-1",
+                storyboard_version_id="storyboard-1",
+            )
+
+        async def claim_terminal_experience(self, job_id: str) -> bool:
+            raise AssertionError("foreign job must not claim PowerMem experience")
+
+    records: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        pixelflow_jianying_draft,
+        "record_power_mem_background",
+        lambda *args, **kwargs: records.append(kwargs),
+    )
+    app = _make_router_app(user_factory=_other_user, service=TerminalJobService())
+    _create_conversation(app.state.pixelflow_task_store, conversation_id="conversation-1", user=_stable_user())
+
+    with TestClient(app) as client:
+        response = client.get("/agent/flows/video/jianying-draft/jobs/foreign-job")
+
+    assert response.status_code == 404
+    assert records == []
+
+
+def test_jianying_draft_router_requires_app_scoped_service():
+    app = _make_router_app()
+
+    with TestClient(app) as client:
+        capability = client.get("/agent/flows/video/jianying-draft/capability")
+        start = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
+        job = client.get("/agent/flows/video/jianying-draft/jobs/missing")
+
+    assert capability.status_code == 503
+    assert start.status_code == 503
+    assert job.status_code == 503
+
+
+def test_jianying_draft_router_has_no_module_scoped_service_or_dedupe_state():
+    from app.gateway.routers import pixelflow_jianying_draft
+
+    assert not hasattr(pixelflow_jianying_draft, "_JIANYING_DRAFT_SKILL")
+    assert not hasattr(pixelflow_jianying_draft, "_JIANYING_DRAFT_SERVICE")
+    assert not hasattr(pixelflow_jianying_draft, "_TERMINAL_EXPERIENCE_JOB_IDS")
 
 
 def test_gateway_app_registers_jianying_draft_router():

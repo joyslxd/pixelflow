@@ -87,11 +87,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("LangGraph runtime initialised")
 
         from deerflow.persistence.engine import get_session_factory
+        from pixelflow.jianying_draft import (
+            JianyingDraftService,
+            UnavailableJianyingDraftSkill,
+        )
         from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
+        # 真实 Provider 尚未接入，按内部默认 1800 秒超时创建不可用 Service，
+        # 不读取或虚构任何第三方连接配置。
+        app.state.pixelflow_jianying_draft_service = JianyingDraftService(
+            skill=UnavailableJianyingDraftSkill()
+        )
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:
@@ -121,6 +130,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
+            pixelflow_jianying_draft_service = getattr(
+                app.state, "pixelflow_jianying_draft_service", None
+            )
+            if pixelflow_jianying_draft_service is not None:
+                await pixelflow_jianying_draft_service.aclose()
+                logger.info("PixelFlow Jianying draft service closed")
             pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
             if pixelflow_mysql_engine is not None:
                 await pixelflow_mysql_engine.dispose()

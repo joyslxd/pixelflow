@@ -170,6 +170,77 @@ class FailThenBlockingFakeSkill:
         return JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
 
 
+class BlockingCapabilityFakeSkill(ResultFakeSkill):
+    def __init__(self) -> None:
+        super().__init__(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+        self.entered_capability = asyncio.Event()
+        self.release_capability = asyncio.Event()
+
+    async def capability(self) -> JianyingDraftCapability:
+        self.entered_capability.set()
+        await self.release_capability.wait()
+        return JianyingDraftCapability(available=True)
+
+
+@pytest.mark.asyncio
+async def test_capability_delegates_to_skill():
+    service = JianyingDraftService(skill=UnavailableJianyingDraftSkill())
+
+    capability = await service.capability()
+
+    assert capability == JianyingDraftCapability(
+        available=False,
+        reason="剪映草稿服务待接入",
+    )
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancels_running_task_and_rejects_new_start():
+    skill = BlockingFakeSkill()
+    service = JianyingDraftService(skill=skill)
+    started = await service.start(_request())
+    assert started.job_id is not None
+    await asyncio.sleep(0)
+
+    await service.aclose()
+    rejected = await service.start(_request(2))
+
+    assert rejected.status == JianyingDraftStatus.NOT_CONFIGURED
+    assert service.job_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_rejects_start_waiting_for_capability():
+    skill = BlockingCapabilityFakeSkill()
+    service = JianyingDraftService(skill=skill)
+    start_task = asyncio.create_task(service.start(_request()))
+    await skill.entered_capability.wait()
+
+    await service.aclose()
+    skill.release_capability.set()
+    rejected = await start_task
+
+    assert rejected.status == JianyingDraftStatus.NOT_CONFIGURED
+    assert service.job_count == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_terminal_experience_is_atomic_and_kept_with_job():
+    service = JianyingDraftService(
+        skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
+    )
+    started = await service.start(_request())
+    assert started.job_id is not None
+    await _wait_for_terminal(service, started.job_id)
+
+    claims = await asyncio.gather(
+        *(service.claim_terminal_experience(started.job_id) for _ in range(8))
+    )
+
+    assert claims.count(True) == 1
+    assert claims.count(False) == 7
+
+
 def test_default_timeout_is_thirty_minutes():
     service = JianyingDraftService(
         skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
