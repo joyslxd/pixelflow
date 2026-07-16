@@ -180,7 +180,7 @@ flowchart TD
 
 最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
 
-当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。剪映草稿 job 首次到达 `succeeded`、`failed` 或 `timeout` 终态时，只异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要。
+当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。路由在 `GET /jobs/{job_id}` 首次读取到 `succeeded`、`failed` 或 `timeout` 终态时，才通过 claim 幂等地异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要；停止轮询不会自行触发写入。
 
 ## PowerMem 语义记忆
 

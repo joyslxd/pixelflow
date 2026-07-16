@@ -670,7 +670,7 @@ Plan 审核与版本规则：
 - 同一 `conversation_id + storyboard_version_id` 的 `queued/running` 和未过期 `succeeded` job 必须复用。`failed/timeout` 只有用户明确 `retry_failed=true` 才创建替代 job；过期成功结果允许重新生成。历史结果不会被当前新版本复用。
 - 前端按 capability 的 `poll_interval_seconds`（默认 2 秒）轮询，客户端和服务端最长 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误使用 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；切换对话、刷新或离开后只继续查询原 job，不重新调用 `/start`。job 404/过期时只提示用户从视频结果卡手动重试。
 - 草稿结果消息使用 `job_id` 构造稳定消息 ID，重复轮询不会追加重复的成功/失败卡片。下载链接只允许成功结果中的 HTTPS 地址，点击后才开始下载。
-- job 首次到达 `succeeded`、`failed` 或 `timeout` 时，路由通过 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
+- 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded`、`failed` 或 `timeout` 终态时，才通过 claim 调用 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
 - 当前 Gateway 启动器未配置 `workers`，部署形态是单 Uvicorn worker；`JianyingDraftService` 的 job registry、幂等索引与后台 task 均为进程内状态。未来多 worker、多容器或多副本部署前，必须替换为共享、持久化 job store，否则 job 查询、幂等和终态去重都会失效。
 
 ## 9. 视频修改循环

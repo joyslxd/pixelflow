@@ -100,8 +100,8 @@ Java 类比：
 
 - 查询 Provider 可用性。
 - 启动草稿生成。
-- 查询草稿任务。
-- 在 Provider 支持时刷新下载地址。
+
+草稿 job 查询由 `JianyingDraftService` 的本地 registry 管理；当前 Protocol 不提供 Provider 侧任务查询或下载地址刷新能力。
 
 统一返回 PixelFlow 结果：
 
@@ -233,8 +233,10 @@ Java 类比：
 `WorkspaceSnapshot` 增加：
 
 - `pendingJianyingDraftJob` 与蛇形兼容字段。
-- 当前 `storyboardVersionId`。
 - `jianyingDraftRecords`，按版本 ID 保存任务和下载结果。
+- `jianying_draft_job_resume_error` 恢复错误。
+
+当前 `storyboard_version_id` 按来源分镜即时重算，不作为独立快照字段持久化。
 
 `ChatArtifact` 增加剪映草稿结果类型，保存：
 
@@ -274,7 +276,7 @@ Java 类比：
 
 ## 11. PowerMem 与日志
 
-- 草稿任务成功、失败或超时后，以 `category=experience`、`infer=False` 异步记录业务摘要。
+- 路由在 `GET /jobs/{job_id}` 首次读取到成功、失败或超时终态时，以 claim 保证幂等后，异步记录 `category=experience`、`infer=False` 的业务摘要；停止轮询不会自行触发写入。
 - `source_agent` 使用 `jianying_draft_agent`。
 - 不记录用户 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或完整异常堆栈。
 - 日志至少包含安全的 job ID、对话 ID 摘要、版本 ID、分镜数量、状态和耗时。
