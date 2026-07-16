@@ -80,9 +80,7 @@ def _payload() -> dict[str, object]:
             "task_id": "video-task-1",
         }
     ]
-    storyboard_version_id = compute_storyboard_version_id(
-        [JianyingDraftScene(**scene) for scene in scenes]
-    )
+    storyboard_version_id = compute_storyboard_version_id([JianyingDraftScene(**scene) for scene in scenes])
     return {
         "conversation_id": "conversation-1",
         "storyboard_version_id": storyboard_version_id,

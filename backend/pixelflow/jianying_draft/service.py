@@ -97,20 +97,14 @@ class JianyingDraftService:
                     reason="剪映草稿服务暂不可用",
                     poll_interval_seconds=self._poll_interval_seconds,
                 )
-        return capability.model_copy(
-            update={"poll_interval_seconds": self._poll_interval_seconds}
-        )
+        return capability.model_copy(update={"poll_interval_seconds": self._poll_interval_seconds})
 
     async def aclose(self) -> None:
         """拒绝新任务，并取消等待中的后台生成任务。"""
 
         async with self._lock:
             self._closed = True
-            tasks = [
-                job.task
-                for job in self._jobs.values()
-                if job.task is not None and not job.task.done()
-            ]
+            tasks = [job.task for job in self._jobs.values() if job.task is not None and not job.task.done()]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -174,20 +168,11 @@ class JianyingDraftService:
 
             previous = self._get_current_job(key)
             replaced_job: _JianyingDraftJob | None = None
-            if (
-                previous is not None
-                and retry_failed
-                and previous.result.status
-                in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}
-            ):
+            if previous is not None and retry_failed and previous.result.status in {JianyingDraftStatus.FAILED, JianyingDraftStatus.TIMEOUT}:
                 replaced_job = previous
 
-            recyclable_job_id = (
-                replaced_job.result.job_id if replaced_job is not None else None
-            )
-            has_room, reclaimed_job = self._make_room_for_new_job(
-                recyclable_job_id=recyclable_job_id
-            )
+            recyclable_job_id = replaced_job.result.job_id if replaced_job is not None else None
+            has_room, reclaimed_job = self._make_room_for_new_job(recyclable_job_id=recyclable_job_id)
             if not has_room:
                 return JianyingDraftResult(
                     status=JianyingDraftStatus.FAILED,
@@ -244,11 +229,7 @@ class JianyingDraftService:
             if job is not None:
                 return job.result.model_copy(deep=True)
             replaced_job = self._replaced_jobs.get(job_id)
-            return (
-                replaced_job.result.model_copy(deep=True)
-                if replaced_job is not None
-                else None
-            )
+            return replaced_job.result.model_copy(deep=True) if replaced_job is not None else None
 
     async def _replaced_job_count(self) -> int:
         """仅供测试确认被替换任务历史的容量边界。"""
@@ -262,20 +243,13 @@ class JianyingDraftService:
         async with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
-                if (
-                    job.result.status not in _TERMINAL_STATUSES
-                    or job.terminal_experience_claimed
-                ):
+                if job.result.status not in _TERMINAL_STATUSES or job.terminal_experience_claimed:
                     return False
                 job.terminal_experience_claimed = True
                 return True
 
             replaced_job = self._replaced_jobs.get(job_id)
-            if (
-                replaced_job is None
-                or replaced_job.result.status not in _TERMINAL_STATUSES
-                or replaced_job.terminal_experience_claimed
-            ):
+            if replaced_job is None or replaced_job.result.status not in _TERMINAL_STATUSES or replaced_job.terminal_experience_claimed:
                 return False
             replaced_job.terminal_experience_claimed = True
             return True
@@ -287,9 +261,7 @@ class JianyingDraftService:
             if job is not None:
                 return job.replaced_by_job_id
             replaced_job = self._replaced_jobs.get(job_id)
-            return (
-                replaced_job.replaced_by_job_id if replaced_job is not None else None
-            )
+            return replaced_job.replaced_by_job_id if replaced_job is not None else None
 
     def _get_current_job(self, key: tuple[str, str]) -> _JianyingDraftJob | None:
         job_id = self._job_ids_by_key.get(key)
@@ -334,11 +306,7 @@ class JianyingDraftService:
     ) -> tuple[bool, _JianyingDraftJob | None]:
         reclaimed_job: _JianyingDraftJob | None = None
         while len(self._jobs) >= _MAX_JOBS:
-            terminal_jobs = [
-                (job_id, job)
-                for job_id, job in self._jobs.items()
-                if job.completed_at is not None
-            ]
+            terminal_jobs = [(job_id, job) for job_id, job in self._jobs.items() if job.completed_at is not None]
             if not terminal_jobs:
                 return False, None
             job_id, job = min(
@@ -414,9 +382,7 @@ class JianyingDraftService:
         async with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
-                job.result = job.result.model_copy(
-                    update={"status": JianyingDraftStatus.RUNNING}
-                )
+                job.result = job.result.model_copy(update={"status": JianyingDraftStatus.RUNNING})
 
     async def _store_result(
         self,

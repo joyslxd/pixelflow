@@ -48,11 +48,7 @@ async def _require_owned_conversation(
     store = getattr(request.app.state, "pixelflow_task_store", None)
     if store is None:
         raise HTTPException(status_code=503, detail="对话服务暂不可用")
-    if (
-        not conversation_id
-        or user_id is None
-        or await store.get_conversation(conversation_id, user_id=user_id) is None
-    ):
+    if not conversation_id or user_id is None or await store.get_conversation(conversation_id, user_id=user_id) is None:
         raise HTTPException(status_code=404, detail="对话不存在或无访问权限")
 
 
@@ -95,10 +91,7 @@ async def get_jianying_draft_job(job_id: str, request: Request) -> JianyingDraft
 
     user_id = await current_user_id(request)
     await _require_owned_conversation(request, result.conversation_id, user_id)
-    if (
-        result.status in _TERMINAL_STATUSES
-        and await service.claim_terminal_experience(job_id)
-    ):
+    if result.status in _TERMINAL_STATUSES and await service.claim_terminal_experience(job_id):
         record_power_mem_background(
             power_mem_service(request),
             user_id=user_id,

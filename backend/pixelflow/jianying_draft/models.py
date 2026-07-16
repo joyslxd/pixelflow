@@ -83,9 +83,7 @@ class JianyingDraftRequest(BaseModel):
     def validate_storyboard(self) -> JianyingDraftRequest:
         expected_version_id = compute_storyboard_version_id(self.scenes)
         if self.storyboard_version_id != expected_version_id:
-            raise ValueError(
-                "storyboard_version_id does not match the supplied scenes"
-            )
+            raise ValueError("storyboard_version_id does not match the supplied scenes")
         return self
 
 

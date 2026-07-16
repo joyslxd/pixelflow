@@ -34,9 +34,7 @@ def _request(number: int = 1) -> JianyingDraftRequest:
     )
 
 
-async def _wait_for_terminal(
-    service: JianyingDraftService, job_id: str
-) -> JianyingDraftResult:
+async def _wait_for_terminal(service: JianyingDraftService, job_id: str) -> JianyingDraftResult:
     for _ in range(100):
         result = await service.get_job(job_id)
         assert result is not None
@@ -279,16 +277,12 @@ async def test_aclose_rejects_start_waiting_for_capability():
 
 @pytest.mark.asyncio
 async def test_claim_terminal_experience_is_atomic_and_kept_with_job():
-    service = JianyingDraftService(
-        skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
-    )
+    service = JianyingDraftService(skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)))
     started = await service.start(_request())
     assert started.job_id is not None
     await _wait_for_terminal(service, started.job_id)
 
-    claims = await asyncio.gather(
-        *(service.claim_terminal_experience(started.job_id) for _ in range(8))
-    )
+    claims = await asyncio.gather(*(service.claim_terminal_experience(started.job_id) for _ in range(8)))
 
     assert claims.count(True) == 1
     assert claims.count(False) == 7
@@ -333,9 +327,7 @@ async def test_provider_business_failure_is_not_retried():
 
 
 def test_default_timeout_is_thirty_minutes():
-    service = JianyingDraftService(
-        skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
-    )
+    service = JianyingDraftService(skill=ResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)))
 
     assert service._timeout_seconds == 1800.0
 
@@ -353,9 +345,7 @@ async def test_unavailable_skill_does_not_create_job():
 
 @pytest.mark.asyncio
 async def test_unavailable_capability_uses_fixed_public_message(caplog):
-    skill = ToggleCapabilityResultFakeSkill(
-        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
-    )
+    skill = ToggleCapabilityResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
     skill.capability_available = False
     skill.reason = "https://provider.example.com/?token=secret-token"
     service = JianyingDraftService(skill=skill)
@@ -443,9 +433,7 @@ async def test_succeeded_job_is_reused_for_same_version():
 
 @pytest.mark.asyncio
 async def test_succeeded_job_reuse_does_not_probe_changed_capability():
-    skill = ToggleCapabilityResultFakeSkill(
-        JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED)
-    )
+    skill = ToggleCapabilityResultFakeSkill(JianyingDraftResult(status=JianyingDraftStatus.SUCCEEDED))
     service = JianyingDraftService(skill=skill)
 
     first = await service.start(_request())
@@ -670,13 +658,7 @@ async def test_terminal_job_pruning_uses_completion_order_not_creation_order():
     assert await service.get_job(first.job_id) is not None
     for number in range(2, 100):
         skill.release(number)
-    await asyncio.gather(
-        *(
-            _wait_for_terminal(service, job.job_id)
-            for job in running_jobs
-            if job.job_id is not None
-        )
-    )
+    await asyncio.gather(*(_wait_for_terminal(service, job.job_id) for job in running_jobs if job.job_id is not None))
 
 
 @pytest.mark.asyncio
@@ -692,14 +674,10 @@ async def test_full_running_job_store_does_not_remove_running_jobs():
     assert refused.status == JianyingDraftStatus.FAILED
     assert refused.job_id is None
     assert all(job.job_id is not None for job in jobs)
-    stored_jobs = await asyncio.gather(
-        *(service.get_job(job.job_id) for job in jobs if job.job_id is not None)
-    )
+    stored_jobs = await asyncio.gather(*(service.get_job(job.job_id) for job in jobs if job.job_id is not None))
     assert all(stored_job is not None for stored_job in stored_jobs)
     skill.release.set()
-    await asyncio.gather(
-        *(_wait_for_terminal(service, job.job_id) for job in jobs if job.job_id is not None)
-    )
+    await asyncio.gather(*(_wait_for_terminal(service, job.job_id) for job in jobs if job.job_id is not None))
 
 
 @pytest.mark.asyncio
@@ -723,13 +701,7 @@ async def test_retry_reuses_its_failed_job_slot_when_store_is_full():
     assert await service._get_replaced_by_job_id(failed.job_id) == retried.job_id
     skill.release.set()
     await _wait_for_terminal(service, retried.job_id)
-    await asyncio.gather(
-        *(
-            _wait_for_terminal(service, job.job_id)
-            for job in running_jobs
-            if job.job_id is not None
-        )
-    )
+    await asyncio.gather(*(_wait_for_terminal(service, job.job_id) for job in running_jobs if job.job_id is not None))
 
 
 @pytest.mark.asyncio

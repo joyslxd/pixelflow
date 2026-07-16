@@ -39,9 +39,7 @@ def test_storyboard_version_is_stable_after_input_reordering():
         ),
     ]
 
-    assert compute_storyboard_version_id(scenes) == compute_storyboard_version_id(
-        list(reversed(scenes))
-    )
+    assert compute_storyboard_version_id(scenes) == compute_storyboard_version_id(list(reversed(scenes)))
 
 
 def test_storyboard_version_changes_when_scene_video_url_changes():
@@ -112,12 +110,8 @@ def test_compute_storyboard_version_rejects_empty_scenes():
 
 def test_compute_storyboard_version_rejects_duplicate_scene_indexes():
     scenes = [
-        JianyingDraftScene(
-            scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"
-        ),
-        JianyingDraftScene(
-            scene_id="scene-2", scene_index=1, video_url="https://cdn/2.mp4"
-        ),
+        JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"),
+        JianyingDraftScene(scene_id="scene-2", scene_index=1, video_url="https://cdn/2.mp4"),
     ]
 
     with pytest.raises(ValueError):
@@ -141,12 +135,8 @@ def test_request_rejects_empty_scenes():
 
 def test_request_rejects_duplicate_scene_indexes():
     scenes = [
-        JianyingDraftScene(
-            scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"
-        ),
-        JianyingDraftScene(
-            scene_id="scene-2", scene_index=1, video_url="https://cdn/2.mp4"
-        ),
+        JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"),
+        JianyingDraftScene(scene_id="scene-2", scene_index=1, video_url="https://cdn/2.mp4"),
     ]
 
     with pytest.raises(ValidationError):
@@ -158,11 +148,7 @@ def test_request_rejects_duplicate_scene_indexes():
 
 
 def test_request_rejects_mismatched_storyboard_version():
-    scenes = [
-        JianyingDraftScene(
-            scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4"
-        )
-    ]
+    scenes = [JianyingDraftScene(scene_id="scene-1", scene_index=1, video_url="https://cdn/1.mp4")]
 
     with pytest.raises(ValidationError):
         JianyingDraftRequest(
