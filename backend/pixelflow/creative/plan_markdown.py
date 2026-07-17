@@ -11,14 +11,24 @@ from typing import Any, Literal
 
 from pixelflow.creative.contract import VideoCreationContract, build_video_creation_contract, resolve_scene_image_spec
 from pixelflow.creative.duration import scene_time_ranges
-from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME, ModelFactory, generate_plan_payload, revise_plan_payload
+from pixelflow.creative.plan_llm import (
+    PLAN_LLM_MODEL_NAME,
+    ModelFactory,
+    generate_plan_payload,
+    repair_plan_shot_descriptions,
+    revise_plan_payload,
+)
 from pixelflow.creative.revision_contract import contract_form_values, merge_revision_contract, validate_revision_contract
 from pixelflow.creative.scene_blueprint import (
+    apply_shot_description_repairs,
+    enrich_incomplete_shot_descriptions,
     fallback_scene_blueprints,
     normalize_scene_blueprints,
     render_scene_blueprints_markdown,
     repair_scene_blueprints_schedule,
     scene_blueprint_durations,
+    shot_description_quality_issues,
+    validate_shot_description_quality,
 )
 
 CreationIntent = Literal["video", "image"]
@@ -234,6 +244,32 @@ async def build_plan_markdown_with_llm(
                 except ValueError as repair_exc:
                     blueprints = _fallback_blueprints(form_values, selected_direction, contract)
                     corrections.append(f"Plan LLM 分镜蓝图已使用规则修正：{repair_exc}")
+            quality_issues = shot_description_quality_issues(blueprints)
+            if quality_issues:
+                try:
+                    repair_payload = await repair_plan_shot_descriptions(
+                        scene_blueprints=blueprints,
+                        quality_issues=quality_issues,
+                        selected_direction=selected_direction,
+                        creation_contract=creation_contract,
+                        visual_style=_text(form_values.get("visual_style")),
+                        model_name=model_name,
+                        model_factory=model_factory,
+                    )
+                    repaired_blueprints = apply_shot_description_repairs(
+                        blueprints,
+                        repair_payload.get("scene_blueprints"),
+                        total_duration_sec=contract.video_duration_sec,
+                    )
+                    validate_shot_description_quality(repaired_blueprints)
+                    blueprints = repaired_blueprints
+                except Exception as exc:  # noqa: BLE001 - 一次修正仍失败时使用确定性丰富模板
+                    blueprints = enrich_incomplete_shot_descriptions(
+                        blueprints,
+                        visual_style=_text(form_values.get("visual_style"), "真实广告风格"),
+                    )
+                    validate_shot_description_quality(blueprints)
+                    corrections.append(f"Plan LLM 镜头描述已使用规则增强：{exc}")
             durations = scene_blueprint_durations(blueprints)
             contract, image_corrections = resolve_scene_image_spec(
                 contract,
@@ -354,6 +390,37 @@ async def revise_plan_markdown_with_llm(
                     )
                 except ValueError as exc:
                     raise ValueError(f"分镜蓝图校验失败：{exc}") from exc
+                quality_issues = shot_description_quality_issues(blueprints)
+                if quality_issues:
+                    try:
+                        repair_payload = await repair_plan_shot_descriptions(
+                            scene_blueprints=blueprints,
+                            quality_issues=quality_issues,
+                            selected_direction=selected_direction,
+                            creation_contract=candidate_contract,
+                            visual_style=_text(candidate_form_values.get("visual_style")),
+                            model_name=model_name,
+                            model_factory=model_factory,
+                        )
+                        blueprints = apply_shot_description_repairs(
+                            blueprints,
+                            repair_payload.get("scene_blueprints"),
+                            total_duration_sec=contract.video_duration_sec,
+                        )
+                        validate_shot_description_quality(blueprints)
+                    except Exception as exc:  # noqa: BLE001 - 定向修正失败时不能发布新版本
+                        return _failed_revision_result(
+                            base=base,
+                            template_path=template_path,
+                            current_plan_markdown=current_plan_markdown,
+                            current_plan_version=current_plan_version,
+                            plan_history=plan_history,
+                            creation_contract=original_contract,
+                            scene_durations_sec=original_durations,
+                            scene_blueprints=original_blueprints,
+                            model_name=model_name,
+                            error=ValueError(f"分镜镜头描述完整度校验失败：{exc}"),
+                        )
                 durations = scene_blueprint_durations(blueprints)
                 contract, image_corrections = resolve_scene_image_spec(
                     contract,

@@ -300,6 +300,8 @@ SmartPPT接口：
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
 - 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。视频 Plan 优先调用 `deepseek-v4-pro` 并加载 `skills/seedance-prompt/SKILL.md`，由 LLM 自主生成总分总 `scene_blueprints`，不得预先按 10 秒机械切分；失败时才使用同合同的叙事职能加权兜底。
 - `scene_blueprints` 是 Plan 阶段的权威脚本合同，包含叙事职能、连续起止秒、时长、故事线、Seedance 镜头描述、旁白、转场和资产需求。它必须随 Plan artifact、每个历史版本、conversation context 和 `pendingScenePackageJob.request` 持久化。
+- Plan 阶段必须逐镜校验 `shot_description` 是否覆盖地点、主体、动作、景别、运镜、光影、声音和收束，且局部时间段必须从 0 秒连续覆盖到当前分镜时长。初次 Plan 缺项时调用专用 LLM 定向修正 1 次，并且只采纳失败分镜返回的镜头描述；仍不完整时只对失败镜头应用增强规则兜底。Plan 修订和手工编辑候选也只允许定向修正镜头描述，修正仍失败时保留原版本。
+- 场景包恢复历史已审核 Plan 时允许兼容旧的全局镜头时间段，并确定性转换为当前分镜的 `0-N秒` 局部时间段；新 Plan 候选仍必须通过严格局部时间轴校验。
 - PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
 - 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
 - 用户在右侧编辑器直接修改完整 plan.md 后，`/planning/plan/save-edit` 也必须调用 Plan 修订 LLM，把编辑稿重新对齐 `creation_contract` 与视频 `scene_blueprints`；合同字段白名单只能来自当前稿与编辑稿的确定性文本差异，完整稿仅供 LLM 重写内容和蓝图，禁止借机修改用户未编辑字段。三者同时校验通过才发布 `manual_edit` 新版本，失败时保留当前版本，禁止只保存 Markdown 并沿用旧合同。
