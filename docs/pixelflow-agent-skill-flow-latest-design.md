@@ -796,7 +796,7 @@ flowchart TD
 - 前端上传附件直接调用 content-app `/api/upload`。
 - 上传返回的 URL、文件名、类型会进入 `materials`。
 - 如果后续步骤要调用 LLM、图片编辑或视频编辑，必须把用户输入和 `materials` 一起提交给后端，让 Agent 理解素材语义。
-- PPT 表单附件只允许 Word、Excel、PDF；图片、视频、音频附件不能作为 SmartPPT 大纲输入文件。
+- PPT 表单附件只允许 Word、Excel、PDF，前端按单个文件最大 20MB、全部附件累计最大 100MB 校验；图片、视频、音频附件不能作为 SmartPPT 大纲输入文件。
 
 ## 13. 配置
 
