@@ -183,7 +183,7 @@ flowchart TD
 
 后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`HttpJianyingDraftSkill` 是真实 HTTP 实现。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
 
-真实 Provider 先调用 `POST /api/jianying/draft/tasks` 创建任务，再每 2 秒调用 `POST /api/jianying/draft/tasks/result` 查询；`20201/20202` 表示继续等待，`200` 的 `data` 是多个草稿 JSON 的 HTTPS URL。PixelFlow 立即下载并校验这些 JSON，尽量保留第三方原文件名生成一个 ZIP，再复用 content-app `/api/upload` 上传到 TOS，前端只接收最终 ZIP 的 HTTPS 下载地址。Provider 域名、超时和重试次数从开发/生产配置读取；固定 token 必须由部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入，配置不完整时装配 unavailable 实现并禁用按钮。
+真实 Provider 先调用 `POST /api/jianying/draft/tasks` 创建任务，再每 2 秒调用 `POST /api/jianying/draft/tasks/result` 查询；`20201/20202` 表示继续等待，`200` 的 `data` 是多个草稿 JSON 的 HTTPS URL。PixelFlow 立即下载并校验这些 JSON，尽量保留第三方原文件名生成一个 ZIP，再复用 content-app `/api/upload` 上传到 TOS，前端只接收最终 ZIP 的 HTTPS 下载地址。Provider 域名、固定 token、连接/读取超时和重试次数均从开发/生产配置读取；配置不完整时装配 unavailable 实现并禁用按钮。
 
 最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
 

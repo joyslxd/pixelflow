@@ -290,7 +290,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 
 `JianyingDraftResult` 是 PixelFlow typed DTO，仅含 `status`、`job_id`、`provider_task_id`、`conversation_id`、`storyboard_version_id`、`download_url`、`file_name`、`expire_at`、`message`。不向前端暴露无限制的 `raw`、Provider 原始响应或内部异常；失败只返回可公开消息。
 
-真实 Provider 使用两个接口：`POST /api/jianying/draft/tasks` 按当前分镜顺序提交 `videoUrl/videoOrder`，`POST /api/jianying/draft/tasks/result` 按第三方 task ID 轮询。业务码 `20201/20202` 继续等待，`200` 返回草稿 JSON URL 集合，其他终态转为公开失败结果。PixelFlow 对 URL 做公网 HTTPS 校验，限制文件数量和体积，校验 UTF-8 JSON 后尽量保留原文件名生成 ZIP，并复用 content-app `/api/upload` 上传到 TOS。第三方 token 只发送给创建/查询接口，必须由部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入，绝不发送给 JSON CDN 或 content-app。配置不完整时才回退 unavailable 实现。
+真实 Provider 使用两个接口：`POST /api/jianying/draft/tasks` 按当前分镜顺序提交 `videoUrl/videoOrder`，`POST /api/jianying/draft/tasks/result` 按第三方 task ID 轮询。业务码 `20201/20202` 继续等待，`200` 返回草稿 JSON URL 集合，其他终态转为公开失败结果。PixelFlow 对 URL 做公网 HTTPS 校验，限制文件数量和体积，校验 UTF-8 JSON 后尽量保留原文件名生成 ZIP，并复用 content-app `/api/upload` 上传到 TOS。第三方 token 从 profile 配置读取且只发送给创建/查询接口，绝不发送给 JSON CDN 或 content-app。配置不完整时才回退 unavailable 实现。
 
 ### 5.6 视频分析类 Skill
 

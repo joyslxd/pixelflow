@@ -216,7 +216,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 剪映草稿位于最终视频确认阶段，输入是当前版本全部成功且 `video_url` 为 HTTPS 的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
 
-真实实现是 `HttpJianyingDraftSkill`。它按分镜顺序向第三方 `POST /api/jianying/draft/tasks` 提交 `videoUrl/videoOrder`，再通过 `POST /api/jianying/draft/tasks/result` 轮询；`20201/20202` 继续等待，`200` 返回多个 JSON HTTPS URL，`50002/41001` 等业务失败立即结束。结果 JSON 必须逐个下载并校验，尽量保留原文件名统一打成 ZIP，再复用 content-app `/api/upload` 上传 TOS，最终只把 ZIP HTTPS 地址返回前端。第三方域名、连接/读取超时和重试次数从 `config.dev.yml/config.prod.yml` 的 `pixelflow.jianying_draft_*` 读取；固定 token 只能通过部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入，配置不完整时装配 `UnavailableJianyingDraftSkill`。
+真实实现是 `HttpJianyingDraftSkill`。它按分镜顺序向第三方 `POST /api/jianying/draft/tasks` 提交 `videoUrl/videoOrder`，再通过 `POST /api/jianying/draft/tasks/result` 轮询；`20201/20202` 继续等待，`200` 返回多个 JSON HTTPS URL，`50002/41001` 等业务失败立即结束。结果 JSON 必须逐个下载并校验，尽量保留原文件名统一打成 ZIP，再复用 content-app `/api/upload` 上传 TOS，最终只把 ZIP HTTPS 地址返回前端。第三方域名、固定 token、连接/读取超时和重试次数都从 `config.dev.yml/config.prod.yml` 的 `pixelflow.jianying_draft_*` 读取；配置不完整时装配 `UnavailableJianyingDraftSkill`。
 
 未结束最终视频卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个按钮。草稿生成期间锁定三项视频操作，但不锁对话输入；前端按 capability 返回的间隔（默认 2 秒）轮询，客户端和服务端最大等待 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误必须通过 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；刷新、离开或切换对话后只能恢复查询原 job，结果消息按 job ID 去重。视频点击“无意见，结束”后，草稿下载/重生历史入口仍保留，成功不自动下载。
 

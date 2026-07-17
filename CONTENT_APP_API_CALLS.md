@@ -83,7 +83,7 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 
 ## 外部剪映草稿 Provider（非 content-app）
 
-以下接口不属于 content-app，仅在此记录它们与 `/api/upload` 的衔接关系。调用实现集中在 `backend/pixelflow/jianying_draft/http_skill.py`，域名从 profile 配置读取，固定 token 由部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入。
+以下接口不属于 content-app，仅在此记录它们与 `/api/upload` 的衔接关系。调用实现集中在 `backend/pixelflow/jianying_draft/http_skill.py`，域名和固定 token 从 profile 配置读取。
 
 | 接口 | 方法 | 用途 | 重试与状态规则 |
 | --- | --- | --- | --- |

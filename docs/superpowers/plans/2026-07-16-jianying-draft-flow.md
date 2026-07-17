@@ -47,7 +47,7 @@
 
 - `backend/app/gateway/routers/__init__.py`：导出新 Router。
 - `backend/app/gateway/app.py`：注册新 Router。
-- `backend/config.dev.yml`、`backend/config.prod.yml`：配置 Provider 域名、轮询、超时和重试参数；敏感 token 由部署环境变量注入。
+- `backend/config.dev.yml`、`backend/config.prod.yml`：配置 Provider 域名、固定 token、轮询、超时和重试参数。
 - `web/src/lib/api.ts`：剪映草稿 API DTO 和调用方法。
 - `web/src/lib/chat.ts`：草稿 artifact、pending job 和结果记录类型。
 - `web/src/pages/WorkspacePage.tsx`：版本计算、pending job 持久化、恢复、轮询和结果消息。

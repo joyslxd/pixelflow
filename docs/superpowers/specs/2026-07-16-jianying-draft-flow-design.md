@@ -288,7 +288,7 @@ Java 类比：
 
 - `jianying_draft_enabled=true`
 - `jianying_draft_base_url`：第三方 API 根地址
-- `jianying_draft_token`：配置文件保持为空，第三方固定鉴权 token 由部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入
+- `jianying_draft_token`：第三方固定鉴权 token，由开发和生产 profile 配置提供
 - 轮询间隔 2 秒
 - 总超时 30 分钟
 - 网络或 HTTP 5xx 最多重试 2 次
