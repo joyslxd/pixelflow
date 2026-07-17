@@ -14,6 +14,7 @@ const activePlanSnapshotPath = path.resolve("src/lib/activePlanSnapshot.ts");
 const activePlanSnapshotSource = fs.existsSync(activePlanSnapshotPath) ? fs.readFileSync(activePlanSnapshotPath, "utf8") : "";
 const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
 const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
+const sceneAssetReplacementPickerSource = fs.readFileSync(path.resolve("src/components/canvas/SceneAssetReplacementPicker.tsx"), "utf8");
 
 test("plan cards do not expose backend consistency diagnostics to users", () => {
   assert.match(apiSource, /consistency_issues/, "the API contract must retain internal plan diagnostics");
@@ -22,6 +23,16 @@ test("plan cards do not expose backend consistency diagnostics to users", () => 
     /consistency_issues\.join/,
     "plan cards must not render internal consistency diagnostics",
   );
+});
+
+test("scene asset replacement keeps temporary local upload and adds persistent asset-library upload", () => {
+  assert.match(sceneAssetReplacementPickerSource, /const uploadLocalImage = async/);
+  assert.match(sceneAssetReplacementPickerSource, /source: "local_upload"/);
+  assert.match(sceneAssetReplacementPickerSource, /const uploadImageAsset = async/);
+  assert.match(sceneAssetReplacementPickerSource, /onProgress: \(percent\) => setAssetUploadProgress\(percent\)/);
+  assert.match(sceneAssetReplacementPickerSource, /api\.createContentImageAsset/);
+  assert.match(sceneAssetReplacementPickerSource, /上传到资产库/);
+  assert.doesNotMatch(sceneAssetReplacementPickerSource, /naturalWidth|naturalHeight/);
 });
 
 function handleSendSource() {

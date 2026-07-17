@@ -1,12 +1,23 @@
-import { ImageIcon, Loader2, RefreshCw, Upload, UserRound, X } from "lucide-react";
+import { Check, ImageIcon, Loader2, RefreshCw, Upload, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type ContentAssetItem, type ContentAssetPageResponse, type DigitalHumanAssetType, type UploadedAttachment } from "@/lib/api";
 import type { GlobalSceneAssetGroup, SceneGlobalAssetReplacement } from "@/lib/scenePackages";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
+const ASSET_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+const ASSET_REFRESH_ATTEMPTS = 3;
+const ASSET_REFRESH_DELAY_MS = 1_000;
+const ASSET_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const ASSET_IMAGE_FILE_PATTERN = /\.(jpe?g|png|webp)$/i;
 
 type PickerMode = "digital_human" | "image_asset";
+type AssetUploadStage = "idle" | "preparing" | "uploading" | "creating_asset" | "refreshing" | "completed" | "sync_delayed" | "failed";
+
+interface UploadedAssetLocator {
+  id: string;
+  imageUrl: string;
+}
 
 interface ReplacementOption {
   key: string;
@@ -49,15 +60,28 @@ export function SceneAssetReplacementPicker({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploadedImage, setUploadedImage] = useState<UploadedAttachment | null>(null);
+  const [assetUploadStage, setAssetUploadStage] = useState<AssetUploadStage>("idle");
+  const [assetUploadProgress, setAssetUploadProgress] = useState(0);
+  const [assetUploadError, setAssetUploadError] = useState("");
+  const [assetUploadDragging, setAssetUploadDragging] = useState(false);
+  const [justUploadedKey, setJustUploadedKey] = useState("");
+  const [uploadedAssetLocator, setUploadedAssetLocator] = useState<UploadedAssetLocator | null>(null);
+  const [contentProjectId, setContentProjectId] = useState<string | number | null>(null);
   const loadingRef = useRef(false);
+  const listRequestTokenRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const assetUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const justUploadedCardRef = useRef<HTMLButtonElement | null>(null);
 
   const selected = useMemo(() => items.find((item) => item.key === selectedKey), [items, selectedKey]);
+  const assetUploadBusy = assetUploadStage === "preparing" || assetUploadStage === "uploading" || assetUploadStage === "creating_asset" || assetUploadStage === "refreshing";
+  const interactionBusy = uploading || assetUploadBusy;
 
   const loadPage = useCallback(
-    async (pageNumber: number, replace = false) => {
-      if (!open || loadingRef.current) return;
+    async (pageNumber: number, replace = false): Promise<ReplacementOption[] | null> => {
+      if (!open || (loadingRef.current && !replace)) return null;
+      const requestToken = replace ? ++listRequestTokenRef.current : listRequestTokenRef.current;
       loadingRef.current = true;
       setLoading(true);
       setError("");
@@ -72,15 +96,22 @@ export function SceneAssetReplacementPicker({
               })
             : await api.listContentImageAssets({ pageCurrent: pageNumber, pageSize: PAGE_SIZE });
         const nextItems = normalizeAssetPage(response, mode, digitalHumanType);
+        if (requestToken !== listRequestTokenRef.current) return null;
         const totalPages = pageTotalPages(response);
         setItems((current) => (replace ? nextItems : [...current, ...nextItems]));
         setPage(pageNumber);
         setHasMore(totalPages ? pageNumber < totalPages : nextItems.length >= PAGE_SIZE);
+        return nextItems;
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        if (requestToken === listRequestTokenRef.current) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+        return null;
       } finally {
-        setLoading(false);
-        loadingRef.current = false;
+        if (requestToken === listRequestTokenRef.current) {
+          setLoading(false);
+          loadingRef.current = false;
+        }
       }
     },
     [digitalHumanType, mode, open],
@@ -105,8 +136,25 @@ export function SceneAssetReplacementPicker({
     setUploading(false);
     setUploadError("");
     setUploadedImage(null);
+    setAssetUploadStage("idle");
+    setAssetUploadProgress(0);
+    setAssetUploadError("");
+    setAssetUploadDragging(false);
+    setJustUploadedKey("");
+    setUploadedAssetLocator(null);
+    listRequestTokenRef.current += 1;
+    loadingRef.current = false;
     if (uploadInputRef.current) uploadInputRef.current.value = "";
+    if (assetUploadInputRef.current) assetUploadInputRef.current.value = "";
   }, [open]);
+
+  useEffect(() => {
+    if (!justUploadedKey) return;
+    const frame = window.requestAnimationFrame(() => {
+      justUploadedCardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [justUploadedKey]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -145,6 +193,115 @@ export function SceneAssetReplacementPicker({
     }
   };
 
+  const refreshUploadedAsset = async (locator: UploadedAssetLocator): Promise<boolean> => {
+    setAssetUploadStage("refreshing");
+    setAssetUploadError("");
+    let receivedPage = false;
+    for (let attempt = 0; attempt < ASSET_REFRESH_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await delay(ASSET_REFRESH_DELAY_MS);
+      const refreshedItems = await loadPage(1, true);
+      if (!refreshedItems) continue;
+      receivedPage = true;
+      const uploadedOption = refreshedItems.find((item) => uploadedAssetOptionMatches(item, locator));
+      if (!uploadedOption) continue;
+      setJustUploadedKey(uploadedOption.key);
+      setAssetUploadStage("completed");
+      setAssetUploadError("");
+      return true;
+    }
+    if (!receivedPage) {
+      setError("");
+      setAssetUploadStage("failed");
+      setAssetUploadError("刷新失败，请重试");
+      return false;
+    }
+    setAssetUploadStage("sync_delayed");
+    setAssetUploadError("图片已上传，资产库同步中，请稍后刷新");
+    return false;
+  };
+
+  const resolveContentProjectId = async (): Promise<string | number> => {
+    if (contentProjectId !== null && contentProjectId !== "") return contentProjectId;
+    const projects = await api.listContentProjects();
+    const projectId = projects[0]?.id;
+    if (projectId === undefined || projectId === null || projectId === "") {
+      throw new Error("未找到可用项目，暂时无法上传到资产库");
+    }
+    setContentProjectId(projectId);
+    return projectId;
+  };
+
+  const uploadImageAsset = async (file: File | undefined, fileCount = 1) => {
+    if (!file || interactionBusy) return;
+    if (fileCount !== 1) {
+      setAssetUploadStage("failed");
+      setAssetUploadError("每次只能上传 1 张图片");
+      return;
+    }
+    const validationError = validateAssetImageFile(file);
+    if (validationError) {
+      setAssetUploadStage("failed");
+      setAssetUploadError(validationError);
+      if (assetUploadInputRef.current) assetUploadInputRef.current.value = "";
+      return;
+    }
+
+    let stage: "project" | "upload" | "create" | "refresh" = "project";
+    setAssetUploadProgress(0);
+    setAssetUploadError("");
+    setJustUploadedKey("");
+    setUploadedAssetLocator(null);
+    setSelectedKey("");
+    setAssetUploadStage("preparing");
+    try {
+      const projectId = await resolveContentProjectId();
+      stage = "upload";
+      setAssetUploadStage("uploading");
+      const uploaded = await api.uploadAttachment(file, {
+        onProgress: (percent) => setAssetUploadProgress(percent),
+      });
+      if (uploaded.type !== "image") {
+        throw new Error("上传结果不是有效图片，请重新选择");
+      }
+
+      stage = "create";
+      setAssetUploadStage("creating_asset");
+      const createdAsset = await api.createContentImageAsset({
+        projectId,
+        name: filenameFromUrl(uploaded.url) || uploaded.filename || uploaded.name || file.name,
+        refrenceUrl: uploaded.url,
+      });
+      const locator: UploadedAssetLocator = {
+        id: createdAsset.id === undefined || createdAsset.id === null ? "" : String(createdAsset.id),
+        imageUrl: uploaded.url,
+      };
+      setUploadedAssetLocator(locator);
+
+      stage = "refresh";
+      await refreshUploadedAsset(locator);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setAssetUploadStage("failed");
+      if (stage === "project") {
+        setAssetUploadError(detail || "获取项目信息失败，请重试");
+      } else if (stage === "upload") {
+        setAssetUploadError(detail || "图片上传失败，请重试");
+      } else if (stage === "create") {
+        setAssetUploadError(detail || "图片保存到资产库失败，请重试");
+      } else {
+        setAssetUploadError(detail || "刷新失败，请重试");
+      }
+    } finally {
+      setAssetUploadDragging(false);
+      if (assetUploadInputRef.current) assetUploadInputRef.current.value = "";
+    }
+  };
+
+  const retryUploadedAssetRefresh = () => {
+    if (!uploadedAssetLocator || assetUploadBusy) return;
+    void refreshUploadedAsset(uploadedAssetLocator);
+  };
+
   const confirmUploadedImage = () => {
     if (!uploadedImage) return;
     onConfirm({
@@ -178,13 +335,13 @@ export function SceneAssetReplacementPicker({
             <button
               type="button"
               onClick={() => uploadInputRef.current?.click()}
-              disabled={uploading}
+              disabled={interactionBusy}
               className="flex h-9 items-center gap-1.5 rounded-[8px] border border-accent px-3 text-[13px] font-medium text-accent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-50"
             >
               {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
               {uploading ? "上传中..." : "本地上传"}
             </button>
-            <button type="button" onClick={onCancel} disabled={uploading} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50" aria-label="关闭">
+            <button type="button" onClick={onCancel} disabled={interactionBusy} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50" aria-label="关闭">
               <X size={20} />
             </button>
           </div>
@@ -193,6 +350,20 @@ export function SceneAssetReplacementPicker({
         {uploadError ? (
           <div className="mx-6 mt-3 rounded-[8px] border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">{uploadError}</div>
         ) : null}
+        {mode === "image_asset" && assetUploadError ? (
+          <div className={cn(
+            "mx-6 mt-3 flex items-center justify-between gap-3 rounded-[8px] border px-3 py-2 text-[13px]",
+            assetUploadStage === "sync_delayed" ? "border-amber-200 bg-amber-50 text-amber-700" : "border-red-200 bg-red-50 text-red-700",
+          )}>
+            <span>{assetUploadError}</span>
+            {uploadedAssetLocator && (assetUploadStage === "sync_delayed" || assetUploadStage === "failed") ? (
+              <button type="button" onClick={retryUploadedAssetRefresh} className="flex shrink-0 items-center gap-1 rounded-md bg-white px-2 py-1">
+                <RefreshCw size={13} />
+                刷新
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-3">
           <div className="flex rounded-[8px] bg-canvas p-1">
@@ -200,6 +371,7 @@ export function SceneAssetReplacementPicker({
               <button
                 type="button"
                 onClick={() => setMode("digital_human")}
+                disabled={interactionBusy}
                 className={cn("flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]", mode === "digital_human" ? "bg-white text-ink shadow-sm" : "text-ink-soft")}
               >
                 <UserRound size={15} />
@@ -209,6 +381,7 @@ export function SceneAssetReplacementPicker({
             <button
               type="button"
               onClick={() => setMode("image_asset")}
+              disabled={interactionBusy}
               className={cn("flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]", mode === "image_asset" ? "bg-white text-ink shadow-sm" : "text-ink-soft")}
             >
               <ImageIcon size={15} />
@@ -244,24 +417,85 @@ export function SceneAssetReplacementPicker({
               </button>
             </div>
           ) : null}
-          {items.length === 0 && !loading ? (
+          {items.length === 0 && !loading && mode !== "image_asset" ? (
             <div className="flex h-64 items-center justify-center rounded-[8px] border border-dashed border-line text-[13px] text-ink-soft">暂无可用素材</div>
           ) : (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {mode === "image_asset" ? (
+                <>
+                  <input
+                    ref={assetUploadInputRef}
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp"
+                    className="hidden"
+                    onChange={(event) => void uploadImageAsset(event.currentTarget.files?.[0], event.currentTarget.files?.length || 0)}
+                  />
+                  <button
+                    type="button"
+                    disabled={interactionBusy}
+                    onClick={() => assetUploadInputRef.current?.click()}
+                    onDragEnter={(event) => {
+                      event.preventDefault();
+                      if (!interactionBusy) setAssetUploadDragging(true);
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      if (!interactionBusy) setAssetUploadDragging(true);
+                    }}
+                    onDragLeave={(event) => {
+                      event.preventDefault();
+                      setAssetUploadDragging(false);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setAssetUploadDragging(false);
+                      void uploadImageAsset(event.dataTransfer.files?.[0], event.dataTransfer.files?.length || 0);
+                    }}
+                    className={cn(
+                      "flex min-h-[250px] flex-col items-center justify-center rounded-[8px] border border-dashed px-4 text-center transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                      assetUploadDragging ? "border-accent bg-accent-soft" : "border-line bg-canvas hover:border-accent hover:bg-accent-soft/40",
+                    )}
+                  >
+                    {assetUploadBusy ? <Loader2 size={26} className="animate-spin text-accent" /> : <Upload size={26} className="text-accent" />}
+                    <div className="mt-3 text-[13px] font-semibold text-ink">
+                      {assetUploadStage === "uploading"
+                        ? `上传中 ${assetUploadProgress}%`
+                        : assetUploadStage === "preparing"
+                          ? "准备上传..."
+                        : assetUploadStage === "creating_asset"
+                          ? "保存到资产库..."
+                          : assetUploadStage === "refreshing"
+                            ? "刷新资产库..."
+                            : "上传到资产库"}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-5 text-ink-soft">点击或拖拽图片到此处</div>
+                    <div className="mt-2 text-[10px] leading-4 text-ink-soft">JPG / PNG / WEBP，单张不超过 20MB</div>
+                  </button>
+                </>
+              ) : null}
               {items.map((item) => {
                 const selectedItem = selectedKey === item.key;
+                const justUploaded = justUploadedKey === item.key;
                 return (
                   <button
                     key={item.key}
+                    ref={justUploaded ? justUploadedCardRef : undefined}
                     type="button"
                     onClick={() => setSelectedKey(item.key)}
+                    disabled={interactionBusy}
                     className={cn(
-                      "overflow-hidden rounded-[8px] border bg-white text-left transition-colors",
+                      "relative overflow-hidden rounded-[8px] border bg-white text-left transition-colors disabled:cursor-not-allowed disabled:opacity-70",
                       selectedItem ? "border-accent shadow-[0_0_0_2px_rgba(17,94,89,0.12)]" : "border-line hover:border-accent",
                     )}
                   >
-                    <div className="aspect-[3/4] bg-canvas">
+                    <div className="relative aspect-[3/4] bg-canvas">
                       <img src={item.imageUrl} alt={item.name} className="h-full w-full object-cover" />
+                      {justUploaded ? (
+                        <span className="absolute left-2 top-2 rounded-full bg-accent px-2 py-1 text-[10px] font-medium text-white">刚刚上传</span>
+                      ) : null}
+                      {selectedItem ? (
+                        <span className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-accent text-white"><Check size={14} /></span>
+                      ) : null}
                     </div>
                     <div className="grid gap-1 px-2 py-2">
                       <div className="truncate text-[13px] font-medium text-ink">{item.name}</div>
@@ -284,13 +518,13 @@ export function SceneAssetReplacementPicker({
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 border-t border-line px-6 py-4">
-          <button type="button" onClick={onCancel} disabled={uploading} className="rounded-[8px] border border-line px-4 py-2 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50">
+          <button type="button" onClick={onCancel} disabled={interactionBusy} className="rounded-[8px] border border-line px-4 py-2 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50">
             取消
           </button>
           <button
             type="button"
             onClick={confirm}
-            disabled={!selected || uploading}
+            disabled={!selected || interactionBusy}
             className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             确认替换
@@ -319,6 +553,26 @@ export function SceneAssetReplacementPicker({
       ) : null}
     </div>
   );
+}
+
+function validateAssetImageFile(file: File): string {
+  const mimeType = file.type.toLowerCase();
+  if ((mimeType && !ASSET_IMAGE_MIME_TYPES.has(mimeType)) || !ASSET_IMAGE_FILE_PATTERN.test(file.name)) {
+    return "暂不支持该图片格式";
+  }
+  if (file.size > ASSET_IMAGE_MAX_BYTES) {
+    return "图片大小不能超过 20MB";
+  }
+  return "";
+}
+
+function uploadedAssetOptionMatches(item: ReplacementOption, locator: UploadedAssetLocator): boolean {
+  if (locator.id && item.replacement.contentAssetId === locator.id) return true;
+  return Boolean(locator.imageUrl) && item.imageUrl === locator.imageUrl;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function normalizeAssetPage(
