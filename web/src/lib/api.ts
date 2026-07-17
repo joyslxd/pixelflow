@@ -66,6 +66,24 @@ export interface ContentAssetPageResponse {
   pageCurrent?: number;
 }
 
+export interface ContentProject extends Record<string, unknown> {
+  id?: string | number;
+}
+
+export interface ContentProjectListResponse {
+  projects?: ContentProject[];
+}
+
+export interface UploadAttachmentOptions {
+  onProgress?: (percent: number) => void;
+}
+
+export interface CreateContentImageAssetBody {
+  projectId: string | number;
+  name: string;
+  refrenceUrl: string;
+}
+
 export interface TaskResponse {
   task_id: string;
   status: string;
@@ -858,7 +876,81 @@ async function responseErrorMessage(res: Response, path: string): Promise<string
   return `${res.status} ${path}: ${(message || res.statusText).slice(0, 200)}`;
 }
 
-async function uploadFileToContentApp(file: File): Promise<UploadedAttachment> {
+function uploadedAttachmentFromResponse(rawResponse: Record<string, unknown>, file: File): UploadedAttachment {
+  const data = rawResponse.data && typeof rawResponse.data === "object"
+    ? rawResponse.data as Record<string, unknown>
+    : rawResponse;
+  if (rawResponse.success === false) {
+    throw new ApiError(400, String(rawResponse.error || rawResponse.message || "上传失败"));
+  }
+  const url = stringField(data.url) || stringField(data.path) || stringField(rawResponse.url) || stringField(rawResponse.path);
+  if (!url) {
+    throw new ApiError(500, "上传成功但没有返回文件 URL");
+  }
+  const filename = stringField(data.filename) || stringField(rawResponse.filename) || file.name;
+  const mimeType = file.type || stringField(data.contentType) || stringField(rawResponse.contentType);
+  return {
+    name: filename,
+    filename,
+    size: numberField(data.size) || numberField(rawResponse.size) || file.size,
+    type: attachmentType(mimeType, filename),
+    mimeType,
+    url,
+    path: stringField(data.path) || stringField(rawResponse.path) || url,
+  };
+}
+
+async function uploadFileToContentAppWithProgress(
+  file: File,
+  onProgress: (percent: number) => void,
+): Promise<UploadedAttachment> {
+  const authorization = await waitForAuthorizationHeader();
+  const headers = authHeadersFromAuthorization(authorization);
+  const formData = new FormData();
+  formData.append("file", file);
+  const path = "/api/upload";
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) return;
+      onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "网络异常，请检查网络后重试"));
+    xhr.onabort = () => reject(new ApiError(0, "图片上传已取消"));
+    xhr.onload = () => {
+      let raw: Record<string, unknown> = {};
+      try {
+        raw = JSON.parse(xhr.responseText || "{}") as Record<string, unknown>;
+      } catch {
+        reject(new ApiError(xhr.status || 500, `${xhr.status || 500} ${path}: 上传响应不是有效 JSON`));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(xhr.status, String(raw.message || raw.error || `${xhr.status} ${path}: ${xhr.statusText || "上传失败"}`)));
+        return;
+      }
+      try {
+        const uploaded = uploadedAttachmentFromResponse(raw, file);
+        onProgress(100);
+        resolve(uploaded);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    xhr.send(formData);
+  });
+}
+
+async function uploadFileToContentApp(
+  file: File,
+  options: UploadAttachmentOptions = {},
+): Promise<UploadedAttachment> {
+  if (options.onProgress) {
+    return uploadFileToContentAppWithProgress(file, options.onProgress);
+  }
   const formData = new FormData();
   formData.append("file", file);
   const path = "/api/upload";
@@ -871,24 +963,7 @@ async function uploadFileToContentApp(file: File): Promise<UploadedAttachment> {
     throw new ApiError(res.status, await responseErrorMessage(res, path));
   }
   const raw = (await res.json()) as Record<string, unknown>;
-  if (raw.success === false) {
-    throw new ApiError(400, String(raw.error || raw.message || "上传失败"));
-  }
-  const url = stringField(raw.url) || stringField(raw.path);
-  if (!url) {
-    throw new ApiError(500, "上传成功但没有返回文件 URL");
-  }
-  const filename = stringField(raw.filename) || file.name;
-  const mimeType = file.type || stringField(raw.contentType);
-  return {
-    name: filename,
-    filename,
-    size: numberField(raw.size) || file.size,
-    type: attachmentType(mimeType, filename),
-    mimeType,
-    url,
-    path: stringField(raw.path) || url,
-  };
+  return uploadedAttachmentFromResponse(raw, file);
 }
 
 function stringField(value: unknown): string {
@@ -1328,7 +1403,7 @@ async function pollPptJob<T extends Record<string, unknown>>(
 export const api = {
   getCurrentUser: () => req<{ authenticated: boolean; id: string; username: string }>("/auth/me"),
 
-  uploadAttachment: (file: File) => uploadFileToContentApp(file),
+  uploadAttachment: (file: File, options?: UploadAttachmentOptions) => uploadFileToContentApp(file, options),
 
   listImageGenerateModelConfigs: () =>
     contentAppReq<ImageModelParamConfig[]>("/api/modelParamConfig/listByCategory/image_generate"),
@@ -1362,6 +1437,24 @@ export const api = {
         assetType: "image",
         pageCurrent: body.pageCurrent,
         pageSize: body.pageSize,
+      }),
+    }),
+
+  listContentProjects: async () => {
+    const response = await contentAppReq<ContentProjectListResponse | ContentProject[]>("/api/projects");
+    return Array.isArray(response) ? response : Array.isArray(response.projects) ? response.projects : [];
+  },
+
+  createContentImageAsset: (body: CreateContentImageAssetBody) =>
+    contentAppReq<ContentAssetItem>("/api/asset/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetType: "image",
+        assetSource: "upload",
+        projectId: body.projectId,
+        name: body.name,
+        refrenceUrl: body.refrenceUrl,
       }),
     }),
 

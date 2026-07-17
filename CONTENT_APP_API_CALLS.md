@@ -56,6 +56,9 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 | `/api/auth/verify` | `POST` | `content_app_auth.verify_authorization_header_remote()`、SSE 生成器 | 实时校验 content-app token，禁用用户或失效 token 立即拒绝。 | `AuthController.verifyToken()` | pixelflow 本地只读取 JWT payload 里的 `sub` 作为用户名；token 真伪、过期和用户禁用状态以此接口返回为准。 |
 | `/api/modelParamConfig/listByCategory/image_generate` | `GET` | `web/src/lib/api.ts` 的 `listImageGenerateModelConfigs()`，由图片编辑参数确认卡、视频需求清洗表单和视频场景包全局素材编辑/融合分支触发 | 查询图片生成/编辑可选模型，以及每个模型支持的尺寸和清晰度。 | `ModelParamConfigController.listByCategory()` | 图片编辑分支由用户选择模型、比例和清晰度；视频表单只让用户选择场景资产图片模型，默认 `gpt-image-2`，并把 `paramConfig.aspectRatioList/sizeList` 作为 `image_model_capabilities` 提交给 Plan Agent。Plan LLM 从该范围选择 `scene_image_ratio/scene_image_size`，后端校验后写入最终创作合同，角色/场景/道具图片严格使用该合同生成；全局素材编辑/融合分支进入生成前也读取该接口。用户确认的模型、尺寸和清晰度会写入对话 context，切换对话或刷新恢复后仍显示用户确认过的参数。 |
 | `/api/modelParamConfig/listByCategory/video_generate` | `GET` | `web/src/lib/api.ts` 的 `listVideoGenerateModelConfigs()`，由视频需求清洗表单触发 | 查询可用视频模型、画幅、清晰度、声音、时长和端点能力。 | `ModelParamConfigController.listByCategory()` | 前端展示所有启用 Seedance；将 `aspectRatioList/sizeList/onSoundList/videoDurationList/modelGenerateTypeList/uploadFileTypeList` 规范化写入 `video_model_capabilities`。用户选择的画幅、清晰度和声音必须落在快照内；切换到当前仅支持 `480p/720p` 的 `seedance-2.0-mini` 或 `seedance-2.0-fast` 时会把旧 `1080p` 自动修正为 `720p`，避免价格配置无法命中。 |
+| `/api/upload` | `POST multipart` | `web/src/lib/api.ts` 的 `uploadAttachment()`，由普通附件、临时本地替换和“上传到资产库”入口触发 | 上传本地文件并返回可引用 URL。 | `UploadController.uploadFile()` | 默认无进度回调时沿用 fetch；资产库入口传 `onProgress` 时 Client 内部改用 `XMLHttpRequest.upload.onprogress` 上报真实进度。上传到资产库只校验 JPG/JPEG/PNG/WEBP 和单张不超过 20MB，不校验宽高。 |
+| `/api/projects` | `GET` | `web/src/lib/api.ts` 的 `listContentProjects()`，由“上传到资产库”入口在创建资产前触发 | 查询当前用户可用项目，取第一项 `id` 作为图片资产 `projectId`。 | 项目查询 Controller | 获取失败时不继续上传或创建资产，不影响原临时“本地上传”入口。 |
+| `/api/asset/create` | `POST` | `web/src/lib/api.ts` 的 `createContentImageAsset()`，由“上传到资产库”入口触发 | 将 `/api/upload` 返回的图片 URL 创建为当前用户长期图片资产。 | `AssetLibraryController.createAsset()` | 固定传 `assetType=image`、`assetSource=upload`、`projectId/name/refrenceUrl`；响应 `data.id` 只用于当前弹窗定位“刚刚上传”和回查同步，不能用创建响应临时插入列表，随后必须重新查询资产库第一页。 |
 | `/api/asset/character-assets` | `POST` | `web/src/lib/api.ts` 的 `listCharacterAssets()`，由分镜全局角色素材“替换素材”弹层触发 | 查询数字人素材列表，支持 `xnszr` 虚拟数字人、`zrszr` 真人数字人、`ipsc` IP素材。 | `AssetLibraryController.getCharacterAssets()` | 前端直连 content-app，POST JSON 传 `assetSource`、`assetType`、`pageCurrent`、`pageSize`。选中数字人后，展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`，并同步到场景包 mentions；保留原场景包 `asset_id`。 |
 | `/api/asset/assets` | `POST` | `web/src/lib/api.ts` 的 `listContentImageAssets()`，由分镜全局素材“替换素材”弹层触发 | 查询资产库图片素材列表。 | `AssetLibraryController.getAssets()` | 前端直连 content-app，固定传 `assetSource=all`、`assetType=image`，并分页传 `pageCurrent`、`pageSize`。选中图片素材后，展示图和模型引用都使用图片 URL，并同步到场景包 global_assets 和 mentions。 |
 | `/api/creative/decompose_video_to_storyboard` | `POST` | `skill._decompose_blocking()`，由 `nodes._decompose_reference_videos()` 或 `/agent/flows/video/analyze-storyboards` 触发 | 将用户上传/输入的参考视频拆解为 storyboard shots，供后续 Brief、分镜规划或视频分析结果展示使用。 | `CreativeController.decomposeVideoToStoryboard()` | 可能返回异步 task，随后会调用 `/api/task/{taskId}/status` 轮询；视频分析默认最多等 15 分钟。 |
@@ -79,18 +82,9 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `/api/upload` | `POST multipart` | `run_generation.upload_file()`；剪映草稿 `HttpJianyingDraftSkill` 也通过该封装上传最终 ZIP | 上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS。剪映流程会先下载第三方返回的多个 JSON，在 PixelFlow 临时目录打成一个 ZIP，再携带当前用户 Authorization 调用本接口，最终把 TOS HTTPS 地址返回前端。 |
-
-## 外部剪映草稿 Provider（非 content-app）
-
-以下接口不属于 content-app，仅在此记录它们与 `/api/upload` 的衔接关系。调用实现集中在 `backend/pixelflow/jianying_draft/http_skill.py`，域名和固定 token 从 profile 配置读取。
-
-| 接口 | 方法 | 用途 | 重试与状态规则 |
-| --- | --- | --- | --- |
-| `/api/jianying/draft/tasks` | `POST` | 按分镜顺序提交 `[{videoUrl, videoOrder}]` 并取得第三方任务 ID。 | 网络和 HTTP 5xx 最多重试 2 次；HTTP 200 但业务码非 200 不重试。 |
-| `/api/jianying/draft/tasks/result` | `POST` | 传 `{taskId}` 查询草稿结果；成功返回多个 JSON HTTPS URL。 | 首次等待 2 秒，此后每 2 秒查询；`20201/20202` 继续，`200` 成功，其他业务码失败；总预算 30 分钟。 |
+| `/api/upload` | `POST multipart` | `run_generation.upload_file()`；剪映草稿 `HttpJianyingDraftSkill` 也通过该封装上传最终 ZIP | 上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS；前端资产库调用说明见上方主流程表。剪映流程会先下载第三方返回的多个 JSON，在 PixelFlow 临时目录打成一个 ZIP，再携带当前用户 Authorization 调用本接口，最终把 TOS HTTPS 地址返回前端。 |
 | `/api/asset/virtual-human-asset` | `POST` | `run_generation.create_virtual_human_asset()` | 创建虚拟人第三方资产。 | `AssetLibraryController.createVirtualHumanAsset()` | 通常和 `/api/asset/create` 串联使用。 |
-| `/api/asset/create` | `POST` | `run_generation.create_virtual_human_asset()` | 在 content-app 资产库创建资产记录。 | `AssetLibraryController.createAsset()` | 依赖前一步返回的第三方资产 ID。 |
+| `/api/asset/create` | `POST` | `run_generation.create_virtual_human_asset()` | 后端工具在 content-app 资产库创建数字人资产记录。 | `AssetLibraryController.createAsset()` | 依赖前一步返回的第三方资产 ID；前端创建普通图片资产的调用说明见上方主流程表。 |
 | `/api/asset/refrence-urls` | `POST` | `run_generation.resolve_asset_urls()` | 根据 asset id 查询可引用的 `refrence_url`。 | `AssetLibraryController.getRefrenceUrls()` | 接口名保留了后端现有拼写 `refrence`。 |
 | `/api/video/text-to-video` | `POST` | `run_generation.text_to_video()` | 纯文本生成视频。 | `VideoController.textToVideo()` | CLI、旧任务流和当前场景视频 job 共用同一 wrapper；精确 DTO 见上方主流程表。 |
 | `/api/video/reference-mode-video` | `POST` | `run_generation.reference_mode_video()` | 用图片、视频、音频参考素材生成视频。 | `VideoController.referenceModeVideo()` | 长参考视频、原生音频参考视频 helper 和当前场景视频 job 共用；最终视频生成后只为 dirty/failed scenes 重新触发，未修改分镜复用旧 URL。 |
@@ -101,6 +95,15 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 | `/api/picture/image_edit` | `POST` | `run_generation.image_edit()` | 对已有图片按 prompt 编辑。 | `ImageController.imageEdit()` | 请求体包含 `image_url`、`prompt`、`model`、`width`、`height`、`imageSize`、`size`、`max_images`、`num`；主 PixelFlow 图片流程的直接图片编辑分支、plan 后图片编辑分支和视频场景包全局素材编辑都会复用；生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。模型、比例和清晰度的可选项由 `/api/modelParamConfig/listByCategory/image_generate` 提供，Python 侧不再维护模型级清晰度白名单，避免前端可选但网关旧规则提前拦截。 |
 | `/api/picture/multi_image_fusion` | `POST` | `run_generation.multi_image_fusion()`，由 `pixelflow_image.fuse_image_asset()` 和普通图片多图融合生成触发 | 多图融合成一张图片。 | `ImageController.multiImageFusion()` | 视频场景包全局素材引用后，如果同一条用户消息含有效上传图片，前端先展示模型/比例/清晰度确认卡，再调用 `/agent/flows/image/fuse-asset/start`；Python 将 `source_image_url` 作为第一张图并追加有效上传图片，最多 9 张，且透传用户确认的 `model/ratio/size`。生成后通过 `/api/task/{taskId}/status` 轮询结果，图片默认最多等 10 分钟；成功后先展示候选图，用户确认后才替换场景包素材。 |
 | `/api/picture/batch_text_to_image` | `POST` | `run_generation.batch_text_to_image()` | 批量文生图。 | `ImageController.batchTextToImage()` | 可能返回多个 task id；每个图片任务默认最多等 10 分钟。 |
+
+## 外部剪映草稿 Provider（非 content-app）
+
+以下接口不属于 content-app，仅在此记录它们与 `/api/upload` 的衔接关系。调用实现集中在 `backend/pixelflow/jianying_draft/http_skill.py`，域名和固定 token 从 profile 配置读取。
+
+| 接口 | 方法 | 用途 | 重试与状态规则 |
+| --- | --- | --- | --- |
+| `/api/jianying/draft/tasks` | `POST` | 按分镜顺序提交 `[{videoUrl, videoOrder}]` 并取得第三方任务 ID。 | 网络和 HTTP 5xx 最多重试 2 次；HTTP 200 但业务码非 200 不重试。 |
+| `/api/jianying/draft/tasks/result` | `POST` | 传 `{taskId}` 查询草稿结果；成功返回多个 JSON HTTPS URL。 | 首次等待 2 秒，此后每 2 秒查询；`20201/20202` 继续，`200` 成功，其他业务码失败；总预算 30 分钟。 |
 
 ## 当前已知注意点
 

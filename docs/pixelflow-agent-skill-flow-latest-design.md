@@ -851,11 +851,12 @@ flowchart TD
 
 ### 14.1 分镜全局素材替换
 
-视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材，也支持通过 content-app `/api/upload` 上传单张本地图片。上传成功后前端先展示图片预览和文件名，必须由用户二次确认才执行替换；取消确认时保留原素材，不把上传图片加入资产库。该能力会替换当前场景包的 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片，作为后续确认和生成视频的可操作卡片。
+视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材，并保留两条互不混用的本地图片入口。原“本地上传”只调用 content-app `/api/upload` 得到临时图片 URL，上传成功后展示图片预览和文件名，必须由用户二次确认才执行替换；取消确认时保留原素材且不创建资产库记录。图片素材列表第一张另有“上传到资产库”卡片：只校验 JPG/JPEG/PNG/WEBP 与单张不超过 20MB，不校验图片宽高；前端先调用 `/api/projects` 取得当前项目，再复用 `uploadAttachment(file, { onProgress })` 上传文件并用 `/api/asset/create` 创建长期图片资产，最后重新查询 `/api/asset/assets` 第一页。创建响应 `data.id` 只用于本次弹窗定位“刚刚上传”卡片和最多 3 次、每次间隔 1 秒的同步回查；用户仍需手动选中资产并点击“确认替换”，取消替换不会删除已创建资产。两条入口最终都复用同一场景包替换逻辑：更新 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片。
 
 - 角色素材 `characters` 可替换为数字人素材或图片素材；场景 `scenes` 和道具 `props` 只能替换为图片素材。
 - 数字人素材前端直连 `/api/asset/character-assets`，支持 `xnszr`、`zrszr`、`ipsc` 三类；展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`。
 - 图片素材前端直连 `/api/asset/assets`，固定查询 `assetType=image`、`assetSource=all`；展示图和模型引用都使用图片 URL。
+- `uploadAttachment()` 默认仍使用 `fetch`；只有传入 `onProgress` 的资产库上传入口在 Client 内部使用 `XMLHttpRequest.upload.onprogress` 上报真实上传进度，业务组件不能把自定义回调直接传给原生 `fetch` 假设浏览器会触发。
 - 场景视频 payload 收集参考图时优先使用 `generation_reference_url`，没有该字段才兜底展示图 URL，避免数字人素材同时把 `asset://thirdAssetId` 和展示图 URL 传给模型。
 
 ## 15. 推荐验证清单

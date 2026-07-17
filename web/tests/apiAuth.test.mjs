@@ -139,3 +139,131 @@ test("uploadAttachment posts multipart file to content-app upload API with autho
     }
   }
 });
+
+test("uploadAttachment reports real upload progress through XMLHttpRequest when onProgress is provided", async () => {
+  const previousWindow = globalThis.window;
+  const previousXhr = globalThis.XMLHttpRequest;
+  const testWindow = makeWindow();
+  testWindow.__CONTENT_APP_AUTHORIZATION__ = "Bearer progress-token";
+  globalThis.window = testWindow;
+
+  let capturedMethod = "";
+  let capturedUrl = "";
+  let capturedAuthorization = "";
+  let capturedBody;
+  class FakeXMLHttpRequest {
+    upload = {};
+    status = 200;
+    statusText = "OK";
+    responseText = JSON.stringify({
+      success: true,
+      filename: "asset.webp",
+      size: 2048,
+      url: "https://x/asset.webp",
+    });
+
+    open(method, url) {
+      capturedMethod = method;
+      capturedUrl = url;
+    }
+
+    setRequestHeader(key, value) {
+      if (key === "Authorization") capturedAuthorization = value;
+    }
+
+    send(body) {
+      capturedBody = body;
+      this.upload.onprogress?.({ lengthComputable: true, loaded: 1, total: 4 });
+      this.onload?.();
+    }
+  }
+  globalThis.XMLHttpRequest = FakeXMLHttpRequest;
+
+  try {
+    const progress = [];
+    const file = new File(["fake"], "asset.webp", { type: "image/webp" });
+    const uploaded = await api.uploadAttachment(file, { onProgress: percent => progress.push(percent) });
+
+    assert.equal(capturedMethod, "POST");
+    assert.equal(capturedUrl, "/api/upload");
+    assert.equal(capturedAuthorization, "Bearer progress-token");
+    assert.ok(capturedBody instanceof FormData);
+    assert.deepEqual(progress, [25, 100]);
+    assert.equal(uploaded.url, "https://x/asset.webp");
+  } finally {
+    if (previousXhr === undefined) {
+      delete globalThis.XMLHttpRequest;
+    } else {
+      globalThis.XMLHttpRequest = previousXhr;
+    }
+    if (previousWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = previousWindow;
+    }
+  }
+});
+
+test("content asset clients list projects and create an uploaded image asset", async () => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const testWindow = makeWindow();
+  testWindow.__CONTENT_APP_AUTHORIZATION__ = "Bearer asset-token";
+  globalThis.window = testWindow;
+
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (String(url) === "/api/projects") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, projects: [{ id: "105" }] }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: {
+          id: 9342,
+          assetType: "image",
+          assetSource: "upload",
+          projectId: "105",
+          name: "asset.png",
+          refrenceUrl: "https://x/asset.png",
+        },
+      }),
+    };
+  };
+
+  try {
+    const projects = await api.listContentProjects();
+    const created = await api.createContentImageAsset({
+      projectId: projects[0].id,
+      name: "asset.png",
+      refrenceUrl: "https://x/asset.png",
+    });
+
+    assert.equal(projects[0].id, "105");
+    assert.equal(created.id, 9342);
+    assert.equal(calls[0].url, "/api/projects");
+    assert.equal(calls[0].init.headers.Authorization, "Bearer asset-token");
+    assert.equal(calls[1].url, "/api/asset/create");
+    assert.deepEqual(JSON.parse(calls[1].init.body), {
+      assetType: "image",
+      assetSource: "upload",
+      projectId: "105",
+      name: "asset.png",
+      refrenceUrl: "https://x/asset.png",
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = previousWindow;
+    }
+  }
+});
