@@ -82,6 +82,10 @@ const IMAGE_SIZES = ["1:1", "16:9", "9:16", "自动适配"];
 const PPT_CUSTOM_STYLE = "自定义";
 const PPT_STYLES = ["极简商务", "科技数据", "教育培训", "产品发布", "投融资路演", "自定义"];
 const PPT_ACCEPT = ".doc,.docx,.xls,.xlsx,.pdf";
+const PPT_MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
+const PPT_MAX_ATTACHMENT_SIZE_LABEL = "20MB";
+const PPT_MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 100 * 1024 * 1024;
+const PPT_MAX_TOTAL_ATTACHMENT_SIZE_LABEL = "100MB";
 
 const inputCls =
   "h-12 w-full rounded-xl border border-line bg-surface px-4 text-[14px] text-ink outline-none placeholder:text-ink-soft/55 focus:border-accent/40";
@@ -230,6 +234,11 @@ function attachmentName(attachment: Record<string, unknown>): string {
 
 function attachmentUrl(attachment: Record<string, unknown>): string {
   return String(attachment.url || attachment.path || attachment.fileUrl || attachment.file_url || "");
+}
+
+function attachmentSize(attachment: Record<string, unknown>): number {
+  const size = Number(attachment.size || attachment.fileSize || attachment.file_size || 0);
+  return Number.isFinite(size) && size > 0 ? size : 0;
 }
 
 function isOfficeAttachment(value: Record<string, unknown>): boolean {
@@ -489,16 +498,37 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
     setUploadError("");
     try {
       const uploads: UploadedAttachment[] = [];
+      const validationErrors: string[] = [];
+      let totalSize = ppt.attachments.reduce((sum, attachment) => sum + attachmentSize(attachment), 0);
       for (const file of Array.from(files)) {
         if (!/\.(docx?|xlsx?|pdf)$/i.test(file.name)) {
-          setUploadError("附件仅支持 Word、Excel、PDF 文件。");
+          validationErrors.push(`${file.name}：附件仅支持 Word、Excel、PDF 文件`);
           continue;
         }
-        uploads.push(await api.uploadAttachment(file));
+        if (file.size > PPT_MAX_ATTACHMENT_SIZE_BYTES) {
+          validationErrors.push(`${file.name}：文件大小不能超过 ${PPT_MAX_ATTACHMENT_SIZE_LABEL}`);
+          continue;
+        }
+        if (totalSize + file.size > PPT_MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+          validationErrors.push(`${file.name}：附件总大小不能超过 ${PPT_MAX_TOTAL_ATTACHMENT_SIZE_LABEL}`);
+          continue;
+        }
+        const uploaded = await api.uploadAttachment(file);
+        if (uploaded.size > PPT_MAX_ATTACHMENT_SIZE_BYTES) {
+          validationErrors.push(`${file.name}：文件大小不能超过 ${PPT_MAX_ATTACHMENT_SIZE_LABEL}`);
+          continue;
+        }
+        if (totalSize + uploaded.size > PPT_MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+          validationErrors.push(`${file.name}：附件总大小不能超过 ${PPT_MAX_TOTAL_ATTACHMENT_SIZE_LABEL}`);
+          continue;
+        }
+        uploads.push(uploaded);
+        totalSize += uploaded.size;
       }
       if (uploads.length) {
         setPpt((prev) => ({ ...prev, attachments: officeAttachments(prev.attachments.concat(uploads)) }));
       }
+      setUploadError(validationErrors.join("；"));
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -686,7 +716,14 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
                 <FieldBlock index={3} label="附件">
                   <label className="flex min-h-[96px] cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-surface px-4 text-center text-[13px] text-ink-soft hover:border-accent/40 hover:text-ink">
                     <Upload size={22} />
-                    <span>{uploading ? "上传中..." : "上传 Word、Excel、PDF，可上传多个"}</span>
+                    {uploading ? (
+                      <span>上传中...</span>
+                    ) : (
+                      <span className="flex flex-col gap-1">
+                        <span>上传 Word、Excel、PDF，可上传多个</span>
+                        <span>单个文件不超过 {PPT_MAX_ATTACHMENT_SIZE_LABEL}，总大小不超过 {PPT_MAX_TOTAL_ATTACHMENT_SIZE_LABEL}</span>
+                      </span>
+                    )}
                     <input
                       className="hidden"
                       type="file"

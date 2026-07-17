@@ -524,6 +524,42 @@ test("ppt form supports custom style and does not expose free-form as a fixed op
   assert.match(genParamsDialogSource, /placeholder="输入自定义 PPT 风格"/, "custom style input should guide the user");
 });
 
+test("ppt form limits each uploaded attachment to 20MB and all attachments to 100MB", () => {
+  assert.match(
+    genParamsDialogSource,
+    /const PPT_MAX_ATTACHMENT_SIZE_BYTES = 20 \* 1024 \* 1024/,
+    "PPT attachment size limit must be 20MB",
+  );
+  assert.match(
+    genParamsDialogSource,
+    /file\.size > PPT_MAX_ATTACHMENT_SIZE_BYTES/,
+    "PPT attachments must be rejected before upload when the selected file is oversized",
+  );
+  assert.match(
+    genParamsDialogSource,
+    /uploaded\.size > PPT_MAX_ATTACHMENT_SIZE_BYTES/,
+    "PPT attachments must also be checked against the uploaded size returned by content-app",
+  );
+  assert.match(
+    genParamsDialogSource,
+    /const PPT_MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 100 \* 1024 \* 1024/,
+    "PPT total attachment size limit must be 100MB",
+  );
+  assert.match(
+    genParamsDialogSource,
+    /ppt\.attachments\.reduce\(\(sum, attachment\) => sum \+ attachmentSize\(attachment\), 0\)/,
+    "PPT total attachment validation must include files already in the form",
+  );
+  assert.match(
+    genParamsDialogSource,
+    /totalSize \+ file\.size > PPT_MAX_TOTAL_ATTACHMENT_SIZE_BYTES/,
+    "PPT attachments must be rejected before upload when their cumulative size is oversized",
+  );
+  assert.match(genParamsDialogSource, /文件大小不能超过/, "PPT form must explain the attachment size validation error");
+  assert.match(genParamsDialogSource, /总大小不能超过/, "PPT form must explain the total attachment size validation error");
+  assert.match(genParamsDialogSource, /className="flex flex-col gap-1"/, "PPT upload limits must be displayed on a separate line");
+});
+
 test("restoring or creating a conversation clears stale pending dialog attachments", () => {
   const applyStart = workspaceSource.indexOf("const applySnapshot = ");
   const applyEnd = workspaceSource.indexOf("const makeSnapshot", applyStart);
