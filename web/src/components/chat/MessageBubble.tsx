@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
-import { Check, ChevronDown, Download, FileText, FileVideo, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Download, FileArchive, FileText, FileVideo, LoaderCircle, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
@@ -7,6 +7,7 @@ import { canAcceptImageResult } from "@/lib/imageReview";
 import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
 import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
+import { draftButtonState, isJianyingDraftResultRetryable, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
@@ -39,6 +40,11 @@ interface MessageBubbleProps {
   onGeneratePptFile?: (msg: ChatMessage) => void;
   onAcceptPptFile?: (msg: ChatMessage) => void;
   onRegeneratePptFile?: (msg: ChatMessage) => void;
+  onGenerateJianyingDraft?: (msg: ChatMessage) => void;
+  onDownloadJianyingDraft?: (msg: ChatMessage) => void;
+  jianyingDraftCapability?: JianyingDraftCapability;
+  jianyingDraftResult?: JianyingDraftJobResponse | null;
+  jianyingDraftRunning?: boolean;
   onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
 }
 
@@ -235,6 +241,11 @@ export function MessageBubble({
   onGeneratePptFile,
   onAcceptPptFile,
   onRegeneratePptFile,
+  onGenerateJianyingDraft,
+  onDownloadJianyingDraft,
+  jianyingDraftCapability,
+  jianyingDraftResult: suppliedJianyingDraftResult,
+  jianyingDraftRunning = false,
   onDownloadArtifact,
 }: MessageBubbleProps) {
   const isUser = msg.role === "user";
@@ -269,6 +280,25 @@ export function MessageBubble({
   const mergedVideoResult = mergedVideoResultForMessage(msg);
   const sceneVideoResults = sceneVideoResultsForMessage(msg);
   const videoResults = [mergedVideoResult, ...sceneVideoResults].filter((result): result is VideoResult => Boolean(result));
+  const jianyingDraftResult = msg.artifact?.type === "jianying_draft" ? msg.artifact.jianyingDraft || suppliedJianyingDraftResult : suppliedJianyingDraftResult;
+  const jianyingDraftScenes = (msg.artifact?.generatedSceneVideos?.scene_videos || []).map((scene) => ({
+    scene_id: scene.scene_id,
+    scene_index: scene.scene_index,
+    task_id: scene.task_id || null,
+    video_url: scene.video_url,
+  }));
+  const jianyingDraftAction = draftButtonState({
+    providerAvailable: Boolean(jianyingDraftCapability?.available),
+    pendingJob: jianyingDraftRunning ? { status: "running" } : null,
+    scenes: jianyingDraftScenes,
+    failedSceneIds: msg.artifact?.generatedSceneVideos?.failed_scenes.map((scene) => String(scene.scene_id || "")) || [],
+    result: jianyingDraftResult,
+  });
+  const jianyingDraftUnavailable = !jianyingDraftCapability?.available;
+  const jianyingDraftDownloadUrl = jianyingDraftResult?.download_url?.startsWith("https://") ? jianyingDraftResult.download_url : "";
+  const jianyingDraftSucceeded = isJianyingDraftSucceededResultValid(jianyingDraftResult) && Boolean(jianyingDraftDownloadUrl);
+  const jianyingDraftRetryable = isJianyingDraftResultRetryable(jianyingDraftResult);
+  const videoResultActionDisabled = Boolean(actionsDisabled || jianyingDraftRunning);
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);
   const hasRunningPptPage = pptImagePages.some((page) => page.status === "running");
@@ -1393,27 +1423,116 @@ export function MessageBubble({
               </button>
             ) : null}
             {msg.artifact.mergedVideo?.ok && videoAccepted ? (
-              <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
-                <Check size={15} />
-                视频流程已结束
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 rounded-xl border border-emerald/20 bg-emerald/10 px-3 py-2 text-[12px] text-emerald">
+                  <Check size={15} />
+                  视频流程已结束
+                </div>
+                {jianyingDraftSucceeded ? (
+                  <a
+                    href={jianyingDraftDownloadUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => onDownloadJianyingDraft?.(msg)}
+                    className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  >
+                    <Download size={15} />
+                    下载剪映草稿
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={actionsDisabled || !jianyingDraftAction.enabled}
+                    title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : jianyingDraftAction.reason || undefined}
+                    onClick={() => onGenerateJianyingDraft?.(msg)}
+                    className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <FileArchive size={15} />}
+                    {jianyingDraftRunning ? "草稿生成中" : jianyingDraftAction.label}
+                  </button>
+                )}
               </div>
             ) : msg.artifact.mergedVideo?.ok ? (
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2 sm:grid-cols-3">
                 <button
                   type="button"
+                  disabled={videoResultActionDisabled}
                   onClick={() => onAcceptVideoResult?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                  className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-brand px-3 py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Check size={15} />
                   无意见，结束
                 </button>
                 <button
                   type="button"
+                  disabled={actionsDisabled || !jianyingDraftAction.enabled}
+                  title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : jianyingDraftAction.reason || undefined}
+                  onClick={() => onGenerateJianyingDraft?.(msg)}
+                  className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <FileArchive size={15} />}
+                  {jianyingDraftRunning ? "草稿生成中" : jianyingDraftAction.label}
+                </button>
+                <button
+                  type="button"
+                  disabled={videoResultActionDisabled}
                   onClick={() => onReviseVideoResult?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Pencil size={15} />
                   提出修改意见
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : msg.artifact?.type === "jianying_draft" && msg.artifact.jianyingDraft ? (
+          <div className="mt-2 w-full max-w-[560px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <FileArchive size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">
+                  {jianyingDraftSucceeded ? "剪映草稿已生成" : "剪映草稿生成失败"}
+                </span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">
+                  {jianyingDraftRetryable && !jianyingDraftSucceeded
+                    ? "剪映草稿生成失败，请重新生成。"
+                    : msg.artifact.description}
+                </span>
+              </span>
+            </div>
+            {jianyingDraftSucceeded ? (
+              <div className="space-y-2 text-[12px] text-ink-soft">
+                <div className="truncate">{msg.artifact.jianyingDraft.file_name || "jianying-draft.zip"}</div>
+                <div>来源分镜：{msg.artifact.jianyingDraftSceneCount || 0} 个</div>
+                <a
+                  href={jianyingDraftDownloadUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => onDownloadJianyingDraft?.(msg)}
+                  className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-brand px-3 py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                >
+                  <Download size={15} />
+                  下载剪映草稿
+                </a>
+              </div>
+            ) : jianyingDraftRetryable ? (
+              <div className="space-y-2">
+                <div className="text-[12px] leading-relaxed text-ink-soft">
+                  {msg.artifact.jianyingDraft.status === "succeeded"
+                    ? "剪映草稿生成失败，请重新生成。"
+                    : msg.artifact.jianyingDraft.message}
+                </div>
+                <button
+                  type="button"
+                  disabled={actionsDisabled || jianyingDraftRunning || jianyingDraftUnavailable}
+                  title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : undefined}
+                  onClick={() => onGenerateJianyingDraft?.(msg)}
+                  className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+                  {jianyingDraftRunning ? "草稿生成中" : "重新生成剪映草稿"}
                 </button>
               </div>
             ) : null}

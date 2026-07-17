@@ -124,10 +124,10 @@ async def test_record_power_mem_background_dual_writes_skill_memory_for_skill_so
     record_power_mem_background(
         service,
         user_id="u1",
-        content="图片生成 Agent 完成同步生成；endpoint=/api/picture/text_to_image；ok=True",
+        content="剪映草稿 Agent 异步任务结束；stage=jianying_draft；ok=True",
         category="experience",
-        source_agent="image_generation_agent",
-        metadata={"source": "image_generate", "endpoint": "/api/picture/text_to_image"},
+        source_agent="jianying_draft_agent",
+        metadata={"source": "video_jianying_draft_job"},
         memory_type="experience",
         infer=False,
     )
@@ -135,6 +135,7 @@ async def test_record_power_mem_background_dual_writes_skill_memory_for_skill_so
     await asyncio.sleep(0)
 
     assert [record["category"] for record in service.records] == ["experience", "skill"]
+    assert service.records[0]["infer"] is False
     assert service.records[1]["memory_type"] == "skill"
     assert service.records[1]["metadata"]["linked_category"] == "experience"
     assert "可复用 Skill 经验" in service.records[1]["content"]

@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-07-14
+更新时间：2026-07-17
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -84,6 +84,8 @@ flowchart TD
   VA --> DONE["返回 storyboard 分析结果"]
   IR --> DONE
   VR --> DONE
+  VR -. "可选生成草稿" .-> JD["剪映草稿 Agent"]
+  JD --> DONE
 ```
 
 ### 3.1 图片、视频、PPT 任务看板
@@ -112,6 +114,7 @@ flowchart TD
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
+| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、归档 JSON 并通过 content-app 上传 ZIP |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
 | 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
@@ -267,7 +270,29 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 }
 ```
 
-### 5.5 视频分析类 Skill
+### 5.5 剪映草稿 Skill
+
+| 组件 | 代码位置 | Java 类比 | 作用 |
+| --- | --- | --- | --- |
+| 剪映草稿 Router | `backend/app/gateway/routers/pixelflow_jianying_draft.py` | Spring Controller | 暴露 capability、start、job 查询；校验用户对来源 conversation 的归属，避免跨对话读取或启动任务 |
+| JianyingDraftService | `backend/pixelflow/jianying_draft/service.py` | 业务 Service | 校验分镜、用 `(conversation_id, storyboard_version_id)` 幂等复用任务、管理后台状态机、30 分钟超时、重试和有限容量 |
+| JianyingDraftSkill | `backend/pixelflow/jianying_draft/skill.py` | 第三方 Client interface | 隔离 Provider 可用性与草稿生成调用，主流程和前端不依赖第三方字段 |
+| HttpJianyingDraftSkill | `backend/pixelflow/jianying_draft/http_skill.py` | 第三方 Client 实现 | 创建并轮询第三方任务，下载和校验多个 JSON，打 ZIP 后通过 content-app 上传 TOS |
+| UnavailableJianyingDraftSkill | `backend/pixelflow/jianying_draft/skill.py` | 未配置 Client 实现 | 仅在域名或 token 缺失时返回“剪映草稿服务待接入” |
+
+接口固定为：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/agent/flows/video/jianying-draft/capability` | 返回 `available/reason/poll_interval_seconds`，供前端决定按钮状态和轮询间隔 |
+| POST | `/agent/flows/video/jianying-draft/start` | 使用当前版本全部成功、按 `scene_index` 排序且 URL 为 HTTPS 的分镜视频启动或复用 job；Provider 未配置时返回 `not_configured`，不创建空任务 |
+| GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源 conversation 归属后查询状态；首次读取 `succeeded/failed/timeout/not_configured` 终态时按 job ID claim 幂等写经验摘要 |
+
+`JianyingDraftResult` 是 PixelFlow typed DTO，仅含 `status`、`job_id`、`provider_task_id`、`conversation_id`、`storyboard_version_id`、`download_url`、`file_name`、`expire_at`、`message`。不向前端暴露无限制的 `raw`、Provider 原始响应或内部异常；失败只返回可公开消息。
+
+真实 Provider 使用两个接口：`POST /api/jianying/draft/tasks` 按当前分镜顺序提交 `videoUrl/videoOrder`，`POST /api/jianying/draft/tasks/result` 按第三方 task ID 轮询。业务码 `20201/20202` 继续等待，`200` 返回草稿 JSON URL 集合，其他终态转为公开失败结果。PixelFlow 对 URL 做公网 HTTPS 校验，限制文件数量和体积，校验 UTF-8 JSON 后尽量保留原文件名生成 ZIP，并复用 content-app `/api/upload` 上传到 TOS。第三方 token 从 profile 配置读取且只发送给创建/查询接口，绝不发送给 JSON CDN 或 content-app。配置不完整时才回退 unavailable 实现。
+
+### 5.6 视频分析类 Skill
 
 | Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
 | --- | --- | --- | --- |
@@ -290,7 +315,7 @@ flowchart TD
   G --> H
 ```
 
-### 5.6 PPT类 Skill
+### 5.7 PPT类 Skill
 
 | Skill | 代码位置 | content-app/Borgrise 接口 | 作用 |
 | --- | --- | --- | --- |
@@ -335,7 +360,7 @@ PPT 异步规则：
 - PPT 轮询超时默认 2 小时：`BORGRISE_PPT_POLL_TIMEOUT=7200`。
 - content-app 返回额度不足时，job 状态为 `quota_paused`，前端提示充值后回到同一对话继续。
 
-### 5.7 PowerMem 语义记忆 Service
+### 5.8 PowerMem 语义记忆 Service
 
 PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python SDK 到业务流程里，而是通过统一的 `PowerMemService` 调用 PowerMem REST API。
 
@@ -647,12 +672,24 @@ Plan 审核与版本规则：
 
 最终视频生成后的原场景包分镜修改：
 
-- `video_result` 卡片只展示“无意见，结束 / 提出修改意见”，不再提供“查看分镜”；视频结果不做 60 秒自动确认，只有用户点击“无意见，结束”后才标记流程结束，之后不再允许从同一结果卡提出修改意见。
+- 未结束的 `video_result` 卡片固定展示“无意见，结束 / 生成剪映草稿 / 提出修改意见”三个按钮，不再提供“查看分镜”；草稿运行中锁定三个按钮。视频结果不做 60 秒自动确认，只有用户点击“无意见，结束”后才标记流程结束，之后不再允许从同一结果卡提出修改意见。
 - 场景视频和合并视频生成完成后，前端把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。
 - 用户点击原场景包卡片里的“查看分镜”复用 `StoryboardPanel`，但右侧镜头预览优先播放 `generatedSceneVideos.scene_videos` 中对应分镜视频；没有视频时才展示参考图。
 - 用户修改故事线、镜头描述、旁白或 @参考图时，前端把对应 `scene_id` 写入 `videoScenePackageEditedSceneIds`。
 - 再次点击“确认并生成视频”时，只把 `videoScenePackageEditedSceneIds` 中的分镜提交到 `/agent/flows/video/generate-scenes/start`；生成完成后用新分镜视频覆盖旧分镜视频，未修改分镜直接复用旧视频，再调用 `/agent/flows/video/merge/start` 生成新版最终视频，并通过 `/agent/flows/video/merge/jobs/{job_id}` 恢复轮询，再次回填原场景包卡片。
 - 如果上一批场景视频存在 `failed_scenes`，再次点击“确认并生成视频”时只提交失败或额度暂停分镜；生成成功的旧分镜视频继续复用，失败分镜补齐后再按 `scene_index` 合并完整视频。
+
+### 8.1 剪映草稿确认、恢复与扩展边界
+
+- 最终视频未结束时，结果卡片固定展示“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成期间三个视频操作都锁定，但对话输入不锁定；成功后不自动下载。
+- 用户点击“无意见，结束”后，视频流程保持结束，但当前版本的草稿下载历史或重新生成入口仍保留。草稿生成或下载不等于接受视频，也不会改变视频结束状态。
+- `storyboard_version_id` 由当前有效分镜的 `scene_id/scene_index/task_id/video_url` 规范化排序后，按 UTF-8 无空白 JSON 计算 FNV-1a 64 位摘要。草稿输入中的每个 `video_url` 必须是 HTTPS；任一分镜视频、task、顺序或成员变化都会得到新版本；合并视频 URL 不参与版本，也不能作为草稿输入。
+- 同一 `conversation_id + storyboard_version_id` 的 `queued/running` 和未过期 `succeeded` job 必须复用。`failed/timeout` 只有用户明确 `retry_failed=true` 才创建替代 job；过期成功结果允许重新生成。历史结果不会被当前新版本复用。
+- 前端按 capability 的 `poll_interval_seconds`（默认 2 秒）轮询，客户端和服务端最长 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误使用 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；切换对话、刷新或离开后只继续查询原 job，不重新调用 `/start`。job 404/过期时只提示用户从视频结果卡手动重试。
+- 草稿结果消息使用 `job_id` 构造稳定消息 ID，重复轮询不会追加重复的成功/失败卡片。下载链接只允许成功结果中的 HTTPS 地址，点击后才开始下载。
+- Provider 成功返回多个 JSON URL 后必须立即下载，优先保留 URL 中安全的原 JSON 文件名，重名时追加稳定序号后打入单个 ZIP；ZIP 上传在工作线程中完成并自行管理临时目录，最终通过当前用户 Authorization 调用 content-app `/api/upload` 上传 TOS。上传失败返回草稿 job 失败，不得重新创建已成功完成的第三方任务。
+- 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded`、`failed`、`timeout` 或 `not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
+- 当前 Gateway 启动器未配置 `workers`，部署形态是单 Uvicorn worker；`JianyingDraftService` 的 job registry、幂等索引与后台 task 均为进程内状态。未来多 worker、多容器或多副本部署前，必须替换为共享、持久化 job store，否则 job 查询、幂等和终态去重都会失效。
 
 ## 9. 视频修改循环
 

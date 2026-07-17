@@ -30,6 +30,15 @@ _MAPPED_ENV_KEYS = {
     "PIXELFLOW_CAPTION_FONT",
     "PIXELFLOW_DRAFT_ROOT",
     "PIXELFLOW_EDIT_SKILL",
+    "PIXELFLOW_JIANYING_DRAFT_ENABLED",
+    "PIXELFLOW_JIANYING_DRAFT_BASE_URL",
+    "PIXELFLOW_JIANYING_DRAFT_TOKEN",
+    "PIXELFLOW_JIANYING_DRAFT_MAX_RETRIES",
+    "PIXELFLOW_JIANYING_DRAFT_POLL_INTERVAL_SECONDS",
+    "PIXELFLOW_JIANYING_DRAFT_TIMEOUT_SECONDS",
+    "PIXELFLOW_JIANYING_DRAFT_CONNECT_TIMEOUT_SECONDS",
+    "PIXELFLOW_JIANYING_DRAFT_CREATE_READ_TIMEOUT_SECONDS",
+    "PIXELFLOW_JIANYING_DRAFT_QUERY_READ_TIMEOUT_SECONDS",
     "PIXELFLOW_MEDIA_SKILL",
     "PIXELFLOW_MEM0_ENABLED",
     "PIXELFLOW_MYSQL_URL",
@@ -98,6 +107,15 @@ pixelflow:
   draft_root: /tmp/pixelflow-drafts
   render_root: /tmp/pixelflow-renders
   caption_font: /tmp/font.ttf
+  jianying_draft_enabled: true
+  jianying_draft_base_url: https://draft.example.test
+  jianying_draft_token: test-draft-token
+  jianying_draft_poll_interval_seconds: 1.5
+  jianying_draft_timeout_seconds: 42
+  jianying_draft_max_retries: 2
+  jianying_draft_connect_timeout_seconds: 4
+  jianying_draft_create_read_timeout_seconds: 24
+  jianying_draft_query_read_timeout_seconds: 12
 borgrise:
   base_url: https://example.test/api
   remote_verify_enabled: true
@@ -141,6 +159,15 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_MYSQL_URL"].startswith("mysql+asyncmy://")
     assert os.environ["PIXELFLOW_MEDIA_SKILL"] == "borgrise"
     assert os.environ["PIXELFLOW_EDIT_SKILL"] == "ffmpeg"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_ENABLED"] == "true"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_BASE_URL"] == "https://draft.example.test"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_TOKEN"] == "test-draft-token"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_POLL_INTERVAL_SECONDS"] == "1.5"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_TIMEOUT_SECONDS"] == "42"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_MAX_RETRIES"] == "2"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_CONNECT_TIMEOUT_SECONDS"] == "4"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_CREATE_READ_TIMEOUT_SECONDS"] == "24"
+    assert os.environ["PIXELFLOW_JIANYING_DRAFT_QUERY_READ_TIMEOUT_SECONDS"] == "12"
     assert os.environ["PIXELFLOW_SEMANTIC_MEMORY_ENABLED"] == "true"
     assert os.environ["PIXELFLOW_SEMANTIC_MEMORY_PROVIDER"] == "powermem"
     assert os.environ["PIXELFLOW_POWERMEM_BASE_URL"] == "https://example.test/powermem"

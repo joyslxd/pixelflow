@@ -23,6 +23,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
 | 视频修改循环 | 可用 | 支持 QAAgent QC 质检、按受影响场景重生并重新合并 |
+| 剪映草稿 Agent | 可用 | 最终视频可异步创建第三方剪映草稿任务，轮询多个 JSON 结果，服务端打包 ZIP 并通过 content-app 上传到 TOS |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
@@ -52,6 +53,7 @@ pixelflow/
 │   │   ├── intake/                  # 意图识别、表单、垂类画像、采集上下文
 │   │   ├── creative/                # 双 Plan 模板、LLM 策划、创作合同、版本和时长分配
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
+│   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
@@ -88,6 +90,7 @@ flowchart TD
   L --> M["按 Seedance Prompt 和视频合同串行创建场景视频任务"]
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
+  O -. "可选生成" .-> JD["剪映草稿 Agent\n生成可下载草稿 ZIP"]
   F --> P["返回分析结果"]
   Q --> R["SmartPPT 生成/修改大纲"]
   R --> S["大纲转JSON + 生成页面图片"]
@@ -152,6 +155,9 @@ flowchart TD
 | 视频 | POST | `/agent/flows/video/quality-review` | 视频 QAAgent QC 质检，覆盖画面缺陷、商品露出、Prompt 跑偏、字幕、Brief 一致性、黑屏/卡顿和约束合规 |
 | 视频 | POST | `/agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | GET | `/agent/flows/video/quality-review/jobs/{job_id}` | 查询视频 QAAgent QC 质检结果 |
+| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/capability` | 查询剪映草稿 Provider 是否可用及前端轮询间隔 |
+| 剪映草稿 | POST | `/agent/flows/video/jianying-draft/start` | 校验来源对话、当前版本全部成功且 URL 为 HTTPS 的分镜，启动或复用草稿 job；未配置时不创建任务 |
+| 剪映草稿 | GET | `/agent/flows/video/jianying-draft/jobs/{job_id}` | 查询来源对话拥有的剪映草稿 job，并在首次读取 `succeeded/failed/timeout/not_configured` 终态时 claim 幂等记录经验摘要 |
 | PPT | POST | `/agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | POST | `/agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | POST | `/agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -170,6 +176,18 @@ flowchart TD
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+## 剪映草稿流程
+
+剪映草稿能力位于最终视频结果确认阶段，输入只能是当前版本全部成功、按 `scene_index` 排序且 URL 为 HTTPS 的分镜视频，不能用合并视频替代。`storyboard_version_id` 由 `scene_id`、顺序、视频 URL 和视频 task ID 的规范化摘要计算；同一 `conversation_id + storyboard_version_id` 复用运行中或未过期成功 job，失败或超时必须由用户以 `retry_failed=true` 明确重试。已过期成功结果可以重新生成，历史草稿不会被新版本复用。
+
+后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`HttpJianyingDraftSkill` 是真实 HTTP 实现。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
+
+真实 Provider 先调用 `POST /api/jianying/draft/tasks` 创建任务，再每 2 秒调用 `POST /api/jianying/draft/tasks/result` 查询；`20201/20202` 表示继续等待，`200` 的 `data` 是多个草稿 JSON 的 HTTPS URL。PixelFlow 立即下载并校验这些 JSON，尽量保留第三方原文件名生成一个 ZIP，再复用 content-app `/api/upload` 上传到 TOS，前端只接收最终 ZIP 的 HTTPS 下载地址。Provider 域名、固定 token、连接/读取超时和重试次数均从开发/生产配置读取；配置不完整时装配 unavailable 实现并禁用按钮。
+
+最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
+
+当前 Gateway 以单 Uvicorn worker 运行，`JianyingDraftService` 的 job registry 是进程内状态；部署为多 worker、多容器或多副本前，必须替换为共享、持久化的 job store，不能依赖当前内存幂等索引。路由在 `GET /jobs/{job_id}` 首次读取到 `succeeded`、`failed`、`timeout` 或 `not_configured` 终态时，才通过 claim 幂等地异步记录 PowerMem `category=experience`、`infer=False` 的安全摘要；停止轮询不会自行触发写入。
 
 ## PowerMem 语义记忆
 
@@ -304,7 +322,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - 图片 plan.md 同意、图片修改重生成、直接图片编辑和全局素材图片编辑都会先拿到 Python `job_id`，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/agent/flows/image/generate/jobs/{job_id}` 或 `/agent/flows/image/edit-asset/jobs/{job_id}`，不会重复启动生成；网关重启导致 job 404 时只提示手动重试，不自动重启，避免重复计费。
 - 图片编辑分支会让 LLM 抽取用户指定的尺寸和清晰度；如果所选模型不支持这些参数，前端提示并自动落到当前模型可用参数，用户可以重新选择可用尺寸和清晰度后继续提交。如果用户没有明确指定，前端按所选模型自动选择一组可用尺寸和清晰度。模型、尺寸和清晰度的可选项以 content-app `/api/modelParamConfig/listByCategory/image_generate` 实时配置为准，Python 侧不再用硬编码模型白名单拦截用户已确认的参数。content-app 图片编辑请求里 `size` 表示比例，`imageSize` 表示清晰度，网关会保持两者分离。图片编辑失败后，重新生成会先回到模型、尺寸和清晰度确认卡，避免继续复用失败参数。
 - 对话里可能保留多个历史视频场景包卡片，但只有最后一个 `video_scene_packages` 卡片显示“查看分镜”和“确认并生成视频”操作；旧卡片只作为历史预览，避免误用过期场景包生成视频。
-- 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。生成结果会同步回填到原 `video_scene_packages` 卡片；用户继续点击原来的“查看分镜”时，右侧 `StoryboardPanel` 的镜头预览优先展示已生成的分镜视频。用户只修改某几个分镜后再次确认生成时，仅重生成这些已修改分镜，未修改分镜复用旧视频，再按分镜顺序重新合并并回填原场景包。
+- 场景视频和合并视频生成完成后，未结束的 `video_result` 卡片固定展示“无意见，结束 / 生成剪映草稿 / 提出修改意见”三个按钮，草稿运行中锁定三个按钮。生成结果会同步回填到原 `video_scene_packages` 卡片；用户继续点击原来的“查看分镜”时，右侧 `StoryboardPanel` 的镜头预览优先展示已生成的分镜视频。用户只修改某几个分镜后再次确认生成时，仅重生成这些已修改分镜，未修改分镜复用旧视频，再按分镜顺序重新合并并回填原场景包。
 - 场景视频生成 job 内部可以并发调度多个分镜，但所有会创建 content-app 计费生成任务的 POST 都经 `run_generation.py` 串行提交；前一个创建接口返回 taskId 并完成 content-app 扣费确认后，才创建下一个图片或视频任务，后续 `/api/task/{taskId}/status` 轮询可以并行等待。所有分镜都结束后再统一判断。全部成功时按 `scene_index` 合并；前端通过 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，并把 `pendingVideoJob.kind="video_merge"` 写入对话上下文，用户切走或刷新后只恢复轮询已有 job；如果只有 1 个分镜，PixelFlow 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`；多个分镜合并时 content-app 会同步完成下载、ffmpeg 合并和上传，PixelFlow 使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并接口读等待，默认 1 小时；合并异常时 job 返回 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端据此展示“视频合并失败”而不是“合并完成”；部分异常时返回 `failed_scenes` 和每个失败原因，重试只提交失败分镜；部分额度不足时整批只提示一次额度不足，充值后同样只重试额度暂停或异常分镜。
 - 视频 QAAgent QC 通过 `/agent/flows/video/quality-review/start` 启动异步 job，再轮询 `/agent/flows/video/quality-review/jobs/{job_id}`，避免浏览器或网关长连接超时。QC 失败时 job 返回 `status=failed` 并保留 content-app 原始错误；content-app 会把长视频压成完整时序的低码率质检预览再送入模型，避免 300 秒级成片直接 base64 后超过模型请求体限制。
 - 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start`，后端 job 连续完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即把 `pendingScenePackageJob` / `pending_scene_package_job` 写入 conversation context；用户切到历史对话、创作页、iframe 外或刷新后，只继续查询 `/jobs/{job_id}`，不会重复启动生成。参考图失败或额度不足时，job 返回已生成场景包和 `sceneAssetFailures`，前端展示可继续的场景包卡片。

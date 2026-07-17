@@ -1,0 +1,56 @@
+"""剪映草稿 Provider 的内部能力协议。"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from pydantic import BaseModel, Field, model_validator
+
+from .models import JianyingDraftRequest, JianyingDraftResult, JianyingDraftStatus
+
+
+class JianyingDraftCapability(BaseModel):
+    """当前剪映草稿 Provider 是否可用。"""
+
+    available: bool
+    reason: str = ""
+    poll_interval_seconds: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def expose_only_public_reason(self) -> JianyingDraftCapability:
+        self.reason = "" if self.available else "剪映草稿服务待接入"
+        return self
+
+
+class JianyingDraftSkill(Protocol):
+    """隔离第三方剪映草稿生成能力的稳定内部协议。"""
+
+    async def capability(self) -> JianyingDraftCapability: ...
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult: ...
+
+    async def aclose(self) -> None: ...
+
+
+class UnavailableJianyingDraftSkill:
+    """Provider 被关闭或配置不完整时的安全实现。"""
+
+    async def capability(self) -> JianyingDraftCapability:
+        return JianyingDraftCapability(available=False, reason="剪映草稿服务待接入")
+
+    async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult:
+        return JianyingDraftResult(
+            status=JianyingDraftStatus.NOT_CONFIGURED,
+            message="剪映草稿服务待接入",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+class DisabledJianyingDraftSkill(UnavailableJianyingDraftSkill):
+    """内部开关关闭时装配的安全 Skill。"""
+
+
+class MissingProviderJianyingDraftSkill(UnavailableJianyingDraftSkill):
+    """已开启但 Provider 域名或 token 缺失时装配的安全 Skill。"""

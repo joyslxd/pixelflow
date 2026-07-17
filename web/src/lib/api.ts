@@ -2,6 +2,19 @@
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
 import type { SceneAssetRetryTarget } from "@/lib/scenePackages";
+import type {
+  JianyingDraftCapability,
+  JianyingDraftJobResponse,
+  JianyingDraftStartRequest,
+} from "./jianyingDraft";
+
+export type {
+  JianyingDraftCapability,
+  JianyingDraftJobResponse,
+  JianyingDraftScene,
+  JianyingDraftStartRequest,
+  JianyingDraftStatus,
+} from "./jianyingDraft";
 
 const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
@@ -175,6 +188,14 @@ export interface ConversationListResponse {
 export interface ConversationDetailResponse {
   conversation: ConversationSummaryResponse;
   messages: ConversationMessageResponse[];
+}
+
+export interface JianyingDraftConversationContextPatchRequest {
+  last_phase: string;
+  expected_job_id: string;
+  pendingJianyingDraftJob: unknown | null;
+  jianyingDraftRecords: Record<string, JianyingDraftJobResponse>;
+  jianying_draft_job_resume_error?: string | null;
 }
 
 export interface ConversationTraceEvent {
@@ -1497,6 +1518,15 @@ export const api = {
     body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> },
   ) => req<ConversationSummaryResponse>(`/conversations/${encodeURIComponent(conversationId)}`, { method: "PUT", body: JSON.stringify(body) }),
 
+  patchJianyingDraftConversationContext: (
+    conversationId: string,
+    body: JianyingDraftConversationContextPatchRequest,
+  ) =>
+    req<ConversationSummaryResponse>(`/conversations/${encodeURIComponent(conversationId)}/jianying-draft-context`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
   appendConversationMessage: (
     conversationId: string,
     body: { role: "user" | "assistant" | "system"; content: string; payload?: Record<string, unknown> },
@@ -1785,6 +1815,18 @@ export const api = {
 
   getSceneVideosJob: (jobId: string) =>
     req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`),
+
+  getJianyingDraftCapability: () =>
+    req<JianyingDraftCapability>(`${FLOW_BASE}/video/jianying-draft/capability`),
+
+  startJianyingDraftJob: (body: JianyingDraftStartRequest) =>
+    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getJianyingDraftJob: (jobId: string) =>
+    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/jobs/${encodeURIComponent(jobId)}`),
 
   pollSceneVideoJob,
 

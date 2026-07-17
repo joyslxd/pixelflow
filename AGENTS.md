@@ -27,25 +27,31 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 6. `backend/app/gateway/routers/pixelflow_image.py`
 7. `backend/app/gateway/routers/pixelflow_video.py`
 8. `backend/app/gateway/routers/pixelflow_ppt.py`
-9. `backend/app/gateway/routers/pixelflow_conversations.py`
-10. `backend/pixelflow/intake/llm.py`
-11. `backend/pixelflow/intake/forms.py`
-12. `backend/pixelflow/intake/industry_profile.py`
-13. `backend/pixelflow/creative/plan_markdown.py`
-14. `backend/pixelflow/creative/plan_llm.py`
-15. `backend/pixelflow/creative/contract.py`
-16. `backend/pixelflow/creative/duration.py`
-17. `backend/pixelflow/generate/image_prepare.py`
-18. `backend/pixelflow/generate/scene_packages.py`
-19. `backend/pixelflow/generate/seedance_prompt.py`
-20. `backend/pixelflow/skills/base.py`
-21. `backend/pixelflow/skills/borgrise/skill.py`
-22. `backend/pixelflow/skills/borgrise/run_generation.py`
-23. `web/src/pages/WorkspacePage.tsx`
-24. `web/src/lib/api.ts`
-25. `web/src/components/composer/GenParamsDialog.tsx`
-26. `web/src/components/canvas/StoryboardPanel.tsx`
-27. `web/src/components/canvas/SceneMentionEditor.tsx`
+9. `backend/app/gateway/routers/pixelflow_jianying_draft.py`
+10. `backend/pixelflow/jianying_draft/models.py`
+11. `backend/pixelflow/jianying_draft/skill.py`
+12. `backend/pixelflow/jianying_draft/http_skill.py`
+13. `backend/pixelflow/jianying_draft/service.py`
+14. `backend/app/gateway/routers/pixelflow_conversations.py`
+15. `backend/pixelflow/intake/llm.py`
+16. `backend/pixelflow/intake/forms.py`
+17. `backend/pixelflow/intake/industry_profile.py`
+18. `backend/pixelflow/creative/plan_markdown.py`
+19. `backend/pixelflow/creative/plan_llm.py`
+20. `backend/pixelflow/creative/contract.py`
+21. `backend/pixelflow/creative/duration.py`
+22. `backend/pixelflow/generate/image_prepare.py`
+23. `backend/pixelflow/generate/scene_packages.py`
+24. `backend/pixelflow/generate/seedance_prompt.py`
+25. `backend/pixelflow/skills/base.py`
+26. `backend/pixelflow/skills/borgrise/skill.py`
+27. `backend/pixelflow/skills/borgrise/run_generation.py`
+28. `web/src/pages/WorkspacePage.tsx`
+29. `web/src/lib/api.ts`
+30. `web/src/components/chat/MessageBubble.tsx`
+31. `web/src/components/composer/GenParamsDialog.tsx`
+32. `web/src/components/canvas/StoryboardPanel.tsx`
+33. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
@@ -135,6 +141,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 视频 | `POST /agent/flows/video/quality-review` | 视频 QAAgent QC 质检 |
 | 视频 | `POST /agent/flows/video/quality-review/start` | 启动可恢复视频 QAAgent QC 质检 job |
 | 视频 | `GET /agent/flows/video/quality-review/jobs/{job_id}` | 轮询视频 QAAgent QC 质检结果 |
+| 剪映草稿 | `GET /agent/flows/video/jianying-draft/capability` | 查询 Provider 可用性、不可用原因和轮询间隔 |
+| 剪映草稿 | `POST /agent/flows/video/jianying-draft/start` | 校验对话归属、当前版本全部成功且 URL 为 HTTPS 的分镜，启动或复用草稿 job |
+| 剪映草稿 | `GET /agent/flows/video/jianying-draft/jobs/{job_id}` | 校验来源对话归属后查询草稿 job；首次读取到 `succeeded/failed/timeout/not_configured` 终态时按 job claim 幂等写经验 |
 | PPT | `POST /agent/flows/ppt/summary/start` | 启动 SmartPPT 大纲生成 |
 | PPT | `POST /agent/flows/ppt/summary/update/start` | 启动 SmartPPT 大纲更新 |
 | PPT | `POST /agent/flows/ppt/content-json/start` | 启动大纲转页面 JSON |
@@ -165,6 +174,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
+| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载多个草稿 JSON、打包 ZIP，再通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
 | 语义记忆 | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | PowerMemService | 读取用户/品牌长期偏好，记录 Agent 经验/Skill 沉淀 |
@@ -201,6 +211,18 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - PowerMem 只写业务摘要、偏好和经验，不写用户 token、供应商 key、完整异常堆栈、本地部署目录或原始大段 prompt。
 - `pixelflow_user_preferences` 仍是结构化业务偏好 Store，PowerMem 不替代它，只提供语义检索和跨 Agent 经验复用。
 - 以后新增或修改 Agent、流程、Skill 时，必须按同一套逻辑：读 `PowerMemService` 上下文，写阶段摘要，并同步更新 `docs/pixelflow-agent-skill-flow-latest-design.md`。
+
+## 剪映草稿 Agent
+
+剪映草稿位于最终视频确认阶段，输入是当前版本全部成功且 `video_url` 为 HTTPS 的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
+
+真实实现是 `HttpJianyingDraftSkill`。它按分镜顺序向第三方 `POST /api/jianying/draft/tasks` 提交 `videoUrl/videoOrder`，再通过 `POST /api/jianying/draft/tasks/result` 轮询；`20201/20202` 继续等待，`200` 返回多个 JSON HTTPS URL，`50002/41001` 等业务失败立即结束。结果 JSON 必须逐个下载并校验，尽量保留原文件名统一打成 ZIP，再复用 content-app `/api/upload` 上传 TOS，最终只把 ZIP HTTPS 地址返回前端。第三方域名、固定 token、连接/读取超时和重试次数都从 `config.dev.yml/config.prod.yml` 的 `pixelflow.jianying_draft_*` 读取；配置不完整时装配 `UnavailableJianyingDraftSkill`。
+
+未结束最终视频卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个按钮。草稿生成期间锁定三项视频操作，但不锁对话输入；前端按 capability 返回的间隔（默认 2 秒）轮询，客户端和服务端最大等待 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误必须通过 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；刷新、离开或切换对话后只能恢复查询原 job，结果消息按 job ID 去重。视频点击“无意见，结束”后，草稿下载/重生历史入口仍保留，成功不自动下载。
+
+路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded/failed/timeout/not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 写 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。不得写入 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。第三方剪映接口不是 content-app 接口，但最终 ZIP 使用 `/api/upload`，因此相关调用变化仍要同步记录到 `CONTENT_APP_API_CALLS.md`。
+
+当前 `JianyingDraftService` 的 job registry、幂等索引和后台 task 都在单 Uvicorn worker 的进程内。未来部署到多 worker、多容器或多副本前，必须改为共享且持久化的 job store，否则不同进程无法共同保证 job 查询、幂等和终态去重。
 
 ## Borgrise/content-app 能力
 
@@ -336,7 +358,7 @@ SmartPPT接口：
 - 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。
 - 全局素材替换弹窗保留两条本地图片入口：原“本地上传”只调用 `/api/upload` 并在二次确认后临时替换，不创建资产记录；图片素材列表第一张“上传到资产库”依次调用 `/api/projects`、`/api/upload`、`/api/asset/create`，再回查 `/api/asset/assets` 第一页，创建响应的 `data.id` 仅用于本次弹窗标记“刚刚上传”和同步重试。资产上传只校验 JPG/JPEG/PNG/WEBP 与 20MB，不校验宽高；取消替换时已创建资产继续保留。需要真实上传进度时复用 `uploadAttachment(file, { onProgress })`，其内部用 XHR 监听上传进度，默认无回调调用仍走 fetch。
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
-- 场景视频和合并视频生成完成后，`video_result` 卡片只展示“无意见，结束 / 提出修改意见”。最终视频卡片不再展示“查看分镜”。
+- 场景视频和合并视频生成完成后，未结束的 `video_result` 卡片固定展示“无意见，结束 / 生成剪映草稿 / 提出修改意见”三个按钮；草稿运行中锁定三个按钮。最终视频卡片不再展示“查看分镜”。
 - 场景视频和合并视频生成完成后，前端会把 `generatedSceneVideos` 和 `mergedVideo` 回填到原 `video_scene_packages` 卡片。用户继续点击原来的“查看分镜”时仍打开 `StoryboardPanel`，但镜头预览优先展示每个分镜已生成的视频，缺视频时才回退到参考图。
 - 场景视频 job 内部仍可并发调度多个分镜，但 `run_generation.py` 对所有会创建 content-app 计费生成任务的 POST 使用进程内串行闸门：前一个创建接口返回 taskId 并完成 content-app 扣费确认后，才提交下一个图片或视频创建任务；`/api/task/{taskId}/status` 轮询不加锁，可以并行等待结果。必须等本批所有分镜都成功、失败或额度暂停后才汇总返回。全部成功后仍按 `scene_index` 调用 `/agent/flows/video/merge/start` 启动可恢复视频合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`，不能按完成先后顺序合并；如果只有 1 个分镜，merge job 直接把该分镜视频作为最终合成视频返回，不再调用 content-app `/api/video/merge`。
 - 多个分镜的视频合并由 Python merge job 调用 content-app `/api/video/merge`。content-app 该接口本身是同步等待下载、ffmpeg 合并和上传完成，不走 `/api/task/{taskId}/status` 轮询；PixelFlow 前端不能直接长连接等待，只能保存 `pendingVideoJob.kind="video_merge"` 并轮询 Python job。后端必须使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制 content-app 读等待，默认 1 小时，不能复用普通 HTTP 30 秒超时。若 content-app 返回业务失败或网络异常，Python job 必须标记 `status=failed`，并在 `result.error/message/raw.details` 中保留 content-app 原始错误，前端不能把失败合并展示成“合并完成”。

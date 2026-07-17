@@ -30,6 +30,7 @@ from app.gateway.routers import (
     pixelflow_conversations,
     pixelflow_image,
     pixelflow_intake,
+    pixelflow_jianying_draft,
     pixelflow_planning,
     pixelflow_ppt,
     pixelflow_preferences,
@@ -56,6 +57,51 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_jianying_draft_skill(runtime_config):
+    """按内部开关与 Provider 配置选择剪映草稿 Skill。"""
+
+    from pixelflow.jianying_draft import (
+        DisabledJianyingDraftSkill,
+        HttpJianyingDraftSkill,
+        MissingProviderJianyingDraftSkill,
+    )
+
+    if not runtime_config.enabled:
+        return DisabledJianyingDraftSkill()
+
+    if runtime_config.base_url and runtime_config.token:
+        return HttpJianyingDraftSkill(
+            base_url=runtime_config.base_url,
+            token=runtime_config.token,
+            poll_interval_seconds=runtime_config.poll_interval_seconds,
+            max_retries=runtime_config.max_retries,
+            connect_timeout_seconds=runtime_config.connect_timeout_seconds,
+            create_read_timeout_seconds=runtime_config.create_read_timeout_seconds,
+            query_read_timeout_seconds=runtime_config.query_read_timeout_seconds,
+        )
+
+    logger.warning("PixelFlow Jianying draft is enabled but Provider URL/token is incomplete; using unavailable skill")
+    return MissingProviderJianyingDraftSkill()
+
+
+def _configure_jianying_draft_service(app: FastAPI) -> None:
+    """按 profile 环境变量注入剪映草稿 Service 与轮询合同参数。"""
+
+    from pixelflow.jianying_draft import (
+        JianyingDraftService,
+        load_jianying_draft_runtime_config,
+    )
+
+    runtime_config = load_jianying_draft_runtime_config()
+    app.state.pixelflow_jianying_draft_service = JianyingDraftService(
+        skill=_build_jianying_draft_skill(runtime_config),
+        timeout_seconds=runtime_config.timeout_seconds,
+        max_retries=runtime_config.max_retries,
+        poll_interval_seconds=runtime_config.poll_interval_seconds,
+    )
+    app.state.jianying_draft_poll_interval_seconds = runtime_config.poll_interval_seconds
 
 
 @asynccontextmanager
@@ -91,6 +137,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
+        # Provider 关闭或配置缺失时仍注入安全不可用实现。
+        _configure_jianying_draft_service(app)
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:
@@ -120,6 +168,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
+            pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
+            if pixelflow_jianying_draft_service is not None:
+                await pixelflow_jianying_draft_service.aclose()
+                logger.info("PixelFlow Jianying draft service closed")
             pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
             if pixelflow_mysql_engine is not None:
                 await pixelflow_mysql_engine.dispose()
@@ -317,6 +369,9 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
 
     # PixelFlow 视频生成和分析 API：/agent/flows/video。
     app.include_router(pixelflow_video.router)
+
+    # PixelFlow 剪映草稿 API：/agent/flows/video/jianying-draft。
+    app.include_router(pixelflow_jianying_draft.router)
 
     # PixelFlow 对话历史 API：/agent/conversations。
     app.include_router(pixelflow_conversations.router)

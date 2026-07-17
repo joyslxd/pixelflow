@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/chat";
 import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
+import { isJianyingDraftResultRetryable, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 import type { WorkflowTaskBoardModel } from "@/lib/workflowTaskBoard";
 import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 
@@ -40,6 +41,11 @@ interface ChatPanelProps {
   onGeneratePptFile?: (msg: ChatMessage) => void;
   onAcceptPptFile?: (msg: ChatMessage) => void;
   onRegeneratePptFile?: (msg: ChatMessage) => void;
+  onGenerateJianyingDraft?: (msg: ChatMessage) => void;
+  onDownloadJianyingDraft?: (msg: ChatMessage) => void;
+  jianyingDraftCapability?: JianyingDraftCapability;
+  getJianyingDraftResult?: (msg: ChatMessage) => JianyingDraftJobResponse | null;
+  isJianyingDraftRunning?: (msg: ChatMessage) => boolean;
   onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
   busy?: boolean;
   workflowTaskBoard?: WorkflowTaskBoardModel | null;
@@ -61,6 +67,7 @@ function hasRecoverableArtifactAction(message: ChatMessage): boolean {
   if (artifact.mergedVideo && !artifact.mergedVideo.ok && Boolean(artifact.generatedSceneVideos?.scene_videos.length)) return true;
   if (artifact.pptSummary && !artifact.pptSummary.ok) return true;
   if (artifact.pptFile && !artifact.pptFile.ok) return true;
+  if (artifact.type === "jianying_draft" && isJianyingDraftResultRetryable(artifact.jianyingDraft)) return true;
   return false;
 }
 
@@ -96,6 +103,11 @@ export function ChatPanel({
   onGeneratePptFile,
   onAcceptPptFile,
   onRegeneratePptFile,
+  onGenerateJianyingDraft,
+  onDownloadJianyingDraft,
+  jianyingDraftCapability,
+  getJianyingDraftResult,
+  isJianyingDraftRunning,
   onDownloadArtifact,
   busy,
   workflowTaskBoard,
@@ -106,7 +118,7 @@ export function ChatPanel({
     .find((message) => message.artifact?.type === "video_scene_packages" && message.artifact.videoScenePackages)?.id;
   const latestActionableMessageId = [...messages]
     .reverse()
-    .find((message) => message.role === "assistant" && message.artifact)?.id;
+    .find((message) => message.role === "assistant" && message.artifact?.type !== "jianying_draft" && message.artifact)?.id;
   const latestAssistantMessage = [...messages]
     .reverse()
     .find((message) => message.role === "assistant");
@@ -172,6 +184,11 @@ export function ChatPanel({
                 onGeneratePptFile={onGeneratePptFile}
                 onAcceptPptFile={onAcceptPptFile}
                 onRegeneratePptFile={onRegeneratePptFile}
+                onGenerateJianyingDraft={onGenerateJianyingDraft}
+                onDownloadJianyingDraft={onDownloadJianyingDraft}
+                jianyingDraftCapability={jianyingDraftCapability}
+                jianyingDraftResult={getJianyingDraftResult?.(m) || null}
+                jianyingDraftRunning={Boolean(isJianyingDraftRunning?.(m))}
                 onDownloadArtifact={onDownloadArtifact}
               />
             );

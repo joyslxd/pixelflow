@@ -82,7 +82,7 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `/api/upload` | `POST multipart` | `run_generation.upload_file()` | 后端工具上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS；前端调用说明见上方主流程表。 |
+| `/api/upload` | `POST multipart` | `run_generation.upload_file()`；剪映草稿 `HttpJianyingDraftSkill` 也通过该封装上传最终 ZIP | 上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS；前端资产库调用说明见上方主流程表。剪映流程会先下载第三方返回的多个 JSON，在 PixelFlow 临时目录打成一个 ZIP，再携带当前用户 Authorization 调用本接口，最终把 TOS HTTPS 地址返回前端。 |
 | `/api/asset/virtual-human-asset` | `POST` | `run_generation.create_virtual_human_asset()` | 创建虚拟人第三方资产。 | `AssetLibraryController.createVirtualHumanAsset()` | 通常和 `/api/asset/create` 串联使用。 |
 | `/api/asset/create` | `POST` | `run_generation.create_virtual_human_asset()` | 后端工具在 content-app 资产库创建数字人资产记录。 | `AssetLibraryController.createAsset()` | 依赖前一步返回的第三方资产 ID；前端创建普通图片资产的调用说明见上方主流程表。 |
 | `/api/asset/refrence-urls` | `POST` | `run_generation.resolve_asset_urls()` | 根据 asset id 查询可引用的 `refrence_url`。 | `AssetLibraryController.getRefrenceUrls()` | 接口名保留了后端现有拼写 `refrence`。 |
@@ -95,6 +95,15 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 | `/api/picture/image_edit` | `POST` | `run_generation.image_edit()` | 对已有图片按 prompt 编辑。 | `ImageController.imageEdit()` | 请求体包含 `image_url`、`prompt`、`model`、`width`、`height`、`imageSize`、`size`、`max_images`、`num`；主 PixelFlow 图片流程的直接图片编辑分支、plan 后图片编辑分支和视频场景包全局素材编辑都会复用；生成后通过 `/api/task/{taskId}/status` 轮询结果；图片默认最多等 10 分钟。模型、比例和清晰度的可选项由 `/api/modelParamConfig/listByCategory/image_generate` 提供，Python 侧不再维护模型级清晰度白名单，避免前端可选但网关旧规则提前拦截。 |
 | `/api/picture/multi_image_fusion` | `POST` | `run_generation.multi_image_fusion()`，由 `pixelflow_image.fuse_image_asset()` 和普通图片多图融合生成触发 | 多图融合成一张图片。 | `ImageController.multiImageFusion()` | 视频场景包全局素材引用后，如果同一条用户消息含有效上传图片，前端先展示模型/比例/清晰度确认卡，再调用 `/agent/flows/image/fuse-asset/start`；Python 将 `source_image_url` 作为第一张图并追加有效上传图片，最多 9 张，且透传用户确认的 `model/ratio/size`。生成后通过 `/api/task/{taskId}/status` 轮询结果，图片默认最多等 10 分钟；成功后先展示候选图，用户确认后才替换场景包素材。 |
 | `/api/picture/batch_text_to_image` | `POST` | `run_generation.batch_text_to_image()` | 批量文生图。 | `ImageController.batchTextToImage()` | 可能返回多个 task id；每个图片任务默认最多等 10 分钟。 |
+
+## 外部剪映草稿 Provider（非 content-app）
+
+以下接口不属于 content-app，仅在此记录它们与 `/api/upload` 的衔接关系。调用实现集中在 `backend/pixelflow/jianying_draft/http_skill.py`，域名和固定 token 从 profile 配置读取。
+
+| 接口 | 方法 | 用途 | 重试与状态规则 |
+| --- | --- | --- | --- |
+| `/api/jianying/draft/tasks` | `POST` | 按分镜顺序提交 `[{videoUrl, videoOrder}]` 并取得第三方任务 ID。 | 网络和 HTTP 5xx 最多重试 2 次；HTTP 200 但业务码非 200 不重试。 |
+| `/api/jianying/draft/tasks/result` | `POST` | 传 `{taskId}` 查询草稿结果；成功返回多个 JSON HTTPS URL。 | 首次等待 2 秒，此后每 2 秒查询；`20201/20202` 继续，`200` 成功，其他业务码失败；总预算 30 分钟。 |
 
 ## 当前已知注意点
 

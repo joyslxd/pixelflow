@@ -8,11 +8,15 @@ LangGraph checkpoint 保存的是运行时状态；这里的 Store 保存的是�
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,6 +60,269 @@ def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:
     if not value:
         return {}
     return {key: item for key, item in value.items() if key != "messages"}
+
+
+class _UnsetJianyingDraftResumeError:
+    pass
+
+
+_UNSET_JIANYING_DRAFT_RESUME_ERROR = _UnsetJianyingDraftResumeError()
+type JianyingDraftResumeErrorPatch = str | None | _UnsetJianyingDraftResumeError
+_JIANYING_DRAFT_CONTEXT_KEYS = (
+    "pendingJianyingDraftJob",
+    "pending_jianying_draft_job",
+    "jianyingDraftRecords",
+    "jianying_draft_records",
+    "jianying_draft_job_resume_error",
+)
+_CONVERSATION_LOCK_STRIPE_COUNT = 64
+_JIANYING_DRAFT_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timeout"})
+_JIANYING_DRAFT_ACTIVE_STATUS_RANK = {"queued": 1, "running": 2}
+
+
+def _jianying_draft_records(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _jianying_draft_pending(value: Any) -> dict[str, Any] | None:
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _jianying_draft_job_id(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    job_id = value.get("job_id")
+    return job_id if isinstance(job_id, str) and job_id else None
+
+
+def _jianying_draft_status(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    return status if isinstance(status, str) and status else None
+
+
+def _jianying_draft_succeeded_is_valid(value: Any, *, now: datetime) -> bool:
+    if _jianying_draft_status(value) != "succeeded" or not isinstance(value, dict):
+        return False
+    download_url = value.get("download_url")
+    if not isinstance(download_url, str):
+        return False
+    try:
+        parsed_download_url = urlsplit(download_url)
+    except ValueError:
+        return False
+    if parsed_download_url.scheme.lower() != "https" or not parsed_download_url.netloc:
+        return False
+    raw_expire_at = value.get("expire_at")
+    if not isinstance(raw_expire_at, (datetime, str)):
+        return True
+    expire_at = _to_datetime(raw_expire_at)
+    if expire_at is None:
+        return True
+    return expire_at > now
+
+
+def _jianying_draft_effective_status(value: Any, *, now: datetime) -> str | None:
+    status = _jianying_draft_status(value)
+    if status == "succeeded" and not _jianying_draft_succeeded_is_valid(value, now=now):
+        return "failed"
+    return status
+
+
+def _merge_jianying_draft_record(
+    current_record: Any,
+    incoming_record: Any,
+    *,
+    expected_job_id: str,
+    current_pending_job_id: str | None,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, bool]:
+    current = dict(current_record) if isinstance(current_record, dict) else None
+    incoming = dict(incoming_record) if isinstance(incoming_record, dict) else None
+    if incoming is None or _jianying_draft_job_id(incoming) != expected_job_id:
+        return current, False
+    if current is None:
+        return incoming, True
+
+    current_status = _jianying_draft_status(current)
+    incoming_status = _jianying_draft_status(incoming)
+    current_job_id = _jianying_draft_job_id(current)
+    if current_job_id != expected_job_id and current_pending_job_id != expected_job_id:
+        return current, False
+    if current_status == "succeeded" and _jianying_draft_succeeded_is_valid(current, now=now):
+        return current, current_job_id == expected_job_id and incoming_status == "succeeded"
+    if incoming_status == "succeeded":
+        return incoming, True
+    if current_job_id == expected_job_id:
+        if current_status in _JIANYING_DRAFT_TERMINAL_STATUSES:
+            return current, incoming_status == current_status
+        if incoming_status in _JIANYING_DRAFT_TERMINAL_STATUSES:
+            return incoming, True
+        if _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(incoming_status or "", 0) >= _JIANYING_DRAFT_ACTIVE_STATUS_RANK.get(current_status or "", 0):
+            return incoming, True
+        return current, False
+    if current_pending_job_id == expected_job_id:
+        return incoming, True
+    return current, False
+
+
+def _can_set_jianying_draft_pending(
+    pending_job: dict[str, Any],
+    *,
+    expected_job_id: str,
+    current_pending_job_id: str | None,
+    records: dict[str, Any],
+    now: datetime,
+) -> bool:
+    if _jianying_draft_job_id(pending_job) != expected_job_id:
+        return False
+    if current_pending_job_id not in {None, expected_job_id}:
+        return False
+    storyboard_version_id = pending_job.get("storyboard_version_id")
+    if not isinstance(storyboard_version_id, str) or not storyboard_version_id:
+        return False
+    record = records.get(storyboard_version_id)
+    record_status = _jianying_draft_status(record)
+    if record_status == "succeeded" and _jianying_draft_succeeded_is_valid(record, now=now):
+        return False
+    return not (_jianying_draft_job_id(record) == expected_job_id and record_status in _JIANYING_DRAFT_TERMINAL_STATUSES)
+
+
+def _jianying_draft_phase_after_patch(
+    current_phase: str,
+    requested_phase: str,
+    *,
+    expected_job_id: str,
+    pending_job: dict[str, Any] | None,
+    merged_records: dict[str, Any],
+    incoming_record_keys: set[str],
+    request_authorized: bool,
+    now: datetime,
+) -> str:
+    if not request_authorized:
+        return current_phase
+    pending_job_id = _jianying_draft_job_id(pending_job)
+    if pending_job_id is not None:
+        return "jianying_draft_running" if pending_job_id == expected_job_id else current_phase
+    effective_statuses = {_jianying_draft_effective_status(merged_records.get(storyboard_version_id), now=now) for storyboard_version_id in incoming_record_keys}
+    if "succeeded" in effective_statuses:
+        return "jianying_draft_succeeded"
+    if "failed" in effective_statuses:
+        return "jianying_draft_failed"
+    if "timeout" in effective_statuses:
+        return "jianying_draft_timeout"
+    return requested_phase
+
+
+def _patch_jianying_draft_context(
+    context: dict[str, Any] | None,
+    *,
+    current_phase: str,
+    requested_phase: str,
+    expected_job_id: str,
+    pending_job: dict[str, Any] | None,
+    records: dict[str, Any],
+    resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
+) -> tuple[dict[str, Any], str]:
+    current = _conversation_context(context)
+    merged_records = {
+        **_jianying_draft_records(current.get("jianying_draft_records")),
+        **_jianying_draft_records(current.get("jianyingDraftRecords")),
+    }
+    current_pending = _jianying_draft_pending(current.get("pending_jianying_draft_job"))
+    camel_pending = _jianying_draft_pending(current.get("pendingJianyingDraftJob"))
+    if camel_pending is not None:
+        current_pending = camel_pending
+    current_pending_job_id = _jianying_draft_job_id(current_pending)
+    patch_time = _now()
+    request_authorized = False
+    for storyboard_version_id, incoming_record in records.items():
+        merged_record, record_authorized = _merge_jianying_draft_record(
+            merged_records.get(storyboard_version_id),
+            incoming_record,
+            expected_job_id=expected_job_id,
+            current_pending_job_id=current_pending_job_id,
+            now=patch_time,
+        )
+        if merged_record is not None:
+            merged_records[storyboard_version_id] = merged_record
+        request_authorized = request_authorized or record_authorized
+
+    resolved_pending = current_pending
+    if pending_job is None:
+        if current_pending_job_id == expected_job_id:
+            resolved_pending = None
+            request_authorized = True
+    elif _can_set_jianying_draft_pending(
+        pending_job,
+        expected_job_id=expected_job_id,
+        current_pending_job_id=current_pending_job_id,
+        records=merged_records,
+        now=patch_time,
+    ):
+        resolved_pending = dict(pending_job)
+        request_authorized = True
+
+    patched = {
+        **current,
+        "pendingJianyingDraftJob": resolved_pending,
+        "pending_jianying_draft_job": resolved_pending,
+        "jianyingDraftRecords": merged_records,
+        "jianying_draft_records": merged_records,
+    }
+    if request_authorized and not isinstance(resume_error, _UnsetJianyingDraftResumeError):
+        patched["jianying_draft_job_resume_error"] = resume_error
+    resolved_phase = _jianying_draft_phase_after_patch(
+        current_phase,
+        requested_phase,
+        expected_job_id=expected_job_id,
+        pending_job=resolved_pending,
+        merged_records=merged_records,
+        incoming_record_keys=set(records),
+        request_authorized=request_authorized,
+        now=patch_time,
+    )
+    return patched, resolved_phase
+
+
+def _replace_context_preserving_jianying_draft_fields(
+    current_context: dict[str, Any] | None,
+    replacement_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current = _conversation_context(current_context)
+    replacement = _conversation_context(replacement_context)
+    for key in _JIANYING_DRAFT_CONTEXT_KEYS:
+        if key in current:
+            replacement[key] = current[key]
+        else:
+            replacement.pop(key, None)
+    return replacement
+
+
+def _new_conversation_locks() -> tuple[asyncio.Lock, ...]:
+    return tuple(asyncio.Lock() for _ in range(_CONVERSATION_LOCK_STRIPE_COUNT))
+
+
+def _conversation_lock(locks: tuple[asyncio.Lock, ...], conversation_id: str) -> asyncio.Lock:
+    return locks[hash(conversation_id) % len(locks)]
+
+
+@asynccontextmanager
+async def _conversation_write_transaction(session: AsyncSession) -> AsyncIterator[None]:
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite 不支持行锁，提前获取数据库写锁以覆盖多 Store/多进程并发。
+        await session.execute(text("BEGIN IMMEDIATE"))
+        try:
+            yield
+        except BaseException:
+            await session.rollback()
+            raise
+        else:
+            await session.commit()
+        return
+    async with session.begin():
+        yield
 
 
 def _parse_cursor(cursor: str | None) -> tuple[datetime, str] | None:
@@ -215,11 +482,18 @@ class PixelFlowTaskStore(Protocol):
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord: ...
     async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None: ...
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None: ...
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_job_id: str,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
     ) -> PixelFlowConversationRecord | None: ...
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord: ...
     async def update_conversation_message(
@@ -231,13 +505,9 @@ class PixelFlowTaskStore(Protocol):
         content: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> PixelFlowConversationMessageRecord | None: ...
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]: ...
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]: ...
     async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]: ...
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]: ...
 
 
 def _row_to_record(row: PixelFlowTaskRow) -> PixelFlowTaskRecord:
@@ -309,6 +579,7 @@ def _conversation_message_row_to_record(row: PixelFlowConversationMessageRow) ->
 class SQLPixelFlowTaskStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._sf = session_factory
+        self._conversation_locks = _new_conversation_locks()
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         async with self._sf() as session:
@@ -404,16 +675,9 @@ class SQLPixelFlowTaskStore:
             await session.refresh(row)
             return _trace_event_to_dict(row)
 
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]:
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
         async with self._sf() as session:
-            stmt = (
-                select(PixelFlowConversationTraceEventRow)
-                .where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id)
-                .order_by(PixelFlowConversationTraceEventRow.id.asc())
-                .limit(limit)
-            )
+            stmt = select(PixelFlowConversationTraceEventRow).where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id).order_by(PixelFlowConversationTraceEventRow.id.asc()).limit(limit)
             if user_id is not None:
                 stmt = stmt.where(PixelFlowConversationTraceEventRow.user_id == user_id)
             if after_id is not None:
@@ -509,15 +773,9 @@ class SQLPixelFlowTaskStore:
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _conversation_row_to_record(row) if row else None
 
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]:
         async with self._sf() as session:
-            stmt = (
-                select(PixelFlowConversationRow)
-                .order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc())
-                .limit(limit + 1)
-            )
+            stmt = select(PixelFlowConversationRow).order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc()).limit(limit + 1)
             if user_id is not None:
                 stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
             parsed = _parse_cursor(cursor)
@@ -537,32 +795,66 @@ class SQLPixelFlowTaskStore:
             next_cursor = _conversation_cursor(records[-1]) if len(rows) > limit and records else None
             return records, next_cursor
 
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            async with self._sf() as session:
+                async with _conversation_write_transaction(session):
+                    stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id).with_for_update()
+                    if user_id is not None:
+                        stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        return None
+                    mapping = {
+                        "title": "title",
+                        "current_task_id": "current_task_id",
+                        "last_phase": "last_phase",
+                        "context": "context_json",
+                    }
+                    for key, value in fields.items():
+                        attr = mapping.get(key)
+                        if attr:
+                            if key == "context":
+                                value = _replace_context_preserving_jianying_draft_fields(row.context_json, value)
+                            setattr(row, attr, value)
+                    row.updated_at = _now()
+                    await session.flush()
+                    return _conversation_row_to_record(row)
+
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_job_id: str,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
     ) -> PixelFlowConversationRecord | None:
-        async with self._sf() as session:
-            stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id)
-            if user_id is not None:
-                stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                return None
-            mapping = {
-                "title": "title",
-                "current_task_id": "current_task_id",
-                "last_phase": "last_phase",
-                "context": "context_json",
-            }
-            for key, value in fields.items():
-                attr = mapping.get(key)
-                if attr:
-                    if key == "context":
-                        value = _conversation_context(value)
-                    setattr(row, attr, value)
-            row.updated_at = _now()
-            await session.commit()
-            await session.refresh(row)
-            return _conversation_row_to_record(row)
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            async with self._sf() as session:
+                async with _conversation_write_transaction(session):
+                    stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id).with_for_update()
+                    if user_id is not None:
+                        stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        return None
+                    row.context_json, row.last_phase = _patch_jianying_draft_context(
+                        row.context_json,
+                        current_phase=row.last_phase,
+                        requested_phase=last_phase,
+                        expected_job_id=expected_job_id,
+                        pending_job=pending_job,
+                        records=records,
+                        resume_error=resume_error,
+                    )
+                    row.updated_at = _now()
+                    await session.flush()
+                    return _conversation_row_to_record(row)
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         async with self._sf() as session:
@@ -609,11 +901,7 @@ class SQLPixelFlowTaskStore:
                 stmt = stmt.where(PixelFlowConversationMessageRow.user_id == user_id)
             rows = (await session.execute(stmt)).scalars().all()
             row = next(
-                (
-                    item
-                    for item in rows
-                    if item.message_id == message_id or (item.payload_json or {}).get("client_message_id") == message_id
-                ),
+                (item for item in rows if item.message_id == message_id or (item.payload_json or {}).get("client_message_id") == message_id),
                 None,
             )
             if row is None:
@@ -629,9 +917,7 @@ class SQLPixelFlowTaskStore:
             await session.refresh(row)
             return _conversation_message_row_to_record(row)
 
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]:
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]:
         async with self._sf() as session:
             stmt = (
                 select(PixelFlowConversationMessageRow)
@@ -668,6 +954,7 @@ class MemoryPixelFlowTaskStore:
         self._conversations: dict[str, PixelFlowConversationRecord] = {}
         self._conversation_messages: dict[str, list[PixelFlowConversationMessageRecord]] = {}
         self._trace_events: dict[str, list[dict[str, Any]]] = {}
+        self._conversation_locks = _new_conversation_locks()
         self._next_event_id = 1
         self._next_trace_event_id = 1
 
@@ -716,9 +1003,7 @@ class MemoryPixelFlowTaskStore:
         self._trace_events.setdefault(conversation_id, []).append(row)
         return row
 
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]:
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
         rows = list(self._trace_events.get(conversation_id, []))
         if after_id is not None:
             rows = [r for r in rows if r["id"] > after_id]
@@ -766,9 +1051,7 @@ class MemoryPixelFlowTaskStore:
             return record
         return None
 
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]:
         rows = [r for r in self._conversations.values() if user_id is None or r.user_id == user_id]
         rows = sorted(rows, key=lambda r: (r.created_at, r.conversation_id), reverse=True)
         parsed = _parse_cursor(cursor)
@@ -780,27 +1063,53 @@ class MemoryPixelFlowTaskStore:
         next_cursor = _conversation_cursor(page[-1]) if len(rows) > limit and page else None
         return page, next_cursor
 
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            record = await self.get_conversation(conversation_id, user_id=user_id)
+            if record is None:
+                return None
+            for key in ("title", "current_task_id", "last_phase", "context"):
+                if key in fields:
+                    if key == "context":
+                        value = _replace_context_preserving_jianying_draft_fields(record.context, fields[key])
+                    else:
+                        value = fields[key]
+                    setattr(record, key, value)
+            record.updated_at = _dt(_now())
+            return record
+
+    async def patch_jianying_draft_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_job_id: str,
+        pending_job: dict[str, Any] | None,
+        records: dict[str, Any],
+        last_phase: str,
+        resume_error: JianyingDraftResumeErrorPatch = _UNSET_JIANYING_DRAFT_RESUME_ERROR,
     ) -> PixelFlowConversationRecord | None:
-        record = await self.get_conversation(conversation_id, user_id=user_id)
-        if record is None:
-            return None
-        for key in ("title", "current_task_id", "last_phase", "context"):
-            if key in fields:
-                value = _conversation_context(fields[key]) if key == "context" else fields[key]
-                setattr(record, key, value)
-        record.updated_at = _dt(_now())
-        return record
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            record = await self.get_conversation(conversation_id, user_id=user_id)
+            if record is None:
+                return None
+            record.context, record.last_phase = _patch_jianying_draft_context(
+                record.context,
+                current_phase=record.last_phase,
+                requested_phase=last_phase,
+                expected_job_id=expected_job_id,
+                pending_job=pending_job,
+                records=records,
+                resume_error=resume_error,
+            )
+            record.updated_at = _dt(_now())
+            return record
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         existing = next(
-            (
-                item
-                for rows in self._conversation_messages.values()
-                for item in rows
-                if item.message_id == message.message_id
-            ),
+            (item for rows in self._conversation_messages.values() for item in rows if item.message_id == message.message_id),
             None,
         )
         if existing is not None:
@@ -825,12 +1134,7 @@ class MemoryPixelFlowTaskStore:
     ) -> PixelFlowConversationMessageRecord | None:
         rows = self._conversation_messages.get(conversation_id, [])
         record = next(
-            (
-                item
-                for item in rows
-                if (user_id is None or item.user_id == user_id)
-                and (item.message_id == message_id or item.payload.get("client_message_id") == message_id)
-            ),
+            (item for item in rows if (user_id is None or item.user_id == user_id) and (item.message_id == message_id or item.payload.get("client_message_id") == message_id)),
             None,
         )
         if record is None:
@@ -844,9 +1148,7 @@ class MemoryPixelFlowTaskStore:
             conversation.updated_at = _dt(_now())
         return record
 
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]:
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]:
         rows = list(self._conversation_messages.get(conversation_id, []))
         if user_id is not None:
             rows = [r for r in rows if r.user_id == user_id]

@@ -4,7 +4,9 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-const moduleUrl = pathToFileURL(path.join(os.tmpdir(), "pixelflow-workflow-task-board-test", "workflowTaskBoard.js")).href;
+const moduleUrl =
+  process.env.WORKFLOW_TASK_BOARD_TEST_MODULE ||
+  pathToFileURL(path.join(os.tmpdir(), "pixelflow-workflow-task-board-test", "workflowTaskBoard.js")).href;
 const { deriveWorkflowTaskBoard, workflowStatusLabel } = await import(moduleUrl);
 
 const progress = (intent, lastPhase, extra = {}) => ({

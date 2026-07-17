@@ -57,6 +57,23 @@ pixelflow:
   render_root: "../renders"
   # FFmpeg 字幕/花字字体文件路径；留空时不强制烧录字体。
   caption_font: "../caption"
+  # 第三方剪映草稿 Provider；测试与生产当前使用同一服务地址。
+  jianying_draft_enabled: true
+  jianying_draft_base_url: "https://s4b29nq5dvu0jtq75uj1h.apigateway-cn-shanghai.volceapi.com"
+  # 第三方剪映草稿接口固定鉴权 token，会写入请求 Header 的 token 字段。
+  jianying_draft_token: "79ddb1ca49342b32a1eba57057672129"
+  # 前端轮询建议间隔，单位秒。
+  jianying_draft_poll_interval_seconds: 2
+  # 单个剪映草稿任务最大等待时间，单位秒。
+  jianying_draft_timeout_seconds: 1800
+  # 网络异常或 HTTP 5xx 的最大重试次数；业务 code 非 200 不自动重试。
+  jianying_draft_max_retries: 2
+  # 与第三方剪映草稿服务建立 HTTP 连接的超时时间，单位秒。
+  jianying_draft_connect_timeout_seconds: 5
+  # 调用第三方创建剪映草稿任务接口后的响应读取超时时间，单位秒。
+  jianying_draft_create_read_timeout_seconds: 30
+  # 轮询第三方剪映草稿任务结果接口时，单次响应读取超时时间，单位秒。
+  jianying_draft_query_read_timeout_seconds: 15
 
 # Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
 # 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。
