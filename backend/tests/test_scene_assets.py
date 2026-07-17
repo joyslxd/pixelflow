@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from pixelflow.generate.scene_assets import (
     collect_prop_reference_image_urls,
     collect_uploaded_reference_image_urls,
@@ -67,6 +69,33 @@ def test_resolve_scene_asset_endpoint():
     assert resolve_scene_asset_endpoint({"text_to_image"}) == "/api/picture/text_to_image"
     assert resolve_scene_asset_endpoint({"reference_image"}) == "/api/picture/multi_reference_image_generation"
     assert resolve_scene_asset_endpoint({"text_to_image", "reference_image"}) == "/api/picture/mixed"
+
+
+def test_generate_scene_assets_rejects_polluted_global_asset_before_image_call():
+    call_count = 0
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise AssertionError("污染资产不应触发图片生成")
+
+        async def reference_image(self, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise AssertionError("污染资产不应触发参考图片生成")
+
+    with pytest.raises(ValueError, match="三秒钩子"):
+        asyncio.run(
+            generate_scene_assets(
+                image_skill=FakeImageSkill(),
+                global_assets={"props": [{"asset_id": "prop-hook", "name": "三秒钩子", "image_prompt": "三秒钩子道具图"}]},
+                scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+                quota_checker=lambda _value: False,
+            )
+        )
+
+    assert call_count == 0
 
 
 def test_generate_scene_assets_passes_all_collected_reference_images_for_props():

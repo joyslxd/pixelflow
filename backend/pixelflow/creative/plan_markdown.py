@@ -15,12 +15,15 @@ from pixelflow.creative.plan_llm import (
     PLAN_LLM_MODEL_NAME,
     ModelFactory,
     generate_plan_payload,
+    repair_plan_asset_requirements,
     repair_plan_shot_descriptions,
     revise_plan_payload,
 )
 from pixelflow.creative.revision_contract import contract_form_values, merge_revision_contract, validate_revision_contract
 from pixelflow.creative.scene_blueprint import (
+    apply_asset_requirement_repairs,
     apply_shot_description_repairs,
+    asset_requirement_quality_issues,
     enrich_incomplete_shot_descriptions,
     fallback_scene_blueprints,
     normalize_scene_blueprints,
@@ -28,6 +31,7 @@ from pixelflow.creative.scene_blueprint import (
     repair_scene_blueprints_schedule,
     scene_blueprint_durations,
     shot_description_quality_issues,
+    validate_asset_requirement_quality,
     validate_shot_description_quality,
 )
 
@@ -270,6 +274,22 @@ async def build_plan_markdown_with_llm(
                     )
                     validate_shot_description_quality(blueprints)
                     corrections.append(f"Plan LLM 镜头描述已使用规则增强：{exc}")
+            asset_issues = asset_requirement_quality_issues(blueprints)
+            if asset_issues:
+                repair_payload = await repair_plan_asset_requirements(
+                    scene_blueprints=blueprints,
+                    quality_issues=asset_issues,
+                    selected_direction=selected_direction,
+                    creation_contract=creation_contract,
+                    model_name=model_name,
+                    model_factory=model_factory,
+                )
+                blueprints = apply_asset_requirement_repairs(
+                    blueprints,
+                    repair_payload.get("scene_blueprints"),
+                    total_duration_sec=contract.video_duration_sec,
+                )
+                validate_asset_requirement_quality(blueprints)
             durations = scene_blueprint_durations(blueprints)
             contract, image_corrections = resolve_scene_image_spec(
                 contract,
@@ -420,6 +440,36 @@ async def revise_plan_markdown_with_llm(
                             scene_blueprints=original_blueprints,
                             model_name=model_name,
                             error=ValueError(f"分镜镜头描述完整度校验失败：{exc}"),
+                        )
+                asset_issues = asset_requirement_quality_issues(blueprints)
+                if asset_issues:
+                    try:
+                        repair_payload = await repair_plan_asset_requirements(
+                            scene_blueprints=blueprints,
+                            quality_issues=asset_issues,
+                            selected_direction=selected_direction,
+                            creation_contract=candidate_contract,
+                            model_name=model_name,
+                            model_factory=model_factory,
+                        )
+                        blueprints = apply_asset_requirement_repairs(
+                            blueprints,
+                            repair_payload.get("scene_blueprints"),
+                            total_duration_sec=contract.video_duration_sec,
+                        )
+                        validate_asset_requirement_quality(blueprints)
+                    except Exception as exc:  # noqa: BLE001 - 定向修正失败时不能发布污染版本
+                        return _failed_revision_result(
+                            base=base,
+                            template_path=template_path,
+                            current_plan_markdown=current_plan_markdown,
+                            current_plan_version=current_plan_version,
+                            plan_history=plan_history,
+                            creation_contract=original_contract,
+                            scene_durations_sec=original_durations,
+                            scene_blueprints=original_blueprints,
+                            model_name=model_name,
+                            error=ValueError(f"分镜资产合同校验失败：{exc}"),
                         )
                 durations = scene_blueprint_durations(blueprints)
                 contract, image_corrections = resolve_scene_image_spec(

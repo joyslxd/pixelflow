@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 所有新增 Python 对外接口必须以 `/agent` 开头；本任务不新增路由。
-- 第三方剪映成功结果只接受单个公开 HTTPS ZIP URL，不兼容旧 JSON URL 数组。
+- 第三方剪映成功结果只接受单个公开 HTTPS ZIP URL，兼容纯字符串和真实服务的单元素数组包装，不兼容多个旧 JSON URL。
 - ZIP 最大 200 MiB，流式下载，不解压、不重新压缩，校验非空 ZIP 后原样上传。
 - Plan 每个分镜仍为 4-15 秒，总时长精确等于用户确认时长。
 - Plan 是权威执行合同；场景包不得静默修改已审核 Plan。
@@ -27,10 +27,10 @@
 - Modify: `backend/pixelflow/jianying_draft/http_skill.py`
 
 **Interfaces:**
-- Consumes: Provider 查询响应 `{"code": 200, "data": "https://.../draft.zip"}`。
+- Consumes: Provider 查询响应 `{"code": 200, "data": "https://.../draft.zip"}` 或真实服务的 `{"code": 200, "data": ["https://.../draft.zip"]}`。
 - Produces: `HttpJianyingDraftSkill.generate(request) -> JianyingDraftResult`，成功结果仍返回自有 TOS `download_url`。
 
-- [ ] **Step 1: 写入单 ZIP 成功合同失败测试**
+- [x] **Step 1: 写入单 ZIP 成功合同失败测试**
 
 把主成功测试改成 Provider 返回单个 ZIP URL，Mock 下载端返回真实 ZIP 字节；uploader 读取临时文件并断言字节与 Provider ZIP 完全一致。
 
@@ -47,7 +47,7 @@ def uploader(path: str) -> dict[str, object]:
     return {"success": True, "url": "https://tos.example.com/jianying/draft.zip"}
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run:
 
@@ -57,7 +57,7 @@ cd backend && .venv/bin/pytest tests/test_jianying_draft_http_skill.py::test_htt
 
 Expected: FAIL，当前实现把字符串 `data` 判定为“结果为空”。
 
-- [ ] **Step 3: 最小实现 ZIP 流式下载和原样上传**
+- [x] **Step 3: 最小实现 ZIP 流式下载和原样上传**
 
 在 `http_skill.py` 中：
 
@@ -80,11 +80,11 @@ async def _download_and_upload(
 async def _download_zip(self, source_url: object, destination: Path) -> None: ...
 ```
 
-- [ ] **Step 4: 增加异常合同测试**
+- [x] **Step 4: 增加异常合同测试**
 
 分别覆盖：旧数组、HTTP URL、非 ZIP、空 ZIP、超过 200 MiB 的 `Content-Length`、下载 404、下载 503 重试耗尽、上传失败。
 
-- [ ] **Step 5: 运行剪映 HTTP Skill 测试并确认 GREEN**
+- [x] **Step 5: 运行剪映 HTTP Skill 测试并确认 GREEN**
 
 Run:
 
@@ -104,7 +104,7 @@ Expected: 全部 PASS。
 - Consumes: Provider 的 `code/message`。
 - Produces: 长度受限且不含凭据的 `JianyingDraftResult.message`。
 
-- [ ] **Step 1: 写入 40101 错误原因测试**
+- [x] **Step 1: 写入 40101 错误原因测试**
 
 ```python
 assert result.status == JianyingDraftStatus.FAILED
@@ -112,7 +112,7 @@ assert result.message == "第三方剪映草稿任务创建失败：token 缺失
 assert call_count == 1
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run:
 
@@ -122,7 +122,7 @@ cd backend && .venv/bin/pytest tests/test_jianying_draft_http_skill.py -k busine
 
 Expected: FAIL，当前只返回通用错误。
 
-- [ ] **Step 3: 实现安全业务消息提取**
+- [x] **Step 3: 实现安全业务消息提取**
 
 新增纯函数：
 
@@ -135,7 +135,7 @@ def _public_business_message(prefix: str, body: dict[str, Any]) -> str:
 
 创建和查询非成功业务码均复用该函数；日志和响应不包含 token、Authorization、响应体或堆栈。
 
-- [ ] **Step 4: 运行剪映 Skill 与 Service/Router 回归测试**
+- [x] **Step 4: 运行剪映 Skill 与 Service/Router 回归测试**
 
 Run:
 
@@ -163,7 +163,7 @@ Expected: 全部 PASS。
 - Produces: `apply_asset_requirement_repairs(blueprints, repairs, total_duration_sec) -> list[dict[str, Any]]`。
 - Produces: `repair_plan_asset_requirements(...) -> dict[str, Any]`。
 
-- [ ] **Step 1: 写入资产质量规则失败测试**
+- [x] **Step 1: 写入资产质量规则失败测试**
 
 合法样例：周衡、林悦、G500头等舱、万米高空金色云海、蓝妹啤酒瓶、玻璃杯、开瓶器。
 
@@ -175,7 +175,7 @@ assert any("三秒钩子" in issue for issue in issues)
 assert any("@图片1" in issue for issue in issues)
 ```
 
-- [ ] **Step 2: 运行规则测试并确认 RED**
+- [x] **Step 2: 运行规则测试并确认 RED**
 
 Run:
 
@@ -185,7 +185,7 @@ cd backend && .venv/bin/pytest tests/test_scene_blueprint_quality.py -k asset_re
 
 Expected: FAIL，函数尚不存在。
 
-- [ ] **Step 3: 实现纯领域校验函数**
+- [x] **Step 3: 实现纯领域校验函数**
 
 在 `scene_blueprint.py` 中识别：
 
@@ -196,7 +196,7 @@ Expected: FAIL，函数尚不存在。
 
 错误必须包含 `scene_index`、集合名和非法值。合法实体名称不能因出现在故事标题中而被删除。
 
-- [ ] **Step 4: 写入定向修复不篡改其他字段测试**
+- [x] **Step 4: 写入定向修复不篡改其他字段测试**
 
 ```python
 repaired = apply_asset_requirement_repairs(original, repairs, total_duration_sec=60)
@@ -205,7 +205,7 @@ for field in ("duration_sec", "storyline", "shot_description", "narration", "tra
     assert repaired[0][field] == original[0][field]
 ```
 
-- [ ] **Step 5: 实现 LLM 定向修复 Skill**
+- [x] **Step 5: 实现 LLM 定向修复 Skill**
 
 `repair_plan_asset_requirements()` 的 Prompt 只允许返回：
 
@@ -215,7 +215,7 @@ for field in ("duration_sec", "storyline", "shot_description", "narration", "tra
 
 提示词明确用户 Seedance 内容中的时间段、镜头指令、声音、风格和参考编号不是资产；实际人物、物理地点和有形物件才是资产。
 
-- [ ] **Step 6: 接入初次 Plan 和 Agent 修改**
+- [x] **Step 6: 接入初次 Plan 和 Agent 修改**
 
 在镜头描述质量校验之后运行资产校验：
 
@@ -223,7 +223,7 @@ for field in ("duration_sec", "storyline", "shot_description", "narration", "tra
 - Agent 修改修复失败时返回现有 `_failed_revision_result()`，保留当前有效版本。
 - 修复成功后重新 `normalize_scene_blueprints()` 并再次校验。
 
-- [ ] **Step 7: 运行 Plan 测试并确认 GREEN**
+- [x] **Step 7: 运行 Plan 测试并确认 GREEN**
 
 Run:
 
@@ -246,11 +246,11 @@ Expected: 全部 PASS。
 - Consumes: 当前激活 Plan 的 `scene_blueprints`。
 - Produces: 合法蓝图对应的 `global_assets`；非法历史蓝图返回可读错误且不触发生图。
 
-- [ ] **Step 1: 写入非法历史 Plan 不生成素材测试**
+- [x] **Step 1: 写入非法历史 Plan 不生成素材测试**
 
 构造 `props=["三秒钩子", "蓝妹啤酒瓶"]`，断言场景包准备返回失败，错误指出分镜和非法资产，且图片 Skill 未被调用。
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run:
 
@@ -260,11 +260,11 @@ cd backend && .venv/bin/pytest tests/test_pixelflow_video_router.py -k invalid_p
 
 Expected: FAIL，当前会为“三秒钩子”创建 prop。
 
-- [ ] **Step 3: 在映射 `global_assets` 前复用领域校验**
+- [x] **Step 3: 在映射 `global_assets` 前复用领域校验**
 
 `prepare_video_scene_packages_with_llm()` 和规则 fallback 都在 `_align_global_assets_to_blueprints()` 前校验；不做过滤和隐式修复。
 
-- [ ] **Step 4: 运行场景包和视频 Router 回归测试**
+- [x] **Step 4: 运行场景包和视频 Router 回归测试**
 
 Run:
 
@@ -286,11 +286,11 @@ Expected: 全部 PASS。
 **Interfaces:**
 - Documents: Provider 单 ZIP 合同、TOS 原样上传、资产质量校验和外部 token 阻塞。
 
-- [ ] **Step 1: 同步三份项目文档**
+- [x] **Step 1: 同步三份项目文档**
 
 删除“多个 JSON 重新打 ZIP”的旧描述，改为“单 ZIP 下载、校验、原样上传”；记录 Plan 资产三类实体和执行前校验。
 
-- [ ] **Step 2: 运行格式与目标测试**
+- [x] **Step 2: 运行格式与目标测试**
 
 Run:
 
@@ -316,15 +316,19 @@ cd backend && .venv/bin/pytest \
 
 Expected: ruff 无错误，目标测试全部 PASS。
 
-- [ ] **Step 3: 使用 dev 配置真实调用第三方**
+- [x] **Step 3: 使用 dev 配置真实调用第三方**
 
 使用本机 `PIXELFLOW_CONFIG_ENV=dev` 和一个真实分镜视频：创建 Provider 任务、轮询到终态。成功时继续下载 ZIP 并通过真实 content-app `/api/upload` 上传 TOS；若仍为 `40101`，保留脱敏请求证据并明确标为外部凭据阻塞。
 
-- [ ] **Step 4: 使用用户 Seedance 修改意见做真实 Plan 回归**
+真实验证：两条分镜按 `videoOrder=1/2` 创建任务 `task_f705116fec434eb757df2012`，查询返回 `data=[zipUrl]`，ZIP 为 `19,075,006` 字节且响应类型为 `application/zip`。此前完整 Skill 联调已把同合同 ZIP 通过 content-app `/api/upload` 上传到自有 TOS。
+
+- [x] **Step 4: 使用用户 Seedance 修改意见做真实 Plan 回归**
 
 运行 Agent 修改，检查新版本 `scene_blueprints[].asset_requirements`；确认只有人物、物理场景和有形道具，没有钩子、时间、运镜、声音、风格或参考编号。若测试环境 LLM 超时，保留自动化定向修复测试结果并记录外部模型阻塞。
 
-- [ ] **Step 5: 拉取远端、解决冲突并提交**
+真实 Plan LLM 请求超过 120 秒仍未返回业务结果，按外部模型超时终止；领域校验、定向修复、历史 Plan 和实际生图边界由自动化回归覆盖，未用 Mock 冒充外部 LLM 成功。
+
+- [x] **Step 5: 拉取远端、解决冲突并提交**
 
 ```bash
 git fetch origin

@@ -45,8 +45,14 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/analyze-storyboards" in paths
 
 
-def test_video_router_prepares_scene_packages():
+def test_video_router_prepares_scene_packages(monkeypatch):
     from app.gateway.routers import pixelflow_video
+    from pixelflow.generate import scene_packages
+
+    def unavailable_model_factory(*_args, **_kwargs):
+        raise RuntimeError("test model unavailable")
+
+    monkeypatch.setattr(scene_packages, "_default_model_factory", unavailable_model_factory)
 
     app = make_authed_test_app(user_factory=_stable_user)
     app.include_router(pixelflow_video.router)

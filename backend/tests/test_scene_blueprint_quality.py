@@ -7,7 +7,9 @@ import pytest
 
 from pixelflow.creative.plan_markdown import build_plan_markdown, build_plan_markdown_with_llm, revise_plan_markdown_with_llm
 from pixelflow.creative.scene_blueprint import (
+    apply_asset_requirement_repairs,
     apply_shot_description_repairs,
+    asset_requirement_quality_issues,
     enrich_incomplete_shot_descriptions,
     normalize_scene_blueprints,
     shot_description_quality_issues,
@@ -196,6 +198,117 @@ def test_apply_shot_description_repairs_ignores_already_complete_scenes() -> Non
     assert repaired[1]["shot_description"] == original_complete_description
 
 
+def test_asset_requirement_quality_rejects_creation_metadata_and_keeps_entities() -> None:
+    blueprint = _blueprint(_complete_description())
+    blueprint["asset_requirements"] = {
+        "characters": ["周衡", "林悦", "三秒钩子", "段A"],
+        "scenes": ["G500头等舱", "万米高空金色云海", "音乐厅", "0-3秒", "穿透运镜", "黄金时刻光影", "9:16竖屏"],
+        "props": [
+            "蓝妹啤酒瓶",
+            "玻璃杯",
+            "开瓶器",
+            "反转伞",
+            "85mm镜头",
+            "4K摄像机",
+            "3秒胶",
+            "背景音乐",
+            "画面无字幕",
+            "高清清晰度",
+            "营造高级感",
+            "8K真人质感",
+            "@图片1",
+            "@视频3",
+        ],
+    }
+
+    issues = asset_requirement_quality_issues([blueprint])
+
+    for invalid_value in (
+        "三秒钩子",
+        "段A",
+        "0-3秒",
+        "穿透运镜",
+        "黄金时刻光影",
+        "9:16竖屏",
+        "背景音乐",
+        "画面无字幕",
+        "高清清晰度",
+        "营造高级感",
+        "8K真人质感",
+        "@图片1",
+        "@视频3",
+    ):
+        assert any(invalid_value in issue for issue in issues)
+    for valid_value in (
+        "周衡",
+        "林悦",
+        "G500头等舱",
+        "万米高空金色云海",
+        "音乐厅",
+        "蓝妹啤酒瓶",
+        "玻璃杯",
+        "开瓶器",
+        "反转伞",
+        "85mm镜头",
+        "4K摄像机",
+        "3秒胶",
+    ):
+        assert all(valid_value not in issue for issue in issues)
+
+
+def test_apply_asset_requirement_repairs_only_changes_invalid_asset_contract() -> None:
+    original = _blueprint(_complete_description())
+    original["asset_requirements"] = {
+        "characters": ["周衡", "三秒钩子"],
+        "scenes": ["G500头等舱", "穿透运镜"],
+        "props": ["蓝妹啤酒瓶", "@图片1"],
+    }
+
+    repaired = apply_asset_requirement_repairs(
+        [original],
+        [
+            {
+                "scene_index": 1,
+                "asset_requirements": {
+                    "characters": ["周衡", "林悦"],
+                    "scenes": ["G500头等舱", "万米高空金色云海"],
+                    "props": ["蓝妹啤酒瓶", "玻璃杯", "开瓶器"],
+                },
+                "storyline": "不应被采纳",
+                "shot_description": "不应被采纳",
+                "duration_sec": 15,
+            }
+        ],
+        total_duration_sec=8,
+    )
+
+    assert repaired[0]["asset_requirements"] == {
+        "characters": ["周衡", "林悦"],
+        "scenes": ["G500头等舱", "万米高空金色云海"],
+        "props": ["蓝妹啤酒瓶", "玻璃杯", "开瓶器"],
+    }
+    for field in ("duration_sec", "storyline", "shot_description", "narration", "transition"):
+        assert repaired[0][field] == original[field]
+
+
+def test_scene_package_rejects_polluted_historical_plan_assets_before_execution() -> None:
+    polluted = _blueprint(_complete_description())
+    polluted["asset_requirements"] = {
+        "characters": ["通勤者", "三秒钩子"],
+        "scenes": ["雨中街道", "穿透运镜"],
+        "props": ["防水背包", "背景音乐"],
+    }
+
+    with pytest.raises(ValueError, match="三秒钩子"):
+        prepare_video_scene_packages(
+            form_values=VIDEO_FORM,
+            plan_markdown="# 历史视频 Plan\n\n按已审核蓝图执行。",
+            selected_direction={"title": "雨天防水实测", "description": "用雨水冲突完成证明。"},
+            target_duration_ms=8_000,
+            scene_blueprints=[polluted],
+        )
+
+
 def _single_scene_plan_payload(shot_description: str) -> dict[str, object]:
     return {
         "plan_markdown": ("# 防水通勤背包短片\n\n## 一、选题方向\n用雨天冲突证明防水。\n\n## 三、视频规格\n- 时长：8 秒\n- 画幅：9:16\n\n## 五、镜头列表\n按权威蓝图执行。"),
@@ -286,6 +399,44 @@ def test_build_video_plan_does_not_repair_complete_shot_description() -> None:
     assert shot_description_quality_issues(result.scene_blueprints) == []
 
 
+def test_build_video_plan_repairs_polluted_asset_requirements_once_with_llm() -> None:
+    polluted = _single_scene_plan_payload(_complete_description())
+    polluted["scene_blueprints"][0]["asset_requirements"] = {
+        "characters": ["周衡", "三秒钩子"],
+        "scenes": ["G500头等舱", "穿透运镜"],
+        "props": ["蓝妹啤酒瓶", "@图片1", "背景音乐"],
+    }
+    repaired_assets = {
+        "characters": ["周衡", "林悦"],
+        "scenes": ["G500头等舱"],
+        "props": ["蓝妹啤酒瓶", "玻璃杯"],
+    }
+    fake_model = _SequenceFakeModel(
+        [
+            json.dumps(polluted, ensure_ascii=False),
+            json.dumps(
+                {"scene_blueprints": [{"scene_index": 1, "asset_requirements": repaired_assets}]},
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            {"direction_id": "direction_1", "title": "机舱品鉴", "description": "用高空体验证明产品价值。"},
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert len(fake_model.prompts) == 2
+    assert "三秒钩子" in str(fake_model.prompts[1])
+    assert result.scene_blueprints[0]["asset_requirements"] == repaired_assets
+    assert result.scene_blueprints[0]["storyline"] == polluted["scene_blueprints"][0]["storyline"]
+    assert asset_requirement_quality_issues(result.scene_blueprints) == []
+
+
 def _revision_blueprints() -> list[dict[str, object]]:
     blueprints: list[dict[str, object]] = []
     for index in range(1, 4):
@@ -354,6 +505,60 @@ def test_revise_video_plan_retries_incomplete_shot_descriptions_once() -> None:
     assert revised.scene_blueprints[0]["narration"] == sparse_blueprints[0]["narration"]
     assert revised.scene_blueprints[0]["asset_requirements"] == sparse_blueprints[0]["asset_requirements"]
     assert "不应被采纳的 Plan" not in revised.plan_markdown
+
+
+def test_revise_video_plan_repairs_only_polluted_asset_requirements() -> None:
+    form = {**VIDEO_FORM, "video_duration_sec": 30}
+    direction = {"direction_id": "direction_1", "title": "机舱品鉴", "description": "用高空体验证明产品价值。"}
+    original = build_plan_markdown("video", form, direction)
+    candidate_blueprints = _revision_blueprints()
+    candidate_blueprints[0]["asset_requirements"] = {
+        "characters": ["周衡", "三秒钩子"],
+        "scenes": ["G500头等舱", "0-3秒"],
+        "props": ["蓝妹啤酒瓶", "@图片1"],
+    }
+    repaired_assets = {
+        "characters": ["周衡", "林悦"],
+        "scenes": ["G500头等舱"],
+        "props": ["蓝妹啤酒瓶", "玻璃杯"],
+    }
+    fake_model = _SequenceFakeModel(
+        [
+            json.dumps(
+                {
+                    "plan_markdown": original.plan_markdown,
+                    "creation_contract_patch": {},
+                    "scene_blueprints": candidate_blueprints,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"scene_blueprints": [{"scene_index": 1, "asset_requirements": repaired_assets}]},
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values=form,
+            selected_direction=direction,
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="按我提供的 Seedance 内容细化分镜",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert len(fake_model.prompts) == 2
+    assert revised.plan_version == 2
+    assert revised.scene_blueprints[0]["asset_requirements"] == repaired_assets
+    assert revised.scene_blueprints[0]["storyline"] == candidate_blueprints[0]["storyline"]
+    assert asset_requirement_quality_issues(revised.scene_blueprints) == []
 
 
 def test_revise_video_plan_preserves_current_version_when_quality_retry_still_fails() -> None:

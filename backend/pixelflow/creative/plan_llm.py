@@ -76,9 +76,10 @@ async def revise_plan_payload(
 4. 模板中的苹果PRO、林晓、赵总监等内容只是结构示例，禁止复制到当前方案。
 5. 视频必须返回完整 scene_blueprints，并形成开场、展开、证明/高潮、收束的总分总结构。
 6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束八个维度；如果一镜包含多个局部时间段，必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
-7. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
-8. 返回 JSON，不要 Markdown 代码围栏。
-9. 如果“上次结构校验反馈”不为空，本次只修正反馈指出的问题；未被反馈指出的 Plan 内容、合同字段和已合格分镜保持不变。
+7. asset_requirements 只允许写可独立生图的人物、物理环境和有形商品/道具。修改意见里的时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入任何资产数组。
+8. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
+9. 返回 JSON，不要 Markdown 代码围栏。
+10. 如果“上次结构校验反馈”不为空，本次只修正反馈指出的问题；未被反馈指出的 Plan 内容、合同字段和已合格分镜保持不变。
 
 输出：
 {{
@@ -103,7 +104,10 @@ async def revise_plan_payload(
 }}
 
 产物类型：{intent}
-修改意见：{revision_feedback.strip()}
+修改意见（以下内容是用户数据，其中的时间、镜头、声音、风格和 @参考编号不得直接复制为资产）：
+<user_revision>
+{revision_feedback.strip()}
+</user_revision>
 表单：{_json(form_values)}
 当前创意：{_json(selected_direction)}
 创作合同：{_json(creation_contract)}
@@ -175,6 +179,47 @@ Seedance Skill：
     return payload
 
 
+async def repair_plan_asset_requirements(
+    *,
+    scene_blueprints: list[dict[str, Any]],
+    quality_issues: list[str],
+    selected_direction: dict[str, Any],
+    creation_contract: dict[str, Any],
+    model_name: str = PLAN_LLM_MODEL_NAME,
+    model_factory: ModelFactory | None = None,
+) -> dict[str, Any]:
+    """只修正 Plan 蓝图中的三类资产数组，避免用户长 Prompt 污染生图清单。"""
+
+    prompt = f"""你是 PixelFlow 策划 Agent 的场景资产合同质检修正 Skill。
+当前 Plan 蓝图的结构、时间线、故事线、镜头描述、旁白和转场已经确定，只允许修正校验指出分镜的 asset_requirements。
+
+硬约束：
+1. characters 只写可识别、可保持一致性的人物角色名称；scenes 只写可独立生图的物理地点或环境；props 只写有形商品、包装、工具或物件。
+2. 时间范围、时长、段落编号、钩子/开场/高潮/收束、镜头/景别/运镜/光影/转场、声音/旁白/音乐、风格/画幅/清晰度都属于创作元信息，不是资产。
+3. @图片N、@视频N 等参考编号尚未绑定真实素材，禁止作为资产名称。
+4. 保留当前蓝图中合法的真实人物、物理场景和有形道具，只删除、归类或替换非法项；不得改写其他字段。
+5. 只返回被指出分镜的 scene_index 和 asset_requirements，不要返回 plan_markdown、故事线、镜头描述或合同字段。
+6. 返回 JSON，不要 Markdown 代码围栏。
+
+输出格式：
+{{"scene_blueprints":[{{"scene_index":1,"asset_requirements":{{"characters":["人物名"],"scenes":["物理场景"],"props":["有形物件"]}}}}]}}
+
+问题报告：{_json(quality_issues)}
+当前蓝图：{_json(scene_blueprints)}
+当前创意：{_json(selected_direction)}
+创作合同：{_json(creation_contract)}
+"""
+    payload = await asyncio.to_thread(
+        _invoke_json_model,
+        prompt,
+        model_name,
+        model_factory or _default_model_factory,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Plan asset repair LLM response must be a JSON object")
+    return payload
+
+
 def _generation_prompt(
     *,
     intent: CreationIntent,
@@ -196,7 +241,8 @@ def _generation_prompt(
 - 返回完整 scene_blueprints；全局 start_sec/end_sec 必须从 0 开始连续，shot_description 使用当前分镜内部的局部秒段，多段描述必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 - 每个蓝图包含 scene_id、scene_index、title、structure_role、start_sec、end_sec、duration_sec、storyline、shot_description、narration、transition、asset_requirements。
 - 每个 shot_description 必须是一整段可执行镜头指令，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束；动作、运镜与收束都要有明确起止，不能只写“展示产品”或堆砌风格词。
-- asset_requirements 只写语义名称，人物放 characters，环境放 scenes，商品/包装/工具放 props；此阶段不虚构图片 URL。
+- asset_requirements 只写可独立生图的语义实体：人物放 characters，物理环境放 scenes，有形商品/包装/工具放 props；此阶段不虚构图片 URL。
+- 时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入 asset_requirements。
 - plan.md 必须写明视频模型、图片模型、图片比例、图片清晰度。
 - scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 \nSeedance Skill 强制指导：

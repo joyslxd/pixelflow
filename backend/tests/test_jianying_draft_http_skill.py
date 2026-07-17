@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import threading
 import zipfile
 from pathlib import Path
 
@@ -56,11 +58,25 @@ async def _wait_for_terminal(service: JianyingDraftService, job_id: str):
     raise AssertionError("job did not complete")
 
 
+def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
 @pytest.mark.asyncio
-async def test_http_skill_creates_polls_packages_and_uploads_zip(tmp_path: Path):
+async def test_http_skill_creates_polls_downloads_and_uploads_provider_zip(tmp_path: Path):
     create_bodies: list[object] = []
     query_count = 0
-    uploaded_archives: list[dict[str, bytes]] = []
+    provider_zip = _zip_bytes(
+        {
+            "draft-a.json": b'{"draft":"a"}',
+            "draft-b.json": b'{"draft":"b"}',
+        }
+    )
+    uploaded_archives: list[bytes] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal query_count
@@ -79,23 +95,17 @@ async def test_http_skill_creates_polls_packages_and_uploads_zip(tmp_path: Path)
                 json={
                     "code": 200,
                     "message": "success",
-                    "data": [
-                        "https://cdn.example.com/draft-a.json",
-                        "https://cdn.example.com/draft-b.json",
-                    ],
+                    "data": ["https://cdn.example.com/draft.zip"],
                 },
             )
-        if request.url.path == "/draft-a.json":
-            return httpx.Response(200, content=b'{"draft":"a"}', headers={"content-type": "application/json"})
-        if request.url.path == "/draft-b.json":
-            return httpx.Response(200, content=b'{"draft":"b"}', headers={"content-type": "application/json"})
+        if request.url.path == "/draft.zip":
+            return httpx.Response(200, content=provider_zip, headers={"content-type": "application/zip"})
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
     def uploader(path: str) -> dict[str, object]:
         archive_path = Path(path)
         assert archive_path.parent != tmp_path
-        with zipfile.ZipFile(archive_path) as archive:
-            uploaded_archives.append({name: archive.read(name) for name in archive.namelist()})
+        uploaded_archives.append(archive_path.read_bytes())
         return {"success": True, "url": "https://tos.example.com/jianying/draft.zip"}
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -121,19 +131,14 @@ async def test_http_skill_creates_polls_packages_and_uploads_zip(tmp_path: Path)
         ]
     ]
     assert query_count == 2
-    assert uploaded_archives == [
-        {
-            "draft-a.json": b'{"draft":"a"}',
-            "draft-b.json": b'{"draft":"b"}',
-        }
-    ]
+    assert uploaded_archives == [provider_zip]
     await skill.aclose()
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_http_skill_preserves_safe_source_names_and_disambiguates_duplicates():
-    uploaded_names: list[str] = []
+async def test_http_skill_rejects_multiple_legacy_source_urls():
+    uploader_called = False
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/jianying/draft/tasks":
@@ -143,19 +148,15 @@ async def test_http_skill_preserves_safe_source_names_and_disambiguates_duplicat
                 200,
                 json={
                     "code": 200,
-                    "data": [
-                        "https://cdn.example.com/path/draft_content.json?version=1",
-                        "https://cdn.example.com/other/draft_content.json?version=2",
-                        "https://cdn.example.com/%E8%8D%89%E7%A8%BF%E5%85%83%E6%95%B0%E6%8D%AE.json",
-                    ],
+                    "data": ["https://cdn.example.com/draft-a.json", "https://cdn.example.com/draft-b.json"],
                 },
             )
-        return httpx.Response(200, content=b"{}")
+        raise AssertionError(f"unexpected request: {request.url}")
 
-    def uploader(path: str) -> dict[str, object]:
-        with zipfile.ZipFile(path) as archive:
-            uploaded_names.extend(archive.namelist())
-        return {"success": True, "url": "https://tos.example.com/draft.zip"}
+    def uploader(_: str) -> dict[str, object]:
+        nonlocal uploader_called
+        uploader_called = True
+        return {"success": True, "url": "https://tos.example.com/unused.zip"}
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     skill = HttpJianyingDraftSkill(
@@ -168,12 +169,8 @@ async def test_http_skill_preserves_safe_source_names_and_disambiguates_duplicat
 
     result = await skill.generate(_request())
 
-    assert result.status == JianyingDraftStatus.SUCCEEDED
-    assert uploaded_names == [
-        "draft_content.json",
-        "draft_content-002.json",
-        "草稿元数据.json",
-    ]
+    assert result.status == JianyingDraftStatus.FAILED
+    assert uploader_called is False
     await skill.aclose()
     await client.aclose()
 
@@ -199,6 +196,7 @@ async def test_http_skill_does_not_retry_non_success_business_code():
     result = await skill.generate(_request())
 
     assert result.status == JianyingDraftStatus.FAILED
+    assert result.message == "第三方剪映草稿任务创建失败：视频集合不能为空"
     assert result.provider_task_id is None
     assert call_count == 1
     await skill.aclose()
@@ -249,7 +247,7 @@ async def test_http_skill_rejects_non_https_source_file_without_uploading():
             return httpx.Response(200, json={"code": 200, "message": "success", "data": "provider-task-1"})
         return httpx.Response(
             200,
-            json={"code": 200, "message": "success", "data": ["http://cdn.example.com/draft.json"]},
+            json={"code": 200, "message": "success", "data": "http://cdn.example.com/draft.zip"},
         )
 
     def uploader(_: str) -> dict[str, object]:
@@ -277,6 +275,7 @@ async def test_http_skill_rejects_non_https_source_file_without_uploading():
 @pytest.mark.asyncio
 async def test_http_skill_does_not_recreate_provider_task_when_tos_upload_raises():
     create_count = 0
+    provider_zip = _zip_bytes({"draft.json": b"{}"})
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal create_count
@@ -286,10 +285,10 @@ async def test_http_skill_does_not_recreate_provider_task_when_tos_upload_raises
         if request.url.path == "/api/jianying/draft/tasks/result":
             return httpx.Response(
                 200,
-                json={"code": 200, "message": "success", "data": ["https://cdn.example.com/draft.json"]},
+                json={"code": 200, "message": "success", "data": "https://cdn.example.com/draft.zip"},
             )
-        if request.url.path == "/draft.json":
-            return httpx.Response(200, content=b"{}")
+        if request.url.path == "/draft.zip":
+            return httpx.Response(200, content=provider_zip)
         raise AssertionError(f"unexpected request: {request.url}")
 
     def uploader(_: str) -> dict[str, object]:
@@ -316,6 +315,7 @@ async def test_http_skill_does_not_recreate_provider_task_when_tos_upload_raises
 @pytest.mark.asyncio
 async def test_background_job_preserves_content_app_authorization_for_tos_upload():
     captured_authorizations: list[str] = []
+    provider_zip = _zip_bytes({"draft.json": b"{}"})
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/jianying/draft/tasks":
@@ -323,10 +323,10 @@ async def test_background_job_preserves_content_app_authorization_for_tos_upload
         if request.url.path == "/api/jianying/draft/tasks/result":
             return httpx.Response(
                 200,
-                json={"code": 200, "message": "success", "data": ["https://cdn.example.com/draft.json"]},
+                json={"code": 200, "message": "success", "data": "https://cdn.example.com/draft.zip"},
             )
-        if request.url.path == "/draft.json":
-            return httpx.Response(200, content=b"{}")
+        if request.url.path == "/draft.zip":
+            return httpx.Response(200, content=provider_zip)
         raise AssertionError(f"unexpected request: {request.url}")
 
     def uploader(_: str) -> dict[str, object]:
@@ -354,4 +354,128 @@ async def test_background_job_preserves_content_app_authorization_for_tos_upload
     assert result.status == JianyingDraftStatus.SUCCEEDED
     assert captured_authorizations == ["Bearer content-app-user-token"]
     await service.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_upload_keeps_temporary_zip_alive_when_cancellation_arrives():
+    provider_zip = _zip_bytes({"draft.json": b"{}"})
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    upload_path_exists: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/jianying/draft/tasks":
+            return httpx.Response(200, json={"code": 200, "data": "provider-task-1"})
+        if request.url.path == "/api/jianying/draft/tasks/result":
+            return httpx.Response(200, json={"code": 200, "data": ["https://cdn.example.com/draft.zip"]})
+        if request.url.path == "/draft.zip":
+            return httpx.Response(200, content=provider_zip)
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    def uploader(path: str) -> dict[str, object]:
+        upload_started.set()
+        assert allow_upload.wait(timeout=2)
+        upload_path_exists.append(Path(path).exists())
+        return {"success": True, "url": "https://tos.example.com/draft.zip"}
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    skill = HttpJianyingDraftSkill(
+        base_url="https://provider.example.com",
+        token="provider-token",
+        poll_interval_seconds=0.001,
+        http_client=client,
+        uploader=uploader,
+    )
+    task = asyncio.create_task(skill.generate(_request()))
+    try:
+        assert await asyncio.to_thread(upload_started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        allow_upload.set()
+        result = await task
+    finally:
+        allow_upload.set()
+        await skill.aclose()
+        await client.aclose()
+
+    assert result.status == JianyingDraftStatus.SUCCEEDED
+    assert upload_path_exists == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_content", "content_length"),
+    [
+        (b"not-a-zip", None),
+        (_zip_bytes({}), None),
+        (_zip_bytes({"draft.json": b"{}"}), str(201 * 1024 * 1024)),
+    ],
+)
+async def test_http_skill_rejects_invalid_empty_or_oversized_provider_zip(
+    provider_content: bytes,
+    content_length: str | None,
+):
+    uploader_called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/jianying/draft/tasks":
+            return httpx.Response(200, json={"code": 200, "data": "provider-task-1"})
+        if request.url.path == "/api/jianying/draft/tasks/result":
+            return httpx.Response(200, json={"code": 200, "data": "https://cdn.example.com/draft.zip"})
+        headers = {"content-length": content_length} if content_length is not None else None
+        return httpx.Response(200, content=provider_content, headers=headers)
+
+    def uploader(_: str) -> dict[str, object]:
+        nonlocal uploader_called
+        uploader_called = True
+        return {"success": True, "url": "https://tos.example.com/unused.zip"}
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    skill = HttpJianyingDraftSkill(
+        base_url="https://provider.example.com",
+        token="provider-token",
+        poll_interval_seconds=0.001,
+        http_client=client,
+        uploader=uploader,
+    )
+
+    result = await skill.generate(_request())
+
+    assert result.status == JianyingDraftStatus.FAILED
+    assert uploader_called is False
+    await skill.aclose()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("download_status", [404, 503])
+async def test_http_skill_reports_provider_zip_download_failure(download_status: int):
+    download_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal download_count
+        if request.url.path == "/api/jianying/draft/tasks":
+            return httpx.Response(200, json={"code": 200, "data": "provider-task-1"})
+        if request.url.path == "/api/jianying/draft/tasks/result":
+            return httpx.Response(200, json={"code": 200, "data": "https://cdn.example.com/draft.zip"})
+        download_count += 1
+        return httpx.Response(download_status)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    skill = HttpJianyingDraftSkill(
+        base_url="https://provider.example.com",
+        token="provider-token",
+        poll_interval_seconds=0.001,
+        max_retries=2,
+        retry_backoff_seconds=0,
+        http_client=client,
+        uploader=lambda _: {"success": True, "url": "https://tos.example.com/unused.zip"},
+    )
+
+    result = await skill.generate(_request())
+
+    assert result.status == JianyingDraftStatus.FAILED
+    assert download_count == (3 if download_status == 503 else 1)
+    await skill.aclose()
     await client.aclose()

@@ -557,7 +557,7 @@ async def test_background_exception_becomes_public_failure():
     result = await _wait_for_terminal(service, started.job_id)
 
     assert result.status == JianyingDraftStatus.FAILED
-    assert result.message == "剪映草稿生成失败，请稍后重试"
+    assert result.message == "剪映草稿生成失败，请稍后重试。"
     assert "secret" not in result.message
 
 
@@ -599,6 +599,54 @@ async def test_provider_terminal_messages_are_replaced_with_public_messages(
     assert "replaced_by_job_id" not in result.model_dump()
     assert "secret-token" not in result.model_dump_json()
     assert "provider.example.com" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_safe_provider_business_failure_message_is_preserved():
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=JianyingDraftStatus.FAILED,
+            message="第三方剪映草稿任务创建失败：视频集合不能为空",
+            provider_task_id="provider-task-1",
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.status == JianyingDraftStatus.FAILED
+    assert result.message == "第三方剪映草稿任务创建失败：视频集合不能为空"
+    assert result.provider_task_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_message",
+    [
+        "第三方剪映草稿任务创建失败：token super-secret-value 无效",
+        "第三方剪映草稿任务创建失败：密钥 super-secret-value 已过期",
+        "第三方剪映草稿任务处理失败：Authorization Bearer super-secret-value",
+    ],
+)
+async def test_provider_business_failure_never_exposes_credential_text(provider_message: str):
+    skill = ResultFakeSkill(
+        JianyingDraftResult(
+            status=JianyingDraftStatus.FAILED,
+            message=provider_message,
+            provider_task_id="provider-task-1",
+        )
+    )
+    service = JianyingDraftService(skill=skill)
+
+    started = await service.start(_request())
+    assert started.job_id is not None
+    result = await _wait_for_terminal(service, started.job_id)
+
+    assert result.status == JianyingDraftStatus.FAILED
+    assert result.message == "剪映草稿生成失败，请稍后重试。"
+    assert "super-secret-value" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio

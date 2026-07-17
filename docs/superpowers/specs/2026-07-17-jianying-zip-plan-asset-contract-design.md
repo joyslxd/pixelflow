@@ -13,13 +13,11 @@
 
 ### 2.1 剪映草稿立即失败
 
-使用本机当前分支和 `backend/config.dev.yml` 真实调用第三方创建接口、结果查询接口，两个接口都返回 HTTP 401、业务码 `40101`、消息“token 缺失或无效”。这说明当前真实请求在第三方鉴权入口被拒绝，尚未创建异步任务。
-
-代码不能伪造鉴权成功。实现完成后的完整成功联调仍依赖第三方重新启用当前固定 token，或提供新的有效 token。
+最初使用本机当前分支和 `backend/config.dev.yml` 调用时，第三方曾返回 HTTP 401、业务码 `40101`。2026-07-17 重新使用两条真实分镜联调后，创建接口已返回任务 ID，查询接口首次即成功，说明固定 token 已恢复可用。
 
 ### 2.2 剪映结果合同已经过期
 
-`HttpJianyingDraftSkill` 当前要求查询响应 `data` 为非空 `list[str]`，逐个下载 JSON 后再压缩。如果第三方返回单个 ZIP URL，当前实现会把成功响应判定为“第三方剪映草稿结果为空”。
+第三方当前查询成功响应为 `data=[zipUrl]`：虽然业务结果只有一个 ZIP URL，但外层仍使用单元素数组。旧实现把数组中的每个 URL 当成 JSON 下载并重新压缩；只按纯字符串实现的新代码也会误判真实成功结果，因此必须兼容单字符串和单元素数组两种包装。
 
 ### 2.3 Plan 资产字段缺少语义校验
 
@@ -48,10 +46,10 @@ Plan LLM 的 `scene_blueprints[].asset_requirements` 当前只做字符串去重
 
 - `POST /api/jianying/draft/tasks/result`
 - `code=20201/20202`：继续轮询。
-- `code=200`：`data` 必须是单个公开 HTTPS ZIP URL。
+- `code=200`：`data` 表达单个公开 HTTPS ZIP URL，可以是字符串或只含该 URL 的单元素数组。
 - 其他业务码：立即进入失败终态，不因业务失败重复创建任务。
 
-不再兼容旧的 JSON URL 数组合同，避免一套代码同时维护两种含义不同的成功数据。
+不再兼容旧的多个 JSON URL 数组合同；数组只允许包含一个 ZIP URL，避免一套代码同时维护两种含义不同的成功数据。
 
 ### 4.2 ZIP 下载与上传
 
@@ -61,16 +59,16 @@ Plan LLM 的 `scene_blueprints[].asset_requirements` 当前只做字符串去重
 2. 流式下载到 `TemporaryDirectory` 中的 `.zip` 文件，不把整个压缩包常驻内存。
 3. 沿用现有总下载大小上限 200 MiB；网络异常和 HTTP 5xx 按配置最多重试 2 次，4xx 不重试。
 4. 使用 `zipfile.is_zipfile()` 和中央目录检查确认文件是非空 ZIP；不解压、不修改、不重新压缩，避免破坏第三方草稿结构。
-5. 在线程中复用 `run_generation.upload_file()` 调用 content-app `/api/upload`，携带当前用户 Authorization 上传到 TOS。
+5. 在线程中复用 `run_generation.upload_file()` 调用 content-app `/api/upload`，携带当前用户 Authorization 上传到 TOS；外层协程取消时仍等待上传线程结束后再清理临时 ZIP。
 6. 只接受 content-app 返回的公开 HTTPS 地址，并生成现有 `JianyingDraftResult` 成功终态。
 
 ### 4.3 错误信息
 
 第三方业务失败时，从响应 `message` 中提取长度受限的纯文本原因，拼接到公开错误中。例如：
 
-`第三方剪映草稿任务创建失败：token 缺失或无效`
+`第三方剪映草稿任务处理失败：草稿素材格式不支持`
 
-不得返回第三方 token、Authorization、完整响应对象、堆栈或下载 URL 查询参数。前端仍复用现有失败卡和“重新生成剪映草稿”按钮。
+不得返回第三方 token、Authorization、API key、secret、密钥、凭据、完整响应对象、堆栈或下载 URL 查询参数；文案命中这些敏感词时统一降级为通用错误。前端仍复用现有失败卡和“重新生成剪映草稿”按钮。
 
 ## 5. Plan 场景资产合同
 
@@ -118,8 +116,8 @@ LLM 提示词同时明确：用户提供的 Seedance 段落、时间标记、镜
 
 ### 6.1 自动化测试
 
-- Provider 查询返回单个 ZIP URL时，下载一次、原样上传一次并成功返回 TOS URL。
-- 查询返回旧数组、空字符串、HTTP URL、非 ZIP、空 ZIP、超限 ZIP、下载 4xx/5xx、上传失败时进入正确失败终态。
+- Provider 查询返回单个 ZIP URL 字符串或单元素数组时，下载一次、原样上传一次并成功返回 TOS URL。
+- 查询返回多个旧 URL、空字符串、HTTP URL、非 ZIP、空 ZIP、超限 ZIP、下载 4xx/5xx、上传失败时进入正确失败终态。
 - 第三方 40101 等业务失败公开显示安全原因，且不重试业务失败。
 - Plan 蓝图中的人物、物理场景、有形道具通过校验。
 - “三秒钩子、段A、穿透运镜、背景音乐、9:16、@图片1”等被准确判为非法资产。
@@ -135,7 +133,7 @@ LLM 提示词同时明确：用户提供的 Seedance 段落、时间标记、镜
 3. 下载 ZIP、校验并调用测试环境 content-app `/api/upload`。
 4. 查询本地 `/agent/flows/video/jianying-draft/jobs/{job_id}`，确认终态为 `succeeded` 且下载地址属于自有 TOS。
 
-如果第三方仍返回 `40101`，记录为外部凭据阻塞，自动化合同测试和本地失败原因展示仍需全部通过；获得有效 token 后继续真实成功验收，不以 Mock 冒充真实成功。
+本次真实联调使用两条分镜按 `videoOrder=1/2` 创建任务，查询得到单元素 ZIP URL 数组；PixelFlow 成功下载、校验并通过测试环境 content-app `/api/upload` 上传到自有 TOS，最终得到 `succeeded` 终态。后续若凭据再次返回 `40101`，仍按外部凭据阻塞处理，不以 Mock 冒充真实成功。
 
 场景包回归使用用户提供的完整 Seedance 修改意见，确认最终 `global_assets` 只包含周衡、林悦、G500相关物理环境和真实道具，不包含时间段、钩子、运镜、声音、风格或 `@图片N/@视频N` 占位符。
 

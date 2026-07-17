@@ -20,7 +20,7 @@ from pixelflow.creative.duration import (
     scene_time_ranges,
     split_video_duration,
 )
-from pixelflow.creative.scene_blueprint import normalize_scene_blueprints
+from pixelflow.creative.scene_blueprint import normalize_scene_blueprints, validate_asset_requirement_quality
 from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_seedance_guidance
 
 DEFAULT_TARGET_DURATION_MS = 30_000
@@ -45,6 +45,8 @@ def prepare_video_scene_packages(
         target_duration_ms,
         scene_blueprints,
     )
+    if authoritative_blueprints:
+        validate_asset_requirement_quality(authoritative_blueprints)
     scene_count = len(durations)
 
     product_name = _first_text(
@@ -169,6 +171,8 @@ async def prepare_video_scene_packages_with_llm(
         target_duration_ms,
         scene_blueprints,
     )
+    if authoritative_blueprints:
+        validate_asset_requirement_quality(authoritative_blueprints)
     scene_count = len(durations)
     try:
         payload = await asyncio.to_thread(

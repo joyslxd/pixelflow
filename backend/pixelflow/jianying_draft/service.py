@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,14 @@ _PUBLIC_PROVIDER_MESSAGES = {
     JianyingDraftStatus.NOT_CONFIGURED: "剪映草稿服务待接入",
 }
 _PUBLIC_SUCCEEDED_MESSAGE = "剪映草稿已生成"
+_PUBLIC_BUSINESS_FAILURE_PREFIXES = (
+    "第三方剪映草稿任务创建失败：",
+    "第三方剪映草稿任务处理失败：",
+)
+_SENSITIVE_PROVIDER_MESSAGE_PATTERN = re.compile(
+    r"https?://|\b(?:bearer|token|authorization|api[_ -]?key|secret)\b|密钥|鉴权|凭据",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass
@@ -349,7 +358,7 @@ class JianyingDraftService:
         except TimeoutError:
             result = JianyingDraftResult(
                 status=JianyingDraftStatus.TIMEOUT,
-                message="剪映草稿生成超时，请稍后重试",
+                message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.TIMEOUT],
             )
         except Exception as exc:  # noqa: BLE001 - provider boundary must not fail background task
             logger.error(
@@ -359,7 +368,7 @@ class JianyingDraftService:
             )
             result = JianyingDraftResult(
                 status=JianyingDraftStatus.FAILED,
-                message="剪映草稿生成失败，请稍后重试",
+                message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
             )
         else:
             result = self._public_provider_result(generated)
@@ -396,6 +405,10 @@ class JianyingDraftService:
                     message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
                 )
             return result.model_copy(update={"message": _PUBLIC_SUCCEEDED_MESSAGE})
+        if result.status == JianyingDraftStatus.FAILED:
+            business_message = JianyingDraftService._safe_business_failure_message(result.message)
+            if business_message is not None:
+                return JianyingDraftResult(status=result.status, message=business_message)
         message = _PUBLIC_PROVIDER_MESSAGES.get(result.status)
         if message is not None:
             return JianyingDraftResult(status=result.status, message=message)
@@ -405,6 +418,17 @@ class JianyingDraftService:
                 message=_PUBLIC_PROVIDER_MESSAGES[JianyingDraftStatus.FAILED],
             )
         return result
+
+    @staticmethod
+    def _safe_business_failure_message(message: str) -> str | None:
+        candidate = str(message or "").strip()
+        if len(candidate) > 220 or any(character in candidate for character in "\r\n\t"):
+            return None
+        if not candidate.startswith(_PUBLIC_BUSINESS_FAILURE_PREFIXES):
+            return None
+        if _SENSITIVE_PROVIDER_MESSAGE_PATTERN.search(candidate):
+            return None
+        return candidate
 
     async def _set_running(self, job_id: str) -> None:
         async with self._lock:

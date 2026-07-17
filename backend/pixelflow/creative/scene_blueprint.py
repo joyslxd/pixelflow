@@ -11,6 +11,32 @@ from pixelflow.creative.duration import MAX_SCENE_DURATION_SEC, MIN_SCENE_DURATI
 
 _TIMELINE_RANGE_PATTERN = re.compile(r"(?P<prefix>^|[\n。；;！？!?】])(?P<spacing>\s*)(?P<start>\d+)\s*(?:[-~—至])\s*(?P<end>\d+)\s*秒")
 _MILLISECOND_PATTERN = re.compile(r"(?:ms|毫秒|\d{1,2}:\d{2}\.\d+)", flags=re.IGNORECASE)
+_ASSET_TIME_PATTERN = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*(?:[-~—至]\s*\d+(?:\.\d+)?\s*)?(?:秒|s|ms|毫秒)(?:\s*[:：].*)?\s*$",
+    flags=re.IGNORECASE,
+)
+_ASSET_REFERENCE_PATTERN = re.compile(r"@?\s*(?:图片|视频)\s*\d+", flags=re.IGNORECASE)
+_ASSET_SEGMENT_PATTERN = re.compile(r"^(?:第?[A-Z0-9一二三四五六七八九十]+段|段[A-Z0-9一二三四五六七八九十]+)(?:\b|[:：_-])?", flags=re.IGNORECASE)
+_ASSET_SPEC_PATTERN = re.compile(
+    r"^(?:\d{1,2}\s*:\s*\d{1,2}(?:竖屏|横屏|画幅|比例)?|(?:(?:720|1080)p|[248]k)(?:真人|写实|画质|质感|清晰度|竖屏|横屏|画幅|比例)+)$",
+    flags=re.IGNORECASE,
+)
+_ASSET_METADATA_PATTERNS = (
+    ("钩子", re.compile(r"钩子")),
+    ("叙事结构", re.compile(r"^(?:开场|高潮|收束|结尾|误判|反转)(?:$|段|镜头|画面|设计|节奏|情节)")),
+    ("全局设定", re.compile(r"^(?:全局设定|关键差异)(?:$|指令|要求|说明)")),
+    ("镜头调度", re.compile(r"(?:景别|运镜|推镜|拉镜|摇镜|跟拍|穿透|转场)(?:$|镜头|设计|方式|指令)")),
+    ("声音设计", re.compile(r"^(?:背景音乐|音效|旁白|声音|环境声|ASMR)(?:$|设计|要求|效果|说明)", flags=re.IGNORECASE)),
+    ("字幕要求", re.compile(r"字幕")),
+    ("光影设计", re.compile(r"(?:光影|光线|色调)(?:$|设计|风格|效果|要求)")),
+    ("创作风格", re.compile(r"(?:风格|质感|高级感|清晰度)(?:$|设计|要求|说明)")),
+    ("画面规格", re.compile(r"(?:画幅|比例|竖屏|横屏)(?:$|要求|说明)")),
+)
+_ASSET_REQUIREMENT_LABELS = {
+    "characters": "人物",
+    "scenes": "场景",
+    "props": "道具/商品",
+}
 _INTERNAL_CONTEXT_MARKERS = (
     "长期记忆约束",
     "PowerMem",
@@ -231,6 +257,63 @@ def validate_shot_description_quality(blueprints: list[dict[str, Any]]) -> None:
     issues = shot_description_quality_issues(blueprints)
     if issues:
         raise ValueError("；".join(issues))
+
+
+def asset_requirement_quality_issues(blueprints: list[dict[str, Any]]) -> list[str]:
+    """识别误入资产数组的时间、镜头、声音、风格和参考编号元信息。"""
+
+    issues: list[str] = []
+    for position, blueprint in enumerate(blueprints, start=1):
+        scene_index = blueprint.get("scene_index")
+        index = scene_index if isinstance(scene_index, int) and not isinstance(scene_index, bool) else position
+        requirements = blueprint.get("asset_requirements")
+        if not isinstance(requirements, dict):
+            issues.append(f"分镜 {index} asset_requirements 必须包含人物、场景和道具/商品数组")
+            continue
+        for key, label in _ASSET_REQUIREMENT_LABELS.items():
+            values = requirements.get(key)
+            if not isinstance(values, list):
+                issues.append(f"分镜 {index} asset_requirements.{key} 必须是数组")
+                continue
+            for value in values:
+                text = _text(value)
+                reason = _asset_metadata_reason(text)
+                if reason:
+                    issues.append(f"分镜 {index} {label}资产“{text}”不是可生成实体：{reason}")
+    return issues
+
+
+def validate_asset_requirement_quality(blueprints: list[dict[str, Any]]) -> None:
+    """拒绝把创作指令或参考编号当作角色、物理场景或有形道具。"""
+
+    issues = asset_requirement_quality_issues(blueprints)
+    if issues:
+        raise ValueError("；".join(issues))
+
+
+def apply_asset_requirement_repairs(
+    blueprints: list[dict[str, Any]],
+    repairs: Any,
+    *,
+    total_duration_sec: int,
+) -> list[dict[str, Any]]:
+    """只采纳 LLM 返回的资产数组，忽略其对其他权威字段的潜在改写。"""
+
+    if not isinstance(repairs, list) or not repairs:
+        raise ValueError("Plan LLM 未返回资产需求修正结果")
+    requirements_by_scene: dict[int, dict[str, list[str]]] = {}
+    for item in repairs:
+        if not isinstance(item, dict):
+            continue
+        scene_index = item.get("scene_index")
+        if isinstance(scene_index, int) and not isinstance(scene_index, bool):
+            requirements_by_scene[scene_index] = _normalize_asset_requirements(item.get("asset_requirements"))
+    repaired = copy.deepcopy(blueprints)
+    for blueprint in repaired:
+        scene_index = int(blueprint["scene_index"])
+        if scene_index in requirements_by_scene and asset_requirement_quality_issues([blueprint]):
+            blueprint["asset_requirements"] = requirements_by_scene[scene_index]
+    return normalize_scene_blueprints(repaired, total_duration_sec=total_duration_sec)
 
 
 def enrich_incomplete_shot_descriptions(
@@ -539,6 +622,23 @@ def _rescale_shot_description(value: Any, *, source_duration: int, target_durati
 def _normalize_asset_requirements(value: Any) -> dict[str, list[str]]:
     source = value if isinstance(value, dict) else {}
     return {key: _dedupe_texts(source.get(key)) for key in ("characters", "scenes", "props")}
+
+
+def _asset_metadata_reason(value: str) -> str | None:
+    if not value:
+        return "名称为空"
+    if _ASSET_REFERENCE_PATTERN.search(value):
+        return "未绑定的图片或视频参考编号"
+    if _ASSET_TIME_PATTERN.search(value):
+        return "时间范围或时长属于分镜调度信息"
+    if _ASSET_SEGMENT_PATTERN.search(value):
+        return "段落编号属于叙事结构信息"
+    if _ASSET_SPEC_PATTERN.search(value):
+        return "画幅或清晰度属于生成规格"
+    for label, pattern in _ASSET_METADATA_PATTERNS:
+        if pattern.search(value):
+            return f"包含创作元信息“{label}”"
+    return None
 
 
 def _transition_text(value: Any, *, is_last: bool) -> str:

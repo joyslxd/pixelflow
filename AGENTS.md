@@ -174,7 +174,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
-| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载多个草稿 JSON、打包 ZIP，再通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
+| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载第三方 ZIP、校验后原样通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
 | 对话持久化 | `pixelflow_conversations.py`、`tasks/store.py` | PixelFlowTaskStore | 保存对话、消息、上下文，避免切换对话串流程 |
 | 语义记忆 | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | PowerMemService | 读取用户/品牌长期偏好，记录 Agent 经验/Skill 沉淀 |
@@ -216,7 +216,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 剪映草稿位于最终视频确认阶段，输入是当前版本全部成功且 `video_url` 为 HTTPS 的场景视频，绝不能用合并视频或本地 Blob 地址替代。前后端用相同 FNV-1a 64 位规范从有序 `scene_id/scene_index/task_id/video_url` 计算 `storyboard_version_id`。`conversation_id + storyboard_version_id` 是幂等键：运行中和未过期成功任务复用，`failed/timeout` 只有用户显式传 `retry_failed=true` 才会新建 job；成功结果过期后可重新生成，旧版本只能保留为历史下载入口。
 
-真实实现是 `HttpJianyingDraftSkill`。它按分镜顺序向第三方 `POST /api/jianying/draft/tasks` 提交 `videoUrl/videoOrder`，再通过 `POST /api/jianying/draft/tasks/result` 轮询；`20201/20202` 继续等待，`200` 返回多个 JSON HTTPS URL，`50002/41001` 等业务失败立即结束。结果 JSON 必须逐个下载并校验，尽量保留原文件名统一打成 ZIP，再复用 content-app `/api/upload` 上传 TOS，最终只把 ZIP HTTPS 地址返回前端。第三方域名、固定 token、连接/读取超时和重试次数都从 `config.dev.yml/config.prod.yml` 的 `pixelflow.jianying_draft_*` 读取；配置不完整时装配 `UnavailableJianyingDraftSkill`。
+真实实现是 `HttpJianyingDraftSkill`。它按 `scene_index` 排序后的分镜顺序向第三方 `POST /api/jianying/draft/tasks` 提交 `[{videoUrl, videoOrder}]`，`videoOrder` 从 1 连续递增；绝不能提交合并视频。随后通过 `POST /api/jianying/draft/tasks/result` 轮询：`20201/20202` 继续等待，`200` 的 `data` 接受单个公开 HTTPS ZIP URL，兼容第三方真实响应使用单元素数组包装该 ZIP URL，多个 URL、非 ZIP 或空 ZIP 均失败；`50002/41001` 等业务失败立即结束。ZIP 最大 200 MiB，下载后只校验格式和非空，不解压、不重新打包，再复用 content-app `/api/upload` 携带当前用户 Authorization 上传 TOS，最终只把自有 TOS ZIP HTTPS 地址返回前端。上传在线程中执行，协程取消时仍等待上传线程结束后再清理临时 ZIP，避免文件被提前删除或已上传结果成为孤儿；第三方错误文案还必须过滤 URL、token、Authorization、API key、secret、密钥和凭据。第三方域名、固定 token、连接/读取超时和重试次数都从 `config.dev.yml/config.prod.yml` 的 `pixelflow.jianying_draft_*` 读取；配置不完整时装配 `UnavailableJianyingDraftSkill`。
 
 未结束最终视频卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个按钮。草稿生成期间锁定三项视频操作，但不锁对话输入；前端按 capability 返回的间隔（默认 2 秒）轮询，客户端和服务端最大等待 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误必须通过 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；刷新、离开或切换对话后只能恢复查询原 job，结果消息按 job ID 去重。视频点击“无意见，结束”后，草稿下载/重生历史入口仍保留，成功不自动下载。
 

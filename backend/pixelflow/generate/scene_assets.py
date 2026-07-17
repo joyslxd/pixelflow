@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from pixelflow.creative.scene_blueprint import validate_asset_requirement_quality
 from pixelflow.generate.image_prepare import filter_image_materials
 
 TEXT_TO_IMAGE_ENDPOINT = "/api/picture/text_to_image"
@@ -266,6 +267,41 @@ def _scene_asset_target_key(value: dict[str, Any]) -> tuple[str, str] | None:
     return asset_type, asset_id
 
 
+def _validate_scene_asset_entity_names(
+    global_assets: dict[str, Any],
+    scene_packages: list[dict[str, Any]],
+) -> None:
+    """在实际生图边界再次拒绝被旧对话保存下来的创作元信息资产。"""
+
+    collections: dict[str, list[str]] = {"characters": [], "scenes": [], "props": []}
+
+    def collect(target: str, value: Any) -> None:
+        for item in _list_of_dicts(value):
+            name = str(item.get("name") or item.get("label") or item.get("asset_name") or "").strip()
+            if name and name not in collections[target]:
+                collections[target].append(name)
+
+    if global_assets:
+        collect("characters", global_assets.get("characters"))
+        collect("scenes", global_assets.get("scenes"))
+        collect("props", global_assets.get("props"))
+    else:
+        for scene in scene_packages:
+            collect("characters", scene.get("characters"))
+            collect("scenes", scene.get("scene_images"))
+            collect("props", scene.get("prop_images"))
+
+    if any(collections.values()):
+        validate_asset_requirement_quality(
+            [
+                {
+                    "scene_index": 1,
+                    "asset_requirements": collections,
+                }
+            ]
+        )
+
+
 async def generate_scene_assets(
     *,
     image_skill: ImageSkill,
@@ -281,6 +317,7 @@ async def generate_scene_assets(
     """生成场景参考图；props / scenes 在用户有上传图片时走参考生图。"""
     enriched = [dict(scene) for scene in scene_packages if isinstance(scene, dict)]
     assets = dict(global_assets) if global_assets else {}
+    _validate_scene_asset_entity_names(assets, enriched)
     failed_assets: list[dict[str, Any]] = []
     generation_modes: set[str] = set()
     reference_urls = collect_prop_reference_image_urls(materials, enriched)

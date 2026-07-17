@@ -114,7 +114,7 @@ flowchart TD
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
-| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、归档 JSON 并通过 content-app 上传 ZIP |
+| 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、下载校验第三方 ZIP 并通过 content-app 原样上传 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
 | 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
@@ -142,8 +142,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
 | PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频同时加载 Seedance Skill，让 LLM 生成 plan.md 与结构化分镜蓝图 |
-| PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用或镜头描述二次校验仍不完整时，按叙事职能使用八维增强规则兜底 |
-| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构、精确总时长，以及地点/主体/动作/景别/运镜/光影/声音/收束八维完整度 |
+| PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用或镜头描述二次校验仍不完整时，按叙事职能使用八维增强规则兜底；资产需求只允许人物、物理场景和有形道具 |
+| PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构、精确总时长、八维镜头完整度，以及资产需求语义；资产不合法时只让 LLM 定向修复 `asset_requirements`，不得修改故事和时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/revision_contract.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 先合并白名单 `creation_contract_patch`，再结合当前 Plan、表单、垂类补充、附件、采集上下文和 PowerMem 重写 Plan；生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
 | PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布编辑完整 Markdown 后复用 Plan 修订 LLM，对齐权威合同、分镜蓝图和镜头完整度；全部校验通过才发布下一版本 |
@@ -277,7 +277,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 | 剪映草稿 Router | `backend/app/gateway/routers/pixelflow_jianying_draft.py` | Spring Controller | 暴露 capability、start、job 查询；校验用户对来源 conversation 的归属，避免跨对话读取或启动任务 |
 | JianyingDraftService | `backend/pixelflow/jianying_draft/service.py` | 业务 Service | 校验分镜、用 `(conversation_id, storyboard_version_id)` 幂等复用任务、管理后台状态机、30 分钟超时、重试和有限容量 |
 | JianyingDraftSkill | `backend/pixelflow/jianying_draft/skill.py` | 第三方 Client interface | 隔离 Provider 可用性与草稿生成调用，主流程和前端不依赖第三方字段 |
-| HttpJianyingDraftSkill | `backend/pixelflow/jianying_draft/http_skill.py` | 第三方 Client 实现 | 创建并轮询第三方任务，下载和校验多个 JSON，打 ZIP 后通过 content-app 上传 TOS |
+| HttpJianyingDraftSkill | `backend/pixelflow/jianying_draft/http_skill.py` | 第三方 Client 实现 | 创建并轮询第三方任务，下载、限制体积并校验第三方 ZIP，通过 content-app 原样上传 TOS |
 | UnavailableJianyingDraftSkill | `backend/pixelflow/jianying_draft/skill.py` | 未配置 Client 实现 | 仅在域名或 token 缺失时返回“剪映草稿服务待接入” |
 
 接口固定为：
@@ -290,7 +290,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 
 `JianyingDraftResult` 是 PixelFlow typed DTO，仅含 `status`、`job_id`、`provider_task_id`、`conversation_id`、`storyboard_version_id`、`download_url`、`file_name`、`expire_at`、`message`。不向前端暴露无限制的 `raw`、Provider 原始响应或内部异常；失败只返回可公开消息。
 
-真实 Provider 使用两个接口：`POST /api/jianying/draft/tasks` 按当前分镜顺序提交 `videoUrl/videoOrder`，`POST /api/jianying/draft/tasks/result` 按第三方 task ID 轮询。业务码 `20201/20202` 继续等待，`200` 返回草稿 JSON URL 集合，其他终态转为公开失败结果。PixelFlow 对 URL 做公网 HTTPS 校验，限制文件数量和体积，校验 UTF-8 JSON 后尽量保留原文件名生成 ZIP，并复用 content-app `/api/upload` 上传到 TOS。第三方 token 从 profile 配置读取且只发送给创建/查询接口，绝不发送给 JSON CDN 或 content-app。配置不完整时才回退 unavailable 实现。
+真实 Provider 使用两个接口：`POST /api/jianying/draft/tasks` 按 `scene_index` 顺序提交 `[{videoUrl, videoOrder}]`，`videoOrder` 从 1 递增；合并视频不能作为输入。`POST /api/jianying/draft/tasks/result` 按第三方 task ID 轮询，业务码 `20201/20202` 继续等待，`200` 的 `data` 是一个 ZIP HTTPS URL，真实服务也可能使用单元素数组包装该 URL，其他终态转为公开失败结果。PixelFlow 校验公网 HTTPS、200 MiB 上限、ZIP 格式和非空内容，不解压也不重新打包，再复用 content-app `/api/upload` 上传到 TOS。第三方 token 只发送给创建/查询接口，绝不发送给 ZIP CDN 或 content-app。配置不完整时才回退 unavailable 实现。
 
 ### 5.6 视频分析类 Skill
 
@@ -642,7 +642,7 @@ Plan 审核与版本规则：
 - 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同、分镜时长与权威蓝图，并统一由 `makeSnapshot()` 写入 conversation context，避免自动保存覆盖回退结果或恢复后重新切镜。
 - Plan 消息以 `conversation_id + client_message_id` 幂等保存；同一对话在网络结果未知后重试只返回既有消息，且必须先确认消息落库再更新 context。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
-- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包还必须逐项消费该版本 `scene_blueprints[].asset_requirements`，补齐人物、场景和道具并重建 `@asset_id`/mentions；不得使用场景包 LLM 返回的旧方案资产或自由 prompt 覆盖最终 Plan。
+- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包还必须逐项消费该版本 `scene_blueprints[].asset_requirements`，补齐人物、场景和道具并重建 `@asset_id`/mentions；不得使用场景包 LLM 返回的旧方案资产或自由 prompt 覆盖最终 Plan。`asset_requirements` 只允许可生图实体，时间段、钩子/收束、段落编号、运镜、声音、风格规格和 `@图片N/@视频N` 均非法；初次生成和 Agent 修订会调用一次 LLM 只修资产数组，场景包执行前还会复用同一校验保护历史 Plan，失败时停止且不创建参考图任务。
 - 场景包的 `characters/scenes/props/visual_style` 四类全局 ID 必须唯一；规范化前先保护已有 `@asset_id`，避免二次替换。任一分镜引用超过 9 张时返回包含分镜标识和引用数量的错误，不允许截断后继续生成。
 
 场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：
@@ -687,7 +687,7 @@ Plan 审核与版本规则：
 - 同一 `conversation_id + storyboard_version_id` 的 `queued/running` 和未过期 `succeeded` job 必须复用。`failed/timeout` 只有用户明确 `retry_failed=true` 才创建替代 job；过期成功结果允许重新生成。历史结果不会被当前新版本复用。
 - 前端按 capability 的 `poll_interval_seconds`（默认 2 秒）轮询，客户端和服务端最长 30 分钟。`pendingJianyingDraftJob`、按版本的 `jianyingDraftRecords` 和恢复错误使用 `/agent/conversations/{conversation_id}/jianying-draft-context` 原子 PATCH 写回来源对话；切换对话、刷新或离开后只继续查询原 job，不重新调用 `/start`。job 404/过期时只提示用户从视频结果卡手动重试。
 - 草稿结果消息使用 `job_id` 构造稳定消息 ID，重复轮询不会追加重复的成功/失败卡片。下载链接只允许成功结果中的 HTTPS 地址，点击后才开始下载。
-- Provider 成功返回多个 JSON URL 后必须立即下载，优先保留 URL 中安全的原 JSON 文件名，重名时追加稳定序号后打入单个 ZIP；ZIP 上传在工作线程中完成并自行管理临时目录，最终通过当前用户 Authorization 调用 content-app `/api/upload` 上传 TOS。上传失败返回草稿 job 失败，不得重新创建已成功完成的第三方任务。
+- Provider 成功后必须返回且只返回一个 ZIP URL；PixelFlow 同时兼容纯字符串和真实服务的单元素数组包装，多个 URL 直接失败。ZIP 必须立即流式下载，限制为 200 MiB，校验为非空 ZIP 后原样上传，不解压、不重新打包。上传在工作线程中完成；即使外层 job 被取消，也必须等待不可中断的上传线程结束后再清理临时目录，避免上传读取到已删除文件或产生无法恢复的孤儿结果。最终通过当前用户 Authorization 调用 content-app `/api/upload` 上传 TOS；上传失败返回草稿 job 失败，不得重新创建已成功完成的第三方任务。第三方失败文案只允许公开安全业务原因，包含 URL、token、Authorization、API key、secret、密钥或凭据时统一降级为通用错误。
 - 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded`、`failed`、`timeout` 或 `not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 仅记录 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。摘要不得包含 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。
 - 当前 Gateway 启动器未配置 `workers`，部署形态是单 Uvicorn worker；`JianyingDraftService` 的 job registry、幂等索引与后台 task 均为进程内状态。未来多 worker、多容器或多副本部署前，必须替换为共享、持久化 job store，否则 job 查询、幂等和终态去重都会失效。
 

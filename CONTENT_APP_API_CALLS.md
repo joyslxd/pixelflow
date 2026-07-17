@@ -82,7 +82,7 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `/api/upload` | `POST multipart` | `run_generation.upload_file()`；剪映草稿 `HttpJianyingDraftSkill` 也通过该封装上传最终 ZIP | 上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS；前端资产库调用说明见上方主流程表。剪映流程会先下载第三方返回的多个 JSON，在 PixelFlow 临时目录打成一个 ZIP，再携带当前用户 Authorization 调用本接口，最终把 TOS HTTPS 地址返回前端。 |
+| `/api/upload` | `POST multipart` | `run_generation.upload_file()`；剪映草稿 `HttpJianyingDraftSkill` 也通过该封装上传最终 ZIP | 上传本地文件，返回后续接口可引用的 URL。 | `UploadController.uploadFile()` | `content-app` 会按 content type 或扩展名识别 `image`、`video`、`audio` 或普通文件，再上传到 TOS；前端资产库调用说明见上方主流程表。剪映流程下载第三方返回的单个 ZIP（真实响应可能用单元素数组包装 URL），限制 200 MiB 并校验非空 ZIP 后原样携带当前用户 Authorization 调用本接口，不解压也不重新打包，最终把自有 TOS HTTPS 地址返回前端。 |
 | `/api/asset/virtual-human-asset` | `POST` | `run_generation.create_virtual_human_asset()` | 创建虚拟人第三方资产。 | `AssetLibraryController.createVirtualHumanAsset()` | 通常和 `/api/asset/create` 串联使用。 |
 | `/api/asset/create` | `POST` | `run_generation.create_virtual_human_asset()` | 后端工具在 content-app 资产库创建数字人资产记录。 | `AssetLibraryController.createAsset()` | 依赖前一步返回的第三方资产 ID；前端创建普通图片资产的调用说明见上方主流程表。 |
 | `/api/asset/refrence-urls` | `POST` | `run_generation.resolve_asset_urls()` | 根据 asset id 查询可引用的 `refrence_url`。 | `AssetLibraryController.getRefrenceUrls()` | 接口名保留了后端现有拼写 `refrence`。 |
@@ -103,7 +103,7 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 | 接口 | 方法 | 用途 | 重试与状态规则 |
 | --- | --- | --- | --- |
 | `/api/jianying/draft/tasks` | `POST` | 按分镜顺序提交 `[{videoUrl, videoOrder}]` 并取得第三方任务 ID。 | 网络和 HTTP 5xx 最多重试 2 次；HTTP 200 但业务码非 200 不重试。 |
-| `/api/jianying/draft/tasks/result` | `POST` | 传 `{taskId}` 查询草稿结果；成功返回多个 JSON HTTPS URL。 | 首次等待 2 秒，此后每 2 秒查询；`20201/20202` 继续，`200` 成功，其他业务码失败；总预算 30 分钟。 |
+| `/api/jianying/draft/tasks/result` | `POST` | 传 `{taskId}` 查询草稿结果；成功返回单个 ZIP HTTPS URL，当前真实响应为 `data=[zipUrl]`。 | 首次等待 2 秒，此后每 2 秒查询；`20201/20202` 继续，`200` 成功，其他业务码失败；总预算 30 分钟。只接受纯字符串或单元素数组包装的一个 ZIP URL。 |
 
 ## 当前已知注意点
 
