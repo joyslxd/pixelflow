@@ -1,6 +1,6 @@
-import { ImageIcon, Loader2, RefreshCw, UserRound, X } from "lucide-react";
+import { ImageIcon, Loader2, RefreshCw, Upload, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type ContentAssetItem, type ContentAssetPageResponse, type DigitalHumanAssetType } from "@/lib/api";
+import { api, type ContentAssetItem, type ContentAssetPageResponse, type DigitalHumanAssetType, type UploadedAttachment } from "@/lib/api";
 import type { GlobalSceneAssetGroup, SceneGlobalAssetReplacement } from "@/lib/scenePackages";
 import { cn } from "@/lib/utils";
 
@@ -46,8 +46,12 @@ export function SceneAssetReplacementPicker({
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [uploadedImage, setUploadedImage] = useState<UploadedAttachment | null>(null);
   const loadingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const selected = useMemo(() => items.find((item) => item.key === selectedKey), [items, selectedKey]);
 
@@ -96,6 +100,14 @@ export function SceneAssetReplacementPicker({
     void loadPage(1, true);
   }, [canUseDigitalHuman, digitalHumanType, loadPage, mode, open]);
 
+  useEffect(() => {
+    if (open) return;
+    setUploading(false);
+    setUploadError("");
+    setUploadedImage(null);
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
+  }, [open]);
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el || loading || !hasMore) return;
@@ -109,6 +121,42 @@ export function SceneAssetReplacementPicker({
     onConfirm(selected.replacement);
   };
 
+  const uploadLocalImage = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || uploading) return;
+    if (!file.type.toLowerCase().startsWith("image/")) {
+      setUploadError("请选择 JPG、PNG、WebP 等图片文件。");
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+      return;
+    }
+    setUploading(true);
+    setUploadError("");
+    try {
+      const uploaded = await api.uploadAttachment(file);
+      if (uploaded.type !== "image") {
+        throw new Error("上传结果不是有效图片，请重新选择。");
+      }
+      setUploadedImage(uploaded);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  const confirmUploadedImage = () => {
+    if (!uploadedImage) return;
+    onConfirm({
+      source: "local_upload",
+      displayImageUrl: uploadedImage.url,
+      generationReferenceUrl: uploadedImage.url,
+      assetType: "image",
+      assetName: uploadedImage.filename || uploadedImage.name,
+      raw: { ...uploadedImage },
+    });
+  };
+
   if (!open) return null;
 
   return (
@@ -119,10 +167,32 @@ export function SceneAssetReplacementPicker({
             <div className="text-[18px] font-semibold text-ink">替换素材</div>
             <div className="mt-1 text-[12px] text-ink-soft">当前素材：{assetName}</div>
           </div>
-          <button type="button" onClick={onCancel} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas" aria-label="关闭">
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(event) => void uploadLocalImage(event.currentTarget.files)}
+            />
+            <button
+              type="button"
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={uploading}
+              className="flex h-9 items-center gap-1.5 rounded-[8px] border border-accent px-3 text-[13px] font-medium text-accent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+              {uploading ? "上传中..." : "本地上传"}
+            </button>
+            <button type="button" onClick={onCancel} disabled={uploading} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50" aria-label="关闭">
+              <X size={20} />
+            </button>
+          </div>
         </div>
+
+        {uploadError ? (
+          <div className="mx-6 mt-3 rounded-[8px] border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">{uploadError}</div>
+        ) : null}
 
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-3">
           <div className="flex rounded-[8px] bg-canvas p-1">
@@ -214,19 +284,39 @@ export function SceneAssetReplacementPicker({
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 border-t border-line px-6 py-4">
-          <button type="button" onClick={onCancel} className="rounded-[8px] border border-line px-4 py-2 text-[13px] font-medium text-ink hover:bg-canvas">
+          <button type="button" onClick={onCancel} disabled={uploading} className="rounded-[8px] border border-line px-4 py-2 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50">
             取消
           </button>
           <button
             type="button"
             onClick={confirm}
-            disabled={!selected}
+            disabled={!selected || uploading}
             className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             确认替换
           </button>
         </div>
       </div>
+      {uploadedImage ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="alertdialog" aria-modal="true" aria-labelledby="local-upload-confirm-title">
+          <div className="w-full max-w-[520px] rounded-[8px] bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.32)]">
+            <div id="local-upload-confirm-title" className="text-[18px] font-semibold text-ink">图片上传成功，是否替换当前素材？</div>
+            <div className="mt-2 text-[13px] text-ink-soft">确认后将同步更新当前素材及分镜中的对应引用。</div>
+            <div className="mt-5 flex max-h-[440px] min-h-[240px] items-center justify-center overflow-hidden rounded-[8px] bg-canvas">
+              <img src={uploadedImage.url} alt={uploadedImage.filename || uploadedImage.name} className="max-h-[440px] w-full object-contain" />
+            </div>
+            <div className="mt-3 truncate text-[13px] text-ink">{uploadedImage.filename || uploadedImage.name}</div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" onClick={() => setUploadedImage(null)} className="rounded-[8px] border border-line px-4 py-2 text-[13px] font-medium text-ink hover:bg-canvas">
+                取消
+              </button>
+              <button type="button" onClick={confirmUploadedImage} className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:opacity-90">
+                确认替换
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -45,6 +45,7 @@ interface MessageBubbleProps {
   jianyingDraftCapability?: JianyingDraftCapability;
   jianyingDraftResult?: JianyingDraftJobResponse | null;
   jianyingDraftRunning?: boolean;
+  onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
 }
 
 function stringArray(value: unknown): string[] {
@@ -245,6 +246,7 @@ export function MessageBubble({
   jianyingDraftCapability,
   jianyingDraftResult: suppliedJianyingDraftResult,
   jianyingDraftRunning = false,
+  onDownloadArtifact,
 }: MessageBubbleProps) {
   const isUser = msg.role === "user";
   const planPreview = msg.artifact?.plan?.plan_markdown || "";
@@ -1039,8 +1041,10 @@ export function MessageBubble({
             {msg.artifact.pptFile.ppt_url ? (
               <a
                 href={msg.artifact.pptFile.ppt_url}
+                download={msg.artifact.pptFile.filename || undefined}
                 target="_blank"
                 rel="noreferrer"
+                onClick={() => onDownloadArtifact?.(msg, String(msg.artifact?.pptFile?.ppt_url || ""))}
                 className="flex items-center gap-3 rounded-xl border border-line bg-canvas px-3 py-3 text-[13px] text-ink hover:bg-accent-soft"
               >
                 <Download size={17} className="text-accent" />
@@ -1113,22 +1117,35 @@ export function MessageBubble({
             )}
             {msg.artifact.imageResult.images.length > 0 && (
               <div className="grid gap-3 sm:grid-cols-2">
-                {msg.artifact.imageResult.images.map((image, index) => (
-                  <a
-                    key={image.asset_id || image.url || index}
-                    href={image.download_url || image.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="overflow-hidden rounded-xl border border-line bg-canvas"
-                  >
-                    {image.url ? (
-                      <img src={image.url} alt={`生成图片 ${index + 1}`} className="mx-auto block max-h-[420px] max-w-full object-contain" />
-                    ) : (
-                      <div className="flex aspect-square items-center justify-center text-[12px] text-ink-soft">无图片 URL</div>
-                    )}
-                    <div className="truncate px-2 py-1.5 text-[11px] text-ink-soft">{image.url || image.asset_id || `图片 ${index + 1}`}</div>
-                  </a>
-                ))}
+                {msg.artifact.imageResult.images.map((image, index) => {
+                  const downloadUrl = image.download_url || image.url || "";
+                  return (
+                    <div key={image.asset_id || image.url || index} className="group/image relative overflow-hidden rounded-xl border border-line bg-canvas">
+                      <div>
+                        {image.url ? (
+                          <img src={image.url} alt={`生成图片 ${index + 1}`} className="mx-auto block max-h-[420px] max-w-full object-contain" />
+                        ) : (
+                          <div className="flex aspect-square items-center justify-center text-[12px] text-ink-soft">无图片 URL</div>
+                        )}
+                      </div>
+                      {downloadUrl ? (
+                        <a
+                          href={downloadUrl}
+                          download
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={() => onDownloadArtifact?.(msg, downloadUrl)}
+                          className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white opacity-100 transition-opacity hover:bg-black/75 focus:opacity-100 sm:opacity-0 sm:group-hover/image:opacity-100"
+                          aria-label={`下载生成图片 ${index + 1}`}
+                          title="下载图片"
+                        >
+                          <Download size={16} />
+                        </a>
+                      ) : null}
+                      <div className="truncate px-2 py-1.5 text-[11px] text-ink-soft">{image.url || image.asset_id || `图片 ${index + 1}`}</div>
+                    </div>
+                  );
+                })}
               </div>
             )}
             {imageGenerationFailed && (
@@ -1352,6 +1369,7 @@ export function MessageBubble({
                   result={mergedVideoResult}
                   className="max-w-[324px]"
                   onOpen={(video) => onOpenVideoResult?.(msg, video, videoResults)}
+                  onDownload={(video) => onDownloadArtifact?.(msg, video.url)}
                 />
               </section>
             )}

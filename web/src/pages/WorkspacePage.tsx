@@ -35,6 +35,7 @@ import {
   type PptSummaryResult,
   type GenerateSceneAssetsResponse,
   type PrepareScenePackagesJobResult,
+  type PrepareScenePackagesJobStatusResponse,
   type PrepareScenePackagesResponse,
   type SceneGenerationPayload,
   type SceneVideoPayload,
@@ -100,6 +101,11 @@ import {
   storyboardVersionId,
   type JianyingDraftScene,
 } from "@/lib/jianyingDraft";
+import {
+  deriveWorkflowTaskBoard,
+  type WorkflowFlowKind,
+  type WorkflowProgressSnapshot,
+} from "@/lib/workflowTaskBoard";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -107,6 +113,12 @@ const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
+const workflowIntentFromPhase = (phase: string): CreationIntent | null => {
+  if (phase.startsWith("ppt_")) return "ppt";
+  if (phase.startsWith("scene_") || (phase.startsWith("video_") && !phase.startsWith("video_analysis"))) return "video";
+  if (phase.startsWith("image_") && !phase.startsWith("scene_global_asset")) return "image";
+  return null;
+};
 const AUTO_CONFIRM_TIMEOUT_MS = 60_000;
 const AUTO_CONFIRM_TIMEOUT_SECONDS = AUTO_CONFIRM_TIMEOUT_MS / 1000;
 const JIANYING_DRAFT_CLIENT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -279,6 +291,8 @@ interface WorkspaceSnapshot {
   scene_durations_sec?: number[];
   scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
   restored_from_version?: number | null;
+  workflowProgress?: WorkflowProgressSnapshot | null;
+  workflow_progress?: WorkflowProgressSnapshot | null;
 }
 
 type ChatArtifact = NonNullable<ChatMessage["artifact"]>;
@@ -1632,6 +1646,7 @@ export function WorkspacePage() {
     poll_interval_seconds: 2,
   });
   const [, setJianyingDraftUiRevision] = useState(0);
+  const [workflowProgress, setWorkflowProgress] = useState<WorkflowProgressSnapshot | null>(null);
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
   useEffect(() => {
@@ -1683,6 +1698,8 @@ export function WorkspacePage() {
   const pendingVideoJobRef = useRef<PendingVideoJob | null>(null);
   const activeVideoJobPollsRef = useRef(new Set<string>());
   const pendingPptJobRef = useRef<PendingPptJob | null>(null);
+  const workflowProgressRef = useRef<WorkflowProgressSnapshot | null>(null);
+  const workflowProgressConversationIdRef = useRef("");
   const activePptJobPollsRef = useRef(new Set<string>());
   const pendingJianyingDraftJobRef = useRef<PendingJianyingDraftJob | null>(null);
   const activeJianyingDraftJobPollsRef = useRef(new Set<string>());
@@ -1746,6 +1763,55 @@ export function WorkspacePage() {
 
   const isVisibleConversation = (targetConversationId: string) => {
     return pageVisibleRef.current && isCurrentConversation(targetConversationId);
+  };
+
+  const advanceWorkflowProgress = (
+    targetConversationId: string,
+    lastPhase: string,
+    patch: Partial<Omit<WorkflowProgressSnapshot, "version" | "last_phase" | "updated_at">> = {},
+  ): WorkflowProgressSnapshot | null => {
+    if (!targetConversationId) return null;
+    const belongsToTarget = workflowProgressConversationIdRef.current === targetConversationId;
+    const current = belongsToTarget ? workflowProgressRef.current : null;
+    const contextIntent = workflowIntentFromPhase(lastPhase);
+    const inferredFlowKind: WorkflowFlowKind = lastPhase.startsWith("image_edit_") ? "direct_image_edit" : "standard";
+    const next: WorkflowProgressSnapshot = {
+      version: 1,
+      intent: patch.intent !== undefined ? patch.intent : current?.intent || contextIntent,
+      flow_kind: patch.flow_kind || current?.flow_kind || inferredFlowKind,
+      source_message_id: patch.source_message_id !== undefined ? patch.source_message_id : current?.source_message_id || "",
+      last_phase: lastPhase,
+      scene_package_stage: patch.scene_package_stage !== undefined ? patch.scene_package_stage : current?.scene_package_stage || null,
+      updated_at: new Date().toISOString(),
+    };
+    if (isCurrentConversation(targetConversationId)) {
+      workflowProgressConversationIdRef.current = targetConversationId;
+      workflowProgressRef.current = next;
+      setWorkflowProgress(next);
+    }
+    return next;
+  };
+
+  const updateConversationWithProgress = (
+    targetConversationId: string,
+    body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> },
+    progressPatch: Partial<Omit<WorkflowProgressSnapshot, "version" | "last_phase" | "updated_at">> = {},
+  ) => {
+    const nextProgress = body.last_phase
+      ? advanceWorkflowProgress(targetConversationId, body.last_phase, progressPatch)
+      : workflowProgressConversationIdRef.current === targetConversationId
+        ? workflowProgressRef.current
+        : null;
+    return api.updateConversation(targetConversationId, {
+      ...body,
+      context: body.context
+        ? {
+            ...body.context,
+            workflowProgress: nextProgress,
+            workflow_progress: nextProgress,
+          }
+        : body.context,
+    });
   };
 
   const setBusyForConversation = (targetConversationId: string, value: boolean) => {
@@ -1820,6 +1886,41 @@ export function WorkspacePage() {
       messagesRef.current = nextItems;
       return nextItems;
     });
+  };
+
+  const recordArtifactDownload = async (msg: ChatMessage, url: string) => {
+    if (!url || !msg.artifact) return;
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const currentMessage = messagesRef.current.find(
+      (message) => message.id === msg.id && messageConversationId(message, targetConversationId) === targetConversationId,
+    ) || msg;
+    if (!currentMessage.artifact || currentMessage.artifact.deliveryDownloadedAt) return;
+    const artifact: ChatArtifact = {
+      ...currentMessage.artifact,
+      deliveryDownloadedAt: new Date().toISOString(),
+      deliveryDownloadedUrl: url,
+    };
+    try {
+      await api.updateConversationMessage(targetConversationId, currentMessage.id, {
+        payload: {
+          artifact,
+          materials: currentMessage.materials || artifact.materials || [],
+          client_message_id: currentMessage.id,
+        } as unknown as Record<string, unknown>,
+      });
+      if (!isCurrentConversation(targetConversationId)) return;
+      setMessages((items) => {
+        const nextItems = items.map((message) =>
+          message.id === currentMessage.id && messageConversationId(message, targetConversationId) === targetConversationId
+            ? { ...message, artifact }
+            : message,
+        );
+        messagesRef.current = nextItems;
+        return nextItems;
+      });
+    } catch (err) {
+      pushAssistant(`下载已开始，但交付状态保存失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+    }
   };
 
   const hasPendingImageRevisionForResult = (msg: ChatMessage, targetConversationId: string): boolean => {
@@ -2012,6 +2113,14 @@ export function WorkspacePage() {
       message: optimisticMessage,
       continue_after_save: continuation,
     };
+    if (continuation?.type === "handle_send") {
+      advanceWorkflowProgress(targetConversationId, "message_save_running", {
+        intent: null,
+        flow_kind: "standard",
+        source_message_id: optimisticMessage.id,
+        scene_package_stage: null,
+      });
+    }
     await persistPendingMessageJob(
       pendingMessageJob,
       targetConversationId,
@@ -2102,8 +2211,7 @@ export function WorkspacePage() {
       }),
     );
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           context: {
             ...makeSnapshot(),
             imageEditConfirmedSelections: imageEditConfirmedSelectionsRef.current,
@@ -2234,8 +2342,7 @@ export function WorkspacePage() {
       return nextItems;
     });
     if (targetConversationId && updatedPackages) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           context: {
             ...makeSnapshot(),
             global_assets: updatedPackages.global_assets,
@@ -2332,8 +2439,7 @@ export function WorkspacePage() {
     extraContext: Record<string, unknown> = {},
   ) => {
     if (!targetConversationId) return;
-    void api
-      .updateConversation(targetConversationId, {
+    void updateConversationWithProgress(targetConversationId, {
         last_phase: lastPhase,
         context: {
           ...makeSnapshot(targetConversationId),
@@ -2392,8 +2498,7 @@ export function WorkspacePage() {
       return nextItems;
     });
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           context: {
             ...makeSnapshot(),
             global_assets: videoScenePackages.global_assets,
@@ -2636,8 +2741,7 @@ export function WorkspacePage() {
       },
     }, targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "scene_global_asset_edit_model_pending",
           context: {
             ...makeSnapshot(),
@@ -2755,8 +2859,7 @@ export function WorkspacePage() {
     pushAssistant(`已在当前场景包中删除「${reference.name}」的素材引用，并保留空占位符。`, targetConversationId);
 
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "scene_global_asset_deleted",
           context: {
             ...makeSnapshot(),
@@ -2781,8 +2884,7 @@ export function WorkspacePage() {
       pendingImageEditRequestRef.current = request;
       pushAssistant("我识别到这是图片编辑需求，请上传需要编辑的图片后提交，我会先让你确认图片编辑模型和参数。", targetConversationId);
       if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
+        void updateConversationWithProgress(targetConversationId, {
             last_phase: "image_edit_waiting_source_image",
             context: {
               ...makeSnapshot(),
@@ -2826,8 +2928,7 @@ export function WorkspacePage() {
       },
     }, targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "image_edit_model_pending",
           context: {
             ...makeSnapshot(),
@@ -2856,6 +2957,10 @@ export function WorkspacePage() {
     const executableRequest: PendingImageEditRequest = { ...request, formValues, intakeContext };
     pendingImageEditRequestRef.current = executableRequest;
     setBusyForConversation(targetConversationId, true);
+    advanceWorkflowProgress(targetConversationId, "image_edit_generation_running", {
+      intent: "image",
+      flow_kind: "direct_image_edit",
+    });
     pushAssistant("已识别为图片编辑需求，正在直接调用图片编辑接口生成结果…", targetConversationId);
     try {
       const imagePrepare = await api.prepareImageGeneration({
@@ -2890,8 +2995,7 @@ export function WorkspacePage() {
             data: { operation: "image_edit" },
           },
         }, targetConversationId);
-        void api
-          .updateConversation(targetConversationId, {
+        void updateConversationWithProgress(targetConversationId, {
             last_phase: "image_edit_waiting_source_image",
             context: {
               ...makeSnapshot(),
@@ -3117,7 +3221,7 @@ export function WorkspacePage() {
   ) => {
     pendingMessageJobRef.current = pendingMessageJob;
     if (!targetConversationId) return;
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...makeSnapshot(targetConversationId),
@@ -3144,7 +3248,7 @@ export function WorkspacePage() {
   ) => {
     pendingIntakeJobRef.current = pendingIntakeJob;
     if (!targetConversationId) return;
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...makeSnapshot(targetConversationId),
@@ -3172,7 +3276,7 @@ export function WorkspacePage() {
     pendingImageJobRef.current = pendingImageJob;
     if (!targetConversationId) return;
     const baseSnapshot = makeSnapshot(targetConversationId);
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...baseSnapshot,
@@ -3199,7 +3303,7 @@ export function WorkspacePage() {
   ) => {
     pendingVideoJobRef.current = pendingVideoJob;
     if (!targetConversationId) return;
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...makeSnapshot(targetConversationId),
@@ -3300,7 +3404,7 @@ export function WorkspacePage() {
     pendingScenePackageJobRef.current = pendingScenePackageJob;
     if (!targetConversationId) return;
     const baseSnapshot = makeSnapshot(targetConversationId);
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...baseSnapshot,
@@ -3328,7 +3432,7 @@ export function WorkspacePage() {
     pendingPptJobRef.current = pendingPptJob;
     if (!targetConversationId) return;
     const baseSnapshot = makeSnapshot(targetConversationId);
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...baseSnapshot,
@@ -3357,7 +3461,7 @@ export function WorkspacePage() {
     pendingDirectionJobRef.current = pendingDirectionJob;
     flowDraftRef.current = flowDraft;
     if (!targetConversationId) return;
-    await api.updateConversation(targetConversationId, {
+    await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
       context: {
         ...makeSnapshot(targetConversationId),
@@ -3497,6 +3601,10 @@ export function WorkspacePage() {
     lastPhase = "directions_running",
     sourceMessageId = "",
   ) => {
+    advanceWorkflowProgress(targetConversationId, lastPhase, {
+      intent: context.intent,
+      flow_kind: "standard",
+    });
     const flowDraft = makeFlowDraft("directions_running", {
       intent: context.intent,
       coreMessage: context.coreMessage,
@@ -3530,6 +3638,7 @@ export function WorkspacePage() {
     const text = pendingIntakeJob.request.prompt;
     const materials = pendingIntakeJob.request.materials || [];
     if (intake.intent === "video_analysis") {
+      advanceWorkflowProgress(targetConversationId, "video_analysis_running", { intent: null });
       pushAssistant("已识别为视频分析/拆解需求，正在识别媒体链接并调用视频分析 Skill…", targetConversationId);
       const videoAnalysis = await api.analyzeStoryboards({ prompt: text, materials });
       pushArtifact(videoAnalysis.ok ? "视频分析已完成，结果如下。" : "视频分析未完成，请查看原因后补充视频链接。", {
@@ -3553,6 +3662,7 @@ export function WorkspacePage() {
       return;
     }
     if (intake.intent === "ppt") {
+      advanceWorkflowProgress(targetConversationId, "ppt_form_pending", { intent: "ppt", flow_kind: "standard" });
       const flowDraft = makeFlowDraft("form_pending", {
         intent: "ppt",
         coreMessage: text,
@@ -3586,6 +3696,10 @@ export function WorkspacePage() {
       return;
     }
     if (intake.intent === "image" && isImageEditIntake(intake, text)) {
+      advanceWorkflowProgress(targetConversationId, "image_edit_options_pending", {
+        intent: "image",
+        flow_kind: "direct_image_edit",
+      });
       const imageEditRequest: PendingImageEditRequest = {
         conversationId: targetConversationId,
         prompt: text,
@@ -3616,6 +3730,10 @@ export function WorkspacePage() {
       return;
     }
     if (isCreationIntent(intake.intent)) {
+      advanceWorkflowProgress(targetConversationId, "intake_form_pending", {
+        intent: intake.intent,
+        flow_kind: "standard",
+      });
       const flowDraft = makeFlowDraft("form_pending", {
         intent: intake.intent,
         coreMessage: text,
@@ -3649,6 +3767,7 @@ export function WorkspacePage() {
       return;
     }
     pushAssistant(intake.reason || "我可以帮你生成图片、生成电商带货短视频，或分析已有视频。请再描述一下需求。", targetConversationId);
+    advanceWorkflowProgress(targetConversationId, "intake_unknown", { intent: null });
     await clearPendingIntakeJob(targetConversationId, "intake_unknown", {
       intake_intent: intake,
     }).catch(() => {});
@@ -3696,6 +3815,12 @@ export function WorkspacePage() {
     sourceMessageId = "",
     autoResume = true,
   ): Promise<PendingIntakeJob> => {
+    advanceWorkflowProgress(targetConversationId, "intake_analyze_running", {
+      intent: null,
+      flow_kind: "standard",
+      source_message_id: sourceMessageId,
+      scene_package_stage: null,
+    });
     const started = await api.startIntakeAnalyzeJob(request);
     const pendingIntakeJob: PendingIntakeJob = {
       job_id: started.job_id,
@@ -3831,7 +3956,7 @@ export function WorkspacePage() {
           true,
         );
         try {
-          await api.updateConversation(pendingMessageJob.conversation_id, {
+          await updateConversationWithProgress(pendingMessageJob.conversation_id, {
             last_phase: planContinuation.last_phase,
             context: {
               ...makeSnapshot(pendingMessageJob.conversation_id),
@@ -4954,6 +5079,33 @@ export function WorkspacePage() {
       return true;
     };
     setBusyForConversation(pendingScenePackageJob.conversation_id, true);
+    const syncScenePackageStage = async (status: PrepareScenePackagesJobStatusResponse) => {
+      const previousStage = workflowProgressConversationIdRef.current === pendingScenePackageJob.conversation_id
+        ? workflowProgressRef.current?.scene_package_stage
+        : null;
+      advanceWorkflowProgress(
+        pendingScenePackageJob.conversation_id,
+        pendingScenePackageJob.kind === "scene_asset_generation" ? "scene_asset_generation_running" : "scene_package_generation_running",
+        {
+          intent: "video",
+          scene_package_stage: status.stage,
+        },
+      );
+      if (status.status === "running" && status.stage === "generate_scene_assets" && previousStage !== status.stage) {
+        await updateConversationWithProgress(
+          pendingScenePackageJob.conversation_id,
+          {
+            last_phase: "scene_package_generation_running",
+            context: {
+              ...makeSnapshot(pendingScenePackageJob.conversation_id),
+              pendingScenePackageJob,
+              pending_scene_package_job: pendingScenePackageJob,
+            } as unknown as Record<string, unknown>,
+          },
+          { intent: "video", scene_package_stage: status.stage },
+        );
+      }
+    };
     try {
       if (stopIfHidden()) return;
       if (pendingScenePackageJob.kind === "scene_asset_generation") {
@@ -4967,11 +5119,12 @@ export function WorkspacePage() {
         await handleCompletedSceneAssetJob(pendingScenePackageJob, sceneAssets, processedKey);
       } else {
         const status = await api.getPrepareScenePackagesJob(pendingScenePackageJob.job_id);
+        await syncScenePackageStage(status);
         if (stopIfHidden()) return;
         const result =
           (status.status === "completed" || status.status === "quota_paused") && status.result
             ? status.result
-            : await api.pollPrepareScenePackagesJob(pendingScenePackageJob.job_id, shouldContinuePolling);
+            : await api.pollPrepareScenePackagesJob(pendingScenePackageJob.job_id, shouldContinuePolling, syncScenePackageStage);
         if (!result || stopIfHidden()) return;
         await handleCompletedScenePackageJob(pendingScenePackageJob, result, processedKey);
       }
@@ -5367,6 +5520,10 @@ export function WorkspacePage() {
       conversationIdRef.current,
       snapshot.jianyingDraftRecords || snapshot.jianying_draft_records || {},
     );
+    const restoredWorkflowProgress = snapshot.workflowProgress || snapshot.workflow_progress || null;
+    workflowProgressConversationIdRef.current = conversationIdRef.current;
+    workflowProgressRef.current = restoredWorkflowProgress;
+    setWorkflowProgress(restoredWorkflowProgress);
     setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
@@ -5457,6 +5614,10 @@ export function WorkspacePage() {
       lastEventId: lastEventIdRef.current,
       announcedPhases: Array.from(announcedPhasesRef.current),
       briefReadyShown: briefReadyShownRef.current,
+      workflowProgress:
+        workflowProgressConversationIdRef.current === snapshotConversationId ? workflowProgressRef.current : null,
+      workflow_progress:
+        workflowProgressConversationIdRef.current === snapshotConversationId ? workflowProgressRef.current : null,
       ...activePlanSnapshot,
       ...scenePackageSnapshot,
     };
@@ -5497,6 +5658,9 @@ export function WorkspacePage() {
     pendingPptJobRef.current = null;
     pendingJianyingDraftJobRef.current = null;
     jianyingDraftRecordsByConversationRef.current = new Map();
+    workflowProgressConversationIdRef.current = "";
+    workflowProgressRef.current = null;
+    setWorkflowProgress(null);
     pptDoneConversationIdsRef.current = new Set();
     planRevisionArtifactRef.current = null;
     setPendingPlanRevisionChoice(null);
@@ -5536,6 +5700,28 @@ export function WorkspacePage() {
     const normalizedMessages = normalizeRestoredMessageReferences(
       dedupeRestoredScenePackageMessages(restorePendingMessageJobMessage(videoAwareMessages, pendingMessageJob)),
     );
+    const contextIntent = isCreationIntent((detail.conversation.context || {}).intent)
+      ? (detail.conversation.context || {}).intent as CreationIntent
+      : null;
+    const storedWorkflowProgress = snapshot.workflowProgress || snapshot.workflow_progress || null;
+    const fallbackBoard = storedWorkflowProgress
+      ? null
+      : deriveWorkflowTaskBoard({
+          lastPhase: detail.conversation.last_phase,
+          fallbackIntent: contextIntent,
+          messages: normalizedMessages,
+        });
+    const restoredWorkflowProgress: WorkflowProgressSnapshot | null = storedWorkflowProgress || (fallbackBoard
+      ? {
+          version: 1,
+          intent: fallbackBoard.intent,
+          flow_kind: fallbackBoard.flowKind,
+          source_message_id: "",
+          last_phase: detail.conversation.last_phase,
+          scene_package_stage: null,
+          updated_at: detail.conversation.updated_at || new Date().toISOString(),
+        }
+      : null);
     applySnapshot({
       ...snapshot,
       pendingScenePackageJob: pendingScenePackageJob && hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob) ? null : pendingScenePackageJob,
@@ -5563,6 +5749,8 @@ export function WorkspacePage() {
       jianyingDraftRecords,
       jianying_draft_records: jianyingDraftRecords,
       imageEditConfirmedSelections,
+      workflowProgress: restoredWorkflowProgress,
+      workflow_progress: restoredWorkflowProgress,
       messages: normalizedMessages,
     });
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
@@ -5772,10 +5960,9 @@ export function WorkspacePage() {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       const snapshot = makeSnapshot(currentConversationId);
-      void api
-        .updateConversation(currentConversationId, {
+      void updateConversationWithProgress(currentConversationId, {
           current_task_id: currentTaskId || null,
-          last_phase: String(canvas.phase || "idle"),
+          last_phase: workflowProgressRef.current?.last_phase || String(canvas.phase || "idle"),
           context: snapshot as unknown as Record<string, unknown>,
         })
         .catch(() => {});
@@ -5950,8 +6137,7 @@ export function WorkspacePage() {
       };
       setPendingPlanRevisionChoice(choice);
       pushAssistant("已收到 plan.md 修改意见，请选择是在当前创意上修改，还是放弃当前创意并重新生成 3 个方向。", activeConversation);
-      void api
-        .updateConversation(activeConversation, {
+      void updateConversationWithProgress(activeConversation, {
           last_phase: "plan_revision_mode_pending",
           context: {
             ...makeSnapshot(activeConversation),
@@ -6116,8 +6302,7 @@ export function WorkspacePage() {
           plan: revisionArtifact.plan,
         }, activeConversation);
         if (activeConversation) {
-          void api
-            .updateConversation(activeConversation, {
+          void updateConversationWithProgress(activeConversation, {
               last_phase: qualityReview.ok ? "video_quality_review_ready" : "video_quality_review_failed",
               context: {
                 ...makeSnapshot(),
@@ -6177,8 +6362,7 @@ export function WorkspacePage() {
         videoAnalysis,
       }, targetConversationId);
       if (targetConversationId) {
-        void api
-          .updateConversation(targetConversationId, {
+        void updateConversationWithProgress(targetConversationId, {
             last_phase: videoAnalysis.ok ? "video_analysis_done" : "video_analysis_failed",
             context: {
               ...makeSnapshot(),
@@ -6186,7 +6370,7 @@ export function WorkspacePage() {
               materials,
               video_analysis: videoAnalysis,
             } as unknown as Record<string, unknown>,
-          })
+          }, { intent: null })
           .catch(() => {});
       }
     } catch (err) {
@@ -6365,6 +6549,7 @@ export function WorkspacePage() {
     const values = valuesFromForm(form);
     try {
       if (form.intent === "ppt") {
+        advanceWorkflowProgress(targetConversationId, "ppt_outline_running", { intent: "ppt", flow_kind: "standard" });
         pushAssistant("正在调用 SmartPPT 生成 PPT 大纲，这一步可能需要等待一会儿…", targetConversationId);
         const request: PptSummaryJobRequest = {
           ppt_topic: form.ppt_topic,
@@ -6445,8 +6630,7 @@ export function WorkspacePage() {
     setBusyForConversation(targetConversationId, false);
     pushAssistant("已取消当前需求表单，流程已终止。", targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "form_cancelled",
           context: {
             ...makeSnapshot(),
@@ -6454,7 +6638,7 @@ export function WorkspacePage() {
             intent: cancelledIntent,
             form_cancelled: true,
           } as unknown as Record<string, unknown>,
-        })
+        }, { intent: cancelledIntent })
         .catch(() => {});
     }
   };
@@ -6471,6 +6655,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
+    advanceWorkflowProgress(targetConversationId, "ppt_content_json_running", { intent: "ppt" });
     pushAssistant("PPT 大纲已确认，正在生成页面 JSON 并准备生成 PPT 图片…", targetConversationId);
     try {
       const pptStyle = String(artifact.pptStyle || artifact.formValues?.ppt_style || "极简商务");
@@ -6597,6 +6782,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
+    advanceWorkflowProgress(targetConversationId, "ppt_file_generation_running", { intent: "ppt" });
     pushAssistant("正在调用 SmartPPT 生成 PPT 附件…", targetConversationId);
     try {
       const request: PptFileJobRequest = { smart_ppt_project_id: projectId, file_urls: fileUrls };
@@ -6671,8 +6857,7 @@ export function WorkspacePage() {
     setPptDoneForConversation(targetConversationId, true);
     markPptFileDoneInMessage(msg.id, targetConversationId);
     pushAssistant("已确认 PPT 附件满意，制作 PPT 流程结束。", targetConversationId);
-    void api
-      .updateConversation(targetConversationId, {
+    void updateConversationWithProgress(targetConversationId, {
         last_phase: "ppt_done",
         context: {
           ...makeSnapshot(),
@@ -6742,6 +6927,7 @@ export function WorkspacePage() {
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setBusyForConversation(targetConversationId, true);
+    advanceWorkflowProgress(targetConversationId, "plan_generation_running", { intent: msg.artifact.intent });
     pushAssistant(`已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
     try {
       const plan = await api.createPlanMarkdown({
@@ -6797,6 +6983,7 @@ export function WorkspacePage() {
     if (!processedKey) return;
     if (artifact.intent === "image") {
       setBusyForConversation(targetConversationId, true);
+      advanceWorkflowProgress(targetConversationId, "image_prepare_running", { intent: "image" });
       pushAssistant("图片 plan.md 已同意，正在准备图片生成参数…", targetConversationId);
       try {
         const imagePrepare = await api.prepareImageGeneration({
@@ -6823,8 +7010,7 @@ export function WorkspacePage() {
             plan: artifact.plan,
           }, targetConversationId);
           if (targetConversationId) {
-            void api
-              .updateConversation(targetConversationId, {
+            void updateConversationWithProgress(targetConversationId, {
                 last_phase: "image_generation_blocked",
                 context: {
                   ...makeSnapshot(),
@@ -6875,6 +7061,10 @@ export function WorkspacePage() {
       return;
     }
     setBusyForConversation(targetConversationId, true);
+    advanceWorkflowProgress(targetConversationId, "scene_package_generation_running", {
+      intent: "video",
+      scene_package_stage: "prepare_scene_packages",
+    });
     const formValues = artifact.formValues;
     const selectedDirection = artifact.selectedDirection;
     const creationContract = artifact.plan.creation_contract as unknown as VideoCreationContract;
@@ -6905,6 +7095,10 @@ export function WorkspacePage() {
         request,
         artifact,
       };
+      advanceWorkflowProgress(targetConversationId, "scene_package_generation_running", {
+        intent: "video",
+        scene_package_stage: started.stage || "prepare_scene_packages",
+      });
       await persistPendingScenePackageJob(pendingScenePackageJob, targetConversationId, "scene_package_generation_running", {
         form_values: formValues,
         intake_context: artifact.intakeContext,
@@ -7062,8 +7256,7 @@ export function WorkspacePage() {
       : null;
     pushAssistant("已暂停当前 plan.md。请在输入框填写修改意见，提交后我会让你选择修改当前 Plan 或重新生成创意。", targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "plan_revision_requested",
           context: {
             ...makeSnapshot(targetConversationId),
@@ -7171,8 +7364,7 @@ export function WorkspacePage() {
     setPendingPlanRevisionChoice(null);
     if (pending.processedKey) releaseArtifactAction(pending.processedKey);
     pushAssistant("已取消本次 plan.md 修改方式选择，当前 Plan 保持不变。", pending.conversationId);
-    void api
-      .updateConversation(pending.conversationId, {
+    void updateConversationWithProgress(pending.conversationId, {
         last_phase: "plan_review",
         context: {
           ...makeSnapshot(pending.conversationId),
@@ -7396,8 +7588,7 @@ export function WorkspacePage() {
     markImageResultAccepted(msg.id, targetConversationId);
     pushAssistant(auto ? timeoutReviewMessage(AUTO_CONFIRM_TIMEOUT_SECONDS) : "已确认图片满意，流程结束。", targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "image_accepted",
           context: { ...makeSnapshot(), image_accepted: true } as unknown as Record<string, unknown>,
         })
@@ -7447,8 +7638,7 @@ export function WorkspacePage() {
       targetConversationId,
     );
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: sceneGlobalAssetReference ? "scene_global_asset_revision_requested" : "image_revision_requested",
           context: {
             ...makeSnapshot(),
@@ -7681,8 +7871,7 @@ export function WorkspacePage() {
     markVideoResultAccepted(msg.id, targetConversationId);
     pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "video_accepted",
           context: { ...makeSnapshot(), video_accepted: true, pendingVideoRevision: null, pending_video_revision: null } as unknown as Record<string, unknown>,
         })
@@ -7704,8 +7893,7 @@ export function WorkspacePage() {
     };
     pushAssistant("请在输入框填写视频修改意见。我会先做 QAAgent QC 质检，再让你选择是否结合质检结果重生成受影响场景。", targetConversationId);
     if (targetConversationId) {
-      void api
-        .updateConversation(targetConversationId, {
+      void updateConversationWithProgress(targetConversationId, {
           last_phase: "video_revision_requested",
           context: {
             ...makeSnapshot(),
@@ -7827,7 +8015,7 @@ export function WorkspacePage() {
     }
   };
 
-  const handleOpenVideoResult = (_msg: ChatMessage, video: VideoResult, results: VideoResult[]) => {
+  const handleOpenVideoResult = (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => {
     setSelectedStoryboardMessageId("");
     setCanvasOpen(true);
     setCanvas((current) => ({
@@ -7835,7 +8023,16 @@ export function WorkspacePage() {
       phase: "done",
       results: results.length > 0 ? results : current.results,
       selectedVideo: video,
+      selectedVideoSourceMessageId: video.assetType === "final_video" ? msg.id : undefined,
     }));
+  };
+
+  const handleDownloadPreviewVideo = (video: VideoResult, sourceMessageId?: string) => {
+    if (video.assetType !== "final_video") return;
+    const sourceMessage = sourceMessageId
+      ? messagesRef.current.find((message) => message.id === sourceMessageId)
+      : [...messagesRef.current].reverse().find((message) => message.artifact?.mergedVideo?.merged_video_url === video.url);
+    if (sourceMessage) void recordArtifactDownload(sourceMessage, video.url);
   };
 
   useEffect(() => {
@@ -7858,6 +8055,13 @@ export function WorkspacePage() {
   const selectedPlanEditorMessage = selectedPlanEditorMessageId
     ? messages.find((message) => message.id === selectedPlanEditorMessageId && message.artifact?.type === "plan" && message.artifact.plan)
     : undefined;
+  const derivedWorkflowTaskBoard = deriveWorkflowTaskBoard({
+    progress: workflowProgress,
+    messages,
+  });
+  const workflowTaskBoard = derivedWorkflowTaskBoard
+    ? { ...derivedWorkflowTaskBoard, workflowId: `${currentConversationId}:${derivedWorkflowTaskBoard.workflowId}` }
+    : null;
 
   const jianyingDraftVersionForMessage = (msg: ChatMessage): string => {
     if (msg.artifact?.type === "jianying_draft") return msg.artifact.pendingJianyingDraftJob?.storyboard_version_id || "";
@@ -7904,6 +8108,7 @@ export function WorkspacePage() {
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         composerPrefillRequest={composerPrefillRequest}
         busy={busy || dialogOpen || Boolean(pendingPlanRevisionChoice)}
+        workflowTaskBoard={workflowTaskBoard}
         onSelectDirection={handleSelectDirection}
         onRegenerateDirections={handleRegenerateDirections}
         onApprovePlan={handleApprovePlan}
@@ -7934,6 +8139,7 @@ export function WorkspacePage() {
         jianyingDraftCapability={jianyingDraftCapability}
         getJianyingDraftResult={getJianyingDraftResult}
         isJianyingDraftRunning={isJianyingDraftRunning}
+        onDownloadArtifact={(msg, url) => void recordArtifactDownload(msg, url)}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
           setCanvasOpen(true);
@@ -7990,6 +8196,7 @@ export function WorkspacePage() {
           onRevise={handleRevise}
           onConfirmStage={handleConfirmStage}
           onSelectVideo={(video) => setCanvas((current) => ({ ...current, selectedVideo: video }))}
+          onDownloadVideo={handleDownloadPreviewVideo}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");

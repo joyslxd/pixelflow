@@ -6,6 +6,8 @@ import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
 import { isJianyingDraftResultRetryable, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
+import type { WorkflowTaskBoardModel } from "@/lib/workflowTaskBoard";
+import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -44,7 +46,9 @@ interface ChatPanelProps {
   jianyingDraftCapability?: JianyingDraftCapability;
   getJianyingDraftResult?: (msg: ChatMessage) => JianyingDraftJobResponse | null;
   isJianyingDraftRunning?: (msg: ChatMessage) => boolean;
+  onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
   busy?: boolean;
+  workflowTaskBoard?: WorkflowTaskBoardModel | null;
 }
 
 function isProgressMessage(message: ChatMessage): boolean {
@@ -104,7 +108,9 @@ export function ChatPanel({
   jianyingDraftCapability,
   getJianyingDraftResult,
   isJianyingDraftRunning,
+  onDownloadArtifact,
   busy,
+  workflowTaskBoard,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const latestVideoScenePackageMessageId = [...messages]
@@ -183,6 +189,7 @@ export function ChatPanel({
                 jianyingDraftCapability={jianyingDraftCapability}
                 jianyingDraftResult={getJianyingDraftResult?.(m) || null}
                 jianyingDraftRunning={Boolean(isJianyingDraftRunning?.(m))}
+                onDownloadArtifact={onDownloadArtifact}
               />
             );
           })
@@ -190,14 +197,21 @@ export function ChatPanel({
         <div ref={endRef} />
       </div>
 
-      <div className="shrink-0 p-4">
-        <Composer
-          onSubmit={onSubmit}
-          referencedMaterials={referencedMaterials}
-          onRemoveReferencedMaterial={onRemoveReferencedMaterial}
-          prefillRequest={composerPrefillRequest}
-          busy={busy}
-        />
+      <div className="relative shrink-0 px-4 pb-4 pt-2">
+        {workflowTaskBoard ? (
+          <div className="relative z-0 mr-auto -mb-4 w-full max-w-[1080px] pl-6 pr-7">
+            <WorkflowTaskBoard key={workflowTaskBoard.workflowId} model={workflowTaskBoard} />
+          </div>
+        ) : null}
+        <div className="relative z-10">
+          <Composer
+            onSubmit={onSubmit}
+            referencedMaterials={referencedMaterials}
+            onRemoveReferencedMaterial={onRemoveReferencedMaterial}
+            prefillRequest={composerPrefillRequest}
+            busy={busy}
+          />
+        </div>
       </div>
     </div>
   );

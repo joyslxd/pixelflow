@@ -122,6 +122,8 @@ export interface ChatMessage {
     pptImages?: PptImagesResult;
     pptFile?: PptFileResult;
     pptDone?: boolean;
+    deliveryDownloadedAt?: string;
+    deliveryDownloadedUrl?: string;
     pptStyle?: string;
     smartPptProjectId?: number | null;
   };
@@ -150,6 +152,7 @@ export interface CanvasState {
   brief?: Brief;
   results: VideoResult[];
   selectedVideo?: VideoResult | null;
+  selectedVideoSourceMessageId?: string;
   qcReport?: {
     passed?: boolean;
     score?: number;

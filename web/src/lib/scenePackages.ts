@@ -70,7 +70,7 @@ export interface SceneGlobalAssetReference extends Record<string, unknown> {
   storyboard_message_id?: string;
 }
 
-export type SceneGlobalAssetReplacementSource = "digital_human" | "image_asset";
+export type SceneGlobalAssetReplacementSource = "digital_human" | "image_asset" | "local_upload";
 
 export interface SceneGlobalAssetReplacement {
   source: SceneGlobalAssetReplacementSource;

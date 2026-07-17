@@ -88,6 +88,22 @@ flowchart TD
   JD --> DONE
 ```
 
+### 3.1 图片、视频、PPT 任务看板
+
+前端在 Composer 后方展示当前主流程的业务任务看板。看板从输入框左上圆角结束位置开始排列并限制最大宽度，输入框保持前景层级；默认折叠，只显示“当前步骤 + 状态”，折叠态由输入框覆盖看板底边和下方圆角。用户展开后才显示全部步骤和任务数量，内容向上滑出、关闭时向下收回。切换对话或重新进入页面时恢复默认折叠，折叠偏好不写入 PowerMem。
+
+| intent | 看板步骤 |
+| --- | --- |
+| `video` | 需求收集 -> 创意规划 -> 创作规划 -> 执行规划 -> 素材生成 -> 视频生成 -> 导出交付 |
+| `ppt` | 需求收集 -> 内容规划 -> 大纲规划 -> 页面生成 -> PPT生成 -> 导出交付 |
+| `image` | 需求收集 -> 创意规划 -> 执行规划 -> 图片生成 -> 导出交付 |
+
+- `workflowProgress` 随 conversation context 保存 intent、根用户消息、`last_phase` 和场景包实时 stage；历史对话没有该字段时由已有 phase、pending job 和 artifact 兼容推导。
+- 视频场景包 job 的 `stage=prepare_scene_packages` 对应“执行规划”，`stage=generate_scene_assets` 对应“素材生成”；场景包确认和全局素材修改也停留在“素材生成”。
+- 直接图片编辑不经过创意方向和 plan.md，因此“创意规划、执行规划”显示“已跳过”。失败、额度不足、表单取消分别显示“需处理、已暂停、已取消”，重试或修订回到受影响步骤。
+- 最终结果生成后“导出交付”显示“待下载”。图片任意最终图、合并成品视频或最终 PPT 文件的明确下载点击会把 `deliveryDownloadedAt/deliveryDownloadedUrl` PATCH 回对应消息 artifact；预览、分镜视频和 PPT 页面图不算交付。新结果消息不会继承旧结果的下载记录。
+- `video_analysis`、未知意图和意图尚未识别时不展示看板。看板只显示业务摘要，不显示内部 phase、job ID、供应商参数或原始 prompt。
+
 ## 4. Agent 职责
 
 | Agent | Controller / Service | 输入 | 输出 | 备注 |
@@ -833,7 +849,7 @@ flowchart TD
 
 ### 14.1 分镜全局素材替换
 
-视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材。该能力会替换当前场景包的 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片，作为后续确认和生成视频的可操作卡片。
+视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材，也支持通过 content-app `/api/upload` 上传单张本地图片。上传成功后前端先展示图片预览和文件名，必须由用户二次确认才执行替换；取消确认时保留原素材，不把上传图片加入资产库。该能力会替换当前场景包的 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片，作为后续确认和生成视频的可操作卡片。
 
 - 角色素材 `characters` 可替换为数字人素材或图片素材；场景 `scenes` 和道具 `props` 只能替换为图片素材。
 - 数字人素材前端直连 `/api/asset/character-assets`，支持 `xnszr`、`zrszr`、`ipsc` 三类；展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`。

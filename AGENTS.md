@@ -95,6 +95,13 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 - 视频场景包确认：当前代码返回 `review_timeout_sec=None`，不做倒计时自动确认。
 - 图片、视频、PPT 的需求表单弹出后，如果用户点击右上角 `X` 关闭，视为取消并终止当前流程；前端需要清空 pending 表单上下文并记录 `form_cancelled`。
 
+前端任务看板规则：
+
+- 图片、视频、PPT 主流程在输入框后方、从左上圆角结束位置开始显示有最大宽度的任务看板；默认折叠，只展示当前步骤和状态，折叠态由前景输入框覆盖看板底边和下方圆角，展开时向上滑出完整链路、关闭时向下收回。`video_analysis`、未知意图和意图尚未识别时不展示。
+- 视频步骤固定为“需求收集 / 创意规划 / 创作规划 / 执行规划 / 素材生成 / 视频生成 / 导出交付”；PPT 为“需求收集 / 内容规划 / 大纲规划 / 页面生成 / PPT生成 / 导出交付”；图片为“需求收集 / 创意规划 / 执行规划 / 图片生成 / 导出交付”。直接图片编辑的“创意规划、执行规划”显示“已跳过”。
+- 看板使用 conversation context 的 `workflowProgress`、pending job 和结果 artifact 恢复；视频场景包 `stage=prepare_scene_packages` 对应“执行规划”，`stage=generate_scene_assets` 对应“素材生成”。
+- “导出交付”只在明确点击最终产物下载入口后完成：多图下载任意一张即可，视频只计算合并成品，PPT 只计算最终 PPT 文件；预览、分镜视频和 PPT 页面图不计入。下载记录写入对应消息 artifact，新结果不能继承旧结果记录。
+
 ## 核心 API
 
 所有 Python 网关对前端或第三方暴露的新接口必须以 `/agent` 开头。当前前端 API client 里 `AGENT_API_PREFIX = "/agent"`，所以 `api.ts` 里的 `FLOW_BASE="/flows"` 最终会拼成 `/agent/flows/...`。
