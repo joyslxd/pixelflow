@@ -181,10 +181,24 @@ test("剪映草稿结果卡提供下载、失败重试且不用伪下载", () =>
 });
 
 test("历史无下载地址的成功草稿卡按失败处理并允许重试", () => {
-  assert.match(messageBubbleSource, /jianyingDraftResult\.status === "succeeded" && !jianyingDraftSucceeded/);
+  assert.match(messageBubbleSource, /isJianyingDraftResultRetryable\(jianyingDraftResult\)/);
   assert.match(messageBubbleSource, /jianyingDraftSucceeded \? "剪映草稿已生成" : "剪映草稿生成失败"/);
   assert.match(messageBubbleSource, /\) : jianyingDraftRetryable \? \(/);
   assert.match(messageBubbleSource, /剪映草稿生成失败，请重新生成。/);
+});
+
+test("失败草稿结果卡绕过旧消息锁定且只受忙碌或服务状态限制", () => {
+  assert.match(chatPanelSource, /artifact\.type === "jianying_draft"/);
+  assert.match(chatPanelSource, /isJianyingDraftResultRetryable\(artifact\.jianyingDraft\)/);
+  assert.match(chatPanelSource, /const keepRecoverableActions = hasRecoverableArtifactAction\(m\)/);
+  assert.match(
+    chatPanelSource,
+    /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions\)\}/,
+  );
+  assert.match(
+    messageBubbleSource,
+    /disabled=\{actionsDisabled \|\| jianyingDraftRunning \|\| jianyingDraftUnavailable\}/,
+  );
 });
 
 test("失败重试、not_configured 终态和 job 级消息幂等均有明确合同", () => {

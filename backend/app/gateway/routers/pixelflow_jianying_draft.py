@@ -72,7 +72,7 @@ def _current_scene_packages(context: Mapping[str, Any]) -> Sequence[Any] | None:
     if isinstance(value, Mapping):
         if value.get("ok") is not True:
             return None
-        value = value.get("scene_packages")
+        value = _mapping_value(value, "scene_packages", "scenePackages")
     return value if isinstance(value, list) else None
 
 
@@ -81,10 +81,12 @@ def _current_generated_scene_videos(context: Mapping[str, Any]) -> Sequence[Any]
     if isinstance(value, Mapping):
         if value.get("ok") is not True:
             return None
-        failed_scenes = value.get("failed_scenes", [])
+        failed_scenes = _mapping_value(value, "failed_scenes", "failedScenes")
+        if failed_scenes is None:
+            failed_scenes = []
         if not isinstance(failed_scenes, list) or failed_scenes:
             return None
-        value = value.get("scene_videos")
+        value = _mapping_value(value, "scene_videos", "sceneVideos")
     else:
         failed_scenes = context.get("failed_scenes", [])
         if not isinstance(failed_scenes, list) or failed_scenes:
@@ -92,9 +94,26 @@ def _current_generated_scene_videos(context: Mapping[str, Any]) -> Sequence[Any]
     return value if isinstance(value, list) else None
 
 
+def _merged_scene_videos(merged_video: Mapping[str, Any]) -> Sequence[Any] | None:
+    value = _mapping_value(merged_video, "scene_videos", "sceneVideos")
+    return value if isinstance(value, list) else None
+
+
 def _normalize_context_scenes(scenes: Sequence[Any]) -> list[JianyingDraftScene] | None:
     try:
-        normalized = [JianyingDraftScene.model_validate(scene) for scene in scenes]
+        normalized = [
+            JianyingDraftScene.model_validate(
+                {
+                    "scene_id": _mapping_value(scene, "scene_id", "sceneId"),
+                    "scene_index": _mapping_value(scene, "scene_index", "sceneIndex"),
+                    "task_id": _mapping_value(scene, "task_id", "taskId"),
+                    "video_url": _mapping_value(scene, "video_url", "videoUrl"),
+                }
+                if isinstance(scene, Mapping)
+                else scene
+            )
+            for scene in scenes
+        ]
     except (TypeError, ValueError):
         return None
     if not normalized:
@@ -111,14 +130,18 @@ def _package_scene_indexes(scene_packages: Sequence[Any]) -> dict[str, int] | No
     for package in scene_packages:
         if not isinstance(package, Mapping):
             return None
-        scene_id = package.get("scene_id")
-        scene_index = package.get("scene_index")
+        scene_id = _mapping_value(package, "scene_id", "sceneId")
+        scene_index = _mapping_value(package, "scene_index", "sceneIndex")
         if not isinstance(scene_id, str) or not scene_id or isinstance(scene_index, bool) or not isinstance(scene_index, int):
             return None
         if scene_id in indexes:
             return None
         indexes[scene_id] = scene_index
     return indexes or None
+
+
+def _scene_identity(scenes: Sequence[JianyingDraftScene]) -> list[tuple[str, int, str, str]]:
+    return sorted((scene.scene_id, scene.scene_index, scene.task_id or "", str(scene.video_url)) for scene in scenes)
 
 
 def _matches_current_storyboard(conversation: Any, request: JianyingDraftStartRequest) -> bool:
@@ -134,25 +157,28 @@ def _matches_current_storyboard(conversation: Any, request: JianyingDraftStartRe
 
     scene_packages = _current_scene_packages(context)
     generated_scene_videos = _current_generated_scene_videos(context)
-    if scene_packages is None or generated_scene_videos is None:
+    merged_scene_videos = _merged_scene_videos(merged_video)
+    if scene_packages is None or generated_scene_videos is None or merged_scene_videos is None:
         return False
 
     package_indexes = _package_scene_indexes(scene_packages)
     current_scenes = _normalize_context_scenes(generated_scene_videos)
-    if package_indexes is None or current_scenes is None:
+    merged_scenes = _normalize_context_scenes(merged_scene_videos)
+    if package_indexes is None or current_scenes is None or merged_scenes is None:
         return False
 
     current_indexes = {scene.scene_id: scene.scene_index for scene in current_scenes}
     if package_indexes != current_indexes:
+        return False
+    current_identity = _scene_identity(current_scenes)
+    if _scene_identity(merged_scenes) != current_identity:
         return False
 
     expected_version_id = compute_storyboard_version_id(current_scenes)
     if request.storyboard_version_id != expected_version_id:
         return False
 
-    current_identity = sorted((scene.scene_id, scene.scene_index, scene.task_id or "", str(scene.video_url)) for scene in current_scenes)
-    request_identity = sorted((scene.scene_id, scene.scene_index, scene.task_id or "", str(scene.video_url)) for scene in request.scenes)
-    return request_identity == current_identity
+    return _scene_identity(request.scenes) == current_identity
 
 
 @router.get("/capability", response_model=JianyingDraftCapability)

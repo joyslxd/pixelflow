@@ -5,7 +5,7 @@ import type { ChatMessage } from "@/lib/chat";
 import type { VideoResult } from "@/lib/types";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
-import type { JianyingDraftCapability, JianyingDraftJobResponse } from "@/lib/jianyingDraft";
+import { isJianyingDraftResultRetryable, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
@@ -63,6 +63,7 @@ function hasRecoverableArtifactAction(message: ChatMessage): boolean {
   if (artifact.mergedVideo && !artifact.mergedVideo.ok && Boolean(artifact.generatedSceneVideos?.scene_videos.length)) return true;
   if (artifact.pptSummary && !artifact.pptSummary.ok) return true;
   if (artifact.pptFile && !artifact.pptFile.ok) return true;
+  if (artifact.type === "jianying_draft" && isJianyingDraftResultRetryable(artifact.jianyingDraft)) return true;
   return false;
 }
 

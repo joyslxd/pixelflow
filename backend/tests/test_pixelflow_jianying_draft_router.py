@@ -107,15 +107,21 @@ def _current_video_context(
     scenes: list[dict[str, object]] | None = None,
     *,
     merged_ok: bool = True,
+    merged_scenes: list[dict[str, object]] | None = None,
+    include_merged_scenes: bool = True,
     generated_ok: bool = True,
     failed_scenes: list[dict[str, object]] | None = None,
     camel_case: bool = False,
 ) -> dict[str, object]:
     current_scenes = deepcopy(scenes or _scenes())
+    current_merged_scenes = deepcopy(merged_scenes if merged_scenes is not None else current_scenes)
     scene_packages = [{"scene_id": scene["scene_id"], "scene_index": scene["scene_index"]} for scene in current_scenes]
+    merged_video = {"ok": merged_ok}
+    if include_merged_scenes:
+        merged_video["scene_videos"] = current_merged_scenes
     if camel_case:
         return {
-            "mergedVideo": {"ok": merged_ok},
+            "mergedVideo": merged_video,
             "videoScenePackages": {"ok": True, "scene_packages": scene_packages},
             "generatedSceneVideos": {
                 "ok": generated_ok,
@@ -124,7 +130,7 @@ def _current_video_context(
             },
         }
     return {
-        "merged_video": {"ok": merged_ok},
+        "merged_video": merged_video,
         "scene_packages": scene_packages,
         "generated_scene_videos": current_scenes,
         "failed_scenes": failed_scenes or [],
@@ -277,8 +283,32 @@ def test_jianying_draft_start_accepts_current_snapshot_context():
     [
         ({}, _payload()),
         (_current_video_context(merged_ok=False), _payload()),
+        (_current_video_context(include_merged_scenes=False), _payload()),
         (_current_video_context(generated_ok=False, camel_case=True), _payload()),
         (_current_video_context(failed_scenes=[{"scene_id": "scene-1"}]), _payload()),
+        (
+            _current_video_context(
+                [
+                    {
+                        **_scenes()[0],
+                        "video_url": "https://cdn.example.com/scene-1-v2.mp4",
+                        "task_id": "video-task-1-v2",
+                    },
+                    _scenes()[1],
+                ],
+                merged_scenes=_scenes(),
+            ),
+            _payload(
+                [
+                    {
+                        **_scenes()[0],
+                        "video_url": "https://cdn.example.com/scene-1-v2.mp4",
+                        "task_id": "video-task-1-v2",
+                    },
+                    _scenes()[1],
+                ]
+            ),
+        ),
         (_current_video_context(), _payload(_scenes()[:1])),
         (
             _current_video_context(),
@@ -337,8 +367,10 @@ def test_jianying_draft_start_accepts_current_snapshot_context():
     ids=(
         "empty-context",
         "merged-failed",
+        "merged-snapshot-missing",
         "generated-failed",
         "failed-scenes",
+        "old-merge-new-generated",
         "missing-scene",
         "extra-scene",
         "replaced-url",

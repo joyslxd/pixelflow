@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "JIANYING_DRAFT_TEST_MODULE must point to the compiled jian
 const {
   JianyingDraftStartGuard,
   draftButtonState,
+  isJianyingDraftResultRetryable,
   isJianyingDraftSucceededResultValid,
   jianyingDraftPublicErrorMessage,
   patchJianyingDraftTargetConversation,
@@ -146,6 +147,25 @@ test("缺少草稿下载地址不被视为成功，允许重新生成", () => {
     { enabled: true, label: "重新生成剪映草稿", reason: "剪映草稿下载地址无效，请重新生成" },
   );
   assert.equal(isJianyingDraftSucceededResultValid({ status: "succeeded", download_url: null, expire_at: null }), false);
+});
+
+test("失败、超时和无效成功草稿可恢复，有效成功仅下载", () => {
+  const now = new Date("2026-07-16T00:00:00.000Z");
+  assert.equal(isJianyingDraftResultRetryable({ status: "failed", download_url: null, expire_at: null }, now), true);
+  assert.equal(isJianyingDraftResultRetryable({ status: "timeout", download_url: null, expire_at: null }, now), true);
+  assert.equal(isJianyingDraftResultRetryable({ status: "succeeded", download_url: null, expire_at: null }, now), true);
+  assert.equal(
+    isJianyingDraftResultRetryable(
+      {
+        status: "succeeded",
+        download_url: "https://cdn.example.com/draft.zip",
+        expire_at: "2026-07-16T01:00:00.000Z",
+      },
+      now,
+    ),
+    false,
+  );
+  assert.equal(isJianyingDraftResultRetryable({ status: "running", download_url: null, expire_at: null }, now), false);
 });
 
 test("剪映草稿公开错误文案不包含供应商或网关异常详情", () => {

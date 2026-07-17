@@ -7,7 +7,7 @@ import { canAcceptImageResult } from "@/lib/imageReview";
 import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
 import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
-import { draftButtonState, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
+import { draftButtonState, isJianyingDraftResultRetryable, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
@@ -295,13 +295,7 @@ export function MessageBubble({
   const jianyingDraftUnavailable = !jianyingDraftCapability?.available;
   const jianyingDraftDownloadUrl = jianyingDraftResult?.download_url?.startsWith("https://") ? jianyingDraftResult.download_url : "";
   const jianyingDraftSucceeded = isJianyingDraftSucceededResultValid(jianyingDraftResult) && Boolean(jianyingDraftDownloadUrl);
-  const jianyingDraftRetryable = Boolean(
-    jianyingDraftResult && (
-      jianyingDraftResult.status === "failed"
-      || jianyingDraftResult.status === "timeout"
-      || (jianyingDraftResult.status === "succeeded" && !jianyingDraftSucceeded)
-    ),
-  );
+  const jianyingDraftRetryable = isJianyingDraftResultRetryable(jianyingDraftResult);
   const videoResultActionDisabled = Boolean(actionsDisabled || jianyingDraftRunning);
   const pptImagePages = pptPages(msg);
   const allPptPagesReady = pptPagesReady(msg);

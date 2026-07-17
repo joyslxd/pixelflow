@@ -227,6 +227,15 @@ export function isJianyingDraftSucceededResultValid(
   return !Number.isFinite(expireAt) || expireAt > now.getTime();
 }
 
+export function isJianyingDraftResultRetryable(
+  result: (Pick<JianyingDraftJobResponse, "status" | "expire_at"> & Partial<Pick<JianyingDraftJobResponse, "download_url">>) | null | undefined,
+  now = new Date(),
+): boolean {
+  if (!result) return false;
+  if (result.status === "failed" || result.status === "timeout") return true;
+  return result.status === "succeeded" && !isJianyingDraftSucceededResultValid(result, now);
+}
+
 /** Resolves the final-video draft action without coupling it to Workspace state. */
 export function draftButtonState({
   providerAvailable,
