@@ -144,6 +144,12 @@ def _scene_identity(scenes: Sequence[JianyingDraftScene]) -> list[tuple[str, int
     return sorted((scene.scene_id, scene.scene_index, scene.task_id or "", str(scene.video_url)) for scene in scenes)
 
 
+def _scene_render_identity(scenes: Sequence[JianyingDraftScene]) -> list[tuple[str, int, str]]:
+    """比较合并快照时忽略合并接口不会回传的上游任务 ID。"""
+
+    return sorted((scene.scene_id, scene.scene_index, str(scene.video_url)) for scene in scenes)
+
+
 def _matches_current_storyboard(conversation: Any, request: JianyingDraftStartRequest) -> bool:
     """仅接受已持久化且完整成功的当前视频分镜版本。"""
 
@@ -171,7 +177,7 @@ def _matches_current_storyboard(conversation: Any, request: JianyingDraftStartRe
     if package_indexes != current_indexes:
         return False
     current_identity = _scene_identity(current_scenes)
-    if _scene_identity(merged_scenes) != current_identity:
+    if _scene_render_identity(merged_scenes) != _scene_render_identity(current_scenes):
         return False
 
     expected_version_id = compute_storyboard_version_id(current_scenes)

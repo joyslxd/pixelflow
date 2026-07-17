@@ -29,9 +29,11 @@ class JianyingDraftSkill(Protocol):
 
     async def generate(self, request: JianyingDraftRequest) -> JianyingDraftResult: ...
 
+    async def aclose(self) -> None: ...
+
 
 class UnavailableJianyingDraftSkill:
-    """真实 Provider 尚未接入时的安全默认实现。"""
+    """Provider 被关闭或配置不完整时的安全实现。"""
 
     async def capability(self) -> JianyingDraftCapability:
         return JianyingDraftCapability(available=False, reason="剪映草稿服务待接入")
@@ -42,10 +44,13 @@ class UnavailableJianyingDraftSkill:
             message="剪映草稿服务待接入",
         )
 
+    async def aclose(self) -> None:
+        return None
+
 
 class DisabledJianyingDraftSkill(UnavailableJianyingDraftSkill):
     """内部开关关闭时装配的安全 Skill。"""
 
 
 class MissingProviderJianyingDraftSkill(UnavailableJianyingDraftSkill):
-    """已开启但真实 Provider 尚未接入时装配的安全 Skill。"""
+    """已开启但 Provider 域名或 token 缺失时装配的安全 Skill。"""

@@ -2,18 +2,20 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在最终视频结果阶段增加可恢复、可幂等的剪映草稿生成流程，并在真实第三方接口尚未接入时安全展示禁用入口。
+> 本文件保留第一阶段占位实现的历史计划。真实 Provider 的最终合同与实现以 `docs/superpowers/specs/2026-07-16-jianying-draft-flow-design.md` 和当前源码为准。
 
-**Architecture:** PixelFlow 新增独立剪映草稿领域模型、Service、Skill 和 `/agent/flows/video/jianying-draft` Router；第三方差异全部封装在 Skill Provider 中，当前使用 unavailable 实现。前端基于有序分镜视频计算稳定版本 ID，把 pending job 和按版本结果保存在 conversation context，并在最终视频卡片中展示第三个操作按钮和独立下载结果消息。
+**Goal:** 在最终视频结果阶段增加可恢复、可幂等的剪映草稿生成流程；真实 Provider 负责创建/轮询任务、下载多个 JSON、打包 ZIP 并上传 TOS。
+
+**Architecture:** PixelFlow 使用独立剪映草稿领域模型、Service、Skill 和 `/agent/flows/video/jianying-draft` Router；第三方差异全部封装在 `HttpJianyingDraftSkill`。前端基于有序分镜视频计算稳定版本 ID，把 pending job 和按版本结果保存在 conversation context，并在最终视频卡片中展示草稿按钮和独立下载结果消息。
 
 **Tech Stack:** Python 3.12、FastAPI、Pydantic、asyncio、pytest、React 19、TypeScript、Vite、Node test、Tailwind CSS。
 
 ## Global Constraints
 
 - 所有新 Python 网关接口必须以 `/agent` 开头。
-- 当前不得配置或调用任何未提供的第三方剪映草稿 URL、鉴权、请求字段和响应字段。
+- 第三方字段只能由 `HttpJianyingDraftSkill` 映射，不能泄漏到前端或视频主流程。
 - 当前不得生成伪剪映草稿或普通占位 ZIP。
-- Provider 未接入时，按钮必须展示但禁用，提示固定为“剪映草稿服务待接入”。
+- Provider 配置缺失时，按钮必须展示但禁用，提示固定为“剪映草稿服务待接入”。
 - 草稿输入只能使用当前版本全部成功的分镜视频，不能使用合并视频替代。
 - 同一 `conversation_id + storyboard_version_id` 只能存在一个有效任务。
 - 分镜变化必须产生新版本，旧草稿可以下载但不能被当前版本复用。
@@ -45,7 +47,7 @@
 
 - `backend/app/gateway/routers/__init__.py`：导出新 Router。
 - `backend/app/gateway/app.py`：注册新 Router。
-- `backend/config.dev.yml`、`backend/config.prod.yml`：增加默认关闭的内部能力配置，不增加第三方字段。
+- `backend/config.dev.yml`、`backend/config.prod.yml`：配置 Provider 域名、轮询、超时和重试参数；敏感 token 由部署环境变量注入。
 - `web/src/lib/api.ts`：剪映草稿 API DTO 和调用方法。
 - `web/src/lib/chat.ts`：草稿 artifact、pending job 和结果记录类型。
 - `web/src/pages/WorkspacePage.tsx`：版本计算、pending job 持久化、恢复、轮询和结果消息。
@@ -570,9 +572,9 @@ git commit -m "功能：增加剪映草稿生成与下载入口"
 
 - 剪映草稿 Agent 和 `JianyingDraftSkill` 的作用。
 - 三个 `/agent/flows/video/jianying-draft` 接口。
-- 当前 Provider 未接入、按钮置灰的行为。
+- Provider 配置缺失时按钮置灰的行为，以及配置完整时真实 HTTP Provider 的创建、轮询、归档和上传流程。
 - 版本 ID、幂等、对话恢复、30 分钟超时和流程结束后入口。
-- 第三方接口到位后只实现 Provider，并同步新增独立第三方调用记录；当前不把它错误记录成 content-app 接口。
+- 第三方创建/查询接口独立记录为外部 Provider；最终 ZIP 复用的 content-app `/api/upload` 同步记录到 `CONTENT_APP_API_CALLS.md`。
 - PowerMem 使用 `experience/infer=False`。
 
 - [ ] **Step 2: 运行后端目标测试**

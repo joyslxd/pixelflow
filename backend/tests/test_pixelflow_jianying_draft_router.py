@@ -278,6 +278,42 @@ def test_jianying_draft_start_accepts_current_snapshot_context():
     assert len(service.requests) == 1
 
 
+def test_jianying_draft_start_accepts_merge_snapshot_without_upstream_task_ids():
+    class CapturingService:
+        def __init__(self) -> None:
+            self.requests: list[JianyingDraftRequest] = []
+
+        async def start(
+            self,
+            request: JianyingDraftRequest,
+            *,
+            retry_failed: bool = False,
+        ) -> JianyingDraftResult:
+            self.requests.append(request)
+            return JianyingDraftResult(
+                status=JianyingDraftStatus.QUEUED,
+                job_id="merge-snapshot-without-task-ids",
+                conversation_id=request.conversation_id,
+                storyboard_version_id=request.storyboard_version_id,
+            )
+
+    merged_scenes = [{key: value for key, value in scene.items() if key != "task_id"} for scene in _scenes()]
+    service = CapturingService()
+    app = _make_router_app(service=service)
+    _create_conversation(
+        app.state.pixelflow_task_store,
+        conversation_id="conversation-1",
+        user=_stable_user(),
+        context=_current_video_context(merged_scenes=merged_scenes),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/agent/flows/video/jianying-draft/start", json=_payload())
+
+    assert response.status_code == 200
+    assert len(service.requests) == 1
+
+
 @pytest.mark.parametrize(
     ("context", "payload"),
     [

@@ -23,7 +23,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
 | 视频修改循环 | 可用 | 支持 QAAgent QC 质检、按受影响场景重生并重新合并 |
-| 剪映草稿 Agent | 框架已就绪，Provider 待接入 | 最终视频可生成剪映草稿的异步、版本化入口已具备；当前按钮可见但禁用，不发起第三方调用、不伪造 ZIP 或下载地址 |
+| 剪映草稿 Agent | 可用 | 最终视频可异步创建第三方剪映草稿任务，轮询多个 JSON 结果，服务端打包 ZIP 并通过 content-app 上传到 TOS |
 | PPT 制作 | 可用 | 支持 PPT 表单、大纲确认/修改、页面图片生成、PPT 文件生成和重新生成附件 |
 | PowerMem 语义记忆 | 可用 | 通过 HTTP sidecar 读取用户/品牌长期偏好，并记录 Agent 经验/Skill 沉淀 |
 | 额度不足暂停恢复 | 可用 | content-app/Borgrise 返回额度不足时暂停，用户充值后可回同一对话继续 |
@@ -90,7 +90,7 @@ flowchart TD
   L --> M["按 Seedance Prompt 和视频合同串行创建场景视频任务"]
   M --> N["按顺序合并视频"]
   N --> O["视频结果确认或修改循环"]
-  O -. "可选：Provider 接入后" .-> JD["剪映草稿 Agent\n生成可下载草稿"]
+  O -. "可选生成" .-> JD["剪映草稿 Agent\n生成可下载草稿 ZIP"]
   F --> P["返回分析结果"]
   Q --> R["SmartPPT 生成/修改大纲"]
   R --> S["大纲转JSON + 生成页面图片"]
@@ -181,9 +181,9 @@ flowchart TD
 
 剪映草稿能力位于最终视频结果确认阶段，输入只能是当前版本全部成功、按 `scene_index` 排序且 URL 为 HTTPS 的分镜视频，不能用合并视频替代。`storyboard_version_id` 由 `scene_id`、顺序、视频 URL 和视频 task ID 的规范化摘要计算；同一 `conversation_id + storyboard_version_id` 复用运行中或未过期成功 job，失败或超时必须由用户以 `retry_failed=true` 明确重试。已过期成功结果可以重新生成，历史草稿不会被新版本复用。
 
-后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`UnavailableJianyingDraftSkill` 是当前安全默认 Client。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
+后端的 `pixelflow_jianying_draft.py` 是 Controller，`JianyingDraftService` 是负责校验、幂等、状态转换、30 分钟超时和容量清理的业务 Service，`JianyingDraftSkill` 是稳定的第三方 Client 接口，`HttpJianyingDraftSkill` 是真实 HTTP 实现。`JianyingDraftResult` 只暴露状态、job、版本、下载地址、文件名、过期时间和公开消息等 typed 字段，不暴露第三方 `raw` 响应或内部异常。
 
-当前没有第三方合同，Provider 默认 unavailable。前端仍展示“生成剪映草稿”按钮，但禁用并以精确 tooltip“剪映草稿服务待接入”说明原因；不会调用 `/start`，不会构造 ZIP、下载 URL 或未定义的 Provider 字段。Provider 接入后只新增真实 Provider 实现和独立第三方调用记录；除非接口实际属于 content-app，否则不要写入 `CONTENT_APP_API_CALLS.md`。
+真实 Provider 先调用 `POST /api/jianying/draft/tasks` 创建任务，再每 2 秒调用 `POST /api/jianying/draft/tasks/result` 查询；`20201/20202` 表示继续等待，`200` 的 `data` 是多个草稿 JSON 的 HTTPS URL。PixelFlow 立即下载并校验这些 JSON，尽量保留第三方原文件名生成一个 ZIP，再复用 content-app `/api/upload` 上传到 TOS，前端只接收最终 ZIP 的 HTTPS 下载地址。Provider 域名、超时和重试次数从开发/生产配置读取；固定 token 必须由部署环境变量 `PIXELFLOW_JIANYING_DRAFT_TOKEN` 注入，配置不完整时装配 unavailable 实现并禁用按钮。
 
 最终视频尚未结束时，结果卡片有“无意见，结束”“生成剪映草稿”“提出修改意见”三个操作。草稿生成中会锁定这三项视频操作，但不锁定对话输入；前端每 2 秒轮询，最长 30 分钟。pending job、按版本保存的结果和恢复错误通过来源对话的原子 PATCH 持久化，刷新或切换对话后只恢复轮询原 job，结果消息按 job ID 去重。用户结束视频流程后，草稿历史下载或重新生成入口仍保留，成功也不会自动下载。
 

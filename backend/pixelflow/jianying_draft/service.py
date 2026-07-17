@@ -114,6 +114,9 @@ class JianyingDraftService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        close_skill = getattr(self._skill, "aclose", None)
+        if callable(close_skill):
+            await close_skill()
 
     async def start(
         self,
@@ -428,3 +431,4 @@ class JianyingDraftService:
             )
             if job.result.status in _TERMINAL_STATUSES:
                 job.completed_at = datetime.now()
+                job.task = None

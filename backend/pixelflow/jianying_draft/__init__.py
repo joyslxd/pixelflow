@@ -4,6 +4,7 @@ from .config import (
     JianyingDraftRuntimeConfig,
     load_jianying_draft_runtime_config,
 )
+from .http_skill import HttpJianyingDraftSkill
 from .models import (
     JianyingDraftRequest,
     JianyingDraftResult,
@@ -23,6 +24,7 @@ from .skill import (
 
 __all__ = [
     "DisabledJianyingDraftSkill",
+    "HttpJianyingDraftSkill",
     "JianyingDraftRequest",
     "JianyingDraftResult",
     "JianyingDraftRuntimeConfig",

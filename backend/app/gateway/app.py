@@ -60,19 +60,29 @@ logger = logging.getLogger(__name__)
 
 
 def _build_jianying_draft_skill(runtime_config):
-    """按内部开关选择安全装配路径，真实 Provider 后续仅在此边界接入。"""
+    """按内部开关与 Provider 配置选择剪映草稿 Skill。"""
 
     from pixelflow.jianying_draft import (
         DisabledJianyingDraftSkill,
+        HttpJianyingDraftSkill,
         MissingProviderJianyingDraftSkill,
     )
 
     if not runtime_config.enabled:
         return DisabledJianyingDraftSkill()
 
-    logger.warning(
-        "PixelFlow Jianying draft is enabled but no Provider is configured; using unavailable skill"
-    )
+    if runtime_config.base_url and runtime_config.token:
+        return HttpJianyingDraftSkill(
+            base_url=runtime_config.base_url,
+            token=runtime_config.token,
+            poll_interval_seconds=runtime_config.poll_interval_seconds,
+            max_retries=runtime_config.max_retries,
+            connect_timeout_seconds=runtime_config.connect_timeout_seconds,
+            create_read_timeout_seconds=runtime_config.create_read_timeout_seconds,
+            query_read_timeout_seconds=runtime_config.query_read_timeout_seconds,
+        )
+
+    logger.warning("PixelFlow Jianying draft is enabled but Provider URL/token is incomplete; using unavailable skill")
     return MissingProviderJianyingDraftSkill()
 
 
@@ -127,7 +137,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
-        # 真实 Provider 尚未接入时仍只注入不可用实现，不虚构任何第三方连接配置。
+        # Provider 关闭或配置缺失时仍注入安全不可用实现。
         _configure_jianying_draft_service(app)
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
@@ -158,9 +168,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
-            pixelflow_jianying_draft_service = getattr(
-                app.state, "pixelflow_jianying_draft_service", None
-            )
+            pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
             if pixelflow_jianying_draft_service is not None:
                 await pixelflow_jianying_draft_service.aclose()
                 logger.info("PixelFlow Jianying draft service closed")
