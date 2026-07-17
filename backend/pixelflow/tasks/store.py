@@ -482,12 +482,8 @@ class PixelFlowTaskStore(Protocol):
     async def upsert_session_context(self, task_id: str, context: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord: ...
     async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None: ...
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
-    ) -> PixelFlowConversationRecord | None: ...
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None: ...
     async def patch_jianying_draft_conversation_context(
         self,
         conversation_id: str,
@@ -509,13 +505,9 @@ class PixelFlowTaskStore(Protocol):
         content: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> PixelFlowConversationMessageRecord | None: ...
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]: ...
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]: ...
     async def append_trace_event(self, conversation_id: str, event: str, data: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]: ...
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]: ...
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]: ...
 
 
 def _row_to_record(row: PixelFlowTaskRow) -> PixelFlowTaskRecord:
@@ -683,16 +675,9 @@ class SQLPixelFlowTaskStore:
             await session.refresh(row)
             return _trace_event_to_dict(row)
 
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]:
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
         async with self._sf() as session:
-            stmt = (
-                select(PixelFlowConversationTraceEventRow)
-                .where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id)
-                .order_by(PixelFlowConversationTraceEventRow.id.asc())
-                .limit(limit)
-            )
+            stmt = select(PixelFlowConversationTraceEventRow).where(PixelFlowConversationTraceEventRow.conversation_id == conversation_id).order_by(PixelFlowConversationTraceEventRow.id.asc()).limit(limit)
             if user_id is not None:
                 stmt = stmt.where(PixelFlowConversationTraceEventRow.user_id == user_id)
             if after_id is not None:
@@ -788,15 +773,9 @@ class SQLPixelFlowTaskStore:
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _conversation_row_to_record(row) if row else None
 
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]:
         async with self._sf() as session:
-            stmt = (
-                select(PixelFlowConversationRow)
-                .order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc())
-                .limit(limit + 1)
-            )
+            stmt = select(PixelFlowConversationRow).order_by(PixelFlowConversationRow.created_at.desc(), PixelFlowConversationRow.conversation_id.desc()).limit(limit + 1)
             if user_id is not None:
                 stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
             parsed = _parse_cursor(cursor)
@@ -816,18 +795,12 @@ class SQLPixelFlowTaskStore:
             next_cursor = _conversation_cursor(records[-1]) if len(rows) > limit and records else None
             return records, next_cursor
 
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
-    ) -> PixelFlowConversationRecord | None:
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
         lock = _conversation_lock(self._conversation_locks, conversation_id)
         async with lock:
             async with self._sf() as session:
                 async with _conversation_write_transaction(session):
-                    stmt = (
-                        select(PixelFlowConversationRow)
-                        .where(PixelFlowConversationRow.conversation_id == conversation_id)
-                        .with_for_update()
-                    )
+                    stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id).with_for_update()
                     if user_id is not None:
                         stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
                     row = (await session.execute(stmt)).scalar_one_or_none()
@@ -864,11 +837,7 @@ class SQLPixelFlowTaskStore:
         async with lock:
             async with self._sf() as session:
                 async with _conversation_write_transaction(session):
-                    stmt = (
-                        select(PixelFlowConversationRow)
-                        .where(PixelFlowConversationRow.conversation_id == conversation_id)
-                        .with_for_update()
-                    )
+                    stmt = select(PixelFlowConversationRow).where(PixelFlowConversationRow.conversation_id == conversation_id).with_for_update()
                     if user_id is not None:
                         stmt = stmt.where(PixelFlowConversationRow.user_id == user_id)
                     row = (await session.execute(stmt)).scalar_one_or_none()
@@ -932,11 +901,7 @@ class SQLPixelFlowTaskStore:
                 stmt = stmt.where(PixelFlowConversationMessageRow.user_id == user_id)
             rows = (await session.execute(stmt)).scalars().all()
             row = next(
-                (
-                    item
-                    for item in rows
-                    if item.message_id == message_id or (item.payload_json or {}).get("client_message_id") == message_id
-                ),
+                (item for item in rows if item.message_id == message_id or (item.payload_json or {}).get("client_message_id") == message_id),
                 None,
             )
             if row is None:
@@ -952,9 +917,7 @@ class SQLPixelFlowTaskStore:
             await session.refresh(row)
             return _conversation_message_row_to_record(row)
 
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]:
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]:
         async with self._sf() as session:
             stmt = (
                 select(PixelFlowConversationMessageRow)
@@ -1040,9 +1003,7 @@ class MemoryPixelFlowTaskStore:
         self._trace_events.setdefault(conversation_id, []).append(row)
         return row
 
-    async def list_trace_events(
-        self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]:
+    async def list_trace_events(self, conversation_id: str, *, user_id: str | None = None, after_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
         rows = list(self._trace_events.get(conversation_id, []))
         if after_id is not None:
             rows = [r for r in rows if r["id"] > after_id]
@@ -1090,9 +1051,7 @@ class MemoryPixelFlowTaskStore:
             return record
         return None
 
-    async def list_conversations(
-        self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None
-    ) -> tuple[list[PixelFlowConversationRecord], str | None]:
+    async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]:
         rows = [r for r in self._conversations.values() if user_id is None or r.user_id == user_id]
         rows = sorted(rows, key=lambda r: (r.created_at, r.conversation_id), reverse=True)
         parsed = _parse_cursor(cursor)
@@ -1104,9 +1063,7 @@ class MemoryPixelFlowTaskStore:
         next_cursor = _conversation_cursor(page[-1]) if len(rows) > limit and page else None
         return page, next_cursor
 
-    async def update_conversation(
-        self, conversation_id: str, *, user_id: str | None = None, **fields: Any
-    ) -> PixelFlowConversationRecord | None:
+    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
         lock = _conversation_lock(self._conversation_locks, conversation_id)
         async with lock:
             record = await self.get_conversation(conversation_id, user_id=user_id)
@@ -1152,12 +1109,7 @@ class MemoryPixelFlowTaskStore:
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         existing = next(
-            (
-                item
-                for rows in self._conversation_messages.values()
-                for item in rows
-                if item.message_id == message.message_id
-            ),
+            (item for rows in self._conversation_messages.values() for item in rows if item.message_id == message.message_id),
             None,
         )
         if existing is not None:
@@ -1182,12 +1134,7 @@ class MemoryPixelFlowTaskStore:
     ) -> PixelFlowConversationMessageRecord | None:
         rows = self._conversation_messages.get(conversation_id, [])
         record = next(
-            (
-                item
-                for item in rows
-                if (user_id is None or item.user_id == user_id)
-                and (item.message_id == message_id or item.payload.get("client_message_id") == message_id)
-            ),
+            (item for item in rows if (user_id is None or item.user_id == user_id) and (item.message_id == message_id or item.payload.get("client_message_id") == message_id)),
             None,
         )
         if record is None:
@@ -1201,9 +1148,7 @@ class MemoryPixelFlowTaskStore:
             conversation.updated_at = _dt(_now())
         return record
 
-    async def list_conversation_messages(
-        self, conversation_id: str, *, user_id: str | None = None, limit: int = 200
-    ) -> list[PixelFlowConversationMessageRecord]:
+    async def list_conversation_messages(self, conversation_id: str, *, user_id: str | None = None, limit: int = 200) -> list[PixelFlowConversationMessageRecord]:
         rows = list(self._conversation_messages.get(conversation_id, []))
         if user_id is not None:
             rows = [r for r in rows if r.user_id == user_id]
