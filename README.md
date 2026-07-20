@@ -18,7 +18,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
-| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频 Plan 同时生成权威分镜蓝图和角色/场景/道具 `asset_manifest`，支持版本化修订与回退 |
+| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频先生成结构与资产分析，再用项目内 `seedance-prompt` Skill 专门写作全部分镜，最终同时发布权威分镜蓝图和角色/场景/道具 `asset_manifest`，支持版本化修订与回退 |
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
@@ -281,8 +281,9 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 视频模型来自 `/api/modelParamConfig/listByCategory/video_generate`，前端展示 content-app 返回的所有启用 Seedance 模型；系统推荐默认解析成 `seedance-2.0`，并向用户展示实际结果。这里的 2.0 只是推荐默认值，不是 Seedance Prompt Skill 的调用开关。
 - 模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准，PixelFlow 不根据型号名称自行推断能力。
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。表单不展示图片比例和清晰度，只把所选模型及其能力范围提交给 Plan Agent。
-- Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`，并应用 Seedance Skill 自主规划 `scene_blueprints`。每个蓝图包含叙事职能、精确时长、故事线、镜头描述、旁白、转场和资产需求；不再预先按 10 秒机械切分。
-- Plan 阶段会逐镜校验镜头描述是否完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束，并校验局部秒段从 0 秒连续覆盖到当前分镜时长。初次候选缺项时只把分镜编号与缺失维度交给 LLM 定向修正 1 次，且后端只采纳失败分镜修正后的 `shot_description`；仍不完整时仅用增强规则模板替换不合格镜头描述，不改写时长、故事线、旁白、转场或资产需求。Plan 修订阶段也使用同一专用修正方式，修正失败时保留当前版本。
+- Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`，并先自主规划结构、精确时间线、资产需求和 `asset_manifest`；稳定 `asset_id` 生成后，再由 `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` 对全部 `scene_blueprints` 做一次专用分镜写作。每个蓝图包含叙事职能、精确时长、故事线、镜头描述、旁白、转场和资产需求；不再预先按 10 秒机械切分。
+- Seedance Plan 写作显式接收用户确认的 `video_model`、完整创作合同、当前 Plan、全部分镜、稳定资产 ID、用户要求和附件，只允许改写标题、故事线、镜头描述、旁白与转场。每镜描述是一整段中文，内部只用连续的 `0-N秒` 整数时间码，覆盖地点、主体、动作、景别、运镜、光影、声音和收束；只引用该镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次解释用途且最多 9 张。分镜数量、顺序、时间线、模型、画幅、卖点、转化目标和资产集合均不可修改；非法响应整批拒绝并携带校验错误重试一次。
+- Plan 修订（包括手工编辑重新对齐）在结构与资产清单通过校验后也执行同一个 Seedance 专用写作阶段，并携带当前版本、修订候选、用户意见、附件和上下文；最终确认版本仍是后续场景包唯一依据。
 - 历史已审核 Plan 若仍使用全局镜头时间段，场景包恢复时会确定性换算为当前分镜的局部 `0-N秒`，不会因新校验阻断旧对话；新 Plan 仍按严格局部时间轴发布。
 - 优先级固定为“用户确认值 > LLM 预填值 > 系统默认值”。Plan、场景包、场景资产和场景视频只读取当前激活 Plan 的最终 `creation_contract`。
 - PowerMem 长期记忆只作为 LLM 的内部决策上下文，不得把“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文展示在 plan.md 中。
@@ -317,7 +318,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - `shot_description.text` 的时间范围必须使用秒级表达，例如 `0-10秒`，不要使用 `ms`、`毫秒` 或 `00:00.000`。
 - 用户在前端镜头描述框输入 `@` 后，可以选择角色、场景、道具图片；前端保存 `mentions`，后端生成视频时提取对应图片 URL 作为参考图。
 - 每个视频场景片段最多 9 张参考图。
-- 镜头描述由 `backend/pixelflow/generate/seedance_prompt.py` 应用项目内 `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 会显式携带用户确认的 `video_model`，并继续保留 `@asset_id` 和 mentions 图片 URL。
+- Plan 分镜写作与场景包执行提示词都应用项目内 `skills/seedance-prompt/SKILL.md`。该 Skill 对 content-app 实时启用的全部 Seedance 系列模型通用；调用层始终显式携带用户确认的 `video_model`，Skill 不改写模型，实时能力不兼容时由调用层提示。场景包继续严格保留最终 Plan 中的 `@asset_id`、正式资产名称和 mentions 图片 URL。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 记录 Skill 的输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 角色三视图、场景图和道具图严格按 `asset_manifest` 一项生成一张并只保存一个 URL，同一 `asset_id` 跨分镜只生成一次；实际生图提示词同时包含清单的正式名称、文字说明和生图要求，避免 `image_prompt` 未重复某项外观约束时丢失 Plan 说明；统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`。分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。

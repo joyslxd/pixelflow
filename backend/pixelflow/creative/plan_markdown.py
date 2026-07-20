@@ -20,6 +20,7 @@ from pixelflow.creative.duration import scene_time_ranges
 from pixelflow.creative.plan_llm import (
     PLAN_LLM_MODEL_NAME,
     ModelFactory,
+    author_seedance_plan_payload,
     generate_plan_payload,
     repair_plan_asset_requirements,
     repair_plan_shot_descriptions,
@@ -40,6 +41,7 @@ from pixelflow.creative.scene_blueprint import (
     validate_asset_requirement_quality,
     validate_shot_description_quality,
 )
+from pixelflow.creative.seedance_plan import apply_seedance_plan_authoring
 
 CreationIntent = Literal["video", "image"]
 
@@ -364,6 +366,29 @@ async def build_plan_markdown_with_llm(
             except ValueError as exc:
                 asset_manifest = fallback_asset_manifest(blueprints)
                 corrections.append(f"Plan LLM 全局资产清单已按分镜资产需求补全：{exc}")
+            authoring_plan = _with_execution_contract(
+                intent,
+                markdown,
+                creation_contract,
+                durations,
+                scene_blueprints=blueprints,
+                asset_manifest=asset_manifest,
+            )
+            blueprints, authoring_corrections = await _author_seedance_plan_blueprints(
+                plan_markdown=authoring_plan,
+                scene_blueprints=blueprints,
+                asset_manifest=asset_manifest,
+                creation_contract=creation_contract,
+                form_values=form_values,
+                selected_direction=selected_direction,
+                intake_context=context,
+                materials=materials or [],
+                redaction_contexts=(profile, context),
+                model_name=model_name,
+                model_factory=model_factory,
+            )
+            corrections.extend(authoring_corrections)
+            durations = scene_blueprint_durations(blueprints)
         markdown = _with_execution_contract(
             intent,
             markdown,
@@ -563,6 +588,36 @@ async def revise_plan_markdown_with_llm(
                     except ValueError:
                         asset_manifest = fallback_asset_manifest(blueprints)
                         corrections.append(f"Plan LLM 全局资产清单已按修订后分镜补全：{exc}")
+                authoring_candidate_plan = _with_execution_contract(
+                    intent,
+                    markdown,
+                    candidate_contract,
+                    durations,
+                    scene_blueprints=blueprints,
+                    asset_manifest=asset_manifest,
+                )
+                authoring_context = (
+                    "# 当前已同意版本\n\n"
+                    f"{current_plan_markdown.strip()}\n\n"
+                    "# 本次结构化修订候选\n\n"
+                    f"{authoring_candidate_plan.strip()}"
+                )
+                blueprints, authoring_corrections = await _author_seedance_plan_blueprints(
+                    plan_markdown=authoring_context,
+                    scene_blueprints=blueprints,
+                    asset_manifest=asset_manifest,
+                    creation_contract=candidate_contract,
+                    form_values=candidate_form_values,
+                    selected_direction=selected_direction,
+                    intake_context=context,
+                    materials=materials or [],
+                    revision_feedback=revision_feedback,
+                    redaction_contexts=(profile, context),
+                    model_name=model_name,
+                    model_factory=model_factory,
+                )
+                corrections.extend(authoring_corrections)
+                durations = scene_blueprint_durations(blueprints)
             markdown = _with_execution_contract(
                 intent,
                 markdown,
@@ -779,6 +834,60 @@ def restore_plan_version(
         asset_manifest=resolved_manifest,
         restored_from_version=restore_version,
     )
+
+
+async def _author_seedance_plan_blueprints(
+    *,
+    plan_markdown: str,
+    scene_blueprints: list[dict[str, Any]],
+    asset_manifest: dict[str, list[dict[str, str]]],
+    creation_contract: dict[str, Any],
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any],
+    materials: list[dict[str, Any]],
+    revision_feedback: str = "",
+    redaction_contexts: tuple[dict[str, Any], ...] = (),
+    model_name: str,
+    model_factory: ModelFactory | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """在稳定资产 ID 生成后执行专用写作；非法响应整批拒绝并重试一次。"""
+    validation_feedback = ""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            payload = await author_seedance_plan_payload(
+                plan_markdown=plan_markdown,
+                scene_blueprints=scene_blueprints,
+                asset_manifest=asset_manifest,
+                creation_contract=creation_contract,
+                form_values=form_values,
+                selected_direction=selected_direction,
+                intake_context=intake_context,
+                materials=materials,
+                revision_feedback=revision_feedback,
+                validation_feedback=validation_feedback,
+                model_name=model_name,
+                model_factory=model_factory,
+            )
+            if redaction_contexts:
+                payload = _redact_semantic_memory_payload(payload, *redaction_contexts)
+            authored = apply_seedance_plan_authoring(
+                scene_blueprints,
+                payload.get("scene_blueprints"),
+                asset_manifest=asset_manifest,
+                total_duration_sec=int(creation_contract.get("video_duration_sec") or 0),
+            )
+            corrections = ["Seedance 分镜已根据专用校验反馈重新生成"] if attempt else []
+            return authored, corrections
+        except Exception as exc:  # noqa: BLE001 - 专用写作失败时不能污染权威 Plan 合同
+            last_error = exc
+            validation_feedback = str(exc)
+
+    return copy.deepcopy(scene_blueprints), [
+        "Seedance 专用分镜写作连续两次未通过，已保留通过结构校验的分镜："
+        f"{last_error or '未知错误'}"
+    ]
 
 
 def _video_contract_and_blueprints(

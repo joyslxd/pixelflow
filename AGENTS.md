@@ -325,8 +325,8 @@ SmartPPT接口：
 - 用户确认表单后生成 `creation_contract`。优先级固定为用户确认值 > LLM 预填 > 默认值。后续创意、Plan、场景包、场景资产和视频生成不得覆盖它。
 - Plan LLM 只能从 `image_model_capabilities` 中选择 `scene_image_ratio/scene_image_size`；非法值按规则修正。最终生产合同必须随 Plan artifact、conversation context 和 pending jobs 保存。
 - 图片和视频 Plan 模板分别是 `plan_image.md` 与 `plan_video.md`。视频 Plan 优先调用 `deepseek-v4-pro` 并加载 `skills/seedance-prompt/SKILL.md`，由 LLM 自主生成总分总 `scene_blueprints`，不得预先按 10 秒机械切分；失败时才使用同合同的叙事职能加权兜底。
-- `scene_blueprints` 是 Plan 阶段的权威脚本合同，包含叙事职能、连续起止秒、时长、故事线、Seedance 镜头描述、旁白、转场和资产需求。它必须随 Plan artifact、每个历史版本、conversation context 和 `pendingScenePackageJob.request` 持久化。
-- Plan 阶段必须逐镜校验 `shot_description` 是否覆盖地点、主体、动作、景别、运镜、光影、声音和收束，且局部时间段必须从 0 秒连续覆盖到当前分镜时长。初次 Plan 缺项时调用专用 LLM 定向修正 1 次，并且只采纳失败分镜返回的镜头描述；仍不完整时只对失败镜头应用增强规则兜底。Plan 修订和手工编辑候选也只允许定向修正镜头描述，修正仍失败时保留原版本。
+- `scene_blueprints` 是 Plan 阶段的权威脚本合同，包含叙事职能、连续起止秒、时长、故事线、Seedance 镜头描述、旁白、转场和资产需求。结构 Plan 先确定时间线与资产需求并生成稳定 `asset_id`，随后必须调用 `creative/seedance_plan.py` + vendored `skills/seedance-prompt/SKILL.md` 对全部分镜做专用写作；它必须随 Plan artifact、每个历史版本、conversation context 和 `pendingScenePackageJob.request` 持久化。
+- Seedance Plan 写作必须传入用户已确认的 `video_model`、完整创作合同、当前 Plan、全部蓝图、稳定资产 ID、用户要求和附件，只允许合并 `title/storyline/shot_description/narration/transition`。每镜描述是一整段中文，内部使用从 0 秒连续覆盖到当前镜时长的整数秒级时间码，禁止 ms、毫秒和小数；必须覆盖地点、主体、动作、景别、运镜、光影、声音和收束，只引用本镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次说明用途且最多 9 张。分镜数量、顺序、时间线、模型、画幅、卖点、转化目标和资产集合不可修改；非法响应整批拒绝并携带错误重试一次。Plan 修订和手工编辑重新对齐同样执行该阶段，并携带当前版本、候选版本、修改意见、附件和上下文。
 - 场景包恢复历史已审核 Plan 时允许兼容旧的全局镜头时间段，并确定性转换为当前分镜的 `0-N秒` 局部时间段；新 Plan 候选仍必须通过严格局部时间轴校验。
 - PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
 - Plan 初次生成和当前创意内修改分别调用 `/planning/plan/start`、`/planning/plan/revise/start`，轮询对应 `/jobs/{job_id}`；前端必须保存 `pendingPlanJob`，恢复时只查询原 job。当前创意内修改产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。

@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable
 from typing import Any, Literal
 
+from pixelflow.creative.seedance_plan import build_seedance_plan_authoring_prompt
 from pixelflow.generate.seedance_prompt import load_seedance_guidance
 
 PLAN_LLM_MODEL_NAME = "deepseek-v4-pro"
@@ -48,6 +49,45 @@ async def generate_plan_payload(
     )
     if not isinstance(payload, dict):
         raise ValueError("Plan LLM response must be a JSON object")
+    return payload
+
+
+async def author_seedance_plan_payload(
+    *,
+    plan_markdown: str,
+    scene_blueprints: list[dict[str, Any]],
+    asset_manifest: dict[str, list[dict[str, str]]],
+    creation_contract: dict[str, Any],
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    intake_context: dict[str, Any],
+    materials: list[dict[str, Any]],
+    revision_feedback: str = "",
+    validation_feedback: str = "",
+    model_name: str = PLAN_LLM_MODEL_NAME,
+    model_factory: ModelFactory | None = None,
+) -> dict[str, Any]:
+    """调用现有 Plan 模型执行专用 Seedance 分镜写作阶段。"""
+    prompt = build_seedance_plan_authoring_prompt(
+        plan_markdown=plan_markdown,
+        scene_blueprints=scene_blueprints,
+        asset_manifest=asset_manifest,
+        creation_contract=creation_contract,
+        form_values=form_values,
+        selected_direction=selected_direction,
+        intake_context=intake_context,
+        materials=materials,
+        revision_feedback=revision_feedback,
+        validation_feedback=validation_feedback,
+    )
+    payload = await asyncio.to_thread(
+        _invoke_json_model,
+        prompt,
+        model_name,
+        model_factory or _default_model_factory,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Seedance Plan authoring LLM response must be a JSON object")
     return payload
 
 

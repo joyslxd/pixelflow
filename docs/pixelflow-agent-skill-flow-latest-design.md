@@ -109,7 +109,7 @@ flowchart TD
 | Agent | Controller / Service | 输入 | 输出 | 备注 |
 | --- | --- | --- | --- | --- |
 | 采集 Agent | `pixelflow_intake.py`、`intake/llm.py`、`intake/forms.py` | 用户提示词、附件 materials、历史上下文 | intent、表单建议值、行业类型、数量、创意方向 | LLM 用 `deepseek-v4-pro`；视频会抽取总时长、画幅、视频模型、图片模型、用途和风格，但必须经用户表单确认后才能进入创意方向 |
-| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频 Plan 同时加载 Seedance Skill，由 LLM 自主完成总分总结构、镜头调度和精确时长分配；失败时按叙事职能加权兜底 |
+| 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py`、`creative/seedance_plan.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频先生成总分总结构、镜头调度、精确时长和资产清单；稳定 `asset_id` 后调用 Seedance Skill 专门写作全部分镜，严格校验后再发布 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
 | 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
@@ -141,7 +141,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.
 
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
-| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频同时加载 Seedance Skill，让 LLM 生成 plan.md 与结构化分镜蓝图 |
+| PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频第一阶段生成 plan.md 结构、精确时间线、资产需求与完整资产清单 |
+| SeedancePlanAuthoringSkill | `backend/pixelflow/creative/seedance_plan.py`、`creative/plan_llm.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 在稳定资产 ID 后一次写作全部分镜；初始生成、Agent 修订和手工编辑重新对齐共用；只允许改叙事字段，模型、时间线、卖点、目标和资产合同不可变 |
 | PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用或镜头描述二次校验仍不完整时，按叙事职能使用八维增强规则兜底；资产需求只允许人物、物理场景和有形道具 |
 | PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构、精确总时长、八维镜头完整度，以及资产需求语义；资产不合法时只让 LLM 定向修复 `asset_requirements`，不得修改故事和时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/revision_contract.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 先合并白名单 `creation_contract_patch`，再结合当前 Plan、表单、垂类补充、附件、采集上下文和 PowerMem 重写 Plan；生成新版本并保留历史 |
@@ -213,7 +214,8 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 图片模型配置来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。用户不选择图片比例和清晰度；前端把所选模型支持的比例/清晰度列表作为只读能力数据交给 Plan Agent。
 - 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
 - Plan LLM 只能在 `image_model_capabilities` 范围内选择 `scene_image_ratio` 和 `scene_image_size`。非法输出按确定性规则修正；最终值写入 plan.md 和生产合同，场景资产生成阶段直接使用，不再猜测。
-- 视频 Plan 的每个镜头描述必须同时覆盖地点、主体、动作、景别、运镜、光影、声音和收束，内部秒段还必须从 0 秒连续覆盖到当前分镜时长。初次生成缺项时，系统把具体分镜和缺失维度交给专用 Plan LLM 修正 1 次，并只合并失败分镜返回的 `shot_description`；修正后仍缺项时，仅对不合格镜头使用八维增强模板，其他 Plan 字段保持不变。Plan 修订与手工编辑候选同样只定向修正镜头描述，失败时不发布新版本。
+- 视频 Plan 第一阶段负责结构、精确时间线、故事职责、资产需求和 `asset_manifest`，全局清单规范化产生稳定 `asset_id` 后，第二阶段把用户确认的 `video_model`、完整创作合同、当前 Plan、全部蓝图、稳定资产、原始要求、附件以及修订上下文交给 Seedance Plan Authoring Skill。该 Skill 对 content-app 实时启用的所有 Seedance 系列模型通用，不得改写模型；实时能力与规则冲突时保留 PixelFlow 合同，由调用层提示参数不兼容。
+- Seedance 专用阶段只返回 `title/storyline/shot_description/narration/transition`。每个 `shot_description` 是一整段中文，可在段内细分 `0-N秒` 整数时间码，但必须连续覆盖当前镜 4-15 秒时长并禁止 ms、毫秒、小数；同时覆盖地点、主体、动作、景别、运镜、光影、声音和收束。引用只允许本镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次说明用途且最多 9 张。后端深拷贝原蓝图，只合并叙事字段，再校验时间线、资产并集和引用；任何部分失败都整批拒绝，携带精确错误重试一次。初始 Plan、Agent 修订与手工编辑重新对齐均执行同一路径，最终确认 Plan 仍是场景包唯一权威输入。
 - 场景包恢复历史 Plan 时对旧的全局镜头时间段做兼容换算，只把时间码平移为当前分镜的 `0-N秒`，不改写故事线、旁白、资产或其他权威字段；新 Plan 候选不走兼容分支。
 - 主流程不因“文生视频/编辑视频/首帧图生视频”等入口类型而绕过场景包。
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。

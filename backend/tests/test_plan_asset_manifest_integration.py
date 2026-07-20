@@ -6,7 +6,6 @@ import json
 
 from pixelflow.creative.plan_markdown import build_plan_markdown, build_plan_markdown_with_llm, restore_plan_version
 
-
 VIDEO_FORM = {
     "product_info": "黑色防水背包",
     "product_category": "箱包",
@@ -167,7 +166,9 @@ def test_initial_plan_retries_invalid_blueprints_without_losing_explicit_named_a
         )
     )
 
-    assert len(model.prompts) == 2
+    # 两次结构 Plan 调用后，专用 Seedance 写作会执行并在非法旧式响应时重试一次。
+    assert len(model.prompts) == 4
     assert [item["name"] for item in result.asset_manifest["characters"]] == ["林晓-浅灰风衣", "陈默-藏蓝夹克"]
     assert [item["name"] for item in result.asset_manifest["props"]] == ["曜石黑防水背包", "透明雨伞", "银色保温杯"]
     assert "用户明确命名" in model.prompts[1]
+    assert "Seedance Plan 分镜写作 Skill" in model.prompts[2]

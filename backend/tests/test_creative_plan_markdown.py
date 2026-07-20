@@ -590,8 +590,10 @@ def test_revise_video_plan_retries_invalid_contract_then_uses_corrected_patch() 
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # 两次 Plan 合同修订后，还会执行一次 Seedance 专用写作并按校验反馈重试一次。
+    assert len(fake_model.prompts) == 4
     assert "500" in str(fake_model.prompts[1])
+    assert "Seedance Plan 分镜写作 Skill" in fake_model.prompts[2]
     assert revised.creation_contract["video_duration_sec"] == 60
     assert sum(revised.scene_durations_sec) == 60
 
