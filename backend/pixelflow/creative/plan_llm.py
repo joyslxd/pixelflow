@@ -59,6 +59,7 @@ async def revise_plan_payload(
     selected_direction: dict[str, Any],
     creation_contract: dict[str, Any],
     current_scene_blueprints: list[dict[str, Any]] | None = None,
+    current_asset_manifest: dict[str, Any] | None = None,
     product_creative_profile: dict[str, Any] | None = None,
     materials: list[dict[str, Any]] | None = None,
     intake_context: dict[str, Any] | None = None,
@@ -77,9 +78,12 @@ async def revise_plan_payload(
 5. 视频必须返回完整 scene_blueprints，并形成开场、展开、证明/高潮、收束的总分总结构。
 6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束八个维度；如果一镜包含多个局部时间段，必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 7. asset_requirements 只允许写可独立生图的人物、物理环境和有形商品/道具。修改意见里的时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入任何资产数组。
-8. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
-9. 返回 JSON，不要 Markdown 代码围栏。
-10. 如果“上次结构校验反馈”不为空，本次只修正反馈指出的问题；未被反馈指出的 Plan 内容、合同字段和已合格分镜保持不变。
+8. 必须重新分析完整修订版 scene_blueprints 与用户修改意见，返回完整 asset_manifest。characters/scenes/props 必须分别与所有分镜 asset_requirements 的同名分类并集完全相等，不能少也不能多；三类名称全局唯一且必须是后续 @ 引用的最终展示名。
+9. asset_manifest.characters 每项包含 name、description、three_view_prompt；scenes/props 每项包含 name、description、image_prompt。描述和生图要求必须具体对应当前人物造型、物理环境或有形道具；同一资产跨分镜只列一次，人物服装或外观明显变化时使用不同且明确的名称。
+10. plan.md 第四章必须包含“全局资产清单”，并逐项展示与 asset_manifest 完全相同的名称、文字说明和生图要求。
+11. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
+12. 返回 JSON，不要 Markdown 代码围栏。
+13. 如果“上次结构校验反馈”不为空，本次只修正反馈指出的问题；未被反馈指出的 Plan 内容、合同字段和已合格分镜保持不变。
 
 输出：
 {{
@@ -87,6 +91,11 @@ async def revise_plan_payload(
   "creation_contract_patch":{{"仅返回用户明确要求修改的合同字段":"新值"}},
   "scene_image_ratio":"仅视频返回",
   "scene_image_size":"仅视频返回",
+  "asset_manifest":{{
+    "characters":[{{"name":"最终角色名","description":"人物固定设定","three_view_prompt":"同一人物正面、侧面、背面三视图要求"}}],
+    "scenes":[{{"name":"最终场景名","description":"物理环境固定设定","image_prompt":"场景参考图生成要求"}}],
+    "props":[{{"name":"最终道具名","description":"有形物件固定设定","image_prompt":"道具参考图生成要求"}}]
+  }},
   "scene_blueprints":[{{
     "scene_id":"scene-1",
     "scene_index":1,
@@ -112,6 +121,7 @@ async def revise_plan_payload(
 当前创意：{_json(selected_direction)}
 创作合同：{_json(creation_contract)}
 当前分镜蓝图：{_json(current_scene_blueprints or [])}
+当前全局资产清单：{_json(current_asset_manifest or {})}
 行业与垂类补充：{_json(product_creative_profile or {})}
 采集上下文：{_json(intake_context or {})}
 附件摘要：{_json(materials or [])}
@@ -243,6 +253,10 @@ def _generation_prompt(
 - 每个 shot_description 必须是一整段可执行镜头指令，并逐镜完整覆盖地点、主体、动作、景别、运镜、光影、声音和收束；动作、运镜与收束都要有明确起止，不能只写“展示产品”或堆砌风格词。
 - asset_requirements 只写可独立生图的语义实体：人物放 characters，物理环境放 scenes，有形商品/包装/工具放 props；此阶段不虚构图片 URL。
 - 时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入 asset_requirements。
+- 必须返回完整 asset_manifest：characters、scenes、props 分别与所有 scene_blueprints.asset_requirements 的同类名称并集完全相等，不能少、不能多；三类名称全局唯一，并作为后续场景包和 @ 图片引用的最终展示名。
+- asset_manifest.characters 每项必须包含 name、description、three_view_prompt，明确同一人物的年龄感、外貌、发型、服装和正面/侧面/背面一致性；scenes/props 每项必须包含 name、description、image_prompt，明确环境或物件的外观、材质、色彩、光线等可执行生图要求。
+- 同一人物、场景或道具跨多个分镜复用时只列一次；人物出现明显服装、年龄阶段或外观变化时，必须拆成不同且明确的名称，并让对应分镜引用该名称。
+- plan.md 第四章必须输出“全局资产清单”，逐项展示与 asset_manifest 完全相同的名称、文字说明和生图要求。
 - plan.md 必须写明视频模型、图片模型、图片比例、图片清晰度。
 - scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 \nSeedance Skill 强制指导：
@@ -260,7 +274,7 @@ def _generation_prompt(
 {video_rules}
 
 输出：
-{{"plan_markdown":"完整 plan.md","scene_image_ratio":"仅视频返回","scene_image_size":"仅视频返回","scene_blueprints":"视频任务返回完整分镜蓝图数组"}}
+{{"plan_markdown":"完整 plan.md","scene_image_ratio":"仅视频返回","scene_image_size":"仅视频返回","asset_manifest":"视频任务返回完整角色/场景/道具清单","scene_blueprints":"视频任务返回完整分镜蓝图数组"}}
 
 产物类型：{intent}
 用户表单：{_json(form_values)}

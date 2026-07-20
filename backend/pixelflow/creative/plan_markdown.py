@@ -9,6 +9,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from pixelflow.creative.asset_manifest import (
+    empty_asset_manifest,
+    fallback_asset_manifest,
+    normalize_asset_manifest,
+    render_asset_manifest_markdown,
+)
 from pixelflow.creative.contract import VideoCreationContract, build_video_creation_contract, resolve_scene_image_spec
 from pixelflow.creative.duration import scene_time_ranges
 from pixelflow.creative.plan_llm import (
@@ -61,6 +67,7 @@ class PlanMarkdownResult:
     creation_contract: dict[str, Any] = field(default_factory=dict)
     scene_durations_sec: list[int] = field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = field(default_factory=list)
+    asset_manifest: dict[str, list[dict[str, str]]] = field(default_factory=empty_asset_manifest)
     llm_used: bool = False
     model_name: str = PLAN_LLM_MODEL_NAME
     error: str | None = None
@@ -79,6 +86,7 @@ class PlanMarkdownResult:
                         creation_contract=self.creation_contract,
                         scene_durations_sec=self.scene_durations_sec,
                         scene_blueprints=self.scene_blueprints,
+                        asset_manifest=self.asset_manifest,
                     )
                 ],
             )
@@ -95,6 +103,7 @@ class PlanMarkdownResult:
             "creation_contract": self.creation_contract,
             "scene_durations_sec": self.scene_durations_sec,
             "scene_blueprints": self.scene_blueprints,
+            "asset_manifest": self.asset_manifest,
             "llm_used": self.llm_used,
             "model_name": self.model_name,
             "error": self.error,
@@ -113,6 +122,7 @@ class PlanMarkdownResult:
         creation_contract: dict[str, Any] | None = None,
         change_source: str | None = None,
         scene_blueprints: list[dict[str, Any]] | None = None,
+        asset_manifest: dict[str, list[dict[str, str]]] | None = None,
     ) -> PlanMarkdownResult:
         history = _normalized_history(plan_history or self.plan_history)
         history_max = max((int(item["version"]) for item in history), default=0)
@@ -120,6 +130,7 @@ class PlanMarkdownResult:
         next_contract = copy.deepcopy(creation_contract if creation_contract is not None else self.creation_contract)
         next_durations = copy.deepcopy(self.scene_durations_sec)
         next_blueprints = copy.deepcopy(scene_blueprints if scene_blueprints is not None else self.scene_blueprints)
+        next_manifest = copy.deepcopy(asset_manifest if asset_manifest is not None else self.asset_manifest)
         if next_blueprints:
             next_durations = scene_blueprint_durations(next_blueprints)
         history.append(
@@ -131,6 +142,7 @@ class PlanMarkdownResult:
                 scene_durations_sec=next_durations,
                 change_source=change_source,
                 scene_blueprints=next_blueprints,
+                asset_manifest=next_manifest,
             )
         )
         return replace(
@@ -144,6 +156,7 @@ class PlanMarkdownResult:
             creation_contract=next_contract,
             scene_durations_sec=next_durations,
             scene_blueprints=next_blueprints,
+            asset_manifest=next_manifest,
         )
 
 
@@ -165,6 +178,7 @@ def build_plan_markdown(
             selected_direction,
         )
         durations = scene_blueprint_durations(blueprints)
+        asset_manifest = fallback_asset_manifest(blueprints)
         markdown = _fallback_video_plan(
             form_values,
             selected_direction,
@@ -174,6 +188,7 @@ def build_plan_markdown(
             contract,
             durations,
             blueprints,
+            asset_manifest,
         )
         return PlanMarkdownResult(
             output_type=intent,
@@ -183,6 +198,7 @@ def build_plan_markdown(
             creation_contract=contract.model_dump(exclude_none=True),
             scene_durations_sec=durations,
             scene_blueprints=blueprints,
+            asset_manifest=asset_manifest,
         )
     markdown = _fallback_image_plan(form_values, selected_direction, profile, materials or [], intake_context or {})
     return PlanMarkdownResult(
@@ -212,6 +228,7 @@ async def build_plan_markdown_with_llm(
     contract: VideoCreationContract | None = None
     durations: list[int] = []
     blueprints: list[dict[str, Any]] = []
+    asset_manifest = empty_asset_manifest()
     creation_contract = _image_creation_contract(form_values, context)
     if intent == "video":
         contract = build_video_creation_contract(form_values)
@@ -298,12 +315,18 @@ async def build_plan_markdown_with_llm(
             )
             corrections.extend(image_corrections)
             creation_contract = contract.model_dump(exclude_none=True)
+            try:
+                asset_manifest = normalize_asset_manifest(payload.get("asset_manifest"), blueprints)
+            except ValueError as exc:
+                asset_manifest = fallback_asset_manifest(blueprints)
+                corrections.append(f"Plan LLM 全局资产清单已按分镜资产需求补全：{exc}")
         markdown = _with_execution_contract(
             intent,
             markdown,
             creation_contract,
             durations,
             scene_blueprints=blueprints,
+            asset_manifest=asset_manifest,
         )
         return PlanMarkdownResult(
             output_type=intent,
@@ -313,6 +336,7 @@ async def build_plan_markdown_with_llm(
             creation_contract=creation_contract,
             scene_durations_sec=durations,
             scene_blueprints=blueprints,
+            asset_manifest=asset_manifest,
             llm_used=True,
             model_name=model_name,
         )
@@ -332,6 +356,7 @@ async def revise_plan_markdown_with_llm(
     revision_feedback: str,
     creation_contract: dict[str, Any] | None = None,
     current_scene_blueprints: list[dict[str, Any]] | None = None,
+    current_asset_manifest: dict[str, list[dict[str, str]]] | None = None,
     product_creative_profile: dict[str, Any] | None = None,
     materials: list[dict[str, Any]] | None = None,
     intake_context: dict[str, Any] | None = None,
@@ -345,6 +370,7 @@ async def revise_plan_markdown_with_llm(
     base = build_plan_markdown(intent, form_values, selected_direction, profile, materials, context)
     original_contract = copy.deepcopy(creation_contract or base.creation_contract)
     original_blueprints = copy.deepcopy(current_scene_blueprints or base.scene_blueprints)
+    original_manifest = copy.deepcopy(current_asset_manifest or base.asset_manifest)
     original_durations = scene_blueprint_durations(original_blueprints) if original_blueprints else copy.deepcopy(base.scene_durations_sec)
     try:
         authoritative_contract = merge_revision_contract(
@@ -363,6 +389,7 @@ async def revise_plan_markdown_with_llm(
             creation_contract=original_contract,
             scene_durations_sec=original_durations,
             scene_blueprints=original_blueprints,
+            asset_manifest=original_manifest,
             model_name=model_name,
             error=exc,
         )
@@ -381,6 +408,7 @@ async def revise_plan_markdown_with_llm(
                 selected_direction=selected_direction,
                 creation_contract=authoritative_contract,
                 current_scene_blueprints=original_blueprints,
+                current_asset_manifest=original_manifest,
                 product_creative_profile=profile,
                 materials=materials or [],
                 intake_context=context,
@@ -401,6 +429,7 @@ async def revise_plan_markdown_with_llm(
             corrections: list[str] = []
             blueprints: list[dict[str, Any]] = []
             durations: list[int] = []
+            asset_manifest = empty_asset_manifest()
             if intent == "video":
                 contract = VideoCreationContract.model_validate(candidate_contract)
                 try:
@@ -438,6 +467,7 @@ async def revise_plan_markdown_with_llm(
                             creation_contract=original_contract,
                             scene_durations_sec=original_durations,
                             scene_blueprints=original_blueprints,
+                            asset_manifest=original_manifest,
                             model_name=model_name,
                             error=ValueError(f"分镜镜头描述完整度校验失败：{exc}"),
                         )
@@ -468,6 +498,7 @@ async def revise_plan_markdown_with_llm(
                             creation_contract=original_contract,
                             scene_durations_sec=original_durations,
                             scene_blueprints=original_blueprints,
+                            asset_manifest=original_manifest,
                             model_name=model_name,
                             error=ValueError(f"分镜资产合同校验失败：{exc}"),
                         )
@@ -479,12 +510,22 @@ async def revise_plan_markdown_with_llm(
                 )
                 corrections.extend(image_corrections)
                 candidate_contract = contract.model_dump(exclude_none=True)
+                try:
+                    asset_manifest = normalize_asset_manifest(payload.get("asset_manifest"), blueprints)
+                except ValueError as exc:
+                    try:
+                        asset_manifest = normalize_asset_manifest(original_manifest, blueprints)
+                        corrections.append(f"Plan LLM 全局资产清单沿用当前版本：{exc}")
+                    except ValueError:
+                        asset_manifest = fallback_asset_manifest(blueprints)
+                        corrections.append(f"Plan LLM 全局资产清单已按修订后分镜补全：{exc}")
             markdown = _with_execution_contract(
                 intent,
                 markdown,
                 candidate_contract,
                 durations,
                 scene_blueprints=blueprints,
+                asset_manifest=asset_manifest,
             )
             revised = replace(
                 base,
@@ -493,6 +534,7 @@ async def revise_plan_markdown_with_llm(
                 creation_contract=candidate_contract,
                 scene_durations_sec=durations,
                 scene_blueprints=blueprints,
+                asset_manifest=asset_manifest,
                 llm_used=True,
                 model_name=model_name,
             )
@@ -504,6 +546,7 @@ async def revise_plan_markdown_with_llm(
                 creation_contract=candidate_contract,
                 change_source=change_source,
                 scene_blueprints=blueprints,
+                asset_manifest=asset_manifest,
             )
         except Exception as exc:  # noqa: BLE001 - 第一次反馈给 LLM 修正，第二次保持原版本
             last_error = exc
@@ -520,6 +563,7 @@ async def revise_plan_markdown_with_llm(
         creation_contract=original_contract,
         scene_durations_sec=original_durations,
         scene_blueprints=original_blueprints,
+        asset_manifest=original_manifest,
         model_name=model_name,
         error=last_error or ValueError("Plan 修订失败"),
     )
@@ -535,6 +579,7 @@ def _failed_revision_result(
     creation_contract: dict[str, Any],
     scene_durations_sec: list[int],
     scene_blueprints: list[dict[str, Any]],
+    asset_manifest: dict[str, list[dict[str, str]]],
     model_name: str,
     error: Exception,
 ) -> PlanMarkdownResult:
@@ -549,6 +594,7 @@ def _failed_revision_result(
         creation_contract=copy.deepcopy(creation_contract),
         scene_durations_sec=copy.deepcopy(scene_durations_sec),
         scene_blueprints=copy.deepcopy(scene_blueprints),
+        asset_manifest=copy.deepcopy(asset_manifest),
         llm_used=False,
         model_name=model_name,
         error=str(error),
@@ -643,6 +689,7 @@ def restore_plan_version(
     creation_contract: dict[str, Any] | None = None,
     scene_durations_sec: list[int] | None = None,
     scene_blueprints: list[dict[str, Any]] | None = None,
+    asset_manifest: dict[str, list[dict[str, str]]] | None = None,
 ) -> PlanMarkdownResult:
     history = _normalized_history(plan_history)
     source = next((item for item in history if int(item.get("version") or 0) == restore_version), None)
@@ -651,6 +698,7 @@ def restore_plan_version(
     source_contract = source.get("creation_contract")
     source_durations = source.get("scene_durations_sec")
     source_blueprints = source.get("scene_blueprints")
+    source_manifest = source.get("asset_manifest")
     resolved_contract = copy.deepcopy(source_contract) if "creation_contract" in source and isinstance(source_contract, dict) else copy.deepcopy(creation_contract or {})
     resolved_durations = _resolve_history_scene_durations(
         intent,
@@ -668,6 +716,13 @@ def restore_plan_version(
     )
     if resolved_blueprints:
         resolved_durations = scene_blueprint_durations(resolved_blueprints)
+    resolved_manifest = _resolve_history_asset_manifest(
+        intent,
+        source,
+        source_manifest,
+        resolved_blueprints,
+        asset_manifest,
+    )
     return PlanMarkdownResult(
         output_type=intent,
         plan_markdown=_sanitize_user_facing_plan_markdown(str(source.get("plan_markdown") or "")),
@@ -677,6 +732,7 @@ def restore_plan_version(
         creation_contract=resolved_contract,
         scene_durations_sec=resolved_durations,
         scene_blueprints=resolved_blueprints,
+        asset_manifest=resolved_manifest,
         restored_from_version=restore_version,
     )
 
@@ -720,6 +776,7 @@ def _fallback_video_plan(
     contract: VideoCreationContract,
     durations: list[int],
     blueprints: list[dict[str, Any]],
+    asset_manifest: dict[str, list[dict[str, str]]],
 ) -> str:
     product = _context_text_value(intake_context, "product_subject") or _text(form_values.get("product_info"), "未命名产品")
     category = _text(form_values.get("product_category"), "未分类")
@@ -794,6 +851,7 @@ def _fallback_video_plan(
         contract.model_dump(exclude_none=True),
         durations,
         scene_blueprints=blueprints,
+        asset_manifest=asset_manifest,
     )
 
 
@@ -879,9 +937,12 @@ def _with_execution_contract(
     durations: list[int],
     *,
     scene_blueprints: list[dict[str, Any]] | None = None,
+    asset_manifest: dict[str, list[dict[str, str]]] | None = None,
 ) -> str:
     base = _sanitize_user_facing_plan_markdown(markdown).split("\n## 制作执行合同", 1)[0].rstrip()
     if intent == "video":
+        if asset_manifest is not None:
+            base = _replace_video_asset_manifest_section(base, asset_manifest)
         if scene_blueprints:
             base = _replace_video_scene_section(base, scene_blueprints)
         ranges = scene_time_ranges(durations)
@@ -923,6 +984,22 @@ def _replace_video_scene_section(markdown: str, scene_blueprints: list[dict[str,
     pattern = re.compile(r"(?ms)^##\s*五、镜头列表\s*$.*?(?=^##\s|\Z)")
     replacement = f"## 五、镜头列表\n\n{render_scene_blueprints_markdown(scene_blueprints)}\n\n"
     return pattern.sub(replacement, markdown, count=1).rstrip()
+
+
+def _replace_video_asset_manifest_section(
+    markdown: str,
+    asset_manifest: dict[str, list[dict[str, str]]],
+) -> str:
+    """第四章始终由结构化清单渲染，名称和生图约束不依赖自由文本。"""
+
+    replacement = f"{render_asset_manifest_markdown(asset_manifest)}\n\n"
+    pattern = re.compile(r"(?ms)^##\s*四、(?:角色列表|全局资产清单)\s*$.*?(?=^##\s|\Z)")
+    if pattern.search(markdown):
+        return pattern.sub(replacement, markdown, count=1).rstrip()
+    scene_heading = re.search(r"(?m)^##\s*五、镜头列表\s*$", markdown)
+    if scene_heading:
+        return f"{markdown[:scene_heading.start()].rstrip()}\n\n{replacement}{markdown[scene_heading.start():]}".rstrip()
+    return f"{markdown.rstrip()}\n\n{replacement}".rstrip()
 
 
 def _validated_llm_markdown(
@@ -1009,6 +1086,7 @@ def _history_entry(
     scene_durations_sec: list[int] | None = None,
     change_source: str | None = None,
     scene_blueprints: list[dict[str, Any]] | None = None,
+    asset_manifest: dict[str, list[dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "version": version,
@@ -1016,6 +1094,7 @@ def _history_entry(
         "creation_contract": copy.deepcopy(creation_contract or {}),
         "scene_durations_sec": copy.deepcopy(scene_durations_sec or []),
         "scene_blueprints": copy.deepcopy(scene_blueprints or []),
+        "asset_manifest": copy.deepcopy(asset_manifest or empty_asset_manifest()),
     }
     if restored_from_version is not None:
         item["restored_from_version"] = restored_from_version
@@ -1118,6 +1197,29 @@ def _validated_history_blueprint_fallback(
         )
     except ValueError:
         return []
+
+
+def _resolve_history_asset_manifest(
+    intent: CreationIntent,
+    source: dict[str, Any],
+    source_manifest: Any,
+    resolved_blueprints: list[dict[str, Any]],
+    fallback_manifest: dict[str, list[dict[str, str]]] | None,
+) -> dict[str, list[dict[str, str]]]:
+    if intent != "video":
+        return empty_asset_manifest()
+    if not resolved_blueprints:
+        return empty_asset_manifest()
+    candidates: list[Any] = []
+    if "asset_manifest" in source:
+        candidates.append(source_manifest)
+    candidates.append(fallback_manifest)
+    for candidate in candidates:
+        try:
+            return normalize_asset_manifest(candidate, resolved_blueprints)
+        except ValueError:
+            continue
+    return fallback_asset_manifest(resolved_blueprints)
 
 
 def _text(value: Any, default: str = "") -> str:

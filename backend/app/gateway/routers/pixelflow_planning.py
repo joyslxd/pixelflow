@@ -81,6 +81,9 @@ class PlanMarkdownResponse(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(
+        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
+    )
     llm_used: bool = False
     model_name: str = "deepseek-v4-pro"
     error: str | None = None
@@ -110,6 +113,9 @@ class PlanRevisionRequest(PlanMarkdownRequest):
     revision_feedback: str = Field(min_length=1)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(
+        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
+    )
 
 
 class PlanRestoreRequest(BaseModel):
@@ -121,6 +127,9 @@ class PlanRestoreRequest(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(
+        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
+    )
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -135,6 +144,9 @@ class PlanManualEditRequest(PlanMarkdownRequest):
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(
+        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
+    )
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
@@ -313,6 +325,7 @@ async def _revise_plan_markdown(
         revision_feedback=body.revision_feedback,
         creation_contract=body.creation_contract,
         current_scene_blueprints=body.scene_blueprints,
+        current_asset_manifest=body.asset_manifest,
         product_creative_profile=product_creative_profile,
         materials=body.materials,
         intake_context=intake_context,
@@ -492,6 +505,7 @@ async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownRespons
         creation_contract=body.creation_contract,
         scene_durations_sec=body.scene_durations_sec,
         scene_blueprints=body.scene_blueprints,
+        asset_manifest=body.asset_manifest,
     )
     return PlanMarkdownResponse(**result.to_dict())
 
@@ -527,6 +541,7 @@ async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -
         revision_feedback=build_manual_plan_revision_feedback(body.current_plan_markdown, body.edited_plan_markdown),
         creation_contract=body.creation_contract,
         current_scene_blueprints=body.scene_blueprints,
+        current_asset_manifest=body.asset_manifest,
         product_creative_profile=product_creative_profile,
         materials=body.materials,
         intake_context=intake_context,
