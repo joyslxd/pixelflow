@@ -195,6 +195,11 @@ def test_video_router_passes_plan_scene_blueprints_to_scene_package_skill(monkey
             "asset_requirements": {"characters": [], "scenes": ["产品台"], "props": ["产品"]},
         }
     ]
+    asset_manifest = {
+        "characters": [],
+        "scenes": [{"name": "产品台", "description": "纯净产品展示台。", "image_prompt": "纯净产品展示台参考图。"}],
+        "props": [{"name": "产品", "description": "测试产品固定外观。", "image_prompt": "测试产品参考图。"}],
+    }
 
     with TestClient(app) as client:
         response = client.post(
@@ -205,11 +210,32 @@ def test_video_router_passes_plan_scene_blueprints_to_scene_package_skill(monkey
                 "selected_direction": {"title": "产品特写"},
                 "target_duration_ms": 4_000,
                 "scene_blueprints": blueprints,
+                "asset_manifest": asset_manifest,
             },
         )
 
     assert response.status_code == 200
     assert captured["scene_blueprints"] == blueprints
+    assert captured["asset_manifest"] == asset_manifest
+
+
+def test_video_router_rejects_final_plan_blueprints_without_asset_manifest():
+    from app.gateway.routers import pixelflow_video
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/prepare-scene-packages",
+            json={
+                "plan_markdown": "# legacy plan",
+                "target_duration_ms": 4_000,
+                "scene_blueprints": [{"scene_id": "scene-1", "scene_index": 1}],
+            },
+        )
+
+    assert response.status_code == 422
+    assert "缺少 asset_manifest" in response.text
 
 
 def test_provider_video_duration_uses_exact_integer_seconds():

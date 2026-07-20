@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.creative.duration import (
     MAX_SCENE_DURATION_SEC,
     MIN_SCENE_DURATION_SEC,
@@ -37,6 +38,7 @@ def prepare_video_scene_packages(
     materials: list[dict[str, Any]] | None = None,
     target_duration_ms: int = DEFAULT_TARGET_DURATION_MS,
     scene_blueprints: list[dict[str, Any]] | None = None,
+    asset_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
@@ -65,12 +67,19 @@ def prepare_video_scene_packages(
 
     scenes = []
     stage_templates = _stage_templates(scene_count)
-    global_assets = _default_global_assets(
-        form_values=form_values,
-        selected_direction=selected_direction,
-        stage_templates=stage_templates,
-    )
-    if authoritative_blueprints:
+    if authoritative_blueprints and asset_manifest is not None:
+        global_assets = _global_assets_from_plan_manifest(
+            asset_manifest,
+            authoritative_blueprints,
+            form_values,
+        )
+    else:
+        global_assets = _default_global_assets(
+            form_values=form_values,
+            selected_direction=selected_direction,
+            stage_templates=stage_templates,
+        )
+    if authoritative_blueprints and asset_manifest is None:
         global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
     elapsed_ms = 0
     for index, duration in enumerate(durations, start=1):
@@ -160,6 +169,7 @@ async def prepare_video_scene_packages_with_llm(
     materials: list[dict[str, Any]] | None = None,
     target_duration_ms: int = DEFAULT_TARGET_DURATION_MS,
     scene_blueprints: list[dict[str, Any]] | None = None,
+    asset_manifest: dict[str, Any] | None = None,
     *,
     model_name: str = SCENE_PACKAGE_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
@@ -174,6 +184,20 @@ async def prepare_video_scene_packages_with_llm(
     if authoritative_blueprints:
         validate_asset_requirement_quality(authoritative_blueprints)
     scene_count = len(durations)
+    if authoritative_blueprints and asset_manifest is not None:
+        result = prepare_video_scene_packages(
+            form_values=form_values,
+            plan_markdown=plan_markdown,
+            selected_direction=selected_direction,
+            materials=materials,
+            target_duration_ms=duration_ms,
+            scene_blueprints=authoritative_blueprints,
+            asset_manifest=asset_manifest,
+        )
+        result["message"] = "已严格按最终 Plan 生成视频场景包和全局资产，不再进行二次资产分析。"
+        result["llm_used"] = False
+        result["model_name"] = model_name
+        return result
     try:
         payload = await asyncio.to_thread(
             _invoke_scene_package_model,
@@ -223,6 +247,7 @@ async def prepare_video_scene_packages_with_llm(
             materials=materials,
             target_duration_ms=duration_ms,
             scene_blueprints=authoritative_blueprints,
+            asset_manifest=asset_manifest,
         )
         fallback["message"] = f"{fallback['message']} LLM 场景包生成失败，已使用规则兜底：{exc}"
         fallback["llm_used"] = False
@@ -465,6 +490,53 @@ def _normalize_llm_global_assets(
             required_fields=("name", "description", "image_prompt"),
         ),
         "visual_style": _normalize_visual_style(raw.get("visual_style"), defaults["visual_style"]),
+    }
+
+
+def _global_assets_from_plan_manifest(
+    asset_manifest: dict[str, Any],
+    scene_blueprints: list[dict[str, Any]],
+    form_values: dict[str, Any],
+) -> dict[str, Any]:
+    """把最终 Plan 清单机械转换为场景包资产，不改名、不增删、不补写语义。"""
+
+    normalized = normalize_asset_manifest(asset_manifest, scene_blueprints)
+    characters = [
+        {
+            **item,
+            "three_view_images": [],
+        }
+        for item in normalized["characters"]
+    ]
+    scenes = [
+        {
+            **item,
+            "images": [],
+        }
+        for item in normalized["scenes"]
+    ]
+    props = [
+        {
+            **item,
+            "images": [],
+        }
+        for item in normalized["props"]
+    ]
+    visual_style = _authoritative_visual_style(
+        form_values.get("visual_style"),
+        {
+            "asset_id": "style-main",
+            "name": "最终 Plan 视觉风格",
+            "description": "严格继承最终 Plan 与创作合同",
+            "prompt": "严格继承最终 Plan 与创作合同",
+        },
+    )
+    visual_style["asset_id"] = "style-main"
+    return {
+        "characters": characters,
+        "scenes": scenes,
+        "props": props,
+        "visual_style": visual_style,
     }
 
 

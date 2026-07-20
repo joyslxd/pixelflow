@@ -415,7 +415,8 @@ async def generate_scene_assets(
                     "raw": getattr(result, "raw", None),
                 }
             )
-        return urls, False, endpoint
+        # Plan 资产清单与图片严格一对一；即使供应商意外返回多张，也只绑定第一张。
+        return urls[:1], False, endpoint
 
     asset_jobs: list[tuple[dict[str, Any], str, str, str, dict[str, Any]]] = []
 

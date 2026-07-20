@@ -8,7 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.creative.contract import VideoCreationContract
@@ -93,6 +93,13 @@ class PrepareScenePackagesRequest(BaseModel):
     intake_context: dict[str, Any] = Field(default_factory=dict)
     creation_contract: VideoCreationContract | None = None
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
+    asset_manifest: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def require_final_plan_asset_manifest(self) -> PrepareScenePackagesRequest:
+        if self.scene_blueprints and self.asset_manifest is None:
+            raise ValueError("最终 Plan 缺少 asset_manifest，请先重新生成或修订 plan.md 后再生成场景包")
+        return self
 
 
 class PrepareScenePackagesResponse(BaseModel):
@@ -473,6 +480,7 @@ async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) ->
         materials=body.materials,
         target_duration_ms=target_duration_ms,
         scene_blueprints=body.scene_blueprints,
+        asset_manifest=body.asset_manifest,
     )
     result["creation_contract"] = contract.model_dump() if contract is not None else None
     return PrepareScenePackagesResponse(**result)

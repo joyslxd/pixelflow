@@ -71,6 +71,38 @@ def test_resolve_scene_asset_endpoint():
     assert resolve_scene_asset_endpoint({"text_to_image", "reference_image"}) == "/api/picture/mixed"
 
 
+def test_generate_scene_assets_keeps_exactly_one_image_per_plan_asset():
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            return ImageGenerationResult(
+                ok=True,
+                images=[{"url": "https://x/first.png"}, {"url": "https://x/unexpected-extra.png"}],
+            )
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无参考图时不应调用参考生图")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "props": [
+                    {
+                        "asset_id": "prop-backpack",
+                        "name": "黑色防水背包",
+                        "description": "哑光黑色方形背包。",
+                        "image_prompt": "黑色防水背包产品参考图。",
+                    }
+                ]
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1, "reference_asset_ids": ["prop-backpack"]}],
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["global_assets"]["props"][0]["images"] == ["https://x/first.png"]
+
+
 def test_generate_scene_assets_rejects_polluted_global_asset_before_image_call():
     call_count = 0
 

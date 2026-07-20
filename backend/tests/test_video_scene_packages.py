@@ -1,10 +1,95 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 import pytest
 
+from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.generate.scene_packages import prepare_video_scene_packages, prepare_video_scene_packages_with_llm
+
+
+def test_authoritative_plan_manifest_bypasses_scene_package_llm_and_preserves_exact_assets():
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "雨夜相遇",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 10,
+            "duration_sec": 10,
+            "storyline": "林晓在雨夜公交站拿起黑色防水背包。",
+            "shot_description": "0-10秒: 地点：雨夜公交站；主体：林晓与黑色防水背包；动作：林晓拿起背包检查；景别：中景；运镜：缓慢推近；光影：冷蓝路灯；声音：雨声；收束：停在背包特写。",
+            "narration": "下雨也不怕。",
+            "transition": "背包特写转场。",
+            "asset_requirements": {"characters": ["林晓-浅灰风衣造型"], "scenes": ["雨夜公交站"], "props": ["黑色防水背包"]},
+        }
+    ]
+    manifest = normalize_asset_manifest({
+        "characters": [{"asset_id": "character-linxiao-coat", "name": "林晓-浅灰风衣造型", "description": "24岁女性，齐肩黑发，浅灰风衣。", "three_view_prompt": "林晓同一人物浅灰风衣造型的正面、侧面、背面三视图。"}],
+        "scenes": [{"asset_id": "scene-rainy-bus-stop", "name": "雨夜公交站", "description": "冷蓝路灯下的现代公交站，湿地反光。", "image_prompt": "雨夜公交站环境参考图，冷蓝路灯和湿地反光。"}],
+        "props": [{"asset_id": "prop-black-backpack", "name": "黑色防水背包", "description": "哑光黑色方形背包，银色拉链。", "image_prompt": "黑色防水背包产品参考图，哑光材质和银色拉链。"}],
+    }, blueprints)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("权威 Plan 已存在时不应再次调用场景包 LLM")
+
+    result = asyncio.run(
+        prepare_video_scene_packages_with_llm(
+            form_values={"video_duration_sec": 10, "visual_style": "电影写实风"},
+            plan_markdown="# plan",
+            target_duration_ms=10_000,
+            scene_blueprints=blueprints,
+            asset_manifest=manifest,
+            model_factory=fail_if_called,
+        )
+    )
+
+    assert result["llm_used"] is False
+    for collection in ("characters", "scenes", "props"):
+        expected = manifest[collection][0]
+        actual = result["global_assets"][collection][0]
+        assert actual["asset_id"] == expected["asset_id"]
+        assert actual["name"] == expected["name"]
+        assert actual["description"] == expected["description"]
+        prompt_field = "three_view_prompt" if collection == "characters" else "image_prompt"
+        assert actual[prompt_field] == expected[prompt_field]
+    assert result["scene_packages"][0]["reference_asset_ids"] == [manifest["characters"][0]["asset_id"], manifest["scenes"][0]["asset_id"], manifest["props"][0]["asset_id"]]
+    assert {mention["name"] for mention in result["scene_packages"][0]["shot_description"]["mentions"]} == {"林晓-浅灰风衣造型", "雨夜公交站", "黑色防水背包"}
+
+
+def test_authoritative_plan_manifest_rejects_missing_or_extra_scene_assets():
+    blueprints = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "title": "产品展示",
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 10,
+            "duration_sec": 10,
+            "storyline": "展示背包。",
+            "shot_description": "0-10秒: 地点：摄影棚；主体：背包；动作：旋转展示；景别：特写；运镜：环绕；光影：柔光；声音：音乐；收束：定格。",
+            "narration": "防水通勤。",
+            "transition": "定格。",
+            "asset_requirements": {"characters": [], "scenes": ["摄影棚"], "props": ["防水背包"]},
+        }
+    ]
+    incomplete_manifest = {
+        "characters": [],
+        "scenes": [{"name": "摄影棚", "description": "白色摄影棚。", "image_prompt": "白色摄影棚参考图。"}],
+        "props": [],
+    }
+
+    with pytest.raises(ValueError, match="必须与分镜资产需求完全一致"):
+        prepare_video_scene_packages(
+            form_values={"video_duration_sec": 10},
+            plan_markdown="# plan",
+            target_duration_ms=10_000,
+            scene_blueprints=blueprints,
+            asset_manifest=incomplete_manifest,
+        )
 
 
 def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
