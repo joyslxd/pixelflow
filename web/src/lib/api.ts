@@ -301,6 +301,20 @@ export interface PlanSceneBlueprint extends Record<string, unknown> {
   };
 }
 
+export interface PlanAssetManifestItem extends Record<string, unknown> {
+  asset_id: string;
+  name: string;
+  description: string;
+  three_view_prompt?: string;
+  image_prompt?: string;
+}
+
+export interface PlanAssetManifest {
+  characters: PlanAssetManifestItem[];
+  scenes: PlanAssetManifestItem[];
+  props: PlanAssetManifestItem[];
+}
+
 export interface PlanMarkdownResponse {
   output_type: CreationIntent;
   plan_markdown: string;
@@ -316,10 +330,12 @@ export interface PlanMarkdownResponse {
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest?: PlanAssetManifest;
   }>;
   creation_contract: Record<string, unknown>;
   scene_durations_sec: number[];
   scene_blueprints: PlanSceneBlueprint[];
+  asset_manifest: PlanAssetManifest;
   llm_used: boolean;
   model_name: string;
   error: string | null;
@@ -1672,6 +1688,7 @@ export const api = {
     revision_feedback: string;
     creation_contract?: Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest?: PlanAssetManifest;
     product_creative_profile?: Record<string, unknown>;
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
@@ -1687,6 +1704,7 @@ export const api = {
     revision_feedback: string;
     creation_contract?: Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest?: PlanAssetManifest;
     product_creative_profile?: Record<string, unknown>;
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
@@ -1709,6 +1727,7 @@ export const api = {
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest?: PlanAssetManifest;
     product_creative_profile?: Record<string, unknown>;
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
@@ -1723,6 +1742,7 @@ export const api = {
     creation_contract?: Record<string, unknown>;
     scene_durations_sec?: number[];
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest?: PlanAssetManifest;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/restore`, { method: "POST", body: JSON.stringify(body) }),
 
   prepareImageGeneration: (body: {
@@ -1824,6 +1844,7 @@ export const api = {
     target_duration_ms?: number;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest: PlanAssetManifest;
   }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
 
   startPrepareScenePackagesJob: (body: {
@@ -1834,6 +1855,7 @@ export const api = {
     target_duration_ms?: number;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
+    asset_manifest: PlanAssetManifest;
   }) =>
     req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
       method: "POST",

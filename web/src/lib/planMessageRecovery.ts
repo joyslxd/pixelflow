@@ -140,6 +140,11 @@ interface SavedPlanMessage {
       creation_contract?: Record<string, unknown>;
       scene_durations_sec?: number[];
       scene_blueprints?: Array<Record<string, unknown>>;
+      asset_manifest?: {
+        characters: Array<Record<string, unknown>>;
+        scenes: Array<Record<string, unknown>>;
+        props: Array<Record<string, unknown>>;
+      };
       restored_from_version?: number | null;
     };
   };
@@ -164,6 +169,7 @@ export function planContextFromSavedMessage(
     creation_contract: structuredClone(plan.creation_contract || {}),
     scene_durations_sec: structuredClone(plan.scene_durations_sec || []),
     scene_blueprints: structuredClone(plan.scene_blueprints || []),
+    asset_manifest: structuredClone(plan.asset_manifest || { characters: [], scenes: [], props: [] }),
     restored_from_version: plan.restored_from_version ?? null,
   };
 }

@@ -615,6 +615,7 @@ function collectSceneGenerationImageUrls(
 
 function normalizeSceneAssetMentionsForGeneration(scene: ScenePackageRecord, globalAssets?: GlobalSceneAssets): ScenePackageRecord {
   const mentionNames = new Map<string, string>();
+  const staleMentionAliases = new Map<string, string>();
   if (globalAssets) {
     for (const collection of [globalAssets.characters, globalAssets.scenes, globalAssets.props]) {
       for (const asset of collection || []) {
@@ -631,16 +632,21 @@ function normalizeSceneAssetMentionsForGeneration(scene: ScenePackageRecord, glo
       const record = mention as Record<string, unknown>;
       const assetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
       const name = stringValue(record.name) || stringValue(record.label);
-      if (assetId && name) mentionNames.set(assetId, name);
+      const canonicalName = assetId ? mentionNames.get(assetId) : undefined;
+      if (assetId && canonicalName && name && name !== canonicalName) staleMentionAliases.set(name, canonicalName);
+      if (assetId && name && !mentionNames.has(assetId)) mentionNames.set(assetId, name);
     }
   }
   if (mentionNames.size === 0) return scene;
 
   const normalizeText = (value: unknown): unknown => {
     if (typeof value !== "string") return value;
-    return Array.from(mentionNames.entries())
+    const assetIdNormalized = Array.from(mentionNames.entries())
       .sort(([left], [right]) => right.length - left.length)
       .reduce((text, [assetId, name]) => text.split(`@${assetId}`).join(`@${name}`), value);
+    return Array.from(staleMentionAliases.entries())
+      .sort(([left], [right]) => right.length - left.length)
+      .reduce((text, [staleName, canonicalName]) => text.split(`@${staleName}`).join(`@${canonicalName}`), assetIdNormalized);
   };
   const shotDescription = scene.shot_description && typeof scene.shot_description === "object"
     ? {
@@ -648,6 +654,15 @@ function normalizeSceneAssetMentionsForGeneration(scene: ScenePackageRecord, glo
         text: normalizeText(scene.shot_description.text),
         description_text: normalizeText(scene.shot_description.description_text),
         shotText: normalizeText(scene.shot_description.shotText),
+        mentions: Array.isArray(scene.shot_description.mentions)
+          ? scene.shot_description.mentions.map((mention) => {
+              if (!mention || typeof mention !== "object") return mention;
+              const record = mention as Record<string, unknown>;
+              const assetId = stringValue(record.asset_id) || stringValue(record.assetId) || stringValue(record.id);
+              const canonicalName = assetId ? mentionNames.get(assetId) : undefined;
+              return canonicalName ? { ...record, name: canonicalName } : mention;
+            })
+          : scene.shot_description.mentions,
       }
     : scene.shot_description;
   return {

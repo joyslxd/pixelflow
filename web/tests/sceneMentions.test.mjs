@@ -138,6 +138,16 @@ test("normalizeShotMentions refreshes existing mentions from matching generated 
   ]);
 });
 
+test("normalizeShotMentions always uses the final Plan global asset name", () => {
+  const mentions = normalizeShotMentions(
+    { mentions: [{ asset_id: "prop-product", name: "旧缓存名称" }] },
+    [],
+    { props: [{ asset_id: "prop-product", name: "黑色防水背包", images: ["https://x/backpack.png"] }] },
+  );
+
+  assert.equal(mentions[0].name, "黑色防水背包");
+});
+
 test("normalizeShotMentions preserves generation reference metadata from global assets", () => {
   const mentions = normalizeShotMentions(
     {

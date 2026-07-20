@@ -68,7 +68,7 @@ export function normalizeShotMentions(
     mentions.push({
       asset_id: assetId || key,
       type: mentionType(record, candidate),
-      name: stringValue(record.name) || stringValue(record.label) || candidate?.name || assetId || key,
+      name: candidate?.name || stringValue(record.name) || stringValue(record.label) || assetId || key,
       image_url: candidate?.image_url || imageUrl,
       ...(generationReferenceUrl ? { generation_reference_url: generationReferenceUrl } : {}),
       ...(thirdAssetId ? { third_asset_id: thirdAssetId } : {}),

@@ -292,6 +292,7 @@ interface WorkspaceSnapshot {
   creation_contract?: Record<string, unknown>;
   scene_durations_sec?: number[];
   scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
+  asset_manifest?: PlanMarkdownResponse["asset_manifest"];
   restored_from_version?: number | null;
   workflowProgress?: WorkflowProgressSnapshot | null;
   workflow_progress?: WorkflowProgressSnapshot | null;
@@ -431,6 +432,7 @@ interface PlanRevisionJobRequest extends PlanGenerationJobRequest {
   revision_feedback: string;
   creation_contract?: Record<string, unknown>;
   scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
+  asset_manifest?: PlanMarkdownResponse["asset_manifest"];
 }
 
 interface PendingPlanJobContext {
@@ -746,6 +748,7 @@ interface PrepareScenePackagesJobRequest {
   target_duration_ms?: number;
   creation_contract?: VideoCreationContract;
   scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
+  asset_manifest: PlanMarkdownResponse["asset_manifest"];
 }
 
 interface SceneAssetsJobRequest {
@@ -7278,6 +7281,13 @@ export function WorkspacePage() {
       pushAssistant("视频 plan.md 缺少完整制作合同，请重新生成 plan.md 后再继续。", targetConversationId);
       return;
     }
+    const assetManifest = artifact.plan.asset_manifest;
+    if (!assetManifest || !Array.isArray(assetManifest.characters) || !Array.isArray(assetManifest.scenes) || !Array.isArray(assetManifest.props)) {
+      releaseArtifactAction(processedKey);
+      setBusyForConversation(targetConversationId, false);
+      pushAssistant("视频 plan.md 缺少最终角色、道具、场景清单，请先重新生成或修订 plan.md。", targetConversationId);
+      return;
+    }
     pushAssistant("视频plan.md已同意,正在准备可编辑视频资产", targetConversationId);
     try {
       const request: PrepareScenePackagesJobRequest = {
@@ -7288,6 +7298,7 @@ export function WorkspacePage() {
         target_duration_ms: creationContract.video_duration_sec * 1000,
         creation_contract: creationContract,
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        asset_manifest: assetManifest,
       };
       const started = await api.startPrepareScenePackagesJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -7312,6 +7323,7 @@ export function WorkspacePage() {
         plan_approved: true,
         creation_contract: creationContract,
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        asset_manifest: assetManifest,
       });
       await resumePendingScenePackageJob(pendingScenePackageJob, processedKey);
     } catch (err) {
@@ -7349,6 +7361,7 @@ export function WorkspacePage() {
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        asset_manifest: artifact.plan.asset_manifest,
         product_creative_profile: { core_message: artifact.coreMessage || pendingCore },
         intake_context: artifact.intakeContext,
         materials: artifact.materials || [],
@@ -7518,6 +7531,7 @@ export function WorkspacePage() {
         revision_feedback: feedback,
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        asset_manifest: artifact.plan.asset_manifest,
         product_creative_profile: { revision_feedback: feedback },
         intake_context: artifact.intakeContext,
         materials,
@@ -7597,6 +7611,7 @@ export function WorkspacePage() {
         creation_contract: artifact.plan.creation_contract || artifact.creationContract || {},
         scene_durations_sec: artifact.plan.scene_durations_sec || [],
         scene_blueprints: artifact.plan.scene_blueprints || [],
+        asset_manifest: artifact.plan.asset_manifest,
       });
       await persistPlanArtifactForConversation(
         createPlanArtifactMessage(

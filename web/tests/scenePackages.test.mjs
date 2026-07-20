@@ -446,9 +446,9 @@ test("scene generation merges partial mention references with global assets and 
     shot_description: {
       text: "0-8秒：@character-host 在 @scene-desk 展示 @prop-product。",
       mentions: [
-        { asset_id: "character-host", name: "讲解者", image_url: "https://x/role-mention.png" },
-        { asset_id: "scene-desk", name: "桌面场景" },
-        { asset_id: "prop-product", name: "蓝牙耳机" },
+        { asset_id: "character-host", name: "旧角色名", image_url: "https://x/role-mention.png" },
+        { asset_id: "scene-desk", name: "旧场景名" },
+        { asset_id: "prop-product", name: "旧道具名" },
       ],
     },
   };
@@ -461,8 +461,9 @@ test("scene generation merges partial mention references with global assets and 
     "https://x/global-scene.png",
     "https://x/global-prop.png",
   ]);
-  assert.equal(payload.prompt, "@讲解者 在 @桌面场景 展示 @蓝牙耳机。");
-  assert.equal(payload.shot_description.text, "0-8秒：@讲解者 在 @桌面场景 展示 @蓝牙耳机。");
+  assert.equal(payload.prompt, "@讲解者 在 @桌面场景 展示 @耳机。");
+  assert.equal(payload.shot_description.text, "0-8秒：@讲解者 在 @桌面场景 展示 @耳机。");
+  assert.deepEqual(payload.shot_description.mentions.map((mention) => mention.name), ["讲解者", "桌面场景", "耳机"]);
 });
 
 test("applyGlobalSceneAssetReplacement stores image asset references as normal image urls", () => {

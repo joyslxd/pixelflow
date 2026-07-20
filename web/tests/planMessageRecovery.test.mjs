@@ -94,6 +94,11 @@ test("恢复完成后七字段必须取自服务端保存的 Plan artifact 而�
         creation_contract: { video_duration_sec: 20, video_model: "seedance-1.5-pro" },
         scene_durations_sec: [10, 10],
         scene_blueprints: [{ scene_id: "scene-1", duration_sec: 10 }, { scene_id: "scene-2", duration_sec: 10 }],
+        asset_manifest: {
+          characters: [{ asset_id: "character-host", name: "讲解者" }],
+          scenes: [{ asset_id: "scene-desk", name: "桌面场景" }],
+          props: [{ asset_id: "prop-product", name: "蓝牙耳机" }],
+        },
         restored_from_version: null,
       },
     },
@@ -117,6 +122,11 @@ test("恢复完成后七字段必须取自服务端保存的 Plan artifact 而�
     creation_contract: { video_duration_sec: 20, video_model: "seedance-1.5-pro" },
     scene_durations_sec: [10, 10],
     scene_blueprints: [{ scene_id: "scene-1", duration_sec: 10 }, { scene_id: "scene-2", duration_sec: 10 }],
+    asset_manifest: {
+      characters: [{ asset_id: "character-host", name: "讲解者" }],
+      scenes: [{ asset_id: "scene-desk", name: "桌面场景" }],
+      props: [{ asset_id: "prop-product", name: "蓝牙耳机" }],
+    },
     restored_from_version: null,
   });
 });
