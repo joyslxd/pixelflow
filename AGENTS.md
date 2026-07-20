@@ -345,8 +345,11 @@ SmartPPT接口：
 
 - 每个片段最少 4 秒，最多 15 秒。
 - 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
-- 场景包必须消费当前激活 Plan 的 `scene_blueprints`，不得再按总时长重新切分或重写标题、故事线、镜头描述、旁白和转场；只负责把每个蓝图的 `asset_requirements` 补齐成全局资产并映射为 `@asset_id` 和 mentions。场景包 LLM 返回的旧资产和自由 prompt 不能覆盖最终 Plan；历史对话没有蓝图时才允许使用兼容兜底。
+- 视频 Plan 必须同时发布结构化 `asset_manifest` 和固定“全局资产清单”第四章。角色项包含最终名称、文字说明、`three_view_prompt`；场景/道具项包含最终名称、文字说明、`image_prompt`。三类名称全局唯一，并分别与所有蓝图 `asset_requirements` 的同类并集完全一致；初次生成、Agent 修订、手工编辑和历史回退都必须版本化保存。
+- 场景包必须消费当前激活 Plan 的 `scene_blueprints + asset_manifest`，不得再按总时长重新切分、重写故事内容或调用第二次 LLM 分析资产；只机械映射全局资产、`@asset_id` 和 mentions。缺少清单的旧 Plan 必须先重新生成或修订，不能继续生成场景包。
 - 权威蓝图中的人物、场景和道具需求必须逐项进入全局资产，四类全局 ID（含 `visual_style.asset_id`）必须唯一；已有 `@asset_id` 不得被名称规范化再次替换。任一分镜引用超过 9 张时直接返回包含分镜编号和引用数的明确错误，不得静默截断。
+- 全局资产名称、场景包名称和前端 `shot_description.mentions[].name` 必须等于最终 Plan 名称；旧缓存名称不能覆盖全局正式名称。每个清单资产只创建一个图片任务并只绑定一个图片 URL，同一资产跨分镜复用时不得重复生图。
+- 场景资产调用 content-app 时，提示词必须合并最终 Plan 清单的正式名称、`description` 和 `three_view_prompt/image_prompt`，不能只取生图字段而丢失文字说明里的外观、材质或颜色约束。
 - 全局固定资产：`characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须生成同一人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、卖点物件必须进入 `props`，不能放进 `characters`。

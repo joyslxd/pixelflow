@@ -103,6 +103,40 @@ def test_generate_scene_assets_keeps_exactly_one_image_per_plan_asset():
     assert result["global_assets"]["props"][0]["images"] == ["https://x/first.png"]
 
 
+def test_generate_scene_assets_combines_plan_description_and_image_prompt():
+    captured: dict[str, Any] = {}
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            captured.update(kwargs)
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/umbrella.png"}])
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无参考图时不应调用参考生图")
+
+    asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "props": [
+                    {
+                        "asset_id": "prop-umbrella",
+                        "name": "透明雨伞",
+                        "description": "透明 PVC 伞面、白色金属伞骨、黑色塑料伞柄。",
+                        "image_prompt": "撑开状态的透明雨伞参考图，纯色背景。",
+                    }
+                ]
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert "透明雨伞" in captured["prompt"]
+    assert "黑色塑料伞柄" in captured["prompt"]
+    assert "撑开状态的透明雨伞参考图" in captured["prompt"]
+
+
 def test_generate_scene_assets_rejects_polluted_global_asset_before_image_call():
     call_count = 0
 

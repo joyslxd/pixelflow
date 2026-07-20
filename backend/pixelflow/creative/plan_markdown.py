@@ -263,8 +263,52 @@ async def build_plan_markdown_with_llm(
                     )
                     corrections.append(f"Plan LLM 分镜时长已按创作合同重新调度：{exc}")
                 except ValueError as repair_exc:
-                    blueprints = _fallback_blueprints(form_values, selected_direction, contract)
-                    corrections.append(f"Plan LLM 分镜蓝图已使用规则修正：{repair_exc}")
+                    validation_feedback = (
+                        "首次返回的 scene_blueprints 结构无效，且确定性时间表修复失败。"
+                        f"原始校验错误：{exc}；时间表修复错误：{repair_exc}。"
+                        "请返回完整、连续且总时长精确匹配创作合同的 scene_blueprints；"
+                        "同时重新核对用户明确命名的人物、服装造型、物理场景、商品和道具，"
+                        "逐项写入 asset_requirements 与 asset_manifest，禁止使用泛化占位名称。"
+                    )
+                    try:
+                        retry_payload = await generate_plan_payload(
+                            intent=intent,
+                            template_markdown=template_markdown,
+                            form_values=form_values,
+                            selected_direction=selected_direction,
+                            product_creative_profile=profile,
+                            materials=materials or [],
+                            intake_context=context,
+                            creation_contract=creation_contract,
+                            validation_feedback=validation_feedback,
+                            model_name=model_name,
+                            model_factory=model_factory,
+                        )
+                        retry_payload = _redact_semantic_memory_payload(retry_payload, profile, context)
+                        retry_markdown = _validated_llm_markdown(
+                            intent,
+                            retry_payload,
+                            form_values,
+                            selected_direction,
+                            context,
+                        )
+                        try:
+                            retry_blueprints = normalize_scene_blueprints(
+                                retry_payload.get("scene_blueprints"),
+                                total_duration_sec=contract.video_duration_sec,
+                            )
+                        except ValueError:
+                            retry_blueprints = repair_scene_blueprints_schedule(
+                                retry_payload.get("scene_blueprints"),
+                                total_duration_sec=contract.video_duration_sec,
+                            )
+                        payload = retry_payload
+                        markdown = retry_markdown
+                        blueprints = retry_blueprints
+                        corrections.append("Plan LLM 分镜蓝图已根据结构反馈重新生成")
+                    except Exception as retry_exc:  # noqa: BLE001 - retry failure degrades to deterministic contract
+                        blueprints = _fallback_blueprints(form_values, selected_direction, contract)
+                        corrections.append(f"Plan LLM 分镜蓝图重试失败，已使用规则修正：{retry_exc}")
             quality_issues = shot_description_quality_issues(blueprints)
             if quality_issues:
                 try:

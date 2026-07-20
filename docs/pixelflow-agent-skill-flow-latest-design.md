@@ -427,7 +427,11 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 
 ## 6. 视频场景包数据合同
 
-场景包返回结构由 `prepare_video_scene_packages_with_llm()` 归一：
+最终视频 Plan 同时发布 `scene_blueprints` 和 `asset_manifest`。`asset_manifest.characters` 每项包含后端生成的稳定 `asset_id`、最终 `name`、`description`、`three_view_prompt`；`scenes/props` 每项包含 `asset_id/name/description/image_prompt`。后端按类别校验三类清单与所有蓝图 `asset_requirements` 的名称并集完全相等，并拒绝跨类别重名、空说明、空提示词、缺少或多出的资产。Plan Markdown 第四章由该结构固定渲染为“全局资产清单”，而不是信任 LLM 自由文本。
+
+初次生成、LLM 修订、右侧编辑器手工发布和历史回退都保存同版本的 `asset_manifest` 深拷贝。前端把它写入 Plan artifact、active Plan 快照、conversation context 和 pending 场景包请求。存在权威蓝图时，`/prepare-scene-packages` 缺少清单返回 422，要求先重新生成或修订旧 Plan。
+
+场景包返回结构由 `prepare_video_scene_packages_with_llm()` 归一；当权威蓝图和清单存在时，该函数不再调用场景包 LLM，而是机械转换：
 
 ```json
 {
@@ -497,8 +501,9 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 - `characters` 只能放人物角色。
 - 每个 `character` 必须有 `three_view_prompt`，生成的是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、球、书包、床垫等非人物主体放到 `props`。
+- `characters/scenes/props` 的个数、顺序、名称、说明和生图提示词必须逐项等于最终 Plan 清单；实际供应商提示词合并正式名称、`description` 和 `three_view_prompt/image_prompt`，保证文字说明中的外观约束不会被遗漏；同一资产跨分镜只保留一个全局记录、创建一个图片任务并绑定一个图片 URL。供应商意外返回多张时只保留第一张。
 - `shot_description.text` 是一整段文本，不能拆成多个 UI 字段。
-- `shot_description.mentions` 是前端 @ 选择后提交的图片引用集合。生成视频请求会合并分镜已有 `image_urls`、mentions 中的生成引用，以及 `reference_asset_ids` 对应的全局人物/场景/道具素材；任一 mention 已有图片时也不能跳过其余全局素材。提交前会把镜头文本和提示词中的 `@asset_id` 统一替换为对应素材名称，参考图仍按稳定顺序去重并最多保留 9 张。
+- `shot_description.mentions` 是前端 @ 选择后提交的图片引用集合。其 `name` 和编辑器 `@名称` 始终以全局 Plan 清单名称覆盖旧缓存名称。生成视频请求会合并分镜已有 `image_urls`、mentions 中的生成引用，以及 `reference_asset_ids` 对应的全局人物/场景/道具素材；任一 mention 已有图片时也不能跳过其余全局素材。提交前会把镜头文本和提示词中的 `@asset_id` 统一替换为对应素材名称，参考图仍按稳定顺序去重并最多保留 9 张。
 - `visual_style` 是文字约束，不作为图片 mention。
 
 ## 7. 图片流程
@@ -647,12 +652,12 @@ Plan 审核与版本规则：
 - 重新生成新创意才调用 `/agent/flows/intake/directions` 返回新的 3 个方向。
 - 初始 Plan 是 v1；每次修订创建新版本，回退只直接激活所选历史版本并保持 `plan_history` 不变，不追加重复版本。
 - 回退后再次“继续修改”时，以历史最大版本号加一创建新版本，例如 v2 回退到 v1 后修订生成 v3，同时保留 v2。
-- 新版本历史条目保存 `creation_contract`、`scene_durations_sec` 与 `scene_blueprints` 快照。回退时恢复所选版本的快照；旧对话缺少蓝图时才使用兼容兜底。
+- 新版本历史条目保存 `creation_contract`、`scene_durations_sec`、`scene_blueprints` 与 `asset_manifest` 快照。回退时恢复所选版本的快照；新场景包流程不接受缺少清单的历史视频 Plan。
 - 视频历史时长快照只接受非 `bool` 的整数，每段 4-15 秒且总和必须等于该历史版本合同的 `video_duration_sec`；任一字段非法时整组沿用当前权威分镜时长。图片显式空快照继续合法。
 - 前端从当前对话最后一条已保存的 Plan artifact 派生激活版本、合同、分镜时长与权威蓝图，并统一由 `makeSnapshot()` 写入 conversation context，避免自动保存覆盖回退结果或恢复后重新切镜。
 - Plan 消息以 `conversation_id + client_message_id` 幂等保存；同一对话在网络结果未知后重试只返回既有消息，且必须先确认消息落库再更新 context。
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
-- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包还必须逐项消费该版本 `scene_blueprints[].asset_requirements`，补齐人物、场景和道具并重建 `@asset_id`/mentions；不得使用场景包 LLM 返回的旧方案资产或自由 prompt 覆盖最终 Plan。`asset_requirements` 只允许可生图实体，时间段、钩子/收束、段落编号、运镜、声音、风格规格和 `@图片N/@视频N` 均非法；初次生成和 Agent 修订会调用一次 LLM 只修资产数组，场景包执行前还会复用同一校验保护历史 Plan，失败时停止且不创建参考图任务。
+- 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包逐项消费该版本 `scene_blueprints[].asset_requirements + asset_manifest` 并重建 `@asset_id`/mentions，不使用第二次 LLM 或自由 prompt 改写最终资产。`asset_requirements` 只允许可生图实体，时间段、钩子/收束、段落编号、运镜、声音、风格规格和 `@图片N/@视频N` 均非法；初次生成和 Agent 修订会调用定向 LLM 修正资产数组，发布前再校验清单并集，失败时不创建参考图任务。
 - 场景包的 `characters/scenes/props/visual_style` 四类全局 ID 必须唯一；规范化前先保护已有 `@asset_id`，避免二次替换。任一分镜引用超过 9 张时返回包含分镜标识和引用数量的错误，不允许截断后继续生成。
 
 场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：

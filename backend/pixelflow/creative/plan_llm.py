@@ -25,6 +25,7 @@ async def generate_plan_payload(
     materials: list[dict[str, Any]],
     intake_context: dict[str, Any],
     creation_contract: dict[str, Any],
+    validation_feedback: str = "",
     model_name: str = PLAN_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
 ) -> dict[str, Any]:
@@ -37,6 +38,7 @@ async def generate_plan_payload(
         materials=materials,
         intake_context=intake_context,
         creation_contract=creation_contract,
+        validation_feedback=validation_feedback,
     )
     payload = await asyncio.to_thread(
         _invoke_json_model,
@@ -240,6 +242,7 @@ def _generation_prompt(
     materials: list[dict[str, Any]],
     intake_context: dict[str, Any],
     creation_contract: dict[str, Any],
+    validation_feedback: str = "",
 ) -> str:
     video_rules = ""
     if intent == "video":
@@ -256,6 +259,7 @@ def _generation_prompt(
 - 必须返回完整 asset_manifest：characters、scenes、props 分别与所有 scene_blueprints.asset_requirements 的同类名称并集完全相等，不能少、不能多；三类名称全局唯一，并作为后续场景包和 @ 图片引用的最终展示名。
 - asset_manifest.characters 每项必须包含 name、description、three_view_prompt，明确同一人物的年龄感、外貌、发型、服装和正面/侧面/背面一致性；scenes/props 每项必须包含 name、description、image_prompt，明确环境或物件的外观、材质、色彩、光线等可执行生图要求。
 - 同一人物、场景或道具跨多个分镜复用时只列一次；人物出现明显服装、年龄阶段或外观变化时，必须拆成不同且明确的名称，并让对应分镜引用该名称。
+- 用户表单、选中创意和采集上下文中明确命名的人物、服装造型、物理场景、商品或道具都是强制资产；必须逐项进入对应分镜的 asset_requirements 和 asset_manifest，禁止替换成“目标用户”“人物角色”“真实使用场景”“产品”等泛化名称。
 - plan.md 第四章必须输出“全局资产清单”，逐项展示与 asset_manifest 完全相同的名称、文字说明和生图要求。
 - plan.md 必须写明视频模型、图片模型、图片比例、图片清晰度。
 - scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
@@ -271,6 +275,7 @@ def _generation_prompt(
 3. 后续图片、分镜资产和视频都会严格按此 plan.md 执行，因此内容必须完整、具体、无占位符。
 4. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
 5. 只返回 JSON，不要解释，不要 Markdown 代码围栏。
+6. 如果“上次结构校验反馈”不为空，必须修复反馈指出的结构问题，同时重新核对并完整保留用户明确命名的全部资产；不得用泛化占位资产替代。
 {video_rules}
 
 输出：
@@ -283,6 +288,7 @@ def _generation_prompt(
 采集上下文：{_json(intake_context)}
 附件摘要：{_json(materials)}
 创作合同：{_json(creation_contract)}
+上次结构校验反馈：{validation_feedback or "无"}
 
 模板结构示例：
 {template_markdown}

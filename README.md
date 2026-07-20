@@ -18,7 +18,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
-| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频 Plan 同时应用 Seedance Skill 生成权威分镜蓝图，支持版本化修订与回退 |
+| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频 Plan 同时生成权威分镜蓝图和角色/场景/道具 `asset_manifest`，支持版本化修订与回退 |
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
@@ -308,7 +308,8 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 
 - 每个场景片段最少 4 秒，最多 15 秒。
 - 所有分镜整数秒时长总和必须精确等于用户确认的 `video_duration_sec`；300 秒任务允许产生超过 18 个分镜。
-- 场景包直接消费当前 Plan 的权威 `scene_blueprints`，保留其标题、故事线、镜头描述、旁白、转场和时长，只负责把每个蓝图的 `asset_requirements` 逐项对齐成全局素材及 `@asset_id`；场景包 LLM 的旧方案资产或自由 prompt 不得覆盖最终 Plan。人物、场景、道具和视觉风格 ID 全局唯一，已有 `@asset_id` 不会被二次替换；任一分镜超过 9 张引用会返回明确错误而不是静默截断。
+- 视频 Plan 的固定第四章是“全局资产清单”，结构化 `asset_manifest` 分别保存角色、场景、道具的最终名称、文字说明和生图要求；三类清单必须与全部 `scene_blueprints[].asset_requirements` 的分类并集完全相等，不能少也不能多。修订、手工编辑和历史回退都按版本保存该清单。
+- 场景包直接消费当前 Plan 的权威 `scene_blueprints + asset_manifest`，保留蓝图标题、故事线、镜头描述、旁白、转场和时长，并机械映射全局素材及 `@asset_id`，不再调用第二次 LLM 分析资产。缺少清单的旧 Plan 会被阻止进入新场景包流程；前端展示和提交的 `mentions.name` 始终以清单正式名称为准。任一分镜超过 9 张引用会返回明确错误而不是静默截断。
 - 全局固定资产是 `characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、书包、球、床垫等非人物主体放到 `props`。
@@ -318,7 +319,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - 每个视频场景片段最多 9 张参考图。
 - 镜头描述由 `backend/pixelflow/generate/seedance_prompt.py` 应用项目内 `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 会显式携带用户确认的 `video_model`，并继续保留 `@asset_id` 和 mentions 图片 URL。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 记录 Skill 的输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
-- 角色三视图、场景图和道具图统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`；分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
+- 角色三视图、场景图和道具图严格按 `asset_manifest` 一项生成一张并只保存一个 URL，同一 `asset_id` 跨分镜只生成一次；实际生图提示词同时包含清单的正式名称、文字说明和生图要求，避免 `image_prompt` 未重复某项外观约束时丢失 Plan 说明；统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`。分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
 - 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
 - 新需求入口使用可恢复 job：用户消息保存走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存完成后采集意图识别走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并写入 `pendingIntakeJob` / `pending_intake_job`。用户切到历史对话、创作页、iframe 外或刷新后只轮询已有 job，不重复追加用户消息、不重复启动采集流程；旧 `/messages` 和 `/intake/analyze` 同步接口仅做兼容。

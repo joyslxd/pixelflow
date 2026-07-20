@@ -117,6 +117,28 @@ def enhance_prop_reference_prompt(prompt: str) -> str:
     return f"{cleaned}。{PROP_REFERENCE_PROMPT_SUFFIX}"
 
 
+def _asset_generation_prompt(asset: dict[str, Any], *prompt_fields: str) -> str:
+    """将 Plan 的正式名称、文字说明和生图要求一起传给供应商。"""
+    name = str(asset.get("name") or "").strip()
+    description = str(asset.get("description") or "").strip()
+    image_prompt = ""
+    for field in prompt_fields:
+        image_prompt = str(asset.get(field) or "").strip()
+        if image_prompt:
+            break
+    if not description and not image_prompt:
+        return ""
+    parts: list[str] = []
+    seen_values: set[str] = set()
+    for label, value in (("资产名称", name), ("Plan文字说明", description), ("生图要求", image_prompt)):
+        if value and value not in seen_values:
+            parts.append(f"{label}：{value}")
+            seen_values.add(value)
+    if len(parts) == 1 and image_prompt:
+        return image_prompt
+    return "；".join(parts)
+
+
 def resolve_scene_asset_endpoint(generation_modes: set[str]) -> str:
     if not generation_modes or generation_modes == {"text_to_image"}:
         return TEXT_TO_IMAGE_ENDPOINT
@@ -451,20 +473,20 @@ async def generate_scene_assets(
 
     if assets:
         for character in _list_of_dicts(assets.get("characters")):
-            prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
+            prompt = _asset_generation_prompt(character, "three_view_prompt", "image_prompt")
             queue_asset(character, "three_view_images", prompt, image_ratio, _asset_context(character, asset_type="character", scene_packages=enriched))
         for scene_image in _list_of_dicts(assets.get("scenes")):
-            prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
+            prompt = _asset_generation_prompt(scene_image, "image_prompt")
             queue_asset(scene_image, "images", prompt, image_ratio, _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched))
         for prop_image in _list_of_dicts(assets.get("props")):
-            prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
+            prompt = _asset_generation_prompt(prop_image, "image_prompt")
             queue_asset(prop_image, "images", prompt, image_ratio, _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched))
     else:
         for scene in enriched:
             scene_id = str(scene.get("scene_id") or "")
             scene_index = scene.get("scene_index")
             for character in _list_of_dicts(scene.get("characters")):
-                prompt = str(character.get("three_view_prompt") or character.get("image_prompt") or character.get("description") or "").strip()
+                prompt = _asset_generation_prompt(character, "three_view_prompt", "image_prompt")
                 queue_asset(
                     character,
                     "three_view_images",
@@ -473,7 +495,7 @@ async def generate_scene_assets(
                     _asset_context(character, asset_type="character", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
                 )
             for scene_image in _list_of_dicts(scene.get("scene_images")):
-                prompt = str(scene_image.get("image_prompt") or scene_image.get("description") or "").strip()
+                prompt = _asset_generation_prompt(scene_image, "image_prompt")
                 queue_asset(
                     scene_image,
                     "images",
@@ -482,7 +504,7 @@ async def generate_scene_assets(
                     _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
                 )
             for prop_image in _list_of_dicts(scene.get("prop_images")):
-                prompt = str(prop_image.get("image_prompt") or prop_image.get("description") or prop_image.get("name") or "").strip()
+                prompt = _asset_generation_prompt(prop_image, "image_prompt")
                 queue_asset(
                     prop_image,
                     "images",
