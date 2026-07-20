@@ -529,7 +529,10 @@ sequenceDiagram
   else "普通图片生成"
     FE->>IA: "POST /agent/flows/intake/directions"
     IA-->>FE: "3 个创意方向"
-    FE->>PA: "POST /agent/flows/planning/plan"
+    FE->>PA: "POST /agent/flows/planning/plan/start"
+    PA-->>FE: "job_id"
+    FE->>FE: "保存 pendingPlanJob 到 conversation context"
+    FE->>PA: "轮询 /agent/flows/planning/plan/jobs/{job_id}"
     PA-->>FE: "plan.md"
     FE->>IMG: "POST /agent/flows/image/prepare"
     IMG-->>FE: "method + endpoint + params"
@@ -584,11 +587,17 @@ sequenceDiagram
   FE->>IA: "已确认表单 + creation_contract"
   IA-->>FE: "3 个创意方向"
   U->>FE: "选择方向"
-  FE->>PA: "按 plan_video.md + Seedance Skill 调用 LLM"
+  FE->>PA: "POST /agent/flows/planning/plan/start"
+  PA-->>FE: "job_id"
+  FE->>FE: "保存 pendingPlanJob 到 conversation context"
+  FE->>PA: "轮询 /agent/flows/planning/plan/jobs/{job_id}"
   PA-->>FE: "plan.md v1 + 最终生产合同 + 权威 scene_blueprints"
   alt "当前创意内修改"
     U->>FE: "修改意见"
-    FE->>PA: "POST /agent/flows/planning/plan/revise"
+    FE->>PA: "POST /agent/flows/planning/plan/revise/start"
+    PA-->>FE: "job_id"
+    FE->>FE: "保存 pendingPlanJob(kind=plan_revision)"
+    FE->>PA: "轮询 /agent/flows/planning/plan/revise/jobs/{job_id}"
     PA-->>FE: "plan.md v2/v3 + 历史版本"
   else "重新生成新创意"
     FE->>IA: "POST /agent/flows/intake/directions"
@@ -625,7 +634,8 @@ sequenceDiagram
 Plan 审核与版本规则：
 
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
-- 当前创意内修改只调用 `/agent/flows/planning/plan/revise`，不得返回创意方向列表。
+- 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`。前端必须把 `pendingPlanJob` / `pending_plan_job` 写入 conversation context，恢复时只轮询已有 job，不得因刷新、离开或切换对话重新提交生成请求；同步 `/plan` 与 `/plan/revise` 仅保留兼容旧调用。
+- 当前创意内修改不得返回创意方向列表；job 完成后再保存 plan artifact，消息保存失败时继续复用已有 Plan 结果和消息 job。
 - 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
 - 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。
 - 候选合同、分镜时间线或镜头描述八维完整度校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。

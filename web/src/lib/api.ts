@@ -34,6 +34,8 @@ const CONVERSATION_MESSAGE_JOB_POLL_INTERVAL_MS = 1000;
 const CONVERSATION_MESSAGE_JOB_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
 const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+const PLAN_JOB_POLL_INTERVAL_MS = 3000;
+const PLAN_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
@@ -322,6 +324,22 @@ export interface PlanMarkdownResponse {
   model_name: string;
   error: string | null;
   restored_from_version: number | null;
+}
+
+export interface PlanJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  message: string;
+}
+
+export interface PlanJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "running" | "completed" | "failed" | string;
+  result: PlanMarkdownResponse | null;
+  error: string | null;
+  message: string;
 }
 
 export interface VideoCreationContract extends Record<string, unknown> {
@@ -1047,6 +1065,28 @@ async function pollCreativeDirectionsJob(
   throw new ApiError(408, "创意方向生成轮询超时");
 }
 
+async function pollPlanJob(
+  jobId: string,
+  kind: "generation" | "revision",
+  shouldContinue: () => boolean = () => true,
+): Promise<PlanMarkdownResponse | null> {
+  const deadline = Date.now() + PLAN_JOB_TIMEOUT_MS;
+  const path = kind === "revision"
+    ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
+    : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<PlanJobStatusResponse>(path);
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "failed") {
+      throw new ApiError(500, status.error || status.message || (kind === "revision" ? "Plan revision failed" : "Plan generation failed"));
+    }
+    await delay(PLAN_JOB_POLL_INTERVAL_MS);
+  }
+  throw new ApiError(408, kind === "revision" ? "Plan revision polling timed out" : "Plan generation polling timed out");
+}
+
 async function pollSceneVideoJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
@@ -1607,6 +1647,21 @@ export const api = {
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan`, { method: "POST", body: JSON.stringify(body) }),
 
+  startPlanMarkdownJob: (body: {
+    intent: CreationIntent;
+    form_values: Record<string, unknown>;
+    selected_direction: Record<string, unknown>;
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+  }) => req<PlanJobStartResponse>(`${FLOW_BASE}/planning/plan/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getPlanMarkdownJob: (jobId: string) =>
+    req<PlanJobStatusResponse>(`${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPlanMarkdownJob: (jobId: string, shouldContinue?: () => boolean) =>
+    pollPlanJob(jobId, "generation", shouldContinue),
+
   revisePlanMarkdown: (body: {
     intent: CreationIntent;
     form_values: Record<string, unknown>;
@@ -1621,6 +1676,27 @@ export const api = {
     intake_context?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
   }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/revise`, { method: "POST", body: JSON.stringify(body) }),
+
+  startPlanRevisionJob: (body: {
+    intent: CreationIntent;
+    form_values: Record<string, unknown>;
+    selected_direction: Record<string, unknown>;
+    current_plan_markdown: string;
+    current_plan_version: number;
+    plan_history: PlanMarkdownResponse["plan_history"];
+    revision_feedback: string;
+    creation_contract?: Record<string, unknown>;
+    scene_blueprints?: PlanSceneBlueprint[];
+    product_creative_profile?: Record<string, unknown>;
+    intake_context?: Record<string, unknown>;
+    materials?: Array<Record<string, unknown>>;
+  }) => req<PlanJobStartResponse>(`${FLOW_BASE}/planning/plan/revise/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getPlanRevisionJob: (jobId: string) =>
+    req<PlanJobStatusResponse>(`${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPlanRevisionJob: (jobId: string, shouldContinue?: () => boolean) =>
+    pollPlanJob(jobId, "revision", shouldContinue),
 
   savePlanMarkdownEdit: (body: {
     intent: CreationIntent;

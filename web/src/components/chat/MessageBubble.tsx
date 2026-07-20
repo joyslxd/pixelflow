@@ -1445,7 +1445,7 @@ export function MessageBubble({
                     disabled={actionsDisabled || !jianyingDraftAction.enabled}
                     title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : jianyingDraftAction.reason || undefined}
                     onClick={() => onGenerateJianyingDraft?.(msg)}
-                    className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                    className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2.5 text-[13px] font-medium text-accent transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <FileArchive size={15} />}
                     {jianyingDraftRunning ? "草稿生成中" : jianyingDraftAction.label}
@@ -1468,7 +1468,7 @@ export function MessageBubble({
                   disabled={actionsDisabled || !jianyingDraftAction.enabled}
                   title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : jianyingDraftAction.reason || undefined}
                   onClick={() => onGenerateJianyingDraft?.(msg)}
-                  className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                  className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2.5 text-[13px] font-medium text-accent transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <FileArchive size={15} />}
                   {jianyingDraftRunning ? "草稿生成中" : jianyingDraftAction.label}
@@ -1529,7 +1529,7 @@ export function MessageBubble({
                   disabled={actionsDisabled || jianyingDraftRunning || jianyingDraftUnavailable}
                   title={jianyingDraftUnavailable ? "剪映草稿服务待接入" : undefined}
                   onClick={() => onGenerateJianyingDraft?.(msg)}
-                  className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-60"
+                  className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2.5 text-[13px] font-medium text-accent transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {jianyingDraftRunning ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={15} />}
                   {jianyingDraftRunning ? "草稿生成中" : "重新生成剪映草稿"}

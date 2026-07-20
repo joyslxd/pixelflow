@@ -129,8 +129,12 @@ flowchart TD
 | 采集 | GET | `/agent/flows/intake/forms/{intent}` | 表单 schema |
 | 采集 | POST | `/agent/flows/intake/validate` | 表单完整性校验 |
 | 采集 | POST | `/agent/flows/intake/directions` | 生成 3 个创意方向 |
-| 策划 | POST | `/agent/flows/planning/plan` | 填充 plan.md |
-| 策划 | POST | `/agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并生成新版本 |
+| 策划 | POST | `/agent/flows/planning/plan` | 同步填充 plan.md，兼容旧调用 |
+| 策划 | POST | `/agent/flows/planning/plan/start` | 启动可恢复 Plan 生成 job |
+| 策划 | GET | `/agent/flows/planning/plan/jobs/{job_id}` | 查询 Plan 生成 job |
+| 策划 | POST | `/agent/flows/planning/plan/revise` | 同步修订 plan.md，兼容旧调用 |
+| 策划 | POST | `/agent/flows/planning/plan/revise/start` | 启动可恢复 Plan 修订 job |
+| 策划 | GET | `/agent/flows/planning/plan/revise/jobs/{job_id}` | 查询 Plan 修订 job |
 | 策划 | POST | `/agent/flows/planning/plan/restore` | 直接激活所选历史 Plan，不追加重复版本 |
 | 图片 | POST | `/agent/flows/image/prepare` | 选择图片接口并生成参数 |
 | 图片 | POST | `/agent/flows/image/generate` | 同步生成图片，兼容旧调用 |

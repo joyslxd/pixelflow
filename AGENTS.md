@@ -115,8 +115,12 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 采集 | `GET /agent/flows/intake/forms/{intent}` | 获取图片、视频或PPT表单 schema |
 | 采集 | `POST /agent/flows/intake/validate` | 表单完整性校验，最多 3 轮 |
 | 采集 | `POST /agent/flows/intake/directions` | 生成 3 个创意方向 |
-| 策划 | `POST /agent/flows/planning/plan` | 按图片/视频独立模板与用户确认合同调用 LLM 生成 plan.md |
-| 策划 | `POST /agent/flows/planning/plan/revise` | 在当前创意内修订 plan.md 并创建下一版本 |
+| 策划 | `POST /agent/flows/planning/plan` | 同步生成 plan.md，仅保留兼容旧调用 |
+| 策划 | `POST /agent/flows/planning/plan/start` | 启动可恢复 Plan 生成 job |
+| 策划 | `GET /agent/flows/planning/plan/jobs/{job_id}` | 查询 Plan 生成 job |
+| 策划 | `POST /agent/flows/planning/plan/revise` | 同步修订 plan.md，仅保留兼容旧调用 |
+| 策划 | `POST /agent/flows/planning/plan/revise/start` | 启动可恢复 Plan 修订 job |
+| 策划 | `GET /agent/flows/planning/plan/revise/jobs/{job_id}` | 查询 Plan 修订 job |
 | 策划 | `POST /agent/flows/planning/plan/restore` | 直接激活所选历史 Plan，不追加重复版本 |
 | 图片 | `POST /agent/flows/image/prepare` | 判断图片接口并生成参数 |
 | 图片 | `POST /agent/flows/image/generate` | 调用图片 skill 生成，支持多张循环生成 |
@@ -325,7 +329,7 @@ SmartPPT接口：
 - Plan 阶段必须逐镜校验 `shot_description` 是否覆盖地点、主体、动作、景别、运镜、光影、声音和收束，且局部时间段必须从 0 秒连续覆盖到当前分镜时长。初次 Plan 缺项时调用专用 LLM 定向修正 1 次，并且只采纳失败分镜返回的镜头描述；仍不完整时只对失败镜头应用增强规则兜底。Plan 修订和手工编辑候选也只允许定向修正镜头描述，修正仍失败时保留原版本。
 - 场景包恢复历史已审核 Plan 时允许兼容旧的全局镜头时间段，并确定性转换为当前分镜的 `0-N秒` 局部时间段；新 Plan 候选仍必须通过严格局部时间轴校验。
 - PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
-- 用户点击“继续修改”后，默认“当前创意内修改”，只调用 `/planning/plan/revise` 并产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
+- Plan 初次生成和当前创意内修改分别调用 `/planning/plan/start`、`/planning/plan/revise/start`，轮询对应 `/jobs/{job_id}`；前端必须保存 `pendingPlanJob`，恢复时只查询原 job。当前创意内修改产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
 - 用户在右侧编辑器直接修改完整 plan.md 后，`/planning/plan/save-edit` 也必须调用 Plan 修订 LLM，把编辑稿重新对齐 `creation_contract` 与视频 `scene_blueprints`；合同字段白名单只能来自当前稿与编辑稿的确定性文本差异，完整稿仅供 LLM 重写内容和蓝图，禁止借机修改用户未编辑字段。三者同时校验通过才发布 `manual_edit` 新版本，失败时保留当前版本，禁止只保存 Markdown 并沿用旧合同。
 - 当前创意内修订必须先合并结构化合同补丁，再调用 LLM 重写 Plan。优先级是“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；未提及字段不得变化。修订 LLM 的上下文必须包含当前 Plan、表单、选中创意、垂类补充、附件、采集上下文和 PowerMem 检索结果。
 - “视频总时长延长/缩短 N 秒”按当前合同计算增量，“把片子改成 N 秒”等自然说法按新的绝对总时长处理。Plan 修订阶段没有新模型的实时能力快照，因此不能直接修改视频模型或图片模型；用户需要返回需求表单重新选择模型并确认能力。
