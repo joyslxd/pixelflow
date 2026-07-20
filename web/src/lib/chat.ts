@@ -91,6 +91,7 @@ export interface ChatMessage {
     plan?: PlanMarkdownResponse;
     planVersion?: number;
     planHistory?: PlanMarkdownResponse["plan_history"];
+    planJobId?: string;
     creationContract?: Record<string, unknown>;
     restoredFromVersion?: number | null;
     imagePrepare?: ImagePrepareResponse;

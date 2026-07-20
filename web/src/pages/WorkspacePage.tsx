@@ -247,6 +247,8 @@ interface WorkspaceSnapshot {
   pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
   pending_direction_job?: PendingDirectionJob | null;
+  pendingPlanJob?: PendingPlanJob | null;
+  pending_plan_job?: PendingPlanJob | null;
   pendingPlanRevisionRequest?: PendingConversationArtifact | null;
   pending_plan_revision_request?: PendingConversationArtifact | null;
   pendingPlanRevisionChoice?: PendingPlanRevisionChoice | null;
@@ -413,6 +415,44 @@ interface PendingDirectionJob {
   context: PendingDirectionJobContext;
 }
 
+interface PlanGenerationJobRequest {
+  intent: CreationIntent;
+  form_values: Record<string, unknown>;
+  selected_direction: Record<string, unknown>;
+  product_creative_profile?: Record<string, unknown>;
+  intake_context?: Record<string, unknown>;
+  materials?: Array<Record<string, unknown>>;
+}
+
+interface PlanRevisionJobRequest extends PlanGenerationJobRequest {
+  current_plan_markdown: string;
+  current_plan_version: number;
+  plan_history: PlanMarkdownResponse["plan_history"];
+  revision_feedback: string;
+  creation_contract?: Record<string, unknown>;
+  scene_blueprints?: PlanMarkdownResponse["scene_blueprints"];
+}
+
+interface PendingPlanJobContext {
+  intent: CreationIntent;
+  formValues: Record<string, unknown>;
+  selectedDirection: CreativeDirectionResponse;
+  coreMessage: string;
+  materials: Array<Record<string, unknown>>;
+  intakeContext?: Record<string, unknown>;
+  processedKey?: string;
+}
+
+interface PendingPlanJob {
+  job_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  kind: "plan_generation" | "plan_revision";
+  started_at: string;
+  request: PlanGenerationJobRequest | PlanRevisionJobRequest;
+  context: PendingPlanJobContext;
+}
+
 const DIRECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["type"]>([
   "plan",
   "image_prepare",
@@ -473,6 +513,8 @@ const REQUIREMENT_COLLECTION_PENDING_JOB_KEYS = [
   "pending_intake_job",
   "pendingDirectionJob",
   "pending_direction_job",
+  "pendingPlanJob",
+  "pending_plan_job",
   "pendingImageEditRequest",
   "pending_image_edit_request",
   "pendingImageJob",
@@ -627,6 +669,19 @@ function hasLaterDirectionSuccessor(
     if (artifact.type === "directions") return true;
     return isDirectionSuccessorArtifact(artifact);
   });
+}
+
+function hasMaterializedPlanJob(
+  messages: ChatMessage[],
+  targetConversationId: string,
+  pendingPlanJob: PendingPlanJob,
+): boolean {
+  return messages.some(
+    (message) =>
+      messageConversationId(message, targetConversationId) === targetConversationId &&
+      message.artifact?.type === "plan" &&
+      message.artifact.planJobId === pendingPlanJob.job_id,
+  );
 }
 
 interface PendingImageEditRequest {
@@ -1685,6 +1740,8 @@ export function WorkspacePage() {
   const activeIntakeJobPollsRef = useRef(new Set<string>());
   const pendingDirectionJobRef = useRef<PendingDirectionJob | null>(null);
   const activeDirectionJobPollsRef = useRef(new Set<string>());
+  const pendingPlanJobRef = useRef<PendingPlanJob | null>(null);
+  const activePlanJobPollsRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const pendingImageJobRef = useRef<PendingImageJob | null>(null);
@@ -3129,6 +3186,7 @@ export function WorkspacePage() {
       intakeContext?: Record<string, unknown>;
     },
     targetConversationId = conversationIdRef.current,
+    planJobId?: string,
   ) => ({
     id: uid(),
     conversationId: targetConversationId || undefined,
@@ -3143,6 +3201,7 @@ export function WorkspacePage() {
       plan,
       planVersion: plan.plan_version || 1,
       planHistory: plan.plan_history || [],
+      planJobId,
       creationContract: plan.creation_contract || {},
       restoredFromVersion: plan.restored_from_version,
       selectedDirection,
@@ -3480,6 +3539,33 @@ export function WorkspacePage() {
     extraContext: Record<string, unknown> = {},
   ) => {
     await persistPendingDirectionJob(null, targetConversationId, lastPhase, flowDraft, extraContext);
+  };
+
+  const persistPendingPlanJob = async (
+    pendingPlanJob: PendingPlanJob | null,
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    pendingPlanJobRef.current = pendingPlanJob;
+    if (!targetConversationId) return;
+    await updateConversationWithProgress(targetConversationId, {
+      last_phase: lastPhase,
+      context: {
+        ...makeSnapshot(targetConversationId),
+        ...extraContext,
+        pendingPlanJob,
+        pending_plan_job: pendingPlanJob,
+      } as unknown as Record<string, unknown>,
+    });
+  };
+
+  const clearPendingPlanJob = async (
+    targetConversationId: string,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ) => {
+    await persistPendingPlanJob(null, targetConversationId, lastPhase, extraContext);
   };
 
   const handleCompletedDirectionJob = async (
@@ -3989,6 +4075,7 @@ export function WorkspacePage() {
         pendingMessageJobRef.current = null;
         if (authoritativeContext.flowDraft === null) flowDraftRef.current = null;
         if (authoritativeContext.pendingDirectionJob === null) pendingDirectionJobRef.current = null;
+        if (authoritativeContext.pendingPlanJob === null) pendingPlanJobRef.current = null;
         if (authoritativeContext.pendingPlanRevisionChoice === null) setPendingPlanRevisionChoice(null);
         if (planContinuation.success_message) {
           pushAssistant(planContinuation.success_message, pendingMessageJob.conversation_id);
@@ -4051,6 +4138,95 @@ export function WorkspacePage() {
     } finally {
       activeMessageJobPollsRef.current.delete(pollKey);
       setBusyForConversation(pendingMessageJob.conversation_id, false);
+    }
+  };
+
+  const resumePendingPlanJob = async (pendingPlanJob: PendingPlanJob) => {
+    const pollKey = `${pendingPlanJob.conversation_id}:${pendingPlanJob.kind}:${pendingPlanJob.job_id}`;
+    if (activePlanJobPollsRef.current.has(pollKey)) return;
+    activePlanJobPollsRef.current.add(pollKey);
+    const targetConversationId = pendingPlanJob.conversation_id;
+    const shouldContinuePolling = () => isVisibleConversation(targetConversationId);
+    const stopIfHidden = () => !shouldContinuePolling();
+    setBusyForConversation(targetConversationId, true);
+    try {
+      if (stopIfHidden()) return;
+      if (hasMaterializedPlanJob(messagesRef.current, targetConversationId, pendingPlanJob)) {
+        await clearPendingPlanJob(targetConversationId, "plan_review").catch(() => {});
+        if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
+        return;
+      }
+      const status = pendingPlanJob.kind === "plan_revision"
+        ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
+        : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
+      if (stopIfHidden()) return;
+      if (status.status === "failed") {
+        throw new Error(status.error || status.message || "Plan job failed");
+      }
+      const plan = status.status === "completed" && status.result
+        ? status.result
+        : pendingPlanJob.kind === "plan_revision"
+          ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
+          : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
+      if (!plan || stopIfHidden()) return;
+      if (plan.error && pendingPlanJob.kind === "plan_revision") {
+        if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
+        await clearPendingPlanJob(targetConversationId, "plan_revision_failed", {
+          plan_job_resume_error: plan.error,
+        }).catch(() => {});
+        pushAssistant(`plan.md 修改失败，已保留当前版本：${plan.error}`, targetConversationId);
+        return;
+      }
+      await persistPlanArtifactForConversation(
+        createPlanArtifactMessage(
+          plan,
+          pendingPlanJob.context.selectedDirection,
+          {
+            intent: pendingPlanJob.context.intent,
+            formValues: pendingPlanJob.context.formValues,
+            materials: pendingPlanJob.context.materials,
+            coreMessage: pendingPlanJob.context.coreMessage,
+            intakeContext: pendingPlanJob.context.intakeContext,
+          },
+          targetConversationId,
+          pendingPlanJob.job_id,
+        ),
+        targetConversationId,
+        {
+          type: "plan_save",
+          last_phase: "plan_review",
+          processed_key: pendingPlanJob.context.processedKey,
+          context: {
+            flowDraft: null,
+            pendingDirectionJob: null,
+            pending_direction_job: null,
+            pendingPlanJob: null,
+            pending_plan_job: null,
+            pendingPlanRevisionChoice: null,
+            pending_plan_revision_choice: null,
+            intent: pendingPlanJob.context.intent,
+            form_values: pendingPlanJob.context.formValues,
+            intake_context: pendingPlanJob.context.intakeContext,
+            materials: pendingPlanJob.context.materials,
+          },
+        },
+      );
+    } catch (err) {
+      if (stopIfHidden()) return;
+      if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
+      const message = err instanceof Error ? err.message : String(err);
+      pushAssistant(
+        message.includes("404")
+          ? "之前的 plan.md 任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新创意方向或 Plan 卡片手动重试。"
+          : `继续查询 plan.md 任务失败：${message}`,
+        targetConversationId,
+      );
+      await clearPendingPlanJob(targetConversationId, "plan_job_resume_failed", {
+        plan_job_resume_error: message,
+      }).catch(() => {});
+    } finally {
+      activePlanJobPollsRef.current.delete(pollKey);
+      setBusyForConversation(targetConversationId, false);
     }
   };
 
@@ -5503,6 +5679,7 @@ export function WorkspacePage() {
     );
     pendingIntakeJobRef.current = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
+    pendingPlanJobRef.current = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     planRevisionArtifactRef.current = snapshot.pendingPlanRevisionRequest || snapshot.pending_plan_revision_request || null;
     setPendingPlanRevisionChoice(snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null);
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
@@ -5564,6 +5741,10 @@ export function WorkspacePage() {
         pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
       pending_direction_job:
         pendingDirectionJobRef.current?.conversation_id === snapshotConversationId ? pendingDirectionJobRef.current : null,
+      pendingPlanJob:
+        pendingPlanJobRef.current?.conversation_id === snapshotConversationId ? pendingPlanJobRef.current : null,
+      pending_plan_job:
+        pendingPlanJobRef.current?.conversation_id === snapshotConversationId ? pendingPlanJobRef.current : null,
       pendingPlanRevisionRequest:
         planRevisionArtifactRef.current?.conversationId === snapshotConversationId ? planRevisionArtifactRef.current : null,
       pending_plan_revision_request:
@@ -5650,6 +5831,7 @@ export function WorkspacePage() {
     pendingPlanMessagePersistenceIdsRef.current = new Set();
     pendingIntakeJobRef.current = null;
     pendingDirectionJobRef.current = null;
+    pendingPlanJobRef.current = null;
     pendingImageEditRequestRef.current = null;
     imageEditConfirmedSelectionsRef.current = {};
     pendingImageJobRef.current = null;
@@ -5679,6 +5861,7 @@ export function WorkspacePage() {
     const pendingMessageJob = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
     const pendingIntakeJob = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
+    const pendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     const pendingVideoRevision = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
@@ -5733,6 +5916,10 @@ export function WorkspacePage() {
       pending_intake_job: pendingIntakeJob,
       pendingDirectionJob,
       pending_direction_job: pendingDirectionJob,
+      pendingPlanJob:
+        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
+      pending_plan_job:
+        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
@@ -5792,6 +5979,18 @@ export function WorkspacePage() {
       window.setTimeout(() => {
         restoreFormDraft(flowDraft, detail.conversation.conversation_id);
       }, 0);
+    }
+    if (
+      !pendingMessageJob &&
+      pendingPlanJob?.job_id &&
+      pendingPlanJob.conversation_id === detail.conversation.conversation_id &&
+      !hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob)
+    ) {
+      window.setTimeout(() => {
+        void resumePendingPlanJob(pendingPlanJob);
+      }, 0);
+    } else if (pendingPlanJob?.job_id && pendingPlanJob.conversation_id === detail.conversation.conversation_id) {
+      await clearPendingPlanJob(detail.conversation.conversation_id, "plan_review").catch(() => {});
     }
     if (pendingImageJob?.job_id && pendingImageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
@@ -5862,6 +6061,10 @@ export function WorkspacePage() {
     const pendingDirectionJob = pendingDirectionJobRef.current;
     if (pendingDirectionJob?.job_id && pendingDirectionJob.conversation_id === activeConversationId) {
       void resumePendingDirectionJob(pendingDirectionJob);
+    }
+    const pendingPlanJob = pendingPlanJobRef.current;
+    if (pendingPlanJob?.job_id && pendingPlanJob.conversation_id === activeConversationId) {
+      void resumePendingPlanJob(pendingPlanJob);
     }
     const pendingImageJob = pendingImageJobRef.current;
     if (pendingImageJob?.job_id && pendingImageJob.conversation_id === activeConversationId) {
@@ -6930,43 +7133,44 @@ export function WorkspacePage() {
     advanceWorkflowProgress(targetConversationId, "plan_generation_running", { intent: msg.artifact.intent });
     pushAssistant(`已选择创意方向「${direction.title}」，正在生成 plan.md…`, targetConversationId);
     try {
-      const plan = await api.createPlanMarkdown({
+      const request: PlanGenerationJobRequest = {
         intent: msg.artifact.intent,
         form_values: msg.artifact.formValues,
         selected_direction: direction as unknown as Record<string, unknown>,
         product_creative_profile: { core_message: msg.artifact.coreMessage || pendingCore },
         intake_context: msg.artifact.intakeContext,
         materials: msg.artifact.materials || [],
-      });
-      await persistPlanArtifactForConversation(
-        createPlanArtifactMessage(
-          plan,
-          direction,
-          {
-            intent: msg.artifact.intent,
-            formValues: msg.artifact.formValues,
-            materials: msg.artifact.materials || [],
-            coreMessage: msg.artifact.coreMessage || pendingCore,
-            intakeContext: msg.artifact.intakeContext,
-          },
-          targetConversationId,
-        ),
+      };
+      const started = await api.startPlanMarkdownJob(request);
+      const pendingPlanJob: PendingPlanJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "plan_generation",
+        started_at: new Date().toISOString(),
+        request,
+        context: {
+          intent: msg.artifact.intent,
+          formValues: msg.artifact.formValues,
+          selectedDirection: direction,
+          materials: msg.artifact.materials || [],
+          coreMessage: msg.artifact.coreMessage || pendingCore,
+          intakeContext: msg.artifact.intakeContext,
+          processedKey,
+        },
+      };
+      await persistPendingPlanJob(
+        pendingPlanJob,
         targetConversationId,
+        "plan_generation_running",
         {
-          type: "plan_save",
-          last_phase: "plan_review",
-          processed_key: processedKey,
-          context: {
-            flowDraft: null,
-            pendingDirectionJob: null,
-            pending_direction_job: null,
-            intent: msg.artifact.intent,
-            form_values: msg.artifact.formValues,
-            intake_context: msg.artifact.intakeContext,
-            materials: msg.artifact.materials || [],
-          },
+          selected_direction: direction,
+          form_values: msg.artifact.formValues,
+          intake_context: msg.artifact.intakeContext,
+          materials: msg.artifact.materials || [],
         },
       );
+      await resumePendingPlanJob(pendingPlanJob);
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -7304,7 +7508,7 @@ export function WorkspacePage() {
       }
 
       pushAssistant(`正在当前创意基础上修订 plan.md v${artifact.plan.plan_version || 1}…`, targetConversationId);
-      const plan = await api.revisePlanMarkdown({
+      const request: PlanRevisionJobRequest = {
         intent: artifact.intent,
         form_values: artifact.formValues,
         selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
@@ -7317,39 +7521,35 @@ export function WorkspacePage() {
         product_creative_profile: { revision_feedback: feedback },
         intake_context: artifact.intakeContext,
         materials,
-      });
-      if (plan.error) {
-        if (pending.processedKey) releaseArtifactAction(pending.processedKey);
-        pushAssistant(
-          `plan.md 修改失败，已保留当前 v${artifact.plan.plan_version || 1}：${plan.error}`,
-          targetConversationId,
-        );
-        return;
-      }
-      await persistPlanArtifactForConversation(
-        createPlanArtifactMessage(
-          plan,
-          artifact.selectedDirection,
-          {
-            intent: artifact.intent,
-            formValues: artifact.formValues,
-            materials,
-            coreMessage: artifact.coreMessage || pendingCore,
-            intakeContext: artifact.intakeContext,
-          },
-          targetConversationId,
-        ),
+      };
+      const started = await api.startPlanRevisionJob(request);
+      const pendingPlanJob: PendingPlanJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: pending.sourceMessageId,
+        kind: "plan_revision",
+        started_at: new Date().toISOString(),
+        request,
+        context: {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          selectedDirection: artifact.selectedDirection,
+          materials,
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+          processedKey: pending.processedKey,
+        },
+      };
+      await persistPendingPlanJob(
+        pendingPlanJob,
         targetConversationId,
+        "plan_revision_running",
         {
-          type: "plan_save",
-          last_phase: "plan_review",
-          processed_key: pending.processedKey,
-          context: {
-            pendingPlanRevisionChoice: null,
-            pending_plan_revision_choice: null,
-          },
+          pendingPlanRevisionChoice: null,
+          pending_plan_revision_choice: null,
         },
       );
+      await resumePendingPlanJob(pendingPlanJob);
     } catch (err) {
       if (pending.processedKey) releaseArtifactAction(pending.processedKey);
       pushAssistant(`plan.md 修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
