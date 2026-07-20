@@ -47,8 +47,9 @@ PowerMem 调用边界：
 
 Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 
+- Plan 初次生成通过 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`，当前创意内修订通过 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`；同步 `/plan` 和 `/plan/revise` 仅保留兼容旧调用。job 只包装 PixelFlow 本地 LLM/校验流程，不新增 content-app 请求。
 - `/agent/flows/planning/plan/restore` 直接激活所选历史版本，不追加重复版本。
-- 回退后再次“继续修改”时，`/agent/flows/planning/plan/revise` 以历史最大版本号加一创建新版本；例如 v2 回退到 v1 后修订生成 v3，v2 仍保留。
+- 回退后再次“继续修改”时，前端通过 `/agent/flows/planning/plan/revise/start` 启动 job，以历史最大版本号加一创建新版本；例如 v2 回退到 v1 后修订生成 v3，v2 仍保留。
 - 新版本历史条目保存 `creation_contract` 与 `scene_durations_sec` 快照；旧对话的历史条目缺少快照时，沿用当前权威创作合同与分镜时长，确保后续 content-app 图片、视频调用仍使用正确参数。
 
 | 接口 | 方法 | 调用位置 | 用途 | content-app 对应控制器 | 备注 |

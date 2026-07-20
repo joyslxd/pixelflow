@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from uuid import UUID
 
 import pytest
@@ -26,9 +27,95 @@ def test_pixelflow_planning_router_prefix_and_paths():
     paths = {route.path for route in pixelflow_planning.router.routes}
     assert pixelflow_planning.router.prefix == "/agent/flows/planning"
     assert "/agent/flows/planning/plan" in paths
+    assert "/agent/flows/planning/plan/start" in paths
+    assert "/agent/flows/planning/plan/jobs/{job_id}" in paths
     assert "/agent/flows/planning/plan/revise" in paths
+    assert "/agent/flows/planning/plan/revise/start" in paths
+    assert "/agent/flows/planning/plan/revise/jobs/{job_id}" in paths
     assert "/agent/flows/planning/plan/restore" in paths
     assert "/agent/flows/planning/plan/save-edit" in paths
+
+
+def _poll_plan_job(client: TestClient, path: str, job_id: str) -> dict:
+    status = None
+    for _ in range(50):
+        response = client.get(f"{path}/{job_id}")
+        assert response.status_code == 200
+        status = response.json()
+        if status["status"] in {"completed", "failed"}:
+            return status
+        time.sleep(0.01)
+    assert status is not None
+    raise AssertionError(f"plan job did not finish: {status}")
+
+
+def test_planning_router_starts_and_polls_plan_generation_job():
+    from app.gateway.routers import pixelflow_planning
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/start",
+            json={
+                "intent": "image",
+                "form_values": {"image_goal": "书包宣传图", "image_type": "海报", "image_usage": "社媒发布", "image_style": "真实摄影", "image_size": "1:1"},
+                "selected_direction": {"title": "通学收纳", "description": "突出容量和护脊"},
+            },
+        )
+        assert response.status_code == 200
+        started = response.json()
+        assert started["job_id"]
+        status = _poll_plan_job(client, "/agent/flows/planning/plan/jobs", started["job_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["output_type"] == "image"
+    assert status["result"]["plan_version"] == 1
+
+
+def test_planning_router_starts_and_polls_plan_revision_job(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+
+    initial = build_plan_markdown(
+        "image",
+        {"image_goal": "书包宣传图", "image_type": "海报", "image_usage": "社媒发布", "image_style": "真实摄影", "image_size": "1:1"},
+        {"title": "通学收纳", "description": "突出容量和护脊"},
+    )
+
+    async def fake_revision(**kwargs):
+        return initial.next_version(
+            plan_markdown=f"{kwargs['current_plan_markdown']}\n\n增加开学氛围",
+            plan_history=kwargs["plan_history"],
+            current_version=kwargs["current_plan_version"],
+        )
+
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", fake_revision)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/revise/start",
+            json={
+                "intent": "image",
+                "form_values": {"image_goal": "书包宣传图", "image_type": "海报", "image_usage": "社媒发布", "image_style": "真实摄影", "image_size": "1:1"},
+                "selected_direction": {"title": "通学收纳", "description": "突出容量和护脊"},
+                "current_plan_markdown": initial.plan_markdown,
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "revision_feedback": "增加开学氛围",
+                "creation_contract": initial.creation_contract,
+            },
+        )
+        assert response.status_code == 200
+        started = response.json()
+        assert started["job_id"]
+        status = _poll_plan_job(client, "/agent/flows/planning/plan/revise/jobs", started["job_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["plan_version"] == 2
 
 
 def _stable_user() -> User:
