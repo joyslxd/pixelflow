@@ -164,7 +164,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 偏好 | `GET/PUT /agent/users/{user_id}/preferences` | 用户偏好 |
 | 旧任务流 | `/agent/flows`、`/agent/flows/{task_id}/events` 等 | LangGraph 任务、SSE、资产查询 |
 
-附件上传是例外：前端文件上传直接调用 content-app 的 `/api/upload`，不是 Python `/agent` 接口。上传结果作为 `materials` 随用户输入传给 Agent。
+附件上传是例外：前端文件上传直接调用 content-app 的 `/api/upload`，不是 Python `/agent` 接口。输入框支持文件选择，并支持从剪贴板粘贴或拖拽加入图片素材；三种入口复用同一上传 Client，上传结果作为 `materials` 随用户输入传给 Agent。
 
 ## Agent 与 Skill
 

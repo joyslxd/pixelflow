@@ -107,7 +107,7 @@ flowchart TD
 ## 关键约束
 
 - 新增 Python 网关接口必须以 `/agent` 开头。
-- 前端上传附件直接调用 content-app `/api/upload`，上传结果作为 `materials` 交给 Agent。
+- 前端上传附件直接调用 content-app `/api/upload`；输入框支持文件选择，并支持从剪贴板粘贴或拖拽加入图片素材，所有入口的上传结果统一作为 `materials` 交给 Agent。
 - 所有 `/agent` 请求必须携带 content-app `Authorization: Bearer <token>`。
 - Skill 调用 content-app/Borgrise 计费接口时必须透传入口请求的 Authorization。
 - 不允许把用户 token、用户名、密码写死到配置、代码或测试脚本里。
