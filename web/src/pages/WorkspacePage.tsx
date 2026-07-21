@@ -4172,12 +4172,18 @@ export function WorkspacePage() {
           ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
           : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
       if (!plan || stopIfHidden()) return;
-      if (plan.error && pendingPlanJob.kind === "plan_revision") {
+      if (plan.error) {
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
-        await clearPendingPlanJob(targetConversationId, "plan_revision_failed", {
+        const isRevision = pendingPlanJob.kind === "plan_revision";
+        await clearPendingPlanJob(targetConversationId, isRevision ? "plan_revision_failed" : "plan_generation_failed", {
           plan_job_resume_error: plan.error,
         }).catch(() => {});
-        pushAssistant(`plan.md 修改失败，已保留当前版本：${plan.error}`, targetConversationId);
+        pushAssistant(
+          isRevision
+            ? `plan.md 修改失败，已保留当前版本：${plan.error}`
+            : `plan.md 生成失败，未展示不符合创作合同的候选方案：${plan.error}`,
+          targetConversationId,
+        );
         return;
       }
       await persistPlanArtifactForConversation(

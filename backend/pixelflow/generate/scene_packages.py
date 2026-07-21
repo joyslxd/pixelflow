@@ -344,7 +344,7 @@ def _scene_package_prompt(
 3. global_assets 是整片固定资产，必须包含 characters、scenes、props、visual_style。
 4. global_assets.characters 只能是人物角色，不能放产品、商品、道具或场景；每个角色必须提供 three_view_prompt，用来生成当前人物的正面、侧面、背面三视图。
 5. scene_packages 是逐片段变化内容，只包含 title、storyline、shot_description、reference_asset_ids、prompt、narration。
-6. shot_description 包含 text 和 mentions。text 是一整段镜头描述，不要拆成 time_range、location、characters、shot_size、description 等字段。
+6. shot_description 包含 text 和 mentions。text 仍是一个字符串，但可包含一个或多个按内容决定的中文段落；每段以局部整数秒范围开头，不要拆成 time_range、location、characters、shot_size、description 等字段。
 7. shot_description.text 中引用角色、场景、道具图片时使用 @asset_id，例如 @character-presenter；视觉风格只作为文字描述，不作为图片 mention。
 8. shot_description.text 的时间范围必须使用秒，例如 0-10秒、10-15秒；不要使用 ms、毫秒或 00:00.000 这类毫秒时间码。
 9. reference_asset_ids 和 shot_description.mentions 最多 9 个，必须来自 global_assets 的角色、场景、道具 asset_id。

@@ -215,7 +215,9 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 表单确认值生成权威 `creation_contract`。优先级是“用户确认 > LLM 预填 > 系统默认”，后续创意、Plan、场景包、场景资产和视频生成不得重新猜测或覆盖。
 - Plan LLM 只能在 `image_model_capabilities` 范围内选择 `scene_image_ratio` 和 `scene_image_size`。非法输出按确定性规则修正；最终值写入 plan.md 和生产合同，场景资产生成阶段直接使用，不再猜测。
 - 视频 Plan 第一阶段负责结构、精确时间线、故事职责、资产需求和 `asset_manifest`，全局清单规范化产生稳定 `asset_id` 后，第二阶段把用户确认的 `video_model`、完整创作合同、当前 Plan、全部蓝图、稳定资产、原始要求、附件以及修订上下文交给 Seedance Plan Authoring Skill。该 Skill 对 content-app 实时启用的所有 Seedance 系列模型通用，不得改写模型；实时能力与规则冲突时保留 PixelFlow 合同，由调用层提示参数不兼容。
-- Seedance 专用阶段只返回 `title/storyline/shot_description/narration/transition`。每个 `shot_description` 是一整段中文，可在段内细分 `0-N秒` 整数时间码，但必须连续覆盖当前镜 4-15 秒时长并禁止 ms、毫秒、小数；同时覆盖地点、主体、动作、景别、运镜、光影、声音和收束。引用只允许本镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次说明用途且最多 9 张。后端深拷贝原蓝图，只合并叙事字段，再校验时间线、资产并集和引用；任何部分失败都整批拒绝，携带精确错误重试一次。初始 Plan、Agent 修订与手工编辑重新对齐均执行同一路径，最终确认 Plan 仍是场景包唯一权威输入。
+- Seedance 专用阶段对 LLM 使用内部 `shot_segments[{start_sec,end_sec,text}]` 结构，校验后再渲染为前端和场景包兼容的 `shot_description` 字符串。秒段数量按内容决定；每段使用独立整数秒范围，动作阶段、景别、运镜、说话者、声音或叙事重点变化时必须换段。多段必须连续覆盖当前镜 4-15 秒时长并禁止 ms、毫秒、小数；每段都显式包含地点、主体、动作、景别、运镜、光影、声音和收束。引用只允许本镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次说明用途且最多 9 张。后端深拷贝原蓝图，只合并叙事字段，再校验时间线、段落、资产并集和引用；任何部分失败都整批拒绝，携带精确错误重试一次。初始 Plan、Agent 修订与手工编辑重新对齐均执行同一路径，最终确认 Plan 仍是场景包唯一权威输入。
+- 每镜 9 张参考图预算在 Plan 初稿和 Plan 修订发布前执行双层控制：LLM 策划提示先要求每镜 `characters + scenes + props` 去重后不超过 9；后端再逐镜硬校验。候选超限时必须重新规划完整分镜，可拆镜或重排 4-15 秒整数时长、动作、对白和资产；重排前后三类具体资产名称并集必须完全一致，禁止通过数组截断、漏掉或删除全局资产凑数。重排仍超限或资产并集变化时 Plan 失败，前端不展示候选 Plan，场景包的 9 图校验只保留为纵深防线。
+- 如果 Plan LLM 的时间范围或镜头格式异常，后端只重建对应时间线和多秒段镜头描述，保留其具体标题、故事线、对白、角色、场景和道具；若具体语义本身不可恢复则 Plan 失败，不再用“目标用户”“真实使用场景”“产品”等泛化内容替换整份蓝图。
 - 场景包恢复历史 Plan 时对旧的全局镜头时间段做兼容换算，只把时间码平移为当前分镜的 `0-N秒`，不改写故事线、旁白、资产或其他权威字段；新 Plan 候选不走兼容分支。
 - 主流程不因“文生视频/编辑视频/首帧图生视频”等入口类型而绕过场景包。
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
@@ -223,7 +225,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 所有片段的整数秒时长总和必须精确等于 `creation_contract.video_duration_sec`；300 秒可以产生超过旧上限 18 个的分镜。
 - 场景资产图片必须使用生产合同中的 `image_model + scene_image_ratio + scene_image_size`；分镜视频必须使用 `video_model + video_ratio + video_size + video_sound`，禁止混用图片和视频模型。
 - 生成场景视频前，前端允许用户编辑故事线、镜头描述、旁白和 @ 参考图。
-- 镜头描述 `shot_description.text` 是一整段文本，时间范围统一使用秒级表达，例如 `0-10秒`、`10-15秒`；后端会归一化 LLM 返回的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
+- 镜头描述 `shot_description.text` 是一个字符串，可包含一个或多个按内容决定的中文段落；每段以当前分镜内部的秒级范围开头，例如 `0-4秒`、`4-10秒`，多段连续覆盖整镜。后端会归一化历史场景包中的 `ms` 或 `00:00.000` 时间码，前端不展示毫秒。
 - 场景视频 job 内部可以并发调度多个分镜，但所有会创建 content-app 计费生成任务的 POST 都必须经 `run_generation.py` 的进程内串行闸门提交：前一个创建接口返回 taskId 并完成 content-app 扣费确认后，才创建下一个图片或视频任务；`/api/task/{taskId}/status` 轮询不加锁，可以并行等待结果。整体阶段仍必须等所有分镜都成功、失败或额度暂停后，才进入汇总、重试或合并判断。
 - 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。合并失败时 job 必须返回 `status=failed`，并保留 `result.error`、`result.message`、`result.raw.details` 中的 content-app 原始错误，前端据此展示“视频合并失败”。
 - 单个分镜出现可恢复网络或服务异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。HTTP 4xx 参数校验、模型价格配置缺失和实时能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 的 `status_code/data/details`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
@@ -504,7 +506,7 @@ PowerMem 采用 HTTP Server sidecar 模式，PixelFlow 不引入 PowerMem Python
 - 每个 `character` 必须有 `three_view_prompt`，生成的是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、球、书包、床垫等非人物主体放到 `props`。
 - `characters/scenes/props` 的个数、顺序、名称、说明和生图提示词必须逐项等于最终 Plan 清单；实际供应商提示词合并正式名称、`description` 和 `three_view_prompt/image_prompt`，保证文字说明中的外观约束不会被遗漏；同一资产跨分镜只保留一个全局记录、创建一个图片任务并绑定一个图片 URL。供应商意外返回多张时只保留第一张。
-- `shot_description.text` 是一整段文本，不能拆成多个 UI 字段。
+- `shot_description.text` 仍是一个字符串字段，不拆成多个 UI 字段；字符串内部可以保留按内容生成的多段秒级中文描述。
 - `shot_description.mentions` 是前端 @ 选择后提交的图片引用集合。其 `name` 和编辑器 `@名称` 始终以全局 Plan 清单名称覆盖旧缓存名称。生成视频请求会合并分镜已有 `image_urls`、mentions 中的生成引用，以及 `reference_asset_ids` 对应的全局人物/场景/道具素材；任一 mention 已有图片时也不能跳过其余全局素材。提交前会把镜头文本和提示词中的 `@asset_id` 统一替换为对应素材名称，参考图仍按稳定顺序去重并最多保留 9 张。
 - `visual_style` 是文字约束，不作为图片 mention。
 

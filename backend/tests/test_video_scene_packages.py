@@ -184,7 +184,11 @@ def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
             "end_sec": 18,
             "duration_sec": 12,
             "storyline": "泼水和开包检查证明防水。",
-            "shot_description": "0-12秒: 中景连续泼水后切入拉链特写，打开背包展示干燥内胆。",
+            "shot_description": (
+                "0-5秒: 中景连续泼水，镜头跟随水杯移动并停在水珠落到背包表面。\n"
+                "5-9秒: 推近拉链特写，打开背包检查夹层，保留拉链开合声。\n"
+                "9-12秒: 微距展示干燥内胆，侧光强化材质反差并定格证据画面。"
+            ),
             "narration": "高密防泼水面料，把雨留在外面。",
             "transition": "由内胆匹配剪辑到办公区。",
             "asset_requirements": {"characters": [], "scenes": ["雨中街道"], "props": ["防水背包", "水杯"]},
@@ -227,7 +231,10 @@ def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
     assert {item["name"] for item in result["global_assets"]["props"]} == {"防水背包", "水杯"}
     second_scene = result["scene_packages"][1]
     shot_text = second_scene["shot_description"]["text"]
-    assert "0-12秒" in shot_text
+    assert "0-5秒" in shot_text
+    assert "5-9秒" in shot_text
+    assert "9-12秒" in shot_text
+    assert shot_text.count("\n") == 2
     reference_lookup = {
         item["asset_id"]: item["name"]
         for collection in ("characters", "scenes", "props")

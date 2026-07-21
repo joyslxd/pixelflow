@@ -18,7 +18,12 @@ CONTENT_APP_BASE_URL = os.getenv("PIXELFLOW_REAL_FLOW_CONTENT_APP_BASE_URL", "ht
 AUTHORIZATION = os.getenv("PIXELFLOW_REAL_FLOW_AUTHORIZATION", "").strip()
 POLL_TIMEOUT_SECONDS = int(os.getenv("PIXELFLOW_REAL_FLOW_POLL_TIMEOUT_SECONDS", "1200"))
 PLAN_TIMEOUT_SECONDS = int(os.getenv("PIXELFLOW_REAL_FLOW_PLAN_TIMEOUT_SECONDS", "900"))
-TIMELINE_PATTERN = re.compile(r"(?P<prefix>^|[\n。；;！？!?】])\s*(?P<start>\d+)\s*[-~—至]\s*(?P<end>\d+)\s*秒")
+EXISTING_PLAN_JOB_ID = os.getenv("PIXELFLOW_REAL_FLOW_PLAN_JOB_ID", "").strip()
+EXISTING_PLAN_RESULT_PATH = os.getenv("PIXELFLOW_REAL_FLOW_PLAN_RESULT_PATH", "").strip()
+PLAN_ONLY = os.getenv("PIXELFLOW_REAL_FLOW_PLAN_ONLY", "").strip().lower() in {"1", "true", "yes"}
+PARAGRAPH_TIMELINE_PATTERN = re.compile(
+    r"^\s*(?P<start>\d+)\s*[-~—至]\s*(?P<end>\d+)\s*秒\s*[:：]"
+)
 ASSET_REFERENCE_PATTERN = re.compile(r"@(?P<asset_id>[A-Za-z0-9_-]+)")
 ASSET_USAGE_MARKERS = ("固定", "保持", "参考", "锚定", "锁定", "作为", "用于", "依据", "参照", "统一", "确保", "延续", "基准", "为准", "锚点", "绑定", "一致")
 
@@ -147,7 +152,7 @@ def assert_plan_contract(plan: dict[str, Any]) -> None:
     for collection in ("characters", "scenes", "props"):
         names = manifest_names(manifest, collection)
         expected = referenced_names(blueprints, collection)
-        if names != expected:
+        if len(names) != len(expected) or set(names) != set(expected):
             raise AssertionError(f"{collection} 清单与分镜引用不一致：manifest={names}, blueprints={expected}")
         all_names.extend(names)
         for name in names:
@@ -156,11 +161,11 @@ def assert_plan_contract(plan: dict[str, Any]) -> None:
     normalized = ["".join(name.split()).casefold() for name in all_names]
     if len(normalized) != len(set(normalized)):
         raise AssertionError("Plan 三类资产名称不是全局唯一")
-    expected_counts = {"characters": 2, "scenes": 1, "props": 3}
+    expected_counts = {"characters": 3, "scenes": 3, "props": 7}
     expected_fragments = {
-        "characters": ("林晓", "陈默"),
-        "scenes": ("雨夜公交站",),
-        "props": ("背包", "雨伞", "保温杯"),
+        "characters": ("程岚", "阿杰", "服务员"),
+        "scenes": ("现代中餐厅", "简约会议室", "办公区午餐角"),
+        "props": ("蓝妹啤酒瓶", "蓝妹直筒透明玻璃杯", "菜单", "托盘", "智能手机", "简易午餐盒", "休闲外套"),
     }
     for collection, expected_count in expected_counts.items():
         names = manifest_names(manifest, collection)
@@ -188,16 +193,25 @@ def assert_plan_contract(plan: dict[str, Any]) -> None:
         "声音": ("声音", "音效", "环境声", "对白", "旁白", "音乐", "雨声", "脚步声"),
         "收束": ("收束", "结尾", "镜尾", "定格", "停在", "落版", "淡出", "结束"),
     }
+    multi_segment_scene_count = 0
     for position, blueprint in enumerate(blueprints, start=1):
         duration = blueprint.get("duration_sec")
         description = str(blueprint.get("shot_description") or "")
         if not isinstance(duration, int) or isinstance(duration, bool) or not 4 <= duration <= 15:
             raise AssertionError(f"分镜 {position} 时长不是 4-15 秒整数：{duration}")
-        if "\n" in description or "\r" in description:
-            raise AssertionError(f"分镜 {position} 镜头描述不是一整段中文")
         if re.search(r"(?:\bms\b|毫秒|\d+\.\d+\s*(?:[-~—至]|秒))", description, flags=re.IGNORECASE):
             raise AssertionError(f"分镜 {position} 使用了毫秒或小数时间码")
-        ranges = [(int(match.group("start")), int(match.group("end"))) for match in TIMELINE_PATTERN.finditer(description)]
+        paragraphs = [paragraph.strip() for paragraph in description.splitlines() if paragraph.strip()]
+        if not paragraphs:
+            raise AssertionError(f"分镜 {position} 镜头描述没有秒级中文段落")
+        ranges: list[tuple[int, int]] = []
+        for paragraph in paragraphs:
+            match = PARAGRAPH_TIMELINE_PATTERN.match(paragraph)
+            if match is None:
+                raise AssertionError(f"分镜 {position} 存在未以整数秒范围开头的段落：{paragraph[:80]}")
+            ranges.append((int(match.group("start")), int(match.group("end"))))
+        if len(paragraphs) > 1:
+            multi_segment_scene_count += 1
         cursor = 0
         for start, end in ranges:
             if start != cursor or end <= start:
@@ -227,6 +241,8 @@ def assert_plan_contract(plan: dict[str, Any]) -> None:
             )
             if not has_usage:
                 raise AssertionError(f"分镜 {position} 的 @{asset_id} 没有说明引用用途")
+    if multi_segment_scene_count == 0:
+        raise AssertionError("真实 Plan 没有生成任何按内容细分的多段镜头描述")
 
 
 def poll_plan_job(job_id: str) -> dict[str, Any]:
@@ -343,11 +359,11 @@ def main() -> None:
     image_model, image_model_capabilities = enabled_image_model()
     video_model, video_model_capabilities, video_ratio, video_size, video_sound = enabled_video_model()
     form_values = {
-        "product_info": "曜石黑城市通勤防水背包",
-        "product_category": "箱包",
-        "target_audience": "22-35岁城市通勤上班族",
-        "conversion_goal": "引导进入直播间了解防水与收纳能力",
-        "video_duration_sec": 20,
+        "product_info": "蓝妹啤酒，双麦黄金配比，蓝白配色玻璃瓶，品牌主张‘好酒不将就’",
+        "product_category": "啤酒饮品",
+        "target_audience": "18-50岁、重视品质生活与朋友聚餐体验的都市人群",
+        "conversion_goal": "引导进入直播间了解蓝妹啤酒并形成购买兴趣",
+        "video_duration_sec": 60,
         "video_ratio": video_ratio,
         "video_model_mode": "system_recommended",
         "video_model": video_model,
@@ -356,31 +372,47 @@ def main() -> None:
         "video_sound": video_sound,
         "image_model": image_model,
         "image_model_capabilities": image_model_capabilities,
-        "video_usage": "电商商品宣传",
-        "visual_style": "真实电影感雨夜广告",
+        "video_usage": "品牌信息流宣传",
+        "visual_style": "电影写实风、暖色老友聚餐质感",
     }
     direction = {
-        "direction_id": "real-flow-rain-commute",
-        "title": "雨夜通勤双人接力实测",
+        "direction_id": "real-flow-lanmei-friends",
+        "title": "老友局，从不将就",
         "description": (
-            "用两个连续分镜讲述林晓和陈默在同一雨夜公交站接力验证背包防水与收纳。"
-            "林晓始终穿浅灰风衣，陈默始终穿藏蓝夹克；两个分镜都复用同一个曜石黑防水背包、透明雨伞和银色保温杯，"
-            "不得增加其他角色、场景或道具。"
+            "用老友聚餐反差叙事讲述程岚平时什么都说可以，唯独啤酒不将就。"
+            "开场在现代中餐厅由阿杰调侃，服务员追问后程岚果断说‘不行’；随后闪回简约会议室和办公区午餐角，"
+            "再回餐厅完成蓝妹啤酒开瓶、倒酒、泡沫微距、老友碰杯和直播间引流。"
+            "每个较长分镜必须按动作、景别、说话者和声音变化拆成连续整数秒中文段落。"
+            "全片只允许三个角色：程岚（深蓝Polo衫）、阿杰（浅灰衬衫）、服务员（黑色围裙）；"
+            "只允许三个场景：现代中餐厅、简约会议室、办公区午餐角；"
+            "只允许七个道具：蓝妹啤酒瓶、蓝妹直筒透明玻璃杯、菜单、托盘、智能手机、简易午餐盒、休闲外套。"
+            "这些全局资产共13个，策划时必须按故事动作分配到不同分镜，任何单分镜引用不得超过9个，"
+            "不得删除、改名、增加或用泛化名称替代。"
         ),
     }
-    started_plan = request_json(
-        "POST",
-        "/flows/planning/plan/start",
-        {
-            "intent": "video",
-            "form_values": form_values,
-            "selected_direction": direction,
-            "product_creative_profile": {"industry": "箱包", "constraints": ["两镜连续", "资产跨镜复用"]},
-            "intake_context": {"original_prompt": direction["description"]},
-            "materials": [],
-        },
-    )
-    plan = poll_plan_job(str(started_plan["job_id"]))
+    if EXISTING_PLAN_RESULT_PATH:
+        plan = json.loads(Path(EXISTING_PLAN_RESULT_PATH).read_text(encoding="utf-8"))
+    elif EXISTING_PLAN_JOB_ID:
+        plan_job_id = EXISTING_PLAN_JOB_ID
+        plan = poll_plan_job(plan_job_id)
+    else:
+        started_plan = request_json(
+            "POST",
+            "/flows/planning/plan/start",
+            {
+                "intent": "video",
+                "form_values": form_values,
+                "selected_direction": direction,
+                "product_creative_profile": {"industry": "啤酒饮品", "constraints": ["反差连续叙事", "复杂镜头按内容细分秒级段落", "13个全局资产必须完整保留", "单分镜最多9个图片引用"]},
+                "intake_context": {"original_prompt": direction["description"]},
+                "materials": [],
+            },
+        )
+        plan_job_id = str(started_plan["job_id"])
+        plan = poll_plan_job(plan_job_id)
+    artifact_directory = Path(tempfile.mkdtemp(prefix="pixelflow-real-seedance-plan-"))
+    (artifact_directory / "plan.md").write_text(str(plan.get("plan_markdown") or ""), encoding="utf-8")
+    (artifact_directory / "plan-result.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     assert_plan_contract(plan)
     print(
         json.dumps(
@@ -393,6 +425,24 @@ def main() -> None:
         ),
         flush=True,
     )
+    if PLAN_ONLY:
+        report = {
+            "ok": True,
+            "plan_version": plan.get("plan_version"),
+            "scene_count": len(plan["scene_blueprints"]),
+            "asset_count": sum(len(plan["asset_manifest"].get(collection) or []) for collection in ("characters", "scenes", "props")),
+            "max_scene_refs": max(
+                sum(len(scene["asset_requirements"].get(collection) or []) for collection in ("characters", "scenes", "props"))
+                for scene in plan["scene_blueprints"]
+            ),
+            "artifact_directory": str(artifact_directory),
+        }
+        (artifact_directory / "plan-verification-report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(json.dumps(report, ensure_ascii=False), flush=True)
+        return
     started = request_json(
         "POST",
         "/flows/video/prepare-scene-packages/start",
@@ -401,7 +451,7 @@ def main() -> None:
             "plan_markdown": plan["plan_markdown"],
             "selected_direction": direction,
             "materials": [],
-            "target_duration_ms": 20_000,
+            "target_duration_ms": 60_000,
             "creation_contract": plan["creation_contract"],
             "scene_blueprints": plan["scene_blueprints"],
             "asset_manifest": plan["asset_manifest"],
@@ -409,9 +459,7 @@ def main() -> None:
     )
     job_result = poll_scene_package_job(str(started["job_id"]))
     packages, image_records = assert_scene_package_contract(plan, job_result)
-    artifact_directory = Path(tempfile.mkdtemp(prefix="pixelflow-real-seedance-plan-"))
     download_images(image_records, artifact_directory)
-    (artifact_directory / "plan.md").write_text(str(plan["plan_markdown"]), encoding="utf-8")
     report = {
         "ok": True,
         "plan_version": plan.get("plan_version"),

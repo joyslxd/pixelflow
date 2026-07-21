@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 
 import pytest
@@ -12,6 +13,9 @@ from pixelflow.creative.scene_blueprint import (
     asset_requirement_quality_issues,
     enrich_incomplete_shot_descriptions,
     normalize_scene_blueprints,
+    rebuild_scene_shot_descriptions,
+    salvage_scene_blueprints,
+    scene_asset_reference_budget_issues,
     shot_description_quality_issues,
 )
 from pixelflow.generate.scene_packages import prepare_video_scene_packages
@@ -139,6 +143,64 @@ def test_shot_description_accepts_continuous_sub_ranges() -> None:
     assert normalized[0]["shot_description"] == description
 
 
+def test_rebuild_scene_shot_descriptions_distributes_existing_actions_without_nested_labels() -> None:
+    blueprint = _blueprint(
+        "0-8秒: 地点：现代中餐厅；主体：程岚、阿杰；动作：服务员递上菜单，阿杰抬头调侃；"
+        "景别：中景；运镜：侧移；光影：暖光；声音：餐厅环境声；收束：程岚抬眼。"
+        "地点：同一餐厅；主体：程岚；动作：程岚放下菜单，坚定回答“可以”；"
+        "景别：近景；运镜：推近；光影：侧光；声音：程岚对白；收束：阿杰惊讶。"
+        "地点：同一餐厅；主体：阿杰；动作：阿杰挑眉，服务员停住动作；"
+        "景别：反打；运镜：固定；光影：暖光；声音：短促反问；收束：切下一镜。"
+    )
+
+    rebuilt = rebuild_scene_shot_descriptions(
+        [blueprint],
+        visual_style="电影写实风",
+        total_duration_sec=8,
+    )
+
+    description = str(rebuilt[0]["shot_description"])
+    assert description.count("\n") == 1
+    assert description.startswith("0-4秒:")
+    assert "\n4-8秒:" in description
+    assert "服务员递上菜单，阿杰抬头调侃" in description
+    assert "程岚放下菜单，坚定回答“可以”" in description
+    assert "阿杰挑眉，服务员停住动作" in description
+    assert "具体承接“" not in description
+    assert "使用用" not in description
+    assert all(line.count("地点：") == 1 for line in description.splitlines())
+
+
+def test_salvage_scene_blueprints_infers_roles_from_position_and_semantics() -> None:
+    raw: list[dict[str, object]] = []
+    for index, (role, title) in enumerate(
+        (("冲突建立", "餐厅反差开场"), ("回忆片段", "会议室闪回"), ("商品时刻", "蓝妹卖点证据"), ("品牌落版", "直播间引流")),
+        start=1,
+    ):
+        item = _blueprint(_complete_description(4))
+        item.update(
+            {
+                "scene_index": index,
+                "title": title,
+                "structure_role": role,
+                "start_sec": (index - 1) * 4,
+                "end_sec": index * 4,
+                "duration_sec": 4,
+                "storyline": f"第{index}段具体故事动作",
+                "asset_requirements": {
+                    "characters": ["程岚-深蓝Polo衫造型"],
+                    "scenes": ["现代中餐厅"],
+                    "props": ["蓝妹啤酒瓶"],
+                },
+            }
+        )
+        raw.append(item)
+
+    salvaged = salvage_scene_blueprints(raw, total_duration_sec=16, visual_style="电影写实风")
+
+    assert [item["structure_role"] for item in salvaged] == ["opening", "development", "climax", "conclusion"]
+
+
 def test_body_duration_phrase_is_not_treated_as_timeline_range() -> None:
     description = _complete_description().replace("擦去表面雨水", "等待提示动画持续1-2秒后擦去表面雨水")
 
@@ -256,6 +318,54 @@ def test_asset_requirement_quality_rejects_creation_metadata_and_keeps_entities(
         assert all(valid_value not in issue for issue in issues)
 
 
+def test_asset_requirement_quality_rejects_generic_placeholders_and_over_nine_references() -> None:
+    generic = _blueprint(_complete_description())
+    generic["asset_requirements"] = {
+        "characters": ["目标用户"],
+        "scenes": ["真实使用场景"],
+        "props": ["蓝妹啤酒，品牌主张从不将就，强调双麦黄金配比，蓝白配色包装，原生logo"],
+    }
+    crowded = _blueprint(_complete_description())
+    crowded["scene_index"] = 2
+    crowded["asset_requirements"] = {
+        "characters": ["程岚", "阿杰", "服务员"],
+        "scenes": ["现代中餐厅", "简约会议室", "办公区午餐角", "家玄关穿衣镜"],
+        "props": ["蓝妹啤酒瓶", "玻璃杯", "托盘", "菜单", "智能手机", "平板电脑"],
+    }
+
+    issues = asset_requirement_quality_issues([generic, crowded])
+
+    assert any("目标用户" in issue for issue in issues)
+    assert any("真实使用场景" in issue for issue in issues)
+    assert any("完整卖点或需求句" in issue for issue in issues)
+    assert any("引用资产共 13 个，最多允许 9 个" in issue for issue in issues)
+
+
+def test_salvage_scene_blueprints_preserves_specific_story_and_assets_when_shot_range_is_invalid() -> None:
+    raw = _blueprint("0-4秒：只覆盖了前四秒。")
+    raw.update(
+        {
+            "title": "老友局啤酒冲突",
+            "storyline": "程岚、阿杰和服务员在现代中餐厅围绕蓝妹啤酒产生不将就的冲突。",
+            "narration": "程岚：喝酒这件事，我不将就。",
+            "asset_requirements": {
+                "characters": ["程岚", "阿杰", "服务员"],
+                "scenes": ["现代中餐厅"],
+                "props": ["蓝妹啤酒瓶", "蓝妹直筒透明玻璃杯", "菜单"],
+            },
+        }
+    )
+
+    salvaged = salvage_scene_blueprints([raw], total_duration_sec=8, visual_style="电影写实")
+
+    assert salvaged[0]["title"] == raw["title"]
+    assert salvaged[0]["storyline"] == raw["storyline"]
+    assert salvaged[0]["narration"] == raw["narration"]
+    assert salvaged[0]["asset_requirements"] == raw["asset_requirements"]
+    assert len(str(salvaged[0]["shot_description"]).splitlines()) >= 2
+    assert normalize_scene_blueprints(salvaged, total_duration_sec=8) == salvaged
+
+
 def test_apply_asset_requirement_repairs_only_changes_invalid_asset_contract() -> None:
     original = _blueprint(_complete_description())
     original["asset_requirements"] = {
@@ -348,9 +458,15 @@ def test_build_video_plan_repairs_incomplete_shot_description_once_with_llm() ->
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # Plan 生成、镜头质检修复，以及 Seedance 专用写作的两次校验尝试。
+    assert len(fake_model.prompts) == 4
     assert "分镜 1 镜头描述缺少：地点、光影、声音、收束" in str(fake_model.prompts[1])
-    assert result.scene_blueprints[0]["shot_description"] == repaired_description
+    final_description = result.scene_blueprints[0]["shot_description"]
+    assert "通勤者抬手护住背包并擦去表面雨水" in final_description
+    assert "具体承接“地点：" not in final_description
+    assert "@character-" in final_description
+    assert "@scene-" in final_description
+    assert "@prop-" in final_description
     assert result.scene_blueprints[0]["storyline"] == sparse["scene_blueprints"][0]["storyline"]
     assert shot_description_quality_issues(result.scene_blueprints) == []
 
@@ -376,9 +492,11 @@ def test_build_video_plan_uses_rich_rule_fallback_after_one_failed_llm_repair() 
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # 规则兜底后仍会进入 Seedance 专用写作并按合同重试一次。
+    assert len(fake_model.prompts) == 4
     assert shot_description_quality_issues(result.scene_blueprints) == []
     assert "地点：雨中街道" in result.scene_blueprints[0]["shot_description"]
+    assert len(result.scene_blueprints[0]["shot_description"].splitlines()) >= 2
     assert any("镜头描述已使用规则增强" in issue for issue in result.consistency_issues)
 
 
@@ -395,7 +513,8 @@ def test_build_video_plan_does_not_repair_complete_shot_description() -> None:
         )
     )
 
-    assert len(fake_model.prompts) == 1
+    # 完整初稿无需八维修复，但仍需执行 Seedance 专用写作阶段和一次校验重试。
+    assert len(fake_model.prompts) == 3
     assert shot_description_quality_issues(result.scene_blueprints) == []
 
 
@@ -430,11 +549,97 @@ def test_build_video_plan_repairs_polluted_asset_requirements_once_with_llm() ->
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # Plan 生成、资产定向修复，以及 Seedance 专用写作的两次校验尝试。
+    assert len(fake_model.prompts) == 4
     assert "三秒钩子" in str(fake_model.prompts[1])
     assert result.scene_blueprints[0]["asset_requirements"] == repaired_assets
     assert result.scene_blueprints[0]["storyline"] == polluted["scene_blueprints"][0]["storyline"]
     assert asset_requirement_quality_issues(result.scene_blueprints) == []
+
+
+def test_build_video_plan_replans_over_nine_assets_without_losing_global_union() -> None:
+    asset_names = [f"蓝妹聚餐道具{i}" for i in range(1, 11)]
+    crowded = _single_scene_plan_payload(_complete_description())
+    crowded["scene_blueprints"][0]["asset_requirements"] = {
+        "characters": [],
+        "scenes": [],
+        "props": asset_names,
+    }
+    first = copy.deepcopy(crowded["scene_blueprints"][0])
+    first.update(
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "structure_role": "opening",
+            "start_sec": 0,
+            "end_sec": 4,
+            "duration_sec": 4,
+            "shot_description": _complete_description(4),
+            "asset_requirements": {"characters": [], "scenes": [], "props": asset_names[:5]},
+        }
+    )
+    second = copy.deepcopy(first)
+    second.update(
+        {
+            "scene_id": "scene-2",
+            "scene_index": 2,
+            "title": "老友局结果收束",
+            "structure_role": "conclusion",
+            "start_sec": 4,
+            "end_sec": 8,
+            "asset_requirements": {"characters": [], "scenes": [], "props": asset_names[5:]},
+        }
+    )
+    replanned = {
+        **crowded,
+        "scene_blueprints": [first, second],
+    }
+    fake_model = _SequenceFakeModel(
+        [json.dumps(crowded, ensure_ascii=False), json.dumps(replanned, ensure_ascii=False)]
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            {"direction_id": "direction_1", "title": "老友聚餐", "description": "用聚餐冲突证明不将就。"},
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert result.error is None
+    assert len(fake_model.prompts) == 4
+    assert "最多允许 9 个" in str(fake_model.prompts[1])
+    assert {name for item in result.scene_blueprints for name in item["asset_requirements"]["props"]} == set(asset_names)
+    assert all(not scene_asset_reference_budget_issues([item]) for item in result.scene_blueprints)
+    assert "重新规划并重新分配内容与资产" in "；".join(result.consistency_issues)
+
+
+def test_build_video_plan_rejects_budget_replan_that_drops_an_asset() -> None:
+    asset_names = [f"蓝妹聚餐道具{i}" for i in range(1, 11)]
+    crowded = _single_scene_plan_payload(_complete_description())
+    crowded["scene_blueprints"][0]["asset_requirements"] = {
+        "characters": [],
+        "scenes": [],
+        "props": asset_names,
+    }
+    dropped = copy.deepcopy(crowded)
+    dropped["scene_blueprints"][0]["asset_requirements"]["props"] = asset_names[:9]
+    fake_model = _SequenceFakeModel(
+        [json.dumps(crowded, ensure_ascii=False), json.dumps(dropped, ensure_ascii=False)]
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            {"direction_id": "direction_1", "title": "老友聚餐", "description": "用聚餐冲突证明不将就。"},
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert result.error is not None
+    assert "不得删除、增加或改名全局资产" in result.error
 
 
 def _revision_blueprints() -> list[dict[str, object]]:
@@ -497,7 +702,8 @@ def test_revise_video_plan_retries_incomplete_shot_descriptions_once() -> None:
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # Plan 修订、镜头定向修复，以及 Seedance 专用写作的两次校验尝试。
+    assert len(fake_model.prompts) == 4
     assert "分镜 1 镜头描述缺少" in str(fake_model.prompts[1])
     assert revised.plan_version == 2
     assert shot_description_quality_issues(revised.scene_blueprints) == []
@@ -554,11 +760,63 @@ def test_revise_video_plan_repairs_only_polluted_asset_requirements() -> None:
         )
     )
 
-    assert len(fake_model.prompts) == 2
+    # Plan 修订、资产定向修复，以及 Seedance 专用写作的两次校验尝试。
+    assert len(fake_model.prompts) == 4
     assert revised.plan_version == 2
     assert revised.scene_blueprints[0]["asset_requirements"] == repaired_assets
     assert revised.scene_blueprints[0]["storyline"] == candidate_blueprints[0]["storyline"]
     assert asset_requirement_quality_issues(revised.scene_blueprints) == []
+
+
+def test_revise_video_plan_replans_over_nine_assets_and_preserves_names() -> None:
+    form = {**VIDEO_FORM, "video_duration_sec": 30}
+    direction = {"direction_id": "direction_1", "title": "老友聚餐", "description": "用聚餐冲突证明不将就。"}
+    original = build_plan_markdown("video", form, direction)
+    asset_names = [f"蓝妹聚餐道具{i}" for i in range(1, 11)]
+    crowded = _revision_blueprints()
+    crowded[0]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names}
+    crowded[1]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names[:5]}
+    crowded[2]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names[5:]}
+    replanned = copy.deepcopy(crowded)
+    replanned[0]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names[:4]}
+    replanned[1]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names[4:8]}
+    replanned[2]["asset_requirements"] = {"characters": [], "scenes": [], "props": asset_names[8:]}
+    candidate_markdown = "# 蓝妹老友局\n\n## 一、选题方向\n聚餐反差。\n\n## 三、视频规格\n- 时长：30 秒\n\n## 五、镜头列表\n按蓝图执行。"
+    first_payload = {
+        "plan_markdown": candidate_markdown,
+        "creation_contract_patch": {},
+        "scene_blueprints": crowded,
+    }
+    second_payload = {
+        "plan_markdown": candidate_markdown,
+        "creation_contract_patch": {},
+        "scene_blueprints": replanned,
+    }
+    fake_model = _SequenceFakeModel(
+        [json.dumps(first_payload, ensure_ascii=False), json.dumps(second_payload, ensure_ascii=False)]
+    )
+
+    revised = asyncio.run(
+        revise_plan_markdown_with_llm(
+            intent="video",
+            form_values=form,
+            selected_direction=direction,
+            current_plan_markdown=original.plan_markdown,
+            current_plan_version=original.plan_version,
+            plan_history=original.plan_history,
+            revision_feedback="保留全部聚餐角色和道具，但每镜最多引用 9 张图",
+            creation_contract=original.creation_contract,
+            current_scene_blueprints=original.scene_blueprints,
+            model_factory=lambda *_args, **_kwargs: fake_model,
+        )
+    )
+
+    assert revised.error is None
+    assert revised.plan_version == 2
+    assert len(fake_model.prompts) == 4
+    assert "分镜九图预算校验失败" in str(fake_model.prompts[1])
+    assert {name for item in revised.scene_blueprints for name in item["asset_requirements"]["props"]} == set(asset_names)
+    assert all(not scene_asset_reference_budget_issues([item]) for item in revised.scene_blueprints)
 
 
 def test_revise_video_plan_preserves_current_version_when_quality_retry_still_fails() -> None:

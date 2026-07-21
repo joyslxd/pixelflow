@@ -136,9 +136,20 @@ PLAN_MARKDOWN = """# 雨夜通勤实测
 def _authored_shot() -> str:
     return (
         "0-3秒：以 @scene-rain-stop 固定雨夜公交站空间，以 @character-linxiao 固定林晓身份，"
-        "镜头用中景建立人物与背包关系，冷蓝路灯形成冷光并勾勒雨丝；3-7秒：林晓抬起水杯将水连续泼向背包，"
-        "摄像机沿手部动作推近，保留雨声与泼水声；7-10秒：以 @prop-backpack 固定商品外观，"
+        "镜头用中景建立人物与背包关系，冷蓝路灯形成冷光并勾勒雨丝。\n3-7秒：林晓抬起水杯将水连续泼向背包，"
+        "摄像机沿手部动作推近，保留雨声与泼水声。\n7-10秒：以 @prop-backpack 固定商品外观，"
         "切换防水面料特写，本分镜旁白说“雨夜通勤也从容”，定格在水珠滚落且面料未浸湿的证据画面。"
+    )
+
+
+def _multiline_authored_shot() -> str:
+    return (
+        "0-3秒：以 @scene-rain-stop 固定雨夜公交站空间，以 @character-linxiao 固定林晓身份，"
+        "中景跟随林晓进入画面，冷蓝路灯勾勒雨丝，保留雨声，镜头停在她取下背包的动作起点。\n"
+        "3-7秒：林晓抬起水杯将水连续泼向背包，摄像机沿手部动作推近，泼水声增强，"
+        "镜尾衔接水珠落到面料的方向。\n"
+        "7-10秒：以 @prop-backpack 固定商品外观，切换防水面料特写，旁白说“雨夜通勤也从容”，"
+        "侧向冷光勾勒水珠，最终定格在水珠滚落且面料未浸湿的证据画面。"
     )
 
 
@@ -165,8 +176,8 @@ def _authored_for_manifest(
     prop_id = manifest["props"][0]["asset_id"]
     shot = (
         f"0-3秒：以 @{scene_id} 固定雨夜公交站空间，以 @{character_id} 固定林晓人物身份，"
-        "中景建立人物与商品关系，冷蓝路灯形成冷光并勾勒雨丝；3-7秒：动作：林晓抬手从肩上取下背包并连续泼水，"
-        "稳定器跟随手部动作推近，雨声、布料摩擦声和泼水声同步增强；"
+        "中景建立人物与商品关系，冷蓝路灯形成冷光并勾勒雨丝。\n3-7秒：动作：林晓抬手从肩上取下背包并连续泼水，"
+        "稳定器跟随手部动作推近，雨声、布料摩擦声和泼水声同步增强。\n"
         f"7-10秒：以 @{prop_id} 固定商品外观，切换面料与拉链大特写，"
         "对白“雨夜通勤也从容”清晰落下，镜头定格在水珠滚落且内层干燥的证据画面。"
     )
@@ -230,6 +241,11 @@ def test_prompt_contains_confirmed_contract_skill_context_and_stable_assets() ->
     assert "不得修改商品卖点、转化目标" in prompt
     assert "不得新增、删除、改名或跨分镜挪用资产" in prompt
     assert "每个分镜最多 9 张" in prompt
+    assert "一个或多个中文段落" in prompt
+    assert "每个段落必须以" in prompt
+    assert "段落数量由本镜内容" in prompt
+    assert "每个段落显式使用“地点：”“主体：”“动作：”“景别：”“运镜：”“光影：”“声音：”“收束：”" in prompt
+    assert r"\n3-N秒" in prompt
 
 
 def test_prompt_requires_confirmed_video_model() -> None:
@@ -294,6 +310,89 @@ def test_apply_accepts_clear_asset_usage_explanation_with_natural_chinese_wordin
     assert "使用 @prop-backpack 作为商品外观依据" in result[0]["shot_description"]
 
 
+def test_apply_accepts_content_driven_multiline_shot_segments() -> None:
+    description = _multiline_authored_shot()
+
+    result = apply_seedance_plan_authoring(
+        BLUEPRINTS,
+        _authored_payload(shot_description=description),
+        asset_manifest=MANIFEST,
+        total_duration_sec=10,
+    )
+
+    assert result[0]["shot_description"] == description
+    assert result[0]["shot_description"].splitlines()[0].startswith("0-3秒")
+    assert result[0]["shot_description"].splitlines()[1].startswith("3-7秒")
+    assert result[0]["shot_description"].splitlines()[2].startswith("7-10秒")
+
+
+def test_apply_accepts_structured_shot_segments_and_renders_existing_string_contract() -> None:
+    authored = _authored_payload()
+    authored[0].pop("shot_description")
+    authored[0]["shot_segments"] = [
+        {
+            "start_sec": 0,
+            "end_sec": 3,
+            "text": "地点：以 @scene-rain-stop 固定雨夜公交站空间；主体：以 @character-linxiao 固定林晓身份；动作：林晓走入站台并取下背包；景别：中景；运镜：稳定跟拍；光影：冷蓝路灯勾勒雨丝；声音：雨声与脚步声；收束：停在她抬手准备泼水。",
+        },
+        {
+            "start_sec": 3,
+            "end_sec": 7,
+            "text": "地点：雨夜公交站；主体：林晓与背包；动作：林晓连续泼水并转动背包；景别：近景；运镜：沿手部动作推近；光影：侧光照亮飞溅水珠；声音：泼水声增强；收束：水珠落向面料。",
+        },
+        {
+            "start_sec": 7,
+            "end_sec": 10,
+            "text": "地点：雨夜公交站；主体：以 @prop-backpack 固定商品外观；动作：水珠从面料滚落且内里保持干燥；景别：材质特写；运镜：缓慢推近后固定；光影：冷光勾勒水珠高光；声音：雨声压低并进入旁白；收束：定格防水证据。",
+        },
+    ]
+
+    result = apply_seedance_plan_authoring(
+        BLUEPRINTS,
+        authored,
+        asset_manifest=MANIFEST,
+        total_duration_sec=10,
+    )
+
+    assert result[0]["shot_description"].startswith("0-3秒：地点：")
+    assert "\n3-7秒：地点：" in result[0]["shot_description"]
+    assert result[0]["shot_description"].endswith("定格防水证据。")
+
+
+def test_apply_rejects_single_segment_that_contains_multiple_content_stages() -> None:
+    description = (
+        "0-10秒：地点：以 @scene-rain-stop 固定雨夜公交站空间；"
+        "主体：以 @character-linxiao 固定林晓身份并以 @prop-backpack 固定商品外观；"
+        "动作：林晓先走入站台，随后连续泼水，最后打开背包展示干燥内里；"
+        "景别：中景切近景再切材质特写；运镜：跟拍后推近并最终固定；"
+        "光影：冷蓝路灯转为侧向产品高光；声音：雨声后加入泼水声和旁白；收束：定格防水证据。"
+    )
+
+    with pytest.raises(ValueError, match="多个内容阶段"):
+        apply_seedance_plan_authoring(
+            BLUEPRINTS,
+            _authored_payload(shot_description=description),
+            asset_manifest=MANIFEST,
+            total_duration_sec=10,
+        )
+
+
+def test_apply_does_not_treat_action_duration_as_an_extra_shot_segment() -> None:
+    description = _multiline_authored_shot().replace(
+        "保留雨声，",
+        "人物定格1-2秒并保留雨声，",
+    )
+
+    result = apply_seedance_plan_authoring(
+        BLUEPRINTS,
+        _authored_payload(shot_description=description),
+        asset_manifest=MANIFEST,
+        total_duration_sec=10,
+    )
+
+    assert "定格1-2秒" in result[0]["shot_description"]
+
+
 @pytest.mark.parametrize(
     ("authored", "message"),
     [
@@ -304,7 +403,7 @@ def test_apply_accepts_clear_asset_usage_explanation_with_natural_chinese_wordin
         (_authored_payload(shot_description=_authored_shot().replace("0-3秒", "0-3.5秒")), "小数"),
         (_authored_payload(shot_description=_authored_shot().replace("3-7秒", "4-7秒")), "连续"),
         (_authored_payload(shot_description=_authored_shot().replace("冷蓝路灯形成冷光", "灰色背景")), "光影"),
-        (_authored_payload(shot_description=_authored_shot() + "\n第二段"), "一整段"),
+        (_authored_payload(shot_description=_authored_shot() + "\n第二段"), "每个段落必须以整数秒时间范围开头"),
     ],
 )
 def test_apply_rejects_invalid_seedance_authoring(
@@ -471,6 +570,59 @@ def test_initial_video_plan_retries_seedance_authoring_with_validation_feedback(
     assert len(model.prompts) == 3
     assert "不能使用毫秒时间码" in model.prompts[2]
     assert "ms" not in result.scene_blueprints[0]["shot_description"]
+
+
+def test_initial_video_plan_binds_stable_assets_when_seedance_authoring_fails_twice() -> None:
+    structural_blueprints = copy.deepcopy(BLUEPRINTS)
+    structural_blueprints[0]["shot_description"] = str(structural_blueprints[0]["shot_description"]).replace(
+        "；主体：",
+        "；\n△补充同一秒段内的构图细节；主体：",
+    )
+    stable_manifest = normalize_asset_manifest(MANIFEST, structural_blueprints)
+    invalid = _authored_for_manifest(stable_manifest)
+    invalid[0]["shot_description"] = str(invalid[0]["shot_description"]) + "\n缺少时间范围的附加段落"
+    model = SequenceModel(
+        [
+            {
+                "plan_markdown": PLAN_MARKDOWN,
+                "scene_image_ratio": "9:16",
+                "scene_image_size": "4K",
+                "scene_blueprints": structural_blueprints,
+                "asset_manifest": MANIFEST,
+            },
+            {"scene_blueprints": invalid},
+            {"scene_blueprints": invalid},
+        ]
+    )
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            DIRECTION,
+            model_factory=lambda *_args, **_kwargs: model,
+        )
+    )
+
+    expected_ids = {
+        item["asset_id"]
+        for collection in ("characters", "scenes", "props")
+        for item in stable_manifest[collection]
+    }
+    actual_ids = {
+        token.removeprefix("@")
+        for token in result.scene_blueprints[0]["shot_description"].split()
+        if token.startswith("@")
+    }
+    assert result.error is None
+    assert expected_ids == actual_ids
+    assert "△补充同一秒段内的构图细节" in result.scene_blueprints[0]["shot_description"]
+    assert "\n" not in result.scene_blueprints[0]["shot_description"] or all(
+        line.lstrip()[0].isdigit()
+        for line in result.scene_blueprints[0]["shot_description"].splitlines()
+        if line.strip()
+    )
+    assert any("规则绑定稳定资产" in issue for issue in result.consistency_issues)
 
 
 def test_video_plan_revision_runs_same_seedance_authoring_with_feedback_and_materials() -> None:

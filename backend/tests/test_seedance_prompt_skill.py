@@ -25,6 +25,9 @@ def test_vendored_seedance_skill_targets_the_whole_model_family():
     assert "@asset_id" in skill_text
     assert "最多 9 张" in skill_text
     assert "content-app 实时配置" in skill_text
+    assert "一个或多个中文段落" in skill_text
+    assert "每个段落必须以" in skill_text
+    assert "段落数量" in skill_text
     assert (SKILL_DIR / "THIRD_PARTY_NOTICE.md").exists()
 
 
@@ -68,7 +71,9 @@ def test_build_seedance_shot_prompt_contains_current_model_and_final_contract(vi
     assert "最多 9" in prompt
     assert "只允许使用上述 @asset_id" in prompt
     assert "不要使用未声明素材" in prompt
-    assert "镜头描述必须是一整段中文" in prompt
+    assert "镜头描述由一个或多个中文段落组成" in prompt
+    assert "每个段落必须以当前分镜内部的整数秒范围开头" in prompt
+    assert "段落数量由内容变化决定" in prompt
 
 
 @pytest.mark.parametrize(

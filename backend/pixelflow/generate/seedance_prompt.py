@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 
+from pixelflow.creative.scene_blueprint import MAX_SCENE_ASSET_REFERENCES
+
 SEEDANCE_SKILL_PATH = (
     Path(__file__).resolve().parents[2]
     / "skills"
@@ -16,7 +18,7 @@ SEEDANCE_SKILL_PATH = (
     / "seedance-prompt"
     / "SKILL.md"
 )
-MAX_IMAGE_REFERENCES = 9
+MAX_IMAGE_REFERENCES = MAX_SCENE_ASSET_REFERENCES
 
 
 @lru_cache(maxsize=1)
@@ -87,8 +89,10 @@ def build_seedance_shot_prompt(
         f"- 旁白：{narration or '本分镜无旁白'}\n"
         f"- 可引用素材：{references}\n"
         f"- 素材规则：只允许使用上述 @asset_id，不要使用未声明素材；每个分镜最多 {MAX_IMAGE_REFERENCES} 张图片参考。\n"
-        "- 镜头描述必须是一整段中文，按需要在该精确秒段内继续划分秒级时间戳；"
-        "包含地点、角色、景别、动作、运镜、光影、声音/对白，并明确每个 @素材的用途。\n"
+        "- 镜头描述由一个或多个中文段落组成，每个段落必须以当前分镜内部的整数秒范围开头；"
+        "段落数量由内容变化决定，动作阶段、景别、运镜、说话者、声音或叙事重点变化时必须换行拆段。\n"
+        "- 多段必须从 0 秒开始连续覆盖本镜时长，每个时间段独占一段；每段显式使用地点、主体、动作、景别、"
+        "运镜、光影、声音、收束八个标签，并明确每个 @素材的用途。\n"
         "- 不得使用 ms、毫秒或带小数的时间码。"
         f"{plan_context}"
     )

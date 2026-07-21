@@ -215,6 +215,41 @@ def _revision_blueprints(total_duration_sec: int) -> list[dict[str, object]]:
     return blueprints
 
 
+def _valid_generation_blueprints(total_duration_sec: int) -> list[dict[str, object]]:
+    durations = [6, 12, 8] if total_duration_sec == 26 else [10] * (total_duration_sec // 10)
+    blueprints: list[dict[str, object]] = []
+    cursor = 0
+    for index, duration in enumerate(durations, start=1):
+        role = "opening" if index == 1 else "conclusion" if index == len(durations) else "development"
+        blueprints.append(
+            {
+                "scene_id": f"scene-{index}",
+                "scene_index": index,
+                "title": f"健康陪伴分镜{index}",
+                "structure_role": role,
+                "start_sec": cursor,
+                "end_sec": cursor + duration,
+                "duration_sec": duration,
+                "storyline": f"体验者在晨光公园推进第{index}段健康体验。",
+                "shot_description": (
+                    f"0-{duration}秒: 地点：晨光公园；主体：健康体验者与AuroraFit智能健康戒指；"
+                    f"动作：体验者完成第{index}段健康记录并查看结果；景别：中景切戒指特写；"
+                    "运镜：稳定跟拍后缓慢推近；光影：晨光侧逆光勾勒戒指轮廓；"
+                    "声音：保留脚步声与轻柔音乐；收束：停在健康数据结果并衔接下一镜。"
+                ),
+                "narration": f"第{index}段健康陪伴清晰可见。",
+                "transition": "动作匹配转场。" if index < len(durations) else "产品定格结束。",
+                "asset_requirements": {
+                    "characters": ["健康体验者"],
+                    "scenes": ["晨光公园"],
+                    "props": ["AuroraFit智能健康戒指"],
+                },
+            }
+        )
+        cursor += duration
+    return blueprints
+
+
 @pytest.mark.parametrize(
     ("feedback", "expected_duration"),
     [
@@ -640,13 +675,15 @@ def test_revise_video_plan_does_not_publish_invalid_contract_after_retry() -> No
 
 def test_build_video_plan_with_llm_uses_uploaded_template_and_constrains_scene_image_specs() -> None:
     fake_model = FakeModel(
-        """
-        {
-          "plan_markdown": "# AuroraFit 智能健康戒指新品宣传\\n\\n## 一、选题方向\\n晨跑到睡眠的健康陪伴。\\n\\n## 三、视频规格\\n- 时长：180 秒\\n- 画幅：9:16\\n\\n## 五、镜头列表\\n严格按照提供的精确镜头时间线执行。",
-          "scene_image_ratio": "3:4",
-          "scene_image_size": "8K"
-        }
-        """
+        json.dumps(
+            {
+                "plan_markdown": "# AuroraFit 智能健康戒指新品宣传\n\n## 一、选题方向\n晨跑到睡眠的健康陪伴。\n\n## 三、视频规格\n- 时长：180 秒\n- 画幅：9:16\n\n## 五、镜头列表\n严格按照提供的精确镜头时间线执行。",
+                "scene_image_ratio": "3:4",
+                "scene_image_size": "8K",
+                "scene_blueprints": _valid_generation_blueprints(180),
+            },
+            ensure_ascii=False,
+        )
     )
 
     result = asyncio.run(
@@ -827,6 +864,7 @@ def test_plan_memory_is_internal_context_and_never_rendered_to_user() -> None:
                 "plan_markdown": leaked_plan,
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
+                "scene_blueprints": _valid_generation_blueprints(26),
             },
             ensure_ascii=False,
         )
@@ -868,6 +906,7 @@ def test_plan_removes_exact_semantic_memory_text_without_internal_marker() -> No
                 "plan_markdown": (f"# 防水背包宣传片\n\n## 一、选题方向\n雨天通勤实测。\n\n## 二、选题优势\n{memory_text}\n产品证明清晰。\n\n## 三、视频规格\n- 时长：26 秒\n\n## 五、镜头列表\n按蓝图执行。"),
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
+                "scene_blueprints": _valid_generation_blueprints(26),
             },
             ensure_ascii=False,
         )
@@ -901,6 +940,7 @@ def test_plan_removes_semantic_memory_even_when_llm_adds_markdown_formatting() -
                 "plan_markdown": ("# 防水背包宣传片\n\n## 一、选题方向\n雨天通勤实测。\n\n## 二、选题优势\n品牌长期偏好：**真实摄影**，避免夸张特效。\n产品证明清晰。\n\n## 三、视频规格\n- 时长：26 秒\n\n## 五、镜头列表\n按蓝图执行。"),
                 "scene_image_ratio": "9:16",
                 "scene_image_size": "4K",
+                "scene_blueprints": _valid_generation_blueprints(26),
             },
             ensure_ascii=False,
         )

@@ -30,18 +30,21 @@ from pixelflow.creative.revision_contract import contract_form_values, merge_rev
 from pixelflow.creative.scene_blueprint import (
     apply_asset_requirement_repairs,
     apply_shot_description_repairs,
-    asset_requirement_quality_issues,
+    asset_requirement_entity_quality_issues,
     enrich_incomplete_shot_descriptions,
     fallback_scene_blueprints,
     normalize_scene_blueprints,
+    rebuild_scene_shot_descriptions,
     render_scene_blueprints_markdown,
     repair_scene_blueprints_schedule,
+    salvage_scene_blueprints,
+    scene_asset_reference_budget_issues,
     scene_blueprint_durations,
     shot_description_quality_issues,
     validate_asset_requirement_quality,
     validate_shot_description_quality,
 )
-from pixelflow.creative.seedance_plan import apply_seedance_plan_authoring
+from pixelflow.creative.seedance_plan import apply_seedance_plan_authoring, bind_seedance_plan_assets
 
 CreationIntent = Literal["video", "image"]
 
@@ -272,6 +275,7 @@ async def build_plan_markdown_with_llm(
                         "同时重新核对用户明确命名的人物、服装造型、物理场景、商品和道具，"
                         "逐项写入 asset_requirements 与 asset_manifest，禁止使用泛化占位名称。"
                     )
+                    retry_payload: dict[str, Any] | None = None
                     try:
                         retry_payload = await generate_plan_payload(
                             intent=intent,
@@ -308,9 +312,66 @@ async def build_plan_markdown_with_llm(
                         markdown = retry_markdown
                         blueprints = retry_blueprints
                         corrections.append("Plan LLM 分镜蓝图已根据结构反馈重新生成")
-                    except Exception as retry_exc:  # noqa: BLE001 - retry failure degrades to deterministic contract
-                        blueprints = _fallback_blueprints(form_values, selected_direction, contract)
-                        corrections.append(f"Plan LLM 分镜蓝图重试失败，已使用规则修正：{retry_exc}")
+                    except Exception as retry_exc:  # noqa: BLE001 - 仅恢复已有具体语义，不生成泛化替代内容
+                        salvage_errors: list[str] = []
+                        salvage_candidates = []
+                        if isinstance(retry_payload, dict):
+                            salvage_candidates.append(("重试结果", retry_payload.get("scene_blueprints")))
+                        salvage_candidates.append(("首次结果", payload.get("scene_blueprints")))
+                        for label, candidate in salvage_candidates:
+                            try:
+                                blueprints = salvage_scene_blueprints(
+                                    candidate,
+                                    total_duration_sec=contract.video_duration_sec,
+                                    visual_style=_text(form_values.get("visual_style"), "真实广告风格"),
+                                )
+                                corrections.append(f"Plan LLM {label}的具体故事线和资产已保留，非法时间线与镜头秒段已按规则重建")
+                                break
+                            except ValueError as salvage_exc:
+                                salvage_errors.append(f"{label}恢复失败：{salvage_exc}")
+                        else:
+                            raise ValueError(
+                                "Plan LLM 分镜蓝图重试后仍不可恢复，已拒绝生成泛化资产 Plan："
+                                f"{retry_exc}；{'；'.join(salvage_errors)}"
+                            ) from retry_exc
+
+            entity_issues = asset_requirement_entity_quality_issues(blueprints)
+            if entity_issues:
+                repair_payload = await repair_plan_asset_requirements(
+                    scene_blueprints=blueprints,
+                    quality_issues=entity_issues,
+                    selected_direction=selected_direction,
+                    creation_contract=creation_contract,
+                    model_name=model_name,
+                    model_factory=model_factory,
+                )
+                blueprints = apply_asset_requirement_repairs(
+                    blueprints,
+                    repair_payload.get("scene_blueprints"),
+                    total_duration_sec=contract.video_duration_sec,
+                )
+                remaining_entity_issues = asset_requirement_entity_quality_issues(blueprints)
+                if remaining_entity_issues:
+                    raise ValueError("；".join(remaining_entity_issues))
+
+            budget_issues = scene_asset_reference_budget_issues(blueprints)
+            if budget_issues:
+                payload, markdown, blueprints = await _replan_initial_asset_budget(
+                    blueprints=blueprints,
+                    budget_issues=budget_issues,
+                    intent=intent,
+                    template_markdown=template_markdown,
+                    form_values=form_values,
+                    selected_direction=selected_direction,
+                    product_creative_profile=profile,
+                    materials=materials or [],
+                    intake_context=context,
+                    creation_contract=creation_contract,
+                    total_duration_sec=contract.video_duration_sec,
+                    model_name=model_name,
+                    model_factory=model_factory,
+                )
+                corrections.append("超出 9 张参考图预算的分镜已在 Plan 阶段重新规划并重新分配内容与资产")
             quality_issues = shot_description_quality_issues(blueprints)
             if quality_issues:
                 try:
@@ -337,22 +398,7 @@ async def build_plan_markdown_with_llm(
                     )
                     validate_shot_description_quality(blueprints)
                     corrections.append(f"Plan LLM 镜头描述已使用规则增强：{exc}")
-            asset_issues = asset_requirement_quality_issues(blueprints)
-            if asset_issues:
-                repair_payload = await repair_plan_asset_requirements(
-                    scene_blueprints=blueprints,
-                    quality_issues=asset_issues,
-                    selected_direction=selected_direction,
-                    creation_contract=creation_contract,
-                    model_name=model_name,
-                    model_factory=model_factory,
-                )
-                blueprints = apply_asset_requirement_repairs(
-                    blueprints,
-                    repair_payload.get("scene_blueprints"),
-                    total_duration_sec=contract.video_duration_sec,
-                )
-                validate_asset_requirement_quality(blueprints)
+            validate_asset_requirement_quality(blueprints)
             durations = scene_blueprint_durations(blueprints)
             contract, image_corrections = resolve_scene_image_spec(
                 contract,
@@ -465,6 +511,7 @@ async def revise_plan_markdown_with_llm(
 
     validation_feedback = ""
     last_error: Exception | None = None
+    budget_replan_required_assets: dict[str, set[str]] | None = None
     for attempt in range(2):
         effective_form_values = {**form_values, **contract_form_values(authoritative_contract)}
         try:
@@ -540,12 +587,12 @@ async def revise_plan_markdown_with_llm(
                             model_name=model_name,
                             error=ValueError(f"分镜镜头描述完整度校验失败：{exc}"),
                         )
-                asset_issues = asset_requirement_quality_issues(blueprints)
-                if asset_issues:
+                entity_issues = asset_requirement_entity_quality_issues(blueprints)
+                if entity_issues:
                     try:
                         repair_payload = await repair_plan_asset_requirements(
                             scene_blueprints=blueprints,
-                            quality_issues=asset_issues,
+                            quality_issues=entity_issues,
                             selected_direction=selected_direction,
                             creation_contract=candidate_contract,
                             model_name=model_name,
@@ -556,7 +603,9 @@ async def revise_plan_markdown_with_llm(
                             repair_payload.get("scene_blueprints"),
                             total_duration_sec=contract.video_duration_sec,
                         )
-                        validate_asset_requirement_quality(blueprints)
+                        remaining_entity_issues = asset_requirement_entity_quality_issues(blueprints)
+                        if remaining_entity_issues:
+                            raise ValueError("；".join(remaining_entity_issues))
                     except Exception as exc:  # noqa: BLE001 - 定向修正失败时不能发布污染版本
                         return _failed_revision_result(
                             base=base,
@@ -571,6 +620,24 @@ async def revise_plan_markdown_with_llm(
                             model_name=model_name,
                             error=ValueError(f"分镜资产合同校验失败：{exc}"),
                         )
+                budget_issues = scene_asset_reference_budget_issues(blueprints)
+                if budget_issues:
+                    if budget_replan_required_assets is None:
+                        budget_replan_required_assets = _asset_name_sets(blueprints)
+                    raise ValueError(
+                        "分镜九图预算校验失败："
+                        f"{'；'.join(budget_issues)}。请重新规划整份 scene_blueprints，可拆分分镜或重新分配时长与动作，"
+                        "保持总时长精确、每镜 4-15 个整数秒、故事连续；不得通过截断或删除全局资产来通过校验，"
+                        f"必须保留的分类资产并集：{budget_replan_required_assets}"
+                    )
+                if budget_replan_required_assets is not None:
+                    actual_assets = _asset_name_sets(blueprints)
+                    if actual_assets != budget_replan_required_assets:
+                        raise ValueError(
+                            "分镜九图预算重排不得删除、增加或改名全局资产；"
+                            f"重排前={budget_replan_required_assets}，重排后={actual_assets}"
+                        )
+                validate_asset_requirement_quality(blueprints)
                 durations = scene_blueprint_durations(blueprints)
                 contract, image_corrections = resolve_scene_image_spec(
                     contract,
@@ -836,6 +903,99 @@ def restore_plan_version(
     )
 
 
+async def _replan_initial_asset_budget(
+    *,
+    blueprints: list[dict[str, Any]],
+    budget_issues: list[str],
+    intent: CreationIntent,
+    template_markdown: str,
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    product_creative_profile: dict[str, Any],
+    materials: list[dict[str, Any]],
+    intake_context: dict[str, Any],
+    creation_contract: dict[str, Any],
+    total_duration_sec: int,
+    model_name: str,
+    model_factory: ModelFactory | None,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    """整份重排超预算 Plan；不允许通过删除资产制造“通过”。"""
+
+    required_assets = _asset_name_sets(blueprints)
+    feedback = (
+        "以下分镜超过 Seedance 每镜最多 9 张不同图片参考的硬上限："
+        f"{'；'.join(budget_issues)}。必须重新规划整份 scene_blueprints，可拆分分镜或重新分配时长与叙事动作，"
+        "但总时长必须精确不变、每镜仍为 4-15 个整数秒、故事因果和镜间衔接必须连续。"
+        "不得简单截断或删除角色、场景、商品和道具；重排前全部具体资产名称的分类并集必须完整保留，"
+        "只把与这些资产关联的动作、对白和镜头内容一起移动到合适分镜。每镜三个资产数组去重后的总数必须不超过 9。"
+        f"必须保留的分类资产并集：{json.dumps(required_assets, ensure_ascii=False, default=list)}"
+    )
+    replanned_payload = await generate_plan_payload(
+        intent=intent,
+        template_markdown=template_markdown,
+        form_values=form_values,
+        selected_direction=selected_direction,
+        product_creative_profile=product_creative_profile,
+        materials=materials,
+        intake_context=intake_context,
+        creation_contract=creation_contract,
+        validation_feedback=feedback,
+        model_name=model_name,
+        model_factory=model_factory,
+    )
+    replanned_payload = _redact_semantic_memory_payload(
+        replanned_payload,
+        product_creative_profile,
+        intake_context,
+    )
+    replanned_markdown = _validated_llm_markdown(
+        intent,
+        replanned_payload,
+        form_values,
+        selected_direction,
+        intake_context,
+    )
+    raw_blueprints = replanned_payload.get("scene_blueprints")
+    try:
+        replanned_blueprints = normalize_scene_blueprints(
+            raw_blueprints,
+            total_duration_sec=total_duration_sec,
+        )
+    except ValueError:
+        try:
+            replanned_blueprints = repair_scene_blueprints_schedule(
+                raw_blueprints,
+                total_duration_sec=total_duration_sec,
+            )
+        except ValueError:
+            replanned_blueprints = salvage_scene_blueprints(
+                raw_blueprints,
+                total_duration_sec=total_duration_sec,
+                visual_style=_text(form_values.get("visual_style"), "真实广告风格"),
+            )
+    validate_asset_requirement_quality(replanned_blueprints)
+    actual_assets = _asset_name_sets(replanned_blueprints)
+    if actual_assets != required_assets:
+        raise ValueError(
+            "分镜九图预算重排不得删除、增加或改名全局资产；"
+            f"重排前={required_assets}，重排后={actual_assets}"
+        )
+    return replanned_payload, replanned_markdown, replanned_blueprints
+
+
+def _asset_name_sets(blueprints: list[dict[str, Any]]) -> dict[str, set[str]]:
+    result = {"characters": set(), "scenes": set(), "props": set()}
+    for blueprint in blueprints:
+        requirements = blueprint.get("asset_requirements")
+        if not isinstance(requirements, dict):
+            continue
+        for collection in result:
+            values = requirements.get(collection)
+            if isinstance(values, list):
+                result[collection].update(str(value).strip() for value in values if str(value).strip())
+    return result
+
+
 async def _author_seedance_plan_blueprints(
     *,
     plan_markdown: str,
@@ -884,8 +1044,18 @@ async def _author_seedance_plan_blueprints(
             last_error = exc
             validation_feedback = str(exc)
 
-    return copy.deepcopy(scene_blueprints), [
-        "Seedance 专用分镜写作连续两次未通过，已保留通过结构校验的分镜："
+    rebuilt = rebuild_scene_shot_descriptions(
+        scene_blueprints,
+        visual_style=_text(form_values.get("visual_style"), "真实广告风格"),
+        total_duration_sec=int(creation_contract.get("video_duration_sec") or 0),
+    )
+    bound = bind_seedance_plan_assets(
+        rebuilt,
+        asset_manifest=asset_manifest,
+        total_duration_sec=int(creation_contract.get("video_duration_sec") or 0),
+    )
+    return bound, [
+        "Seedance 专用分镜写作连续两次未通过，已在保留故事线、对白和资产合同的前提下重建连续秒段并按规则绑定稳定资产："
         f"{last_error or '未知错误'}"
     ]
 

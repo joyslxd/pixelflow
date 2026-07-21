@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from pixelflow.creative.scene_blueprint import validate_asset_requirement_quality
+from pixelflow.creative.scene_blueprint import asset_requirement_entity_quality_issues
 from pixelflow.generate.image_prepare import filter_image_materials
 
 TEXT_TO_IMAGE_ENDPOINT = "/api/picture/text_to_image"
@@ -314,14 +314,11 @@ def _validate_scene_asset_entity_names(
             collect("props", scene.get("prop_images"))
 
     if any(collections.values()):
-        validate_asset_requirement_quality(
-            [
-                {
-                    "scene_index": 1,
-                    "asset_requirements": collections,
-                }
-            ]
+        issues = asset_requirement_entity_quality_issues(
+            [{"scene_index": 1, "asset_requirements": collections}]
         )
+        if issues:
+            raise ValueError("；".join(issues))
 
 
 async def generate_scene_assets(

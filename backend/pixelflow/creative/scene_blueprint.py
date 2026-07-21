@@ -9,6 +9,8 @@ from typing import Any
 
 from pixelflow.creative.duration import MAX_SCENE_DURATION_SEC, MIN_SCENE_DURATION_SEC
 
+MAX_SCENE_ASSET_REFERENCES = 9
+
 _TIMELINE_RANGE_PATTERN = re.compile(r"(?P<prefix>^|[\n。；;！？!?】])(?P<spacing>\s*)(?P<start>\d+)\s*(?:[-~—至])\s*(?P<end>\d+)\s*秒")
 _MILLISECOND_PATTERN = re.compile(r"(?:ms|毫秒|\d{1,2}:\d{2}\.\d+)", flags=re.IGNORECASE)
 _ASSET_TIME_PATTERN = re.compile(
@@ -178,6 +180,86 @@ def repair_scene_blueprints_schedule(raw_blueprints: Any, *, total_duration_sec:
     return normalize_scene_blueprints(repaired, total_duration_sec=total_duration_sec)
 
 
+def salvage_scene_blueprints(
+    raw_blueprints: Any,
+    *,
+    total_duration_sec: int,
+    visual_style: str,
+) -> list[dict[str, Any]]:
+    """保留可用叙事和资产，仅重建非法时间线与镜头描述。
+
+    这里故意不生成“目标用户/真实使用场景”一类通用替代内容。只要标题、
+    故事线、角色职能或资产合同无法从 LLM 结果中恢复，就让本次 Plan 失败，
+    避免一个镜头格式错误把整份具体创意降级成看似成功的泛化 Plan。
+    """
+
+    _validate_total_duration(total_duration_sec)
+    if not isinstance(raw_blueprints, list) or not raw_blueprints:
+        raise ValueError("Plan LLM 未返回可恢复的 scene_blueprints")
+    minimum_count = math.ceil(total_duration_sec / MAX_SCENE_DURATION_SEC)
+    maximum_count = total_duration_sec // MIN_SCENE_DURATION_SEC
+    if not minimum_count <= len(raw_blueprints) <= maximum_count:
+        raise ValueError(f"分镜数量 {len(raw_blueprints)} 无法在 4-15 秒约束内恢复为 {total_duration_sec} 秒")
+    if not all(isinstance(item, dict) for item in raw_blueprints):
+        raise ValueError("Plan LLM 分镜必须是对象")
+
+    source_durations = [_source_scene_duration(item) for item in raw_blueprints]
+    durations = _weighted_durations(total_duration_sec, [float(value) for value in source_durations])
+    salvaged: list[dict[str, Any]] = []
+    cursor = 0
+    for position, (raw, duration) in enumerate(zip(raw_blueprints, durations, strict=True), start=1):
+        title = _public_required_text(raw.get("title"), f"分镜 {position} title")
+        storyline = _public_required_text(raw.get("storyline"), f"分镜 {position} storyline")
+        item = {
+            "scene_id": f"scene-{position}",
+            "scene_index": position,
+            "title": title,
+            "structure_role": _salvage_role(
+                raw.get("structure_role"),
+                position=position,
+                scene_count=len(raw_blueprints),
+                title=title,
+                storyline=storyline,
+            ),
+            "start_sec": cursor,
+            "end_sec": cursor + duration,
+            "duration_sec": duration,
+            "storyline": storyline,
+            "shot_description": "",
+            "narration": _public_optional_text(raw.get("narration")) or "本分镜无旁白",
+            "transition": _transition_text(raw.get("transition"), is_last=position == len(raw_blueprints)),
+            "asset_requirements": _normalize_asset_requirements(raw.get("asset_requirements")),
+        }
+        item["shot_description"] = _rich_fallback_shot_description(item, visual_style=visual_style)
+        salvaged.append(item)
+        cursor += duration
+
+    normalized = normalize_scene_blueprints(salvaged, total_duration_sec=total_duration_sec)
+    entity_issues = asset_requirement_entity_quality_issues(normalized)
+    if entity_issues:
+        raise ValueError("；".join(entity_issues))
+    return normalized
+
+
+def _salvage_role(value: Any, *, position: int, scene_count: int, title: str, storyline: str) -> str:
+    """恢复 LLM 自创的结构标签；首尾由时间位置决定，中段按语义或展开职能归类。"""
+
+    try:
+        return _normalize_role(value, position)
+    except ValueError:
+        pass
+    if scene_count == 1:
+        return "conclusion"
+    if position == 1:
+        return "opening"
+    if position == scene_count:
+        return "conclusion"
+    semantic_text = f"{_text(value)} {title} {storyline}".lower()
+    if any(marker in semantic_text for marker in ("climax", "proof", "demo", "高潮", "证明", "验证", "证据", "卖点", "产品展示")):
+        return "climax"
+    return "development"
+
+
 def fallback_scene_blueprints(
     *,
     total_duration_sec: int,
@@ -262,6 +344,15 @@ def validate_shot_description_quality(blueprints: list[dict[str, Any]]) -> None:
 def asset_requirement_quality_issues(blueprints: list[dict[str, Any]]) -> list[str]:
     """识别误入资产数组的时间、镜头、声音、风格和参考编号元信息。"""
 
+    return [
+        *asset_requirement_entity_quality_issues(blueprints),
+        *scene_asset_reference_budget_issues(blueprints),
+    ]
+
+
+def asset_requirement_entity_quality_issues(blueprints: list[dict[str, Any]]) -> list[str]:
+    """识别不是具体可生成实体的资产名，不处理每镜引用预算。"""
+
     issues: list[str] = []
     for position, blueprint in enumerate(blueprints, start=1):
         scene_index = blueprint.get("scene_index")
@@ -277,9 +368,35 @@ def asset_requirement_quality_issues(blueprints: list[dict[str, Any]]) -> list[s
                 continue
             for value in values:
                 text = _text(value)
-                reason = _asset_metadata_reason(text)
+                reason = _asset_metadata_reason(text) or _generic_asset_reason(key, text)
                 if reason:
                     issues.append(f"分镜 {index} {label}资产“{text}”不是可生成实体：{reason}")
+    return issues
+
+
+def scene_asset_reference_budget_issues(blueprints: list[dict[str, Any]]) -> list[str]:
+    """校验每个分镜声明的去重全局图片资产引用不超过 Seedance 上限。"""
+
+    issues: list[str] = []
+    for position, blueprint in enumerate(blueprints, start=1):
+        scene_index = blueprint.get("scene_index")
+        index = scene_index if isinstance(scene_index, int) and not isinstance(scene_index, bool) else position
+        requirements = blueprint.get("asset_requirements")
+        if not isinstance(requirements, dict):
+            continue
+        reference_count = len(
+            {
+                text
+                for key in _ASSET_REQUIREMENT_LABELS
+                for text in _dedupe_texts(requirements.get(key))
+            }
+        )
+        if reference_count > MAX_SCENE_ASSET_REFERENCES:
+            scene_id = _text(blueprint.get("scene_id")) or f"scene-{index}"
+            issues.append(
+                f"分镜 {scene_id}（scene_index={index}）引用资产共 {reference_count} 个，"
+                f"最多允许 {MAX_SCENE_ASSET_REFERENCES} 个"
+            )
     return issues
 
 
@@ -330,6 +447,72 @@ def enrich_incomplete_shot_descriptions(
                 visual_style=visual_style,
             )
     return enriched
+
+
+def rebuild_scene_shot_descriptions(
+    blueprints: list[dict[str, Any]],
+    *,
+    visual_style: str,
+    total_duration_sec: int,
+) -> list[dict[str, Any]]:
+    """保留权威叙事与资产，为全部分镜确定性重建内容驱动的连续秒段。"""
+
+    rebuilt = copy.deepcopy(blueprints)
+    for blueprint in rebuilt:
+        action_hints = _existing_shot_action_hints(blueprint.get("shot_description"))
+        blueprint["shot_description"] = _rich_fallback_shot_description(
+            blueprint,
+            visual_style=visual_style,
+            action_hints=action_hints,
+        )
+    return normalize_scene_blueprints(rebuilt, total_duration_sec=total_duration_sec)
+
+
+def _existing_shot_action_hints(value: Any) -> list[str]:
+    """从旧描述提取纯动作阶段，避免把整段摄影标签嵌进新秒段。"""
+
+    text = _text(value)
+    if not text:
+        return []
+    without_ranges = _TIMELINE_RANGE_PATTERN.sub(lambda match: match.group("prefix"), text)
+    matches = re.findall(
+        r"(?:^|[；;。])\s*动作[:：]\s*(.+?)(?=[；;。]\s*(?:地点|主体|动作|景别|运镜|光影|声音|收束)[:：]|$)",
+        without_ranges,
+        flags=re.DOTALL,
+    )
+    hints: list[str] = []
+    for match in matches:
+        hint = _clean_extracted_action(re.sub(r"\s+", " ", match))
+        if hint and hint not in hints:
+            hints.append(hint)
+    supplements = [
+        re.sub(r"\s+", " ", match).strip(" ：:；;。")
+        for match in re.findall(r"△[^\n；;。]+", without_ranges)
+    ]
+    supplements = [item for item in supplements if item]
+    if supplements:
+        supplement_text = "；".join(supplements)
+        if hints:
+            hints[-1] = f"{hints[-1]}；{supplement_text}"
+        else:
+            hints.append(supplement_text)
+    return hints
+
+
+def _clean_extracted_action(value: str) -> str:
+    hint = value.strip(" ：:；;。")
+    generic_prefixes = (
+        "建立人物、环境与冲突起点，具体承接",
+        "沿上一段动作方向继续执行核心过程，用可观察细节推进",
+        "呈现动作结果并完成本分镜叙事收束，落实",
+    )
+    for prefix in generic_prefixes:
+        if hint.startswith(prefix):
+            hint = hint[len(prefix) :].strip(" ：:；;。")
+            if (hint.startswith("“") and hint.endswith("”")) or (hint.startswith('"') and hint.endswith('"')):
+                hint = hint[1:-1].strip(" ：:；;。")
+            break
+    return hint
 
 
 def apply_shot_description_repairs(
@@ -484,6 +667,7 @@ def _rich_fallback_shot_description(
     *,
     visual_style: str,
     action_hint: str = "",
+    action_hints: list[str] | None = None,
 ) -> str:
     duration = _strict_int(blueprint.get("duration_sec"), field_name="规则兜底 duration_sec")
     assets = blueprint.get("asset_requirements") if isinstance(blueprint.get("asset_requirements"), dict) else {}
@@ -520,9 +704,85 @@ def _rich_fallback_shot_description(
         ),
     }
     shot_size, camera, lighting, closure = role_directions[role]
-    action = _text(action_hint) or f"围绕“{storyline}”完成一个有明确起点、过程和结果的连续动作"
-    sound = "保留符合地点的环境声与关键动作音效，本镜头无旁白" if narration in {"本分镜无旁白", "无旁白"} else f"保留符合地点的环境声和关键动作音效，并清晰承载旁白“{narration}”"
-    return f"0-{duration}秒: 地点：{'、'.join(locations)}；主体：{'、'.join(subjects)}；动作：{action}；景别：{shot_size}；运镜：{camera}；光影：按{style}使用{lighting}；声音：{sound}；收束：{closure}。"
+    extracted_actions = _dedupe_texts(action_hints)
+    base_action = _text(action_hint) or storyline
+    sound = "保留符合地点的环境声与关键动作音效，本镜头无旁白" if narration in {"本分镜无旁白", "无旁白"} else f"保留符合地点的环境声和关键动作音效，并清晰承载旁白或对白“{narration}”"
+    segment_count = 1 if duration <= 5 else 2 if duration <= 9 else 3
+    boundaries = _segment_boundaries(duration, segment_count)
+    grouped_actions = _group_action_hints(extracted_actions, segment_count)
+    phases = (
+        (
+            f"建立人物、环境与冲突起点，具体承接“{base_action}”",
+            "中景建立空间与人物关系",
+            "稳定跟拍主体并轻推至第一个关键动作",
+            "停在能引出下一步的动作、视线或物件上",
+        ),
+        (
+            f"沿上一段动作方向继续执行核心过程，用可观察细节推进“{storyline}”",
+            shot_size,
+            camera,
+            "在本段信息点或动作完成点短暂停留，保持方向连续",
+        ),
+        (
+            f"呈现动作结果并完成本分镜叙事收束，落实“{storyline}”",
+            "结果近景切主体或产品特写",
+            "从证据细节缓慢拉稳并固定结果画面",
+            closure,
+        ),
+    )
+    lines: list[str] = []
+    for segment_index, (start_sec, end_sec) in enumerate(boundaries):
+        action, segment_shot_size, segment_camera, segment_closure = phases[min(segment_index, len(phases) - 1)]
+        if grouped_actions[segment_index]:
+            action = grouped_actions[segment_index]
+        lines.append(
+            f"{start_sec}-{end_sec}秒: 地点：{'、'.join(locations)}；主体：{'、'.join(subjects)}；"
+            f"动作：{action}；景别：{segment_shot_size}；运镜：{segment_camera}；"
+            f"光影：按{style}{lighting}；声音：{sound}；收束：{segment_closure}。"
+        )
+    return "\n".join(lines)
+
+
+def _group_action_hints(action_hints: list[str], segment_count: int) -> list[str]:
+    """按原先顺序把动作阶段完整分配到目标秒段，不丢动作也不复制整段标签。"""
+
+    action_hints = _expand_action_hints(action_hints, segment_count)
+    grouped: list[list[str]] = [[] for _ in range(segment_count)]
+    hint_count = len(action_hints)
+    if not hint_count:
+        return ["" for _ in range(segment_count)]
+    for index, action in enumerate(action_hints):
+        if hint_count <= segment_count:
+            target = index
+        else:
+            target = min(segment_count - 1, math.ceil((index + 1) * segment_count / hint_count) - 1)
+        grouped[target].append(action)
+    return ["；随后".join(items) for items in grouped]
+
+
+def _expand_action_hints(action_hints: list[str], segment_count: int) -> list[str]:
+    """动作阶段不足时按自然语义停顿拆开，让每个秒段承担不同且连续的动作。"""
+
+    expanded = list(action_hints)
+    while expanded and len(expanded) < segment_count:
+        split_index = max(range(len(expanded)), key=lambda index: len(expanded[index]))
+        parts = [part.strip(" ：:；;。，,") for part in re.split(r"[，；]", expanded[split_index])]
+        parts = [part for part in parts if len(part) >= 3]
+        if len(parts) < 2:
+            break
+        expanded[split_index : split_index + 1] = parts
+    return expanded
+
+
+def _segment_boundaries(duration_sec: int, segment_count: int) -> list[tuple[int, int]]:
+    base, remainder = divmod(duration_sec, segment_count)
+    durations = [base + (1 if index < remainder else 0) for index in range(segment_count)]
+    result: list[tuple[int, int]] = []
+    cursor = 0
+    for duration in durations:
+        result.append((cursor, cursor + duration))
+        cursor += duration
+    return result
 
 
 def _dimension_label_has_content(label: str, description: str) -> bool:
@@ -638,6 +898,24 @@ def _asset_metadata_reason(value: str) -> str | None:
     for label, pattern in _ASSET_METADATA_PATTERNS:
         if pattern.search(value):
             return f"包含创作元信息“{label}”"
+    return None
+
+
+def _generic_asset_reason(collection: str, value: str) -> str | None:
+    normalized = re.sub(r"\s+", "", value).lower()
+    generic_values = {
+        "characters": {"目标用户", "用户", "消费者", "人物", "角色", "模特"},
+        "scenes": {"真实使用场景", "使用场景", "真实场景", "场景", "环境"},
+        "props": {"产品", "商品", "核心产品", "主商品"},
+    }
+    if normalized in generic_values.get(collection, set()):
+        return "名称过于泛化，必须给出可稳定复用的具体身份或实体名称"
+    if collection == "props":
+        sentence_markers = ("卖点", "强调", "主张", "要求", "需要", "目标", "配比", "包装", "logo")
+        punctuation_count = sum(value.count(mark) for mark in ("，", ",", "；", ";", "。"))
+        marker_count = sum(marker in normalized for marker in sentence_markers)
+        if len(value) >= 28 and (punctuation_count >= 2 or marker_count >= 3):
+            return "完整卖点或需求句不能作为单个道具名称"
     return None
 
 

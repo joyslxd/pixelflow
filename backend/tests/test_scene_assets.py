@@ -164,6 +164,44 @@ def test_generate_scene_assets_rejects_polluted_global_asset_before_image_call()
     assert call_count == 0
 
 
+def test_generate_scene_assets_allows_more_than_nine_global_assets_when_each_scene_is_within_budget():
+    call_count = 0
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/{call_count}.png"}])
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无参考图时不应调用参考图片生成")
+
+    props = [
+        {
+            "asset_id": f"prop-item-{index}",
+            "name": f"聚餐道具{index}",
+            "description": f"聚餐道具{index}的固定外观。",
+            "image_prompt": f"聚餐道具{index}参考图。",
+        }
+        for index in range(1, 11)
+    ]
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={"props": props},
+            scene_packages=[
+                {"scene_id": "scene-1", "scene_index": 1, "reference_asset_ids": [item["asset_id"] for item in props[:5]]},
+                {"scene_id": "scene-2", "scene_index": 2, "reference_asset_ids": [item["asset_id"] for item in props[5:]]},
+            ],
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert call_count == 10
+    assert len(result["global_assets"]["props"]) == 10
+
+
 def test_generate_scene_assets_passes_all_collected_reference_images_for_props():
     captured: dict[str, Any] = {}
 
