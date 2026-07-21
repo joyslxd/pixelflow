@@ -15,6 +15,7 @@ const activePlanSnapshotSource = fs.existsSync(activePlanSnapshotPath) ? fs.read
 const planRevisionDialogPath = path.resolve("src/components/composer/PlanRevisionDialog.tsx");
 const planRevisionDialogSource = fs.existsSync(planRevisionDialogPath) ? fs.readFileSync(planRevisionDialogPath, "utf8") : "";
 const sceneAssetReplacementPickerSource = fs.readFileSync(path.resolve("src/components/canvas/SceneAssetReplacementPicker.tsx"), "utf8");
+const storyboardPanelSource = fs.readFileSync(path.resolve("src/components/canvas/StoryboardPanel.tsx"), "utf8");
 
 test("plan cards do not expose backend consistency diagnostics to users", () => {
   assert.match(apiSource, /consistency_issues/, "the API contract must retain internal plan diagnostics");
@@ -33,6 +34,29 @@ test("scene asset replacement keeps temporary local upload and adds persistent a
   assert.match(sceneAssetReplacementPickerSource, /api\.createContentImageAsset/);
   assert.match(sceneAssetReplacementPickerSource, /上传到资产库/);
   assert.doesNotMatch(sceneAssetReplacementPickerSource, /naturalWidth|naturalHeight/);
+});
+
+test("storyboard global asset rows expose manual addition through the shared picker", () => {
+  assert.match(storyboardPanelSource, /onAddGlobalAsset/);
+  assert.match(storyboardPanelSource, /operation="add"/);
+  assert.match(storyboardPanelSource, /添加素材/);
+  assert.match(sceneAssetReplacementPickerSource, /operation\?: "add" \| "replace"/);
+  assert.match(sceneAssetReplacementPickerSource, /adding \? "添加素材" : "替换素材"/);
+  assert.match(workspaceSource, /addGlobalSceneAssetReference/);
+  assert.match(workspaceSource, /scene_global_asset_added/);
+});
+
+test("manual global asset addition persists in place without clearing generated or dirty scene state", () => {
+  const start = workspaceSource.indexOf("const handleAddGlobalAsset = (");
+  const end = workspaceSource.indexOf("const handleRemoveReferencedMaterial", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /const updatedArtifact: ChatArtifact = \{\s*\.\.\.artifact,/);
+  assert.match(handler, /updateVideoScenePackageArtifactInMessage/);
+  assert.match(handler, /api\.updateConversationMessage/);
+  assert.match(handler, /persistScenePackageSnapshot/);
+  assert.doesNotMatch(handler, /videoScenePackageEditedSceneIds:\s*\[\]/);
 });
 
 function handleSendSource() {

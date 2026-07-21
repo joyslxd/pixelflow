@@ -83,6 +83,11 @@ export interface SceneGlobalAssetReplacement {
   raw?: Record<string, unknown>;
 }
 
+export interface AddedGlobalSceneAsset<T extends GlobalSceneAssets = GlobalSceneAssets> {
+  global_assets: T;
+  added_asset: Record<string, unknown>;
+}
+
 export interface GlobalSceneAssets {
   characters?: Array<Record<string, unknown>>;
   scenes?: Array<Record<string, unknown>>;
@@ -317,6 +322,71 @@ export function applyGlobalSceneAssetReplacement<T extends GlobalSceneAssets, S 
       thirdAssetId: input.replacement.thirdAssetId,
       replacementSource: input.replacement.source,
     }) as S,
+  };
+}
+
+export function addGlobalSceneAssetReference<T extends GlobalSceneAssets>(
+  globalAssets: T,
+  input: {
+    assetGroup: GlobalSceneAssetGroup;
+    manualId: string;
+    replacement: SceneGlobalAssetReplacement;
+  },
+): AddedGlobalSceneAsset<T> {
+  const prefix: Record<GlobalSceneAssetGroup, string> = {
+    characters: "character",
+    scenes: "scene",
+    props: "prop",
+  };
+  const fallbackName: Record<GlobalSceneAssetGroup, string> = {
+    characters: "新增角色",
+    scenes: "新增场景",
+    props: "新增道具",
+  };
+  const existingRecords = (["characters", "scenes", "props"] as const).flatMap((group) => {
+    const records = globalAssets[group];
+    return Array.isArray(records) ? records : [];
+  });
+  const existingIds = new Set(
+    [
+      ...existingRecords.map((record) => stringValue(record.asset_id) || stringValue(record.id)),
+      stringValue(globalAssets.visual_style?.asset_id) || stringValue(globalAssets.visual_style?.id),
+    ].filter(Boolean),
+  );
+  const existingNames = new Set(
+    existingRecords
+      .map((record) => stringValue(record.name) || stringValue(record.label) || stringValue(record.description))
+      .filter(Boolean),
+  );
+  const manualId = input.manualId.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
+  const assetId = uniqueManualValue(`${prefix[input.assetGroup]}-manual-${manualId}`, existingIds);
+  const requestedName = input.replacement.assetName?.trim() || fallbackName[input.assetGroup];
+  const name = uniqueManualValue(requestedName, existingNames);
+  const imageKey = input.assetGroup === "characters" ? "three_view_images" : "images";
+  const addedAsset: Record<string, unknown> = {
+    asset_id: assetId,
+    name,
+    description: name,
+    [imageKey]: [input.replacement.displayImageUrl],
+    image_url: input.replacement.displayImageUrl,
+    url: input.replacement.displayImageUrl,
+    generation_reference_url: input.replacement.generationReferenceUrl,
+    replacement_source: input.replacement.source,
+    manual_added: true,
+    asset_origin: "manual_addition",
+    ...(input.replacement.thirdAssetId ? { third_asset_id: input.replacement.thirdAssetId } : {}),
+    ...(input.replacement.assetType ? { replacement_asset_type: input.replacement.assetType } : {}),
+    ...(input.replacement.contentAssetId ? { replacement_asset_id: input.replacement.contentAssetId } : {}),
+    ...(input.replacement.assetName ? { replacement_asset_name: input.replacement.assetName } : {}),
+  };
+  const rawGroupRecords = globalAssets[input.assetGroup];
+  const groupRecords: Array<Record<string, unknown>> = Array.isArray(rawGroupRecords) ? rawGroupRecords : [];
+  return {
+    global_assets: {
+      ...globalAssets,
+      [input.assetGroup]: [...groupRecords, addedAsset],
+    } as T,
+    added_asset: addedAsset,
   };
 }
 
@@ -899,6 +969,13 @@ function removeAssetMentionTokens(text: string, tokens: Array<string | undefined
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function uniqueManualValue(base: string, existing: Set<string>): string {
+  if (!existing.has(base)) return base;
+  let suffix = 2;
+  while (existing.has(`${base}-${suffix}`)) suffix += 1;
+  return `${base}-${suffix}`;
 }
 
 function collectGlobalAssetUrls(globalAssets: GlobalSceneAssets, assetId: string): string[] {

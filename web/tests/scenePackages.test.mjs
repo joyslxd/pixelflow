@@ -5,6 +5,7 @@ const moduleUrl = process.env.SCENE_PACKAGES_TEST_MODULE;
 assert.ok(moduleUrl, "SCENE_PACKAGES_TEST_MODULE must point to the compiled scenePackages module");
 
 const {
+  addGlobalSceneAssetReference,
   applyGlobalSceneAssetReplacement,
   applyGlobalSceneAssetImageEdit,
   aspectRatioValue,
@@ -153,6 +154,133 @@ function sampleGlobalAssets() {
     },
   };
 }
+
+test("addGlobalSceneAssetReference appends manual assets without changing existing records", () => {
+  const original = sampleGlobalAssets();
+  const characterAdded = addGlobalSceneAssetReference(original, {
+    assetGroup: "characters",
+    manualId: "m-1",
+    replacement: {
+      source: "digital_human",
+      displayImageUrl: "https://x/digital-human.png",
+      generationReferenceUrl: "asset://digital-1",
+      thirdAssetId: "digital-1",
+      assetType: "xnszr",
+      contentAssetId: "101",
+      assetName: "讲解者",
+    },
+  });
+
+  assert.equal(original.characters.length, 1);
+  assert.equal(characterAdded.global_assets.characters.length, 2);
+  assert.equal(characterAdded.added_asset.asset_id, "character-manual-m-1");
+  assert.equal(characterAdded.added_asset.name, "讲解者-2");
+  assert.deepEqual(characterAdded.added_asset.three_view_images, ["https://x/digital-human.png"]);
+  assert.equal(characterAdded.added_asset.generation_reference_url, "asset://digital-1");
+  assert.equal(characterAdded.added_asset.third_asset_id, "digital-1");
+  assert.equal(characterAdded.added_asset.manual_added, true);
+  assert.equal(characterAdded.added_asset.asset_origin, "manual_addition");
+
+  const sceneAdded = addGlobalSceneAssetReference(characterAdded.global_assets, {
+    assetGroup: "scenes",
+    manualId: "m-1",
+    replacement: {
+      source: "image_asset",
+      displayImageUrl: "https://x/library-scene.png",
+      generationReferenceUrl: "https://x/library-scene.png",
+      contentAssetId: "202",
+      assetName: "桌面场景",
+    },
+  });
+  assert.equal(sceneAdded.added_asset.asset_id, "scene-manual-m-1");
+  assert.equal(sceneAdded.added_asset.name, "桌面场景-2");
+  assert.deepEqual(sceneAdded.added_asset.images, ["https://x/library-scene.png"]);
+
+  const propAdded = addGlobalSceneAssetReference(sceneAdded.global_assets, {
+    assetGroup: "props",
+    manualId: "m-1",
+    replacement: {
+      source: "local_upload",
+      displayImageUrl: "https://x/uploaded-prop.png",
+      generationReferenceUrl: "https://x/uploaded-prop.png",
+      assetName: "新道具.png",
+    },
+  });
+  assert.equal(propAdded.added_asset.asset_id, "prop-manual-m-1");
+  assert.equal(propAdded.added_asset.name, "新道具.png");
+  assert.deepEqual(propAdded.added_asset.images, ["https://x/uploaded-prop.png"]);
+});
+
+test("addGlobalSceneAssetReference makes ids and names unique across all global asset groups", () => {
+  const first = addGlobalSceneAssetReference(sampleGlobalAssets(), {
+    assetGroup: "props",
+    manualId: "same",
+    replacement: {
+      source: "image_asset",
+      displayImageUrl: "https://x/manual-1.png",
+      generationReferenceUrl: "https://x/manual-1.png",
+      assetName: "讲解者",
+    },
+  });
+  const second = addGlobalSceneAssetReference(first.global_assets, {
+    assetGroup: "props",
+    manualId: "same",
+    replacement: {
+      source: "image_asset",
+      displayImageUrl: "https://x/manual-2.png",
+      generationReferenceUrl: "https://x/manual-2.png",
+      assetName: "讲解者",
+    },
+  });
+
+  assert.equal(first.added_asset.asset_id, "prop-manual-same");
+  assert.equal(first.added_asset.name, "讲解者-2");
+  assert.equal(second.added_asset.asset_id, "prop-manual-same-2");
+  assert.equal(second.added_asset.name, "讲解者-3");
+});
+
+test("manual assets only participate in generation after a shot explicitly references them", () => {
+  const [scene] = sampleScenes();
+  const added = addGlobalSceneAssetReference(sampleGlobalAssets(), {
+    assetGroup: "characters",
+    manualId: "digital",
+    replacement: {
+      source: "digital_human",
+      displayImageUrl: "https://x/manual-character.png",
+      generationReferenceUrl: "asset://manual-character",
+      thirdAssetId: "manual-character",
+      assetName: "新增角色",
+    },
+  });
+  const unreferencedPayload = sceneGenerationPayloadFromPackage(
+    { ...scene, image_urls: [], reference_asset_ids: [], shot_description: { text: "仅展示产品。", mentions: [] } },
+    added.global_assets,
+    { edited: true },
+  );
+  assert.deepEqual(unreferencedPayload.image_urls, []);
+
+  const referencedPayload = sceneGenerationPayloadFromPackage(
+    {
+      ...scene,
+      image_urls: [],
+      reference_asset_ids: [added.added_asset.asset_id],
+      shot_description: {
+        text: `@${added.added_asset.name} 展示产品。`,
+        mentions: [
+          {
+            asset_id: added.added_asset.asset_id,
+            name: added.added_asset.name,
+            image_url: added.added_asset.image_url,
+            generation_reference_url: added.added_asset.generation_reference_url,
+          },
+        ],
+      },
+    },
+    added.global_assets,
+    { edited: true },
+  );
+  assert.deepEqual(referencedPayload.image_urls, ["asset://manual-character"]);
+});
 
 test("scene duration constants match backend-only 4 to 15 second contract", () => {
   assert.equal(MIN_SCENE_DURATION_MS, 4000);
