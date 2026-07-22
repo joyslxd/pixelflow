@@ -56,15 +56,16 @@ flowchart LR
 
 开发时 M08–M11 只依赖 M00 的 `OperationPort` fake；合并/真实联调才依赖 M06。因此它们可以和 A 线同时开发。
 
-建议波次：
+技术依赖不变，但实施和上线按 R1–R4 阶段检查点推进：
 
-| 波次 | A 线 | B 线 | 合并检查点 |
+| 批次 | A 线 | B 线 | 阶段检查点 |
 | --- | --- | --- | --- |
-| W0 | M00-A.1 → A.2 → A.3 串行 | M00-B.1 | M00-I.1 手动启动一次；双分支、跨端合同、自动化和 flag-off 回归 |
-| W1 | M01、M03 模块并行 | M07、M08、M09 模块并行 | 各模块内部切片串行；谁先完成谁进入单槽集成队列 |
-| W2 | M02（M01 后）、M04（M01+M03 后） | M10、M11；M12 在 M07 后 | fake 合同开发与独立模块门禁 |
-| W3 | M06（M01+M02 后）、M05（M02–M04 后） | M08–M11 真实联调 | 持久化 job、Supervisor 和复杂流程联调 |
-| W7 | M13，共同 | M13，共同 | 全量、shadow、灰度、回滚 |
+| R1 / D1–D4 | M00-A、M01、M03、M04；模块间可并行、模块内串行 | M00-B、M07、M12.1–M12.3 | 手动 M00-I.1；M12 建立 `R1-assist-ui` 中间检查点；执行 M13-R1，交付压缩可感知版 |
+| R2 / D5–D9 | M02、M05、M06 | M11、M12.4–M12.5 | 执行 M13-R2，只让新视频对话进入会话 Agent |
+| R3 / D10–D13 | 平台稳定化和跨 workflow 缺陷修复 | M08、M09、M10 模块并行 | 执行 M13-R3，四类 intent 使用同一 Supervisor/Context Runtime |
+| R4 / D14–D18 | M13 全量、并发、回滚与真实联调 | M13 前端恢复、全流程和运行手册 | 10%→30%→50%→100% 新对话；每次生产比例变更人工批准 |
+
+完整的每日顺序、配置和门禁见[四阶段上线计划](phased-rollout-plan.md)。阶段检查点只是把模块截至指定 commit 的增量纳入 Agent，不允许跳过切片，也不把 `phase_integrated` 误报成模块完成。
 
 ## 3. 模块清单
 
@@ -95,7 +96,7 @@ flowchart LR
 | M00-A.2 | 3h | A | `m00-a` | Python action/workflow/turn/event/context DTO、Ports、fake 与规范 JSON fixture | Python 合同和 fake Port 测试；依赖 A.1 |
 | M00-A.3 | 3h | A | `m00-a` | dev→agent、模块分支/worktree、普通模块自动集成和每日漂移检查 PowerShell 脚本 | Pester/临时仓库验证；依赖 A.2；不实现切片子分支 |
 | M00-B.1 | 2.5h | B | `m00-b` | TypeScript 镜像合同、wire event 校验、web 测试入口；不得改写 Python DTO/fixture | Node 合同测试；与 A 线并行，设计源为已评审 `contracts-v1.md` |
-| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，接入 Gitee/Jenkins 门禁、跨平台测试聚合、完整 A/B 逐切片话术和自动化状态验收 | 跨端 fixture、dev-sync guard、`build-prod`、ready 自动集成与 02:00 调度；由开发者手动启动一次 |
+| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，接入 Gitee/Jenkins 门禁、跨平台测试聚合、执行手册第9节唯一话术和自动化状态验收 | 跨端 fixture、dev-sync guard、`build-prod`、ready 自动集成与 02:00 调度；由开发者手动启动一次 |
 
 M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁`。如果 A/B 不是从同一设计/Agent 基线创建，或者任一分支修改了对方锁定路径，必须 fail-closed，不允许靠现场手工挑选字段解决。
 
@@ -298,21 +299,23 @@ M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m0
 | M12.4 | 2.5h | reply/artifact refs/interrupt ID/场景 mention 元数据提交 | 目标定位 fixture 测试 |
 | M12.5 | 2.5h | message.upserted、workflow.progressed、历史恢复和 task board 投影 | 全部前端恢复测试 + build-prod |
 
+R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色时写 `ready_for_phase_integration`；进入 Agent 后写 `phase_integrated`，再继续串行开发 M12.4–M12.5。
+
 模块闸门：旧 `frontend_v2` 对话完全不走新 start；`supervisor_v1` 对话完全不从前端启动供应商阶段；切换对话不串流。
 
 ### M13：集成、Shadow、灰度、回滚与交付
 
 - Owner：A+B；每次合并只有一个集成人。
-- 依赖：M01–M12。
+- 依赖：按 R1–R4 增量满足；M13 最终收口依赖 M01–M12 全部完成。
 - 目标：证明模块拼起来可运行、可观察、可停用、可恢复。
 
 | 切片 | 时长 | 产物 | 验证 |
 | --- | ---: | --- | --- |
-| M13.1 | 2.5h | Agent 集成分支累计结果、migration、配置与 OpenAPI 总检查 | 默认 off 全量回归 |
-| M13.2 | 3h | Supervisor replay/shadow 比较；禁止 shadow 触发计费和 PowerMem record | 黄金对话和 shadow 指标 |
-| M13.3 | 3h | 五主流程 + 直接图片编辑的 mock E2E、重启、断线、并发、402 | `test-matrix.md` 全部非付费项 |
-| M13.4 | 2.5h | 内部白名单 → 1% → 5% 灰度与 kill switch/排空回滚演练 | 灰度报告和回滚记录 |
-| M13.5 | 2h | 经人工批准的真实供应商冒烟、运行手册、AGENTS/README/最新设计同步 | 真实报告；不泄漏凭据 |
+| M13.1 / R1 | 2.5h | assist 配置、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价 | 默认 off + assist 全量回归；内部白名单→10% |
+| M13.2 / R2 | 3h | 视频 Supervisor replay/shadow、黄金对话、视频 mock E2E；禁止 shadow 计费和 PowerMem record | 视频 10%→30%、重复 start 为 0、kill switch |
+| M13.3 / R3 | 3h | 图片/编辑、PPT、视频分析 mock E2E；重启、断线、并发、402 | 四类 intent 30%，旧 API/flag-off 回归 |
+| M13.4 / R4 | 2.5h | 五主流程全量门禁、10%→30%→50%→100% 灰度、kill switch/排空回滚 | 全量非付费矩阵、灰度报告和回滚记录 |
+| M13.5 / R4 | 2h | 经人工批准的真实供应商冒烟、运行手册、AGENTS/README/最新设计同步 | 真实报告与发布签字；不泄漏凭据 |
 
 模块闸门：默认关闭无回归；重复计费/跨会话污染/鉴权泄漏/job 丢失为 0；回滚不强切运行中对话。
 
@@ -327,12 +330,12 @@ M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m0
 | 合计 | 约 155h |
 | 加 20% 合并、联调、分支自动化和外部环境缓冲 | 约 186h |
 
-两人每天各 6–7 小时有效开发/验证，考虑 W0/W7 的串行评审和视频真实联调，建议对外承诺 **15–19 个工作日（约 3–4 周）**。其中：
+两人每天各 6–7 小时有效开发/验证，考虑 M00/M13 的串行评审和视频真实联调，建议对外承诺 **15–19 个工作日（约 3–4 周）**。其中：
 
-- 第 1 周目标：M00 自动分支/合同门禁、M01/M07、M02/M08 合入，图片 Agent 在 fake 环境贯通。
-- 第 2 周目标：持久化 job、上下文/压缩、PPT、视频分析合入。
-- 第 3 周目标：Supervisor、视频子图、UI 双运行时、mock E2E。
-- 第 4 周缓冲：shadow、真实供应商、灰度和缺陷修复；进展顺利时可提前结束。
+- 第 4 个工作日：R1 自动上下文压缩可感知版。
+- 第 9 个工作日：R2 视频会话 Agent MVP。
+- 第 13 个工作日：R3 图片/编辑、PPT、视频分析接入同一 Agent Runtime。
+- 第 16–18 个工作日：R4 全流程灰度和新对话全面接管；第 19 个工作日只作外部环境缓冲。
 
 不要把约 155h 简单除以两人八小时：合同评审、分支同步门禁、顺序合并、真实长任务和灰度不能完全并行。
 
@@ -351,60 +354,18 @@ M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m0
 3. 当前切片完成后 Codex 必须停止，等待开发者手动发送“继续下一个未完成切片”；不得自动连续完成整个模块。
 4. 不跨模块顺手修复；发现问题记入模块状态或 `integration/DECISIONS.md`。
 
-模块最后一个切片完成后：
+到达阶段检查点或模块最后一个切片后：
 
-1. 运行模块闸门和 feature flag 关闭回归。
+1. 只有[四阶段上线计划](phased-rollout-plan.md)明确列出的中间检查点才运行阶段闸门；模块最后一片运行完整模块闸门和 feature flag 关闭回归。
 2. 另一位开发者或独立 reviewer 基于最新提交复跑关键测试。
-3. 写入 `ready_for_integration` 并 push 后停止；M00 验收后的远端单槽流水线自动按“最新 Agent + 最新 dev + 模块分支”集成并追加 `MERGE_LOG.md`。
-4. 集成冲突或测试失败时写 `integration_blocked`，保持 Agent 主干不变；已推送模块分支不得 force-push 改写历史。
+3. 中间检查点写 `ready_for_phase_integration`，最终模块写 `ready_for_integration`，push 后停止；M00 验收后的远端单槽流水线按“最新 Agent + 最新 dev + 模块检查点 commit”集成并追加 `MERGE_LOG.md`。
+4. 阶段集成冲突或失败写 `phase_integration_blocked`，最终模块失败写 `integration_blocked`；Agent 主干保持不变，已推送模块分支不得 force-push 改写历史。
 
-### 可直接复制给 Codex 的完整话术
+### Codex 启动话术的唯一来源
 
-以下话术必须保持可独立使用。即使 Codex 看不到旧聊天，也必须先读 `AGENTS.md` 和仓库状态后再执行。
+本文件只定义模块、切片、依赖、工时和执行协议，不再复制 Codex 启动话术。实际开新对话、继续切片、启动 M00 集成或并行启动不同模块时，只能复制[执行手册第9节：Codex 唯一权威 A/B 启动话术](branch-and-codex-runbook.md#codex-prompts)。
 
-A 普通模块首次开始（以 M01 为例）：
-
-```text
-不要依赖任何旧对话内容。严格先阅读仓库根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md、docs/agentization/README.md、docs/agentization/architecture-design.md、docs/agentization/contracts-v1.md、docs/agentization/work-breakdown.md、docs/agentization/branch-and-codex-runbook.md、docs/agentization/test-matrix.md、docs/agentization/status/BOARD.md 和 docs/agentization/status/M01-status.md。你是 A 开发线 Codex，请全自动执行 M01 的第一个未完成切片。验证依赖后执行 dev→agent 安全预检，创建或恢复 codex/agent-0.8.4-m01-runtime-store 及独立模块 worktree。模块内部所有切片严格串行，本次只完成一个切片；完成 TDD、定向/边界测试、独立审核、状态/测试记录、独立 commit 和 push 后停止并报告下一切片。不得建立切片子分支/worktree，不得自动继续整个模块，不得直接修改两个长期 feature 分支；只有运行手册定义的硬阻塞才询问。
-```
-
-A 新开对话继续普通模块：
-
-```text
-不要依赖任何旧对话内容。请先阅读仓库根目录 AGENTS.md、全部 docs/agentization 开发入口文档和目标 A 线模块状态文件；检查远端模块分支、最近 commit、worktree、用户改动、上一切片证据和当前唯一写入者，确认安全后只执行 A 线目标模块的下一个未完成切片。自动恢复同一模块分支/worktree，完成 TDD、测试、独立审核、状态记录、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果这是最后一片，运行模块门禁，绿色后写 ready_for_integration 并 push，然后停止等待远端单槽流水线；只有硬阻塞才询问。
-```
-
-B 普通模块首次开始（以 M07 为例）：
-
-```text
-不要依赖任何旧对话内容。严格先阅读仓库根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md、docs/agentization/README.md、docs/agentization/architecture-design.md、docs/agentization/contracts-v1.md、docs/agentization/work-breakdown.md、docs/agentization/branch-and-codex-runbook.md、docs/agentization/test-matrix.md、docs/agentization/status/BOARD.md 和 docs/agentization/status/M07-status.md。你是 B 开发线 Codex，请全自动执行 M07 的第一个未完成切片。验证依赖后执行 dev→agent 安全预检，创建或恢复 codex/agent-0.8.4-m07-web-runtime 及独立模块 worktree。模块内部所有切片严格串行，本次只完成一个切片；完成 TDD、定向/边界测试、独立审核、状态/测试记录、独立 commit 和 push 后停止并报告下一切片。不得建立切片子分支/worktree，不得自动继续整个模块，不得直接修改两个长期 feature 分支；只有运行手册定义的硬阻塞才询问。
-```
-
-B 新开对话继续普通模块：
-
-```text
-不要依赖任何旧对话内容。请先阅读仓库根目录 AGENTS.md、全部 docs/agentization 开发入口文档和目标 B 线模块状态文件；检查远端模块分支、最近 commit、worktree、用户改动、上一切片证据和当前唯一写入者，确认安全后只执行 B 线目标模块的下一个未完成切片。自动恢复同一模块分支/worktree，完成 TDD、测试、独立审核、状态记录、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果这是最后一片，运行模块门禁，绿色后写 ready_for_integration 并 push，然后停止等待远端单槽流水线；只有硬阻塞才询问。
-```
-
-M00-A 首次与继续话术：
-
-```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口、status/M00-status.md 和 status/M00-A-status.md。你是 A 线 Codex，请执行 M00-A 的第一个或下一个未完成切片；首次时从同步后的共同 Agent 基线创建 codex/agent-0.8.4-m00-a，继续时恢复该分支/worktree。M00-A 内部严格串行，本次只完成一个切片；完成 TDD、测试、独立审核、状态记录、独立 commit 和 push 后停止。不得自动继续下一片，不得修改 M00-B 或两个长期 feature 分支。
-```
-
-M00-B 首次与继续话术：
-
-```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口、status/M00-status.md 和 status/M00-B-status.md。你是 B 线 Codex，请执行 M00-B 的第一个或下一个未完成切片；首次时从与 M00-A 相同的共同 Agent 基线创建 codex/agent-0.8.4-m00-b，继续时恢复该分支/worktree。M00-B 内部严格串行，本次只完成一个切片；严格按 contracts-v1.md 实现前端镜像，Python DTO/fixture 只读。完成 TDD、测试、独立审核、状态记录、独立 commit 和 push 后停止。不得修改 M00-A 或两个长期 feature 分支。
-```
-
-普通模块集成不需要开发者另开 Codex：最后一个切片写 `ready_for_integration` 并 push 后，由 M00 交付的 Gitee/Jenkins 单槽流水线自动执行。未达到 `automation_active` 时必须 fail-closed，并报告仍需完成的远端配置。
-
-M00 专用集成话术：
-
-```text
-不要依赖任何旧对话内容。请先阅读仓库根目录 AGENTS.md、docs/agentization/branch-and-codex-runbook.md、work-breakdown.md、test-matrix.md、status/M00-status.md、status/M00-A-status.md、status/M00-B-status.md 和 integration/MERGE_LOG.md；严格执行 M00-I.1。确认 M00-A/M00-B 全部完成并已 push 后，创建临时 codex/integrate-m00-YYYYMMDD-HHMM，按“最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁”集成。完成独立审核和一次性 Gitee/Jenkins 配置验收；只有全部绿色且远端基线未变化时才更新 feature/agent_0.8.4_boguan、状态和 MERGE_LOG，否则保持长期分支不变并报告证据。不得把未实际配置的远端能力标记为 automation_active。
-```
+如果本文件、状态文件或其他设计文档的描述与第9节不一致，必须停止开工，先由 M00/集成人修正引用或执行规则；不得现场拼接两套话术。
 
 ### 多 Codex 对话并行规则
 

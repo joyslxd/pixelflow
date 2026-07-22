@@ -14,9 +14,11 @@
 - integration candidate branch and dev-sync ancestor check
 - contract/design base SHA（M00）
 - M00-A/M00-B 共同祖先与固定合并顺序（仅 M00）；普通模块记录单一模块分支
-- `ready_for_integration` 触发、单槽 queue/job 和最终 `merged | integration_blocked` 状态
+- `release_id`、`checkpoint_slice`、`checkpoint_commit`、`last_integrated_commit` 和集成增量范围
+- `ready_for_phase_integration | ready_for_integration` 触发、单槽 queue/job 和最终 `phase_integrated | phase_integration_blocked | merged | integration_blocked` 状态
 - 文件所有权/locked paths 越界检查
 - feature flag 状态
+- 生产 Feature Flag/灰度变更的人工批准人、时间和比例；只合代码未发布时明确记录“未发布”
 - 测试报告链接和复核人
 - 冲突及解决方式
 - migration/配置变化

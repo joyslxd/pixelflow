@@ -941,3 +941,27 @@ corepack pnpm build
 - 直接视频生成接口 `/agent/flows/video/generate-direct/start` 存在，但业务主流程仍要求先走 plan.md 和视频场景包。
 - `ScenePackageSkill` 会先尝试 LLM，失败后用规则版兜底，保证流程可继续。
 - `content-app/Borgrise` 的真实接口参数应以同级 `content-app` Controller 和当前 `run_generation.py` 为准；发现 PixelFlow 需要但 content-app 不存在的接口，应先在 content-app 新增或向用户确认业务逻辑。
+
+## 17. 已确认但尚未实现的完整 Agent 化改造
+
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构，但截至 2026-07-22 尚未进入业务代码实现。实施期间必须区分“当前实现事实”和“已批准目标设计”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+
+目标方案采用四阶段上线：
+
+| 批次 | 累计目标 | 业务可见成果 |
+| --- | ---: | --- |
+| R1 | 第 4 个工作日 | 自动上下文压缩开始/完成提示、压缩期输入排队、刷新恢复和原任务继续；现有阶段工作流仍保留推进权 |
+| R2 | 第 9 个工作日 | 新视频对话使用会话 Supervisor，支持继续、修改、重生成、重试、新建、切换、取消和追问 |
+| R3 | 第 13 个工作日 | 图片/图片编辑、PPT、视频分析接入同一 Supervisor 和 Context Runtime |
+| R4 | 第 16–18 个工作日 | 五条主流程全量 E2E、Shadow、灰度、回滚和新对话全面接管 |
+
+开发固定采用“两人、多 Codex、模块之间并行、模块内部切片串行”：每个 Codex 任务只执行一个 1–3 小时切片，完成 TDD、测试、审核、状态记录、commit 和 push 后停止；下一切片必须由开发者手动启动。合法阶段检查点和模块最终提交可由 M00 交付的远端单槽流水线自动纳入 `feature/agent_0.8.4_boguan`，但生产 Feature Flag、灰度比例、真实付费冒烟和最终 Agent→dev 收口仍需人工明确批准。
+
+完整事实源位于：
+
+- `docs/agentization/architecture-design.md`
+- `docs/agentization/phased-rollout-plan.md`
+- `docs/agentization/work-breakdown.md`
+- `docs/agentization/branch-and-codex-runbook.md`
+- `docs/agentization/test-matrix.md`
+- `docs/agentization/status/BOARD.md`

@@ -1,6 +1,6 @@
 # Mxx 模块状态
 
-- phase：`not_started | ready | in_progress | blocked | review | ready_for_integration | integration_blocked | merged | canary | done`
+- phase：`not_started | ready | in_progress | blocked | review | ready_for_phase_integration | phase_integration_blocked | phase_integrated | ready_for_integration | integration_blocked | merged | canary | done`
 - owner：
 - backup/reviewer：
 - base SHA：
@@ -10,6 +10,11 @@
 - 开始时间：
 - 最后更新时间：
 - feature flag 状态：
+- release_id：`— | R1 | R2 | R3 | R4`
+- checkpoint_slice：
+- checkpoint_commit：
+- last_integrated_commit：
+- checkpoint_status：`— | pending | ready | integrated | blocked`
 - 依赖模块/SHA：
 - latest dev SHA included：
 - latest agent SHA at module start：
@@ -53,4 +58,4 @@
 
 禁止写入 Authorization、token、供应商 key、完整带查询参数 URL 或用户原始长 prompt。
 
-同一模块所有切片必须串行并复用本模块分支/worktree。每个 Codex 任务只执行一个切片；最后一个切片完成后写 `ready_for_integration` 并停止，由远端单槽流水线处理普通模块集成。
+同一模块所有切片必须串行并复用本模块分支/worktree。每个 Codex 任务只执行一个切片；只有 `phased-rollout-plan.md` 列出的中间检查点可写 `ready_for_phase_integration`，最后一个切片写 `ready_for_integration`。两者写入并 push 后 Codex 都必须停止，由远端单槽流水线集成；`phase_integrated` 不代表模块完成，下一切片仍由开发者手动启动。

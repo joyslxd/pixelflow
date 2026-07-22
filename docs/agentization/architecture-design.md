@@ -301,7 +301,12 @@ web/src/components/chat/ConversationRuntimeNotice.tsx
 - `supervisor_v1` 对话的前端不能调用图片、视频、PPT `/start` 推进阶段。
 - 旧对话继续按原 job ID 查询，不能为了迁移重新启动任务。
 - 所有新实现都受 feature flag 保护，默认 `off`。
-- 迁移顺序：图片/编辑 → PPT → 视频分析 → 视频。
+- R1（第 4 个工作日）：先上线 `assist` 模式的统一 Turn/SSE、自动上下文压缩、排队和刷新恢复，让业务可见压缩开始/完成提示；不改变现有阶段工作流的推进权。
+- R2（累计第 9 个工作日）：只让新视频对话进入 `primary`，交付会话 Supervisor、视频 Workflow Graph 和继续/修改/重生成/重试/新建/切换/取消等交互。
+- R3（累计第 13 个工作日）：把图片/图片编辑、PPT、视频分析接入同一 Supervisor 与 Context Runtime。
+- R4（累计第 16–18 个工作日）：完成全流程 E2E、Shadow、灰度、回滚和新对话全面接管。
+
+每一阶段的模块范围、配置、检查点和上线门禁以[四阶段上线计划](phased-rollout-plan.md)为准。
 
 建议模式：
 
@@ -351,13 +356,13 @@ pixelflow:
 同步不依赖人工记忆：
 
 - 每个模块开工前，自动检查 Agent 是否包含远端最新 dev；不包含时先构建同步候选并运行门禁。
-- 普通模块最后一个切片完成后写入 `ready_for_integration`，远端单槽流水线按“最新 agent + 最新 dev + 模块分支”重建候选并验证；绿色后自动进入 Agent，失败时写 `integration_blocked` 并保持 Agent 主干不变。
+- 普通模块到达四阶段计划明确列出的中间检查点时写入 `ready_for_phase_integration`；模块最后一个切片完成后写入 `ready_for_integration`。远端单槽流水线都按“最新 agent + 最新 dev + 模块检查点 commit”重建增量候选并验证；绿色后自动进入 Agent，失败时分别写 `phase_integration_blocked` 或 `integration_blocked` 并保持 Agent 主干不变。
 - 每天北京时间 02:00 由 Gitee/Jenkins 定时流水线执行漂移检查，绿色时进入单槽同步队列；冲突或测试失败时保持 Agent 主干不变。Codex 对话不会在结束后自行定时唤醒，这项能力只有完成 M00 和一次性远端管理员配置后才真正生效。
 - 远端门禁在最终合并瞬间再次验证最新 dev SHA 是候选 HEAD 的祖先；dev 在测试期间前进会使候选失效。
 
-Agent 模块全部完成后，先执行最后一次 dev→agent，再运行 M13，最后才把 Agent 整体合回 dev。
+M13 按 R1–R4 增量执行阶段门禁；所有 Agent 模块最终完成后，再执行最后一次 dev→agent 和 M13 全量收口，最后才把 Agent 整体合回 dev。阶段检查点已经合入不代表模块完成，后续切片继续使用原模块分支并只集成新增 commit。
 
-远端是 Gitee。M00 负责落地仓库内 PowerShell 分支脚本，并对接 Gitee 保护分支/评审模式和团队可用的 Gitee 流水线或 Jenkins。完整脚本、分支名、触发器、失败处理和 Codex 一句话入口见 [branch-and-codex-runbook.md](branch-and-codex-runbook.md)。
+远端是 Gitee。M00 负责落地仓库内 PowerShell 分支脚本，并对接 Gitee 保护分支/评审模式和团队可用的 Gitee 流水线或 Jenkins。完整脚本、分支名、触发器和失败处理见执行手册；可直接复制给 Codex 的话术**唯一以[执行手册第9节](branch-and-codex-runbook.md#codex-prompts)为准**，本设计文档不复制第二套话术。
 
 ## 13. 两人并行开发边界
 
@@ -411,7 +416,10 @@ M00 自身采用一次受控的双分支并行：已经评审通过的 `contract
 - 净开发估算约 155 人时。
 - 加 20% 合并、联调、分支自动化和外部环境缓冲约 186 人时。
 - 两人预计 15–19 个工作日，约 3–4 周。
-- 图片/图片编辑 fake/MVP 目标在第 6–8 个工作日。
+- 第 4 个工作日：自动上下文压缩可感知版。
+- 第 9 个工作日：视频会话 Agent MVP。
+- 第 13 个工作日：图片/编辑、PPT、视频分析接入同一 Agent Runtime。
+- 第 16–18 个工作日：全流程灰度与新对话全面接管；第 19 个工作日作为外部环境缓冲，不预先承诺新能力。
 
 GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议使用极高思考进行设计复核或 code review：M00 合同、M04 压缩事实保护、M05 Supervisor、M06 crash window、M11 视频合同、M13 灰度与回滚。
 
@@ -427,8 +435,9 @@ GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议�
 - 认可模型窗口动态验证，不能把 256K/512K 当成当前模型事实。
 - 认可业务合同永不摘要、原始消息不删除、压缩期间输入可排队。
 - 认可每个 Codex 对话只领取一个切片，完成状态写入模块文档。
+- 认可 R1–R4 分阶段上线和明确的 `release checkpoint`；阶段检查点可自动进入 Agent，但生产 Feature Flag 与灰度比例仍需人工批准。
 - 认可 `dev → agent` 自动同步、单槽集成列车和 Agent 保护分支；共享 feature 分支不允许普通切片 Codex 直接 push。
 - 认可所有模块内部切片一律串行，不设计 `parallel_safe` 切片、切片子分支或切片 worktree；多个 Codex 不得同时写同一模块分支/worktree。
-- 认可开发者需要手动启动每个切片和可并行模块；切片内部 Git/测试/审核/状态/commit/push 自动完成，普通模块最后一片后由远端流水线自动集成。
+- 认可开发者需要手动启动每个切片和可并行模块；切片内部 Git/测试/审核/状态/commit/push 自动完成，明确阶段检查点和普通模块最后一片后由远端流水线自动集成，但不会自动开始下一切片或自动发布生产。
 
 评审通过后，先为 M00 生成逐文件、测试先行的实施计划，再由 Codex 按执行手册自动同步 dev、创建 M00 worktree/分支。M00 合同与分支自动化合并前，两条开发线不能各自编写不兼容的真实 Runtime/Adapter。

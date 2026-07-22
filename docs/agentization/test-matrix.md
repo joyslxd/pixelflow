@@ -23,7 +23,7 @@
 
 | 模块 | 必测范围 |
 | --- | --- |
-| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有 18 个测试文件聚合；PowerShell 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、`ready_for_integration`、单槽自动集成、每日调度和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
+| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有 18 个测试文件聚合；PowerShell 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、阶段检查点白名单、`ready_for_phase_integration/ready_for_integration`、增量/最终单槽自动集成、每日调度和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
 | M01 | `test_pixelflow_task_store.py`、`test_pixelflow_conversations_router.py`、owner isolation、CAS/Inbox/Outbox 新测试、剪映原子 patch |
 | M02 | checkpointer、run manager、gateway runtime cleanup/recovery、harness boundary、新 graph interrupt/restart |
 | M03 | model profile、token budget、context relevance、PowerMem helper、artifact externalization |
@@ -109,18 +109,30 @@
 - 模块集成候选必须按最新 agent → 最新 dev → 模块分支构建。
 - 候选测试期间 dev 或 agent 前进时，最终祖先检查失败，候选不得合入。
 - 模拟 dev/模块同时修改同一文件时，脚本必须停在候选分支并保持两个 feature 分支不变。
-- 模拟定向测试失败、module status 非 `ready_for_integration`、未完成切片、脏工作区、错误分支和缺少远端时都必须 fail-closed。
+- 模拟定向测试失败、module status 既非合法 `ready_for_phase_integration` 也非 `ready_for_integration`、脏工作区、错误分支和缺少远端时都必须 fail-closed；任意未列入四阶段计划的中间切片不得伪造阶段检查点。
 - 两个集成任务并发时只能有一个进入共享分支合并区；另一个排队或因基线变化重建。
 - 切片 Codex 只能 push 当前模块分支；测试必须拒绝创建 `mXX-sYY-*` 切片分支，也必须拒绝直接 push `feature/dev_*` 或 `feature/agent_*`。
 - M00-A/M00-B 必须从同一个已包含评审设计的 Agent SHA 创建；两分支 HEAD 必须能证明该 SHA 是共同祖先。
 - M00-B 修改规范 Python DTO/fixture、M00-A 修改 B 锁定的 `web/**` 合同路径、任一分支修改模块汇总状态时，文件所有权门禁必须失败。
 - M00 集成必须按 `最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁` 执行；交换顺序、遗漏分支或两个 Codex 同写临时候选都必须 fail-closed。
 - 在两个 worktree 强制 checkout 同一模块分支、两个对话尝试并发 push 同一模块或前一切片未 push 就启动下一片时，分支策略测试必须拒绝执行并提示模块内串行。
-- 普通模块最后一片写 `ready_for_integration` 后必须触发单槽流水线；绿色更新 Agent/BOARD/MERGE_LOG，失败写 `integration_blocked` 且 Agent 不变。
+- 普通模块合法中间检查点写 `ready_for_phase_integration`、最后一片写 `ready_for_integration` 后必须触发单槽流水线；绿色更新 Agent/BOARD/MERGE_LOG，并分别写 `phase_integrated/merged`；失败分别写 `phase_integration_blocked/integration_blocked` 且 Agent 不变。
+- 同一模块第二次检查点只允许集成 `last_integrated_commit..checkpoint_commit`，测试必须拒绝 force-push/rebase、重复集成旧 commit 和跳过前置切片。
 - 每天 02:00 调度必须验证 dev 无领先、可安全同步和失败不污染三种路径；已结束的 Codex 对话不能被当作调度器。
 - 未配置 Gitee/Jenkins/Codex Automation 时自动化状态只能是 `automation_local_ready`；远端调度、保护分支和绿色自动合并实际验证后才能是 `automation_active`。
 
-## 8. 建议命令
+## 8. 四阶段上线门禁
+
+| 批次 | 上线前必须证明 | 立即停止条件 |
+| --- | --- | --- |
+| R1 压缩可感知版 | 60/72/85/92 阈值、关键事实 hash 100% 保留、压缩期输入排队、SSE 续传、刷新恢复、flag-off 旧流程等价 | 丢失合同/ID/否定约束/当前输入，前端重发，恢复后重复 start |
+| R2 视频会话 Agent | 视频黄金对话、Supervisor target、Plan/合同/场景包继承、Operation 幂等、重启/402/部分失败恢复、视频人工结束 | 任何计费误执行、重复供应商 start、视频自动结束或目标不唯一仍执行 |
+| R3 其余 intent | 图片/编辑、PPT、视频分析 mock E2E，跨 workflow 切换、artifact 定向引用、旧 API 与 flag-off 回归 | 串 workflow/artifact/user、图片编辑绕过原图或参数确认、PPT 整体误重生 |
+| R4 全量 | 五主流程+直接图片编辑全矩阵、Shadow 无副作用、10→30→50→100 灰度、kill switch/排空、批准后的真实冒烟 | 跨会话污染、鉴权泄漏、job 丢失、无法回滚、真实凭据进入日志/状态 |
+
+阶段候选进入 Agent 不等于自动发布生产。每次 R1–R4 Feature Flag、灰度百分比或真实付费验证都需要发布负责人显式批准并把证据写入 `integration/MERGE_LOG.md`。
+
+## 9. 建议命令
 
 后端定向示例：
 
