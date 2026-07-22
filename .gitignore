@@ -19,3 +19,6 @@ docs/*
 .claude/
 
 .understand-anything/
+
+# 用途：隔离 Codex 模块 worktree；影响：本地模块检出不会进入仓库暂存范围。
+.worktrees/
