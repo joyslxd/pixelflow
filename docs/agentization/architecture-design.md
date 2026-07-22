@@ -304,7 +304,7 @@ web/src/components/chat/ConversationRuntimeNotice.tsx
 - R1（第 4 个工作日）：先上线 `assist` 模式的统一 Turn/SSE、自动上下文压缩、排队和刷新恢复，让业务可见压缩开始/完成提示；不改变现有阶段工作流的推进权。
 - R2（累计第 9 个工作日）：只让新视频对话进入 `primary`，交付会话 Supervisor、视频 Workflow Graph 和继续/修改/重生成/重试/新建/切换/取消等交互。
 - R3（累计第 13 个工作日）：把图片/图片编辑、PPT、视频分析接入同一 Supervisor 与 Context Runtime。
-- R4（累计第 16–18 个工作日）：完成全流程 E2E、Shadow、灰度、回滚和新对话全面接管。
+- R4（累计第 16–18 个工作日）：在 `primary + 四类 intent + 100%` 不再扩围的前提下，完成全流程 E2E、Shadow、回滚和新对话全面接管验收。
 
 每一阶段的模块范围、配置、检查点和上线门禁以[四阶段上线计划](phased-rollout-plan.md)为准。
 
@@ -321,8 +321,12 @@ pixelflow:
 
 - `off`：行为等同当前 v2。
 - `shadow`：只比较决策和标准 DTO，不调用付费供应商、不写 PowerMem 经验。
-- `assist`：新对话使用统一输入、事件和压缩，Adapter 调用现有 Service。
-- `primary`：按 intent 灰度接管。
+- `assist`：Conversation Runtime 接管新对话的消息入口、Turn、SSE、上下文预算、压缩、排队和恢复；业务下一步仍由现有阶段工作流决定，Adapter 调用现有 Service。可以理解为“换了会话管家，但没有换业务司机”。
+- `primary`：在 `assist` 的会话基础设施之上，Supervisor 负责理解当前输入并决定继续、修改、重生成、重试、新建、切换、取消或追问，再把动作路由给 `enabled_intents` 对应的 Workflow Graph。可以理解为“会话管家和业务司机都由 Agent 接管”。
+
+`mode` 控制谁拥有会话/决策权，`enabled_intents` 控制 `primary` 可以接管哪些业务，`new_conversation_rollout_percent` 控制多少新对话进入新 Runtime。当前无真实外部用户，因此 R1–R4 获批后比例固定为100%，不实现随机10%/30%/50%灰度或用户白名单：R1 是 `assist + [] + 100%`，R2 是 `primary + [video] + 100%`，R3/R4 是 `primary + [video,image,ppt,video_analysis] + 100%`。历史对话和运行中任务始终保持原 owner。
+
+配置示例表示某个发布批次获批后的目标值，不是 M13.x 切片通过后自动写入生产。M13.x 负责证明候选可上线并停在 `awaiting_release_approval`；唯一发布负责人再给出一次精确到批次、模式和 intent 范围的明确授权，Codex/受控流水线才执行生产配置、部署、验证和异常回滚。所谓人工批准不要求负责人亲自编辑 YAML，但生产平台强制的二次认证或审批按钮仍需人工完成；完整话术以[执行手册第9节](branch-and-codex-runbook.md#codex-prompts)为准。
 
 回滚只停止新对话进入 Supervisor；运行中的 `supervisor_v1` 对话继续安全排空或人工处理，不能强切回前端 v2。
 
@@ -419,9 +423,9 @@ M00 自身采用一次受控的双分支并行：已经评审通过的 `contract
 - 第 4 个工作日：自动上下文压缩可感知版。
 - 第 9 个工作日：视频会话 Agent MVP。
 - 第 13 个工作日：图片/编辑、PPT、视频分析接入同一 Agent Runtime。
-- 第 16–18 个工作日：全流程灰度与新对话全面接管；第 19 个工作日作为外部环境缓冲，不预先承诺新能力。
+- 第 16–18 个工作日：全流程稳定化与新对话全面接管验收；第 19 个工作日作为外部环境缓冲，不预先承诺新能力。
 
-GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议使用极高思考进行设计复核或 code review：M00 合同、M04 压缩事实保护、M05 Supervisor、M06 crash window、M11 视频合同、M13 灰度与回滚。
+GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议使用极高思考进行设计复核或 code review：M00 合同、M04 压缩事实保护、M05 Supervisor、M06 crash window、M11 视频合同、M13 全量发布与回滚。
 
 ## 16. 开工前评审门槛
 
@@ -435,7 +439,7 @@ GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议�
 - 认可模型窗口动态验证，不能把 256K/512K 当成当前模型事实。
 - 认可业务合同永不摘要、原始消息不删除、压缩期间输入可排队。
 - 认可每个 Codex 对话只领取一个切片，完成状态写入模块文档。
-- 认可 R1–R4 分阶段上线和明确的 `release checkpoint`；阶段检查点可自动进入 Agent，但生产 Feature Flag 与灰度比例仍需人工批准。
+- 认可 R1–R4 分阶段上线和明确的 `release checkpoint`；阶段检查点可自动进入 Agent，但生产运行模式、`enabled_intents` 与 Feature Flag 变化仍需人工批准；当前各阶段新对话比例固定100%。
 - 认可 `dev → agent` 自动同步、单槽集成列车和 Agent 保护分支；共享 feature 分支不允许普通切片 Codex 直接 push。
 - 认可所有模块内部切片一律串行，不设计 `parallel_safe` 切片、切片子分支或切片 worktree；多个 Codex 不得同时写同一模块分支/worktree。
 - 认可开发者需要手动启动每个切片和可并行模块；切片内部 Git/测试/审核/状态/commit/push 自动完成，明确阶段检查点和普通模块最后一片后由远端流水线自动集成，但不会自动开始下一切片或自动发布生产。

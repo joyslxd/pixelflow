@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | A：Agent Platform | 持久化、LangGraph Runtime、上下文、压缩、Supervisor、外部 job | M01–M06；M00-A.1–M00-A.3 | `tasks/store.py`、ORM/migration、`app.py`、config、新 Agent Router/Runtime |
 | B：Workflow & UI | 前端 runtime、四类 workflow adapter、五条流程 UI 迁移 | M07–M12；M00-B.1 | 现有 v2 routers/service 提取、`WorkspacePage.tsx`、`api.ts`、新 supervisor 前端目录 |
-| A+B | M00/M13 集成、shadow、灰度、回滚 | M00-I.1、M13 | 共同评审，但每次只有一个集成人写共享候选、文档和发布配置 |
+| A+B | M00/M13 集成、shadow、全量发布、回滚 | M00-I.1、M13 | 共同评审，但每次只有一个集成人写共享候选、文档和发布配置 |
 
 M00 不是 M01–M12 的父编号，而是两条开发线共同依赖的启动模块。M01–M06 属于 A 线，M07–M12 属于 B 线。M00-A、M00-B 从同一个已评审设计/Agent 基线创建两条开发分支并行，各线内部严格串行；A/B 完成后由开发者手动启动一次 M00-I.1 收口。M00 合入并启用自动化后，两条线可使用测试 fake 并行开发不同模块，不需要等待对方真实实现。
 
@@ -31,7 +31,7 @@ flowchart LR
     M10["M10 视频分析 Adapter"]
     M11["M11 视频 Adapter"]
     M12["M12 交互 UI/Legacy 迁移"]
-    M13["M13 E2E/Shadow/灰度"]
+    M13["M13 E2E/Shadow/全量发布"]
 
     M00 --> M01 --> M02 --> M05
     M00 --> M03 --> M04 --> M05
@@ -63,7 +63,7 @@ flowchart LR
 | R1 / D1–D4 | M00-A、M01、M03、M04；模块间可并行、模块内串行 | M00-B、M07、M12.1–M12.3 | 手动 M00-I.1；M12 建立 `R1-assist-ui` 中间检查点；执行 M13-R1，交付压缩可感知版 |
 | R2 / D5–D9 | M02、M05、M06 | M11、M12.4–M12.5 | 执行 M13-R2，只让新视频对话进入会话 Agent |
 | R3 / D10–D13 | 平台稳定化和跨 workflow 缺陷修复 | M08、M09、M10 模块并行 | 执行 M13-R3，四类 intent 使用同一 Supervisor/Context Runtime |
-| R4 / D14–D18 | M13 全量、并发、回滚与真实联调 | M13 前端恢复、全流程和运行手册 | 10%→30%→50%→100% 新对话；每次生产比例变更人工批准 |
+| R4 / D14–D18 | M13 全量、并发、回滚与真实联调 | M13 前端恢复、全流程和运行手册 | 保持 `primary + 四类intent + 100%`，完成稳定化和回滚验收 |
 
 完整的每日顺序、配置和门禁见[四阶段上线计划](phased-rollout-plan.md)。阶段检查点只是把模块截至指定 commit 的增量纳入 Agent，不允许跳过切片，也不把 `phase_integrated` 误报成模块完成。
 
@@ -303,7 +303,7 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 
 模块闸门：旧 `frontend_v2` 对话完全不走新 start；`supervisor_v1` 对话完全不从前端启动供应商阶段；切换对话不串流。
 
-### M13：集成、Shadow、灰度、回滚与交付
+### M13：集成、Shadow、全量发布、回滚与交付
 
 - Owner：A+B；每次合并只有一个集成人。
 - 依赖：按 R1–R4 增量满足；M13 最终收口依赖 M01–M12 全部完成。
@@ -311,10 +311,10 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 
 | 切片 | 时长 | 产物 | 验证 |
 | --- | ---: | --- | --- |
-| M13.1 / R1 | 2.5h | assist 配置、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价 | 默认 off + assist 全量回归；内部白名单→10% |
-| M13.2 / R2 | 3h | 视频 Supervisor replay/shadow、黄金对话、视频 mock E2E；禁止 shadow 计费和 PowerMem record | 视频 10%→30%、重复 start 为 0、kill switch |
-| M13.3 / R3 | 3h | 图片/编辑、PPT、视频分析 mock E2E；重启、断线、并发、402 | 四类 intent 30%，旧 API/flag-off 回归 |
-| M13.4 / R4 | 2.5h | 五主流程全量门禁、10%→30%→50%→100% 灰度、kill switch/排空回滚 | 全量非付费矩阵、灰度报告和回滚记录 |
+| M13.1 / R1 | 2.5h | assist 配置、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价 | 默认 off 回归；测试 assist 100%；生产获批后 assist 100% |
+| M13.2 / R2 | 3h | 视频 Supervisor replay/shadow、黄金对话、视频 mock E2E；禁止 shadow 计费和 PowerMem record | `primary(video) + 100%`、重复 start 为 0、kill switch |
+| M13.3 / R3 | 3h | 图片/编辑、PPT、视频分析 mock E2E；重启、断线、并发、402 | `primary(四类intent) + 100%`，旧 API/flag-off 回归 |
+| M13.4 / R4 | 2.5h | 五主流程全量门禁、Shadow、kill switch/排空回滚 | 保持100%范围；全量非付费矩阵、稳定化报告和回滚记录 |
 | M13.5 / R4 | 2h | 经人工批准的真实供应商冒烟、运行手册、AGENTS/README/最新设计同步 | 真实报告与发布签字；不泄漏凭据 |
 
 模块闸门：默认关闭无回归；重复计费/跨会话污染/鉴权泄漏/job 丢失为 0；回滚不强切运行中对话。
@@ -335,9 +335,9 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 - 第 4 个工作日：R1 自动上下文压缩可感知版。
 - 第 9 个工作日：R2 视频会话 Agent MVP。
 - 第 13 个工作日：R3 图片/编辑、PPT、视频分析接入同一 Agent Runtime。
-- 第 16–18 个工作日：R4 全流程灰度和新对话全面接管；第 19 个工作日只作外部环境缓冲。
+- 第 16–18 个工作日：R4 全流程稳定化和新对话全面接管验收；第 19 个工作日只作外部环境缓冲。
 
-不要把约 155h 简单除以两人八小时：合同评审、分支同步门禁、顺序合并、真实长任务和灰度不能完全并行。
+不要把约 155h 简单除以两人八小时：合同评审、分支同步门禁、顺序合并、真实长任务和全量发布验证不能完全并行。
 
 ## 5. 每个小任务的执行协议
 
@@ -380,6 +380,6 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 ## 6. Codex 模式建议
 
 - 机械 DTO、Repository 双实现、fixture、简单 reducer：GPT-5.6-sol 高思考。
-- M00 合同、M04 摘要事实保护、M05 Supervisor 决策、M06 crash window、M11 视频合同、M13 灰度/回滚：GPT-5.6-sol 极高思考用于方案复核和 code review。
+- M00 合同、M04 摘要事实保护、M05 Supervisor 决策、M06 crash window、M11 视频合同、M13 全量发布/回滚：GPT-5.6-sol 极高思考用于方案复核和 code review。
 - 每个 Codex 对话只领取一个 1–3h 切片；实现前使用 `superpowers:test-driven-development`，完成前使用 `superpowers:verification-before-completion`。
 - 不使用子 agent 同时实现同一模块的不同切片；独立 reviewer 可以只读并行，但写入仍由当前切片唯一 Codex 完成。

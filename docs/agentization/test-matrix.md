@@ -128,9 +128,9 @@
 | R1 压缩可感知版 | 60/72/85/92 阈值、关键事实 hash 100% 保留、压缩期输入排队、SSE 续传、刷新恢复、flag-off 旧流程等价 | 丢失合同/ID/否定约束/当前输入，前端重发，恢复后重复 start |
 | R2 视频会话 Agent | 视频黄金对话、Supervisor target、Plan/合同/场景包继承、Operation 幂等、重启/402/部分失败恢复、视频人工结束 | 任何计费误执行、重复供应商 start、视频自动结束或目标不唯一仍执行 |
 | R3 其余 intent | 图片/编辑、PPT、视频分析 mock E2E，跨 workflow 切换、artifact 定向引用、旧 API 与 flag-off 回归 | 串 workflow/artifact/user、图片编辑绕过原图或参数确认、PPT 整体误重生 |
-| R4 全量 | 五主流程+直接图片编辑全矩阵、Shadow 无副作用、10→30→50→100 灰度、kill switch/排空、批准后的真实冒烟 | 跨会话污染、鉴权泄漏、job 丢失、无法回滚、真实凭据进入日志/状态 |
+| R4 全量 | 五主流程+直接图片编辑全矩阵、Shadow 无副作用、保持 `primary+四类intent+100%`、kill switch/排空、批准后的真实冒烟 | 跨会话污染、鉴权泄漏、job 丢失、无法回滚、真实凭据进入日志/状态 |
 
-阶段候选进入 Agent 不等于自动发布生产。每次 R1–R4 Feature Flag、灰度百分比或真实付费验证都需要发布负责人显式批准并把证据写入 `integration/MERGE_LOG.md`。
+阶段候选进入 Agent 不等于自动发布生产。每次 R1–R4 运行模式、`enabled_intents`、Feature Flag 或真实付费验证都需要发布负责人显式批准并把证据写入 `integration/MERGE_LOG.md`；当前阶段比例固定100%，不验证随机百分比灰度或用户白名单。
 
 ## 9. 建议命令
 

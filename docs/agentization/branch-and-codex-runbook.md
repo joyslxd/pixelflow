@@ -16,7 +16,7 @@
 最终收口顺序固定为：
 
 ```text
-最新 dev → 最新 Agent → M13 全量/Shadow/灰度/回滚
+最新 dev → 最新 Agent → M13 全量/Shadow/发布/回滚
 → 人工批准 Agent 整体合回 dev
 → 正常测试/发布分支
 ```
@@ -167,7 +167,7 @@ codex/integrate-rX-mXX-YYYYMMDD-HHMM
 | R1 / D1–D4 | M00-A、M01、M03、M04 | M00-B、M07、M12.1–M12.3 | M00-I.1 后交付 assist/自动压缩可感知版 |
 | R2 / D5–D9 | M02、M05、M06 | M11、M12.4–M12.5 | 视频 Supervisor/Workflow Agent MVP |
 | R3 / D10–D13 | 平台稳定化、跨 workflow 缺陷 | M08、M09、M10 | 图片/编辑、PPT、视频分析接入 |
-| R4 / D14–D18 | M13 全量、并发、回滚 | M13 前端恢复、真实流程 | 10%→30%→50%→100%，生产比例人工批准 |
+| R4 / D14–D18 | M13 全量、并发、回滚 | M13 前端恢复、真实流程 | 保持100%新对话，生产模式/intent变化人工批准 |
 
 同一个人建议同时保持 2–3 个写入型模块任务，避免本地资源和审查负担过高。例如 M00 后：
 
@@ -335,6 +335,66 @@ B 可同时打开三个独立 Codex 任务：
 ```
 
 短话术只有在 `AGENTS.md` 和本手册已经包含完整自动化约束时使用；发现文档不一致必须停止开工并先修正文档。
+
+### 9.11 M13 与生产发布的两道门
+
+M13 仍然只有一个模块分支 `codex/agent-0.8.4-m13-integration` 和一个 worktree，M13.1→M13.2→M13.3→M13.4→M13.5 严格串行。每个 M13 切片都必须由开发者手动启动一次；切片内部的代码、测试、审核、状态记录、commit 和 push 自动完成。
+
+M13.x 通过只表示“对应发布候选已经具备申请上线的资格”，**不表示已经发布生产**。M13.1–M13.4 默认只允许非付费门禁、测试环境全量验证或 dry-run；切片先写 `ready_for_phase_integration:R*` 并停止，远端单槽候选绿色进入 Agent 后再写 `phase_integrated:R*` 和 `awaiting_release_approval:R*`。生产运行模式、`enabled_intents` 范围、Feature Flag 和真实付费供应商冒烟是另一道外部状态门禁，必须由唯一发布负责人再明确批准一次，且一次批准只允许一个批次的精确变化。当前无真实外部用户，不设计随机百分比灰度或用户白名单，各阶段获批后均覆盖全部新对话100%。
+
+| 切片 | 允许启动的最早条件 | 切片通过后的停止点 |
+| --- | --- | --- |
+| M13.1 / R1 | M00-I.1 已完成；M01、M03、M04、M07 和 M12.3 的 R1 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R1`；自动集成绿色后才到 `awaiting_release_approval:R1`，不得自动改生产 `assist/100%` |
+| M13.2 / R2 | M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R2`；自动集成绿色后才到 `awaiting_release_approval:R2`，不得自动把 `video` 切到 `primary`；比例保持100% |
+| M13.3 / R3 | M08、M09、M10 的 R3 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R3`；自动集成绿色后才到 `awaiting_release_approval:R3`，不得自动开放四类 intent |
+| M13.4 / R4 | M01–M12 最终门禁全部绿色并完成最后一次 dev→agent 同步 | 先 `ready_for_phase_integration:R4`；自动集成绿色后才到 `awaiting_release_approval:R4`；保持 `primary + 四类intent + 100%`，只做稳定化/回滚门禁 |
+| M13.5 / R4 | M13.4 通过，且发布负责人明确批准真实付费供应商冒烟并提供临时凭据 | 真实报告、运行手册和发布签字完成后停止 |
+
+### 9.12 手动启动 M13.1 / R1
+
+```text
+不要依赖任何旧对话内容。请先完整阅读仓库根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md，以及 docs/agentization 下的 README.md、architecture-design.md、phased-rollout-plan.md、contracts-v1.md、work-breakdown.md、branch-and-codex-runbook.md、test-matrix.md、status/BOARD.md、status/M13-status.md、integration/DECISIONS.md 和 integration/MERGE_LOG.md。
+
+你是本周唯一 M13 集成人。请全自动执行且只执行 M13.1 / R1。先确认 M00-I.1 已完成，M01、M03、M04、M07、M12.3 的 R1 增量已经进入 feature/agent_0.8.4_boguan，最新 dev→agent 门禁绿色；然后创建或恢复 codex/agent-0.8.4-m13-integration 及独立 worktree。完成 assist 配置候选、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价、flag-off 和全部 R1 非付费门禁，并在测试环境以 assist+100% 覆盖全部新对话验证；完成独立审核、状态/测试记录、独立 commit 和 push 后立即停止，并把状态写为 ready_for_phase_integration:R1，等待远端单槽候选自动集成；只有候选绿色进入 Agent 后，自动化才可写 phase_integrated:R1 和 awaiting_release_approval:R1。不得修改生产 Feature Flag、不得把生产从 off+0% 改为 assist+100%、不得调用真实付费 API、不得自动执行 M13.2；依赖不满足时保持分支不变并报告证据。
+```
+
+### 9.13 手动启动 M13.2 / R2
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R1/R2 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.2 / R2。先确认 M13.1 已完成，M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent，最新 dev→agent 门禁绿色。完成视频 replay/shadow、黄金对话、mock E2E、重复 start=0、kill switch 和禁止 shadow 计费/PowerMem record 的非付费门禁，并在测试环境以 primary(video)+100% 验证；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R2，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R2。不得修改生产配置、不得在未批准时把 video 切到 primary、不得调用真实付费 API、不得自动执行 M13.3。
+```
+
+### 9.14 手动启动 M13.3 / R3
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R2/R3 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.3 / R3。先确认 M13.2 已完成，M08、M09、M10 的 R3 增量已进入 Agent，最新 dev→agent 门禁绿色。完成图片/编辑、PPT、视频分析 mock E2E，以及重启、断线、并发、402、旧 API 和 flag-off 回归；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R3，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R3。不得修改生产配置、不得开放生产四类 intent、不得调用真实付费 API、不得自动执行 M13.4。
+```
+
+### 9.15 手动启动 M13.4 / R4
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的全量门禁/回滚记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.4 / R4。先确认 M01–M12 全部模块已完成最终集成，最后一次 dev→agent 同步绿色。完成五条主流程和直接图片编辑的全量非付费矩阵、Shadow、并发、断线恢复、kill switch、排空和回滚演练；保持 primary+四类intent+100% 的既定范围，不设计逐级百分比灰度。完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R4，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R4。不得自动修改生产模式或intent范围，不得调用真实付费 API，不得自动执行 M13.5。
+```
+
+### 9.16 经批准启动 M13.5 / R4 真实冒烟
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md、最近的 M13.4 门禁/回滚证据和发布负责人的本次书面批准。你是本周唯一 M13 集成人。我明确批准本次 M13.5 真实付费供应商冒烟；授权范围只限批准记录列出的环境、流程、账号、次数和费用上限。请恢复 codex/agent-0.8.4-m13-integration，只执行 M13.5：从进程环境读取临时 Authorization，执行批准范围内的真实冒烟，完成安全脱敏报告、运行手册、AGENTS/README/最新设计同步、发布签字、独立 commit 和 push 后立即停止。不得扩大测试范围、不得把凭据写入代码/文档/日志、不得自动改变生产运行模式、intent范围或 Feature Flag；批准、凭据或费用上限不完整时不得调用真实接口。
+```
+
+<a id="r1-release-approval"></a>
+
+### 9.17 R1 生产发布的明确批准话术（assist + 100%）
+
+M13.1 通过并进入 Agent 后，如果阶段报告、回滚方案和生产访问条件都齐全，发布负责人另开一个 Codex 任务并复制下面这段。**发送这段话就是人工批准动作；不要求发布负责人亲自编辑 YAML。** Codex/流水线只在获得生产权限、审批链和可回滚部署入口后执行，遇到二次认证或平台强制人工按钮时再由发布负责人完成该不可委托步骤。
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、docs/agentization/branch-and-codex-runbook.md、docs/agentization/phased-rollout-plan.md、docs/agentization/status/BOARD.md、docs/agentization/status/M13-status.md，以及 M13.1/R1 阶段报告和回滚证据。
+
+我以本次唯一发布负责人身份，明确批准执行 R1 生产发布：对全部新建对话启用 agent_runtime.mode=assist 和 context_compaction_enabled=true，enabled_intents 保持空列表，new_conversation_rollout_percent=100；现有图片、视频、PPT、视频分析阶段工作流仍拥有推进权，历史对话和运行中任务不得迁移。当前不使用随机百分比灰度或用户白名单。请先复核 M13.1 已进入 feature/agent_0.8.4_boguan、最新 dev→agent 门禁绿色、生产备份/kill switch/回滚路径可用，再通过受控配置和发布流水线完成本次变更、部署后 smoke/指标观察、BOARD/M13/MERGE_LOG/发布记录更新。任何门禁失败或红线指标异常立即停止并回滚到 off+0%；本次授权不包含 R2、primary、真实付费供应商测试或 Agent→dev 合并。完成或回滚后立即停止并报告证据。
+```
+
+后续 R2/R3/R4 使用同一原则：比例始终保持全部新对话100%，每次批准只写明一个精确能力范围变化。R2 只批准 `mode=primary + enabled_intents=[video]`；R3 只批准 `mode=primary + enabled_intents=[video,image,ppt,video_analysis]`；R4 不扩大模式、intent或比例，只批准在既有全量范围内完成稳定化、回滚验收和经单独授权的真实冒烟。不得使用“按计划继续后续全部阶段”这种无限授权；每个阶段完成观察和记录后都必须停止，等待下一次人工批准。
 
 ## 10. 明确不采用的方案
 

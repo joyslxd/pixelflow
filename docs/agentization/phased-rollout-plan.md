@@ -6,12 +6,12 @@
 
 | 上线批次 | 工作日 | 累计时间 | 对业务可见的能力 | 运行模式 |
 | --- | ---: | ---: | --- | --- |
-| R1 自动上下文压缩可感知版 | 4 天 | 第 4 天 | 压缩开始/完成提示、输入排队、刷新恢复、原任务继续 | `assist`，新对话 10% |
-| R2 视频会话 Agent MVP | 5 天 | 第 9 天 | 视频流程可自然语言继续、修改、重生成、重试、新建、切换、取消或追问 | `primary`，仅 `video`，10%→30% |
-| R3 其余业务接入 Agent | 4 天 | 第 13 天 | 图片/编辑、PPT、视频分析使用同一 Supervisor 和 Context Runtime | `primary`，四类 intent，30% |
-| R4 完整灰度和全面接管 | 3–5 天 | 第 16–18 天 | Shadow、全流程 E2E、灰度、回滚和新对话 100% 接管 | 内部→10%→30%→50%→100% |
+| R1 自动上下文压缩可感知版 | 4 天 | 第 4 天 | 压缩开始/完成提示、输入排队、刷新恢复、原任务继续 | `assist`，全部新对话 100% |
+| R2 视频会话 Agent MVP | 5 天 | 第 9 天 | 视频流程可自然语言继续、修改、重生成、重试、新建、切换、取消或追问 | `primary`，仅 `video`，全部新对话 100% |
+| R3 其余业务接入 Agent | 4 天 | 第 13 天 | 图片/编辑、PPT、视频分析使用同一 Supervisor 和 Context Runtime | `primary`，四类 intent，全部新对话 100% |
+| R4 全量稳定化和全面接管 | 3–5 天 | 第 16–18 天 | Shadow、全流程 E2E、回滚和新对话全面接管 | 保持 `primary`、四类 intent、100% |
 
-总工作量没有因为分阶段而消失；变化是第 4 天和第 9 天就能分别交付可演示、可灰度的业务成果，不再等到所有流程完成后一次性上线。
+总工作量没有因为分阶段而消失；变化是第 4 天和第 9 天就能分别交付可演示、可上线的业务成果，不再等到所有流程完成后一次性上线。当前测试和生产均无真实外部用户，因此不使用随机 10%/30%/50% 灰度或内部用户白名单；每个获批阶段直接覆盖全部新对话，阶段之间仍通过独立人工批准控制风险。
 
 ## 2. 阶段性集成检查点
 
@@ -37,13 +37,13 @@
   → 失败时保持 Agent 不变
 ```
 
-代码进入 Agent 分支不等于自动发布生产。每个 R1–R4 上线批次仍需唯一发布负责人审核阶段报告并明确批准 Feature Flag/灰度比例变化。
+代码进入 Agent 分支不等于自动发布生产。每个 R1–R4 上线批次仍需唯一发布负责人审核阶段报告并明确批准运行模式或 `enabled_intents` 范围变化。这里有两道独立门：M13.x 切片通过是“具备申请上线资格”，生产批准才是“允许生产新对话使用本阶段能力”。前者不会隐式包含后者。
 
 ## 3. R1：自动上下文压缩可感知版
 
 ### 3.1 时间和目标
 
-- 开发、联调和灰度：4 个工作日。
+- 开发、联调和上线：4 个工作日。
 - 业务第一次可见成果：第 4 个工作日。
 - 目标：新对话在不改变现有图片、视频、PPT阶段编排的情况下，先使用统一 Turn、SSE、Context Budget Guard 和压缩状态。
 
@@ -53,7 +53,7 @@
 | --- | --- | --- |
 | A | M00-A、M01、M03、M04 | 合同、Turn/Summary/Event、上下文档案、60/72/85/92压缩、压缩锁和排队 |
 | B | M00-B、M07、M12.1–M12.3 | TypeScript合同、Snapshot/SSE/Reducer、双运行时挂载、压缩和排队UI、历史恢复 |
-| A+B | M00-I.1、M13-R1 | 跨端fixture、assist门禁、旧流程等价、内部白名单和10%新对话灰度 |
+| A+B | M00-I.1、M13-R1 | 跨端fixture、assist门禁、旧流程等价和全部新对话100%发布门禁 |
 
 M12 在 R1 前三个切片后建立 `R1-assist-ui` 检查点；M12 后续表单/Plan/Artifact交互切片继续在同一模块分支串行开发。
 
@@ -72,9 +72,20 @@ pixelflow:
   agent_runtime:
     mode: assist
     enabled_intents: []
-    new_conversation_rollout_percent: 10
+    new_conversation_rollout_percent: 100
     context_compaction_enabled: true
 ```
+
+以上是 R1 获批后的**目标生产值**，不是 M13.1 测试通过后自动写入的值：
+
+- `assist`：全部新对话先使用统一 Turn、SSE、Context Budget Guard、压缩与恢复；业务执行权仍归现有阶段工作流，不启用 Supervisor 自主接管。
+- `enabled_intents: []`：R1 不让任何图片/视频/PPT/视频分析 intent 进入 `primary`。
+- `new_conversation_rollout_percent: 100`：当前无真实外部用户，测试和生产获批后均让全部**新建对话**进入本阶段；历史对话和运行中任务不迁移。
+- `context_compaction_enabled: true`：允许 R1 新对话在达到预算阈值时压缩，并向前端发出“开始整理/整理完成”事件。
+
+当前版本不设计也不实现用户白名单字段。以后真正存在外部用户并需要分群时，再单独设计基于后端认证 `user_id`/租户的发布策略；不得把尚未实现的白名单写成现有可配置能力。
+
+M13.1 通过后先写 `ready_for_phase_integration:R1`；远端候选绿色并进入 Agent 后，自动化再写 `phase_integrated:R1` 与 `awaiting_release_approval:R1`。唯一发布负责人必须再使用[执行手册 9.17 的 R1 生产批准话术](branch-and-codex-runbook.md#r1-release-approval)启动一次受控发布任务；该授权只允许生产从 `off+0%` 变为 `assist+100%`，不包含 R2、`primary`、真实付费 API 或 Agent→dev 合并。
 
 ### 3.5 上线门禁
 
@@ -98,7 +109,7 @@ pixelflow:
 | --- | --- | --- |
 | A | M02、M05、M06 | Supervisor/Workflow thread、interrupt/resume、ActionDecision、Validator、持久化Operation/Lease |
 | B | M11、M12.4–M12.5 | 视频Workflow Graph、消息/Artifact/@scene目标引用、视频交互卡和任务看板 |
-| A+B | M13-R2 | 视频黄金对话、Shadow、Mock E2E、真实长任务灰度和Kill Switch |
+| A+B | M13-R2 | 视频黄金对话、Shadow、Mock E2E、真实长任务全量验证和Kill Switch |
 
 ### 4.3 第一版动作
 
@@ -122,11 +133,11 @@ pixelflow:
     mode: primary
     enabled_intents:
       - video
-    new_conversation_rollout_percent: 10
+    new_conversation_rollout_percent: 100
     context_compaction_enabled: true
 ```
 
-绿色观察后可把视频新对话从10%提升到30%。
+R2 获批后，全部新对话仍使用统一 Context Runtime；其中 `video` 由 `primary` Supervisor/Workflow Graph 接管，其他 intent 保持 R1 `assist` 和旧阶段工作流。比例不再变化，风险边界由 `enabled_intents` 控制。
 
 ### 4.5 上线门禁
 
@@ -152,7 +163,7 @@ pixelflow:
 | B | M09 | PPT大纲、页面、单页重生成、文件和下载 |
 | B | M10 | 单/多视频分析、结果外置、继续/换视频/另开流程 |
 | A | 平台稳定化 | 通用Operation、Context、Supervisor和跨Workflow目标定位缺陷修复 |
-| A+B | M13-R3 | 三类intent Mock E2E、跨流程切换、Artifact引用和30%灰度 |
+| A+B | M13-R3 | 三类intent Mock E2E、跨流程切换、Artifact引用和四类intent全量发布门禁 |
 
 ### 5.3 配置
 
@@ -165,7 +176,7 @@ pixelflow:
       - image
       - ppt
       - video_analysis
-    new_conversation_rollout_percent: 30
+    new_conversation_rollout_percent: 100
     context_compaction_enabled: true
 ```
 
@@ -177,18 +188,21 @@ pixelflow:
 - 视频分析完整结果外置，Supervisor只读取摘要和证据引用。
 - 同一对话多个Workflow并存时不得串任务、串Artifact或串用户。
 
-## 6. R4：完整灰度和全面接管
+## 6. R4：全量稳定化和全面接管
 
 ### 6.1 时间和目标
 
 - R3后继续开发3–5个工作日。
 - 累计第16–18个工作日完成。
-- 目标：补齐全流程门禁、真实供应商冒烟、运行监控、灰度和回滚演练。
+- 目标：在 R3 已经 `primary + 四类 intent + 100%` 的基础上，补齐全流程门禁、真实供应商冒烟、运行监控和回滚演练。
 
-### 6.2 灰度顺序
+### 6.2 阶段接管顺序
 
 ```text
-内部白名单 → 10%新对话 → 30% → 50% → 100%新对话
+R1：assist + 100%新对话
+→ R2：primary(video) + 100%新对话
+→ R3：primary(四类intent) + 100%新对话
+→ R4：保持R3生产范围，完成稳定化、真实冒烟和发布签字
 ```
 
 历史 `frontend_v2` 对话继续按原Job和原Owner安全排空；有pending job的旧对话禁止在线切换。回滚只停止新对话进入Supervisor，不强切正在运行的对话。
@@ -199,7 +213,7 @@ pixelflow:
 - 五条主流程和直接图片编辑Mock E2E、重启、断线、并发、402全绿。
 - Shadow不调用付费供应商、不写PowerMem经验。
 - Kill Switch、排空、回滚和最后一次dev→agent同步演练通过。
-- 经人工批准后才执行真实供应商冒烟和生产比例提升。
+- 经人工批准后才执行真实供应商冒烟；R4 不再改变100%比例，只验证现有全量接管的稳定性和回滚能力。
 
 ## 7. 两人按天并行顺序
 
@@ -208,13 +222,13 @@ pixelflow:
 | D1 | M00-A.1起，串行推进A线切片 | M00-B.1 | 合同/fixture一致；准备M00-I.1 |
 | D2 | M01与M03不同模块并行，各模块内串行 | M07 | Turn/Context与前端事件fake对齐 |
 | D3 | M04；补齐M01/M03门禁 | M12.1–M12.3 | R1候选、压缩和排队恢复 |
-| D4 | R1后端/安全门禁 | R1前端/旧流程回归 | `assist`内部→10%上线 |
+| D4 | R1后端/安全门禁 | R1前端/旧流程回归 | `assist` + 全部新对话100%上线 |
 | D5–D6 | M02后进入M05 | M11使用fake并行开发 | Supervisor/视频合同对齐 |
 | D7–D8 | M06与M05收口 | M11、M12.4–M12.5 | 视频Mock E2E、恢复、402 |
-| D9 | R2 Shadow/真实灰度门禁 | R2视频UI/任务看板回归 | `video` 10%→30% |
+| D9 | R2 Shadow/全量视频门禁 | R2视频UI/任务看板回归 | `primary(video)` + 全部新对话100% |
 | D10–D12 | 平台稳定化和跨Workflow缺陷修复 | M08/M09/M10不同模块并行 | 三类Adapter逐个进入Agent |
-| D13 | R3跨流程门禁 | R3前端/旧API回归 | 四类intent 30% |
-| D14–D16 | M13全量、并发、回滚 | M13全量、前端恢复、运行手册 | 50%→100%新对话 |
+| D13 | R3跨流程门禁 | R3前端/旧API回归 | `primary(四类intent)` + 全部新对话100% |
+| D14–D16 | M13全量、并发、回滚 | M13全量、前端恢复、运行手册 | 保持100%，完成稳定化和回滚验收 |
 | D17–D18 | 真实供应商与线上问题缓冲 | 真实流程与交互缺陷缓冲 | 仅按实际问题使用 |
 
 每一行仍遵守：一个Codex任务只执行一个1–3小时切片；开发者手动启动下一个切片；不同模块可并行，同一模块切片不能并行。
@@ -223,10 +237,14 @@ pixelflow:
 
 ### 开发者必须手动批准
 
-- R1、R2、R3、R4每次生产Feature Flag/灰度比例变化。
+- R1、R2、R3、R4每次生产运行模式、`enabled_intents` 范围或 Feature Flag 变化。
 - 真实付费供应商测试。
 - 生产Kill Switch或Agent→dev最终收口。
 - 无法通过自动门禁的冲突和业务取舍。
+
+这里的“手动批准”是指发布负责人必须明确发送一次范围有限的发布指令或点击公司发布平台强制要求的审批按钮，**不是要求开发者亲自登录服务器修改 YAML**。获得批准后，Codex和受控流水线负责复核证据、应用配置、部署、smoke、观察、记录和异常回滚；如果生产平台要求二次认证、人工审批按钮或暂时没有自动化发布入口，则该不可委托步骤仍由发布负责人完成。
+
+R1 的标准批准话术位于[执行手册 9.17](branch-and-codex-runbook.md#r1-release-approval)。M13.1 通过但未收到该明确批准时，生产必须保持 `off + 0%`（或保持发布前原值），不得因为“代码已经进入 Agent”自动启用 `assist + 100%`。
 
 ### Codex和流水线自动完成
 
@@ -245,6 +263,6 @@ pixelflow:
 ## 9. 估算前提
 
 - 两人每天各有6–7小时有效开发/验证时间，并可同时开启不同模块的Codex任务。
-- Gitee/Jenkins、测试环境和模型/供应商配置可用；M00远端管理员配置延误时，R1生产灰度顺延1个工作日。
-- R1–R3时间包含定向测试、阶段门禁和小比例灰度，不包含无法预估的第三方接口长期故障。
+- Gitee/Jenkins、测试环境和模型/供应商配置可用；M00远端管理员配置延误时，R1生产发布顺延1个工作日。
+- R1–R3时间包含定向测试、阶段门禁和100%新对话发布验证，不包含无法预估的第三方接口长期故障。
 - D17–D18是缓冲，不应提前承诺给新功能。

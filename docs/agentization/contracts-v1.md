@@ -14,7 +14,7 @@
 ```
 
 - 历史对话和已有 pending job 的对话默认 `frontend_v2`。
-- 新对话才允许按灰度配置选择 `supervisor_v1`。
+- 新对话才允许按已批准的阶段配置选择 `frontend_v2` 或 `supervisor_v1`；当前各阶段发布范围为全部新对话100%，历史对话不迁移。
 - 有 pending job 的 `frontend_v2` 对话禁止迁移，避免前后端同时启动收费任务。
 - `supervisor_v1` 对话的前端不得再调用现有图片、视频、PPT `/start` 接口启动下一阶段；只能提交 turn 或人工决策。
 

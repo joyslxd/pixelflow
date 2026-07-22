@@ -25,7 +25,7 @@
 | 文档 | 谁更新 | 何时更新 |
 | --- | --- | --- |
 | 总体设计 | 架构负责人 | 只有评审通过的架构变更才更新 |
-| `phased-rollout-plan.md` | 架构/发布负责人 | 上线批次、阶段检查点、灰度日期或范围变化时 |
+| `phased-rollout-plan.md` | 架构/发布负责人 | 上线批次、阶段检查点、运行模式或intent范围变化时 |
 | `contracts-v1.md` | M00 合同负责人 | DTO、事件或状态机变更先走合同评审 |
 | `work-breakdown.md` | 集成人 | 模块拆分或依赖确实变化时 |
 | `status/Mxx-*.md` | 当前模块开发者 | 开工前、每个小任务完成后、交接前 |
@@ -58,7 +58,7 @@
 - 所有模块内部切片严格串行：一个切片对应一个 Codex 任务、一个独立 commit；当前切片完成后必须由开发者手动发出“继续下一个未完成切片”，Codex 不得自行连续执行整个模块。模块内不创建切片子分支，也不允许多个写入型 Codex 同时处理同一模块。
 - M00-A 与 M00-B 从同一个已评审 `contracts-v1.md` 和同一个 Agent 基线并行开始，各自在自己的分支串行；M00 首次集成由开发者手动启动一次。M00 合入并启用远端门禁后，普通模块到达四阶段计划列出的检查点时置为 `ready_for_phase_integration`，模块最后一片置为 `ready_for_integration`，均由单槽流水线自动集成；失败分别置为 `phase_integration_blocked` 或 `integration_blocked`，不得污染 Agent 主干。
 - 新实现全部受 feature flag 保护。关闭开关时，当前 v2 五条流程行为必须不变。
-- 旧对话固定 `frontend_v2`，新对话按灰度规则固定 `supervisor_v1`；存在 pending job 的对话绝不在线迁移编排所有权。
+- 旧对话固定 `frontend_v2`；新对话按获批阶段固定运行模式，R1 全部新对话使用 `assist`，R2 仅 `video` 进入 `primary`，R3/R4 四类intent进入 `primary`；存在 pending job 的对话绝不在线迁移编排所有权。
 - 完整分支清单、创建/合并顺序、自动同步和可直接复制的 Codex 指令，**唯一以[执行手册第9节](branch-and-codex-runbook.md#codex-prompts)为准**。
 - `architecture-design.md`、`work-breakdown.md`、README 和状态文件不得复制另一套话术，只能链接第9节。发现任何文档与第9节不一致时停止开工，由 M00/集成人先修正规则或引用。
 - 合并顺序和验证结果写入 `integration/MERGE_LOG.md`。
@@ -70,7 +70,7 @@
 - 同一模块同一时刻只能有一个写代码的 Codex，后续切片复用同一个模块分支/worktree；另开对话只允许只读审核，或者在上一切片完成并释放写入权后接续开发。
 - M00 的写入型并行只发生在两个独立模块线：A 写 `m00-a`，B 写 `m00-b`；两条线内部仍然串行，不能共同写对方分支或临时集成候选。
 - 每个并行模块使用独立分支/worktree。Codex 对话先声明 `base SHA + branch + module + slice + locked_files`，再开始写入。
-- 普通切片 Codex 只 push 当前模块分支，不直接更新两个长期 feature 分支。普通模块到达明确阶段检查点或最后一片后，由远端单槽流水线自动更新 `feature/agent_0.8.4_boguan`；M00 首次集成、生产 Feature Flag/灰度调整和最终 Agent→dev 收口仍需人工明确启动/批准。
+- 普通切片 Codex 只 push 当前模块分支，不直接更新两个长期 feature 分支。普通模块到达明确阶段检查点或最后一片后，由远端单槽流水线自动更新 `feature/agent_0.8.4_boguan`；M00 首次集成、生产运行模式/intent范围调整和最终 Agent→dev 收口仍需人工明确启动/批准。
 - 如果切片做到一半需要换对话，先填写 `templates/HANDOFF_TEMPLATE.md`；接手对话按“精确恢复动作”继续，不重新猜设计。
 
 ## “完成”的统一定义
@@ -81,4 +81,4 @@
 
 一个模块完成：该模块全部切片完成、模块测试和 feature flag 关闭回归通过，并已由单槽候选合入 Agent；只有切片完成但尚未集成时状态是 `ready_for_integration`，不能称为模块完成。
 
-整个改造完成：M00–M13 全部合入，五条主流程和图片编辑流程均通过新旧双运行时回归，重复请求不产生重复计费任务，上下文压缩开始/完成对前端可感知，灰度和回滚演练通过。
+整个改造完成：M00–M13 全部合入，五条主流程和图片编辑流程均通过新旧双运行时回归，重复请求不产生重复计费任务，上下文压缩开始/完成对前端可感知，全量发布和回滚演练通过。
