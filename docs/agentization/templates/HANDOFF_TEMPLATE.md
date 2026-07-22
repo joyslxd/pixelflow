@@ -51,6 +51,9 @@
 - 是否调用付费 API：否
 - 独立 reviewer / 结论：
 - commit SHA：
+- commit 标题/正文为中文：`yes | no`
+- 新增/修改代码注释中文检查：`passed | not_applicable | blocked`
+- 新增/修改配置逐项中文说明：`passed | not_applicable | blocked`
 
 ## 风险和回滚
 

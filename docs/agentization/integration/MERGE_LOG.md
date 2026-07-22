@@ -22,6 +22,7 @@
 - 测试报告链接和复核人
 - 冲突及解决方式
 - migration/配置变化
+- 中文 commit/合并说明、代码注释和配置逐项中文说明门禁结果
 - 合并后 smoke 结果
 - 回滚方式或 revert SHA
 - 同步的设计/README/AGENTS/content-app 文档

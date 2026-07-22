@@ -850,6 +850,8 @@ flowchart TD
 | `borgrise.max_retries=3` | 异常重试次数 |
 | `BORGRISE_STATUS_POLL_ERROR_RECOVERY_ATTEMPTS=3` | `/api/task/{taskId}/status` 可恢复网络错误后的额外状态轮询次数 |
 
+配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
+
 ## 14. 文件更新要求
 
 改动类型和必须同步检查的文件：
@@ -867,6 +869,8 @@ flowchart TD
 | 对话隔离 | `pixelflow_conversations.py`、`tasks/store.py`、`WorkspacePage.tsx` |
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
 | 文档 | `README.md`、`AGENTS.md`、`CONTENT_APP_API_CALLS.md`、本文件 |
+
+所有后续开发还必须遵守根目录 `AGENTS.md` 的中文工程交付规范：commit/PR/合并/状态/测试/交接记录使用中文；新增或修改的人工代码注释使用中文；配置逐项提供中文说明。代码标识符和第三方协议字段继续使用语言和合同规定的英文，不做中文化改名。
 
 ### 14.1 分镜全局素材替换
 

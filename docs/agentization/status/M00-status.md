@@ -17,9 +17,9 @@
 
 - [ ] M00-A.1 characterization tests（A，2h）
 - [ ] M00-A.2 Python DTO/Ports/fakes/规范 fixture（A，3h；依赖 A.1）
-- [ ] M00-A.3 dev→agent 同步、模块分支/worktree、单槽集成脚本（A，3h；依赖 A.2）
+- [ ] M00-A.3 dev→agent 同步、模块分支/worktree、单槽集成和中文提交/注释/配置说明门禁脚本（A，3h；依赖 A.2）
 - [ ] M00-B.1 TypeScript 镜像合同、wire event 与 web 测试入口（B，2.5h；与 A 线并行，只读 `contracts-v1.md`）
-- [ ] M00-I.1 首次 M00 集成、跨端合同、Gitee/Jenkins 门禁和自动化验收（A+B 评审，单一集成人写入，3h；A/B 两线完成后由开发者手动启动）
+- [ ] M00-I.1 首次 M00 集成、跨端合同、中文工程规范、Gitee/Jenkins 门禁和自动化验收（A+B 评审，单一集成人写入，3h；A/B 两线完成后由开发者手动启动）
 
 ## 当前记录
 

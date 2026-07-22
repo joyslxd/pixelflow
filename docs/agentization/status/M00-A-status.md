@@ -12,7 +12,7 @@
 
 - [ ] M00-A.1 characterization tests（2h）
 - [ ] M00-A.2 Python DTO/Ports/fakes/规范 fixture（3h）
-- [ ] M00-A.3 dev→agent 同步、模块分支/worktree、单槽集成脚本（3h）
+- [ ] M00-A.3 dev→agent 同步、模块分支/worktree、单槽集成和中文提交/注释/配置说明门禁脚本（3h）
 
 ## 最后验证与交接
 

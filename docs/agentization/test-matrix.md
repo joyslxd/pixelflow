@@ -16,6 +16,9 @@
 4. DTO/API 变更：Python/TypeScript 共享 fixture + OpenAPI operation ID 测试。
 5. Agent/Skill/恢复逻辑变更：同步最新设计、README、AGENTS；content-app 合同变化再同步 `CONTENT_APP_API_CALLS.md`。
 6. 测试不能输出 Authorization、API key、用户原始长 prompt 或完整供应商 URL 查询参数。
+7. 中文提交门禁：当前切片 commit 标题/正文、状态、测试、交接、合并说明包含中文主体语义；自动集成 commit 使用中文模板，纯英文说明直接失败。
+8. 中文注释门禁：新增或修改的人工代码注释、docstring、JSDoc、脚本说明使用中文；机器指令类例外只允许命中仓库最小白名单。
+9. 配置说明门禁：每个新增或修改的叶子配置键都有紧邻中文注释，至少说明用途和影响；JSON 等不支持注释的格式逐键具备 schema `description` 或同目录中文说明映射。
 
 当前前端没有统一 `test`/`build` 脚本，部分 UI 合同测试未纳入 package script，且部分脚本使用 Unix `/tmp/rm`。M00 必须先补跨平台聚合入口和分支自动化测试；完成前，以现有独立命令为准，构建使用 `build-prod`，不要使用不存在的 `pnpm build`。
 
@@ -23,7 +26,7 @@
 
 | 模块 | 必测范围 |
 | --- | --- |
-| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有 18 个测试文件聚合；PowerShell 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、阶段检查点白名单、`ready_for_phase_integration/ready_for_integration`、增量/最终单槽自动集成、每日调度和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
+| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有 18 个测试文件聚合；PowerShell 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、阶段检查点白名单、中文 commit/注释/配置说明、`ready_for_phase_integration/ready_for_integration`、增量/最终单槽自动集成、每日调度和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
 | M01 | `test_pixelflow_task_store.py`、`test_pixelflow_conversations_router.py`、owner isolation、CAS/Inbox/Outbox 新测试、剪映原子 patch |
 | M02 | checkpointer、run manager、gateway runtime cleanup/recovery、harness boundary、新 graph interrupt/restart |
 | M03 | model profile、token budget、context relevance、PowerMem helper、artifact externalization |

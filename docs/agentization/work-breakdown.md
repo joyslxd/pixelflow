@@ -94,13 +94,13 @@ flowchart LR
 | --- | ---: | --- | --- | --- | --- |
 | M00-A.1 | 2h | A | `m00-a` | characterization tests，锁定旧人工确认、pending job、额度暂停、下载完成等不变量 | 旧定向测试保持绿；A 线串行前置 |
 | M00-A.2 | 3h | A | `m00-a` | Python action/workflow/turn/event/context DTO、Ports、fake 与规范 JSON fixture | Python 合同和 fake Port 测试；依赖 A.1 |
-| M00-A.3 | 3h | A | `m00-a` | dev→agent、模块分支/worktree、普通模块自动集成和每日漂移检查 PowerShell 脚本 | Pester/临时仓库验证；依赖 A.2；不实现切片子分支 |
+| M00-A.3 | 3h | A | `m00-a` | dev→agent、模块分支/worktree、普通模块自动集成、每日漂移检查和中文工程规范检查 PowerShell 脚本 | Pester/临时仓库验证中文 commit、注释和配置逐项说明门禁；依赖 A.2；不实现切片子分支 |
 | M00-B.1 | 2.5h | B | `m00-b` | TypeScript 镜像合同、wire event 校验、web 测试入口；不得改写 Python DTO/fixture | Node 合同测试；与 A 线并行，设计源为已评审 `contracts-v1.md` |
-| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，接入 Gitee/Jenkins 门禁、跨平台测试聚合、执行手册第9节唯一话术和自动化状态验收 | 跨端 fixture、dev-sync guard、`build-prod`、ready 自动集成与 02:00 调度；由开发者手动启动一次 |
+| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，接入 Gitee/Jenkins 门禁、跨平台测试聚合、中文工程规范门禁、执行手册第9节唯一话术和自动化状态验收 | 跨端 fixture、dev-sync guard、中文 commit/注释/配置说明、`build-prod`、ready 自动集成与 02:00 调度；由开发者手动启动一次 |
 
 M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁`。如果 A/B 不是从同一设计/Agent 基线创建，或者任一分支修改了对方锁定路径，必须 fail-closed，不允许靠现场手工挑选字段解决。
 
-模块闸门：Python/TS 对同一 fixture 解析一致；开关默认 `off`；现有接口 OpenAPI 无删除或改名；模块开始/合并脚本都能证明最新 dev SHA 是候选祖先；冲突/失败时 Agent 主干不变；未配置远端流水线时不能标记 `automation_active`。
+模块闸门：Python/TS 对同一 fixture 解析一致；开关默认 `off`；现有接口 OpenAPI 无删除或改名；模块开始/合并脚本都能证明最新 dev SHA 是候选祖先；中文 commit、代码注释和配置逐项说明检查通过；冲突/失败时 Agent 主干不变；未配置远端流水线时不能标记 `automation_active`。
 
 ### M01：业务持久化、CAS、Turn Inbox 与 Event Outbox
 
@@ -346,13 +346,16 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 1. 在对应模块状态文件写 `in_progress`、base SHA、branch、当前切片、唯一写入者和文件锁。
 2. 只有模块第一个切片检查 dev→agent 同步并从最新 Agent SHA 创建模块分支/worktree；中间切片恢复同一模块分支/worktree。
 3. 先写或确认失败测试，再写最小实现。
+4. 确认本切片遵循根目录 `AGENTS.md` 的中文工程规范；涉及配置时先列出全部新增/修改配置键及其中文说明要求。
 
 完成后：
 
 1. 运行定向测试和 `git diff --check`。
-2. 更新状态文件：已完成、修改文件、测试命令/结果、决策、commit/push 和下一切片第一步。
-3. 当前切片完成后 Codex 必须停止，等待开发者手动发送“继续下一个未完成切片”；不得自动连续完成整个模块。
-4. 不跨模块顺手修复；发现问题记入模块状态或 `integration/DECISIONS.md`。
+2. 检查新增/修改代码注释均为中文解释，逐项核对新增/修改配置及其中文注释或 schema/说明映射。
+3. 使用中文编写 commit 标题/正文、状态、测试和交接记录；中文规范门禁通过后才允许 commit/push。
+4. 更新状态文件：已完成、修改文件、测试命令/结果、中文规范检查结果、决策、commit/push 和下一切片第一步。
+5. 当前切片完成后 Codex 必须停止，等待开发者手动发送“继续下一个未完成切片”；不得自动连续完成整个模块。
+6. 不跨模块顺手修复；发现问题记入模块状态或 `integration/DECISIONS.md`。
 
 到达阶段检查点或模块最后一个切片后：
 
