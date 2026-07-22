@@ -3,6 +3,9 @@
 docs/*
 !docs/
 !docs/pixelflow-agent-skill-flow-latest-design.md
+!docs/PixelFlow完整Agent化改造方案与并行实施计划.docx
+!docs/agentization/
+!docs/agentization/**
 
 # IntelliJ IDEA / PyCharm local project metadata.
 .idea/
