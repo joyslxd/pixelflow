@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 _MAPPED_ENV_KEYS = {
     "BORGRISE_BASE_URL",
@@ -95,12 +96,6 @@ gateway:
   enable_docs: {str(docs).lower()}
   cors_origins: http://localhost:5273
 pixelflow:
-  agent_runtime:
-    mode: assist
-    enabled_intents:
-      - video
-    new_conversation_rollout_percent: 100
-    context_compaction_enabled: true
   mysql_url: mysql+asyncmy://user:pwd@localhost:3306/pixelflow
   mem0_enabled: false
   semantic_memory_enabled: true
@@ -156,6 +151,17 @@ database:
 def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_file = tmp_path / "config.dev.yml"
     _write_minimal_profile(config_file, port=8123, docs=False)
+    profile_data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    profile_data["pixelflow"]["agent_runtime"] = {
+        "mode": "assist",
+        "enabled_intents": ["video"],
+        "new_conversation_rollout_percent": 100,
+        "context_compaction_enabled": True,
+    }
+    config_file.write_text(
+        yaml.safe_dump(profile_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
 
     from app.gateway.profile_config import load_profile_config
