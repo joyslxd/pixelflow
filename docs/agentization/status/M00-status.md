@@ -1,17 +1,18 @@
 # M00 合同、分支自动化、feature flag 与测试入口
 
-- phase：`in_progress`
+- phase：`merged`
 - owner：A（后端合同/自动化）+ B（前端镜像合同）
-- reviewer：A/B 互审
+- reviewer：A/B 互审 + 独立终审 `/root/m00_i1_independent_review`
 - base SHA：`8e626ae232d984f14fa9954b672b4e025894d426`
 - branches：
-  - A 线：`codex/agent-0.8.4-m00-a`，远端 HEAD `89cf1ff4dfcd7dd73f1c471935f00c149a7093ef`
-  - B 线：`codex/agent-0.8.4-m00-b`，远端 HEAD `efadb5d48a9c81655332acb2369918c5af88db27`
-  - 首次集成：按需创建临时 `codex/integrate-m00-YYYYMMDD-HHMM`
+  - A 线：`codex/agent-0.8.4-m00-a`，本轮冻结远端 HEAD `89cf1ff4dfcd7dd73f1c471935f00c149a7093ef`
+  - B 线：`codex/agent-0.8.4-m00-b`，本轮冻结远端 HEAD `efadb5d48a9c81655332acb2369918c5af88db27`
+  - 集成候选：`codex/integrate-m00-20260724-0043`
 - contract/design base SHA：`8e626ae232d984f14fa9954b672b4e025894d426`；M00-A/M00-B 已证明从同一 SHA 创建
-- 当前切片：`M00-I.1`，按 D-008 和执行手册 9.5 重新创建候选
-- feature flag：尚未实现；设计要求默认 `off`
-- 文件锁：A 只写后端合同/fixture、`scripts/agentization/**` 及其测试；B 只写 TypeScript 镜像合同、前端合同测试和 web 测试入口；两线分别更新自己的状态文件
+- 当前切片：`M00-I.1` 已完成
+- automation state：`automation_local_ready`
+- feature flag：已实现启动期配置合同，默认严格为 `off + [] + 0 + false`；尚未接管任何业务流程
+- 文件锁：A/B 开发写锁均已释放；M00-I.1 仅由唯一集成人写候选和汇总状态
 
 ## 切片
 
@@ -19,15 +20,28 @@
 - [x] M00-A.2 Python DTO/Ports/fakes/规范 fixture（A，3h；依赖 A.1）
 - [x] M00-A.3 dev→agent 同步、模块分支/worktree、单槽集成和中文提交/注释/配置说明门禁脚本（A，3h；依赖 A.2）
 - [x] M00-B.1 TypeScript 镜像合同、wire event 与 web 测试入口（B，2.5h；与 A 线并行，只读 `contracts-v1.md`）
-- [ ] M00-I.1 首次 M00 集成、跨端合同、中文工程规范、本地单槽门禁和 `automation_local_ready` 验收（A+B 评审，单一集成人写入，3h；A/B 两线完成后由开发者手动启动）
+- [x] M00-I.1 首次 M00 集成、跨端合同、中文工程规范、本地单槽门禁和 `automation_local_ready` 验收（A+B 评审，单一集成人写入）
 
-## 当前记录
+## 集成记录
 
-- 已完成：设计级合同、模块拆分、测试矩阵、M00-A.1–M00-A.3 和 M00-B.1；A/B 两条远端分支均为 `ready_for_integration`。
-- 尚未完成：M00-I.1 尚未进入长期 Agent；上一条候选仅作为 blocked 证据，不得直接合入。
-- 下一步第一动作：复制执行手册 9.5 修订话术，按最新四条远端引用创建新的 M00-I.1 候选。
-- 已知风险：Python/TS 字段命名必须在 `M00-I.1` 用 A 线规范 fixture 做跨端验证；B 线不得创建第二权威 fixture。
-- 固定集成顺序：`最新 Agent + 最新 dev → M00-A → M00-A定向测试 → M00-B → M00跨端合同/M00范围全量/flag-off/本地自动化门禁`。临时集成候选只有一个写入者；不得运行 M02 定向集合或 M13 后端仓库全量。
-- Pester 兼容：候选必须在 Windows PowerShell 5.1 + Pester 3.4 执行；数组成员检查使用 `-contains` 布尔断言，禁止把 Pester 3.4 的文件断言 `Should Contain` 用于数组。
-- 自动化状态：A 线脚本已达到 `automation_local_ready`，但 M00 整体尚未集成，整体状态仍为 `design_only`；M00-I.1 本地候选门禁绿色后把整体更新为 `automation_local_ready` 即可完成 M00。当前没有 Jenkins 或其他远端 CI，不新增无效 `Jenkinsfile`，也不得写 `automation_active`。
-- 启动例外：M00-I.1 由开发者手动启动一次。后续 M01–M12 的阶段/最终集成和 dev→agent 漂移检查继续由开发者按执行手册人工触发仓库脚本；未来实际部署并验收远端 CI 后，才改为无人值守触发。
+- 四条冻结远端引用：
+  - Agent：`90ace58e58a665d54219698bdf46bf4ba9543610`
+  - dev：`fb7450775a227d891372c19eae1b308045c51e68`
+  - M00-A：`89cf1ff4dfcd7dd73f1c471935f00c149a7093ef`
+  - M00-B：`efadb5d48a9c81655332acb2369918c5af88db27`
+- 固定集成顺序已执行：`最新 Agent + 最新 dev → M00-A → M00-A定向测试 → M00-B → M00跨端合同/M00范围全量/flag-off/本地自动化门禁`。
+- 关键候选提交：dev 同步 `55e187b`、M00-A 合入 `ccc5881`、M00-B 合入 `974bccd`、M00-I.1 最终实现与审核整改 `9b7a292`。
+- M00-A 定向 Final 门禁 `4/4`；M00 Final 门禁 `8/8`。完整证据见 `docs/agentization/test-reports/M00-I.1.md`。
+- Python/TypeScript 共用唯一 Python fixture；前端聚合入口会生成并严格编译 TypeScript fixture 类型，不存在第二权威 fixture。
+- Agent Runtime 启动配置非法时 fail-closed；默认关闭。现有 OpenAPI 合同未删除或改名。
+- Windows PowerShell 5.1 + Pester 3.4 使用 `-contains` 布尔数组断言；未把文件内容断言 `Should Contain` 用于数组。
+- 本轮未执行 M01–M13 模块门禁，未执行 M02 gateway runtime cleanup 等定向测试，未执行 M13 后端仓库全量测试。
+- 当前没有 Jenkins 或其他远端 CI；未新增 `Jenkinsfile`，未要求管理员配置、保护分支或 WebHook，自动化状态保持 `automation_local_ready`，绝不记为 `automation_active`。
+- 未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API。
+- 独立终审无 Critical、Important 或 Minor 阻塞；四条远端基线在候选验收后复核未变化。
+
+## 下一步
+
+- M00 已完成，无硬阻塞。按 R1 顺序可并行启动 A 线 M01/M03 和 B 线 M07；依赖满足后再启动 M04 与 M12。
+- 后续阶段/最终单槽集成和 dev→agent 漂移检查继续由开发者按执行手册人工触发仓库脚本；未来实际部署并验收远端 CI 后，才能提升为 `automation_active`。
+- 生产运行模式、`enabled_intents`、真实付费冒烟及 Agent→dev 收口仍需人工明确批准；M00 不授权发布。

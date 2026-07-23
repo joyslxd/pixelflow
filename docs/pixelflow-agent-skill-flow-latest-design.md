@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-07-17
+更新时间：2026-07-24
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -850,6 +850,10 @@ flowchart TD
 | `BORGRISE_PPT_POLL_TIMEOUT=7200` | SmartPPT 每一步轮询默认 2 小时 |
 | `borgrise.max_retries=3` | 异常重试次数 |
 | `BORGRISE_STATUS_POLL_ERROR_RECOVERY_ATTEMPTS=3` | `/api/task/{taskId}/status` 可恢复网络错误后的额外状态轮询次数 |
+| `PIXELFLOW_AGENT_RUNTIME_MODE=off` | Agent Runtime 运行模式；M00 默认关闭，仅建立启动配置合同，不接管现有业务 |
+| `PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS=[]` | Agent Runtime 可接管 intent 列表；M00 默认空数组，只允许 `video/image/ppt/video_analysis` |
+| `PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT=0` | 新对话接管比例；M00 默认 0，只接受 0–100 的十进制整数 |
+| `PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED=false` | 是否启用新 Runtime 上下文压缩；M00 默认关闭，不启动压缩流程 |
 
 配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
 
@@ -951,7 +955,7 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构，但截至 2026-07-22 尚未进入业务代码实现。实施期间必须区分“当前实现事实”和“已批准目标设计”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-24，M00 已完成合同、唯一 fixture、默认关闭启动配置和本地门禁基础设施；M01–M13 的业务 Agent Runtime 尚未实现，现有图片、视频、PPT 和视频分析流程仍未被新 Runtime 接管。实施期间必须区分“当前实现事实”和“已批准目标设计”，不能把设计中的 API、状态或自动化描述成已经在线运行。
 
 目标方案采用四阶段上线：
 
@@ -962,7 +966,7 @@ corepack pnpm build
 | R3 | 第 13 个工作日 | 图片/图片编辑、PPT、视频分析接入同一 Supervisor 和 Context Runtime |
 | R4 | 第 16–18 个工作日 | 五条主流程全量 E2E、Shadow、回滚和新对话全面接管验收 |
 
-开发固定采用“两人、多 Codex、模块之间并行、模块内部切片串行”：每个 Codex 任务只执行一个 1–3 小时切片，完成 TDD、测试、审核、状态记录、commit 和 push 后停止；下一切片必须由开发者手动启动。合法阶段检查点和模块最终提交可由 M00 交付的远端单槽流水线自动纳入 `feature/agent_0.8.4_boguan`，但生产运行模式、`enabled_intents`、Feature Flag、真实付费冒烟和最终 Agent→dev 收口仍需人工明确批准。当前无真实外部用户，各阶段获批后均覆盖全部新对话100%：R1为`assist`，R2仅`video`进入`primary`，R3/R4四类intent进入`primary`；不实现随机百分比灰度或用户白名单。
+开发固定采用“两人、多 Codex、模块之间并行、模块内部切片串行”：每个 Codex 任务只执行一个 1–3 小时切片，完成 TDD、测试、审核、状态记录、commit 和 push 后停止；下一切片必须由开发者手动启动。当前自动化状态为 `automation_local_ready`：合法阶段检查点、模块最终提交和 dev→agent 漂移检查由开发者按执行手册人工触发 M00 交付的仓库单槽脚本；只有未来实际部署并验收远端 CI 后，才能改为无人值守触发并标记 `automation_active`。生产运行模式、`enabled_intents`、Feature Flag、真实付费冒烟和最终 Agent→dev 收口仍需人工明确批准。当前无真实外部用户，各阶段获批后均覆盖全部新对话100%：R1为`assist`，R2仅`video`进入`primary`，R3/R4四类intent进入`primary`；不实现随机百分比灰度或用户白名单。
 
 完整事实源位于：
 
