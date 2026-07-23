@@ -13,6 +13,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
 from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
@@ -30,7 +31,7 @@ PIXELFLOW_TASK_TABLES = [
     PixelFlowAssetRow.__table__,
     PixelFlowConversationRow.__table__,
     PixelFlowConversationMessageRow.__table__,
-]
+] + list(AGENT_RUNTIME_TABLES)
 
 
 _MICROSECOND_COLUMNS = {
