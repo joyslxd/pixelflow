@@ -44,6 +44,12 @@ class LoadedProfileConfig:
 
 _loaded_profile: LoadedProfileConfig | None = None
 _managed_env_keys: set[str] = set()
+_AGENT_RUNTIME_PROFILE_FIELDS = {
+    "mode",
+    "enabled_intents",
+    "new_conversation_rollout_percent",
+    "context_compaction_enabled",
+}
 
 
 # YAML 路径 -> 环境变量名映射表。
@@ -195,6 +201,26 @@ def _apply_known_mappings(data: dict[str, Any]) -> None:
             _set_env(env_key, value)
 
 
+def _validate_agent_runtime_profile(data: dict[str, Any]) -> None:
+    """区分配置缺失与显式空值，防止 Agent Runtime 静默回退默认值。"""
+
+    pixelflow = data.get("pixelflow")
+    if not isinstance(pixelflow, dict) or "agent_runtime" not in pixelflow:
+        return
+    runtime = pixelflow["agent_runtime"]
+    if not isinstance(runtime, dict):
+        raise ValueError("pixelflow.agent_runtime 必须是 YAML 对象")
+    unknown_fields = set(runtime) - _AGENT_RUNTIME_PROFILE_FIELDS
+    if unknown_fields:
+        unknown_text = ", ".join(sorted(str(field) for field in unknown_fields))
+        raise ValueError(f"pixelflow.agent_runtime 包含不支持的配置键：{unknown_text}")
+    for field_name, value in runtime.items():
+        if value is None or value == "":
+            raise ValueError(f"pixelflow.agent_runtime.{field_name} 不能是 null 或空字符串")
+        if field_name == "enabled_intents" and not isinstance(value, list):
+            raise ValueError("pixelflow.agent_runtime.enabled_intents 必须是 YAML 数组")
+
+
 def _apply_extra_environment(data: dict[str, Any]) -> None:
     """写入 ``environment.variables`` 直通配置。
 
@@ -236,6 +262,7 @@ def load_profile_config() -> LoadedProfileConfig:
     if "DEER_FLOW_PROJECT_ROOT" not in os.environ:
         _set_env("DEER_FLOW_PROJECT_ROOT", str(path.parent))
 
+    _validate_agent_runtime_profile(data)
     _apply_known_mappings(data)
     _apply_extra_environment(data)
 

@@ -216,6 +216,67 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["DEER_FLOW_CONFIG_PATH"] == str(config_file)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("mode", None),
+        ("mode", ""),
+        ("enabled_intents", None),
+        ("enabled_intents", {}),
+        ("new_conversation_rollout_percent", None),
+        ("context_compaction_enabled", None),
+    ],
+)
+def test_explicit_invalid_agent_runtime_profile_value_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    config_file = tmp_path / "config.dev.yml"
+    _write_minimal_profile(config_file)
+    profile_data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    profile_data["pixelflow"]["agent_runtime"] = {
+        "mode": "off",
+        "enabled_intents": [],
+        "new_conversation_rollout_percent": 0,
+        "context_compaction_enabled": False,
+    }
+    profile_data["pixelflow"]["agent_runtime"][field_name] = invalid_value
+    config_file.write_text(
+        yaml.safe_dump(profile_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
+
+    from app.gateway.profile_config import load_profile_config
+
+    with pytest.raises(ValueError, match=f"pixelflow.agent_runtime.{field_name}"):
+        load_profile_config()
+
+
+@pytest.mark.parametrize("invalid_runtime", [None, [], "off"])
+def test_agent_runtime_profile_requires_an_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_runtime: object,
+) -> None:
+    config_file = tmp_path / "config.dev.yml"
+    _write_minimal_profile(config_file)
+    profile_data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    profile_data["pixelflow"]["agent_runtime"] = invalid_runtime
+    config_file.write_text(
+        yaml.safe_dump(profile_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
+
+    from app.gateway.profile_config import load_profile_config
+
+    with pytest.raises(ValueError, match="pixelflow.agent_runtime 必须是 YAML 对象"):
+        load_profile_config()
+
+
 def test_borgrise_project_id_is_no_longer_profile_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """content-app/Borgrise 接口不再接收 projectId，配置里的旧字段也不能再导出。"""
     config_file = tmp_path / "config.dev.yml"

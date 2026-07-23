@@ -367,6 +367,7 @@ Describe "Agent 分支自动化入口" {
         @($webCommands | Where-Object { $_.Arguments -contains "build-prod" }).Count | Should Be 1
         ($allArguments -match "test_gateway_runtime_cleanup") | Should Be $false
         ($allArguments -match "M0[1-9]|M1[0-3]") | Should Be $false
+        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M00" -GateType "Final" -AdditionalGateScript "outside-m00.ps1" -PlanOnly } | Should Throw
     }
 
     It "阶段集成把触发参数绑定到远端 checkpoint 元数据" {

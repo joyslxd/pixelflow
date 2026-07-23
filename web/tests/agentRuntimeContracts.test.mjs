@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const moduleUrl = process.env.AGENT_RUNTIME_CONTRACTS_TEST_MODULE;
@@ -7,6 +7,8 @@ assert.ok(moduleUrl, "AGENT_RUNTIME_CONTRACTS_TEST_MODULE 必须指向编译后�
 const fixturePath = process.env.AGENT_RUNTIME_CONTRACT_FIXTURE;
 assert.ok(fixturePath, "AGENT_RUNTIME_CONTRACT_FIXTURE 必须指向 Python 唯一规范 fixture");
 const contractFixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+const generatedTypeTestPath = process.env.AGENT_RUNTIME_GENERATED_TYPE_TEST;
+assert.ok(generatedTypeTestPath, "必须从 Python 唯一 fixture 生成 TypeScript 类型检查文件");
 
 const {
   ACTION_VALUES,
@@ -15,6 +17,7 @@ const {
   INTENT_VALUES,
   ORCHESTRATION_MODE_VALUES,
   TURN_STATUS_VALUES,
+  WORKFLOW_KIND_VALUES,
   WORKFLOW_STATUS_VALUES,
   isAgentEventEnvelope,
   parseAgentEventEnvelope,
@@ -42,6 +45,15 @@ test("TypeScript 合同直接读取 Python 唯一规范 fixture", () => {
     "operation_request",
     "context_request",
   ], "fixture 根字段漂移");
+});
+
+test("测试运行器从唯一 fixture 生成全 DTO TypeScript 检查", () => {
+  assert.equal(existsSync(generatedTypeTestPath), true);
+  const generatedSource = readFileSync(generatedTypeTestPath, "utf8");
+  assert.match(generatedSource, /type CanonicalFixture =/u);
+  assert.match(generatedSource, /const fixture: CanonicalFixture =/u);
+  assert.match(generatedSource, /"workflow_record":/u);
+  assert.match(generatedSource, /"context_envelope":/u);
 });
 
 test("TypeScript 镜像覆盖 fixture 中全部冻结 DTO 字段", () => {
@@ -190,6 +202,7 @@ test("镜像合同枚举与 contracts-v1.md 冻结值一致", () => {
     "clarify",
   ]);
   assert.deepEqual(INTENT_VALUES, ["image", "video", "ppt", "video_analysis", "general"]);
+  assert.deepEqual(WORKFLOW_KIND_VALUES, ["image", "video", "ppt", "video_analysis"]);
   assert.deepEqual(WORKFLOW_STATUS_VALUES, [
     "draft",
     "awaiting_user",

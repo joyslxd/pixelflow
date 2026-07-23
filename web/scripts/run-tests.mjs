@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const contractOnly = process.argv.includes("--contracts");
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-"));
+const typeTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-contract-types-"));
 const moduleDirectory = path.join(temporaryRoot, "modules");
 const apiDirectory = path.join(temporaryRoot, "api");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
@@ -25,6 +26,10 @@ const agentRuntimeContractFixture = path.resolve(
   "fixtures",
   "agent_runtime",
   "contracts-v1.json",
+);
+const generatedAgentRuntimeTypeTest = path.join(
+  typeTestRoot,
+  "canonicalFixture.type-test.ts",
 );
 
 function run(command, args, options = {}) {
@@ -74,6 +79,65 @@ function checkContractTypes() {
   ]);
 }
 
+function checkCanonicalFixtureTypes() {
+  const fixture = JSON.parse(readFileSync(agentRuntimeContractFixture, "utf8"));
+  const contractsWithoutExtension = path.join(webRoot, "src/lib/supervisor/contracts");
+  const relativeContractsPath = path
+    .relative(typeTestRoot, contractsWithoutExtension)
+    .split(path.sep)
+    .join("/");
+  const contractsImport = relativeContractsPath.startsWith(".")
+    ? relativeContractsPath
+    : `./${relativeContractsPath}`;
+  const generatedTypeTest = `
+import type {
+  ActionDecision,
+  AgentEventEnvelope,
+  ContextEnvelope,
+  ContextRequest,
+  ContextSummary,
+  ConversationOrchestration,
+  ExternalJobRef,
+  OperationRequest,
+  TurnRecord,
+  TurnStartRequest,
+  WorkflowRecord,
+} from ${JSON.stringify(contractsImport)};
+
+type CanonicalFixture = {
+  schema_version: 1;
+  orchestration: ConversationOrchestration;
+  action_decision: ActionDecision;
+  external_job_ref: ExternalJobRef;
+  workflow_record: WorkflowRecord;
+  turn_record: TurnRecord;
+  context_summary: ContextSummary;
+  context_envelope: ContextEnvelope;
+  event: AgentEventEnvelope;
+  turn_start_request: TurnStartRequest;
+  operation_request: OperationRequest;
+  context_request: ContextRequest;
+};
+
+const fixture: CanonicalFixture = ${JSON.stringify(fixture)};
+void fixture;
+`;
+  writeFileSync(generatedAgentRuntimeTypeTest, generatedTypeTest);
+  run(process.execPath, [
+    tscEntry,
+    generatedAgentRuntimeTypeTest,
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--noEmit",
+    "--skipLibCheck",
+    "--strict",
+  ]);
+}
+
 function compileApiModule() {
   run(process.execPath, [
     tscEntry,
@@ -98,6 +162,7 @@ try {
 
   writeFileSync(path.join(temporaryRoot, "package.json"), JSON.stringify({ type: "module" }));
   checkContractTypes();
+  checkCanonicalFixtureTypes();
 
   if (contractOnly) {
     compileStandaloneModules(["src/lib/supervisor/contracts.ts"]);
@@ -136,6 +201,7 @@ try {
         contractOnly ? "contracts.js" : "supervisor/contracts.js",
       ),
       AGENT_RUNTIME_CONTRACT_FIXTURE: agentRuntimeContractFixture,
+      AGENT_RUNTIME_GENERATED_TYPE_TEST: generatedAgentRuntimeTypeTest,
       API_TEST_MODULE: moduleUrl(apiDirectory, "api.js"),
       AUTH_STORAGE_TEST_MODULE: moduleUrl(moduleDirectory, "authStorage.js"),
       CONVERSATION_ROUTING_TEST_MODULE: moduleUrl(moduleDirectory, "conversationRouting.js"),
@@ -153,4 +219,5 @@ try {
   });
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
+  rmSync(typeTestRoot, { recursive: true, force: true });
 }

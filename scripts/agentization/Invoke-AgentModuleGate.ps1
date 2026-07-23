@@ -56,6 +56,9 @@ if ($ModuleId -eq "M00") {
     if ($GateType -ne "Final") {
         throw "M00-I.1 只允许执行 Final 门禁。"
     }
+    if (-not [string]::IsNullOrWhiteSpace($AdditionalGateScript)) {
+        throw "M00-I.1 禁止追加范围外门禁脚本。"
+    }
 }
 else {
     Get-AgentModuleDefinition -ModuleId $ModuleId | Out-Null

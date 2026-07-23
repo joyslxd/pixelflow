@@ -316,7 +316,7 @@ pixelflow:
     mode: off  # off | shadow | assist | primary
     enabled_intents: []
     new_conversation_rollout_percent: 0
-    context_compaction_enabled: true
+    context_compaction_enabled: false
 ```
 
 - `off`：行为等同当前 v2。

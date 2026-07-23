@@ -55,6 +55,7 @@ def test_agent_runtime_accepts_explicit_approved_values(monkeypatch: pytest.Monk
         ("PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS", "["),
         ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "-1"),
         ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "101"),
+        ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "1.0"),
         ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "all"),
         ("PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED", "sometimes"),
     ],
@@ -67,6 +68,17 @@ def test_agent_runtime_rejects_invalid_startup_values(
     from pixelflow.agent_runtime.config import load_agent_runtime_config_from_env
 
     monkeypatch.setenv(key, value)
+
+    with pytest.raises(ValueError, match="Agent Runtime 配置无效"):
+        load_agent_runtime_config_from_env()
+
+
+def test_agent_runtime_rejects_explicit_empty_intent_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pixelflow.agent_runtime.config import load_agent_runtime_config_from_env
+
+    monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS", "")
 
     with pytest.raises(ValueError, match="Agent Runtime 配置无效"):
         load_agent_runtime_config_from_env()

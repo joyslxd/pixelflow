@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -40,13 +41,20 @@ class AgentRuntimeConfig(BaseModel):
 def _parse_enabled_intents(raw_value: str) -> tuple[str, ...]:
     value = raw_value.strip()
     if not value:
-        return ()
+        raise ValueError("enabled_intents 显式配置不能为空")
     if value.startswith("["):
         parsed = json.loads(value)
         if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
             raise ValueError("enabled_intents 必须是字符串数组")
         return tuple(item.strip() for item in parsed)
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _parse_rollout_percent(raw_value: str) -> int:
+    value = raw_value.strip()
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)", value, flags=re.ASCII) is None:
+        raise ValueError("new_conversation_rollout_percent 必须是十进制整数")
+    return int(value)
 
 
 def _parse_bool(raw_value: str) -> bool:
@@ -62,14 +70,19 @@ def load_agent_runtime_config_from_env() -> AgentRuntimeConfig:
     """读取并校验进程启动环境；缺省值保持新 Runtime 完全关闭。"""
 
     try:
+        enabled_intents_value = os.getenv("PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS")
         return AgentRuntimeConfig(
             mode=os.getenv("PIXELFLOW_AGENT_RUNTIME_MODE", "off").strip(),
-            enabled_intents=_parse_enabled_intents(
-                os.getenv("PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS", ""),
+            enabled_intents=(
+                ()
+                if enabled_intents_value is None
+                else _parse_enabled_intents(enabled_intents_value)
             ),
-            new_conversation_rollout_percent=os.getenv(
-                "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
-                "0",
+            new_conversation_rollout_percent=_parse_rollout_percent(
+                os.getenv(
+                    "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
+                    "0",
+                ),
             ),
             context_compaction_enabled=_parse_bool(
                 os.getenv("PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED", "false"),
