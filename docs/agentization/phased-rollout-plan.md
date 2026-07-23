@@ -20,15 +20,15 @@
 ### 2.1 状态
 
 - `ready_for_phase_integration`：当前模块到达本文件列出的阶段检查点，检查点测试通过，可以把本模块截至当前 commit 的增量纳入 Agent 集成候选。
-- `phase_integrated`：该检查点已经通过单槽流水线进入 `feature/agent_0.8.4_boguan`，但模块仍可能有后续切片，不能标记为 `done`。
+- `phase_integrated`：该检查点已经通过单槽候选进入 `feature/agent_0.8.4_boguan`，但模块仍可能有后续切片，不能标记为 `done`。
 - `phase_integration_blocked`：检查点冲突、测试失败或远端基线变化；Agent 主干保持不变。
 - `ready_for_integration`：模块全部切片完成后的最终集成状态，含义保持不变。
 
 模块状态必须记录：`release_id`、`checkpoint_slice`、`checkpoint_commit`、`last_integrated_commit`、`checkpoint_status` 和门禁证据。同一模块后续切片继续复用原模块分支/worktree，禁止 force-push；下一检查点只集成 `last_integrated_commit..checkpoint_commit` 的增量。
 
-### 2.2 自动化
+### 2.2 单槽集成
 
-普通模块最终完成或达到本文件明确定义的阶段检查点时，远端单槽流水线都按以下方式构建候选：
+普通模块最终完成或达到本文件明确定义的阶段检查点时，单槽集成任务都按以下方式构建候选：
 
 ```text
 最新 Agent + 最新 dev + 模块 checkpoint commit
@@ -53,7 +53,7 @@
 | --- | --- | --- |
 | A | M00-A、M01、M03、M04 | 合同、Turn/Summary/Event、上下文档案、60/72/85/92压缩、压缩锁和排队 |
 | B | M00-B、M07、M12.1–M12.3 | TypeScript合同、Snapshot/SSE/Reducer、双运行时挂载、压缩和排队UI、历史恢复 |
-| A+B | M00-I.1、M13-R1 | 跨端fixture、assist门禁、旧流程等价和全部新对话100%发布门禁 |
+| A+B | M00-I.1、M13-R1 | M00 跨端 fixture 与本地自动化门禁、assist 门禁、旧流程等价和全部新对话100%发布门禁 |
 
 M12 在 R1 前三个切片后建立 `R1-assist-ui` 检查点；M12 后续表单/Plan/Artifact交互切片继续在同一模块分支串行开发。
 
@@ -246,12 +246,12 @@ R1：assist + 100%新对话
 
 R1 的标准批准话术位于[执行手册 9.17](branch-and-codex-runbook.md#r1-release-approval)。M13.1 通过但未收到该明确批准时，生产必须保持 `off + 0%`（或保持发布前原值），不得因为“代码已经进入 Agent”自动启用 `assist + 100%`。
 
-### Codex和流水线自动完成
+### Codex 和单槽集成任务完成
 
 - 单切片内TDD、测试、审核、状态记录、commit和push。
-- 明确阶段检查点的候选构建和门禁。
+- 开发者人工触发后，完成明确阶段检查点的候选构建和门禁。
 - 失败时写 `phase_integration_blocked` 并保持Agent主干不变。
-- 每天北京时间02:00的dev漂移检查（M00远端配置验收后）。
+- 当前在模块开工和集成前人工执行dev漂移检查；未来提升为 `automation_active` 后，才增加每天北京时间02:00调度。
 
 ### 必须停止上线
 
@@ -263,6 +263,6 @@ R1 的标准批准话术位于[执行手册 9.17](branch-and-codex-runbook.md#r1
 ## 9. 估算前提
 
 - 两人每天各有6–7小时有效开发/验证时间，并可同时开启不同模块的Codex任务。
-- Gitee/Jenkins、测试环境和模型/供应商配置可用；M00远端管理员配置延误时，R1生产发布顺延1个工作日。
+- 当前没有 Jenkins 或其他远端 CI；M00 和后续模块按 `automation_local_ready` 人工触发单槽集成与漂移检查。测试环境和模型/供应商配置仍需可用，人工触发产生的排队时间计入各阶段缓冲。
 - R1–R3时间包含定向测试、阶段门禁和100%新对话发布验证，不包含无法预估的第三方接口长期故障。
 - D17–D18是缓冲，不应提前承诺给新功能。

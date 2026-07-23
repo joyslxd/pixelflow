@@ -26,7 +26,7 @@
 
 | 模块 | 必测范围 |
 | --- | --- |
-| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有 18 个测试文件聚合；PowerShell 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、阶段检查点白名单、中文 commit/注释/配置说明、`ready_for_phase_integration/ready_for_integration`、增量/最终单槽自动集成、每日调度和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
+| M00 | 新 Python/TS 合同；`test_openapi_operation_ids.py`；前端现有测试文件聚合；Windows PowerShell 5.1 + Pester 3.4 临时仓库验证 dev-sync guard、模块分支/worktree、逐切片串行、阶段检查点白名单、中文 commit/注释/配置说明、`ready_for_phase_integration/ready_for_integration`、增量/最终单槽集成、漂移检查入口和失败不写 Agent 主干；M00-A/M00-B 同源设计/Agent SHA、文件所有权和固定集成顺序 |
 | M01 | `test_pixelflow_task_store.py`、`test_pixelflow_conversations_router.py`、owner isolation、CAS/Inbox/Outbox 新测试、剪映原子 patch |
 | M02 | checkpointer、run manager、gateway runtime cleanup/recovery、harness boundary、新 graph interrupt/restart |
 | M03 | model profile、token budget、context relevance、PowerMem helper、artifact externalization |
@@ -40,6 +40,10 @@
 | M11 | Plan/asset/blueprint/scene package/video router/provider/QC/Jianying 全组；前端 scene/Jianying/main flow |
 | M12 | conversation routing、active Plan snapshot、Plan recovery、main flow、task board、新旧 runtime UI |
 | M13 | 后端全量、前端全量、mock E2E、三进程本地冒烟、shadow、回滚；批准后真实 verifier |
+
+M00-I.1 只运行 M00 行定义的门禁。“M00 范围全量”不包含 M01–M13：M02 的 checkpointer、run manager、gateway runtime cleanup/recovery 和 harness boundary 在 M02 执行；后端仓库全量只在 M13 执行。下游测试红灯必须留在对应模块修复，不能反向阻止 M00 合同、脚本和前端聚合入口进入 Agent。
+
+M00 PowerShell 测试的权威兼容环境是 Windows PowerShell 5.1 + Pester 3.4。数组成员断言必须使用 `($items -contains $expected) | Should Be $true`；Pester 3.4 的 `Should Contain` 是文件内容断言，不能用于数组，否则会把首个参数误当成本地文件路径。
 
 ## 4. 新 Agent 必测场景
 
@@ -117,12 +121,12 @@
 - 切片 Codex 只能 push 当前模块分支；测试必须拒绝创建 `mXX-sYY-*` 切片分支，也必须拒绝直接 push `feature/dev_*` 或 `feature/agent_*`。
 - M00-A/M00-B 必须从同一个已包含评审设计的 Agent SHA 创建；两分支 HEAD 必须能证明该 SHA 是共同祖先。
 - M00-B 修改规范 Python DTO/fixture、M00-A 修改 B 锁定的 `web/**` 合同路径、任一分支修改模块汇总状态时，文件所有权门禁必须失败。
-- M00 集成必须按 `最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁` 执行；交换顺序、遗漏分支或两个 Codex 同写临时候选都必须 fail-closed。
+- M00 集成必须按 `最新 Agent + 最新 dev → m00-a → M00-A 定向测试 → m00-b → M00跨端合同/M00范围全量/flag-off/本地自动化门禁` 执行；交换顺序、遗漏分支、调用 M01–M13 门禁或两个 Codex 同写临时候选都必须 fail-closed。
 - 在两个 worktree 强制 checkout 同一模块分支、两个对话尝试并发 push 同一模块或前一切片未 push 就启动下一片时，分支策略测试必须拒绝执行并提示模块内串行。
-- 普通模块合法中间检查点写 `ready_for_phase_integration`、最后一片写 `ready_for_integration` 后必须触发单槽流水线；绿色更新 Agent/BOARD/MERGE_LOG，并分别写 `phase_integrated/merged`；失败分别写 `phase_integration_blocked/integration_blocked` 且 Agent 不变。
+- 普通模块合法中间检查点写 `ready_for_phase_integration`、最后一片写 `ready_for_integration` 后必须进入单槽集成；`automation_local_ready` 时由开发者按执行手册人工触发，未来 `automation_active` 时才由远端流水线触发。绿色更新 Agent/BOARD/MERGE_LOG，并分别写 `phase_integrated/merged`；失败分别写 `phase_integration_blocked/integration_blocked` 且 Agent 不变。
 - 同一模块第二次检查点只允许集成 `last_integrated_commit..checkpoint_commit`，测试必须拒绝 force-push/rebase、重复集成旧 commit 和跳过前置切片。
-- 每天 02:00 调度必须验证 dev 无领先、可安全同步和失败不污染三种路径；已结束的 Codex 对话不能被当作调度器。
-- 未配置 Gitee/Jenkins/Codex Automation 时自动化状态只能是 `automation_local_ready`；远端调度、保护分支和绿色自动合并实际验证后才能是 `automation_active`。
+- 漂移检查脚本必须验证 dev 无领先、可安全同步和失败不污染三种路径。`automation_local_ready` 时在模块开工和集成前人工触发；只有 `automation_active` 才要求每天 02:00 远端调度，已结束的 Codex 对话不能被当作调度器。
+- 未配置 Gitee/Jenkins 或其他 CI 时，M00 可以在本地候选门禁绿色后完成，但自动化状态必须保持 `automation_local_ready`；远端调度、保护分支和绿色自动合并实际验证后才能提升为 `automation_active`。
 
 ## 8. 四阶段上线门禁
 
@@ -145,20 +149,16 @@ uv run pytest tests/test_pixelflow_task_store.py tests/test_pixelflow_conversati
 uv run ruff check pixelflow app/gateway tests
 ```
 
-前端当前示例：
+M00 集成后的前端跨平台聚合入口：
 
 ```powershell
 cd web
-corepack pnpm test:conversation-routing
-corepack pnpm test:active-plan-snapshot
-corepack pnpm test:plan-message-recovery
-corepack pnpm test:jianying-draft
-corepack pnpm test:workflow-task-board
-node --test tests/mainFlowContract.test.mjs tests/jianyingDraftUiContract.test.mjs tests/videoSceneUiContract.test.mjs tests/reviewWindow.test.mjs
+corepack pnpm test:agent-runtime-contracts
+corepack pnpm test
 corepack pnpm lint
 corepack pnpm build-prod
 ```
 
-M00 完成后使用新聚合命令替代逐条 Node 命令，并把实际命令写回本文件和 `AGENTS.md`。
+`test:agent-runtime-contracts` 直接读取 Python 唯一规范 fixture；`test` 聚合执行 `web/tests` 下全部 `*.test.mjs`。M00-B、M07–M12 和 M13 的门禁统一调用聚合入口，避免遗漏新测试文件。
 
 真实验证脚本 `scripts/verify_video_asset_manifest_flow.py` 可能调用外部环境、下载文件和产生费用，只能在 M13 人工批准后运行；其 Authorization 只存在进程环境变量中，不能写入文档或测试报告。

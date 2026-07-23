@@ -40,7 +40,7 @@ Codex 创建模块分支前执行 `dev-sync preflight`：
 
 ### 2.2 普通模块阶段检查点或最后一个切片完成后
 
-只有[四阶段上线计划](phased-rollout-plan.md)明确列出的中间切片可以成为 `release checkpoint`。该切片通过阶段门禁后写 `ready_for_phase_integration`；模块最后一片通过完整门禁后写 `ready_for_integration`。远端单槽流水线随后自动构建：
+只有[四阶段上线计划](phased-rollout-plan.md)明确列出的中间切片可以成为 `release checkpoint`。该切片通过阶段门禁后写 `ready_for_phase_integration`；模块最后一片通过完整门禁后写 `ready_for_integration`。单槽集成随后构建：
 
 ```text
 最新 origin/feature/agent_0.8.4_boguan
@@ -53,36 +53,37 @@ Codex 创建模块分支前执行 `dev-sync preflight`：
 
 - dev-sync guard、模块定向/边界测试和 flag-off 回归全部绿色；
 - 候选构建后远端 agent/dev 没有再次前进；
-- 只有单槽流水线可以更新 Agent 保护分支；
+- 只有单槽集成任务可以更新 Agent；未来启用保护分支后也只授予该任务更新权限；
 - 绿色时更新 Agent、`status/BOARD.md` 和 `integration/MERGE_LOG.md`；
 - 阶段检查点绿色后写 `phase_integrated`，但模块仍按同一分支串行开发后续切片；最终模块绿色后写 `merged`；
 - 冲突或测试失败时 Agent 保持不变，中间检查点写 `phase_integration_blocked`，最终模块写 `integration_blocked` 并保存安全证据；
 - 后续检查点只集成 `last_integrated_commit..checkpoint_commit` 的新增历史，禁止 force-push/rebase 已共享模块分支；
 - dev 在测试期间前进时当前候选自动失效并从最新远端重建。
 
-普通模块不要求开发者再手动启动集成任务。M00 是引导自动化的例外，见 2.4。
+`automation_local_ready` 是当前实际模式：模块状态和 checkpoint commit 推送后停止，由开发者复制 9.10A 话术手动启动单槽集成。只有未来状态提升为 `automation_active` 后，才由远端 CI 自动触发；两种模式执行同一候选构建和 fail-closed 门禁。
 
-### 2.3 每天北京时间 02:00
+### 2.3 dev→agent 漂移检查
 
-Gitee/Jenkins 定时流水线执行 `dev-sync reconciliation`：
+`dev-sync reconciliation` 执行以下检查：
 
 - dev 没有领先：成功结束，不做变更；
 - dev 领先且可无冲突合并：创建同步候选，运行非付费回归，绿色后进入 Agent 单槽队列；
 - 冲突或测试失败：不修改 Agent，记录安全证据并通知；
 - 凭据、用户内容、完整 URL 或异常堆栈不得写入通知和日志。
 
-Codex 对话结束后不会在每天 02:00 自行唤醒。定时能力必须由 M00 生成的仓库脚本和一次性配置的 Gitee/Jenkins 调度执行。M00 未完成前只能标记 `design_only`；本地脚本完成但远端未配置时只能标记 `automation_local_ready`；实际调度、保护分支和绿色自动合并验证后才能标记 `automation_active`。
+当前没有 Jenkins 或其他远端 CI，状态固定为 `automation_local_ready`：开发者必须在每个模块首次开工、阶段检查点集成和最终模块集成前人工触发该脚本。未来实际配置远端 CI 后，才可增加每天北京时间 02:00 调度并把状态提升为 `automation_active`。Codex 对话结束后不会自行定时唤醒，也不能把人工触发描述成无人值守调度。
 
 ### 2.4 M00 首次引导例外
 
-M00 自身负责创建上述自动化，因此不能依赖尚不存在的流水线完成第一次集成：
+M00 自身负责创建上述本地安全脚本，因此不能依赖当前不存在的远端 CI 完成第一次集成：
 
 1. 开发者分别启动 M00-A、M00-B 的每个短切片；两条线并行，各线内部串行。
 2. A/B 全部完成后，开发者手动启动一次 `M00-I.1`。
-3. `M00-I.1` 创建临时 `codex/integrate-m00-YYYYMMDD-HHMM`，纳入最新 agent/dev、M00-A、M00-B 并运行跨端/自动化门禁。
-4. 完成一次性 Gitee/Jenkins 管理员配置并实际验收后，M01–M12 才能依赖无人值守自动集成和每日调度。
+3. `M00-I.1` 创建临时 `codex/integrate-m00-YYYYMMDD-HHMM`，纳入最新 agent/dev、M00-A、M00-B 并运行 M00 跨端合同、flag-off、Pester、Web 聚合、构建、中文工程规范和本地分支自动化门禁。
+4. 本地候选全部绿色且远端基线未变化后即可更新 Agent，把状态写为 `automation_local_ready` 并完成 M00；缺少 Jenkins/Gitee 流水线不是阻塞项。
+5. M00-I.1 不运行 M01–M13 模块门禁；M02 定向集合由 M02 执行，后端仓库全量只由 M13 执行。
 
-## 3. 自动化脚本与一次性远端配置
+## 3. 本地自动化脚本与可选远端配置
 
 M00 计划交付：
 
@@ -93,11 +94,11 @@ M00 计划交付：
 | `scripts/agentization/Start-AgentModule.ps1` | 同步预检后创建模块分支、worktree、状态记录和远端 tracking；M00 支持 `a/b` lane |
 | `scripts/agentization/Integrate-AgentModule.ps1` | 获取单槽锁，校验 module/release/checkpoint 后按最新 Agent + dev + 模块增量构建候选并执行门禁 |
 | `scripts/agentization/Invoke-AgentModuleGate.ps1` | 根据模块 ID 和可选 release ID 运行阶段或最终定向、边界、flag-off 和构建测试 |
-| `scripts/agentization/Reconcile-DevToAgent.ps1` | 每日 02:00 漂移检查入口 |
+| `scripts/agentization/Reconcile-DevToAgent.ps1` | dev→agent 漂移检查入口；当前人工触发，未来 `automation_active` 才接入 02:00 调度 |
 
 不再设计 `Start-AgentSlice.ps1`。所有切片顺序复用模块分支/worktree。
 
-一次性管理员准备：
+未来如果团队部署 Jenkins、Gitee 流水线或其他 CI，可再执行一次性管理员准备：
 
 - 为 Codex/CI 配置最小权限 Gitee 凭据，凭据只放系统凭据库或 CI secret；
 - 将 Agent 设置为保护分支/评审模式，禁止普通开发直接 push；
@@ -106,7 +107,7 @@ M00 计划交付：
 - 配置每天北京时间 02:00 的调度；
 - 验证失败时不更新 Agent，日志不泄露 token、Authorization 或业务内容。
 
-如果暂时没有远端流水线，逐切片开发仍可使用本地脚本，但普通模块不会自行集成、每天 02:00 也不会自动执行；不得把这种状态描述成“已经自动化”。
+当前没有远端流水线，不创建无法运行的 `Jenkinsfile`。逐切片开发、单槽集成和漂移检查全部使用本地脚本并由开发者人工触发；状态保持 `automation_local_ready`，不得描述成“已经无人值守自动化”。未来完成上述管理员配置并实际验收后，才能提升为 `automation_active`。
 
 ## 4. 完整分支清单
 
@@ -184,9 +185,9 @@ M01.1 → 测试/审核/状态/commit/push → Codex 停止
 M01.2 → 测试/审核/状态/commit/push → Codex 停止
 ……
 明确阶段检查点 → 阶段门禁 → ready_for_phase_integration → Codex 停止
-远端单槽流水线自动增量集成；后续切片仍由开发者手动启动
+开发者复制 9.10A 话术手动触发单槽增量集成；后续切片仍由开发者手动启动
 最后一片 → 模块门禁 → ready_for_integration → Codex 停止
-远端单槽流水线自动集成
+开发者复制 9.10A 话术手动触发单槽最终集成
 ```
 
 强制约束：
@@ -213,7 +214,7 @@ M01.2 → 测试/审核/状态/commit/push → Codex 停止
 11. 使用中文更新状态/测试报告/交接信息，只暂存当前切片文件；commit 标题和正文必须以中文表达本切片目的与验证结果。
 12. 中文规范和全部切片门禁通过后，创建当前切片独立 commit 并 push 模块分支；不合规不得 push。
 13. 如果当前切片不是检查点也不是最后一片，记录下一片第一动作并停止；等待开发者手动继续。
-14. 如果当前切片是阶段计划明确列出的检查点，运行阶段门禁，绿色时写 `ready_for_phase_integration` 并 push；如果是最后一片，运行完整模块门禁，绿色时写 `ready_for_integration` 并 push。随后停止，由远端流水线接管；不得自动进入下一片。
+14. 如果当前切片是阶段计划明确列出的检查点，运行阶段门禁，绿色时写 `ready_for_phase_integration` 并 push；如果是最后一片，运行完整模块门禁，绿色时写 `ready_for_integration` 并 push。随后停止；当前 `automation_local_ready` 时提示开发者复制 9.10A 话术人工启动单槽集成，未来 `automation_active` 时才由远端 CI 接管。不得自动进入下一片。
 15. 失败或硬阻塞不得声称完成，也不得直接修改长期 feature 分支。
 
 Codex 只有以下情况才停下询问，而不是自行扩大范围：
@@ -223,7 +224,7 @@ Codex 只有以下情况才停下询问，而不是自行扩大范围：
 - 基线测试失败且原因不属于当前切片；
 - 需要真实付费 API、生产凭据、Gitee 管理员权限或 Agent→dev 最终批准；
 - 合并冲突不能依据现有合同安全处理；
-- 推送/流水线因外部权限或平台状态失败。
+- 推送或单槽集成任务因外部权限、远端状态失败。
 
 ## 8. 自动审核的定义
 
@@ -276,7 +277,15 @@ Codex 只有以下情况才停下询问，而不是自行扩大范围：
 ### 9.5 手动启动首次 M00 集成
 
 ```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md、docs/agentization/README.md、docs/agentization/architecture-design.md、docs/agentization/phased-rollout-plan.md、docs/agentization/contracts-v1.md、docs/agentization/work-breakdown.md、docs/agentization/branch-and-codex-runbook.md、docs/agentization/test-matrix.md、docs/agentization/status/BOARD.md、docs/agentization/status/M00-status.md、docs/agentization/status/M00-A-status.md、docs/agentization/status/M00-B-status.md、docs/agentization/integration/DECISIONS.md 和 docs/agentization/integration/MERGE_LOG.md。请全自动执行 M00-I.1。只有 A/B 两线全部完成并已 push 时才创建临时 codex/integrate-m00-YYYYMMDD-HHMM；按“最新 Agent + 最新 dev → M00-A → 定向测试 → M00-B → 跨端合同/全量/flag-off/自动化门禁”集成。完成独立审核和一次性 Gitee/Jenkins 配置验收；只有全部绿色且远端基线未变化时才更新 feature/agent_0.8.4_boguan、状态和 MERGE_LOG。否则保持长期分支不变并报告证据。不得调用真实付费 API，不得把未实际配置的远端能力标记为 automation_active。
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md、docs/agentization/README.md、docs/agentization/architecture-design.md、docs/agentization/phased-rollout-plan.md、docs/agentization/contracts-v1.md、docs/agentization/work-breakdown.md、docs/agentization/branch-and-codex-runbook.md、docs/agentization/test-matrix.md、docs/agentization/status/BOARD.md、docs/agentization/status/M00-status.md、docs/agentization/status/M00-A-status.md、docs/agentization/status/M00-B-status.md、docs/agentization/integration/DECISIONS.md 和 docs/agentization/integration/MERGE_LOG.md；如本次任务附带上一轮 M00-I.1 阻塞报告，可将其作为历史证据读取，但不得把报告中的旧验收边界覆盖 D-008。请全自动重新执行 M00-I.1。
+
+先 fetch 并固定最新 origin/feature/agent_0.8.4_boguan、origin/feature/dev_0.8.4_boguan、origin/codex/agent-0.8.4-m00-a、origin/codex/agent-0.8.4-m00-b 四条远端引用；只有 A/B 两线全部完成并已 push 时，才从这四条最新引用创建全新的 codex/integrate-m00-YYYYMMDD-HHMM。不得直接续用或合入上一条 blocked 候选。
+
+固定顺序为“最新 Agent + 最新 dev → M00-A → M00-A定向测试 → M00-B → M00跨端合同/M00范围全量/flag-off/本地自动化门禁”。M00范围只包括 Python/TypeScript唯一fixture、Agent Runtime默认关闭合同、OpenAPI兼容、Windows PowerShell 5.1 + Pester 3.4、Web测试聚合、lint、build-prod、中文提交/注释/配置说明和分支脚本临时仓库验证。禁止执行 M01–M13 模块门禁；禁止用 M02 的 gateway runtime cleanup 等历史定向测试阻塞 M00；禁止运行只属于 M13 的后端仓库全量 pytest。
+
+候选 Pester 必须使用兼容 Pester 3.4 的数组断言：用“($items -contains $expected) | Should Be $true”，不得把文件内容断言“Should Contain”用于数组。当前没有 Jenkins 或其他远端 CI：不要新增 Jenkinsfile，不要求 Gitee/Jenkins 管理员配置，不把缺少远端调度、保护分支或Webhook视为 M00 阻塞；本地候选全部绿色后自动化状态写 automation_local_ready，绝不能写 automation_active。
+
+完成独立审核；只有上述 M00 本地门禁全部绿色且四条远端基线未变化时，才更新 feature/agent_0.8.4_boguan、M00/BOARD 状态和 MERGE_LOG。失败时保持长期分支不变并报告安全证据。不得调用真实付费 API。
 ```
 
 ### 9.6 A 首次启动普通模块（以 M01 为例）
@@ -292,7 +301,7 @@ Codex 只有以下情况才停下询问，而不是自行扩大范围：
 ### 9.7 A 新对话继续普通模块
 
 ```text
-不要依赖任何旧对话内容。先阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档（包括 phased-rollout-plan.md）和目标 A 线模块状态文件。检查目标模块远端分支、最近 commit、worktree、用户改动、上一切片证据和唯一写入者；安全后只执行该模块下一个未完成切片。自动恢复模块分支/worktree，完成 TDD、测试、独立审核、状态更新、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果本切片是 phased-rollout-plan.md 明确列出的检查点，运行阶段门禁，绿色后写 ready_for_phase_integration 并 push；如果是最后一片，运行完整模块门禁，绿色后写 ready_for_integration 并 push。随后停止等待远端单槽流水线；只有硬阻塞才询问。
+不要依赖任何旧对话内容。先阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档（包括 phased-rollout-plan.md）和目标 A 线模块状态文件。检查目标模块远端分支、最近 commit、worktree、用户改动、上一切片证据和唯一写入者；安全后只执行该模块下一个未完成切片。自动恢复模块分支/worktree，完成 TDD、测试、独立审核、状态更新、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果本切片是 phased-rollout-plan.md 明确列出的检查点，运行阶段门禁，绿色后写 ready_for_phase_integration 并 push；如果是最后一片，运行完整模块门禁，绿色后写 ready_for_integration 并 push。随后停止；当前为 automation_local_ready 时，明确提示开发者复制 9.10A 话术手动启动单槽集成。只有硬阻塞才询问。
 ```
 
 ### 9.8 B 首次启动普通模块（以 M07 为例）
@@ -308,7 +317,7 @@ Codex 只有以下情况才停下询问，而不是自行扩大范围：
 ### 9.9 B 新对话继续普通模块
 
 ```text
-不要依赖任何旧对话内容。先阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档（包括 phased-rollout-plan.md）和目标 B 线模块状态文件。检查目标模块远端分支、最近 commit、worktree、用户改动、上一切片证据和唯一写入者；安全后只执行该模块下一个未完成切片。自动恢复模块分支/worktree，完成 TDD、测试、独立审核、状态更新、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果本切片是 phased-rollout-plan.md 明确列出的检查点，运行阶段门禁，绿色后写 ready_for_phase_integration 并 push；如果是最后一片，运行完整模块门禁，绿色后写 ready_for_integration 并 push。随后停止等待远端单槽流水线；只有硬阻塞才询问。
+不要依赖任何旧对话内容。先阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档（包括 phased-rollout-plan.md）和目标 B 线模块状态文件。检查目标模块远端分支、最近 commit、worktree、用户改动、上一切片证据和唯一写入者；安全后只执行该模块下一个未完成切片。自动恢复模块分支/worktree，完成 TDD、测试、独立审核、状态更新、独立 commit 和 push 后停止。不得自动进入再下一片，不得创建切片子分支，不得直接修改两个长期 feature 分支。如果本切片是 phased-rollout-plan.md 明确列出的检查点，运行阶段门禁，绿色后写 ready_for_phase_integration 并 push；如果是最后一片，运行完整模块门禁，绿色后写 ready_for_integration 并 push。随后停止；当前为 automation_local_ready 时，明确提示开发者复制 9.10A 话术手动启动单槽集成。只有硬阻塞才询问。
 ```
 
 ### 9.10 同时启动不同模块的示例
@@ -339,18 +348,28 @@ B 可同时打开三个独立 Codex 任务：
 
 短话术只有在 `AGENTS.md` 和本手册已经包含完整自动化约束时使用；发现文档不一致必须停止开工并先修正文档。
 
+### 9.10A 无远端 CI 时手动启动单槽集成
+
+当目标模块状态已经是 `ready_for_phase_integration` 或 `ready_for_integration`，开发者新开一个 Codex 任务，复制下面的话术，并在同一条消息中明确提供模块号；阶段检查点还要提供 release ID 和切片号：
+
+```text
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、docs/agentization 全部开发入口文档、目标模块状态文件、status/BOARD.md、integration/DECISIONS.md 和 integration/MERGE_LOG.md。当前自动化状态是 automation_local_ready，没有 Jenkins 或其他远端 CI。请全自动且只执行我在本消息指定模块的单槽集成：先 fetch 并固定最新 Agent、dev 和目标模块远端 checkpoint，验证状态只能是 ready_for_phase_integration 或 ready_for_integration、提交已 push、阶段检查点在白名单中且没有其他集成人；然后由本次任务调用 scripts/agentization/Integrate-AgentModule.ps1，按“最新 Agent + 最新 dev + 目标模块增量”创建全新候选并运行该模块权威门禁。绿色且远端基线未变化时才更新 Agent、目标模块状态、BOARD 和 MERGE_LOG；失败时分别写 phase_integration_blocked 或 integration_blocked，并保持 Agent 不变。不得自动执行目标模块下一切片，不得运行其他模块门禁，不得调用真实付费 API，不得把状态写成 automation_active。
+```
+
+每次人工集成只允许一个模块或一个阶段检查点；禁止在同一任务中批量扫描并集成所有 ready 模块。模块号、release ID 和切片号缺失或与状态文件不一致时必须 fail-closed。
+
 ### 9.11 M13 与生产发布的两道门
 
 M13 仍然只有一个模块分支 `codex/agent-0.8.4-m13-integration` 和一个 worktree，M13.1→M13.2→M13.3→M13.4→M13.5 严格串行。每个 M13 切片都必须由开发者手动启动一次；切片内部的代码、测试、审核、状态记录、commit 和 push 自动完成。
 
-M13.x 通过只表示“对应发布候选已经具备申请上线的资格”，**不表示已经发布生产**。M13.1–M13.4 默认只允许非付费门禁、测试环境全量验证或 dry-run；切片先写 `ready_for_phase_integration:R*` 并停止，远端单槽候选绿色进入 Agent 后再写 `phase_integrated:R*` 和 `awaiting_release_approval:R*`。生产运行模式、`enabled_intents` 范围、Feature Flag 和真实付费供应商冒烟是另一道外部状态门禁，必须由唯一发布负责人再明确批准一次，且一次批准只允许一个批次的精确变化。当前无真实外部用户，不设计随机百分比灰度或用户白名单，各阶段获批后均覆盖全部新对话100%。
+M13.x 通过只表示“对应发布候选已经具备申请上线的资格”，**不表示已经发布生产**。M13.1–M13.4 默认只允许非付费门禁、测试环境全量验证或 dry-run；切片先写 `ready_for_phase_integration:R*` 并停止，开发者使用 9.10A 人工触发单槽候选，绿色进入 Agent 后再写 `phase_integrated:R*` 和 `awaiting_release_approval:R*`。生产运行模式、`enabled_intents` 范围、Feature Flag 和真实付费供应商冒烟是另一道外部状态门禁，必须由唯一发布负责人再明确批准一次，且一次批准只允许一个批次的精确变化。当前无真实外部用户，不设计随机百分比灰度或用户白名单，各阶段获批后均覆盖全部新对话100%。
 
 | 切片 | 允许启动的最早条件 | 切片通过后的停止点 |
 | --- | --- | --- |
-| M13.1 / R1 | M00-I.1 已完成；M01、M03、M04、M07 和 M12.3 的 R1 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R1`；自动集成绿色后才到 `awaiting_release_approval:R1`，不得自动改生产 `assist/100%` |
-| M13.2 / R2 | M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R2`；自动集成绿色后才到 `awaiting_release_approval:R2`，不得自动把 `video` 切到 `primary`；比例保持100% |
-| M13.3 / R3 | M08、M09、M10 的 R3 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R3`；自动集成绿色后才到 `awaiting_release_approval:R3`，不得自动开放四类 intent |
-| M13.4 / R4 | M01–M12 最终门禁全部绿色并完成最后一次 dev→agent 同步 | 先 `ready_for_phase_integration:R4`；自动集成绿色后才到 `awaiting_release_approval:R4`；保持 `primary + 四类intent + 100%`，只做稳定化/回滚门禁 |
+| M13.1 / R1 | M00-I.1 已完成；M01、M03、M04、M07 和 M12.3 的 R1 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R1`；人工触发的单槽候选绿色后才到 `awaiting_release_approval:R1`，不得自动改生产 `assist/100%` |
+| M13.2 / R2 | M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R2`；人工触发的单槽候选绿色后才到 `awaiting_release_approval:R2`，不得自动把 `video` 切到 `primary`；比例保持100% |
+| M13.3 / R3 | M08、M09、M10 的 R3 增量已进入 Agent；最新 dev→agent 门禁绿色 | 先 `ready_for_phase_integration:R3`；人工触发的单槽候选绿色后才到 `awaiting_release_approval:R3`，不得自动开放四类 intent |
+| M13.4 / R4 | M01–M12 最终门禁全部绿色并完成最后一次 dev→agent 同步 | 先 `ready_for_phase_integration:R4`；人工触发的单槽候选绿色后才到 `awaiting_release_approval:R4`；保持 `primary + 四类intent + 100%`，只做稳定化/回滚门禁 |
 | M13.5 / R4 | M13.4 通过，且发布负责人明确批准真实付费供应商冒烟并提供临时凭据 | 真实报告、运行手册和发布签字完成后停止 |
 
 ### 9.12 手动启动 M13.1 / R1
@@ -358,25 +377,25 @@ M13.x 通过只表示“对应发布候选已经具备申请上线的资格”�
 ```text
 不要依赖任何旧对话内容。请先完整阅读仓库根目录 AGENTS.md、docs/pixelflow-agent-skill-flow-latest-design.md，以及 docs/agentization 下的 README.md、architecture-design.md、phased-rollout-plan.md、contracts-v1.md、work-breakdown.md、branch-and-codex-runbook.md、test-matrix.md、status/BOARD.md、status/M13-status.md、integration/DECISIONS.md 和 integration/MERGE_LOG.md。
 
-你是本周唯一 M13 集成人。请全自动执行且只执行 M13.1 / R1。先确认 M00-I.1 已完成，M01、M03、M04、M07、M12.3 的 R1 增量已经进入 feature/agent_0.8.4_boguan，最新 dev→agent 门禁绿色；然后创建或恢复 codex/agent-0.8.4-m13-integration 及独立 worktree。完成 assist 配置候选、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价、flag-off 和全部 R1 非付费门禁，并在测试环境以 assist+100% 覆盖全部新对话验证；完成独立审核、状态/测试记录、独立 commit 和 push 后立即停止，并把状态写为 ready_for_phase_integration:R1，等待远端单槽候选自动集成；只有候选绿色进入 Agent 后，自动化才可写 phase_integrated:R1 和 awaiting_release_approval:R1。不得修改生产 Feature Flag、不得把生产从 off+0% 改为 assist+100%、不得调用真实付费 API、不得自动执行 M13.2；依赖不满足时保持分支不变并报告证据。
+你是本周唯一 M13 集成人。请全自动执行且只执行 M13.1 / R1。先确认 M00-I.1 已完成，M01、M03、M04、M07、M12.3 的 R1 增量已经进入 feature/agent_0.8.4_boguan，最新 dev→agent 门禁绿色；然后创建或恢复 codex/agent-0.8.4-m13-integration 及独立 worktree。完成 assist 配置候选、migration/OpenAPI、压缩 Notice/排队/恢复、旧流程等价、flag-off 和全部 R1 非付费门禁，并在测试环境以 assist+100% 覆盖全部新对话验证；完成独立审核、状态/测试记录、独立 commit 和 push 后立即停止，并把状态写为 ready_for_phase_integration:R1，提示开发者复制 9.10A 话术人工触发单槽集成；只有候选绿色进入 Agent 后才可写 phase_integrated:R1 和 awaiting_release_approval:R1。不得修改生产 Feature Flag、不得把生产从 off+0% 改为 assist+100%、不得调用真实付费 API、不得自动执行 M13.2；依赖不满足时保持分支不变并报告证据。
 ```
 
 ### 9.13 手动启动 M13.2 / R2
 
 ```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R1/R2 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.2 / R2。先确认 M13.1 已完成，M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent，最新 dev→agent 门禁绿色。完成视频 replay/shadow、黄金对话、mock E2E、重复 start=0、kill switch 和禁止 shadow 计费/PowerMem record 的非付费门禁，并在测试环境以 primary(video)+100% 验证；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R2，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R2。不得修改生产配置、不得在未批准时把 video 切到 primary、不得调用真实付费 API、不得自动执行 M13.3。
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R1/R2 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.2 / R2。先确认 M13.1 已完成，M02、M05、M06、M11、M12.4–M12.5 的 R2 增量已进入 Agent，最新 dev→agent 门禁绿色。完成视频 replay/shadow、黄金对话、mock E2E、重复 start=0、kill switch 和禁止 shadow 计费/PowerMem record 的非付费门禁，并在测试环境以 primary(video)+100% 验证；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R2，提示开发者复制 9.10A 话术人工触发单槽集成；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R2。不得修改生产配置、不得在未批准时把 video 切到 primary、不得调用真实付费 API、不得自动执行 M13.3。
 ```
 
 ### 9.14 手动启动 M13.3 / R3
 
 ```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R2/R3 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.3 / R3。先确认 M13.2 已完成，M08、M09、M10 的 R3 增量已进入 Agent，最新 dev→agent 门禁绿色。完成图片/编辑、PPT、视频分析 mock E2E，以及重启、断线、并发、402、旧 API 和 flag-off 回归；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R3，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R3。不得修改生产配置、不得开放生产四类 intent、不得调用真实付费 API、不得自动执行 M13.4。
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的 R2/R3 门禁记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.3 / R3。先确认 M13.2 已完成，M08、M09、M10 的 R3 增量已进入 Agent，最新 dev→agent 门禁绿色。完成图片/编辑、PPT、视频分析 mock E2E，以及重启、断线、并发、402、旧 API 和 flag-off 回归；完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R3，提示开发者复制 9.10A 话术人工触发单槽集成；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R3。不得修改生产配置、不得开放生产四类 intent、不得调用真实付费 API、不得自动执行 M13.4。
 ```
 
 ### 9.15 手动启动 M13.4 / R4
 
 ```text
-不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的全量门禁/回滚记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.4 / R4。先确认 M01–M12 全部模块已完成最终集成，最后一次 dev→agent 同步绿色。完成五条主流程和直接图片编辑的全量非付费矩阵、Shadow、并发、断线恢复、kill switch、排空和回滚演练；保持 primary+四类intent+100% 的既定范围，不设计逐级百分比灰度。完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R4，等待远端单槽候选；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R4。不得自动修改生产模式或intent范围，不得调用真实付费 API，不得自动执行 M13.5。
+不要依赖任何旧对话内容。先完整阅读根目录 AGENTS.md、全部 docs/agentization 开发入口文档、status/M13-status.md、status/BOARD.md 和最近的全量门禁/回滚记录。你是本周唯一 M13 集成人。请恢复 codex/agent-0.8.4-m13-integration，并且只执行 M13.4 / R4。先确认 M01–M12 全部模块已完成最终集成，最后一次 dev→agent 同步绿色。完成五条主流程和直接图片编辑的全量非付费矩阵、Shadow、并发、断线恢复、kill switch、排空和回滚演练；保持 primary+四类intent+100% 的既定范围，不设计逐级百分比灰度。完成审核、状态/测试记录、独立 commit 和 push 后立即停止，并写 ready_for_phase_integration:R4，提示开发者复制 9.10A 话术人工触发单槽集成；只有候选绿色进入 Agent 后才可写 awaiting_release_approval:R4。不得自动修改生产模式或intent范围，不得调用真实付费 API，不得自动执行 M13.5。
 ```
 
 ### 9.16 经批准启动 M13.5 / R4 真实冒烟
@@ -411,7 +430,7 @@ M13.1 通过并进入 Agent 后，如果阶段报告、回滚方案和生产访�
 
 ### 只靠人记得定期同步 dev
 
-已否决。模块开始、普通模块自动集成和每日 02:00 都必须经过仓库脚本/远端门禁。
+已否决。当前虽然由开发者人工触发，但模块开工、阶段/最终集成和漂移检查都必须使用状态文件、固定话术和仓库脚本，禁止临场手写合并命令或跳过门禁；未来远端 CI 也只能调用同一脚本。
 
 ### 每次 dev push 未经测试直接进入 Agent
 

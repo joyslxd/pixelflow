@@ -53,10 +53,11 @@
 - 日常业务权威分支：`feature/dev_0.8.4_boguan`。
 - Agent 集成分支：`feature/agent_0.8.4_boguan`。
 - 开发期间只允许 `dev → agent`；M13 完成前不自动执行 `agent → dev`。
-- 模块第一个切片开工前、明确阶段检查点和模块最后一片的集成门禁都会纳入远端最新 dev；每天北京时间 02:00 再由 Gitee/Jenkins 定时流水线做一次漂移检查。M00 尚未实现并完成一次性管理员配置前，这些能力只能标记为 `design_only`，不能宣称已经自动运行。
+- 模块第一个切片开工前、明确阶段检查点和模块最后一片的集成门禁都必须纳入远端最新 dev。当前没有 Jenkins 或其他远端 CI，M00 本地脚本和候选级门禁绿色后状态为 `automation_local_ready`；模块集成与 dev→agent 漂移检查由开发者按执行手册人工触发，不能宣称已经无人值守运行。
 - 模块分支按需自动创建，不提前建立全部长期分支。M00 是特殊启动模块，只保留 `codex/agent-0.8.4-m00-a`、`codex/agent-0.8.4-m00-b` 两条开发分支；首次收口使用一次性的 `codex/integrate-m00-YYYYMMDD-HHMM` 候选。其他模块各使用一个模块分支。
 - 所有模块内部切片严格串行：一个切片对应一个 Codex 任务、一个独立 commit；当前切片完成后必须由开发者手动发出“继续下一个未完成切片”，Codex 不得自行连续执行整个模块。模块内不创建切片子分支，也不允许多个写入型 Codex 同时处理同一模块。
-- M00-A 与 M00-B 从同一个已评审 `contracts-v1.md` 和同一个 Agent 基线并行开始，各自在自己的分支串行；M00 首次集成由开发者手动启动一次。M00 合入并启用远端门禁后，普通模块到达四阶段计划列出的检查点时置为 `ready_for_phase_integration`，模块最后一片置为 `ready_for_integration`，均由单槽流水线自动集成；失败分别置为 `phase_integration_blocked` 或 `integration_blocked`，不得污染 Agent 主干。
+- M00-A 与 M00-B 从同一个已评审 `contracts-v1.md` 和同一个 Agent 基线并行开始，各自在自己的分支串行；M00 首次集成由开发者手动启动一次。M00 以 `automation_local_ready` 合入后，普通模块到达四阶段计划列出的检查点时置为 `ready_for_phase_integration`，模块最后一片置为 `ready_for_integration`；当前由开发者手动启动单槽集成，未来实际启用远端 CI 后才改为自动触发。失败分别置为 `phase_integration_blocked` 或 `integration_blocked`，不得污染 Agent 主干。
+- `M00-I.1` 的 M00 范围全量门禁不包含 M02 定向集合，也不包含只属于 M13 的后端仓库全量测试；下游模块的既有红灯不能反向阻塞 M00。
 - 新实现全部受 feature flag 保护。关闭开关时，当前 v2 五条流程行为必须不变。
 - 旧对话固定 `frontend_v2`；新对话按获批阶段固定运行模式，R1 全部新对话使用 `assist`，R2 仅 `video` 进入 `primary`，R3/R4 四类intent进入 `primary`；存在 pending job 的对话绝不在线迁移编排所有权。
 - 完整分支清单、创建/合并顺序、自动同步和可直接复制的 Codex 指令，**唯一以[执行手册第9节](branch-and-codex-runbook.md#codex-prompts)为准**。
@@ -77,7 +78,7 @@
 - 同一模块同一时刻只能有一个写代码的 Codex，后续切片复用同一个模块分支/worktree；另开对话只允许只读审核，或者在上一切片完成并释放写入权后接续开发。
 - M00 的写入型并行只发生在两个独立模块线：A 写 `m00-a`，B 写 `m00-b`；两条线内部仍然串行，不能共同写对方分支或临时集成候选。
 - 每个并行模块使用独立分支/worktree。Codex 对话先声明 `base SHA + branch + module + slice + locked_files`，再开始写入。
-- 普通切片 Codex 只 push 当前模块分支，不直接更新两个长期 feature 分支。普通模块到达明确阶段检查点或最后一片后，由远端单槽流水线自动更新 `feature/agent_0.8.4_boguan`；M00 首次集成、生产运行模式/intent范围调整和最终 Agent→dev 收口仍需人工明确启动/批准。
+- 普通切片 Codex 只 push 当前模块分支，不直接更新两个长期 feature 分支。普通模块到达明确阶段检查点或最后一片后，开发者按执行手册人工启动单槽候选更新 `feature/agent_0.8.4_boguan`；M00 首次集成、生产运行模式/intent范围调整和最终 Agent→dev 收口同样需要人工明确启动/批准。
 - 如果切片做到一半需要换对话，先填写 `templates/HANDOFF_TEMPLATE.md`；接手对话按“精确恢复动作”继续，不重新猜设计。
 
 ## “完成”的统一定义

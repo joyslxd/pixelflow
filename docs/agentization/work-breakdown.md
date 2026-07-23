@@ -12,7 +12,7 @@
 | B：Workflow & UI | 前端 runtime、四类 workflow adapter、五条流程 UI 迁移 | M07–M12；M00-B.1 | 现有 v2 routers/service 提取、`WorkspacePage.tsx`、`api.ts`、新 supervisor 前端目录 |
 | A+B | M00/M13 集成、shadow、全量发布、回滚 | M00-I.1、M13 | 共同评审，但每次只有一个集成人写共享候选、文档和发布配置 |
 
-M00 不是 M01–M12 的父编号，而是两条开发线共同依赖的启动模块。M01–M06 属于 A 线，M07–M12 属于 B 线。M00-A、M00-B 从同一个已评审设计/Agent 基线创建两条开发分支并行，各线内部严格串行；A/B 完成后由开发者手动启动一次 M00-I.1 收口。M00 合入并启用自动化后，两条线可使用测试 fake 并行开发不同模块，不需要等待对方真实实现。
+M00 不是 M01–M12 的父编号，而是两条开发线共同依赖的启动模块。M01–M06 属于 A 线，M07–M12 属于 B 线。M00-A、M00-B 从同一个已评审设计/Agent 基线创建两条开发分支并行，各线内部严格串行；A/B 完成后由开发者手动启动一次 M00-I.1 收口。M00 以 `automation_local_ready` 合入后，两条线可使用测试 fake 并行开发不同模块，不需要等待对方真实实现；模块集成和漂移检查继续由开发者人工触发仓库脚本。
 
 ## 2. 依赖图与开发波次
 
@@ -73,7 +73,7 @@ flowchart LR
 
 - Owner：A 主笔后端，B 主笔前端；共同签字。
 - 依赖：无。
-- 目标：冻结 action/state/event/API/Port，并交付 dev→agent 自动同步、模块分支/worktree、普通模块自动集成、每日漂移检查和测试入口，确保后续 Codex 不依赖人工记忆执行 Git 流程。
+- 目标：冻结 action/state/event/API/Port，并交付 dev→agent 安全同步、模块分支/worktree、普通模块单槽集成入口、漂移检查入口和测试入口，确保后续 Codex 不依赖人工临场拼接 Git 命令。
 - 分支拓扑：
   - `codex/agent-0.8.4-m00-a`：A 串行完成 M00-A.1–M00-A.3。
   - `codex/agent-0.8.4-m00-b`：B 完成 M00-B.1，可与 A 线并行。
@@ -94,13 +94,13 @@ flowchart LR
 | --- | ---: | --- | --- | --- | --- |
 | M00-A.1 | 2h | A | `m00-a` | characterization tests，锁定旧人工确认、pending job、额度暂停、下载完成等不变量 | 旧定向测试保持绿；A 线串行前置 |
 | M00-A.2 | 3h | A | `m00-a` | Python action/workflow/turn/event/context DTO、Ports、fake 与规范 JSON fixture | Python 合同和 fake Port 测试；依赖 A.1 |
-| M00-A.3 | 3h | A | `m00-a` | dev→agent、模块分支/worktree、普通模块自动集成、每日漂移检查和中文工程规范检查 PowerShell 脚本 | Pester/临时仓库验证中文 commit、注释和配置逐项说明门禁；依赖 A.2；不实现切片子分支 |
+| M00-A.3 | 3h | A | `m00-a` | dev→agent、模块分支/worktree、普通模块单槽集成、漂移检查和中文工程规范检查 PowerShell 脚本 | Pester/临时仓库验证中文 commit、注释和配置逐项说明门禁；依赖 A.2；不实现切片子分支 |
 | M00-B.1 | 2.5h | B | `m00-b` | TypeScript 镜像合同、wire event 校验、web 测试入口；不得改写 Python DTO/fixture | Node 合同测试；与 A 线并行，设计源为已评审 `contracts-v1.md` |
-| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，接入 Gitee/Jenkins 门禁、跨平台测试聚合、中文工程规范门禁、执行手册第9节唯一话术和自动化状态验收 | 跨端 fixture、dev-sync guard、中文 commit/注释/配置说明、`build-prod`、ready 自动集成与 02:00 调度；由开发者手动启动一次 |
+| M00-I.1 | 3h | A+B 评审、单一集成人写入 | 临时 `integrate-m00-*` | 顺序纳入 A/B，完成跨平台测试聚合、中文工程规范门禁、执行手册第9节唯一话术和本地自动化状态验收 | 跨端 fixture、dev-sync guard、Pester 3.4、中文 commit/注释/配置说明、`build-prod`、人工触发单槽集成与漂移检查；由开发者手动启动一次，状态上限为 `automation_local_ready` |
 
-M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m00-a → 定向测试 → m00-b → 跨端/全量/flag-off/自动化门禁`。如果 A/B 不是从同一设计/Agent 基线创建，或者任一分支修改了对方锁定路径，必须 fail-closed，不允许靠现场手工挑选字段解决。
+M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m00-a → M00-A 定向测试 → m00-b → M00 跨端合同/M00范围全量/flag-off/本地自动化门禁`。这里的“全量”只指 M00 范围：禁止运行 M01–M13 模块门禁，禁止用 M02 的历史 runtime cleanup 测试或 M13 的后端仓库全量反向阻塞 M00。如果 A/B 不是从同一设计/Agent 基线创建，或者任一分支修改了对方锁定路径，必须 fail-closed，不允许靠现场手工挑选字段解决。
 
-模块闸门：Python/TS 对同一 fixture 解析一致；开关默认 `off`；现有接口 OpenAPI 无删除或改名；模块开始/合并脚本都能证明最新 dev SHA 是候选祖先；中文 commit、代码注释和配置逐项说明检查通过；冲突/失败时 Agent 主干不变；未配置远端流水线时不能标记 `automation_active`。
+模块闸门：Python/TS 对同一 fixture 解析一致；开关默认 `off`；现有接口 OpenAPI 无删除或改名；模块开始/合并脚本都能证明最新 dev SHA 是候选祖先；中文 commit、代码注释和配置逐项说明检查通过；冲突/失败时 Agent 主干不变；未配置远端流水线时状态固定为 `automation_local_ready`，由开发者按执行手册人工触发，不能标记 `automation_active`。
 
 ### M01：业务持久化、CAS、Turn Inbox 与 Event Outbox
 
@@ -361,7 +361,7 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 
 1. 只有[四阶段上线计划](phased-rollout-plan.md)明确列出的中间检查点才运行阶段闸门；模块最后一片运行完整模块闸门和 feature flag 关闭回归。
 2. 另一位开发者或独立 reviewer 基于最新提交复跑关键测试。
-3. 中间检查点写 `ready_for_phase_integration`，最终模块写 `ready_for_integration`，push 后停止；M00 验收后的远端单槽流水线按“最新 Agent + 最新 dev + 模块检查点 commit”集成并追加 `MERGE_LOG.md`。
+3. 中间检查点写 `ready_for_phase_integration`，最终模块写 `ready_for_integration`，push 后停止；当前由开发者按执行手册 9.10A 人工启动单槽任务，按“最新 Agent + 最新 dev + 模块检查点 commit”集成并追加 `MERGE_LOG.md`。未来提升为 `automation_active` 后才改为远端 CI 触发。
 4. 阶段集成冲突或失败写 `phase_integration_blocked`，最终模块失败写 `integration_blocked`；Agent 主干保持不变，已推送模块分支不得 force-push 改写历史。
 
 ### Codex 启动话术的唯一来源

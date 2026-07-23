@@ -58,4 +58,4 @@
 
 禁止写入 Authorization、token、供应商 key、完整带查询参数 URL 或用户原始长 prompt。
 
-同一模块所有切片必须串行并复用本模块分支/worktree。每个 Codex 任务只执行一个切片；只有 `phased-rollout-plan.md` 列出的中间检查点可写 `ready_for_phase_integration`，最后一个切片写 `ready_for_integration`。两者写入并 push 后 Codex 都必须停止，由远端单槽流水线集成；`phase_integrated` 不代表模块完成，下一切片仍由开发者手动启动。
+同一模块所有切片必须串行并复用本模块分支/worktree。每个 Codex 任务只执行一个切片；只有 `phased-rollout-plan.md` 列出的中间检查点可写 `ready_for_phase_integration`，最后一个切片写 `ready_for_integration`。两者写入并 push 后 Codex 都必须停止；当前 `automation_local_ready` 时由开发者按执行手册 9.10A 手动启动单槽集成，未来 `automation_active` 时才由远端 CI 触发。`phase_integrated` 不代表模块完成，下一切片仍由开发者手动启动。

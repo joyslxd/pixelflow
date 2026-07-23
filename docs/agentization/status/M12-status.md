@@ -17,7 +17,7 @@
 - [ ] M12.4 reply/artifact/interrupt/mention 元数据（2.5h）
 - [ ] M12.5 消息/进度/历史/task board 投影（2.5h）
 
-R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `ready_for_phase_integration` 并停止；远端进入 Agent 后写 `phase_integrated`。M12.4 仍需开发者再次手动启动，继续复用本模块分支。
+R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `ready_for_phase_integration` 并停止；开发者按执行手册 9.10A 人工触发单槽候选，绿色进入 Agent 后写 `phase_integrated`。M12.4 仍需开发者再次手动启动，继续复用本模块分支。
 
 ## 恢复提示
 
