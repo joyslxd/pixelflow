@@ -22,7 +22,7 @@
 - 最后完成切片：`M00-A.3`
 - 测试证据：`docs/agentization/test-reports/M00-A.3.md`；Pester 临时仓库 `39 passed`，扩展后端回归 `65 passed`，Ruff、PowerShell AST、whitespace、共同基线中文门禁与 M00-A Final gate 通过
 - commit/push：历史兼容实现提交为 `db3dbdc`；本状态文件使用后续独立中文提交并推送至 `origin/codex/agent-0.8.4-m00-a`，最终 SHA 以远端 ref 为准
-- 下一步第一动作：M00-A 已无未完成切片；等待 M00-B 解除其共同基线 Plan UI 测试阻塞并写 `ready_for_integration` 后，由开发者手动启动唯一集成人执行 `M00-I.1`
-- 硬阻塞：M00-A 无。完整 SHA `0af72ff6993e9e67636f21e8e16d641411702d67` 已按用户批准设计作为门禁启用前精确历史豁免，不改写历史；只放过仍由该提交 blame 拥有的英文行，并显式清除 ignore-revs 配置影响。M00-B 当前仍为 `blocked`，因此不得自动启动 `M00-I.1`。
+- 下一步第一动作：M00-A 已无未完成切片；M00-B 远端最新状态也已为 `ready_for_integration`，由开发者手动启动唯一集成人执行 `M00-I.1`
+- 硬阻塞：M00-A 无。完整 SHA `0af72ff6993e9e67636f21e8e16d641411702d67` 已按用户批准设计作为门禁启用前精确历史豁免，不改写历史；只放过仍由该提交 blame 拥有的英文行，并显式清除 ignore-revs 配置影响。`M00-I.1` 尚未启动，必须等待开发者手动触发。
 
 每个 Codex 任务只执行一个切片。完成后停止，等待开发者手动发送“继续 M00-A 的下一个未完成切片”。
