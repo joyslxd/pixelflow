@@ -75,6 +75,49 @@ function handleApprovePlanSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handleSelectDirectionSource() {
+  const start = workspaceSource.indexOf("const handleSelectDirection = async");
+  const end = workspaceSource.indexOf("const handleApprovePlan = async", start);
+  assert.notEqual(start, -1, "direction selection handler must exist");
+  assert.notEqual(end, -1, "Plan approval handler must follow direction selection");
+  return workspaceSource.slice(start, end);
+}
+
+function handleConfirmPlanRevisionModeSource() {
+  const start = workspaceSource.indexOf("const handleConfirmPlanRevisionMode = async");
+  const end = workspaceSource.indexOf("const handleCancelPlanRevisionMode", start);
+  assert.notEqual(start, -1, "Plan revision mode handler must exist");
+  assert.notEqual(end, -1, "Plan revision cancel handler must follow revision mode handler");
+  return workspaceSource.slice(start, end);
+}
+
+function resumePendingMessageJobSource() {
+  const start = workspaceSource.indexOf("const resumePendingMessageJob = async");
+  const end = workspaceSource.indexOf("const resumePendingPlanJob = async", start);
+  assert.notEqual(start, -1, "pending message resume helper must exist");
+  assert.notEqual(end, -1, "pending Plan resume helper must follow pending message resume");
+  return workspaceSource.slice(start, end);
+}
+
+function resumePendingPlanJobSource() {
+  const start = workspaceSource.indexOf("const resumePendingPlanJob = async");
+  const end = workspaceSource.indexOf("const scenePackageContext", start);
+  assert.notEqual(start, -1, "pending Plan resume helper must exist");
+  assert.notEqual(end, -1, "scene package helper must follow pending Plan resume");
+  return workspaceSource.slice(start, end);
+}
+
+function assertRecoverablePlanJobOrder(source, startCall, label) {
+  const startIndex = source.indexOf(startCall);
+  const persistIndex = source.indexOf("await persistPendingPlanJob", startIndex);
+  const resumeIndex = source.indexOf("await resumePendingPlanJob", persistIndex);
+  assert.notEqual(startIndex, -1, `${label} must start a recoverable Plan job`);
+  assert.notEqual(persistIndex, -1, `${label} must persist the Plan job before polling`);
+  assert.notEqual(resumeIndex, -1, `${label} must enter the shared Plan resume path`);
+  assert.ok(startIndex < persistIndex, `${label} must start the Plan job before persisting its handle`);
+  assert.ok(persistIndex < resumeIndex, `${label} must persist the Plan job before resuming it`);
+}
+
 function handleRetrySceneAssetsSource() {
   const start = workspaceSource.indexOf("const handleRetrySceneAssets = async");
   const end = workspaceSource.indexOf("const handleRevisePlan =", start);
@@ -229,6 +272,8 @@ test("video requirement form collects and persists the complete creation contrac
 });
 
 test("plan revision defaults to modifying the current creative and only regenerates directions on explicit choice", () => {
+  const revisionSource = handleConfirmPlanRevisionModeSource();
+
   assert.match(planRevisionDialogSource, /extend_current/, "revision dialog must expose current-creative modification");
   assert.match(planRevisionDialogSource, /regenerate_directions/, "revision dialog must expose creative regeneration");
   assert.match(planRevisionDialogSource, /useState<PlanRevisionMode>\("extend_current"\)/, "current-creative modification must be the default");
@@ -237,8 +282,10 @@ test("plan revision defaults to modifying the current creative and only regenera
   assert.match(planRevisionDialogSource, /max-h-48/, "long revision feedback must have a bounded preview height");
   assert.match(planRevisionDialogSource, /overflow-y-auto/, "long revision feedback must scroll inside the dialog");
   assert.match(planRevisionDialogSource, /max-h-\[calc\(100dvh-2\.5rem\)\]/, "revision dialog must stay within the viewport");
-  assert.match(workspaceSource, /api\.revisePlanMarkdown/, "extend-current mode must call the Plan revision endpoint");
-  assert.match(workspaceSource, /mode === "regenerate_directions"[\s\S]*startDirectionJob/, "only regenerate mode may call the directions job");
+  assertRecoverablePlanJobOrder(revisionSource, "api.startPlanRevisionJob", "extend-current mode");
+  assert.match(revisionSource, /kind:\s*"plan_revision"/, "the recoverable job must retain its revision kind");
+  assert.equal(revisionSource.includes("api.revisePlanMarkdown"), false, "the handler must not fall back to synchronous Plan revision");
+  assert.match(revisionSource, /mode === "regenerate_directions"[\s\S]*startDirectionJob/, "only regenerate mode may call the directions job");
   assert.match(apiSource, /planning\/plan\/revise/, "api client must expose Plan revision");
   assert.match(apiSource, /planning\/plan\/restore/, "api client must expose Plan restore");
   assert.match(messageBubbleSource, /plan\.plan_version/, "Plan cards must display their version");
@@ -298,34 +345,50 @@ test("strict Plan message persistence starts and resumes a recoverable pending j
   );
 });
 
-test("current-creative Plan revision persists the v3 message before context", () => {
-  const start = workspaceSource.indexOf("const handleConfirmPlanRevisionMode = async");
-  const end = workspaceSource.indexOf("const handleCancelPlanRevisionMode", start);
-  assert.notEqual(start, -1, "Plan revision mode handler must exist");
-  assert.notEqual(end, -1, "Plan revision cancel handler must follow revision mode handler");
-  const revisionSource = workspaceSource.slice(start, end);
-  const messagePersistIndex = revisionSource.indexOf("await persistPlanArtifactForConversation");
+test("current-creative Plan revision persists the returned message before authoritative context", () => {
+  const revisionSource = handleConfirmPlanRevisionModeSource();
+  const planResumeSource = resumePendingPlanJobSource();
+  const messageResumeSource = resumePendingMessageJobSource();
 
   assert.equal(revisionSource.includes("pushPlanArtifact("), false, "revision must not use the failure-swallowing Plan helper");
-  assert.notEqual(messagePersistIndex, -1, "revision must await strict Plan message persistence");
-  assert.match(revisionSource, /createPlanArtifactMessage\(/, "revision must persist the returned v3 Plan artifact");
+  assertRecoverablePlanJobOrder(revisionSource, "api.startPlanRevisionJob", "revision");
   assert.equal(revisionSource.includes("api.updateConversation"), false, "message rejection must prevent any revision context write");
-  assert.match(revisionSource, /type:\s*"plan_save"/, "v1 -> v3 revision must use a recoverable Plan continuation");
-  assert.match(revisionSource, /pendingPlanRevisionChoice:\s*null/, "completion must clear the revision choice only after save");
+  assert.match(
+    revisionSource,
+    /await persistPendingPlanJob\([\s\S]*pendingPlanRevisionChoice:\s*null,[\s\S]*pending_plan_revision_choice:\s*null/,
+    "persisting the pending job must clear the completed revision-mode choice so refresh cannot reopen it",
+  );
+  assert.match(planResumeSource, /await persistPlanArtifactForConversation\(/, "the shared resume path must await strict Plan message persistence");
+  assert.match(planResumeSource, /createPlanArtifactMessage\(/, "the shared resume path must persist the returned revision Plan artifact");
+  assert.match(planResumeSource, /type:\s*"plan_save"/, "revision must use a recoverable Plan continuation");
+  assert.match(planResumeSource, /pendingPlanRevisionChoice:\s*null/, "the final authoritative Plan context must keep the revision choice cleared");
+
+  const savedIndex = messageResumeSource.indexOf("const step = await resumePlanMessageJobStep");
+  const savedMessageIndex = messageResumeSource.indexOf("const savedMessage = messageFromResponse(step.result");
+  const authoritativeContextIndex = messageResumeSource.indexOf(
+    "authoritativeContext = planContextFromSavedMessage(savedMessage, planContinuation.context)",
+  );
+  const contextWriteIndex = messageResumeSource.indexOf("await updateConversationWithProgress", authoritativeContextIndex);
+  assert.notEqual(savedIndex, -1, "the strict message resume step must exist");
+  assert.notEqual(savedMessageIndex, -1, "the strict path must deserialize the server-saved message result");
+  assert.notEqual(authoritativeContextIndex, -1, "completion must derive context from the server-saved Plan artifact");
+  assert.notEqual(contextWriteIndex, -1, "the authoritative Plan context must eventually be written");
+  assert.ok(savedIndex < savedMessageIndex, "the server message job must complete before its result is deserialized");
+  assert.ok(savedMessageIndex < authoritativeContextIndex, "the saved server message must be the source of authoritative context");
+  assert.ok(authoritativeContextIndex < contextWriteIndex, "authoritative context must be derived before it is written");
 });
 
 test("initial v1 Plan uses the recoverable strict message job before writing context", () => {
-  const start = workspaceSource.indexOf("const handleSelectDirection = async");
-  const end = workspaceSource.indexOf("const handleApprovePlan = async", start);
-  assert.notEqual(start, -1, "direction selection handler must exist");
-  assert.notEqual(end, -1, "Plan approval handler must follow direction selection");
-  const source = workspaceSource.slice(start, end);
+  const source = handleSelectDirectionSource();
+  const planResumeSource = resumePendingPlanJobSource();
 
   assert.equal(source.includes("pushPlanArtifact("), false, "initial v1 must not use failure-swallowing Plan persistence");
-  assert.match(source, /await persistPlanArtifactForConversation\(/, "initial v1 must await recoverable Plan message persistence");
-  assert.match(source, /type:\s*"plan_save"/, "initial v1 must persist a plan_save continuation");
-  assert.match(source, /flowDraft:\s*null/, "initial Plan completion must clear the direction draft");
+  assertRecoverablePlanJobOrder(source, "api.startPlanMarkdownJob", "initial v1");
+  assert.match(source, /kind:\s*"plan_generation"/, "the recoverable job must retain its generation kind");
   assert.equal(source.includes("api.updateConversation("), false, "initial handler must not write Plan context outside job completion");
+  assert.match(planResumeSource, /await persistPlanArtifactForConversation\(/, "the shared resume path must await recoverable Plan message persistence");
+  assert.match(planResumeSource, /type:\s*"plan_save"/, "initial v1 must persist a plan_save continuation");
+  assert.match(planResumeSource, /flowDraft:\s*null/, "initial Plan completion must clear the direction draft");
 });
 
 test("recoverable Plan message jobs retain unknown results and resume with server artifact authority", () => {

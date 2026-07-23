@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "test:agent-runtime-contracts": "node scripts/run-tests.mjs --contracts",
     "dev": "vite --mode development",
     "dev:test": "vite --mode test",
     "prod": "vite --mode production",
