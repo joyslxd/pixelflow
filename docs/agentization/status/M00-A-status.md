@@ -1,10 +1,10 @@
 # M00-A 开发线状态
 
-- phase：`blocked`
+- phase：`ready_for_integration`
 - owner：A
 - branch：`codex/agent-0.8.4-m00-a`
 - base Agent SHA：`8e626ae232d984f14fa9954b672b4e025894d426`
-- 当前切片：`M00-A.3`（切片已完成，模块集成前置条件阻塞）
+- 当前切片：`M00-A.3`（已完成；门禁前历史兼容修订也已完成）
 - 当前唯一写入者：尚未领取
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m00-a`
 - started at：`2026-07-23T00:00:33+08:00`
@@ -20,9 +20,9 @@
 ## 最后验证与交接
 
 - 最后完成切片：`M00-A.3`
-- 测试证据：`docs/agentization/test-reports/M00-A.3.md`；Pester 临时仓库 `36 passed`，扩展后端回归 `65 passed`，Ruff、PowerShell AST 与 whitespace 检查通过
-- commit/push：本状态文件所在独立提交，推送至 `origin/codex/agent-0.8.4-m00-a`；最终 SHA 以远端 ref 为准
-- 下一步第一动作：M00-A 已无未完成切片；先处理下述历史中文门禁阻塞并等待 M00-B.1 完成，再由开发者手动启动唯一集成人执行 `M00-I.1`
-- 硬阻塞：从共同 Agent 基线运行中文规范门禁会拒绝既有提交 `0af72ff6993e9e67636f21e8e16d641411702d67` 的英文标题，以及 `backend/tests/test_agent_runtime_legacy_invariants.py` 的英文 docstring。该已推送历史不得由本切片 force-push 改写，且本切片无权修改 M00-A.1 锁定文件；因此不得写 `ready_for_integration`。此外，当前远端尚无 `codex/agent-0.8.4-m00-b`，不满足 `M00-I.1` 启动条件。
+- 测试证据：`docs/agentization/test-reports/M00-A.3.md`；Pester 临时仓库 `39 passed`，扩展后端回归 `65 passed`，Ruff、PowerShell AST、whitespace、共同基线中文门禁与 M00-A Final gate 通过
+- commit/push：历史兼容实现提交为 `db3dbdc`；本状态文件使用后续独立中文提交并推送至 `origin/codex/agent-0.8.4-m00-a`，最终 SHA 以远端 ref 为准
+- 下一步第一动作：M00-A 已无未完成切片；等待 M00-B 解除其共同基线 Plan UI 测试阻塞并写 `ready_for_integration` 后，由开发者手动启动唯一集成人执行 `M00-I.1`
+- 硬阻塞：M00-A 无。完整 SHA `0af72ff6993e9e67636f21e8e16d641411702d67` 已按用户批准设计作为门禁启用前精确历史豁免，不改写历史；只放过仍由该提交 blame 拥有的英文行，并显式清除 ignore-revs 配置影响。M00-B 当前仍为 `blocked`，因此不得自动启动 `M00-I.1`。
 
 每个 Codex 任务只执行一个切片。完成后停止，等待开发者手动发送“继续 M00-A 的下一个未完成切片”。
