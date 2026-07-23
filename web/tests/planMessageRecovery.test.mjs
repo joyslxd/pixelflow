@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-const moduleUrl = pathToFileURL(
+const moduleUrl = process.env.PLAN_MESSAGE_RECOVERY_TEST_MODULE || pathToFileURL(
   path.join(os.tmpdir(), "pixelflow-plan-message-recovery-test", "planMessageRecovery.js"),
 ).href;
 const {
