@@ -29,8 +29,9 @@ interface ReplacementOption {
 
 interface SceneAssetReplacementPickerProps {
   open: boolean;
+  operation?: "add" | "replace";
   assetGroup: GlobalSceneAssetGroup;
-  assetName: string;
+  assetName?: string;
   onCancel: () => void;
   onConfirm: (replacement: SceneGlobalAssetReplacement) => void;
 }
@@ -43,11 +44,13 @@ const DIGITAL_HUMAN_TYPES: Array<{ label: string; value: DigitalHumanAssetType }
 
 export function SceneAssetReplacementPicker({
   open,
+  operation = "replace",
   assetGroup,
   assetName,
   onCancel,
   onConfirm,
 }: SceneAssetReplacementPickerProps) {
+  const adding = operation === "add";
   const canUseDigitalHuman = assetGroup === "characters";
   const [mode, setMode] = useState<PickerMode>(canUseDigitalHuman ? "digital_human" : "image_asset");
   const [digitalHumanType, setDigitalHumanType] = useState<DigitalHumanAssetType>("xnszr");
@@ -321,8 +324,8 @@ export function SceneAssetReplacementPicker({
       <div className="relative flex max-h-[86vh] w-full max-w-[900px] flex-col rounded-[8px] bg-white shadow-[0_24px_80px_rgba(15,23,42,0.28)]">
         <div className="flex shrink-0 items-center justify-between border-b border-line px-6 py-4">
           <div>
-            <div className="text-[18px] font-semibold text-ink">替换素材</div>
-            <div className="mt-1 text-[12px] text-ink-soft">当前素材：{assetName}</div>
+            <div className="text-[18px] font-semibold text-ink">{adding ? "添加素材" : "替换素材"}</div>
+            {!adding ? <div className="mt-1 text-[12px] text-ink-soft">当前素材：{assetName}</div> : null}
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -527,15 +530,19 @@ export function SceneAssetReplacementPicker({
             disabled={!selected || interactionBusy}
             className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            确认替换
+            {adding ? "确认添加" : "确认替换"}
           </button>
         </div>
       </div>
       {uploadedImage ? (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 px-4" role="alertdialog" aria-modal="true" aria-labelledby="local-upload-confirm-title">
           <div className="w-full max-w-[520px] rounded-[8px] bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.32)]">
-            <div id="local-upload-confirm-title" className="text-[18px] font-semibold text-ink">图片上传成功，是否替换当前素材？</div>
-            <div className="mt-2 text-[13px] text-ink-soft">确认后将同步更新当前素材及分镜中的对应引用。</div>
+            <div id="local-upload-confirm-title" className="text-[18px] font-semibold text-ink">
+              {adding ? "图片上传成功，是否添加此素材？" : "图片上传成功，是否替换当前素材？"}
+            </div>
+            <div className="mt-2 text-[13px] text-ink-soft">
+              {adding ? "确认后将添加到当前场景包，之后可在镜头描述中通过 @ 引用。" : "确认后将同步更新当前素材及分镜中的对应引用。"}
+            </div>
             <div className="mt-5 flex max-h-[440px] min-h-[240px] items-center justify-center overflow-hidden rounded-[8px] bg-canvas">
               <img src={uploadedImage.url} alt={uploadedImage.filename || uploadedImage.name} className="max-h-[440px] w-full object-contain" />
             </div>
@@ -545,7 +552,7 @@ export function SceneAssetReplacementPicker({
                 取消
               </button>
               <button type="button" onClick={confirmUploadedImage} className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-medium text-white hover:opacity-90">
-                确认替换
+                {adding ? "确认添加" : "确认替换"}
               </button>
             </div>
           </div>
