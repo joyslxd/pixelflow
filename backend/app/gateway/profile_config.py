@@ -16,6 +16,7 @@ Settings 对象。
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -55,6 +56,18 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("gateway", "port"): "GATEWAY_PORT",
     ("gateway", "enable_docs"): "GATEWAY_ENABLE_DOCS",
     ("gateway", "cors_origins"): "GATEWAY_CORS_ORIGINS",
+    ("pixelflow", "agent_runtime", "mode"): "PIXELFLOW_AGENT_RUNTIME_MODE",
+    ("pixelflow", "agent_runtime", "enabled_intents"): "PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "new_conversation_rollout_percent",
+    ): "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "context_compaction_enabled",
+    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
     ("pixelflow", "mysql_url"): "PIXELFLOW_MYSQL_URL",
     ("pixelflow", "mem0_enabled"): "PIXELFLOW_MEM0_ENABLED",
     ("pixelflow", "semantic_memory_enabled"): "PIXELFLOW_SEMANTIC_MEMORY_ENABLED",
@@ -150,6 +163,8 @@ def _to_env_value(value: Any) -> str:
     """把 YAML 值转换成环境变量字符串。"""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     if value is None:
         return ""
     return str(value)

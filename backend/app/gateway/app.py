@@ -9,10 +9,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.profile_config import load_profile_config
+from pixelflow.agent_runtime.config import validate_agent_runtime_startup_config
 
 # 在导入会触发 DeerFlow/Skill 初始化副作用的 router 之前加载 profile YAML，
 # 确保 DeerFlow 使用 DEER_FLOW_CONFIG_PATH，不再回退查找旧 config.yaml。
 load_profile_config()
+validate_agent_runtime_startup_config()
 
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config

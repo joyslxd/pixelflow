@@ -17,6 +17,15 @@ const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-")
 const moduleDirectory = path.join(temporaryRoot, "modules");
 const apiDirectory = path.join(temporaryRoot, "api");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
+const agentRuntimeContractFixture = path.resolve(
+  webRoot,
+  "..",
+  "backend",
+  "tests",
+  "fixtures",
+  "agent_runtime",
+  "contracts-v1.json",
+);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -126,6 +135,7 @@ try {
         moduleDirectory,
         contractOnly ? "contracts.js" : "supervisor/contracts.js",
       ),
+      AGENT_RUNTIME_CONTRACT_FIXTURE: agentRuntimeContractFixture,
       API_TEST_MODULE: moduleUrl(apiDirectory, "api.js"),
       AUTH_STORAGE_TEST_MODULE: moduleUrl(moduleDirectory, "authStorage.js"),
       CONVERSATION_ROUTING_TEST_MODULE: moduleUrl(moduleDirectory, "conversationRouting.js"),

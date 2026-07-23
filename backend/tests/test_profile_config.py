@@ -30,6 +30,10 @@ _MAPPED_ENV_KEYS = {
     "PIXELFLOW_CAPTION_FONT",
     "PIXELFLOW_DRAFT_ROOT",
     "PIXELFLOW_EDIT_SKILL",
+    "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
+    "PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS",
+    "PIXELFLOW_AGENT_RUNTIME_MODE",
+    "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
     "PIXELFLOW_JIANYING_DRAFT_ENABLED",
     "PIXELFLOW_JIANYING_DRAFT_BASE_URL",
     "PIXELFLOW_JIANYING_DRAFT_TOKEN",
@@ -91,6 +95,12 @@ gateway:
   enable_docs: {str(docs).lower()}
   cors_origins: http://localhost:5273
 pixelflow:
+  agent_runtime:
+    mode: assist
+    enabled_intents:
+      - video
+    new_conversation_rollout_percent: 100
+    context_compaction_enabled: true
   mysql_url: mysql+asyncmy://user:pwd@localhost:3306/pixelflow
   mem0_enabled: false
   semantic_memory_enabled: true
@@ -157,6 +167,10 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["GATEWAY_ENABLE_DOCS"] == "false"
     assert os.environ["GATEWAY_CORS_ORIGINS"] == "http://localhost:5273"
     assert os.environ["PIXELFLOW_MYSQL_URL"].startswith("mysql+asyncmy://")
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_MODE"] == "assist"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS"] == '["video"]'
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT"] == "100"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED"] == "true"
     assert os.environ["PIXELFLOW_MEDIA_SKILL"] == "borgrise"
     assert os.environ["PIXELFLOW_EDIT_SKILL"] == "ffmpeg"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_ENABLED"] == "true"
