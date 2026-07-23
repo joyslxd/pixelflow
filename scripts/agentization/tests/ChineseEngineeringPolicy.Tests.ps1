@@ -2,6 +2,7 @@
 $ErrorActionPreference = "Stop"
 
 $AgentizationRoot = Split-Path -Parent $PSScriptRoot
+$RepositoryRoot = Split-Path -Parent (Split-Path -Parent $AgentizationRoot)
 $PolicyScript = Join-Path $AgentizationRoot "Test-ChineseEngineeringPolicy.ps1"
 $script:TemporaryRoots = @()
 
@@ -99,6 +100,78 @@ Describe "中文工程规范门禁" {
 
     It "提供独立的中文规范检查入口" {
         (Test-Path -LiteralPath $PolicyScript) | Should Be $true
+    }
+
+    It "只豁免门禁启用前的精确提交及其原始行" {
+        $result = & $PolicyScript `
+            -RepositoryPath $RepositoryRoot `
+            -BaseRef "8e626ae232d984f14fa9954b672b4e025894d426" `
+            -HeadRef "0af72ff6993e9e67636f21e8e16d641411702d67"
+
+        $result.Passed | Should Be $true
+    }
+
+    It "豁免提交中的英文行被后续修改后重新拒绝" {
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("pixelflow-grandfather-policy-" + [guid]::NewGuid().ToString("N"))
+        $script:TemporaryRoots += $root
+        Invoke-TestGit -RepositoryPath $RepositoryRoot -Arguments @("clone", "--no-local", ".", $root) | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("config", "user.name", "历史豁免测试") | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("config", "user.email", "grandfather-tests@example.invalid") | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("checkout", "0af72ff6993e9e67636f21e8e16d641411702d67") | Out-Null
+        $path = Join-Path $root "backend\tests\test_agent_runtime_legacy_invariants.py"
+        $content = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+        $content = $content.Replace(
+            "Characterization tests for v2 behavior that the Agent runtime must preserve.",
+            "Characterization tests for v2 behavior that the Agent runtime must preserve. Updated."
+        )
+        [System.IO.File]::WriteAllText($path, $content, [System.Text.Encoding]::UTF8)
+        Invoke-TestGit -RepositoryPath $root -Arguments @("add", "backend/tests/test_agent_runtime_legacy_invariants.py") | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("commit", "-m", "测试：修改历史英文说明") | Out-Null
+        $modifiedCommit = @(Invoke-TestGit -RepositoryPath $root -Arguments @("rev-parse", "HEAD"))[-1]
+        [System.IO.File]::WriteAllText(
+            (Join-Path $root ".git-blame-ignore-revs"),
+            "$modifiedCommit`n",
+            [System.Text.Encoding]::ASCII
+        )
+        Invoke-TestGit -RepositoryPath $root -Arguments @("config", "blame.ignoreRevsFile", ".git-blame-ignore-revs") | Out-Null
+
+        $failure = $null
+        try {
+            & $PolicyScript -RepositoryPath $root -BaseRef "8e626ae232d984f14fa9954b672b4e025894d426" -HeadRef "HEAD"
+        }
+        catch {
+            $failure = $_
+        }
+        $failure | Should Not Be $null
+        $failure.Exception.Message | Should Match "docstring 缺少中文说明"
+    }
+
+    It "复制豁免提交中的英文原文到新位置时仍拒绝" {
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("pixelflow-grandfather-copy-" + [guid]::NewGuid().ToString("N"))
+        $script:TemporaryRoots += $root
+        Invoke-TestGit -RepositoryPath $RepositoryRoot -Arguments @("clone", "--no-local", ".", $root) | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("config", "user.name", "历史豁免复制测试") | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("config", "user.email", "grandfather-copy@example.invalid") | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("checkout", "0af72ff6993e9e67636f21e8e16d641411702d67") | Out-Null
+        $relativePath = "backend/tests/test_grandfather_copy.py"
+        $path = Join-Path $root "backend\tests\test_grandfather_copy.py"
+        [System.IO.File]::WriteAllText(
+            $path,
+            '"""Characterization tests for v2 behavior that the Agent runtime must preserve."""',
+            [System.Text.Encoding]::UTF8
+        )
+        Invoke-TestGit -RepositoryPath $root -Arguments @("add", $relativePath) | Out-Null
+        Invoke-TestGit -RepositoryPath $root -Arguments @("commit", "-m", "测试：复制历史英文说明") | Out-Null
+
+        $failure = $null
+        try {
+            & $PolicyScript -RepositoryPath $root -BaseRef "8e626ae232d984f14fa9954b672b4e025894d426" -HeadRef "HEAD"
+        }
+        catch {
+            $failure = $_
+        }
+        $failure | Should Not Be $null
+        $failure.Exception.Message | Should Match "test_grandfather_copy.py"
     }
 
     It "拒绝只有英文语义的提交标题或正文" {

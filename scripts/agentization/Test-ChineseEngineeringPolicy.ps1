@@ -13,6 +13,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Agentization.Common.ps1")
 
+# 用途：兼容中文门禁启用前已审核并推送的历史；影响：只跳过精确 SHA，后续提交仍执行全部中文检查。
+$GrandfatheredCommits = @{
+    "0af72ff6993e9e67636f21e8e16d641411702d67" = "M00-A.1 创建时尚未启用中文工程门禁，现经用户明确批准保留历史。"
+}
+
 function Test-MachineDirectiveComment {
     param([string]$Comment)
 
@@ -56,10 +61,10 @@ function Get-AddedCommentText {
     return $null
 }
 
-function Get-AddedLineNumbers {
+function Get-AddedLineEntries {
     param([string[]]$DiffLines)
 
-    $numbers = New-Object System.Collections.Generic.List[int]
+    $entries = New-Object System.Collections.Generic.List[object]
     $currentLine = 0
     $insideHunk = $false
     foreach ($line in $DiffLines) {
@@ -72,7 +77,10 @@ function Get-AddedLineNumbers {
             continue
         }
         if ($line.StartsWith("+")) {
-            $numbers.Add($currentLine)
+            $entries.Add([pscustomobject]@{
+                LineNumber = $currentLine
+                Text = $line.Substring(1)
+            })
             $currentLine++
         }
         elseif ($line.StartsWith("-")) {
@@ -82,7 +90,63 @@ function Get-AddedLineNumbers {
             $currentLine++
         }
     }
-    return $numbers.ToArray()
+    return $entries.ToArray()
+}
+
+function Get-AddedLineNumbers {
+    param([string[]]$DiffLines)
+
+    return @(
+        (Get-AddedLineEntries -DiffLines $DiffLines) |
+            ForEach-Object { $_.LineNumber }
+    )
+}
+
+function Get-LineOriginCommit {
+    param(
+        [string]$RepositoryPath,
+        [string]$HeadRef,
+        [string]$RelativePath,
+        [int]$LineNumber
+    )
+
+    $result = Invoke-AgentGit -RepositoryPath $RepositoryPath -Arguments @(
+        "blame",
+        "--ignore-revs-file=",
+        "--porcelain",
+        $HeadRef,
+        "-L",
+        "$LineNumber,$LineNumber",
+        "--",
+        $RelativePath
+    ) -AllowFailure
+    if ($result.ExitCode -ne 0 -or $result.Output.Count -eq 0) {
+        return $null
+    }
+    $origin = ($result.Output[0] -split "\s+")[0].TrimStart("^")
+    if ($origin -notmatch "^[0-9a-fA-F]{40}$") {
+        return $null
+    }
+    return $origin.ToLowerInvariant()
+}
+
+function Test-GrandfatheredLine {
+    param(
+        [string]$RepositoryPath,
+        [string]$HeadRef,
+        [string]$RelativePath,
+        [int]$LineNumber
+    )
+
+    $origin = Get-LineOriginCommit `
+        -RepositoryPath $RepositoryPath `
+        -HeadRef $HeadRef `
+        -RelativePath $RelativePath `
+        -LineNumber $LineNumber
+    if ([string]::IsNullOrWhiteSpace($origin)) {
+        return $false
+    }
+    return $GrandfatheredCommits.ContainsKey($origin)
 }
 
 function Get-TripleQuotedLineNumbers {
@@ -206,6 +270,9 @@ $violations = New-Object System.Collections.Generic.List[string]
 $commitResult = Invoke-AgentGit -RepositoryPath $root -Arguments @("rev-list", "--reverse", "$BaseRef..$HeadRef")
 $commits = @($commitResult.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 foreach ($commit in $commits) {
+    if ($GrandfatheredCommits.ContainsKey($commit)) {
+        continue
+    }
     $subject = (Invoke-AgentGit -RepositoryPath $root -Arguments @("show", "-s", "--format=%s", $commit)).Output -join "`n"
     $body = (Invoke-AgentGit -RepositoryPath $root -Arguments @("show", "-s", "--format=%b", $commit)).Output -join "`n"
     if (-not (Test-AgentContainsChinese -Text $subject)) {
@@ -223,20 +290,24 @@ foreach ($relativePath in $changedPaths) {
     $extension = [System.IO.Path]::GetExtension($relativePath).ToLowerInvariant()
     if ($codeExtensions -contains $extension) {
         $diff = Invoke-AgentGit -RepositoryPath $root -Arguments @("diff", "--unified=0", "--no-color", $BaseRef, $HeadRef, "--", $relativePath)
-        foreach ($rawLine in $diff.Output) {
-            if (-not $rawLine.StartsWith("+") -or $rawLine.StartsWith("+++")) {
-                continue
-            }
-            $line = $rawLine.Substring(1)
-            $comment = Get-AddedCommentText -Line $line -Extension $extension
+        $addedEntries = @(Get-AddedLineEntries -DiffLines $diff.Output)
+        foreach ($entry in $addedEntries) {
+            $comment = Get-AddedCommentText -Line $entry.Text -Extension $extension
             if ($null -eq $comment -or [string]::IsNullOrWhiteSpace($comment)) {
                 continue
             }
             if ((Test-MachineDirectiveComment -Comment $comment) -or (Test-AgentContainsChinese -Text $comment)) {
                 continue
             }
-            if ($comment -match "[A-Za-z]{2,}") {
-                $violations.Add("人工注释缺少中文说明：$relativePath -> $comment")
+            if (
+                $comment -match "[A-Za-z]{2,}" -and
+                -not (Test-GrandfatheredLine `
+                    -RepositoryPath $root `
+                    -HeadRef $HeadRef `
+                    -RelativePath $relativePath `
+                    -LineNumber $entry.LineNumber)
+            ) {
+                $violations.Add("人工注释缺少中文说明：$relativePath 第 $($entry.LineNumber) 行 -> $comment")
             }
         }
         if ($extension -eq ".py") {
@@ -248,7 +319,15 @@ foreach ($relativePath in $changedPaths) {
                     continue
                 }
                 $docstringText = $headLines[$lineNumber - 1].Trim().Replace('"""', "").Replace("'''", "").Trim()
-                if ($docstringText -match "[A-Za-z]{2,}" -and -not (Test-AgentContainsChinese -Text $docstringText)) {
+                if (
+                    $docstringText -match "[A-Za-z]{2,}" -and
+                    -not (Test-AgentContainsChinese -Text $docstringText) -and
+                    -not (Test-GrandfatheredLine `
+                        -RepositoryPath $root `
+                        -HeadRef $HeadRef `
+                        -RelativePath $relativePath `
+                        -LineNumber $lineNumber)
+                ) {
                     $violations.Add("docstring 缺少中文说明：$relativePath 第 $lineNumber 行")
                 }
             }
