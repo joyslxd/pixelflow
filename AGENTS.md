@@ -164,7 +164,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 偏好 | `GET/PUT /agent/users/{user_id}/preferences` | 用户偏好 |
 | 旧任务流 | `/agent/flows`、`/agent/flows/{task_id}/events` 等 | LangGraph 任务、SSE、资产查询 |
 
-附件上传是例外：前端文件上传直接调用 content-app 的 `/api/upload`，不是 Python `/agent` 接口。上传结果作为 `materials` 随用户输入传给 Agent。
+附件上传是例外：前端文件上传直接调用 content-app 的 `/api/upload`，不是 Python `/agent` 接口。输入框支持文件选择，并支持从剪贴板粘贴或拖拽加入图片素材；三种入口复用同一上传 Client，上传结果作为 `materials` 随用户输入传给 Agent。
 
 ## Agent 与 Skill
 
@@ -363,6 +363,7 @@ SmartPPT接口：
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset/start`，不能掉回普通采集 Agent。
 - 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。
+- `StoryboardPanel` 的角色、场景、道具三行末尾必须固定显示“添加素材”，并以 `operation="add"` 复用替换素材弹层。添加结果只追加到当前场景包 `global_assets`：ID 使用 `character-manual-*`、`scene-manual-*`、`prop-manual-*` 并保持全局唯一，三类来源名称重名时自动追加序号，角色写 `three_view_images`，场景/道具写 `images`，数字人保留 `generation_reference_url=asset://thirdAssetId`。不得修改当前 Plan `asset_manifest` 或自动写入镜头；只有用户之后在镜头描述中手动 `@` 选择时，才更新 mentions/reference IDs、标记 dirty scene，并在已有视频上只重生成受影响镜头。新增资产必须原地持久化到当前消息和 conversation context，保留已有分镜视频、合并视频及 dirty scene 状态。
 - 全局素材替换弹窗保留两条本地图片入口：原“本地上传”只调用 `/api/upload` 并在二次确认后临时替换，不创建资产记录；图片素材列表第一张“上传到资产库”依次调用 `/api/projects`、`/api/upload`、`/api/asset/create`，再回查 `/api/asset/assets` 第一页，创建响应的 `data.id` 仅用于本次弹窗标记“刚刚上传”和同步重试。资产上传只校验 JPG/JPEG/PNG/WEBP 与 20MB，不校验宽高；取消替换时已创建资产继续保留。需要真实上传进度时复用 `uploadAttachment(file, { onProgress })`，其内部用 XHR 监听上传进度，默认无回调调用仍走 fetch。
 - 对话中只有最后一个 `video_scene_packages` 卡片能展示“查看分镜 / 确认并生成视频 / 重新生成参考图”等操作；旧场景包卡片只能作为历史预览，防止用户基于过期素材继续生成。
 - 场景视频和合并视频生成完成后，未结束的 `video_result` 卡片固定展示“无意见，结束 / 生成剪映草稿 / 提出修改意见”三个按钮；草稿运行中锁定三个按钮。最终视频卡片不再展示“查看分镜”。

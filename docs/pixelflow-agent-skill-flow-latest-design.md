@@ -231,6 +231,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 单个分镜出现可恢复网络或服务异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。HTTP 4xx 参数校验、模型价格配置缺失和实时能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 的 `status_code/data/details`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
 - 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`；如果同一条消息里存在有效上传图片素材，前端改走 `/agent/flows/image/fuse-asset`，后端调用 `MultiImageFusionSkill` 把引用素材图和上传图片融合成新图。进入 job 前前端会先展示图片编辑模型/比例/清晰度确认卡，默认模型 `gpt-image-2`，比例优先保持原素材比例。两条链路成功后只展示候选新图，必须用户点击确认后才替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`；点击重新编辑会基于当前候选图继续弹参数确认卡，不重新走 intake。
+- `StoryboardPanel` 在角色、场景、道具三行末尾固定展示“添加素材”。添加入口复用素材替换弹层和 content-app 素材库 Client，但使用独立的添加文案；新增素材使用 `character-manual-*`、`scene-manual-*` 或 `prop-manual-*` ID，名称在三类素材中自动追加序号去重，并只原地追加到当前场景包 `global_assets` 与 conversation context，不修改当前 Plan 的 `asset_manifest`、蓝图或任何镜头引用。用户之后必须在目标镜头描述中手动通过 `@` 选择，新素材才会进入该镜头 `mentions/reference_asset_ids`、标记该镜头已修改并参与首次生成或局部二次生成。
 - 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
@@ -812,7 +813,7 @@ flowchart TD
 
 上传：
 
-- 前端上传附件直接调用 content-app `/api/upload`。
+- 前端上传附件直接调用 content-app `/api/upload`。输入框支持文件选择，并支持从剪贴板粘贴或拖拽加入图片素材；三种入口复用同一上传 Client。
 - 上传返回的 URL、文件名、类型会进入 `materials`。
 - 如果后续步骤要调用 LLM、图片编辑或视频编辑，必须把用户输入和 `materials` 一起提交给后端，让 Agent 理解素材语义。
 - PPT 表单附件只允许 Word、Excel、PDF，前端按单个文件最大 20MB、全部附件累计最大 100MB 校验；图片、视频、音频附件不能作为 SmartPPT 大纲输入文件。
@@ -868,9 +869,11 @@ flowchart TD
 | 鉴权/额度 | `content_app_auth.py`、`content_app_auth_context.py`、`skills/base.py`、`run_generation.py` |
 | 文档 | `README.md`、`AGENTS.md`、`CONTENT_APP_API_CALLS.md`、本文件 |
 
-### 14.1 分镜全局素材替换
+### 14.1 分镜全局素材添加与替换
 
-视频场景包的全局素材预览弹窗支持直接从 content-app 资产库替换素材，并保留两条互不混用的本地图片入口。原“本地上传”只调用 content-app `/api/upload` 得到临时图片 URL，上传成功后展示图片预览和文件名，必须由用户二次确认才执行替换；取消确认时保留原素材且不创建资产库记录。图片素材列表第一张另有“上传到资产库”卡片：只校验 JPG/JPEG/PNG/WEBP 与单张不超过 20MB，不校验图片宽高；前端先调用 `/api/projects` 取得当前项目，再复用 `uploadAttachment(file, { onProgress })` 上传文件并用 `/api/asset/create` 创建长期图片资产，最后重新查询 `/api/asset/assets` 第一页。创建响应 `data.id` 只用于本次弹窗定位“刚刚上传”卡片和最多 3 次、每次间隔 1 秒的同步回查；用户仍需手动选中资产并点击“确认替换”，取消替换不会删除已创建资产。两条入口最终都复用同一场景包替换逻辑：更新 `global_assets` 和所有引用同一 `asset_id` 的 `shot_description.mentions`，保留原场景包 `asset_id`、原素材名称和分镜文本里的 `@` 标识，不写入 `videoScenePackageEditedSceneIds`；替换完成后推送一张新的 `video_scene_packages` 场景包卡片。
+视频场景包的素材选择弹层通过 `operation=add|replace` 同时服务添加和替换，并保留两条互不混用的本地图片入口。原“本地上传”只调用 content-app `/api/upload` 得到临时图片 URL，上传成功后展示图片预览和文件名，必须由用户二次确认才执行当前操作；图片素材列表第一张“上传到资产库”则先调用 `/api/projects`，再用 `/api/upload` 和 `/api/asset/create` 创建长期图片资产，最后重新查询 `/api/asset/assets` 第一页。创建响应 `data.id` 只用于本次弹层定位“刚刚上传”和同步回查；取消时已创建资产继续保留。
+
+替换模式保持原合同：更新 `global_assets` 和所有同 `asset_id` 的 `shot_description.mentions`，保留原 ID、名称和镜头 `@` 标识。添加模式只追加带 `manual_added=true/asset_origin=manual_addition` 的新全局素材并持久化当前消息与 conversation context，不自动修改 `scene_packages`；当用户随后在 `SceneMentionEditor` 中选择该素材时，现有编辑链路才写入 mention、参考 ID 和 dirty scene。角色素材使用 `three_view_images`，场景/道具使用 `images`；数字人生成引用保存为 `asset://thirdAssetId`，普通图片保存 HTTPS URL。
 
 - 角色素材 `characters` 可替换为数字人素材或图片素材；场景 `scenes` 和道具 `props` 只能替换为图片素材。
 - 数字人素材前端直连 `/api/asset/character-assets`，支持 `xnszr`、`zrszr`、`ipsc` 三类；展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`。

@@ -66,6 +66,7 @@ import {
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
+  addGlobalSceneAssetReference,
   applyGlobalSceneAssetReplacement,
   applyGlobalSceneAssetImageEdit,
   DEFAULT_TARGET_DURATION_MS,
@@ -2696,6 +2697,61 @@ export function WorkspacePage() {
         third_asset_id: replacement.thirdAssetId,
         replacement_asset_type: replacement.assetType,
         replacement_asset_id: replacement.contentAssetId,
+      },
+    });
+  };
+
+  const handleAddGlobalAsset = (
+    msg: ChatMessage,
+    assetGroup: GlobalSceneAssetGroup,
+    replacement: SceneGlobalAssetReplacement,
+  ) => {
+    const targetConversationId = messageConversationId(msg, currentConversationId || conversationIdRef.current);
+    const storyboardMessage = messagesRef.current.find(
+      (item) =>
+        item.id === msg.id &&
+        messageConversationId(item, targetConversationId) === targetConversationId &&
+        Boolean(item.artifact?.videoScenePackages),
+    ) || msg;
+    const artifact = storyboardMessage.artifact;
+    const videoScenePackages = artifact?.videoScenePackages;
+    if (!artifact || !videoScenePackages) {
+      pushAssistant("当前没有找到可添加素材的场景包，请先打开最新的场景包卡片。", targetConversationId);
+      return;
+    }
+
+    const added = addGlobalSceneAssetReference(videoScenePackages.global_assets, {
+      assetGroup,
+      manualId: uid(),
+      replacement,
+    });
+    const updatedPackages: PrepareScenePackagesResponse = {
+      ...videoScenePackages,
+      global_assets: added.global_assets,
+    };
+    const updatedArtifact: ChatArtifact = {
+      ...artifact,
+      videoScenePackages: updatedPackages,
+    };
+
+    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
+    if (targetConversationId) {
+      void api.updateConversationMessage(targetConversationId, storyboardMessage.id, {
+        content: storyboardMessage.content,
+        payload: {
+          artifact: updatedArtifact,
+          materials: updatedArtifact.materials || [],
+          client_message_id: storyboardMessage.id,
+        } as unknown as Record<string, unknown>,
+      }).catch(() => {});
+    }
+    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_added", {
+      scene_global_asset_addition: {
+        asset_id: added.added_asset.asset_id,
+        asset_group: assetGroup,
+        name: added.added_asset.name,
+        replacement_source: replacement.source,
+        manual_added: true,
       },
     });
   };
@@ -8402,6 +8458,7 @@ export function WorkspacePage() {
           onReferenceGlobalAsset={handleReferenceGlobalAsset}
           onDeleteGlobalAsset={handleDeleteGlobalAsset}
           onReplaceGlobalAsset={handleReplaceGlobalAsset}
+          onAddGlobalAsset={(assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)}
           onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
           onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
           onClose={() => {

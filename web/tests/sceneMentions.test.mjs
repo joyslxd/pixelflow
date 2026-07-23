@@ -30,6 +30,35 @@ test("buildMentionCandidates returns only character scene and prop image candida
   );
 });
 
+test("buildMentionCandidates exposes manually added assets with their generation references", () => {
+  const candidates = buildMentionCandidates({
+    characters: [
+      {
+        asset_id: "character-manual-m1",
+        name: "新增角色",
+        three_view_images: ["https://x/manual-character.png"],
+        generation_reference_url: "asset://manual-character",
+        third_asset_id: "manual-character",
+        replacement_source: "digital_human",
+        manual_added: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(candidates, [
+    {
+      asset_id: "character-manual-m1",
+      type: "character",
+      group: "characters",
+      name: "新增角色",
+      image_url: "https://x/manual-character.png",
+      generation_reference_url: "asset://manual-character",
+      third_asset_id: "manual-character",
+      replacement_source: "digital_human",
+    },
+  ]);
+});
+
 test("buildMentionCandidates uses generated asset images before stale direct urls", () => {
   const candidates = buildMentionCandidates({
     characters: [

@@ -1,4 +1,4 @@
-import { ArrowLeft, Box, Download, ImageIcon, MapPin, Replace, Sparkles, Trash2, UserRound, X } from "lucide-react";
+import { ArrowLeft, Box, Download, ImageIcon, MapPin, Plus, Replace, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import { SceneAssetReplacementPicker } from "@/components/canvas/SceneAssetReplacementPicker";
 import type { ChatMessage } from "@/lib/chat";
@@ -6,6 +6,7 @@ import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from
 import {
   collectSceneImageUrls,
   stringArray,
+  type GlobalSceneAssetGroup,
   type GlobalSceneAssets,
   type SceneGlobalAssetReference,
   type SceneGlobalAssetReplacement,
@@ -21,12 +22,13 @@ interface StoryboardPanelProps {
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
+  onAddGlobalAsset?: (assetGroup: GlobalSceneAssetGroup, replacement: SceneGlobalAssetReplacement) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
   onClose?: () => void;
 }
 
-type AssetGroup = "characters" | "scenes" | "props";
+type AssetGroup = GlobalSceneAssetGroup;
 
 const assetGroupTitle: Record<AssetGroup, string> = {
   characters: "出场角色",
@@ -124,6 +126,7 @@ export function StoryboardPanel({
   onReferenceGlobalAsset,
   onDeleteGlobalAsset,
   onReplaceGlobalAsset,
+  onAddGlobalAsset,
   onGenerateVideo,
   onRetrySceneAssets,
   onClose,
@@ -135,6 +138,7 @@ export function StoryboardPanel({
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
+  const [additionTarget, setAdditionTarget] = useState<AssetGroup | null>(null);
   const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
@@ -222,6 +226,12 @@ export function StoryboardPanel({
     setReplacementTarget(null);
   };
 
+  const confirmAddition = (replacement: SceneGlobalAssetReplacement) => {
+    if (!additionTarget) return;
+    onAddGlobalAsset?.(additionTarget, replacement);
+    setAdditionTarget(null);
+  };
+
   return (
     <aside className="flex h-full w-[52vw] min-w-[680px] max-w-[980px] flex-col border-l border-line bg-[#f8fafc]">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-4">
@@ -249,30 +259,38 @@ export function StoryboardPanel({
                       {assetGroupTitle[group]}
                     </div>
                     <div className="flex gap-2 overflow-x-auto pb-1">
-                      {items.length > 0 ? (
-                        items.map((asset, index) => {
-                          const image = assetImage(asset);
-                          const id = assetId(asset, `${group}-${index + 1}`);
-                          return (
-                            <button
-                              key={id}
-                              type="button"
-                              onClick={() => openAssetPreview(group, asset, `${group}-${index + 1}`)}
-                              disabled={!image}
-                              className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent disabled:cursor-default disabled:hover:border-line"
-                            >
-                              {image ? (
-                                <img src={image} alt={assetName(asset, id)} className="h-16 w-full object-cover" />
-                              ) : (
-                                <div className="flex h-16 items-center justify-center text-[11px] text-ink-soft">待生成</div>
-                              )}
-                              <div className="truncate px-2 py-1 text-[11px] text-ink-soft">@{assetName(asset, id)}</div>
-                            </button>
-                          );
-                        })
-                      ) : (
-                        <div className="text-[12px] text-ink-soft">暂无素材</div>
-                      )}
+                      {items.map((asset, index) => {
+                        const image = assetImage(asset);
+                        const id = assetId(asset, `${group}-${index + 1}`);
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => openAssetPreview(group, asset, `${group}-${index + 1}`)}
+                            disabled={!image}
+                            className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent disabled:cursor-default disabled:hover:border-line"
+                          >
+                            {image ? (
+                              <img src={image} alt={assetName(asset, id)} className="h-16 w-full object-cover" />
+                            ) : (
+                              <div className="flex h-16 items-center justify-center text-[11px] text-ink-soft">待生成</div>
+                            )}
+                            <div className="truncate px-2 py-1 text-[11px] text-ink-soft">@{assetName(asset, id)}</div>
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => setAdditionTarget(group)}
+                        className="w-24 shrink-0 overflow-hidden rounded-xl border border-dashed border-line bg-white text-left transition-colors hover:border-accent hover:bg-accent-soft/30"
+                        title={`添加${assetGroupTitle[group]}素材`}
+                        aria-label={`添加${assetGroupTitle[group]}素材`}
+                      >
+                        <div className="flex h-16 items-center justify-center text-accent">
+                          <Plus size={22} />
+                        </div>
+                        <div className="truncate px-2 py-1 text-center text-[11px] text-ink-soft">添加素材</div>
+                      </button>
                     </div>
                   </div>
                 );
@@ -470,6 +488,15 @@ export function StoryboardPanel({
           assetName={replacementTarget.name}
           onCancel={() => setReplacementTarget(null)}
           onConfirm={confirmReplacement}
+        />
+      ) : null}
+      {additionTarget ? (
+        <SceneAssetReplacementPicker
+          open={Boolean(additionTarget)}
+          operation="add"
+          assetGroup={additionTarget}
+          onCancel={() => setAdditionTarget(null)}
+          onConfirm={confirmAddition}
         />
       ) : null}
     </aside>

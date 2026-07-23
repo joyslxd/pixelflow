@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ClipboardEvent, DragEvent } from "react";
 import { ArrowUp, FileText, ImageIcon, Loader2, Plus, X } from "lucide-react";
 import { api, type UploadedAttachment } from "@/lib/api";
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
@@ -17,8 +18,10 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dragDepthRef = useRef(0);
   const hasReferencedMaterials = referencedMaterials.length > 0;
   const canSend = !busy && !uploading && (text.trim().length > 0 || (!hasReferencedMaterials && attachments.length > 0));
 
@@ -42,8 +45,8 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
 
   const selectFiles = () => inputRef.current?.click();
 
-  const uploadFiles = async (files: FileList | null) => {
-    const selected = Array.from(files || []);
+  const uploadFiles = async (files: File[]) => {
+    const selected = files;
     if (selected.length === 0) return;
     setUploading(true);
     setUploadError("");
@@ -58,6 +61,54 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
     }
   };
 
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const imageFiles = imageFilesFromDataTransfer(event.clipboardData);
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    if (busy || uploading) {
+      setUploadError("当前任务处理中，暂时无法添加图片素材");
+      return;
+    }
+    void uploadFiles(imageFiles);
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event.dataTransfer) || busy || uploading) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDraggingFiles(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event.dataTransfer) || busy || uploading) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFiles(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDraggingFiles(false);
+    if (busy || uploading) {
+      setUploadError("当前任务处理中，暂时无法添加图片素材");
+      return;
+    }
+    const imageFiles = imageFilesFromDataTransfer(event.dataTransfer);
+    if (imageFiles.length === 0) {
+      setUploadError("请拖入图片素材");
+      return;
+    }
+    void uploadFiles(imageFiles);
+  };
+
   const removeAttachment = (url: string) => {
     setAttachments((items) => items.filter((item) => item.url !== url));
   };
@@ -69,7 +120,22 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   const materialsForDisplay = [...referencedMaterials, ...attachments];
 
   return (
-    <div className="rounded-[24px] border border-line bg-white px-3 pb-3 pt-4 shadow-[0_1px_2px_rgba(16,24,40,0.04),0_10px_30px_rgba(16,24,40,0.08)] transition-colors focus-within:border-ink-soft/35">
+    <div
+      onPaste={handlePaste}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`relative rounded-[24px] border bg-white px-3 pb-3 pt-4 shadow-[0_1px_2px_rgba(16,24,40,0.04),0_10px_30px_rgba(16,24,40,0.08)] transition-colors focus-within:border-ink-soft/35 ${
+        isDraggingFiles ? "border-accent ring-2 ring-accent/20" : "border-line"
+      }`}
+    >
+      {isDraggingFiles ? (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-[24px] border-2 border-dashed border-accent bg-white/90 text-sm font-medium text-accent">
+          <ImageIcon size={20} />
+          松开即可添加图片素材
+        </div>
+      ) : null}
       {materialsForDisplay.length > 0 && (
         <div className="mb-3 flex max-h-24 flex-wrap gap-2 overflow-y-auto px-1">
           {materialsForDisplay.map((item) => {
@@ -115,7 +181,7 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
         className="min-h-[64px] max-h-[320px] w-full resize-none overflow-y-auto bg-transparent px-2 text-[15px] leading-7 text-ink outline-none placeholder:text-ink-soft/60"
       />
       <div className="mt-2 flex min-h-10 items-center gap-2">
-        <input ref={inputRef} type="file" multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
+        <input ref={inputRef} type="file" multiple className="hidden" onChange={(event) => void uploadFiles(Array.from(event.target.files || []))} />
         <button
           type="button"
           onClick={selectFiles}
@@ -125,7 +191,9 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
         >
           {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
         </button>
-        {materialsForDisplay.length > 0 ? <span className="text-[12px] text-ink-soft">已添加 {materialsForDisplay.length} 个素材</span> : null}
+        <span className="text-[12px] text-ink-soft">
+          {materialsForDisplay.length > 0 ? `已添加 ${materialsForDisplay.length} 个素材` : "支持粘贴或拖入图片"}
+        </span>
         <div className="flex-1" />
         <button
           type="button"
@@ -155,4 +223,20 @@ function materialType(item: Record<string, unknown>): string {
 
 function materialName(item: Record<string, unknown>): string {
   return String(item.name || item.filename || item.asset_name || "引用素材");
+}
+
+function hasFileTransfer(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes("Files");
+}
+
+function imageFilesFromDataTransfer(dataTransfer: DataTransfer): File[] {
+  const itemFiles = Array.from(dataTransfer.items)
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+  return (itemFiles.length > 0 ? itemFiles : Array.from(dataTransfer.files)).filter(isImageFile);
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.toLowerCase().startsWith("image/") || /\.(avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i.test(file.name);
 }
