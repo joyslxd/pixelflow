@@ -2,21 +2,21 @@
 
 - phase：`in_progress`
 - owner：A
-- reviewer：`/root/m01_2_independent_review`
+- reviewer：`/root/m01_3_independent_review`
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
 - branch：`codex/agent-0.8.4-m01-runtime-store`
 - 依赖：M00（已进入 `feature/agent_0.8.4_boguan`）
-- 当前切片：`M01.3`
-- 最近完成：`M01.2`
+- 当前切片：`M01.4`
+- 最近完成：`M01.3`
 - 当前唯一写入者：`尚未领取`
-- 当前锁定文件：无
-- 本切片开始时间：无
+- 当前锁定文件：`无`
+- 本切片开始时间：`未开始`
 
 ## 切片
 
 - [x] M01.1 数据模型与 additive migration（2.5h）
 - [x] M01.2 SQL/Memory Repository（3h）
-- [ ] M01.3 revision/CAS/服务端保留 namespace（2.5h）
+- [x] M01.3 revision/CAS/服务端保留 namespace（2.5h）
 - [ ] M01.4 Turn Inbox 幂等和顺序领取（2h）
 - [ ] M01.5 Event Outbox/sequence/cursor（2h）
 
@@ -40,6 +40,17 @@
 - 独立审核首轮发现 2 个 Important 和 1 组 Minor 覆盖缺口；按 TDD 整改后复审确认 Critical、Important、Minor 均无。
 - 本切片未实现 M01.3 的 revision/CAS、M01.4 的 Turn claim 或 M01.5 的 Event Outbox claim，未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.2.md`。
 
+## M01.3 交付与验证
+
+- 对话聚合新增从 `1` 开始的单调 `revision`；普通更新、Agent Runtime 专用 patch 和剪映原子 patch 只在实际状态变化时递增，no-op 不递增。
+- Memory Store 使用对话锁，SQL Store 使用事务内行锁，SQLite 使用 `BEGIN IMMEDIATE`；相同旧 revision 的并发写恰好一个成功，冲突不产生部分更新。
+- 所有者谓词先于 revision 比较，跨用户请求继续表现为不存在；HTTP CAS 冲突统一返回 409，未携带 `expected_revision` 的旧前端请求保持兼容。
+- `__agent_runtime` 只能由服务端 Repository 方法写入；前端创建和整包 context 更新不能创建、覆盖或删除该命名空间，并继续保留剪映双字段与恢复错误。
+- Memory 写入输入和返回快照均使用深拷贝，调用方不能通过修改普通 context、Runtime patch 或剪映嵌套对象绕过 CAS。
+- Alembic 旧表迁移使用所有权索引保护 downgrade，预存 revision 列不认领，离线模式 fail-closed；独立 MySQL 初始化仅在缺列时执行兼容升级。
+- 新合同为 `10 passed, 1 warning`；M01 范围回归为 `197 passed, 1 warning`。ruff 与 `git diff --check` 通过。
+- 独立审核经过两轮 TDD 整改，最终确认 Critical、Important、Minor 均无；未实现 M01.4/M01.5，未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.3.md`。
+
 ## 恢复提示
 
-下一次只执行 M01.3：先从远端恢复同一模块分支/worktree，复核 M01.2 双实现合同，再以失败测试实现 conversation revision/CAS 与服务端保留 namespace；不得提前实现 M01.4 的 Turn Inbox claim 或 M01.5 的 Event Outbox claim。
+下一次只执行 M01.4：先从远端恢复同一模块分支/worktree，复核 M01.3 revision/CAS 与服务端保留 namespace 合同，再以失败测试实现 Turn Inbox 幂等和顺序领取；不得提前实现 M01.5 的 Event Outbox claim、sequence 或 cursor 投递。

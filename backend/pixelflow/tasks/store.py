@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -56,10 +57,54 @@ def _dt(value: datetime | str | None) -> str:
 
 
 def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:
-    """Drop legacy chat snapshots; persisted messages are the source of truth."""
+    """丢弃旧聊天快照，持久化消息表才是消息权威来源。"""
     if not value:
         return {}
-    return {key: item for key, item in value.items() if key != "messages"}
+    return {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key != "messages"
+    }
+
+
+AGENT_RUNTIME_CONTEXT_KEY = "__agent_runtime"
+
+
+def sanitize_client_conversation_context(
+    value: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """移除只能由服务端维护的 Agent Runtime 命名空间。"""
+
+    sanitized = _conversation_context(value)
+    sanitized.pop(AGENT_RUNTIME_CONTEXT_KEY, None)
+    return sanitized
+
+
+class ConversationRevisionConflictError(RuntimeError):
+    """对话聚合版本与调用方期望不一致。"""
+
+    def __init__(self, expected_revision: int, current_revision: int):
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+        super().__init__("conversation revision conflict")
+
+
+def _require_conversation_revision(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("conversation revision must be a positive integer")
+    return value
+
+
+def _check_conversation_revision(
+    current_revision: int,
+    expected_revision: int | None,
+) -> None:
+    current = _require_conversation_revision(current_revision)
+    if expected_revision is None:
+        return
+    expected = _require_conversation_revision(expected_revision)
+    if expected != current:
+        raise ConversationRevisionConflictError(expected, current)
 
 
 class _UnsetJianyingDraftResumeError:
@@ -81,11 +126,11 @@ _JIANYING_DRAFT_ACTIVE_STATUS_RANK = {"queued": 1, "running": 2}
 
 
 def _jianying_draft_records(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
+    return deepcopy(value) if isinstance(value, dict) else {}
 
 
 def _jianying_draft_pending(value: Any) -> dict[str, Any] | None:
-    return dict(value) if isinstance(value, dict) else None
+    return deepcopy(value) if isinstance(value, dict) else None
 
 
 def _jianying_draft_job_id(value: Any) -> str | None:
@@ -138,8 +183,8 @@ def _merge_jianying_draft_record(
     current_pending_job_id: str | None,
     now: datetime,
 ) -> tuple[dict[str, Any] | None, bool]:
-    current = dict(current_record) if isinstance(current_record, dict) else None
-    incoming = dict(incoming_record) if isinstance(incoming_record, dict) else None
+    current = deepcopy(current_record) if isinstance(current_record, dict) else None
+    incoming = deepcopy(incoming_record) if isinstance(incoming_record, dict) else None
     if incoming is None or _jianying_draft_job_id(incoming) != expected_job_id:
         return current, False
     if current is None:
@@ -261,7 +306,7 @@ def _patch_jianying_draft_context(
         records=merged_records,
         now=patch_time,
     ):
-        resolved_pending = dict(pending_job)
+        resolved_pending = deepcopy(pending_job)
         request_authorized = True
 
     patched = {
@@ -286,18 +331,33 @@ def _patch_jianying_draft_context(
     return patched, resolved_phase
 
 
-def _replace_context_preserving_jianying_draft_fields(
+def _replace_context_preserving_server_fields(
     current_context: dict[str, Any] | None,
     replacement_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     current = _conversation_context(current_context)
-    replacement = _conversation_context(replacement_context)
-    for key in _JIANYING_DRAFT_CONTEXT_KEYS:
+    replacement = sanitize_client_conversation_context(replacement_context)
+    for key in (AGENT_RUNTIME_CONTEXT_KEY, *_JIANYING_DRAFT_CONTEXT_KEYS):
         if key in current:
-            replacement[key] = current[key]
+            replacement[key] = deepcopy(current[key])
         else:
             replacement.pop(key, None)
     return replacement
+
+
+def _patch_agent_runtime_context(
+    context: dict[str, Any] | None,
+    runtime_patch: dict[str, Any],
+) -> dict[str, Any]:
+    current = _conversation_context(context)
+    current_runtime = current.get(AGENT_RUNTIME_CONTEXT_KEY)
+    merged_runtime = (
+        deepcopy(current_runtime)
+        if isinstance(current_runtime, dict)
+        else {}
+    )
+    merged_runtime.update(deepcopy(runtime_patch))
+    return {**current, AGENT_RUNTIME_CONTEXT_KEY: merged_runtime}
 
 
 def _new_conversation_locks() -> tuple[asyncio.Lock, ...]:
@@ -425,6 +485,7 @@ class PixelFlowConversationRecord:
     current_task_id: str | None = None
     last_phase: str = "idle"
     context: dict[str, Any] = field(default_factory=dict)
+    revision: int = 1
     created_at: str = ""
     updated_at: str = ""
 
@@ -436,6 +497,7 @@ class PixelFlowConversationRecord:
             "current_task_id": self.current_task_id,
             "last_phase": self.last_phase,
             "context": self.context,
+            "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -483,7 +545,21 @@ class PixelFlowTaskStore(Protocol):
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord: ...
     async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None: ...
     async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]: ...
-    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None: ...
+    async def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int | None = None, **fields: Any,
+    ) -> PixelFlowConversationRecord | None: ...
+    async def patch_agent_runtime_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int,
+        runtime_patch: dict[str, Any],
+    ) -> PixelFlowConversationRecord | None: ...
     async def patch_jianying_draft_conversation_context(
         self,
         conversation_id: str,
@@ -559,6 +635,7 @@ def _conversation_row_to_record(row: PixelFlowConversationRow) -> PixelFlowConve
         current_task_id=row.current_task_id,
         last_phase=row.last_phase or "idle",
         context=_conversation_context(row.context_json),
+        revision=_require_conversation_revision(row.revision),
         created_at=_dt(row.created_at),
         updated_at=_dt(row.updated_at),
     )
@@ -757,6 +834,7 @@ class SQLPixelFlowTaskStore:
                 current_task_id=record.current_task_id,
                 last_phase=record.last_phase,
                 context_json=_conversation_context(record.context),
+                revision=_require_conversation_revision(record.revision),
                 created_at=created_at,
                 updated_at=updated_at,
             )
@@ -795,7 +873,13 @@ class SQLPixelFlowTaskStore:
             next_cursor = _conversation_cursor(records[-1]) if len(rows) > limit and records else None
             return records, next_cursor
 
-    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
+    async def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int | None = None, **fields: Any,
+    ) -> PixelFlowConversationRecord | None:
         lock = _conversation_lock(self._conversation_locks, conversation_id)
         async with lock:
             async with self._sf() as session:
@@ -806,6 +890,8 @@ class SQLPixelFlowTaskStore:
                     row = (await session.execute(stmt)).scalar_one_or_none()
                     if row is None:
                         return None
+                    _check_conversation_revision(row.revision, expected_revision)
+                    changed = False
                     mapping = {
                         "title": "title",
                         "current_task_id": "current_task_id",
@@ -816,9 +902,56 @@ class SQLPixelFlowTaskStore:
                         attr = mapping.get(key)
                         if attr:
                             if key == "context":
-                                value = _replace_context_preserving_jianying_draft_fields(row.context_json, value)
-                            setattr(row, attr, value)
-                    row.updated_at = _now()
+                                value = _replace_context_preserving_server_fields(row.context_json, value)
+                            if getattr(row, attr) != value:
+                                setattr(row, attr, value)
+                                changed = True
+                    if changed:
+                        row.revision = (
+                            _require_conversation_revision(row.revision) + 1
+                        )
+                        row.updated_at = _now()
+                    await session.flush()
+                    return _conversation_row_to_record(row)
+
+    async def patch_agent_runtime_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int,
+        runtime_patch: dict[str, Any],
+    ) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            async with self._sf() as session:
+                async with _conversation_write_transaction(session):
+                    stmt = (
+                        select(PixelFlowConversationRow)
+                        .where(
+                            PixelFlowConversationRow.conversation_id
+                            == conversation_id
+                        )
+                        .with_for_update()
+                    )
+                    if user_id is not None:
+                        stmt = stmt.where(
+                            PixelFlowConversationRow.user_id == user_id
+                        )
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    if row is None:
+                        return None
+                    _check_conversation_revision(row.revision, expected_revision)
+                    patched_context = _patch_agent_runtime_context(
+                        row.context_json,
+                        runtime_patch,
+                    )
+                    if patched_context != row.context_json:
+                        row.context_json = patched_context
+                        row.revision = (
+                            _require_conversation_revision(row.revision) + 1
+                        )
+                        row.updated_at = _now()
                     await session.flush()
                     return _conversation_row_to_record(row)
 
@@ -843,7 +976,7 @@ class SQLPixelFlowTaskStore:
                     row = (await session.execute(stmt)).scalar_one_or_none()
                     if row is None:
                         return None
-                    row.context_json, row.last_phase = _patch_jianying_draft_context(
+                    patched_context, patched_phase = _patch_jianying_draft_context(
                         row.context_json,
                         current_phase=row.last_phase,
                         requested_phase=last_phase,
@@ -852,7 +985,16 @@ class SQLPixelFlowTaskStore:
                         records=records,
                         resume_error=resume_error,
                     )
-                    row.updated_at = _now()
+                    if (
+                        patched_context != row.context_json
+                        or patched_phase != row.last_phase
+                    ):
+                        row.context_json = patched_context
+                        row.last_phase = patched_phase
+                        row.revision = (
+                            _require_conversation_revision(row.revision) + 1
+                        )
+                        row.updated_at = _now()
                     await session.flush()
                     return _conversation_row_to_record(row)
 
@@ -1038,17 +1180,19 @@ class MemoryPixelFlowTaskStore:
         return row
 
     async def create_conversation(self, record: PixelFlowConversationRecord) -> PixelFlowConversationRecord:
+        stored = deepcopy(record)
         stamp = _dt(_now())
-        record.created_at = record.created_at or stamp
-        record.updated_at = record.updated_at or stamp
-        record.context = _conversation_context(record.context)
-        self._conversations[record.conversation_id] = record
-        return record
+        stored.created_at = stored.created_at or stamp
+        stored.updated_at = stored.updated_at or stamp
+        stored.context = _conversation_context(stored.context)
+        stored.revision = _require_conversation_revision(stored.revision)
+        self._conversations[stored.conversation_id] = stored
+        return deepcopy(stored)
 
     async def get_conversation(self, conversation_id: str, *, user_id: str | None = None) -> PixelFlowConversationRecord | None:
         record = self._conversations.get(conversation_id)
         if record and (user_id is None or record.user_id == user_id):
-            return record
+            return deepcopy(record)
         return None
 
     async def list_conversations(self, *, user_id: str | None = None, limit: int = 5, cursor: str | None = None) -> tuple[list[PixelFlowConversationRecord], str | None]:
@@ -1061,23 +1205,70 @@ class MemoryPixelFlowTaskStore:
             rows = [r for r in rows if (r.created_at, r.conversation_id) < cursor_key]
         page = rows[:limit]
         next_cursor = _conversation_cursor(page[-1]) if len(rows) > limit and page else None
-        return page, next_cursor
+        return deepcopy(page), next_cursor
 
-    async def update_conversation(self, conversation_id: str, *, user_id: str | None = None, **fields: Any) -> PixelFlowConversationRecord | None:
+    async def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int | None = None, **fields: Any,
+    ) -> PixelFlowConversationRecord | None:
         lock = _conversation_lock(self._conversation_locks, conversation_id)
         async with lock:
-            record = await self.get_conversation(conversation_id, user_id=user_id)
-            if record is None:
+            record = self._conversations.get(conversation_id)
+            if record is None or (
+                user_id is not None and record.user_id != user_id
+            ):
                 return None
+            _check_conversation_revision(record.revision, expected_revision)
+            changed = False
             for key in ("title", "current_task_id", "last_phase", "context"):
                 if key in fields:
                     if key == "context":
-                        value = _replace_context_preserving_jianying_draft_fields(record.context, fields[key])
+                        value = _replace_context_preserving_server_fields(
+                            record.context,
+                            fields[key],
+                        )
                     else:
                         value = fields[key]
-                    setattr(record, key, value)
-            record.updated_at = _dt(_now())
-            return record
+                    if getattr(record, key) != value:
+                        setattr(record, key, value)
+                        changed = True
+            if changed:
+                record.revision = (
+                    _require_conversation_revision(record.revision) + 1
+                )
+                record.updated_at = _dt(_now())
+            return deepcopy(record)
+
+    async def patch_agent_runtime_conversation_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        expected_revision: int,
+        runtime_patch: dict[str, Any],
+    ) -> PixelFlowConversationRecord | None:
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            record = self._conversations.get(conversation_id)
+            if record is None or (
+                user_id is not None and record.user_id != user_id
+            ):
+                return None
+            _check_conversation_revision(record.revision, expected_revision)
+            patched_context = _patch_agent_runtime_context(
+                record.context,
+                runtime_patch,
+            )
+            if patched_context != record.context:
+                record.context = patched_context
+                record.revision = (
+                    _require_conversation_revision(record.revision) + 1
+                )
+                record.updated_at = _dt(_now())
+            return deepcopy(record)
 
     async def patch_jianying_draft_conversation_context(
         self,
@@ -1092,10 +1283,12 @@ class MemoryPixelFlowTaskStore:
     ) -> PixelFlowConversationRecord | None:
         lock = _conversation_lock(self._conversation_locks, conversation_id)
         async with lock:
-            record = await self.get_conversation(conversation_id, user_id=user_id)
-            if record is None:
+            record = self._conversations.get(conversation_id)
+            if record is None or (
+                user_id is not None and record.user_id != user_id
+            ):
                 return None
-            record.context, record.last_phase = _patch_jianying_draft_context(
+            patched_context, patched_phase = _patch_jianying_draft_context(
                 record.context,
                 current_phase=record.last_phase,
                 requested_phase=last_phase,
@@ -1104,8 +1297,17 @@ class MemoryPixelFlowTaskStore:
                 records=records,
                 resume_error=resume_error,
             )
-            record.updated_at = _dt(_now())
-            return record
+            if (
+                patched_context != record.context
+                or patched_phase != record.last_phase
+            ):
+                record.context = patched_context
+                record.last_phase = patched_phase
+                record.revision = (
+                    _require_conversation_revision(record.revision) + 1
+                )
+                record.updated_at = _dt(_now())
+            return deepcopy(record)
 
     async def append_conversation_message(self, message: PixelFlowConversationMessageRecord) -> PixelFlowConversationMessageRecord:
         existing = next(
