@@ -10,7 +10,6 @@ from typing import Literal
 
 import yaml
 
-
 Status = Literal["ok", "warn", "fail", "skip"]
 
 
@@ -55,7 +54,8 @@ def _env_name_from_value(value: object) -> str | None:
 def check_python() -> CheckResult:
     import sys
 
-    if sys.version_info >= (3, 12):
+    # doctor 可能在依赖安装前执行，因此仍需给旧解释器返回可操作的版本提示。
+    if sys.version_info >= (3, 12):  # noqa: UP036
         return CheckResult("ok", "Python version", f"Python {sys.version.split()[0]}")
     return CheckResult("fail", "Python version", f"Python {sys.version.split()[0]}", fix="Please use Python 3.12+")
 

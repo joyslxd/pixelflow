@@ -5,7 +5,6 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
 AssetManifest = dict[str, list[dict[str, str]]]
 
 _COLLECTION_SPECS = (
@@ -219,5 +218,5 @@ def _stable_asset_id(asset_type: str, name: str, existing_ids: set[str]) -> str:
     candidate = f"{asset_type}-{suffix}"
     if candidate not in existing_ids:
         return candidate
-    digest = hashlib.sha1(f"{asset_type}:{name}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(f"{asset_type}:{name}".encode()).hexdigest()[:12]
     return f"{asset_type}-{suffix}-{digest}"

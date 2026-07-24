@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sys
+from dataclasses import dataclass
 
-from wizard.providers import SearchProvider, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS
+from wizard.providers import SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, SearchProvider
 
 
 @dataclass
