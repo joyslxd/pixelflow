@@ -101,11 +101,13 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 "Write-Output hello",
             ],
             {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": None,
+                    "shell": False,
+                    "capture_output": True,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": 600,
+                    "env": None,
             },
         )
     ]
@@ -130,11 +132,13 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
         (
             [r"C:\Program Files\Git\bin\sh.exe", "-c", "echo hello"],
             {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {
+                    "shell": False,
+                    "capture_output": True,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": 600,
+                    "env": {
                     "PATH": r"C:\Program Files\Git\bin",
                     "MSYS_NO_PATHCONV": "1",
                     "MSYS2_ARG_CONV_EXCL": "*",
@@ -179,11 +183,13 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
         (
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
             {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": None,
+                    "shell": False,
+                    "capture_output": True,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": 600,
+                    "env": None,
             },
         )
     ]

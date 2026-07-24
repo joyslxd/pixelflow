@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
@@ -308,7 +310,12 @@ def test_find_grep_matches_skips_symlink_outside_root(tmp_path) -> None:
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("TODO outside\n", encoding="utf-8")
-    (workspace / "outside-link.txt").symlink_to(outside)
+    try:
+        (workspace / "outside-link.txt").symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("当前 Windows 环境未授予创建符号链接的权限")
+        raise
 
     matches, truncated = find_grep_matches(workspace, "TODO")
 

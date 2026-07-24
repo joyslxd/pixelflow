@@ -105,7 +105,7 @@ def e2e_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setenv(
         "DEER_FLOW_PROJECT_ROOT",
-        str(Path(__file__).resolve().parents[2]),
+        str(Path(__file__).resolve().parents[1]),
     )
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)

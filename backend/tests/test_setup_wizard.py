@@ -7,6 +7,7 @@ Run from repo root:
 from __future__ import annotations
 
 import yaml
+
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS
 from wizard.steps import search as search_step
 from wizard.writer import (

@@ -71,11 +71,7 @@ function Resolve-AgentPythonExecutable {
         }
     }
 
-    $pathPython = Get-Command "python" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pathPython) {
-        return $pathPython.Source
-    }
-    throw "未找到 Python：请在仓库 backend/.venv 安装依赖，或把 python 加入 PATH。"
+    throw "未找到项目 Python 虚拟环境：请先创建 backend/.venv；模块门禁禁止回退到 PATH Python。"
 }
 
 function Assert-AgentCleanWorktree {

@@ -10,8 +10,8 @@ PixelFlow 运行时登录已经统一交给 content-app，网关只接收
 """
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
-from app.gateway.auth.models import User, UserResponse
 from app.gateway.auth.jwt import create_access_token, decode_token
+from app.gateway.auth.models import User, UserResponse
 from app.gateway.auth.password import hash_password, verify_password
 
 __all__ = [
