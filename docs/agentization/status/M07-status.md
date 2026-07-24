@@ -4,9 +4,9 @@
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
-- 当前切片：M07.3
+- 当前切片：M07.4
 - base SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
-- 当前唯一写入者：已释放（M07.2 完成）
+- 当前唯一写入者：已释放（M07.3 完成）
 - 开始时间：`2026-07-24 07:19:26 +0800`
 - M07.1 完成时间：`2026-07-24 08:30:24 +0800`
 - M07.1 已释放文件：`web/src/lib/supervisor/api.ts`、`web/tests/supervisorApi.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.1.md`
@@ -14,6 +14,11 @@
 - M07.2 锁定文件：`web/src/lib/supervisor/events.ts`、`web/tests/supervisorEvents.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.2.md`
 - M07.2 完成时间：`2026-07-24 09:12:20 +0800`
 - M07.2 已释放文件：`web/src/lib/supervisor/events.ts`、`web/tests/supervisorEvents.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.2.md`
+- M07.3 开始时间：`2026-07-24 10:11:42 +0800`
+- M07.3 唯一写入者：已释放
+- M07.3 锁定文件：`web/src/lib/supervisor/reducer.ts`、`web/tests/supervisorReducer.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.3.md`
+- M07.3 完成时间：`2026-07-24 10:50:15 +0800`
+- M07.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/tests/supervisorReducer.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.3.md`
 
 ## 开工检查
 
@@ -25,13 +30,24 @@
 
 - [x] M07.1 API transport（2h）
 - [x] M07.2 SSE/cursor/gap/reconnect（2.5h）
-- [ ] M07.3 reducer 四维状态机（2.5h）
+- [x] M07.3 reducer 四维状态机（2.5h）
 - [ ] M07.4 conversation hook/Abort 隔离（2h）
 - [ ] M07.5 legacy snapshot adapter（2h）
 
 ## 恢复提示
 
 本模块不改 `WorkspacePage.tsx`。全部使用 fixture/mock server 开发，先证明重复/乱序事件和切换对话安全。
+
+## M07.3 完成记录
+
+- 实现：新增 Supervisor 四维纯 reducer，统一管理 connection、run、compression、input queue 和 cursor/sequence 恢复点；支持本地发送状态、SSE 事件映射、Snapshot hydration 与对话 reset。
+- 边界：重复、乱序、跨对话和 sequence gap 均 fail-closed；非法事件不推进恢复点；Snapshot 先隔离旧对话再校验四维交叉约束；`client_input_id` 与 `turn_id` 保持一一绑定；状态只保存固定中文安全错误，不落原始 payload。
+- TDD：基线 `244/244`；初始模块缺失 RED；首轮 GREEN `253/253`；自审边界 RED `251/253` 后 GREEN `253/253`；独立审核整改 RED `250/255` 后最终 GREEN `255/255`。
+- 验证：`npm test`（`255/255`）、`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建只有既存 chunk 体积提醒。未调用真实付费 API。
+- 审核：独立只读 reviewer `/root/m07_3_reviewer` 第二轮结论 `Ready`，无 Critical/Important；首轮 3 项 Important 均已通过 RED/GREEN 关闭。
+- 环境：本机没有可执行的 PowerShell；按仓库 fail-closed 条件完成人工中文规范检查，无新增配置、无代码注释，未修改锁文件。
+- 阶段：M07.3 不是 `phased-rollout-plan.md` 检查点，也不是模块最后一片，不写阶段或模块集成就绪状态。
+- 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.4 conversation hook/Abort 隔离`。
 
 ## M07.2 完成记录
 
