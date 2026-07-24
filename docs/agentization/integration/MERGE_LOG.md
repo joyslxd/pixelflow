@@ -94,3 +94,4 @@
 - remote guard：最终门禁和独立终审后重新 fetch；Agent、dev 和修复源三个远端引用必须与冻结值完全一致，否则中止推送
 - rollback：如需撤回，基于本记录定位本次 Agent 更新范围，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：D-009、M00 状态、BOARD、MERGE_LOG 和本次集成报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
+- 2026-07-24 18:16:17 +08:00：M03 最终模块 候选通过，模块提交 `e43b5e96ef177f7da856c8c86de95212cd0826cb` 已纳入最新 Agent/dev 基线。
