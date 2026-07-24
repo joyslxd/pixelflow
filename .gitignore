@@ -16,6 +16,9 @@ docs/*
 # Local Codex helper logs.
 **/.codex-*.log
 
+# 用途：忽略 Python 解释器生成的字节码缓存；影响：本地测试不会污染 Git 工作区。
+**/__pycache__/
+
 .claude/
 
 .understand-anything/

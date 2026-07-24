@@ -332,8 +332,17 @@ async def test_cancel_not_inflight(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_list_by_thread(manager: RunManager):
+async def test_list_by_thread(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
     """Same thread should return multiple runs."""
+    timestamps = iter(
+        (
+            "2026-01-01T00:00:01+00:00",
+            "2026-01-01T00:00:02+00:00",
+            "2026-01-01T00:00:03+00:00",
+        )
+    )
+    monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: next(timestamps))
+
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
     await manager.create("thread-2")

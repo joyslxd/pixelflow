@@ -120,12 +120,14 @@ class TestExternalize:
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == "full content here"
 
-    def test_returns_none_on_invalid_path(self):
+    def test_returns_none_on_invalid_path(self, tmp_path):
+        parent_file = tmp_path / "parent-is-file"
+        parent_file.write_text("block directory creation", encoding="utf-8")
         path = _externalize(
             "data",
             tool_name="test",
             tool_call_id="tc-1",
-            outputs_path="/nonexistent/path/that/should/not/exist",
+            outputs_path=str(parent_file / "outputs"),
             storage_subdir=".tool-results",
         )
         assert path is None
@@ -360,7 +362,7 @@ class TestWrapToolCallFallback:
         assert "Persistent storage unavailable" in result.content
         assert len(result.content) < len(content)
 
-    def test_fallback_when_disk_write_fails(self):
+    def test_fallback_when_disk_write_fails(self, tmp_path):
         config = ToolOutputConfig(
             externalize_min_chars=50,
             fallback_max_chars=200,
@@ -370,7 +372,9 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/nonexistent/impossible/path")
+        parent_file = tmp_path / "parent-is-file"
+        parent_file.write_text("block directory creation", encoding="utf-8")
+        req = _make_request(outputs_path=str(parent_file / "outputs"))
 
         result = mw.wrap_tool_call(req, lambda _: msg)
 

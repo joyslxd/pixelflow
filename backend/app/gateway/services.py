@@ -163,6 +163,8 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     """
 
     user = getattr(request.state, "user", None)
+    if getattr(user, "system_role", None) == "internal":
+        return
     user_id = getattr(user, "id", None)
     if user_id is None:
         return
