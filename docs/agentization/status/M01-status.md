@@ -1,6 +1,6 @@
 # M01 持久化、CAS、Turn Inbox 与 Event Outbox
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：A
 - reviewer：`/root/m01_5_independent_review`（M01 权威门禁修复复审）
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
@@ -82,7 +82,7 @@
 ## 恢复提示
 
 M01 五个切片和最终权威门禁修复均已完成并达到 `ready_for_integration`。当前自动化状态为 `automation_local_ready`；本次开发者已经明确授权当前任务在 push 后继续执行 M01 最终单槽集成。不得自动继续 M02。
-- last_integrated_commit：`—`
+- last_integrated_commit：`337a19124000892d319250497c56645821197ebb`
 - locked files：`无`
-- checkpoint_status：`ready`
+- checkpoint_status：`integrated`
 - integration failure evidence：`无`
