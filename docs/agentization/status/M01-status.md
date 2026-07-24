@@ -1,6 +1,6 @@
 # M01 持久化、CAS、Turn Inbox 与 Event Outbox
 
-- phase：`ready_for_integration`
+- phase：`integration_blocked`
 - owner：A
 - reviewer：`/root/m01_5_independent_review`
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
@@ -74,3 +74,7 @@
 ## 恢复提示
 
 M01 五个切片均已完成并达到 `ready_for_integration`。当前自动化状态为 `automation_local_ready`；下一步由开发者复制执行手册 9.10A 话术，在新的 Codex 任务中手动启动 M01 最终单槽集成。不得在本开发任务中自动修改 `feature/agent_0.8.4_boguan` 或继续 M02。
+- last_integrated_commit：`—`
+- locked files：`无`
+- checkpoint_status：`blocked`
+- integration failure evidence：`候选 codex/integrate-m01-20260724-111148-574ee408 已保留；Agent 未更新；错误类型 RuntimeException`
