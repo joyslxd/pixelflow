@@ -955,7 +955,7 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-24，M00 已完成合同、唯一 fixture、默认关闭启动配置和本地门禁基础设施；M01–M13 的业务 Agent Runtime 尚未实现，现有图片、视频、PPT 和视频分析流程仍未被新 Runtime 接管。实施期间必须区分“当前实现事实”和“已批准目标设计”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-25，M00 已完成合同、唯一 fixture、默认关闭启动配置和本地门禁基础设施，M01 业务持久化/Turn Inbox/Event Outbox 与 M03 Context 预算/组装已经进入 Agent 集成分支；M04 的结构化摘要、四阈值压缩、压缩锁/输入队列、生命周期事件和事实验证已经在模块分支完成最终门禁，仍需按执行手册 9.10A 完成人工触发的单槽集成。M02、M05–M13 尚未完成，现有图片、视频、PPT 和视频分析流程仍未被新 Runtime 接管。实施期间必须区分“模块实现/已进入 Agent”和“已经发布生产”，不能把设计中的 API、状态或自动化描述成已经在线运行。
 
 目标方案采用四阶段上线：
 
@@ -967,6 +967,10 @@ corepack pnpm build
 | R4 | 第 16–18 个工作日 | 五条主流程全量 E2E、Shadow、回滚和新对话全面接管验收 |
 
 R1 的 conversation 压缩锁由永久数据库协调行和短事务租约实现，协调状态为 `idle`、`active` 或 `retry_required`，使用随机 fencing token 阻止过期 worker 收尾。普通 Turn 与压缩专用入口都先锁同一协调行；压缩执行期间输入由后端直接持久化为 `queued`，成功后原子切回 `idle` 并只把最早输入迁移为 `processing`，失败或暂停则保留 `retry_required` 恢复标记和全部排队输入，继续阻止超窗处理，后续 worker 从原队列接管，前端不重新发送。
+
+结构化摘要由增量 `SummaryBuilder` 生成，并在返回持久化边界前强制经过 `SummaryVerifier`。调用方必须给出本轮仍然有效的用户目标、已确认决定、否定约束、Workflow 状态、未决问题、Artifact 证据引用和稳定 ID；Verifier 使用精确匹配保证这些关键事实 100% 保留，同时复算摘要语义与消息覆盖范围的 `sha256` 内容 hash。已经解决或发生权威变更的事实必须由调用方从新一轮验证基线中显式移除，不能依赖模糊相似度或让摘要模型自行判断。Plan、创作合同、场景蓝图、资产清单、pending action/job 和 operation 始终留在业务权威通道，不进入摘要输入，也不由 Verifier 改写。
+
+压缩 Runtime 在取得 conversation 租约后，把 `context.compression_started`、每个成功压缩动作对应的 `context.compression_progressed`、成功收尾的 `context.compression_completed` 和暂停/异常的 `context.compression_failed` 先写入 M01 Event Outbox；同一 conversation 继续使用单调 sequence 和不透明 cursor，并发抢占 sequence 时重新读取尾部后有限重试。事件 payload 只包含公开状态、动作、步骤、安全 reason code 和冻结提示文案，不包含摘要正文、token 数、内部 prompt、用户原文、异常字符串、Authorization、API key 或完整 URL。`already_running` 不重复写 started；进度事件写入失败按 fail-closed 进入 `retry_required`，不能被 92% 最小上下文 fallback 当作压缩成功吞掉。
 
 开发固定采用“两人、多 Codex、模块之间并行、模块内部切片串行”：每个 Codex 任务只执行一个 1–3 小时切片，完成 TDD、测试、审核、状态记录、commit 和 push 后停止；下一切片必须由开发者手动启动。当前自动化状态为 `automation_local_ready`：合法阶段检查点、模块最终提交和 dev→agent 漂移检查由开发者按执行手册人工触发 M00 交付的仓库单槽脚本；只有未来实际部署并验收远端 CI 后，才能改为无人值守触发并标记 `automation_active`。生产运行模式、`enabled_intents`、Feature Flag、真实付费冒烟和最终 Agent→dev 收口仍需人工明确批准。当前无真实外部用户，各阶段获批后均覆盖全部新对话100%：R1为`assist`，R2仅`video`进入`primary`，R3/R4四类intent进入`primary`；不实现随机百分比灰度或用户白名单。
 

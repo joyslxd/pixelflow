@@ -1,18 +1,19 @@
 # M04 全流程上下文压缩 Runtime
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：A
 - base Agent SHA：`d20762935ad8bd994a24e332f4237da7a1aaf591`
 - branch：`codex/agent-0.8.4-m04-context-compaction`
 - 依赖：M01、M03
-- 当前切片：`M04.5`（未开始）
+- 当前切片：`M04.5`
 - 当前唯一写入者：`尚未领取`
-- 当前锁定文件：无；M04.4 写锁已释放
-- 本切片开始时间：`2026-07-25T00:20:02+08:00`
+- 当前锁定文件：`无`
+- 本切片开始时间：`2026-07-25T05:32:54+08:00`
 - M04.1 完成时间：`2026-07-24T22:21:05+08:00`
 - M04.2 完成时间：`2026-07-24T23:20:58+08:00`
 - M04.3 完成时间：`2026-07-25T00:00:42+08:00`
 - M04.4 完成时间：`2026-07-25T01:07:32+08:00`
+- M04.5 完成时间：`2026-07-25T06:14:26+08:00`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m04-context-compaction`
 
 ## 切片
@@ -21,7 +22,7 @@
 - [x] M04.2 增量 SummaryBuilder（3h）
 - [x] M04.3 四阈值 Coordinator（2.5h）
 - [x] M04.4 压缩锁与输入队列（2h）
-- [ ] M04.5 事件与 SummaryVerifier（2.5h）
+- [x] M04.5 事件与 SummaryVerifier（2.5h）
 
 ## M04.1 交付记录
 
@@ -91,6 +92,29 @@
 - 阶段状态：M04.4 不是 `phased-rollout-plan.md` 明确检查点，也不是模块最后一片，因此保持 `in_progress`，不运行阶段/M04 Final 门禁，不更新 `status/BOARD.md`，不写 ready 状态，也不触发 9.10A。
 - 下一切片第一动作：开发者手动启动 M04.5 后，恢复同一模块分支/worktree并领取唯一 writer；先用失败测试冻结压缩 started/progress/completed/failed Outbox 事件与 `SummaryVerifier`，再执行 M04 完整模块门禁。
 
+## M04.5 交付记录
+
+- 产物：新增 `SummaryVerificationBaseline`、`SummaryVerifier` 和稳定内容 hash 校验；`SummaryBuilder` 在返回候选前逐项验证用户目标、已确认决定、否定约束、Workflow 状态、未决问题、Artifact 证据与稳定 ID，缺失、篡改或跨会话均 fail-closed。
+- 生命周期事件：取得租约后先写 `context.compression_started`，每个成功压缩动作写 `context.compression_progressed`；完成、暂停或异常分别写安全的 `completed/failed` Outbox，payload 不含摘要正文、用户原文、token、prompt、Authorization、密钥、异常字符串或完整 URL。
+- 原子终态：Memory/SQL Repository 在同一临界区或数据库事务中校验 fencing token、追加终态 Outbox、释放或保留队列；EventSink 与 Queue 必须绑定同一个 Repository。陈旧 worker 只能留下已发生的 started/progress，不能写伪 completed/failed，也不能覆盖接管租约。
+- 失败安全：started/progress 持久化失败、92% 硬闸门失败、Coordinator 异常或终态事件失败都不放行超窗上下文；暂停和失败保留 `retry_required` 与全部 queued Turn，不要求前端重发。
+- TDD 证据：Verifier 首轮模块不存在而收集失败；Builder 接入先为 `1 failed`；稳定 ID 前缀碰撞先为 `1 failed`；Outbox 首轮模块不存在而收集失败。独立审核的陈旧 worker 用例稳定复现 `started → completed → failed` 后，原子收尾整改转绿。
+- 最后测试：M04.5 定向回归为 `98 passed`；18 个 `test_agent_runtime_*` 为 `333 passed, 1 warning`；DeerFlow summarization、dynamic context 与 Harness 边界为 `39 passed, 1 warning`；BranchAutomation Pester 为 `36 passed, 0 failed`。
+- Final 门禁：权威脚本把 Runtime 与 DeerFlow 边界拆为两个 pytest 进程，避免 Alembic `fileConfig` 污染同进程 logger，同时保持原日志断言；最终树执行 `Invoke-AgentModuleGate.ps1 -ModuleId M04 -GateType Final -ChinesePolicyBaseRef 45c4a5c12e5e873bb97e0ffea0707d68174f8b23`，结果 `Passed=True`、`CommandCount=5`。
+- 静态检查：完整 Ruff 通过，9 个变更 Python 文件 `ruff format --check` 通过，`git diff --check` 通过；warning 仅来自既有 LangGraph pending deprecation。
+- 独立审核：首轮 Critical 0、Important 2、Minor 0；按 TDD 修复陈旧 worker 伪终态，并补齐一致的完成材料。最终复审 Critical/Important/Minor 均为 0，结论“是否可提交：是”；reviewer 独立鲜跑 98/333/39 项 pytest、36 项 Pester、Ruff、format 和差异检查均通过。
+- 中文规范：新增/修改注释、docstring、计划、状态和测试报告均使用中文主体说明；本切片没有新增或修改配置项。提交后门禁首次把 Python 列表解包的行首 `*` 误识别为人工注释，已改为行为等价的显式 `extend` 并复跑 31 项摘要测试，再由同一门禁验证。
+- commit/push：本状态文件所在 M04.5 中文独立提交；提交级中文门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
+- 阶段状态：M04.5 是模块最后一片且不是阶段中间检查点；M04 Final 绿色后写 `ready_for_integration`，不更新 `status/BOARD.md`，不直接启动单槽集成。
+- 下一步第一动作：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术，并在同一条消息中明确模块号 `M04`，手动启动唯一单槽最终集成；不得继续不存在的 M04.6。
+
 ## 恢复提示
 
 业务合同永不摘要；原始消息永不删除。现有 DeerFlow middleware 是复用基础和安全网，不单独满足前端感知/排队需求。
+- release_id：`R1`
+- checkpoint_slice：`M04.5`
+- checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
+- last_integrated_commit：`无`
+- locked files：`无`
+- checkpoint_status：`ready_for_integration`
+- integration failure evidence：`无`

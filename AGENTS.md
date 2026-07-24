@@ -449,7 +449,8 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 | 采集表单、意图、行业画像 | `backend/pixelflow/intake/` |
 | plan.md 和 Brief 纯逻辑 | `backend/pixelflow/creative/` |
 | 图片/视频生成准备逻辑 | `backend/pixelflow/generate/` |
-| PowerMem 语义记忆 Client 和上下文压缩 | `backend/pixelflow/memory/` |
+| PowerMem 语义记忆 Client 和现有记忆上下文整理 | `backend/pixelflow/memory/` |
+| 新 Agent Runtime 的模型预算、结构化摘要与全局上下文压缩 | `backend/pixelflow/agent_runtime/context/` |
 | 第三方 API、上传、轮询、错误归一 | `backend/pixelflow/skills/` |
 | 任务、会话、资产持久化 | `backend/pixelflow/tasks/` |
 | 用户偏好 | `backend/pixelflow/preferences/` |

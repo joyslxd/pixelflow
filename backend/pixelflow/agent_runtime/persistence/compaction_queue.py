@@ -7,13 +7,15 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from ..contracts import TurnRecord, TurnStatus
+from ..contracts import AgentEvent, AgentEventType, TurnRecord, TurnStatus
 from ..contracts.base import ContractModel
 from .models import (
     PixelFlowAgentCompactionLockRow,
+    PixelFlowAgentEventRow,
     PixelFlowAgentTurnRow,
 )
 from .repositories import (
@@ -22,7 +24,9 @@ from .repositories import (
     SQLAgentRuntimeRepository,
     _clone,
     _database_utc,
+    _MemoryEventDeliveryState,
     _normalize_datetime,
+    _normalize_event,
     _normalize_turn,
     _repository_write_transaction,
     _require_text,
@@ -88,6 +92,20 @@ class CompactionQueueRepository(Protocol):
         claim_next: bool,
     ) -> TurnRecord | None: ...
 
+    async def finish_compaction_with_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        lease_token: UUID,
+        now: datetime,
+        claim_next: bool,
+        run_id: str,
+        event_type: AgentEventType,
+        payload: dict[str, JsonValue],
+    ) -> tuple[TurnRecord | None, AgentEvent]: ...
+
 
 def _lease_parameters(
     lease_owner: str,
@@ -114,6 +132,37 @@ def _finish_parameters(
     if not isinstance(lease_token, UUID):
         raise ValueError("lease_token must be a UUID")
     return owner, lease_token, _normalize_datetime("now", now)
+
+
+def _terminal_event(
+    *,
+    sequence: int,
+    conversation_id: str,
+    run_id: str,
+    occurred_at: datetime,
+    event_type: AgentEventType,
+    payload: dict[str, JsonValue],
+) -> AgentEvent:
+    """只允许在租约收尾事务中构造压缩终态事件。"""
+
+    if event_type not in {
+        AgentEventType.CONTEXT_COMPRESSION_COMPLETED,
+        AgentEventType.CONTEXT_COMPRESSION_FAILED,
+    }:
+        raise ValueError("压缩租约收尾只接受 completed 或 failed 事件")
+    event_uuid = uuid4().hex
+    return _normalize_event(
+        AgentEvent(
+            event_id=f"evt_{event_uuid}",
+            sequence=sequence,
+            cursor=f"cursor_{event_uuid}",
+            conversation_id=conversation_id,
+            run_id=_require_text("run_id", run_id, 64),
+            occurred_at=occurred_at,
+            type=event_type,
+            payload=payload,
+        )
+    )
 
 
 def _execution_turn(record: TurnRecord) -> TurnRecord:
@@ -378,6 +427,103 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
             self._turns[owner_key] = _clone(claimed)
             return _clone(claimed)
 
+    async def finish_compaction_with_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        lease_token: UUID,
+        now: datetime,
+        claim_next: bool,
+        run_id: str,
+        event_type: AgentEventType,
+        payload: dict[str, JsonValue],
+    ) -> tuple[TurnRecord | None, AgentEvent]:
+        """在同一内存临界区校验 fencing、写终态事件并迁移队列。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        worker, token, normalized_now = _finish_parameters(
+            lease_owner,
+            lease_token,
+            now,
+        )
+        async with self._compaction_write_lock:
+            state = self._compaction_leases.get(conversation)
+            if state is None or state[0] != owner or state[1].lease_owner != worker or state[1].lease_token != token or state[1].lease_expires_at <= normalized_now:
+                raise CompactionLeaseConflictError("压缩租约已失效，拒绝陈旧 worker 收尾")
+            owner_keys = [
+                owner_key
+                for owner_key, turn in self._turns.items()
+                if owner_key[0] == owner
+                and turn.conversation_id == conversation
+                and turn.status
+                in {
+                    TurnStatus.ACCEPTED,
+                    TurnStatus.QUEUED,
+                    TurnStatus.PROCESSING,
+                }
+            ]
+            owner_keys.sort(key=self._turn_owner_sequences.__getitem__)
+            if claim_next and any(self._turns[owner_key].status is TurnStatus.PROCESSING for owner_key in owner_keys):
+                raise CompactionLeaseConflictError("压缩结束时已有 processing Turn，拒绝重复领取")
+
+            async with self._event_write_lock:
+                conversation_records = [(record_owner, existing) for (record_owner, _), existing in self._events.items() if existing.conversation_id == conversation]
+                if any(record_owner != owner for record_owner, _ in conversation_records):
+                    raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                event = _terminal_event(
+                    sequence=(1 if not conversation_records else max(existing.sequence for _, existing in conversation_records) + 1),
+                    conversation_id=conversation,
+                    run_id=run_id,
+                    occurred_at=normalized_now,
+                    event_type=event_type,
+                    payload=payload,
+                )
+                sequence_key = (event.conversation_id, event.sequence)
+                cursor_key = (event.conversation_id, event.cursor)
+                if event.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
+                    raise AgentRuntimeRecordConflictError("AgentEvent 记录已存在")
+
+                claimed: TurnRecord | None = None
+                if claim_next:
+                    del self._compaction_leases[conversation]
+                    candidates = [
+                        owner_key
+                        for owner_key in owner_keys
+                        if self._turns[owner_key].status
+                        in {
+                            TurnStatus.ACCEPTED,
+                            TurnStatus.QUEUED,
+                        }
+                    ]
+                    if candidates:
+                        claimed_key = candidates[0]
+                        claimed = self._turns[claimed_key].model_copy(update={"status": TurnStatus.PROCESSING})
+                        self._turns[claimed_key] = _clone(claimed)
+                else:
+                    expired = state[1].model_copy(update={"lease_expires_at": normalized_now})
+                    self._compaction_leases[conversation] = (
+                        owner,
+                        _clone(expired),
+                    )
+
+                owner_key = (owner, event.event_id)
+                self._event_ids.add(event.event_id)
+                self._event_sequence_keys.add(sequence_key)
+                self._event_cursor_keys.add(cursor_key)
+                self._events[owner_key] = _clone(event)
+                self._event_delivery[owner_key] = _MemoryEventDeliveryState()
+                return (
+                    None if claimed is None else _clone(claimed),
+                    _clone(event),
+                )
+
 
 class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
     """用永久协调行、短事务和 fencing token 串行化压缩与 Turn。"""
@@ -578,6 +724,111 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
                 claimed.updated_at = normalized_now
                 await session.flush()
                 return _turn_from_row(claimed)
+
+    async def finish_compaction_with_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        lease_token: UUID,
+        now: datetime,
+        claim_next: bool,
+        run_id: str,
+        event_type: AgentEventType,
+        payload: dict[str, JsonValue],
+    ) -> tuple[TurnRecord | None, AgentEvent]:
+        """在同一数据库事务中校验 fencing、写终态 Outbox 并迁移队列。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        worker, token, normalized_now = _finish_parameters(
+            lease_owner,
+            lease_token,
+            now,
+        )
+        await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=normalized_now,
+        )
+        last_event_statement = select(PixelFlowAgentEventRow).where(PixelFlowAgentEventRow.conversation_id == conversation).order_by(PixelFlowAgentEventRow.sequence.desc()).limit(1).with_for_update()
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    coordination = (await session.scalars(self._coordination_statement(conversation))).one()
+                    if coordination.user_id != owner or coordination.state != "active":
+                        raise CompactionLeaseConflictError("压缩租约已失效，拒绝陈旧 worker 收尾")
+                    current_lease = _lease_from_row(coordination)
+                    if current_lease.lease_owner != worker or current_lease.lease_token != token or current_lease.lease_expires_at <= normalized_now:
+                        raise CompactionLeaseConflictError("压缩租约已失效，拒绝陈旧 worker 收尾")
+                    turns = (await session.scalars(self._active_turn_statement(owner, conversation))).all()
+                    if claim_next and any(turn.status == TurnStatus.PROCESSING.value for turn in turns):
+                        raise CompactionLeaseConflictError("压缩结束时已有 processing Turn，拒绝重复领取")
+
+                    last_event = (await session.scalars(last_event_statement)).first()
+                    if last_event is not None and last_event.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    event = _terminal_event(
+                        sequence=(1 if last_event is None else last_event.sequence + 1),
+                        conversation_id=conversation,
+                        run_id=run_id,
+                        occurred_at=normalized_now,
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=event.schema_version,
+                            event_id=event.event_id,
+                            sequence=event.sequence,
+                            cursor=event.cursor,
+                            conversation_id=event.conversation_id,
+                            user_id=owner,
+                            run_id=event.run_id,
+                            occurred_at=event.occurred_at,
+                            event_type=event.type.value,
+                            payload_json=event.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+
+                    claimed: TurnRecord | None = None
+                    if claim_next:
+                        coordination.state = "idle"
+                        coordination.lease_owner = None
+                        coordination.lease_token = None
+                        coordination.lease_expires_at = None
+                        candidates = [
+                            turn
+                            for turn in turns
+                            if turn.status
+                            in {
+                                TurnStatus.ACCEPTED.value,
+                                TurnStatus.QUEUED.value,
+                            }
+                        ]
+                        if candidates:
+                            claimed_row = candidates[0]
+                            claimed_row.status = TurnStatus.PROCESSING.value
+                            claimed_row.updated_at = normalized_now
+                            claimed = _turn_from_row(claimed_row)
+                    else:
+                        coordination.state = "retry_required"
+                        coordination.lease_expires_at = normalized_now
+                    coordination.updated_at = normalized_now
+                    await session.flush()
+                    return claimed, _clone(event)
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("压缩收尾事件唯一键冲突") from None
 
 
 __all__ = [

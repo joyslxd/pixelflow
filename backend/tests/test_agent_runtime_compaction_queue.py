@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import pytest
@@ -19,6 +19,7 @@ from pixelflow.agent_runtime.context import (
     ContextCompactionRequest,
     ContextCompactionResult,
     ConversationCompactionRuntime,
+    RepositoryCompactionEventOutbox,
 )
 from pixelflow.agent_runtime.contracts import ContextBudgetReport, TurnRecord, TurnStatus
 from pixelflow.agent_runtime.persistence import (
@@ -184,6 +185,8 @@ class _BlockingCoordinator:
     async def coordinate(
         self,
         request: ContextCompactionRequest,
+        *,
+        on_progress: Any = None,
     ) -> ContextCompactionResult:
         self.requests.append(request)
         self.started.set()
@@ -920,10 +923,11 @@ async def test_runtime_accepts_inputs_during_compaction_and_claims_in_order() ->
         repository=repository,
         lease_owner="worker-a",
         lease_ttl=timedelta(minutes=5),
+        event_sink=RepositoryCompactionEventOutbox(repository=repository),
         clock=lambda: NOW,
     )
 
-    compaction_task = asyncio.create_task(runtime.compact(OWNER_A, _request()))
+    compaction_task = asyncio.create_task(runtime.compact(OWNER_A, _request(), run_id="run-a"))
     await coordinator.started.wait()
     queued = [await runtime.enqueue_turn(OWNER_A, _turn(index)) for index in (1, 2, 3)]
     coordinator.resume.set()
@@ -946,12 +950,13 @@ async def test_runtime_rejects_parallel_compaction_even_for_same_worker() -> Non
         repository=repository,
         lease_owner="worker-a",
         lease_ttl=timedelta(minutes=5),
+        event_sink=RepositoryCompactionEventOutbox(repository=repository),
         clock=lambda: NOW,
     )
 
-    first_task = asyncio.create_task(runtime.compact(OWNER_A, _request()))
+    first_task = asyncio.create_task(runtime.compact(OWNER_A, _request(), run_id="run-a"))
     await coordinator.started.wait()
-    parallel = await runtime.compact(OWNER_A, _request())
+    parallel = await runtime.compact(OWNER_A, _request(), run_id="run-b")
     coordinator.resume.set()
     completed = await first_task
 
@@ -979,10 +984,11 @@ async def test_runtime_failure_or_pause_preserves_inputs_without_resend(
         repository=repository,
         lease_owner="worker-a",
         lease_ttl=timedelta(minutes=5),
+        event_sink=RepositoryCompactionEventOutbox(repository=repository),
         clock=lambda: NOW,
     )
 
-    compaction_task = asyncio.create_task(runtime.compact(OWNER_A, _request()))
+    compaction_task = asyncio.create_task(runtime.compact(OWNER_A, _request(), run_id="run-a"))
     await coordinator.started.wait()
     first = await runtime.enqueue_turn(OWNER_A, _turn(1))
     replayed = await runtime.enqueue_turn(OWNER_A, _turn(1))

@@ -163,7 +163,49 @@ elseif ($ModuleId -eq "M03") {
         }
     )
 }
-elseif ($ModuleId -match "^M0(2|4|5|6)$") {
+elseif ($ModuleId -eq "M04") {
+    $m04RuntimeTests = @(
+        "tests/test_agent_runtime_compaction_coordinator.py",
+        "tests/test_agent_runtime_compaction_events.py",
+        "tests/test_agent_runtime_compaction_queue.py",
+        "tests/test_agent_runtime_config.py",
+        "tests/test_agent_runtime_context_assembler.py",
+        "tests/test_agent_runtime_context_externalizer.py",
+        "tests/test_agent_runtime_context_profiles.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_conversation_cas.py",
+        "tests/test_agent_runtime_event_outbox.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_agent_runtime_migration.py",
+        "tests/test_agent_runtime_repositories.py",
+        "tests/test_agent_runtime_structured_summaries.py",
+        "tests/test_agent_runtime_summary_builder.py",
+        "tests/test_agent_runtime_summary_verification.py",
+        "tests/test_agent_runtime_token_meter.py",
+        "tests/test_agent_runtime_turn_inbox.py"
+    )
+    # Alembic fileConfig 会改写进程级 logger；边界测试使用独立进程保留原日志断言。
+    $m04BoundaryTests = @(
+        "tests/test_summarization_middleware.py",
+        "tests/test_dynamic_context_middleware.py",
+        "tests/test_harness_boundary.py"
+    )
+    $m04RuffPaths = @(
+        "packages/harness/deerflow/persistence/migrations/versions/20260725_03_compaction_locks.py",
+        "pixelflow/agent_runtime/context",
+        "pixelflow/agent_runtime/persistence"
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m04RuntimeTests + @("-q") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m04BoundaryTests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m04RuffPaths + $m04RuntimeTests + $m04BoundaryTests
+        }
+    )
+}
+elseif ($ModuleId -match "^M0(2|5|6)$") {
     throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
 }
 elseif ($ModuleId -match "^M(07|12)$") {

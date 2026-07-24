@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -20,14 +19,20 @@ from pydantic import (
     model_validator,
 )
 
-from ..contracts import ContextBudgetReport, ContextSummary, TurnRecord
+from ..contracts import AgentEventType, ContextBudgetReport, ContextSummary, TurnRecord
 from ..persistence.compaction_queue import (
     CompactionLeaseConflictError,
     CompactionQueueRepository,
     ConversationCompactionLease,
 )
+from .compaction_events import CompactionEventSink
 from .profiles import ModelContextProfile, resolve_model_context_profile
 from .token_meter import TokenMeter, get_context_budget_policy
+from .verification import (
+    SummaryVerificationBaseline,
+    SummaryVerifier,
+    calculate_summary_content_hash,
+)
 
 
 class SummaryBuildValidationError(ValueError):
@@ -44,6 +49,15 @@ class CompactionValidationError(ValueError):
 
 class CompactionExecutionError(RuntimeError):
     """压缩阶段没有返回单调不增的安全计量结果。"""
+
+
+class CompactionProgressError(RuntimeError):
+    """压缩进度事件没有成功进入持久化 Outbox。"""
+
+
+COMPACTION_STARTED_MESSAGE = "对话内容较长，正在整理上下文，当前任务和已生成内容不会丢失。"
+COMPACTION_COMPLETED_MESSAGE = "上下文整理完成，正在继续处理刚才的请求。"
+COMPACTION_FAILED_MESSAGE = "上下文整理暂时未完成，你的输入已保留，系统将继续重试。"
 
 
 PIXELFLOW_STRUCTURED_SUMMARY_PROMPT = (
@@ -100,6 +114,15 @@ class SummaryBuildRequest(_CompactionRecord):
     conversation_id: str = Field(min_length=1)
     previous_summary: ContextSummary | None = None
     new_messages: tuple[SummarySourceMessage, ...] = ()
+    verification_baseline: SummaryVerificationBaseline
+
+    @model_validator(mode="after")
+    def require_verification_conversation(self) -> Self:
+        """验证基线必须和本轮增量摘要属于同一 conversation。"""
+
+        if self.verification_baseline.conversation_id != self.conversation_id:
+            raise ValueError("verification_baseline 必须属于当前 conversation_id")
+        return self
 
 
 class SummaryGenerationInput(_CompactionRecord):
@@ -221,6 +244,9 @@ class CompactionAttempt(_CompactionRecord):
     batch: CompactionBatch | None = None
 
 
+type CompactionProgressObserver = Callable[[CompactionAttempt], Awaitable[None]]
+
+
 class ContextCompactionResult(_CompactionRecord):
     """向调用方返回是否允许继续模型调用的安全结论。"""
 
@@ -339,22 +365,6 @@ def _canonical_json(payload: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-
-
-def _summary_content_hash(
-    *,
-    semantic: SummarySemanticSnapshot,
-    covered_message_ids: list[str],
-    covered_sequence_end: int,
-) -> str:
-    payload = {
-        "semantic": semantic.model_dump(mode="json"),
-        "covered_message_ids": covered_message_ids,
-        "covered_sequence_start": 1,
-        "covered_sequence_end": covered_sequence_end,
-    }
-    encoded = _canonical_json(payload).encode("utf-8")
-    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _validate_incremental_range(request: SummaryBuildRequest) -> None:
@@ -495,10 +505,12 @@ class SummaryBuilder:
         engine: SummaryEngine,
         summary_id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        verifier: SummaryVerifier | None = None,
     ) -> None:
         self._engine = engine
         self._summary_id_factory = summary_id_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._verifier = verifier or SummaryVerifier()
 
     async def build(
         self,
@@ -538,11 +550,7 @@ class SummaryBuilder:
             "conversation_id": frozen_request.conversation_id,
             "version": 1 if previous is None else previous.version + 1,
             "previous_summary_id": (None if previous is None else previous.summary_id),
-            "content_hash": _summary_content_hash(
-                semantic=semantic,
-                covered_message_ids=covered_message_ids,
-                covered_sequence_end=covered_sequence_end,
-            ),
+            "content_hash": "pending-verification",
             "covered_message_ids": covered_message_ids,
             "covered_sequence_start": 1,
             "covered_sequence_end": covered_sequence_end,
@@ -550,7 +558,12 @@ class SummaryBuilder:
             "created_at": created_at,
         }
         summary_payload.update(semantic.model_dump(mode="python"))
-        summary = ContextSummary.model_validate(summary_payload)
+        summary_draft = ContextSummary.model_validate(summary_payload)
+        summary = summary_draft.model_copy(
+            update={"content_hash": calculate_summary_content_hash(summary_draft)},
+            deep=True,
+        )
+        self._verifier.verify(summary, frozen_request.verification_baseline)
         return SummaryBuildResult(
             summary=summary,
             source_token_count=source_token_count,
@@ -627,6 +640,8 @@ class ContextCompactionCoordinator:
     async def coordinate(
         self,
         request: ContextCompactionRequest,
+        *,
+        on_progress: CompactionProgressObserver | None = None,
     ) -> ContextCompactionResult:
         """冻结请求并按初始压缩等级累进执行，达到目标后立即停止。"""
 
@@ -677,6 +692,7 @@ class ContextCompactionCoordinator:
                 current_tokens=current_tokens,
                 target_input_tokens=target_input_tokens,
                 attempts=attempts,
+                on_progress=on_progress,
             )
             if current_tokens <= target_input_tokens:
                 return self._target_result(
@@ -695,6 +711,7 @@ class ContextCompactionCoordinator:
                         current_tokens=current_tokens,
                         target_input_tokens=target_input_tokens,
                         attempts=attempts,
+                        on_progress=on_progress,
                     )
                     if current_tokens <= target_input_tokens:
                         return self._target_result(
@@ -713,6 +730,7 @@ class ContextCompactionCoordinator:
                         current_tokens=current_tokens,
                         target_input_tokens=target_input_tokens,
                         attempts=attempts,
+                        on_progress=on_progress,
                     )
                     if current_tokens <= target_input_tokens:
                         return self._target_result(
@@ -730,6 +748,7 @@ class ContextCompactionCoordinator:
                     current_tokens=current_tokens,
                     target_input_tokens=target_input_tokens,
                     attempts=attempts,
+                    on_progress=on_progress,
                 )
                 if current_tokens <= target_input_tokens:
                     return self._target_result(
@@ -738,6 +757,8 @@ class ContextCompactionCoordinator:
                         target_input_tokens,
                         attempts,
                     )
+        except CompactionProgressError:
+            raise
         except Exception:
             if initial.compaction_level < 4:
                 raise
@@ -747,6 +768,7 @@ class ContextCompactionCoordinator:
                 current_tokens=current_tokens,
                 target_input_tokens=target_input_tokens,
                 attempts=attempts,
+                on_progress=on_progress,
             )
 
         if initial.compaction_level >= 4:
@@ -756,6 +778,7 @@ class ContextCompactionCoordinator:
                 current_tokens=current_tokens,
                 target_input_tokens=target_input_tokens,
                 attempts=attempts,
+                on_progress=on_progress,
             )
         return self._result(
             status="target_not_reached",
@@ -790,6 +813,7 @@ class ContextCompactionCoordinator:
         current_tokens: int,
         target_input_tokens: int,
         attempts: list[CompactionAttempt],
+        on_progress: CompactionProgressObserver | None,
     ) -> int:
         raw_result = await self._executor.execute(
             CompactionStageRequest(
@@ -806,14 +830,15 @@ class ContextCompactionCoordinator:
             raise CompactionExecutionError("压缩 Stage 必须返回合法的重新计量结果") from None
         if result.estimated_input_tokens > current_tokens:
             raise CompactionExecutionError("压缩 Stage 不得增加上下文 token")
-        attempts.append(
-            CompactionAttempt(
-                action=action,
-                estimated_input_tokens_before=current_tokens,
-                estimated_input_tokens_after=result.estimated_input_tokens,
-                batch=batch,
-            )
+        attempt = CompactionAttempt(
+            action=action,
+            estimated_input_tokens_before=current_tokens,
+            estimated_input_tokens_after=result.estimated_input_tokens,
+            batch=batch,
         )
+        attempts.append(attempt)
+        if on_progress is not None:
+            await on_progress(attempt.model_copy(deep=True))
         return result.estimated_input_tokens
 
     async def _minimal_or_paused(
@@ -824,6 +849,7 @@ class ContextCompactionCoordinator:
         current_tokens: int,
         target_input_tokens: int,
         attempts: list[CompactionAttempt],
+        on_progress: CompactionProgressObserver | None,
     ) -> ContextCompactionResult:
         before_minimal = current_tokens
         try:
@@ -834,6 +860,7 @@ class ContextCompactionCoordinator:
                 current_tokens=current_tokens,
                 target_input_tokens=target_input_tokens,
                 attempts=attempts,
+                on_progress=on_progress,
             )
             if current_tokens >= before_minimal:
                 if attempts and attempts[-1].action == "minimal_safe_context":
@@ -855,6 +882,8 @@ class ContextCompactionCoordinator:
                     attempts=attempts,
                     model_invocation_allowed=True,
                 )
+        except CompactionProgressError:
+            raise
         except Exception:
             current_tokens = before_minimal
         return self._result(
@@ -918,6 +947,7 @@ class ConversationCompactionRuntime:
         repository: CompactionQueueRepository,
         lease_owner: str,
         lease_ttl: timedelta,
+        event_sink: CompactionEventSink,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_owner = lease_owner.strip()
@@ -925,10 +955,15 @@ class ConversationCompactionRuntime:
             raise ValueError("lease_owner 不能为空")
         if lease_ttl <= timedelta(0):
             raise ValueError("lease_ttl 必须大于零")
+        if not isinstance(event_sink, CompactionEventSink):
+            raise TypeError("event_sink 必须实现 CompactionEventSink")
+        if not event_sink.is_bound_to(repository):
+            raise ValueError("event_sink 必须与压缩队列绑定同一个 Repository")
         self._coordinator = coordinator
         self._repository = repository
         self._lease_owner = normalized_owner
         self._lease_ttl = lease_ttl
+        self._event_sink = event_sink
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def enqueue_turn(
@@ -949,10 +984,15 @@ class ConversationCompactionRuntime:
         self,
         user_id: str,
         request: ContextCompactionRequest,
+        *,
+        run_id: str,
     ) -> ConversationCompactionRunResult:
         """取得短租约后执行压缩，并按安全结论原子处理队列。"""
 
         frozen = ContextCompactionRequest.model_validate(request.model_dump(mode="python"))
+        normalized_run_id = run_id.strip()
+        if not normalized_run_id:
+            raise ValueError("run_id 不能为空")
         started_at = self._clock()
         lease = await self._repository.acquire_compaction_lease(
             user_id,
@@ -964,46 +1004,140 @@ class ConversationCompactionRuntime:
         if lease is None:
             return ConversationCompactionRunResult(status="already_running")
 
-        try:
-            raw_result = await self._coordinator.coordinate(frozen)
-            result = ContextCompactionResult.model_validate(raw_result)
-        except BaseException:
-            try:
-                await self._mark_failed_compaction(
-                    user_id,
-                    lease,
-                )
-            except CompactionLeaseConflictError:
-                # 租约已被接管时只保留原始异常，陈旧 worker 不再改写协调状态。
-                pass
-            raise
+        started_event_persisted = False
+        progress_step = 0
 
-        if result.status == "paused":
-            await self._repository.finish_compaction(
+        async def emit_progress(attempt: CompactionAttempt) -> None:
+            nonlocal progress_step
+            progress_step += 1
+            try:
+                await self._append_event(
+                    user_id,
+                    conversation_id=lease.conversation_id,
+                    run_id=normalized_run_id,
+                    event_type=AgentEventType.CONTEXT_COMPRESSION_PROGRESSED,
+                    payload={
+                        "status": "running",
+                        "action": attempt.action,
+                        "step": progress_step,
+                    },
+                )
+            except Exception:
+                raise CompactionProgressError("压缩进度事件持久化失败") from None
+
+        try:
+            await self._append_event(
+                user_id,
+                conversation_id=lease.conversation_id,
+                run_id=normalized_run_id,
+                event_type=AgentEventType.CONTEXT_COMPRESSION_STARTED,
+                payload={
+                    "status": "running",
+                    "message": COMPACTION_STARTED_MESSAGE,
+                },
+            )
+            started_event_persisted = True
+            raw_result = await self._coordinator.coordinate(
+                frozen,
+                on_progress=emit_progress,
+            )
+            result = ContextCompactionResult.model_validate(raw_result)
+            if result.status == "paused":
+                await self._repository.finish_compaction_with_event(
+                    user_id,
+                    lease.conversation_id,
+                    lease_owner=lease.lease_owner,
+                    lease_token=lease.lease_token,
+                    now=self._clock(),
+                    claim_next=False,
+                    run_id=normalized_run_id,
+                    event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
+                    payload={
+                        "status": "retry_required",
+                        "reason_code": "hard_gate_compaction_failed",
+                        "message": COMPACTION_FAILED_MESSAGE,
+                    },
+                )
+                return ConversationCompactionRunResult(
+                    status="paused",
+                    compaction_result=result,
+                )
+
+            next_turn, _ = await self._repository.finish_compaction_with_event(
                 user_id,
                 lease.conversation_id,
                 lease_owner=lease.lease_owner,
                 lease_token=lease.lease_token,
                 now=self._clock(),
-                claim_next=False,
+                claim_next=True,
+                run_id=normalized_run_id,
+                event_type=AgentEventType.CONTEXT_COMPRESSION_COMPLETED,
+                payload={
+                    "status": "completed",
+                    "message": COMPACTION_COMPLETED_MESSAGE,
+                },
             )
             return ConversationCompactionRunResult(
-                status="paused",
+                status="completed",
                 compaction_result=result,
+                next_turn=next_turn,
             )
+        except BaseException:
+            if started_event_persisted:
+                try:
+                    await self._repository.finish_compaction_with_event(
+                        user_id,
+                        lease.conversation_id,
+                        lease_owner=lease.lease_owner,
+                        lease_token=lease.lease_token,
+                        now=self._clock(),
+                        claim_next=False,
+                        run_id=normalized_run_id,
+                        event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
+                        payload={
+                            "status": "retry_required",
+                            "reason_code": "compaction_execution_failed",
+                            "message": COMPACTION_FAILED_MESSAGE,
+                        },
+                    )
+                except CompactionLeaseConflictError:
+                    # 租约已被接管时，陈旧 worker 不得写入任何伪终态。
+                    pass
+                except Exception:
+                    try:
+                        await self._mark_failed_compaction(
+                            user_id,
+                            lease,
+                        )
+                    except CompactionLeaseConflictError:
+                        pass
+            else:
+                try:
+                    await self._mark_failed_compaction(
+                        user_id,
+                        lease,
+                    )
+                except CompactionLeaseConflictError:
+                    pass
+            raise
 
-        next_turn = await self._repository.finish_compaction(
+    async def _append_event(
+        self,
+        user_id: str,
+        *,
+        conversation_id: str,
+        run_id: str,
+        event_type: AgentEventType,
+        payload: dict[str, JsonValue],
+    ) -> None:
+        """通过唯一事件端口先持久化生命周期状态，再继续压缩编排。"""
+        await self._event_sink.append(
             user_id,
-            lease.conversation_id,
-            lease_owner=lease.lease_owner,
-            lease_token=lease.lease_token,
-            now=self._clock(),
-            claim_next=True,
-        )
-        return ConversationCompactionRunResult(
-            status="completed",
-            compaction_result=result,
-            next_turn=next_turn,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            event_type=event_type,
+            payload=payload,
+            occurred_at=self._clock(),
         )
 
     async def _mark_failed_compaction(
@@ -1029,6 +1163,8 @@ __all__ = [
     "CompactionBatch",
     "CompactionBatchScope",
     "CompactionExecutionError",
+    "CompactionProgressError",
+    "CompactionProgressObserver",
     "CompactionRunStatus",
     "CompactionSegment",
     "CompactionStageExecutor",

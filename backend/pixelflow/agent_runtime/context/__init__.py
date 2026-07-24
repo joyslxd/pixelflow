@@ -19,6 +19,8 @@ from .compaction import (
     CompactionBatch,
     CompactionBatchScope,
     CompactionExecutionError,
+    CompactionProgressError,
+    CompactionProgressObserver,
     CompactionRunStatus,
     CompactionSegment,
     CompactionStageExecutor,
@@ -41,6 +43,11 @@ from .compaction import (
     SummaryGenerationInput,
     SummarySemanticSnapshot,
     SummarySourceMessage,
+)
+from .compaction_events import (
+    CompactionEventPersistenceError,
+    CompactionEventSink,
+    RepositoryCompactionEventOutbox,
 )
 from .externalizer import (
     ContextExternalizationResult,
@@ -72,6 +79,13 @@ from .token_meter import (
     TokenMeter,
     get_context_budget_policy,
 )
+from .verification import (
+    SummaryVerificationBaseline,
+    SummaryVerificationError,
+    SummaryVerificationResult,
+    SummaryVerifier,
+    calculate_summary_content_hash,
+)
 
 __all__ = [
     "ArtifactEvidenceRecord",
@@ -81,6 +95,10 @@ __all__ = [
     "CompactionBatch",
     "CompactionBatchScope",
     "CompactionExecutionError",
+    "CompactionEventPersistenceError",
+    "CompactionEventSink",
+    "CompactionProgressError",
+    "CompactionProgressObserver",
     "CompactionRunStatus",
     "CompactionSegment",
     "CompactionStageExecutor",
@@ -111,6 +129,7 @@ __all__ = [
     "ModelContextProfileResolution",
     "PayloadKind",
     "PIXELFLOW_STRUCTURED_SUMMARY_PROMPT",
+    "RepositoryCompactionEventOutbox",
     "StructuredSummaryRepository",
     "SummaryBuildRequest",
     "SummaryBuildResult",
@@ -126,11 +145,16 @@ __all__ = [
     "SummarySemanticSnapshot",
     "SummarySourceMessage",
     "SummaryVersionConflictError",
+    "SummaryVerificationBaseline",
+    "SummaryVerificationError",
+    "SummaryVerificationResult",
+    "SummaryVerifier",
     "TokenMeter",
     "TokenEstimator",
     "WorkflowSummaryRecord",
     "estimate_context_tokens",
     "estimate_prompt_bytes",
+    "calculate_summary_content_hash",
     "get_context_budget_policy",
     "parse_model_context_profiles",
     "resolve_model_context_profile",

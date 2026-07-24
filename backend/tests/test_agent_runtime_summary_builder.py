@@ -21,6 +21,10 @@ from pixelflow.agent_runtime.context.compaction import (
     SummarySemanticSnapshot,
     SummarySourceMessage,
 )
+from pixelflow.agent_runtime.context.verification import (
+    SummaryVerificationBaseline,
+    SummaryVerificationError,
+)
 from pixelflow.agent_runtime.contracts import ContextSummary
 
 NOW = datetime(2026, 7, 24, 15, 0, tzinfo=UTC)
@@ -81,6 +85,21 @@ def _message(
     )
 
 
+def _verification_baseline(**updates: Any) -> SummaryVerificationBaseline:
+    payload: dict[str, Any] = {
+        "conversation_id": "conversation-1",
+        "required_user_goals": ["制作 30 秒新品视频"],
+        "required_confirmed_decisions": ["使用 9:16 画幅"],
+        "required_negative_constraints": ["不要真人出镜"],
+        "required_workflow_states": {"video-1": "plan_review"},
+        "required_unresolved_questions": ["是否需要旁白"],
+        "required_artifact_evidence_refs": ["artifact:plan-1"],
+        "required_identifiers": ["video-1", "artifact:plan-1"],
+    }
+    payload.update(updates)
+    return SummaryVerificationBaseline.model_validate(payload)
+
+
 class _FakeSummaryEngine:
     def __init__(
         self,
@@ -122,12 +141,30 @@ def test_summary_build_request_rejects_business_context() -> None:
                 "conversation_id": "conversation-1",
                 "previous_summary": None,
                 "new_messages": [_message(1).model_dump(mode="python")],
+                "verification_baseline": _verification_baseline().model_dump(mode="python"),
                 "business_context": {
                     "creation_contract": {"duration": 30},
                     "pending_action": "generate_video",
                 },
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_summary_builder_rejects_candidate_missing_required_facts() -> None:
+    engine = _FakeSummaryEngine(
+        semantic=_semantic_snapshot(negative_constraints=[]),
+    )
+    request = SummaryBuildRequest(
+        conversation_id="conversation-1",
+        new_messages=(_message(1),),
+        verification_baseline=_verification_baseline(),
+    )
+
+    with pytest.raises(SummaryVerificationError) as caught:
+        await _builder(engine, summary_id="summary-1").build(request)
+
+    assert caught.value.reason_code == "missing_negative_constraint"
 
 
 @pytest.mark.asyncio
@@ -140,6 +177,7 @@ async def test_summary_builder_builds_first_version_from_contiguous_messages() -
             _message(1),
             _message(2, role="assistant"),
         ),
+        verification_baseline=_verification_baseline(),
     )
 
     result = await builder.build(request)
@@ -177,6 +215,9 @@ async def test_summary_builder_passes_only_previous_semantics_and_new_messages()
             new_messages=(
                 _message(3),
                 _message(4, role="assistant"),
+            ),
+            verification_baseline=_verification_baseline(
+                required_unresolved_questions=(),
             ),
         )
     )
@@ -239,6 +280,7 @@ async def test_summary_builder_rejects_non_incremental_message_ranges(
                 conversation_id="conversation-1",
                 previous_summary=previous,
                 new_messages=messages,
+                verification_baseline=_verification_baseline(),
             )
         )
 
@@ -254,6 +296,7 @@ async def test_summary_builder_rejects_previous_summary_from_another_conversatio
                 conversation_id="conversation-1",
                 previous_summary=previous,
                 new_messages=(_message(3),),
+                verification_baseline=_verification_baseline(),
             )
         )
 
@@ -279,6 +322,7 @@ async def test_summary_builder_freezes_source_before_await() -> None:
         conversation_id="conversation-1",
         previous_summary=previous,
         new_messages=(message,),
+        verification_baseline=_verification_baseline(),
     )
     engine = _BlockingSummaryEngine()
     task = asyncio.create_task(_builder(engine, summary_id="summary-2").build(request))
@@ -320,6 +364,7 @@ async def test_summary_builder_copies_input_for_each_engine_boundary() -> None:
             conversation_id="conversation-1",
             previous_summary=previous,
             new_messages=(message,),
+            verification_baseline=_verification_baseline(),
         )
     )
 
@@ -344,6 +389,7 @@ async def test_summary_builder_rejects_invalid_engine_output() -> None:
             SummaryBuildRequest(
                 conversation_id="conversation-1",
                 new_messages=(_message(1),),
+                verification_baseline=_verification_baseline(),
             )
         )
 
@@ -353,6 +399,7 @@ async def test_summary_content_hash_ignores_generated_identity_and_time() -> Non
     request = SummaryBuildRequest(
         conversation_id="conversation-1",
         new_messages=(_message(1),),
+        verification_baseline=_verification_baseline(),
     )
     first = await SummaryBuilder(
         engine=_FakeSummaryEngine(),
