@@ -5,6 +5,8 @@
 """
 
 from pixelflow.tasks.store import (
+    AGENT_RUNTIME_CONTEXT_KEY,
+    ConversationRevisionConflictError,
     MemoryPixelFlowTaskStore,
     PixelFlowAssetRecord,
     PixelFlowConversationMessageRecord,
@@ -12,9 +14,12 @@ from pixelflow.tasks.store import (
     PixelFlowTaskRecord,
     PixelFlowTaskStore,
     SQLPixelFlowTaskStore,
+    sanitize_client_conversation_context,
 )
 
 __all__ = [
+    "AGENT_RUNTIME_CONTEXT_KEY",
+    "ConversationRevisionConflictError",
     "MemoryPixelFlowTaskStore",
     "PixelFlowAssetRecord",
     "PixelFlowConversationMessageRecord",
@@ -22,4 +27,5 @@ __all__ = [
     "PixelFlowTaskRecord",
     "PixelFlowTaskStore",
     "SQLPixelFlowTaskStore",
+    "sanitize_client_conversation_context",
 ]

@@ -13,6 +13,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
 from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
@@ -30,7 +31,7 @@ PIXELFLOW_TASK_TABLES = [
     PixelFlowAssetRow.__table__,
     PixelFlowConversationRow.__table__,
     PixelFlowConversationMessageRow.__table__,
-]
+] + list(AGENT_RUNTIME_TABLES)
 
 
 _MICROSECOND_COLUMNS = {
@@ -60,6 +61,29 @@ async def _mysql_datetime_precision(conn, *, table: str, column: str) -> int | N
         return None
     precision = row[0]
     return int(precision) if precision is not None else None
+
+
+async def _ensure_mysql_conversation_revision(conn) -> None:
+    """为 create_all 无法修改的旧对话表补齐 CAS revision。"""
+
+    if conn.dialect.name not in {"mysql", "mariadb"}:
+        return
+    result = await conn.execute(
+        text(
+            "SELECT COLUMN_NAME "
+            "FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'pixelflow_conversations' "
+            "AND COLUMN_NAME = 'revision'"
+        )
+    )
+    if result.first() is None:
+        await conn.execute(
+            text(
+                "ALTER TABLE pixelflow_conversations "
+                "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+            )
+        )
 
 
 async def _ensure_mysql_microsecond_timestamps(conn) -> None:
@@ -108,6 +132,7 @@ async def make_mysql_task_store(url: str, *, echo: bool = False, pool_size: int 
                 tables=PIXELFLOW_TASK_TABLES,
             )
         )
+        await _ensure_mysql_conversation_revision(conn)
         await _ensure_mysql_microsecond_timestamps(conn)
     logger.info("PixelFlow MySQL task tables are ready")
     return SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False)), engine

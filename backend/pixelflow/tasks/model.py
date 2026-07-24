@@ -100,6 +100,7 @@ class PixelFlowConversationRow(Base):
     current_task_id: Mapped[str | None] = mapped_column(String(64), index=True)
     last_phase: Mapped[str] = mapped_column(String(32), default="idle", index=True)
     context_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
 

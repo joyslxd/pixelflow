@@ -16,7 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
-from pixelflow.tasks import PixelFlowConversationMessageRecord, PixelFlowConversationRecord, PixelFlowTaskStore
+from pixelflow.tasks import (
+    ConversationRevisionConflictError,
+    PixelFlowConversationMessageRecord,
+    PixelFlowConversationRecord,
+    PixelFlowTaskStore,
+    sanitize_client_conversation_context,
+)
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
 
@@ -36,6 +42,7 @@ class ConversationUpdateRequest(BaseModel):
     current_task_id: str | None = None
     last_phase: str | None = None
     context: dict[str, Any] | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class JianyingDraftConversationContextPatchRequest(BaseModel):
@@ -104,6 +111,7 @@ class ConversationResponse(BaseModel):
     current_task_id: str | None = None
     last_phase: str = "idle"
     context: dict[str, Any] = Field(default_factory=dict)
+    revision: int = Field(default=1, ge=1)
     created_at: str = ""
     updated_at: str = ""
 
@@ -198,7 +206,7 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
             title=title,
             current_task_id=body.current_task_id,
             last_phase=body.last_phase,
-            context=body.context,
+            context=sanitize_client_conversation_context(body.context),
         )
     )
     return _conversation_response(record)
@@ -225,7 +233,22 @@ async def get_conversation(conversation_id: str, request: Request) -> Conversati
 async def update_conversation(conversation_id: str, body: ConversationUpdateRequest, request: Request) -> ConversationResponse:
     user_id = await get_current_user(request)
     fields = body.model_dump(exclude_unset=True)
-    updated = await _task_store(request).update_conversation(conversation_id, user_id=user_id, **fields)
+    expected_revision = fields.pop("expected_revision", None)
+    try:
+        updated = await _task_store(request).update_conversation(
+            conversation_id,
+            user_id=user_id,
+            expected_revision=expected_revision, **fields,
+        )
+    except ConversationRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "conversation_revision_conflict",
+                "expected_revision": exc.expected_revision,
+                "current_revision": exc.current_revision,
+            },
+        ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return _conversation_response(updated)
