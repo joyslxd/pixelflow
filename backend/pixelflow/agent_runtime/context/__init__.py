@@ -28,6 +28,14 @@ from .profiles import (
     parse_model_context_profiles,
     resolve_model_context_profile,
 )
+from .summaries import (
+    StructuredSummaryRepository,
+    SummaryEvidenceSnapshot,
+    SummaryEvidenceSource,
+    SummaryEvidenceValidationError,
+    SummaryMessageEvidence,
+    SummaryVersionConflictError,
+)
 from .token_meter import (
     ContextBudgetNode,
     ContextBudgetPolicy,
@@ -54,6 +62,12 @@ __all__ = [
     "ModelContextProfile",
     "ModelContextProfileResolution",
     "PayloadKind",
+    "StructuredSummaryRepository",
+    "SummaryEvidenceSnapshot",
+    "SummaryEvidenceSource",
+    "SummaryEvidenceValidationError",
+    "SummaryMessageEvidence",
+    "SummaryVersionConflictError",
     "TokenMeter",
     "TokenEstimator",
     "WorkflowSummaryRecord",
