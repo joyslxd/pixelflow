@@ -390,8 +390,53 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
-    It "M01 在 Event Outbox 权威清单完成前必须 fail-closed" {
-        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M01" -GateType "Final" -PlanOnly } | Should Throw
+    It "M01 最终门禁只运行二百二十二项权威测试并使用项目 Python" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M01" -GateType "Final" -PlanOnly)
+        $versionCommands = @($plan | Where-Object { $_.Arguments -contains "import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" })
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $expectedTests = @(
+            "tests/test_agent_runtime_conversation_cas.py",
+            "tests/test_agent_runtime_event_outbox.py",
+            "tests/test_agent_runtime_migration.py",
+            "tests/test_agent_runtime_repositories.py",
+            "tests/test_agent_runtime_turn_inbox.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_config.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_pixelflow_task_store.py",
+            "tests/test_pixelflow_conversations_router.py",
+            "tests/test_owner_isolation.py",
+            "tests/test_harness_boundary.py",
+            "tests/test_pixelflow_jianying_draft_router.py",
+            "tests/test_openapi_operation_ids.py"
+        )
+        $expectedRuffPaths = @(
+            "app/gateway/routers/pixelflow_conversations.py",
+            "packages/harness/deerflow/persistence/migrations/versions/20260724_01_agent_runtime_tables.py",
+            "packages/harness/deerflow/persistence/migrations/versions/20260724_02_conversation_revision.py",
+            "packages/harness/deerflow/persistence/models/__init__.py",
+            "pixelflow/agent_runtime/persistence",
+            "pixelflow/tasks/__init__.py",
+            "pixelflow/tasks/model.py",
+            "pixelflow/tasks/mysql.py",
+            "pixelflow/tasks/store.py"
+        )
+
+        $versionCommands.Count | Should Be 1
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        ($versionCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
     }
 
     It "未配置权威测试清单的后端模块必须 fail-closed" {

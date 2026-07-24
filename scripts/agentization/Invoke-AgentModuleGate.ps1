@@ -69,7 +69,7 @@ if ($GateType -eq "Phase") {
     }
 }
 
-$backendModuleIds = @("M00", "M00-A", "M02", "M03", "M04", "M05", "M06", "M13")
+$backendModuleIds = @("M00", "M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M13")
 $pythonExecutable = $null
 if ($backendModuleIds -contains $ModuleId) {
     $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
@@ -107,7 +107,41 @@ elseif ($ModuleId -eq "M00-B") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "node"; Arguments = @("--test", "tests") })
 }
 elseif ($ModuleId -eq "M01") {
-    throw "模块 M01 的 M01.5 Event Outbox 权威测试清单尚未建立；禁止在最终切片完成前提前放行。"
+    $m01Tests = @(
+        "tests/test_agent_runtime_conversation_cas.py",
+        "tests/test_agent_runtime_event_outbox.py",
+        "tests/test_agent_runtime_migration.py",
+        "tests/test_agent_runtime_repositories.py",
+        "tests/test_agent_runtime_turn_inbox.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_config.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_pixelflow_task_store.py",
+        "tests/test_pixelflow_conversations_router.py",
+        "tests/test_owner_isolation.py",
+        "tests/test_harness_boundary.py",
+        "tests/test_pixelflow_jianying_draft_router.py",
+        "tests/test_openapi_operation_ids.py"
+    )
+    $m01RuffPaths = @(
+        "app/gateway/routers/pixelflow_conversations.py",
+        "packages/harness/deerflow/persistence/migrations/versions/20260724_01_agent_runtime_tables.py",
+        "packages/harness/deerflow/persistence/migrations/versions/20260724_02_conversation_revision.py",
+        "packages/harness/deerflow/persistence/models/__init__.py",
+        "pixelflow/agent_runtime/persistence",
+        "pixelflow/tasks/__init__.py",
+        "pixelflow/tasks/model.py",
+        "pixelflow/tasks/mysql.py",
+        "pixelflow/tasks/store.py"
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m01Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m01RuffPaths + $m01Tests
+        }
+    )
 }
 elseif ($ModuleId -eq "M03") {
     $m03Tests = @(
