@@ -1,8 +1,8 @@
 # M01 持久化、CAS、Turn Inbox 与 Event Outbox
 
-- phase：`integration_blocked`
+- phase：`ready_for_integration`
 - owner：A
-- reviewer：`/root/m01_5_independent_review`
+- reviewer：`/root/m01_5_independent_review`（M01 权威门禁修复复审）
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
 - branch：`codex/agent-0.8.4-m01-runtime-store`
 - 依赖：M00（已进入 `feature/agent_0.8.4_boguan`）
@@ -69,12 +69,20 @@
 - SQLite 同 Engine 使用共享异步锁，跨 Engine/进程使用 `BEGIN IMMEDIATE`；生产 SQL 使用 `SELECT ... FOR UPDATE`。Memory/SQL 并发 append 与 claim 合同全绿。
 - 新合同为 `13 passed, 1 warning`；完整 M01 精确范围门禁为 `222 passed, 1 warning`。ruff、`git diff --check` 与分支策略检查均通过。
 - 独立审核确认 Critical、Important、Minor 均为 0；未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.5.md`。
-- 当前无远端 CI，自动化状态保持 `automation_local_ready`；M01 已满足最终单槽集成本地入口，但本任务不自动集成。
+- 当前无远端 CI，自动化状态保持 `automation_local_ready`；原 M01.5 开发任务只负责准备最终单槽集成本地入口，本次门禁修复任务已获得开发者继续集成的明确授权。
+
+## M01 最终权威门禁修复
+
+- 首次单槽集成因 canonical gate 尚未固化 M01.5 权威清单而安全阻塞，Agent 未更新。
+- 已合入最新 Agent 门禁基线，并把 M01 Final 固定为项目 Python 3.12、14 个精确测试文件和限定 Ruff 路径。
+- TDD 红灯为 `34 passed, 1 failed`，修复后 Pester 3.4 为 `35 passed, 0 failed`；M01 精确 pytest 为 `222 passed, 1 warning`，Ruff 与 canonical Final 均通过。
+- 独立复审 Critical、Important、Minor 均为 0，`Ready to merge: Yes`。完整记录见 `docs/agentization/test-reports/M01-gate-repair.md`。
+- 本次开发者已明确授权在状态恢复并 push 后，由同一任务重新创建全新单槽候选；不得复用原阻塞候选。
 
 ## 恢复提示
 
-M01 五个切片均已完成并达到 `ready_for_integration`。当前自动化状态为 `automation_local_ready`；下一步由开发者复制执行手册 9.10A 话术，在新的 Codex 任务中手动启动 M01 最终单槽集成。不得在本开发任务中自动修改 `feature/agent_0.8.4_boguan` 或继续 M02。
+M01 五个切片和最终权威门禁修复均已完成并达到 `ready_for_integration`。当前自动化状态为 `automation_local_ready`；本次开发者已经明确授权当前任务在 push 后继续执行 M01 最终单槽集成。不得自动继续 M02。
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`blocked`
-- integration failure evidence：`候选 codex/integrate-m01-20260724-111148-574ee408 已保留；Agent 未更新；错误类型 RuntimeException`
+- checkpoint_status：`ready`
+- integration failure evidence：`无`
