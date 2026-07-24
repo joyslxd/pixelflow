@@ -103,6 +103,29 @@ def _compaction_level(
 class TokenMeter:
     """把调用前的输入估算转换为冻结的上下文预算报告。"""
 
+    def remeasure(
+        self,
+        *,
+        estimated_input_tokens: int,
+        baseline: ContextBudgetReport,
+    ) -> ContextBudgetReport:
+        """复用既有窗口和预留值，对压缩后的输入重新计算统一等级。"""
+
+        if isinstance(estimated_input_tokens, bool) or not isinstance(estimated_input_tokens, int) or estimated_input_tokens < 0:
+            raise ValueError("estimated_input_tokens 必须是非负整数")
+        return ContextBudgetReport(
+            estimated_input_tokens=estimated_input_tokens,
+            effective_context_tokens=baseline.effective_context_tokens,
+            usable_input_tokens=baseline.usable_input_tokens,
+            max_output_tokens=baseline.max_output_tokens,
+            safety_reserve_tokens=baseline.safety_reserve_tokens,
+            utilization=estimated_input_tokens / baseline.usable_input_tokens,
+            compaction_level=_compaction_level(
+                estimated_input_tokens,
+                baseline.usable_input_tokens,
+            ),
+        )
+
     def measure(
         self,
         *,
@@ -112,11 +135,7 @@ class TokenMeter:
     ) -> ContextBudgetReport:
         """按模型能力和业务上限取较小值，并保留实际输出空间。"""
 
-        if (
-            isinstance(estimated_input_tokens, bool)
-            or not isinstance(estimated_input_tokens, int)
-            or estimated_input_tokens < 0
-        ):
+        if isinstance(estimated_input_tokens, bool) or not isinstance(estimated_input_tokens, int) or estimated_input_tokens < 0:
             raise ValueError("estimated_input_tokens 必须是非负整数")
 
         effective_context_tokens = min(
@@ -127,11 +146,7 @@ class TokenMeter:
             profile.max_output_tokens,
             policy.output_reserve_tokens,
         )
-        usable_input_tokens = (
-            effective_context_tokens
-            - max_output_tokens
-            - policy.safety_reserve_tokens
-        )
+        usable_input_tokens = effective_context_tokens - max_output_tokens - policy.safety_reserve_tokens
         if usable_input_tokens <= 0:
             raise ValueError("usable_input 必须在输出和安全预留后仍大于零")
 

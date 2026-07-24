@@ -5,19 +5,20 @@
 - base Agent SHA：`d20762935ad8bd994a24e332f4237da7a1aaf591`
 - branch：`codex/agent-0.8.4-m04-context-compaction`
 - 依赖：M01、M03
-- 当前切片：`M04.3`（未开始）
+- 当前切片：`M04.4`（未开始）
 - 当前唯一写入者：`尚未领取`
-- 当前锁定文件：无；M04.2 写锁已释放
-- 本切片开始时间：`2026-07-24T22:57:05+08:00`
+- 当前锁定文件：无；M04.3 写锁已释放
+- 本切片开始时间：`2026-07-24T23:45:00+08:00`
 - M04.1 完成时间：`2026-07-24T22:21:05+08:00`
 - M04.2 完成时间：`2026-07-24T23:20:58+08:00`
+- M04.3 完成时间：`2026-07-25T00:00:42+08:00`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m04-context-compaction`
 
 ## 切片
 
 - [x] M04.1 StructuredSummary/版本/证据引用（2h）
 - [x] M04.2 增量 SummaryBuilder（3h）
-- [ ] M04.3 四阈值 Coordinator（2.5h）
+- [x] M04.3 四阈值 Coordinator（2.5h）
 - [ ] M04.4 压缩锁与输入队列（2h）
 - [ ] M04.5 事件与 SummaryVerifier（2.5h）
 
@@ -53,6 +54,24 @@
 - commit/push：本状态文件所在 M04.2 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
 - 阶段状态：M04.2 不是阶段检查点或模块最后一片，因此保持 `in_progress`，不运行阶段/M04 Final 门禁，不更新 `status/BOARD.md`，不写 ready 状态，也不触发 9.10A。
 - 下一切片第一动作：开发者手动启动 M04.3 后，恢复同一模块分支/worktree并领取唯一 writer；先用失败测试固定 59/60、71/72、84/85、91/92 边界、45% 回落目标和超大输入分块/层级压缩。
+
+## M04.3 交付记录
+
+- 产物：新增严格 `CompactionSegment/Batch/StageRequest/StageResult/Attempt`、`ContextCompactionRequest/Result`、`CompactionStageExecutor` 和 `ContextCompactionCoordinator`；为 M03 `TokenMeter` 增加复用既有预算报告的统一重计量入口。
+- 四阈值：59/60、71/72、84/85、91/92 边界全部复用 M03 唯一阈值计算；60% 起外置大型载荷，72% 起增量摘要，85% 起 workflow 摘要到会话摘要的层级压缩，92% 增加同步硬闸门。
+- 回落目标：使用整数公式保证成功结果严格低于 45%；`usable_input=100` 时 44 为成功，45 只记录 `target_not_reached`，不会误报。
+- 摘要预算：调用方不能传裸分块上限；Coordinator 冻结摘要模型名与档案映射，通过 M03 档案解析、`TokenMeter` 和 `summary` 节点策略计算实际可用预算，缺失或过期档案按至多 128K 保守档案分块。
+- 分块与层级：消息段和 workflow 摘要段按来源顺序稳定贪心分块，每块不超过摘要节点实际窗口；单段超窗 fail-closed，不会直接提交给摘要模型；85% 先处理消息增量，再做 workflow 层级汇总。
+- 92% 安全边界：执行异常、非法返回、token 增长、目标未达成或分块规划失败均转为最小安全上下文；仍不能证明低于可用上限时返回 `paused` 并禁止模型调用，不会放行原上下文。
+- 业务隔离：Coordinator DTO 只含预算、会话 ID 和可压缩段引用，拒绝 `business_context`；不写库、不删除/改写原始 SQL 消息，Plan、创作合同、场景蓝图、资产清单、pending action 和 operation 均保持在业务权威通道。
+- TDD 证据：初始合同不存在时收集失败；最小实现后 `18 passed`；DTO 自审先得到 `6 failed, 18 passed` 再修复为 `24 passed`；独立审核整改先得到 `23 failed, 5 passed`，最终为 `28 passed, 1 warning`。
+- 最后测试：M04.3 + M04.2/M04.1 + M03/M01 相邻集合为 `227 passed, 1 warning`；DeerFlow summarization/dynamic context 与 Harness 边界为 `39 passed, 1 warning`。warning 均来自既有 LangGraph pending deprecation。
+- 静态检查：变更 Python 路径 `ruff check`、`ruff format --check` 和差异检查均通过；整个 `context` 目录探测出的既有 `profiles.py` formatter 差异未被本切片越界重排。
+- 独立审核：首轮 Critical 0、Important 2、Minor 0；两项均按 TDD 修复。复审最终 Critical/Important/Minor 均为 0，结论“可以提交：是”。
+- 中文规范：新增/修改注释、docstring、计划、状态和测试记录均为中文主体说明；本切片没有配置变更。
+- commit/push：本状态文件所在 M04.3 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
+- 阶段状态：M04.3 不是阶段检查点或模块最后一片，因此保持 `in_progress`，不运行阶段/M04 Final 门禁，不更新 `status/BOARD.md`，不写 ready 状态，也不触发 9.10A。
+- 下一切片第一动作：开发者手动启动 M04.4 后，恢复同一模块分支/worktree并领取唯一 writer；先用并发失败测试固定 conversation 压缩锁、turn `queued/processing` 顺序迁移和失败恢复，确保输入不丢失、不由前端重发。
 
 ## 恢复提示
 

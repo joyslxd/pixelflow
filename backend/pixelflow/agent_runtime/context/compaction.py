@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from types import MappingProxyType
+from typing import Any, Literal, Protocol, Self
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationError,
+    model_validator,
+)
 
-from ..contracts import ContextSummary
+from ..contracts import ContextBudgetReport, ContextSummary
+from .profiles import ModelContextProfile, resolve_model_context_profile
+from .token_meter import TokenMeter, get_context_budget_policy
 
 
 class SummaryBuildValidationError(ValueError):
@@ -21,6 +31,14 @@ class SummaryBuildValidationError(ValueError):
 
 class SummaryGenerationError(RuntimeError):
     """摘要 Engine 没有返回可验证的结构化结果。"""
+
+
+class CompactionValidationError(ValueError):
+    """压缩请求或分块不满足冻结预算合同。"""
+
+
+class CompactionExecutionError(RuntimeError):
+    """压缩阶段没有返回单调不增的安全计量结果。"""
 
 
 PIXELFLOW_STRUCTURED_SUMMARY_PROMPT = (
@@ -92,6 +110,162 @@ class SummaryBuildResult(_CompactionRecord):
 
     summary: ContextSummary
     source_token_count: int = Field(ge=0)
+
+
+CompactionAction = Literal[
+    "externalize_payloads",
+    "incremental_summary",
+    "hierarchical_summary",
+    "hard_gate_summary",
+    "minimal_safe_context",
+]
+CompactionBatchScope = Literal["messages", "workflow_summaries"]
+CompactionStatus = Literal[
+    "not_required",
+    "target_reached",
+    "target_not_reached",
+    "minimal_safe_context",
+    "paused",
+]
+
+
+class CompactionSegment(_CompactionRecord):
+    """只描述可压缩段的稳定标识和估算规模，不携带业务权威对象。"""
+
+    segment_id: str = Field(min_length=1)
+    estimated_tokens: int = Field(ge=1, strict=True)
+
+
+class CompactionBatch(_CompactionRecord):
+    """表示一次摘要节点可安全处理的有序输入批次。"""
+
+    scope: CompactionBatchScope
+    batch_index: int = Field(ge=1, strict=True)
+    batch_count: int = Field(ge=1, strict=True)
+    segments: tuple[CompactionSegment, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_valid_batch_position(self) -> Self:
+        """保证批次位置不会超出同轮分块总数。"""
+
+        if self.batch_index > self.batch_count:
+            raise ValueError("batch_index 不能大于 batch_count")
+        return self
+
+    @property
+    def estimated_tokens(self) -> int:
+        """返回批次内所有来源段的累计 token 估算。"""
+
+        return sum(segment.estimated_tokens for segment in self.segments)
+
+
+class CompactionStageRequest(_CompactionRecord):
+    """向具体压缩策略提交一次无业务合同的编排动作。"""
+
+    conversation_id: str = Field(min_length=1)
+    action: CompactionAction
+    target_input_tokens: int = Field(ge=0, strict=True)
+    current_estimated_input_tokens: int = Field(ge=0, strict=True)
+    batch: CompactionBatch | None = None
+
+    @model_validator(mode="after")
+    def require_action_batch_match(self) -> Self:
+        """摘要动作必须携带对应作用域批次，其他动作不得夹带批次。"""
+
+        if self.action == "incremental_summary":
+            if self.batch is None or self.batch.scope != "messages":
+                raise ValueError("incremental_summary 的 batch 必须是 messages")
+        elif self.action == "hierarchical_summary":
+            if self.batch is None or self.batch.scope != "workflow_summaries":
+                raise ValueError("hierarchical_summary 的 batch 必须是 workflow_summaries")
+        elif self.batch is not None:
+            raise ValueError(f"{self.action} 的 batch 必须为空")
+        return self
+
+
+class CompactionStageResult(_CompactionRecord):
+    """压缩策略完成后必须返回重新组装得到的输入 token 数。"""
+
+    estimated_input_tokens: int = Field(ge=0, strict=True)
+
+
+class ContextCompactionRequest(_CompactionRecord):
+    """只接收预算和可压缩段，业务状态始终留在 Coordinator 之外。"""
+
+    conversation_id: str = Field(min_length=1)
+    budget_report: ContextBudgetReport
+    incremental_segments: tuple[CompactionSegment, ...] = ()
+    workflow_summary_segments: tuple[CompactionSegment, ...] = ()
+
+    @model_validator(mode="after")
+    def require_unique_segment_ids(self) -> Self:
+        """拒绝重复处理同一消息段或 Workflow 摘要段。"""
+
+        segment_ids = [segment.segment_id for segment in self.incremental_segments + self.workflow_summary_segments]
+        if len(segment_ids) != len(set(segment_ids)):
+            raise ValueError("可压缩段 segment_id 不能重复")
+        return self
+
+
+class CompactionAttempt(_CompactionRecord):
+    """记录一个成功完成并重新计量的压缩动作。"""
+
+    action: CompactionAction
+    estimated_input_tokens_before: int = Field(ge=0, strict=True)
+    estimated_input_tokens_after: int = Field(ge=0, strict=True)
+    batch: CompactionBatch | None = None
+
+
+class ContextCompactionResult(_CompactionRecord):
+    """向调用方返回是否允许继续模型调用的安全结论。"""
+
+    status: CompactionStatus
+    initial_budget_report: ContextBudgetReport
+    final_budget_report: ContextBudgetReport
+    target_input_tokens: int = Field(ge=0, strict=True)
+    attempts: tuple[CompactionAttempt, ...] = ()
+    model_invocation_allowed: bool
+    pause_reason: Literal["hard_gate_compaction_failed"] | None = None
+
+    @model_validator(mode="after")
+    def require_safe_status(self) -> Self:
+        """保证暂停与放行标记不会形成相互矛盾的结果。"""
+
+        expected_target = _strict_target_input_tokens(self.initial_budget_report.usable_input_tokens)
+        if self.target_input_tokens != expected_target:
+            raise ValueError("target_input_tokens 必须严格对应 45% 回落目标")
+        if self.status == "paused":
+            if self.model_invocation_allowed:
+                raise ValueError("压缩暂停时不能允许模型调用")
+            if self.pause_reason is None:
+                raise ValueError("压缩暂停时必须提供安全原因码")
+            return self
+        if not self.model_invocation_allowed:
+            raise ValueError("非暂停结果必须允许模型调用")
+        if self.pause_reason is not None:
+            raise ValueError("只有压缩暂停结果可以提供 pause_reason")
+        final_tokens = self.final_budget_report.estimated_input_tokens
+        if self.status == "target_reached" and final_tokens > self.target_input_tokens:
+            raise ValueError("target_reached 必须严格低于 45% 回落目标")
+        if self.status in {"target_not_reached", "minimal_safe_context"} and final_tokens <= self.target_input_tokens:
+            raise ValueError(f"{self.status} 不能误报已经达到回落目标")
+        if self.status == "minimal_safe_context" and final_tokens >= self.final_budget_report.usable_input_tokens:
+            raise ValueError("minimal_safe_context 必须低于可用输入上限")
+        if self.status == "not_required":
+            if self.initial_budget_report.compaction_level != 0:
+                raise ValueError("not_required 只允许用于未触发压缩的上下文")
+            if final_tokens != self.initial_budget_report.estimated_input_tokens:
+                raise ValueError("not_required 不能改变输入 token")
+        return self
+
+
+class CompactionStageExecutor(Protocol):
+    """把编排动作适配到载荷外置、SummaryBuilder 或层级摘要。"""
+
+    async def execute(
+        self,
+        request: CompactionStageRequest,
+    ) -> CompactionStageResult: ...
 
 
 class SummaryEngine(Protocol):
@@ -343,7 +517,372 @@ class SummaryBuilder:
         )
 
 
+def _strict_target_input_tokens(usable_input_tokens: int) -> int:
+    """计算严格低于 45% 时允许的最大整数 token 数。"""
+
+    return (usable_input_tokens * 45 - 1) // 100
+
+
+def _build_compaction_batches(
+    *,
+    scope: CompactionBatchScope,
+    segments: tuple[CompactionSegment, ...],
+    limit_tokens: int,
+) -> tuple[CompactionBatch, ...]:
+    """按来源顺序贪心分块，保证每块不超过摘要节点实际预算。"""
+
+    if any(segment.estimated_tokens > limit_tokens for segment in segments):
+        raise CompactionValidationError("单段压缩输入超过摘要节点预算，必须先外置或拆分来源")
+    grouped: list[tuple[CompactionSegment, ...]] = []
+    current: list[CompactionSegment] = []
+    current_tokens = 0
+    for segment in segments:
+        if current and current_tokens + segment.estimated_tokens > limit_tokens:
+            grouped.append(tuple(current))
+            current = []
+            current_tokens = 0
+        current.append(segment)
+        current_tokens += segment.estimated_tokens
+    if current:
+        grouped.append(tuple(current))
+    batch_count = len(grouped)
+    return tuple(
+        CompactionBatch(
+            scope=scope,
+            batch_index=index,
+            batch_count=batch_count,
+            segments=batch_segments,
+        )
+        for index, batch_segments in enumerate(grouped, start=1)
+    )
+
+
+class ContextCompactionCoordinator:
+    """统一执行四阈值、分块、层级压缩和 92% 硬闸门。"""
+
+    def __init__(
+        self,
+        *,
+        executor: CompactionStageExecutor,
+        summary_model_name: str,
+        model_profiles: Mapping[str, ModelContextProfile],
+        token_meter: TokenMeter | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        normalized_model_name = summary_model_name.strip()
+        if not normalized_model_name:
+            raise ValueError("summary_model_name 不能为空")
+        frozen_profiles: dict[str, ModelContextProfile] = {}
+        for profile_name, profile in model_profiles.items():
+            frozen_profile = ModelContextProfile.model_validate(profile.model_dump(mode="python"))
+            if profile_name != frozen_profile.model_name:
+                raise ValueError("摘要模型档案键必须与 model_name 一致")
+            frozen_profiles[profile_name] = frozen_profile
+        self._executor = executor
+        self._summary_model_name = normalized_model_name
+        self._model_profiles = MappingProxyType(frozen_profiles)
+        self._token_meter = token_meter or TokenMeter()
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def coordinate(
+        self,
+        request: ContextCompactionRequest,
+    ) -> ContextCompactionResult:
+        """冻结请求并按初始压缩等级累进执行，达到目标后立即停止。"""
+
+        frozen = ContextCompactionRequest.model_validate(request.model_dump(mode="python"))
+        initial = self._token_meter.remeasure(
+            estimated_input_tokens=frozen.budget_report.estimated_input_tokens,
+            baseline=frozen.budget_report,
+        )
+        if initial.compaction_level != frozen.budget_report.compaction_level:
+            raise CompactionValidationError("budget_report.compaction_level 与统一阈值计算不一致")
+        target_input_tokens = _strict_target_input_tokens(initial.usable_input_tokens)
+        if initial.compaction_level == 0:
+            return self._result(
+                status="not_required",
+                initial=initial,
+                current_tokens=initial.estimated_input_tokens,
+                target_input_tokens=target_input_tokens,
+                attempts=[],
+                model_invocation_allowed=True,
+            )
+
+        current_tokens = initial.estimated_input_tokens
+        attempts: list[CompactionAttempt] = []
+        try:
+            summary_chunk_limit_tokens = self._summary_chunk_limit_tokens() if initial.compaction_level >= 2 else None
+            incremental_batches = (
+                _build_compaction_batches(
+                    scope="messages",
+                    segments=frozen.incremental_segments,
+                    limit_tokens=summary_chunk_limit_tokens,
+                )
+                if summary_chunk_limit_tokens is not None
+                else ()
+            )
+            hierarchical_batches = (
+                _build_compaction_batches(
+                    scope="workflow_summaries",
+                    segments=frozen.workflow_summary_segments,
+                    limit_tokens=summary_chunk_limit_tokens,
+                )
+                if initial.compaction_level >= 3 and summary_chunk_limit_tokens is not None
+                else ()
+            )
+            current_tokens = await self._execute_action(
+                frozen,
+                action="externalize_payloads",
+                batch=None,
+                current_tokens=current_tokens,
+                target_input_tokens=target_input_tokens,
+                attempts=attempts,
+            )
+            if current_tokens <= target_input_tokens:
+                return self._target_result(
+                    initial,
+                    current_tokens,
+                    target_input_tokens,
+                    attempts,
+                )
+
+            if initial.compaction_level >= 2:
+                for batch in incremental_batches:
+                    current_tokens = await self._execute_action(
+                        frozen,
+                        action="incremental_summary",
+                        batch=batch,
+                        current_tokens=current_tokens,
+                        target_input_tokens=target_input_tokens,
+                        attempts=attempts,
+                    )
+                    if current_tokens <= target_input_tokens:
+                        return self._target_result(
+                            initial,
+                            current_tokens,
+                            target_input_tokens,
+                            attempts,
+                        )
+
+            if initial.compaction_level >= 3:
+                for batch in hierarchical_batches:
+                    current_tokens = await self._execute_action(
+                        frozen,
+                        action="hierarchical_summary",
+                        batch=batch,
+                        current_tokens=current_tokens,
+                        target_input_tokens=target_input_tokens,
+                        attempts=attempts,
+                    )
+                    if current_tokens <= target_input_tokens:
+                        return self._target_result(
+                            initial,
+                            current_tokens,
+                            target_input_tokens,
+                            attempts,
+                        )
+
+            if initial.compaction_level >= 4:
+                current_tokens = await self._execute_action(
+                    frozen,
+                    action="hard_gate_summary",
+                    batch=None,
+                    current_tokens=current_tokens,
+                    target_input_tokens=target_input_tokens,
+                    attempts=attempts,
+                )
+                if current_tokens <= target_input_tokens:
+                    return self._target_result(
+                        initial,
+                        current_tokens,
+                        target_input_tokens,
+                        attempts,
+                    )
+        except Exception:
+            if initial.compaction_level < 4:
+                raise
+            return await self._minimal_or_paused(
+                frozen,
+                initial=initial,
+                current_tokens=current_tokens,
+                target_input_tokens=target_input_tokens,
+                attempts=attempts,
+            )
+
+        if initial.compaction_level >= 4:
+            return await self._minimal_or_paused(
+                frozen,
+                initial=initial,
+                current_tokens=current_tokens,
+                target_input_tokens=target_input_tokens,
+                attempts=attempts,
+            )
+        return self._result(
+            status="target_not_reached",
+            initial=initial,
+            current_tokens=current_tokens,
+            target_input_tokens=target_input_tokens,
+            attempts=attempts,
+            model_invocation_allowed=True,
+        )
+
+    def _summary_chunk_limit_tokens(self) -> int:
+        """从摘要模型档案和 summary 节点策略计算不可伪造的分块上限。"""
+
+        resolution = resolve_model_context_profile(
+            self._summary_model_name,
+            self._model_profiles,
+            now=self._clock(),
+        )
+        summary_budget = self._token_meter.measure(
+            estimated_input_tokens=0,
+            profile=resolution.profile,
+            policy=get_context_budget_policy("summary"),
+        )
+        return summary_budget.usable_input_tokens
+
+    async def _execute_action(
+        self,
+        request: ContextCompactionRequest,
+        *,
+        action: CompactionAction,
+        batch: CompactionBatch | None,
+        current_tokens: int,
+        target_input_tokens: int,
+        attempts: list[CompactionAttempt],
+    ) -> int:
+        raw_result = await self._executor.execute(
+            CompactionStageRequest(
+                conversation_id=request.conversation_id,
+                action=action,
+                target_input_tokens=target_input_tokens,
+                current_estimated_input_tokens=current_tokens,
+                batch=batch,
+            )
+        )
+        try:
+            result = CompactionStageResult.model_validate(raw_result)
+        except (TypeError, ValueError, ValidationError):
+            raise CompactionExecutionError("压缩 Stage 必须返回合法的重新计量结果") from None
+        if result.estimated_input_tokens > current_tokens:
+            raise CompactionExecutionError("压缩 Stage 不得增加上下文 token")
+        attempts.append(
+            CompactionAttempt(
+                action=action,
+                estimated_input_tokens_before=current_tokens,
+                estimated_input_tokens_after=result.estimated_input_tokens,
+                batch=batch,
+            )
+        )
+        return result.estimated_input_tokens
+
+    async def _minimal_or_paused(
+        self,
+        request: ContextCompactionRequest,
+        *,
+        initial: ContextBudgetReport,
+        current_tokens: int,
+        target_input_tokens: int,
+        attempts: list[CompactionAttempt],
+    ) -> ContextCompactionResult:
+        before_minimal = current_tokens
+        try:
+            current_tokens = await self._execute_action(
+                request,
+                action="minimal_safe_context",
+                batch=None,
+                current_tokens=current_tokens,
+                target_input_tokens=target_input_tokens,
+                attempts=attempts,
+            )
+            if current_tokens >= before_minimal:
+                if attempts and attempts[-1].action == "minimal_safe_context":
+                    attempts.pop()
+                raise CompactionExecutionError("最小安全上下文必须严格降低上下文 token")
+            if current_tokens <= target_input_tokens:
+                return self._target_result(
+                    initial,
+                    current_tokens,
+                    target_input_tokens,
+                    attempts,
+                )
+            if current_tokens < initial.usable_input_tokens:
+                return self._result(
+                    status="minimal_safe_context",
+                    initial=initial,
+                    current_tokens=current_tokens,
+                    target_input_tokens=target_input_tokens,
+                    attempts=attempts,
+                    model_invocation_allowed=True,
+                )
+        except Exception:
+            current_tokens = before_minimal
+        return self._result(
+            status="paused",
+            initial=initial,
+            current_tokens=current_tokens,
+            target_input_tokens=target_input_tokens,
+            attempts=attempts,
+            model_invocation_allowed=False,
+            pause_reason="hard_gate_compaction_failed",
+        )
+
+    def _target_result(
+        self,
+        initial: ContextBudgetReport,
+        current_tokens: int,
+        target_input_tokens: int,
+        attempts: list[CompactionAttempt],
+    ) -> ContextCompactionResult:
+        return self._result(
+            status="target_reached",
+            initial=initial,
+            current_tokens=current_tokens,
+            target_input_tokens=target_input_tokens,
+            attempts=attempts,
+            model_invocation_allowed=True,
+        )
+
+    def _result(
+        self,
+        *,
+        status: CompactionStatus,
+        initial: ContextBudgetReport,
+        current_tokens: int,
+        target_input_tokens: int,
+        attempts: list[CompactionAttempt],
+        model_invocation_allowed: bool,
+        pause_reason: Literal["hard_gate_compaction_failed"] | None = None,
+    ) -> ContextCompactionResult:
+        return ContextCompactionResult(
+            status=status,
+            initial_budget_report=initial,
+            final_budget_report=self._token_meter.remeasure(
+                estimated_input_tokens=current_tokens,
+                baseline=initial,
+            ),
+            target_input_tokens=target_input_tokens,
+            attempts=tuple(attempts),
+            model_invocation_allowed=model_invocation_allowed,
+            pause_reason=pause_reason,
+        )
+
+
 __all__ = [
+    "CompactionAction",
+    "CompactionAttempt",
+    "CompactionBatch",
+    "CompactionBatchScope",
+    "CompactionExecutionError",
+    "CompactionSegment",
+    "CompactionStageExecutor",
+    "CompactionStageRequest",
+    "CompactionStageResult",
+    "CompactionStatus",
+    "CompactionValidationError",
+    "ContextCompactionCoordinator",
+    "ContextCompactionRequest",
+    "ContextCompactionResult",
     "DeerFlowSummaryEngine",
     "PIXELFLOW_STRUCTURED_SUMMARY_PROMPT",
     "SummaryBuildRequest",
