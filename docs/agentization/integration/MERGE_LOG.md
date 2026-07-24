@@ -62,3 +62,35 @@
 - remote guard：最终门禁和独立终审后重新 fetch，四条远端基线与冻结值完全一致
 - rollback：如需撤回，基于本记录定位 Agent 更新范围后使用中文说明的 `git revert` 创建回滚提交；同时把四项 Agent Runtime 配置恢复为默认 `off + [] + 0 + false`。禁止改写共享分支历史
 - synchronized docs：`docs/pixelflow-agent-skill-flow-latest-design.md`、M00 状态、BOARD、MERGE_LOG 和本测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
+
+### 0002 / 2026-07-24 / M00 门禁基线修复
+
+- module：`M00`
+- source branch / SHA：`origin/codex/agent-0.8.4-m00-gate-baseline-repair@1aba4ae9e4670930fd456519d8ecc7d4cef39880`
+- integration target before：`origin/feature/agent_0.8.4_boguan@5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
+- integration target after：本记录随最终候选原子更新 Agent；推送后以 `origin/feature/agent_0.8.4_boguan` 与候选远端分支复读的相同最终 HEAD 为准
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交已是冻结 Agent 祖先，没有产生额外 dev 合并
+- candidate：`codex/integrate-m00-gate-repair-20260724-164428`
+- fixed sequence：
+  1. 从冻结 Agent `5826c741180b58c9e8d3cdbbcb092d38e5f04b0d` 创建唯一候选并持有全局单槽锁
+  2. 合入修复源并生成中文合并提交 `a82df1c7b1410a75623db5800f6ffaa0035e05ba`
+  3. 首轮 Pester `45/45`、M13 Final `8/8`
+  4. 独立审核提出 2 个 Important 和 1 个 Minor；TDD 红灯 `44 passed, 3 failed`
+  5. 审核加固提交 `4514ffe` 后 Pester `47/47`、M13 Final `8/8`
+  6. 更新 D-009、M00 状态、BOARD、MERGE_LOG 和集成报告，复核中文规范与远端冻结引用后原子推送
+- checkpoint：M00 后续维护特例，`release_id/checkpoint_slice/checkpoint_commit/last_integrated_commit` 不适用；触发条件为开发者明确授权一次性门禁基线修复单槽集成
+- single slot：唯一候选、唯一集成人、唯一全局锁；最终状态 `merged`
+- file ownership：只写候选分支；没有写 M03 模块 worktree，没有删除或纳入根工作区既有 `scripts/__pycache__/`
+- feature flag：保持默认 `off + [] + 0 + false`，没有接管现有业务
+- production：未发布；未修改生产运行模式、intent 范围或 Feature Flag；没有发布批准记录
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：`docs/agentization/test-reports/2026-07-24-agent-gate-baseline-repair-integration.md`；项目 Python 3.12.13；最终 Pester `47 passed, 0 failed`；M13 Final `8/8`
+- reviewer：`/root/m00_gate_repair_integration_review`；终审无 Critical、Important 或 Minor，`Ready to merge: Yes`
+- conflicts：修复源合入候选无内容冲突；独立审核发现普通模块门禁漏测后，在候选内补充 fail-closed 和前端全量测试合同，没有改写修复源分支
+- migration/configuration：无 migration、无配置键变化
+- Chinese engineering policy：中文合并提交、审核修复提交、状态、决策、合并日志和测试报告均由本地中文规范门禁检查；人工代码注释和配置未新增或修改
+- smoke：执行 M13 非付费全量本地门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未执行真实付费冒烟，未修改生产配置，未把 Agent 反向合入 dev，未修改 M03 状态，未自动执行 M03.4 或 M03 的 9.10A
+- remote guard：最终门禁和独立终审后重新 fetch；Agent、dev 和修复源三个远端引用必须与冻结值完全一致，否则中止推送
+- rollback：如需撤回，基于本记录定位本次 Agent 更新范围，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：D-009、M00 状态、BOARD、MERGE_LOG 和本次集成报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API

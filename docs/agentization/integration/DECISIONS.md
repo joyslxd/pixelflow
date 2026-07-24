@@ -77,3 +77,12 @@
 - 测试边界：`M00-I.1` 中的“全量”只表示 M00 范围全量，不运行 M01–M13 模块门禁。M02 的 checkpointer/runtime cleanup 等定向集合在 M02 执行，后端仓库全量只在 M13 执行，二者都不能反向成为 M00 前置。
 - 后续触发：状态为 `automation_local_ready` 时，普通模块到达 `ready_for_phase_integration` 或 `ready_for_integration` 后，由开发者使用执行手册第 9 节话术手动启动单槽集成；每天 02:00 漂移检查改为每次模块开工和集成前手动执行。脚本仍必须 fail-closed，失败不得更新 Agent。
 - 未来启用：以后实际部署并验收远端 CI、保护分支、Webhook、单槽、失败路径和定时调度时，再单独执行运维启用任务并把状态提升为 `automation_active`；该任务不反向改变已经完成的 M00 代码验收。
+
+## D-009：M00 门禁与后端基线修复使用一次性单槽集成
+
+- 日期：2026-07-24
+- 状态：已确认
+- 决策：开发者明确授权把 `codex/agent-0.8.4-m00-gate-baseline-repair@1aba4ae9e4670930fd456519d8ecc7d4cef39880` 通过唯一临时候选合入 `feature/agent_0.8.4_boguan`。候选必须从冻结的最新 Agent 创建，确认最新 dev 已是其祖先，使用项目虚拟环境 Python 3.12 执行 M13 全量非付费门禁，并在独立审核、中文规范和远端防漂移检查全部绿色后原子更新远端 Agent 与候选分支。
+- 原因：M03.4 暴露的失败来自共享 Agent 基线中的门禁范围、旧鉴权测试和已退役 Docker/provisioner/Sandbox 合同，不属于 M03 业务实现。产品已确认不保留缺失的旧 Docker/provisioner/Sandbox 能力；继续在 M03 分支绕过或复制修复会造成门禁双轨和模块越界。
+- 审核加固：M01 在 M01.5 Event Outbox 权威测试清单冻结前保持 fail-closed；M07、M12 增加前端全量测试；M08–M11 在后端权威清单冻结前保持 fail-closed；Pester 精确锁定项目 Python 3.12 版本检查。不得猜测尚未由模块 owner 冻结的测试文件名。
+- 边界：这是开发者明确批准的 M00 维护特例，不改变 D-004/D-008 的普通模块 9.10A 触发流程，不授权发布、真实付费冒烟、生产配置变更或 Agent→dev 反向合并，也不得据此提前修改 M03 状态。修复进入 Agent 后，M03.4 仍须在原模块分支恢复并执行真实 M03 Final 门禁；绿色后才可写 `ready_for_integration`，再由开发者手动启动 M03 的 9.10A 单槽集成。

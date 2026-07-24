@@ -4,7 +4,7 @@
 >
 > 原始设计基线：`02493711e8c9b74ec5f8e54cfadac3881297754c`；M00-A/M00-B 共同 Agent 基线：`8e626ae232d984f14fa9954b672b4e025894d426`。M00-I.1 不固定使用本页旧快照，必须在执行时重新 fetch 四条远端引用。
 >
-> 当前结论：四阶段上线方案已确认，当前目标为 R1。M00-I.1 已从最新四条远端引用创建全新候选，按 D-008 完成 M00 范围本地门禁和独立终审，自动化状态为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。后续模块之间并行、模块内部切片严格串行；阶段/最终单槽集成和漂移检查均由开发者按执行手册人工触发。当前无真实外部用户，各阶段获批后覆盖全部新对话100%，不使用随机百分比或用户白名单；生产运行模式/intent范围和真实付费冒烟仍需人工批准。中文提交、中文代码注释和配置逐项中文说明是所有切片的硬性门禁。
+> 当前结论：四阶段上线方案已确认，当前目标为 R1。M00-I.1 已按 D-008 完成 M00 范围本地门禁和独立终审；开发者随后明确批准一次性单槽集成，把 `codex/agent-0.8.4-m00-gate-baseline-repair@1aba4ae9e4670930fd456519d8ecc7d4cef39880` 纳入长期 Agent，并通过独立审核补强普通模块 fail-closed 边界。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。本次不修改 M03 状态，下一步是在原 M03 模块分支恢复 M03.4 并执行真实 Final 门禁。后续模块之间并行、模块内部切片严格串行；阶段/最终单槽集成和漂移检查均由开发者按执行手册人工触发。当前无真实外部用户，各阶段获批后覆盖全部新对话100%，不使用随机百分比或用户白名单；生产运行模式/intent范围和真实付费冒烟仍需人工批准。中文提交、中文代码注释和配置逐项中文说明是所有切片的硬性门禁。
 
 ## 上线里程碑
 
@@ -17,7 +17,7 @@
 
 | 模块 | 名称 | Owner | 当前状态 | 已完成切片 | 阻塞/前置 | 合并 SHA |
 | --- | --- | --- | --- | ---: | --- | --- |
-| M00 | 合同、分支自动化、中文工程门禁、feature flag、测试入口 | A+B | `merged` | 5/5 | 无；`automation_local_ready` | `9b7a292`（验收实现） |
+| M00 | 合同、分支自动化、中文工程门禁、feature flag、测试入口 | A+B | `merged` | 5/5 | 无；门禁基线已修复；`automation_local_ready` | `9b7a292`（验收实现）；`1aba4ae` + `4514ffe`（基线修复与审核加固） |
 | M01 | 持久化、CAS、Inbox/Outbox | A | `not_started` | 0/5 | M00 | — |
 | M02 | LangGraph 会话/Workflow 内核 | A | `not_started` | 0/4 | M00、M01 | — |
 | M03 | 模型档案、预算、ContextEnvelope | A | `not_started` | 0/4 | M00 | — |
@@ -34,11 +34,11 @@
 
 ## 当前文件所有权
 
-M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `codex/integrate-m00-20260724-0043` 完成，没有复用上一条 blocked 候选。根工作区的 `scripts/__pycache__/` 是既有未跟踪用户文件，不属于本项目任务，不能删除或纳入提交。
+M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `codex/integrate-m00-20260724-0043` 完成，没有复用上一条 blocked 候选。门禁基线修复使用独立候选 `codex/integrate-m00-gate-repair-20260724-164428` 和全局单槽锁，推送确认后释放；没有写入 M03 模块 worktree。根工作区的 `scripts/__pycache__/` 是既有未跟踪用户文件，不属于本项目任务，不能删除或纳入提交。
 
 ## 下一步
 
-1. 按 R1 顺序并行启动 A 线 M01/M03、B 线 M07；依赖满足后启动 M04 和 M12。每个 Codex 任务只做一个切片；模块到达 `ready_for_phase_integration` 或 `ready_for_integration` 后，由开发者使用执行手册 9.10A 话术手动启动单槽集成。
+1. 门禁基线修复进入长期 Agent 后，恢复 `codex/agent-0.8.4-m03-context-runtime` 的 M03.4，只执行真实 M03 Final 门禁与该切片收尾；绿色后写 `ready_for_integration` 并 push。随后由开发者使用执行手册 9.10A 话术手动启动 M03 单槽集成，不得跳过 M03.4 直接集成当前模块分支。
 2. 当前自动化状态为 `automation_local_ready`。模块开工、阶段/最终集成和 dev→agent 漂移检查均人工触发仓库脚本；只有未来实际部署并验收远端 CI 后才能提升为 `automation_active`。
 3. R1 所需增量通过人工触发的单槽候选进入 Agent 且最新 dev→agent 绿色后，开发者手动启动 M13.1。M13.1 切片通过先写 `ready_for_phase_integration:R1`，对应候选绿色进入 Agent 后才写 `awaiting_release_approval:R1`；唯一发布负责人再使用运行手册 9.17 明确批准后，受控发布流程才允许把生产从 `off+0%` 调整到 `assist+100%`。
 
