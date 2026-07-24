@@ -141,4 +141,28 @@
 - remote guard：权威门禁后重新 fetch；Agent、dev 和 M07 三条远端引用与冻结值一致后才执行原子更新，集成记录补正前再次复核 Agent 远端未变化
 - rollback：如需撤回，基于本记录定位 M07 集成提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M07 状态、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有设计和 content-app API 变化
-- 2026-07-24 19:40:56 +08:00：M01 最终模块 候选通过，模块提交 `337a19124000892d319250497c56645821197ebb` 已纳入最新 Agent/dev 基线。
+### 0005 / 2026-07-24 / M01 最终模块集成
+
+- module：`M01`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m01-runtime-store@337a19124000892d319250497c56645821197ebb`
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@ac25357ffbc956a0b76364837846967a5dc576e7`；`Integrate-AgentModule.ps1` 首次原子推进至 `c756a1bc99ac910bd75b7b0af734f41c3268703a`，完整交接记录随同一候选再次复核并快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m01-runtime-store@6035fee25be3dfd534abb72912759b12cc2ca49f`
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：`codex/integrate-m01-20260724-114004-b292f538`；按“最新 Agent + 最新 dev + M01 增量”创建的全新候选，没有复用首次阻塞候选 `codex/integrate-m01-20260724-111148-574ee408`
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M01.5`，`checkpoint_commit=337a19124000892d319250497c56645821197ebb`，此前 `last_integrated_commit=—`，最终写为该 checkpoint
+- trigger / single slot：M01 权威清单修复后远端状态恢复为 `ready_for_integration` 且提交已 push；开发者明确授权同一任务继续执行 9.10A，集成前后均确认全局单槽锁可用；最终状态 `merged`，`checkpoint_status=integrated`
+- blocked history：首次候选因 canonical gate 尚未固化 M01.5 权威清单而 fail-closed，Agent 保持不变并安全写回 `integration_blocked`；修复提交 `42df90a0ff4b9458c2598373276c4d56207e57fb` 和状态/报告提交 `337a19124000892d319250497c56645821197ebb` 通过后才重新开放入口
+- file ownership：M01 五个切片和门禁修复均已释放写锁；候选只纳入 M01 业务持久化、门禁清单、测试和交接记录，没有进入 M02/M04 或其他模块
+- feature flag：保持默认 `off + [] + 0 + false`，没有接管现有业务
+- production：未发布；未修改生产运行模式、intent 范围、Feature Flag 或生产配置，没有发布批准记录
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：M01 Final `Passed=True`、`CommandCount=4`；项目 Python `3.12.13`；14 个精确文件 `222 passed, 1 warning`；限定 Ruff `All checks passed`；Windows PowerShell 5.1 + Pester 3.4 自动化 `35 passed, 0 failed`
+- reviewer：`/root/m01_5_independent_review` 对门禁修复复审，Critical 0、Important 0、Minor 0，`Ready to merge: Yes`
+- conflicts：M01 模块分支先以中文 merge commit 纳入冻结 Agent 门禁基线，候选合入 M01 checkpoint 时无内容冲突；没有人工挑选或覆盖其他模块文件
+- migration/configuration：M01 的 additive migration `20260724_01_agent_runtime_tables.py` 与 revision migration `20260724_02_conversation_revision.py` 随模块进入 Agent；本次门禁修复没有新增 migration 或配置键
+- Chinese engineering policy：M01 五个切片、门禁修复、状态、测试报告、候选合并说明、BOARD 和 MERGE_LOG 均通过本地中文规范门禁；新增 Pester 合同兼容 Pester 3.4，没有使用数组 `Should Contain`
+- smoke：只执行 M01 非付费本地权威门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未运行 M02/M04 或其他模块门禁，未自动执行下一切片，未修改 dev，未发布生产，未把自动化状态提升为 `automation_active`
+- remote guard：模块修复 push 前和最终候选原子更新前均重新读取 Agent、dev、M01 三条远端引用；三者与冻结值一致后才推进
+- rollback：如需撤回，基于本记录定位 M01 候选中的业务、门禁和状态提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M01 状态、M01 门禁修复报告、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有改变设计合同或 content-app API
