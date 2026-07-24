@@ -18,6 +18,7 @@
 - M03.4 门禁阻塞确认时间：`2026-07-24 09:17:51 +08:00`
 - M03.4 门禁恢复开始时间：`2026-07-24 17:46:57 +08:00`
 - M03.4 门禁恢复完成时间：`2026-07-24 18:03:45 +08:00`
+- M03 单槽集成完成时间：`2026-07-24 18:16:17 +08:00`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m03-context-runtime`
 - 锁定文件：无；M03.4 写锁已释放
 
@@ -82,8 +83,10 @@
 - 历史门禁阻塞（已解除）：旧版 `Invoke-AgentModuleGate.ps1` 曾把 M03 Final 扩大到仓库全量 pytest/Ruff，得到 `4292 passed, 108 failed, 37 errors, 42 skipped, 12 warnings`，红灯集中在 M03 范围外的既有 auth、sandbox/provisioner、Skills、上传、Harness 等测试。基线独立复跑也得到相同代表性失败，因此当时按 fail-closed 写入 `integration_blocked`，没有启动集成。
 - 依赖与恢复证据：`origin/feature/dev_0.8.4_boguan` 的 `fb7450775a227d891372c19eae1b308045c51e68` 已进入当前 Agent `2648723185655e2e59faf916147cbb9b0359b363`；门禁基线修复提交也已成为该 Agent 的祖先。恢复时远端 M03 为 `0f12e235bb7fb9ab8ff4088f1475ed8723848cad`，本地模块分支与其一致，唯一 worktree 和唯一写入者检查通过。模块使用项目虚拟环境 Python `3.12.13`，没有恢复已确认无需保留的 Docker/Sandbox 文件。
 - 最终模块门禁：使用当前 Agent `2648723185655e2e59faf916147cbb9b0359b363` 中修复后的权威脚本执行 `Invoke-AgentModuleGate.ps1 -ModuleId M03 -GateType Final -ChinesePolicyBaseRef 5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`，结果 `Passed=True`、`CommandCount=4`；覆盖 `git diff --check`、项目 Python 3.12、M03 的 120 项 pytest 和对应 Ruff 范围。
-- 最终结论：M03.4 是模块最后一片且不是阶段中间检查点；完整模块门禁已绿色，状态写为 `ready_for_integration`。未修改 `status/BOARD.md`、两个长期 feature 分支或真实付费 API，也未自动启动单槽集成。
-- 下一步第一动作：开发者复制执行手册 9.10A 话术，指定 M03，手动启动唯一单槽集成人；不得重新执行 M03.4，也不得自动进入 M04。
+- 最终结论：M03.4 是模块最后一片且不是阶段中间检查点；开发者已按执行手册 9.10A 启动唯一单槽集成，候选通过 M03 Final 权威门禁后已进入 Agent。模块状态为 `merged`，检查点状态为 `integrated`。
+- 单槽集成证据：候选分支为 `codex/integrate-m03-20260724-101526-afe4c4f6`；冻结 Agent 为 `2648723185655e2e59faf916147cbb9b0359b363`，冻结 dev 为 `fb7450775a227d891372c19eae1b308045c51e68`，M03 checkpoint 为 `e43b5e96ef177f7da856c8c86de95212cd0826cb`。脚本原子推进结果为 Agent `3eb37c886c5907c55db753804368a38b7fb1811c`、M03 状态提交 `743f491dfd0024fc08f840590c113fefd0ab9c03`。
+- 集成验证：M03 Final 结果 `Passed=True`、`CommandCount=4`；使用项目虚拟环境 Python `3.12.13`，pytest `120 passed, 1 warning`，Ruff 与 `git diff --check` 均通过。本次未运行 M04 或其他模块门禁，未调用真实付费 API，未修改生产配置，自动化状态仍为 `automation_local_ready`。
+- 下一步第一动作：M03 已完成最终集成，不得重复执行 M03.4 或 9.10A。M04 依赖 M01 与 M03；仅在 M01 也进入 Agent 后，由开发者按新切片话术手动启动 M04.1。
 
 ## 恢复提示
 
