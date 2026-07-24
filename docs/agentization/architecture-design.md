@@ -159,7 +159,7 @@ flowchart LR
 
 - Supervisor thread 保存会话级判断和任务索引。
 - 每个 workflow 使用独立 thread 保存该业务任务的执行位置。
-- SQL 保存可查询的 workflow、turn、operation、summary 和 event。
+- SQL 保存可查询的 workflow、turn、operation、summary、event，以及只用于协调的 conversation compaction lease。
 - Event Outbox 将多个 workflow 的事件汇聚成一条 conversation SSE。
 
 建议命名：
@@ -253,6 +253,8 @@ utilization = estimated_input_tokens / usable_input
 成功压缩目标是回落到 45% 以下。原始 SQL 消息、权威 Plan 和 artifact 不删除。
 
 压缩流程：发送 started 事件 → 取得 conversation 锁 → 生成结构化摘要 → 校验目标/否定约束/合同/ID/未决问题 → 原子保存 → 发送 completed → 按顺序处理排队输入。
+
+SQL 为每个进入 Turn 路径的 conversation 建立永久协调行，状态为 `idle`、`active` 或 `retry_required`；普通 Turn 与压缩专用入口都先锁该行，再用短事务租约和随机 fencing token 协调，压缩期间不占用长事务或数据库连接。成功收尾时原子切回 `idle`、清空租约字段并只把最早 Turn 从 `queued` 迁移为 `processing`；异常或 `paused` 时切为 `retry_required` 恢复标记，通用 Turn 领取仍被阻塞，新 worker 可立即用新 token 接管，陈旧 worker 不能改写新锁或消费队列。
 
 当前仓库的 `DeerFlowSummarizationMiddleware` 可复用 token 计数、摘要和 Skill 内容保护思路，但它没有完整覆盖持久化摘要、输入队列、多进程锁和前端事件。因此它作为最后防溢出保护，主流程使用 PixelFlow `ContextCompactionCoordinator`。
 

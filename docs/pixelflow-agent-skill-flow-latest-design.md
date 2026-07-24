@@ -966,6 +966,8 @@ corepack pnpm build
 | R3 | 第 13 个工作日 | 图片/图片编辑、PPT、视频分析接入同一 Supervisor 和 Context Runtime |
 | R4 | 第 16–18 个工作日 | 五条主流程全量 E2E、Shadow、回滚和新对话全面接管验收 |
 
+R1 的 conversation 压缩锁由永久数据库协调行和短事务租约实现，协调状态为 `idle`、`active` 或 `retry_required`，使用随机 fencing token 阻止过期 worker 收尾。普通 Turn 与压缩专用入口都先锁同一协调行；压缩执行期间输入由后端直接持久化为 `queued`，成功后原子切回 `idle` 并只把最早输入迁移为 `processing`，失败或暂停则保留 `retry_required` 恢复标记和全部排队输入，继续阻止超窗处理，后续 worker 从原队列接管，前端不重新发送。
+
 开发固定采用“两人、多 Codex、模块之间并行、模块内部切片串行”：每个 Codex 任务只执行一个 1–3 小时切片，完成 TDD、测试、审核、状态记录、commit 和 push 后停止；下一切片必须由开发者手动启动。当前自动化状态为 `automation_local_ready`：合法阶段检查点、模块最终提交和 dev→agent 漂移检查由开发者按执行手册人工触发 M00 交付的仓库单槽脚本；只有未来实际部署并验收远端 CI 后，才能改为无人值守触发并标记 `automation_active`。生产运行模式、`enabled_intents`、Feature Flag、真实付费冒烟和最终 Agent→dev 收口仍需人工明确批准。当前无真实外部用户，各阶段获批后均覆盖全部新对话100%：R1为`assist`，R2仅`video`进入`primary`，R3/R4四类intent进入`primary`；不实现随机百分比灰度或用户白名单。
 
 完整事实源位于：

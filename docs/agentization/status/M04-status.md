@@ -5,13 +5,14 @@
 - base Agent SHA：`d20762935ad8bd994a24e332f4237da7a1aaf591`
 - branch：`codex/agent-0.8.4-m04-context-compaction`
 - 依赖：M01、M03
-- 当前切片：`M04.4`（未开始）
+- 当前切片：`M04.5`（未开始）
 - 当前唯一写入者：`尚未领取`
-- 当前锁定文件：无；M04.3 写锁已释放
-- 本切片开始时间：`2026-07-24T23:45:00+08:00`
+- 当前锁定文件：无；M04.4 写锁已释放
+- 本切片开始时间：`2026-07-25T00:20:02+08:00`
 - M04.1 完成时间：`2026-07-24T22:21:05+08:00`
 - M04.2 完成时间：`2026-07-24T23:20:58+08:00`
 - M04.3 完成时间：`2026-07-25T00:00:42+08:00`
+- M04.4 完成时间：`2026-07-25T01:07:32+08:00`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m04-context-compaction`
 
 ## 切片
@@ -19,7 +20,7 @@
 - [x] M04.1 StructuredSummary/版本/证据引用（2h）
 - [x] M04.2 增量 SummaryBuilder（3h）
 - [x] M04.3 四阈值 Coordinator（2.5h）
-- [ ] M04.4 压缩锁与输入队列（2h）
+- [x] M04.4 压缩锁与输入队列（2h）
 - [ ] M04.5 事件与 SummaryVerifier（2.5h）
 
 ## M04.1 交付记录
@@ -72,6 +73,23 @@
 - commit/push：本状态文件所在 M04.3 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
 - 阶段状态：M04.3 不是阶段检查点或模块最后一片，因此保持 `in_progress`，不运行阶段/M04 Final 门禁，不更新 `status/BOARD.md`，不写 ready 状态，也不触发 9.10A。
 - 下一切片第一动作：开发者手动启动 M04.4 后，恢复同一模块分支/worktree并领取唯一 writer；先用并发失败测试固定 conversation 压缩锁、turn `queued/processing` 顺序迁移和失败恢复，确保输入不丢失、不由前端重发。
+
+## M04.4 交付记录
+
+- 产物：新增 `ConversationCompactionLease`、`CompactionQueueRepository`、Memory/SQL 双实现和 `ConversationCompactionRuntime`；新增 additive migration，将 conversation 压缩协调行纳入 Agent Runtime 表集合。
+- 协调状态：SQL 为每个进入 Turn 路径的 conversation 建立永久协调行，严格使用 `idle | active | retry_required`；状态与租约字段组合由数据库 Check Constraint 和应用层共同 fail-closed。
+- 稳定互斥：普通 `create_turn`、`enqueue_turn`、`claim_next_turn` 与压缩专用入口都先建立并锁定同一协调行；首次建行会核对 additive migration 前已有 Turn 的 owner，空 claim 不得抢占 conversation。
+- 排队语义：取得租约时拒绝已有 `processing`，并把既有 `accepted` 原子迁移为 `queued`；`active/retry_required` 期间普通与专用输入都只能持久化为 `queued`，同一 client input 幂等返回原 Turn。
+- 成功与恢复：成功收尾在同一短事务中校验 fencing token、切回 `idle`、清空租约字段，并只把最早待执行 Turn 迁移为 `processing`；异常或 `paused` 切为 `retry_required`，保留全部队列，后续 worker 用新随机 token 接管，陈旧 worker 不能收尾。
+- 多进程边界：压缩调用期间不持有数据库事务或连接；两个独立 SQLite Engine 的竞态测试覆盖 acquire/enqueue 与 acquire/普通 claim，任一交错都不能形成 active 与 accepted/processing 同时成立。
+- TDD 证据：首轮模块不存在时收集失败；最小实现为 `18 passed`；migration 冻结首轮 `2 failed, 82 passed`；通用领取绕过用例先为 `6 failed, 14 passed`；首轮独立审核对应回归先为 `2 failed, 20 deselected`；additive migration owner 漏洞用例先为 `1 failed, 25 deselected`，修复后全部转绿。
+- 最后测试：全部 `test_agent_runtime_*.py` 为 `307 passed, 1 warning`；M04.4 与 Turn Inbox 为 `38 passed, 1 warning`；DeerFlow summarization、dynamic context 与 Harness 边界为 `39 passed, 1 warning`；warning 均来自既有 LangGraph pending deprecation。
+- 静态检查：9 个变更 Python 路径的 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过；既有 Repository/Model 的 formatter 差异随本切片相关修改完成机械格式化，不改变额外业务语义。
+- 独立审核：首轮 Critical 2、Important 1、Minor 0；逐项以失败测试整改。第二轮又发现并修复 additive migration 既有 Turn owner 抢占边界；同一只读 reviewer 最终确认 Critical/Important/Minor 均为 0，结论“是否可提交：是”。
+- 中文规范：新增/修改注释、docstring、计划、状态和测试报告均为中文主体说明；本切片没有配置变更。
+- commit/push：本状态文件所在 M04.4 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
+- 阶段状态：M04.4 不是 `phased-rollout-plan.md` 明确检查点，也不是模块最后一片，因此保持 `in_progress`，不运行阶段/M04 Final 门禁，不更新 `status/BOARD.md`，不写 ready 状态，也不触发 9.10A。
+- 下一切片第一动作：开发者手动启动 M04.5 后，恢复同一模块分支/worktree并领取唯一 writer；先用失败测试冻结压缩 started/progress/completed/failed Outbox 事件与 `SummaryVerifier`，再执行 M04 完整模块门禁。
 
 ## 恢复提示
 

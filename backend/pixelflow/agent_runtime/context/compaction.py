@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, Self
 from uuid import uuid4
@@ -20,7 +20,12 @@ from pydantic import (
     model_validator,
 )
 
-from ..contracts import ContextBudgetReport, ContextSummary
+from ..contracts import ContextBudgetReport, ContextSummary, TurnRecord
+from ..persistence.compaction_queue import (
+    CompactionLeaseConflictError,
+    CompactionQueueRepository,
+    ConversationCompactionLease,
+)
 from .profiles import ModelContextProfile, resolve_model_context_profile
 from .token_meter import TokenMeter, get_context_budget_policy
 
@@ -256,6 +261,41 @@ class ContextCompactionResult(_CompactionRecord):
                 raise ValueError("not_required 只允许用于未触发压缩的上下文")
             if final_tokens != self.initial_budget_report.estimated_input_tokens:
                 raise ValueError("not_required 不能改变输入 token")
+        return self
+
+
+CompactionRunStatus = Literal[
+    "completed",
+    "already_running",
+    "paused",
+]
+
+
+class ConversationCompactionRunResult(_CompactionRecord):
+    """返回压缩互斥状态、Coordinator 结论和下一条已领取输入。"""
+
+    status: CompactionRunStatus
+    compaction_result: ContextCompactionResult | None = None
+    next_turn: TurnRecord | None = None
+
+    @model_validator(mode="after")
+    def require_status_payload_match(self) -> Self:
+        """防止等待、暂停和完成结果携带互相矛盾的队列状态。"""
+
+        if self.status == "already_running":
+            if self.compaction_result is not None or self.next_turn is not None:
+                raise ValueError("already_running 不能携带压缩结果或下一 Turn")
+            return self
+        if self.compaction_result is None:
+            raise ValueError("压缩完成或暂停时必须携带 Coordinator 结果")
+        if self.status == "paused":
+            if self.compaction_result.status != "paused":
+                raise ValueError("paused 必须对应 Coordinator 暂停结果")
+            if self.next_turn is not None:
+                raise ValueError("压缩暂停时不能领取下一 Turn")
+            return self
+        if self.compaction_result.status == "paused":
+            raise ValueError("completed 不能携带 Coordinator 暂停结果")
         return self
 
 
@@ -868,18 +908,136 @@ class ContextCompactionCoordinator:
         )
 
 
+class ConversationCompactionRuntime:
+    """组合压缩租约、M04.3 Coordinator 和持久化 Turn Inbox。"""
+
+    def __init__(
+        self,
+        *,
+        coordinator: ContextCompactionCoordinator,
+        repository: CompactionQueueRepository,
+        lease_owner: str,
+        lease_ttl: timedelta,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        normalized_owner = lease_owner.strip()
+        if not normalized_owner:
+            raise ValueError("lease_owner 不能为空")
+        if lease_ttl <= timedelta(0):
+            raise ValueError("lease_ttl 必须大于零")
+        self._coordinator = coordinator
+        self._repository = repository
+        self._lease_owner = normalized_owner
+        self._lease_ttl = lease_ttl
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def enqueue_turn(
+        self,
+        user_id: str,
+        record: TurnRecord,
+    ) -> TurnRecord:
+        """由后端根据活跃租约决定 accepted 或 queued，不依赖前端重发。"""
+
+        frozen = TurnRecord.model_validate(record.model_dump(mode="python"))
+        return await self._repository.enqueue_turn_for_execution(
+            user_id,
+            frozen,
+            now=self._clock(),
+        )
+
+    async def compact(
+        self,
+        user_id: str,
+        request: ContextCompactionRequest,
+    ) -> ConversationCompactionRunResult:
+        """取得短租约后执行压缩，并按安全结论原子处理队列。"""
+
+        frozen = ContextCompactionRequest.model_validate(request.model_dump(mode="python"))
+        started_at = self._clock()
+        lease = await self._repository.acquire_compaction_lease(
+            user_id,
+            frozen.conversation_id,
+            lease_owner=self._lease_owner,
+            now=started_at,
+            lease_expires_at=started_at + self._lease_ttl,
+        )
+        if lease is None:
+            return ConversationCompactionRunResult(status="already_running")
+
+        try:
+            raw_result = await self._coordinator.coordinate(frozen)
+            result = ContextCompactionResult.model_validate(raw_result)
+        except BaseException:
+            try:
+                await self._mark_failed_compaction(
+                    user_id,
+                    lease,
+                )
+            except CompactionLeaseConflictError:
+                # 租约已被接管时只保留原始异常，陈旧 worker 不再改写协调状态。
+                pass
+            raise
+
+        if result.status == "paused":
+            await self._repository.finish_compaction(
+                user_id,
+                lease.conversation_id,
+                lease_owner=lease.lease_owner,
+                lease_token=lease.lease_token,
+                now=self._clock(),
+                claim_next=False,
+            )
+            return ConversationCompactionRunResult(
+                status="paused",
+                compaction_result=result,
+            )
+
+        next_turn = await self._repository.finish_compaction(
+            user_id,
+            lease.conversation_id,
+            lease_owner=lease.lease_owner,
+            lease_token=lease.lease_token,
+            now=self._clock(),
+            claim_next=True,
+        )
+        return ConversationCompactionRunResult(
+            status="completed",
+            compaction_result=result,
+            next_turn=next_turn,
+        )
+
+    async def _mark_failed_compaction(
+        self,
+        user_id: str,
+        lease: ConversationCompactionLease,
+    ) -> None:
+        """异常路径只写恢复标记，绝不消费已经持久化的输入。"""
+
+        await self._repository.finish_compaction(
+            user_id,
+            lease.conversation_id,
+            lease_owner=lease.lease_owner,
+            lease_token=lease.lease_token,
+            now=self._clock(),
+            claim_next=False,
+        )
+
+
 __all__ = [
     "CompactionAction",
     "CompactionAttempt",
     "CompactionBatch",
     "CompactionBatchScope",
     "CompactionExecutionError",
+    "CompactionRunStatus",
     "CompactionSegment",
     "CompactionStageExecutor",
     "CompactionStageRequest",
     "CompactionStageResult",
     "CompactionStatus",
     "CompactionValidationError",
+    "ConversationCompactionRunResult",
+    "ConversationCompactionRuntime",
     "ContextCompactionCoordinator",
     "ContextCompactionRequest",
     "ContextCompactionResult",

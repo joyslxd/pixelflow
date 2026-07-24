@@ -5,7 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -67,6 +75,59 @@ class PixelFlowAgentTurnRow(Base):
     __table_args__ = (
         UniqueConstraint("conversation_id", "client_input_id", name="uq_pf_agent_turns_conversation_client_input"),
         Index("ix_pf_agent_turns_owner_queue", "user_id", "conversation_id", "status", "inbox_sequence"),
+    )
+
+
+class PixelFlowAgentCompactionLockRow(Base):
+    """保存 conversation 压缩的短事务租约和 fencing token。"""
+
+    __tablename__ = "pixelflow_agent_compaction_locks"
+
+    conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="idle",
+    )
+    lease_owner: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    lease_token: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        _timestamp_type(),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _timestamp_type(),
+        nullable=False,
+        default=_now,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _timestamp_type(),
+        nullable=False,
+        default=_now,
+        onupdate=_now,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('idle', 'active', 'retry_required')",
+            name="ck_pf_agent_compaction_locks_state",
+        ),
+        CheckConstraint(
+            "(state = 'idle' AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR (state IN ('active', 'retry_required') AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_pf_agent_compaction_locks_lease_fields",
+        ),
+        Index(
+            "ix_pf_agent_compaction_locks_owner_expiry",
+            "user_id",
+            "lease_expires_at",
+        ),
     )
 
 
@@ -168,6 +229,7 @@ class PixelFlowAgentOperationRow(Base):
 AGENT_RUNTIME_TABLES = (
     PixelFlowAgentWorkflowRow.__table__,
     PixelFlowAgentTurnRow.__table__,
+    PixelFlowAgentCompactionLockRow.__table__,
     PixelFlowAgentContextSummaryRow.__table__,
     PixelFlowAgentEventRow.__table__,
     PixelFlowAgentOperationRow.__table__,
