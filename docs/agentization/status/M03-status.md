@@ -1,12 +1,12 @@
 # M03 模型档案、Token 预算与 ContextEnvelope
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：A
 - branch：`codex/agent-0.8.4-m03-context-runtime`
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
 - 依赖：M00
 - 当前切片：`M03.4`（已完成）
-- 当前唯一写入者：已释放；最终收口写入者为 `/root`
+- 当前唯一写入者：`尚未领取`
 - M03.1 开始时间：`2026-07-24 02:55:58 +08:00`
 - M03.1 完成时间：`2026-07-24 03:12:35 +08:00`
 - M03.2 开始时间：`2026-07-24 05:34:37 +08:00`
@@ -88,3 +88,7 @@
 ## 恢复提示
 
 256K/384K/512K 是建议上限，不是当前 AIRouter 已验证事实。缺失档案必须走 128K；未验证或过期档案使用不超过 128K、且不放大已声明能力的保守上限。M03.4 只能外置大 tool/artifact 输出并提取必要片段，不得裁剪当前用户输入、目标 Workflow 权威字段或修改 business contract。
+- last_integrated_commit：`e43b5e96ef177f7da856c8c86de95212cd0826cb`
+- locked files：`无`
+- checkpoint_status：`integrated`
+- integration failure evidence：`无`
