@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from ..contracts import (
     AgentEvent,
     ContextSummary,
     ExternalJobStatus,
     TurnRecord,
+    TurnStatus,
     WorkflowRecord,
 )
 from ..contracts.base import ContractModel
@@ -25,6 +30,10 @@ from .models import (
     PixelFlowAgentOperationRow,
     PixelFlowAgentTurnRow,
     PixelFlowAgentWorkflowRow,
+)
+
+_SQLITE_ENGINE_WRITE_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = (
+    WeakKeyDictionary()
 )
 
 
@@ -64,6 +73,8 @@ class AgentRuntimeRepository(Protocol):
 
     async def create_turn(self, user_id: str, record: TurnRecord) -> TurnRecord: ...
 
+    async def enqueue_turn(self, user_id: str, record: TurnRecord) -> TurnRecord: ...
+
     async def get_turn(self, user_id: str, turn_id: str) -> TurnRecord | None: ...
 
     async def get_turn_by_client_input_id(
@@ -74,6 +85,12 @@ class AgentRuntimeRepository(Protocol):
     ) -> TurnRecord | None: ...
 
     async def list_turns(self, user_id: str, conversation_id: str) -> list[TurnRecord]: ...
+
+    async def claim_next_turn(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> TurnRecord | None: ...
 
     async def create_summary(self, user_id: str, record: ContextSummary) -> ContextSummary: ...
 
@@ -127,6 +144,30 @@ def _database_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+@asynccontextmanager
+async def _turn_write_transaction(
+    session: AsyncSession,
+    sqlite_write_lock: asyncio.Lock | None,
+) -> AsyncIterator[None]:
+    if session.get_bind().dialect.name == "sqlite":
+        if sqlite_write_lock is None:
+            raise RuntimeError("SQLite Turn 写事务缺少 Engine 级进程内锁")
+        # 同一 Engine 先串行写事务，再获取数据库写锁覆盖跨 Engine/进程并发。
+        async with sqlite_write_lock:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                yield
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+        return
+
+    async with session.begin():
+        yield
 
 
 def _normalize_workflow(record: WorkflowRecord) -> WorkflowRecord:
@@ -254,7 +295,10 @@ class MemoryAgentRuntimeRepository:
         self._turns: dict[tuple[str, str], TurnRecord] = {}
         self._turn_ids: set[str] = set()
         self._turn_owner_sequences: dict[tuple[str, str], int] = {}
-        self._turn_client_keys: set[tuple[str, str]] = set()
+        self._turn_client_keys: dict[
+            tuple[str, str],
+            tuple[str, str],
+        ] = {}
         self._next_turn_sequence = 1
         self._summaries: dict[tuple[str, str], ContextSummary] = {}
         self._summary_ids: set[str] = set()
@@ -301,11 +345,31 @@ class MemoryAgentRuntimeRepository:
             raise AgentRuntimeRecordConflictError("Turn 记录已存在")
         owner_key = (owner, normalized.turn_id)
         self._turn_ids.add(normalized.turn_id)
-        self._turn_client_keys.add(client_key)
+        self._turn_client_keys[client_key] = owner_key
         self._turns[owner_key] = _clone(normalized)
         self._turn_owner_sequences[owner_key] = self._next_turn_sequence
         self._next_turn_sequence += 1
         return _clone(normalized)
+
+    async def enqueue_turn(
+        self,
+        user_id: str,
+        record: TurnRecord,
+    ) -> TurnRecord:
+        owner = _require_text("user_id", user_id, 64)
+        normalized = _normalize_turn(record)
+        client_key = (
+            normalized.conversation_id,
+            str(normalized.client_input_id),
+        )
+        existing_owner_key = self._turn_client_keys.get(client_key)
+        if existing_owner_key is not None:
+            if existing_owner_key[0] != owner:
+                raise AgentRuntimeRecordConflictError(
+                    "Turn 幂等键已经被其他所有者占用"
+                )
+            return _clone(self._turns[existing_owner_key])
+        return await self.create_turn(owner, normalized)
 
     async def get_turn(self, user_id: str, turn_id: str) -> TurnRecord | None:
         owner = _require_text("user_id", user_id, 64)
@@ -335,6 +399,44 @@ class MemoryAgentRuntimeRepository:
         ]
         owner_keys.sort(key=self._turn_owner_sequences.__getitem__)
         return [_clone(self._turns[owner_key]) for owner_key in owner_keys]
+
+    async def claim_next_turn(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> TurnRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        owner_keys = [
+            owner_key
+            for owner_key, record in self._turns.items()
+            if owner_key[0] == owner
+            and record.conversation_id == conversation
+            and record.status
+            in {
+                TurnStatus.ACCEPTED,
+                TurnStatus.QUEUED,
+                TurnStatus.PROCESSING,
+            }
+        ]
+        owner_keys.sort(key=self._turn_owner_sequences.__getitem__)
+        if any(
+            self._turns[owner_key].status is TurnStatus.PROCESSING
+            for owner_key in owner_keys
+        ):
+            return None
+        if not owner_keys:
+            return None
+        owner_key = owner_keys[0]
+        claimed = self._turns[owner_key].model_copy(
+            update={"status": TurnStatus.PROCESSING}
+        )
+        self._turns[owner_key] = _clone(claimed)
+        return _clone(claimed)
 
     async def create_summary(self, user_id: str, record: ContextSummary) -> ContextSummary:
         owner = _require_text("user_id", user_id, 64)
@@ -536,6 +638,12 @@ class SQLAgentRuntimeRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+        bind = session_factory.kw.get("bind")
+        self._sqlite_turn_write_lock = (
+            _SQLITE_ENGINE_WRITE_LOCKS.setdefault(bind, asyncio.Lock())
+            if isinstance(bind, AsyncEngine) and bind.dialect.name == "sqlite"
+            else None
+        )
 
     async def _insert(self, row: object) -> None:
         async with self._session_factory() as session:
@@ -616,6 +724,71 @@ class SQLAgentRuntimeRepository:
         )
         return _clone(normalized)
 
+    async def enqueue_turn(
+        self,
+        user_id: str,
+        record: TurnRecord,
+    ) -> TurnRecord:
+        owner = _require_text("user_id", user_id, 64)
+        normalized = _normalize_turn(record)
+        statement = (
+            select(PixelFlowAgentTurnRow)
+            .where(
+                PixelFlowAgentTurnRow.user_id == owner,
+                PixelFlowAgentTurnRow.conversation_id
+                == normalized.conversation_id,
+                PixelFlowAgentTurnRow.client_input_id
+                == str(normalized.client_input_id),
+            )
+            .with_for_update()
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _turn_write_transaction(
+                    session,
+                    self._sqlite_turn_write_lock,
+                ):
+                    existing = (
+                        await session.scalars(statement)
+                    ).one_or_none()
+                    if existing is not None:
+                        return _turn_from_row(existing)
+                    session.add(
+                        PixelFlowAgentTurnRow(
+                            turn_id=normalized.turn_id,
+                            conversation_id=normalized.conversation_id,
+                            user_id=owner,
+                            client_input_id=str(
+                                normalized.client_input_id
+                            ),
+                            status=normalized.status.value,
+                            target_workflow_id=normalized.target_workflow_id,
+                            decision_json=(
+                                None
+                                if normalized.decision is None
+                                else normalized.decision.model_dump(
+                                    mode="json"
+                                )
+                            ),
+                            expected_context_version=(
+                                normalized.expected_context_version
+                            ),
+                            created_at=normalized.created_at,
+                            updated_at=normalized.created_at,
+                        )
+                    )
+        except IntegrityError:
+            async with self._session_factory() as session:
+                existing = (
+                    await session.scalars(statement)
+                ).one_or_none()
+            if existing is not None:
+                return _turn_from_row(existing)
+            raise AgentRuntimeRecordConflictError(
+                "记录主键或唯一业务键已经被占用"
+            ) from None
+        return _clone(normalized)
+
     async def get_turn(self, user_id: str, turn_id: str) -> TurnRecord | None:
         owner = _require_text("user_id", user_id, 64)
         statement = select(PixelFlowAgentTurnRow).where(
@@ -656,6 +829,50 @@ class SQLAgentRuntimeRepository:
         async with self._session_factory() as session:
             rows = (await session.scalars(statement)).all()
         return [_turn_from_row(row) for row in rows]
+
+    async def claim_next_turn(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> TurnRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        active_statuses = (
+            TurnStatus.ACCEPTED.value,
+            TurnStatus.QUEUED.value,
+            TurnStatus.PROCESSING.value,
+        )
+        statement = (
+            select(PixelFlowAgentTurnRow)
+            .where(
+                PixelFlowAgentTurnRow.user_id == owner,
+                PixelFlowAgentTurnRow.conversation_id == conversation,
+                PixelFlowAgentTurnRow.status.in_(active_statuses),
+            )
+            .order_by(PixelFlowAgentTurnRow.inbox_sequence.asc())
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _turn_write_transaction(
+                session,
+                self._sqlite_turn_write_lock,
+            ):
+                rows = (await session.scalars(statement)).all()
+                if any(
+                    row.status == TurnStatus.PROCESSING.value
+                    for row in rows
+                ):
+                    return None
+                if not rows:
+                    return None
+                row = rows[0]
+                row.status = TurnStatus.PROCESSING.value
+                await session.flush()
+                return _turn_from_row(row)
 
     async def create_summary(self, user_id: str, record: ContextSummary) -> ContextSummary:
         owner = _require_text("user_id", user_id, 64)

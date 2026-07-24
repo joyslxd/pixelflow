@@ -2,12 +2,12 @@
 
 - phase：`in_progress`
 - owner：A
-- reviewer：`/root/m01_3_independent_review`
+- reviewer：`/root/m01_4_independent_review`
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
 - branch：`codex/agent-0.8.4-m01-runtime-store`
 - 依赖：M00（已进入 `feature/agent_0.8.4_boguan`）
-- 当前切片：`M01.4`
-- 最近完成：`M01.3`
+- 当前切片：`M01.5`
+- 最近完成：`M01.4`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - 本切片开始时间：`未开始`
@@ -17,7 +17,7 @@
 - [x] M01.1 数据模型与 additive migration（2.5h）
 - [x] M01.2 SQL/Memory Repository（3h）
 - [x] M01.3 revision/CAS/服务端保留 namespace（2.5h）
-- [ ] M01.4 Turn Inbox 幂等和顺序领取（2h）
+- [x] M01.4 Turn Inbox 幂等和顺序领取（2h）
 - [ ] M01.5 Event Outbox/sequence/cursor（2h）
 
 ## M01.1 交付与验证
@@ -51,6 +51,16 @@
 - 新合同为 `10 passed, 1 warning`；M01 范围回归为 `197 passed, 1 warning`。ruff 与 `git diff --check` 通过。
 - 独立审核经过两轮 TDD 整改，最终确认 Critical、Important、Minor 均无；未实现 M01.4/M01.5，未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.3.md`。
 
+## M01.4 交付与验证
+
+- Repository Port 与 Memory/SQL 双实现新增 `enqueue_turn()`：同一 `conversation_id + client_input_id` 的同 owner 重试返回首次持久化快照，不新增 Turn；严格 `create_turn()` 语义保持不变。
+- `claim_next_turn()` 按 `inbox_sequence` 领取最早的 `accepted/queued` Turn 并原子更新为 `processing`；同一会话已有处理中 Turn 时阻塞后续领取，终态跳过，不同会话互不阻塞。
+- owner 过滤、全局 `turn_id` 与全局幂等键继续 fail-closed；跨 owner 读取仍表现为不存在，不泄露既有 Turn。
+- SQLite 同 Engine 使用共享异步锁避免内存 `StaticPool` 嵌套事务，跨 Engine/进程继续由 `BEGIN IMMEDIATE` 数据库写锁保护；生产 SQL 使用 `SELECT ... FOR UPDATE`。
+- 新合同为 `12 passed, 1 warning`；M01 精确范围回归为 `209 passed, 1 warning`。ruff、`git diff --check` 与分支策略检查均通过。
+- 独立审核首次仅发现 1 个 Minor 测试证据缺口；补齐 Memory/SQL 双实现并发入队合同后复审确认 Critical、Important、Minor 均无。
+- 本切片未实现 M01.5 Event Outbox，未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.4.md`。
+
 ## 恢复提示
 
-下一次只执行 M01.4：先从远端恢复同一模块分支/worktree，复核 M01.3 revision/CAS 与服务端保留 namespace 合同，再以失败测试实现 Turn Inbox 幂等和顺序领取；不得提前实现 M01.5 的 Event Outbox claim、sequence 或 cursor 投递。
+下一次只执行 M01.5：先从远端恢复同一模块分支/worktree，复核 M01.4 Turn Inbox 幂等与按会话顺序领取合同，再以失败测试实现 Event Outbox 的 claim、sequence 和 cursor 投递；这是 M01 最后一片，必须运行完整模块门禁，绿色后才可写 `ready_for_integration`。
