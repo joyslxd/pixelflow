@@ -28,6 +28,12 @@ const agentRuntimeContractFixture = path.resolve(
   "agent_runtime",
   "contracts-v1.json",
 );
+const supervisorLegacyAdapterFixture = path.join(
+  webRoot,
+  "tests",
+  "fixtures",
+  "supervisorLegacySnapshots.json",
+);
 const generatedAgentRuntimeTypeTest = path.join(
   typeTestRoot,
   "canonicalFixture.type-test.ts",
@@ -207,6 +213,7 @@ try {
       "src/lib/supervisor/api.ts",
       "src/lib/supervisor/contracts.ts",
       "src/lib/supervisor/events.ts",
+      "src/lib/supervisor/legacyAdapter.ts",
       "src/lib/supervisor/reducer.ts",
       "src/lib/time.ts",
       "src/lib/videoRequirementConfig.ts",
@@ -245,6 +252,11 @@ try {
       SUPERVISOR_API_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/api.js"),
       SUPERVISOR_EVENTS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/events.js"),
       SUPERVISOR_HOOK_TEST_MODULE: moduleUrl(hookTestRoot, "hooks/useSupervisorConversation.js"),
+      SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE: moduleUrl(
+        moduleDirectory,
+        "supervisor/legacyAdapter.js",
+      ),
+      SUPERVISOR_LEGACY_ADAPTER_FIXTURE: supervisorLegacyAdapterFixture,
       SUPERVISOR_REDUCER_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/reducer.js"),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),

@@ -1,12 +1,12 @@
 # M07 前端 Supervisor 事件 Runtime
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
 - 当前切片：M07.5
 - base SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
-- 当前唯一写入者：已释放（M07.4 完成）
+- 当前唯一写入者：已释放（M07.5 完成）
 - 开始时间：`2026-07-24 07:19:26 +0800`
 - M07.1 完成时间：`2026-07-24 08:30:24 +0800`
 - M07.1 已释放文件：`web/src/lib/supervisor/api.ts`、`web/tests/supervisorApi.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.1.md`
@@ -24,6 +24,10 @@
 - M07.4 锁定文件：`web/src/hooks/useSupervisorConversation.ts`、`web/tests/useSupervisorConversation.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.4.md`；独立审核要求增加真实 React `StrictMode` 挂载验证，仍在既有测试文件内完成，无需新增依赖或扩大写入范围
 - M07.4 完成时间：`2026-07-24 15:14:57 +0800`
 - M07.4 已释放文件：`web/src/hooks/useSupervisorConversation.ts`、`web/tests/useSupervisorConversation.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.4.md`
+- M07.5 开始时间：`2026-07-24 15:55:48 +0800`
+- M07.5 锁定文件：`web/src/lib/supervisor/legacyAdapter.ts`、`web/tests/supervisorLegacyAdapter.test.mjs`、`web/tests/fixtures/supervisorLegacySnapshots.json`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.5.md`
+- M07.5 完成时间：`2026-07-24 16:11:30 +0800`
+- M07.5 已释放文件：`web/src/lib/supervisor/legacyAdapter.ts`、`web/tests/supervisorLegacyAdapter.test.mjs`、`web/tests/fixtures/supervisorLegacySnapshots.json`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.5.md`
 
 ## 开工检查
 
@@ -37,11 +41,23 @@
 - [x] M07.2 SSE/cursor/gap/reconnect（2.5h）
 - [x] M07.3 reducer 四维状态机（2.5h）
 - [x] M07.4 conversation hook/Abort 隔离（2h）
-- [ ] M07.5 legacy snapshot adapter（2h）
+- [x] M07.5 legacy snapshot adapter（2h）
 
 ## 恢复提示
 
 本模块不改 `WorkspacePage.tsx`。全部使用 fixture/mock server 开发，先证明重复/乱序事件和切换对话安全。
+
+## M07.5 完成记录
+
+- 实现：新增 legacy Snapshot → ViewModel Adapter，统一投影 14 组 pending 双字段、18 类 artifact、历史消息和编排归属；adapter 只做 DTO 适配，不恢复 job 或触发外部调用。
+- 边界：pending、artifact 和消息对话归属冲突均 fail-closed；旧 pending 未排空时保留 `frontend_v2` 恢复权；重复 client ID 稳定消解，所有输出深拷贝，非法数据只返回固定中文错误。
+- TDD：基线 `265/265`；初始模块缺失 RED；首轮 GREEN `271/271`；自审边界 RED `271/273` 后 GREEN `273/273`；独立审核 RED `273/274` 后最终 GREEN `274/274`。
+- 验证：完整 M07 模块门禁 `npm test`（`274/274`）、`npm run test:agent-runtime-contracts`（`9/9`）、`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建只有既存 chunk 体积提醒。未调用真实付费 API。
+- 审核：独立只读 reviewer `/root/m07_5_reviewer` 二审结论 `Ready`，无 Critical、Important 或 Minor；首轮 1 项消息归属双字段 Important 已通过 RED/GREEN 关闭。
+- 环境：本机没有可执行的 PowerShell；按仓库 fail-closed 范围执行 M07 测试矩阵并完成人工中文规范检查，无新增配置、依赖或人工代码注释，未修改锁文件。
+- 阶段：M07.5 是模块最后一片，完整模块门禁绿色，M07 写入 `ready_for_integration`；这不是 `phased-rollout-plan.md` 的 M12 中间检查点，不写 `ready_for_phase_integration`。
+- 提交与推送：本状态随 M07.5 独立中文提交推送到 `origin/codex/agent-0.8.4-m07-web-runtime`。
+- 下一步：停止并等待开发者后续人工启动 M07 单槽集成；当前自动化状态为 `automation_local_ready`，本任务不触发集成，也不进入 M12 或其他模块。
 
 ## M07.4 完成记录
 

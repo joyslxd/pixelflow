@@ -1,0 +1,284 @@
+import {
+  ORCHESTRATION_MODE_VALUES,
+  type JsonObject,
+  type JsonValue,
+  type OrchestrationMode,
+} from "./contracts.js";
+
+export const LEGACY_PENDING_FIELD_PAIRS = [
+  { camel: "pendingMessageJob", snake: "pending_message_job" },
+  { camel: "pendingIntakeJob", snake: "pending_intake_job" },
+  { camel: "pendingDirectionJob", snake: "pending_direction_job" },
+  { camel: "pendingPlanJob", snake: "pending_plan_job" },
+  { camel: "pendingPlanRevisionRequest", snake: "pending_plan_revision_request" },
+  { camel: "pendingPlanRevisionChoice", snake: "pending_plan_revision_choice" },
+  { camel: "pendingImageEditRequest", snake: "pending_image_edit_request" },
+  { camel: "pendingImageJob", snake: "pending_image_job" },
+  { camel: "pendingImageRevision", snake: "pending_image_revision" },
+  { camel: "pendingScenePackageJob", snake: "pending_scene_package_job" },
+  { camel: "pendingVideoJob", snake: "pending_video_job" },
+  { camel: "pendingVideoRevision", snake: "pending_video_revision" },
+  { camel: "pendingPptJob", snake: "pending_ppt_job" },
+  { camel: "pendingJianyingDraftJob", snake: "pending_jianying_draft_job" },
+] as const;
+
+export type LegacyPendingField = (typeof LEGACY_PENDING_FIELD_PAIRS)[number]["camel"];
+
+export type LegacyPendingProjection = Record<LegacyPendingField, JsonObject | null>;
+
+export interface LegacyMessageViewModel {
+  id: string;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  time: string;
+  materials: JsonObject[];
+  artifact: JsonObject | null;
+}
+
+export interface LegacyArtifactViewModel {
+  messageId: string;
+  type: string;
+  artifact: JsonObject;
+}
+
+export interface LegacyConversationViewModel {
+  conversationId: string;
+  orchestrationMode: OrchestrationMode;
+  orchestrationVersion: 1;
+  title: string;
+  currentTaskId: string | null;
+  lastPhase: string;
+  context: JsonObject;
+  pending: LegacyPendingProjection;
+  hasPendingWork: boolean;
+  messages: LegacyMessageViewModel[];
+  artifacts: LegacyArtifactViewModel[];
+}
+
+const INVALID_SNAPSHOT = "历史对话 Snapshot 状态不合法";
+const INVALID_PENDING = "历史对话 pending 状态不合法";
+const CONFLICTING_PENDING = "历史对话 pending 状态不一致";
+const INVALID_PENDING_OWNER = "历史对话 pending 状态归属不合法";
+const CONFLICTING_ARTIFACT = "历史对话 artifact 状态不一致";
+
+function fail(message = INVALID_SNAPSHOT): never {
+  throw new TypeError(message);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function cloneJsonValue(value: unknown, ancestors = new WeakSet<object>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "object" || ancestors.has(value)) return fail();
+
+  ancestors.add(value);
+  const cloned: JsonValue = Array.isArray(value)
+    ? value.map((item) => cloneJsonValue(item, ancestors))
+    : Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item, ancestors)]),
+    );
+  ancestors.delete(value);
+  return cloned;
+}
+
+function cloneJsonObject(value: unknown, message = INVALID_SNAPSHOT): JsonObject {
+  if (!isRecord(value)) return fail(message);
+  const cloned = cloneJsonValue(value);
+  if (!isRecord(cloned)) return fail(message);
+  return cloned as JsonObject;
+}
+
+function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => jsonValuesEqual(item, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]
+      && jsonValuesEqual(left[key] as JsonValue, right[key] as JsonValue));
+}
+
+function readNullableObject(value: unknown, message: string): JsonObject | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return cloneJsonObject(value, message);
+}
+
+function validatePendingOwner(value: JsonObject, conversationId: string): void {
+  const snakeOwner = value.conversation_id;
+  const camelOwner = value.conversationId;
+  for (const owner of [snakeOwner, camelOwner]) {
+    if (owner === undefined) continue;
+    if (!isNonEmptyString(owner) || owner !== conversationId) fail(INVALID_PENDING_OWNER);
+  }
+}
+
+function resolvePending(
+  context: Record<string, unknown>,
+  conversationId: string,
+): LegacyPendingProjection {
+  return Object.fromEntries(LEGACY_PENDING_FIELD_PAIRS.map(({ camel, snake }) => {
+    const camelValue = readNullableObject(context[camel], INVALID_PENDING);
+    const snakeValue = readNullableObject(context[snake], INVALID_PENDING);
+    if (camelValue && snakeValue && !jsonValuesEqual(camelValue, snakeValue)) {
+      fail(CONFLICTING_PENDING);
+    }
+    const value = camelValue ?? snakeValue ?? null;
+    if (value) validatePendingOwner(value, conversationId);
+    return [camel, value];
+  })) as LegacyPendingProjection;
+}
+
+function resolveOrchestration(
+  conversation: Record<string, unknown>,
+  context: Record<string, unknown>,
+): { mode: OrchestrationMode; version: 1 } {
+  const rawMode = conversation.orchestration_mode ?? context.orchestration_mode;
+  const rawVersion = conversation.orchestration_version ?? context.orchestration_version;
+  if (rawMode === undefined && rawVersion === undefined) {
+    return { mode: "frontend_v2", version: 1 };
+  }
+  if (typeof rawMode !== "string"
+    || !(ORCHESTRATION_MODE_VALUES as readonly string[]).includes(rawMode)
+    || rawVersion !== 1) {
+    return fail();
+  }
+  return { mode: rawMode as OrchestrationMode, version: 1 };
+}
+
+function resolveArtifact(message: Record<string, unknown>): JsonObject | null {
+  const payload = message.payload === undefined
+    ? null
+    : cloneJsonObject(message.payload);
+  const directArtifact = readNullableObject(message.artifact, INVALID_SNAPSHOT);
+  const payloadArtifact = readNullableObject(payload?.artifact, INVALID_SNAPSHOT);
+  if (directArtifact && payloadArtifact && !jsonValuesEqual(directArtifact, payloadArtifact)) {
+    fail(CONFLICTING_ARTIFACT);
+  }
+  const artifact = directArtifact ?? payloadArtifact ?? null;
+  if (artifact && !isNonEmptyString(artifact.type)) fail();
+  return artifact;
+}
+
+function resolveMaterials(message: Record<string, unknown>): JsonObject[] {
+  const payload = message.payload === undefined
+    ? null
+    : cloneJsonObject(message.payload);
+  const rawMaterials = message.materials ?? payload?.materials ?? [];
+  if (!Array.isArray(rawMaterials)) return fail();
+  return rawMaterials.map((material) => cloneJsonObject(material));
+}
+
+function projectMessage(
+  value: unknown,
+  conversationId: string,
+): LegacyMessageViewModel | null {
+  if (!isRecord(value)) return fail();
+  const role = value.role;
+  if (role === "system") return null;
+  if (role !== "user" && role !== "assistant") return fail();
+
+  for (const messageConversationId of [value.conversationId, value.conversation_id]) {
+    if (messageConversationId !== undefined
+      && (!isNonEmptyString(messageConversationId) || messageConversationId !== conversationId)) {
+      return fail();
+    }
+  }
+  const payload = value.payload === undefined
+    ? null
+    : cloneJsonObject(value.payload);
+  const payloadClientId = payload?.client_message_id;
+  const id = isNonEmptyString(payloadClientId)
+    ? payloadClientId
+    : value.id ?? value.message_id;
+  if (!isNonEmptyString(id) || typeof value.content !== "string") return fail();
+
+  const rawTime = value.time ?? value.created_at ?? "";
+  if (typeof rawTime !== "string") return fail();
+  return {
+    id,
+    conversationId,
+    role,
+    content: value.content,
+    time: rawTime,
+    materials: resolveMaterials(value),
+    artifact: resolveArtifact(value),
+  };
+}
+
+function makeMessageIdsUnique(messages: LegacyMessageViewModel[]): LegacyMessageViewModel[] {
+  const usedIds = new Set<string>();
+  return messages.map((message) => {
+    const baseId = message.id;
+    let id = baseId;
+    let suffix = 2;
+    while (usedIds.has(id)) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    usedIds.add(id);
+    return id === message.id ? message : { ...message, id };
+  });
+}
+
+export function projectLegacyConversationSnapshot(value: unknown): LegacyConversationViewModel {
+  if (!isRecord(value) || !isRecord(value.conversation) || !Array.isArray(value.messages)) {
+    return fail();
+  }
+  const conversation = value.conversation;
+  const conversationId = conversation.conversation_id;
+  const context = cloneJsonObject(conversation.context ?? {});
+  if (!isNonEmptyString(conversationId)
+    || typeof conversation.title !== "string"
+    || typeof conversation.last_phase !== "string") {
+    return fail();
+  }
+  const currentTaskId = conversation.current_task_id;
+  if (currentTaskId !== null && currentTaskId !== undefined && !isNonEmptyString(currentTaskId)) {
+    return fail();
+  }
+
+  const pending = resolvePending(context, conversationId);
+  const messages = makeMessageIdsUnique(value.messages
+    .map((message) => projectMessage(message, conversationId))
+    .filter((message): message is LegacyMessageViewModel => message !== null));
+  const orchestration = resolveOrchestration(conversation, context);
+  const artifacts = messages.flatMap((message): LegacyArtifactViewModel[] => {
+    if (!message.artifact) return [];
+    return [{
+      messageId: message.id,
+      type: message.artifact.type as string,
+      artifact: cloneJsonObject(message.artifact),
+    }];
+  });
+
+  return {
+    conversationId,
+    orchestrationMode: orchestration.mode === "supervisor_v1" && Object.values(pending).some(Boolean)
+      ? "frontend_v2"
+      : orchestration.mode,
+    orchestrationVersion: orchestration.version,
+    title: conversation.title,
+    currentTaskId: currentTaskId ?? null,
+    lastPhase: conversation.last_phase,
+    context,
+    pending,
+    hasPendingWork: Object.values(pending).some((item) => item !== null),
+    messages,
+    artifacts,
+  };
+}
