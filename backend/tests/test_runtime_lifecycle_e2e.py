@@ -1,9 +1,8 @@
-"""HTTP/runtime lifecycle E2E tests for the Gateway-owned runs API.
+"""网关运行生命周期 HTTP E2E 测试。
 
-These tests keep the external model out of scope while exercising the real
-FastAPI app, auth middleware, lifespan-created runtime dependencies,
-``start_run()``, ``run_agent()``, StreamBridge, checkpointer, run store, and
-thread metadata store.
+测试仅替换外部模型与 content-app 鉴权 Client，保留真实 FastAPI 应用、认证中间件、
+生命周期依赖、``start_run()``、``run_agent()``、StreamBridge、checkpointer、
+运行存储与线程元数据存储。
 """
 
 from __future__ import annotations
@@ -25,6 +24,9 @@ from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_mode
 from langchain_core.messages import AIMessage, HumanMessage
 
 pytestmark = pytest.mark.no_auto_user
+
+_TEST_AUTHORIZATION = "Bearer runtime-e2e-token"
+_TEST_USER_ID = "runtime-e2e-user"
 
 
 _MINIMAL_CONFIG_YAML = """\
@@ -183,14 +185,10 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     - app_config / extensions_config: parsed config file caches.
     - paths: ``DEER_FLOW_HOME``-derived filesystem paths.
     - persistence.engine: SQLAlchemy engine/session factory for the sqlite dir.
-    - app.gateway.deps: cached local auth provider/repository.
-
-    A shared public reset helper would be cleaner long-term; this test keeps
-    the reset boundary explicit because the PR is focused on runtime lifecycle
-    coverage rather than config-cache API cleanup.
+    content-app 鉴权 Client 会在 ``isolated_app`` 中替换，因此这里不再重置已经退役的
+    本地认证 Provider 或 Repository。
     """
 
-    from app.gateway import deps as deps_module
     from deerflow.config import app_config as app_config_module
     from deerflow.config import extensions_config as extensions_config_module
     from deerflow.config import paths as paths_module
@@ -206,8 +204,6 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
         (paths_module, "_paths", None),
         (engine_module, "_engine", None),
         (engine_module, "_session_factory", None),
-        (deps_module, "_cached_local_provider", None),
-        (deps_module, "_cached_repo", None),
     ):
         monkeypatch.setattr(module, attr, value, raising=False)
 
@@ -255,33 +251,35 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     _preserve_process_config_singletons(monkeypatch)
     _reset_process_singletons(monkeypatch)
 
+    from app.gateway import deps as deps_module
+    from app.gateway.content_app_auth import ContentAppUser
     from deerflow.config import app_config as app_config_module
 
     cfg = app_config_module.get_app_config()
     cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+
+    async def authenticate_test_authorization(authorization: str | None) -> ContentAppUser:
+        """在 content-app Client 边界返回固定用户，保留网关认证传播链路。"""
+        assert authorization == _TEST_AUTHORIZATION
+        return ContentAppUser(id=_TEST_USER_ID, username=_TEST_USER_ID)
+
+    monkeypatch.setattr(deps_module, "authenticate_authorization_header", authenticate_test_authorization)
 
     from app.gateway.app import create_app
 
     return create_app()
 
 
-def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
-    response = client.post(
-        "/agent/auth/register",
-        json={"email": email, "password": "very-strong-password-123"},
-    )
-    assert response.status_code == 201, response.text
-    csrf_token = client.cookies.get("csrf_token")
-    assert csrf_token
-    return csrf_token
+def _configure_content_app_auth(client) -> None:
+    """模拟前端为所有网关请求携带同一 content-app Authorization。"""
+    client.headers.update({"Authorization": _TEST_AUTHORIZATION})
 
 
-def _create_thread(client, csrf_token: str) -> str:
+def _create_thread(client) -> str:
     thread_id = str(uuid.uuid4())
     response = client.post(
         "/agent/threads",
         json={"thread_id": thread_id, "metadata": {"purpose": "runtime-lifecycle-e2e"}},
-        headers={"X-CSRF-Token": csrf_token},
     )
     assert response.status_code == 200, response.text
     return thread_id
@@ -440,14 +438,13 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         patch("app.gateway.services.resolve_agent_factory", return_value=factory),
         TestClient(isolated_app) as client,
     ):
-        csrf_token = _register_user(client)
-        thread_id = _create_thread(client, csrf_token)
+        _configure_content_app_auth(client)
+        thread_id = _create_thread(client)
 
         with client.stream(
             "POST",
             f"/agent/threads/{thread_id}/runs/stream",
             json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
         ) as response:
             assert response.status_code == 200, response.read().decode()
             run_id = _run_id_from_response(response)
@@ -491,9 +488,9 @@ def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_
         ),
         TestClient(isolated_app) as client,
     ):
-        csrf_token = _register_user(client, email="business-e2e@example.com")
+        _configure_content_app_auth(client)
         auth_user_id = client.get("/agent/auth/me").json()["id"]
-        thread_id = _create_thread(client, csrf_token)
+        thread_id = _create_thread(client)
 
         body = _run_body(
             input={
@@ -517,7 +514,6 @@ def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_
             "POST",
             f"/agent/threads/{thread_id}/runs/stream",
             json=body,
-            headers={"X-CSRF-Token": csrf_token},
         ) as response:
             assert response.status_code == 200, response.read().decode()
             run_id = _run_id_from_response(response)
@@ -554,13 +550,12 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         patch("app.gateway.services.resolve_agent_factory", return_value=factory),
         TestClient(isolated_app) as client,
     ):
-        csrf_token = _register_user(client, email="interrupt-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
+        _configure_content_app_auth(client)
+        thread_id = _create_thread(client)
 
         created = client.post(
             f"/agent/threads/{thread_id}/runs",
             json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert created.status_code == 200, created.text
         run_id = created.json()["run_id"]
@@ -568,7 +563,6 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
 
         cancelled = client.post(
             f"/agent/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert cancelled.status_code == 204, cancelled.text
         assert controller.cancelled.wait(5), "fake agent task was not cancelled"
@@ -645,8 +639,8 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         patch("app.gateway.services.resolve_agent_factory", return_value=factory),
         TestClient(isolated_app) as client,
     ):
-        csrf_token = _register_user(client, email="rollback-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
+        _configure_content_app_auth(client)
+        thread_id = _create_thread(client)
 
         before = client.post(
             f"/agent/threads/{thread_id}/state",
@@ -657,7 +651,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
                 },
                 "as_node": "test_seed",
             },
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert before.status_code == 200, before.text
         assert before.json()["values"]["title"] == "Before rollback"
@@ -665,7 +658,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         created = client.post(
             f"/agent/threads/{thread_id}/runs",
             json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert created.status_code == 200, created.text
         run_id = created.json()["run_id"]
@@ -677,7 +669,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
 
         rolled_back = client.post(
             f"/agent/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=rollback",
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert rolled_back.status_code == 204, rolled_back.text
         assert controller.cancelled.wait(5), "rollback did not cancel the worker task"

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import jwt
 import pytest
+from fastapi import HTTPException
 
 from app.gateway.content_app_auth import ContentAppAuthConfig, ContentAppAuthError, authenticate_authorization_header, get_content_app_auth_config, verify_authorization_header_remote
+from app.gateway.deps import get_current_user_from_request
 
 TEST_SECRET = "volcengine-secret-key-256-bits-minimum-required-for-jwt-security"
 
@@ -18,6 +21,22 @@ def _token(username: str = "java_dev", *, secret: str = TEST_SECRET, expired: bo
     now = datetime.now(UTC)
     exp = now - timedelta(minutes=1) if expired else now + timedelta(minutes=30)
     return jwt.encode({"sub": username, "iat": now, "exp": exp}, secret, algorithm="HS512")
+
+
+@pytest.mark.asyncio
+async def test_current_user_resolver_ignores_legacy_cookie():
+    """旧 PixelFlow cookie 不能绕过 content-app Authorization 鉴权。"""
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=None),
+        headers={},
+        cookies={"access_token": "legacy-token"},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_current_user_from_request(request)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["code"] == "not_authenticated"
 
 
 @pytest.mark.asyncio

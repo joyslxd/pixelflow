@@ -17,8 +17,8 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from unittest.mock import Mock
 from typing import TYPE_CHECKING, TypeVar, cast
+from unittest.mock import Mock
 
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
@@ -241,59 +241,24 @@ async def get_current_user_from_request(request: Request):
         if isinstance(auth_candidate, str):
             authorization = auth_candidate
 
+    if authorization is None:
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.NOT_AUTHENTICATED,
+                message="Unauthorized",
+            ).model_dump(),
+        )
+
     try:
-        if authorization is not None:
-            return await authenticate_authorization_header(authorization)
+        return await authenticate_authorization_header(authorization)
     except ContentAppAuthError as exc:
-        # If Authorization header exists, keep existing content-app error contract.
-        if authorization is not None:
-            code = AuthErrorCode(exc.code) if exc.code in AuthErrorCode._value2member_map_ else AuthErrorCode.TOKEN_INVALID
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail=AuthErrorResponse(code=code, message=exc.message).model_dump(),
-            ) from exc
-        # If header is not present / invalid in test stubs, continue with local cookie path.
-
-    access_token = getattr(request, "cookies", {}).get("access_token")
-    if access_token:
-        from app.gateway.auth.jwt import decode_token
-        from app.gateway.auth.errors import TokenError
-
-        payload = decode_token(access_token)
-        if isinstance(payload, TokenError):
-            raise HTTPException(status_code=401, detail="Token has been revoked")
-
-        try:
-            provider = get_local_provider()
-            user = await provider.get_user(payload.sub)
-            if user is None or user.token_version != payload.ver:
-                raise HTTPException(status_code=401, detail="Token has been revoked")
-            return user
-        except HTTPException:
-            raise
-        except Exception as exc:  # pragma: no cover
-            raise HTTPException(status_code=503, detail="Auth provider unavailable") from exc
-
-    code = AuthErrorCode.TOKEN_INVALID if authorization else AuthErrorCode.NOT_AUTHENTICATED
-    raise HTTPException(
-        status_code=401,
-        detail=AuthErrorResponse(
-            code=code,
-            message="Unauthorized",
-        ).model_dump(),
-    )
-
-
-def get_local_provider():
-    """Return legacy local auth provider for compatibility and tests."""
-    from deerflow.persistence.engine import get_session_factory
-    from app.gateway.auth.local_provider import LocalAuthProvider
-    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-
-    sf = get_session_factory()
-    if sf is None:
-        raise RuntimeError("Local auth provider not initialized")
-    return LocalAuthProvider(SQLiteUserRepository(sf))
+        # Authorization 存在时始终保持 content-app 的结构化错误合同。
+        code = AuthErrorCode(exc.code) if exc.code in AuthErrorCode._value2member_map_ else AuthErrorCode.TOKEN_INVALID
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=AuthErrorResponse(code=code, message=exc.message).model_dump(),
+        ) from exc
 
 
 async def get_optional_user_from_request(request: Request):
