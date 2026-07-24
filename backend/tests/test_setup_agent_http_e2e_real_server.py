@@ -1,24 +1,8 @@
-"""Real HTTP end-to-end verification for issue #2862's setup_agent path.
+"""验证 ``setup_agent`` 真实 HTTP 链路的端到端合同。
 
-This test drives the **entire** FastAPI gateway through ``starlette.testclient.TestClient``:
-
-  starlette.testclient.TestClient (real ASGI stack)
-    -> AuthMiddleware (real cookie parsing, real JWT decode)
-    -> /agent/auth/register endpoint (real password hash + sqlite write)
-    -> /agent/threads/{id}/runs/stream endpoint (real start_run config-assembly)
-    -> background asyncio.create_task(run_agent) (real worker, real Runtime)
-    -> langchain.agents.create_agent graph (real, with fake LLM)
-    -> ToolNode dispatch (real)
-    -> setup_agent tool (real file I/O)
-
-The only mock is the LLM (no API key needed). Every layer that participates
-in ``user_id`` propagation — auth, ContextVar, ``inject_authenticated_user_context``,
-``worker._build_runtime_context``, ``Runtime.merge`` — is the real production
-code path. If the chain is broken at any layer, this test fails.
-
-This is what "真实验证" looks like for a server that lives behind authentication:
-register a user, log in (cookie), POST to /runs/stream, wait for the run to
-finish, then read the filesystem.
+测试通过 ``TestClient`` 驱动完整 FastAPI 网关，仅替换外部 LLM 与 content-app
+鉴权 Client。认证中间件、ContextVar、运行时、工具分发与文件写入均使用生产代码，
+任何一层丢失 ``user_id`` 都会使测试失败。
 """
 
 from __future__ import annotations
@@ -29,6 +13,9 @@ from unittest.mock import patch
 
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
+
+_TEST_AUTHORIZATION = "Bearer setup-agent-e2e-token"
+_TEST_USER_ID = "setup-agent-e2e-user"
 
 
 def _build_fake_create_chat_model(agent_name: str):
@@ -155,10 +142,19 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
 
     # Re-resolve the config from the test-only DEER_FLOW_HOME and pin its
     # sqlite path into tmp_path so the lifespan-time engine init lands there.
+    from app.gateway import deps as deps_module
+    from app.gateway.content_app_auth import ContentAppUser
     from deerflow.config import app_config as app_config_module
 
     cfg = app_config_module.get_app_config()
     cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+
+    async def authenticate_test_authorization(authorization: str | None) -> ContentAppUser:
+        """在 content-app Client 边界返回固定用户，保留真实认证传播链路。"""
+        assert authorization == _TEST_AUTHORIZATION
+        return ContentAppUser(id=_TEST_USER_ID, username=_TEST_USER_ID)
+
+    monkeypatch.setattr(deps_module, "authenticate_authorization_header", authenticate_test_authorization)
 
     from app.gateway.app import create_app
 
@@ -213,14 +209,13 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
     isolated_deer_flow_home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The full real-server contract test.
+    """验证 content-app 用户身份能传到 ``setup_agent`` 的目标目录。
 
-    1. Register a real user via POST /agent/auth/register (also auto-logs in)
-    2. POST to /agent/threads/{tid}/runs/stream with the **exact** body shape the
-       frontend (LangGraph SDK) sends during the bootstrap flow.
-    3. Wait for the background run to finish.
-    4. Assert SOUL.md exists under users/<authenticated_uid>/agents/<name>/.
-    5. Assert NOTHING exists under users/default/agents/<name>/.
+    1. 为 TestClient 配置 content-app Authorization。
+    2. 按前端线协议创建线程并提交 ``/runs/stream``。
+    3. 等待后台运行完成。
+    4. 断言 SOUL.md 位于已认证用户目录。
+    5. 断言默认用户目录没有同名 Agent。
     """
     # ``deerflow.agents.lead_agent.agent`` imports ``create_chat_model`` with
     # ``from deerflow.models import create_chat_model`` at module load time,
@@ -238,35 +233,23 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         ),
         TestClient(isolated_app) as client,
     ):
-        # --- 1. Register & auto-login ---
-        register = client.post(
-            "/agent/auth/register",
-            json={"email": "e2e-user@example.com", "password": "very-strong-password-123"},
-        )
-        assert register.status_code == 201, register.text
-        registered = register.json()
-        auth_uid = registered["id"]
-        # The endpoint sets both access_token (auth) and csrf_token (CSRF Double
-        # Submit Cookie) cookies; the TestClient cookie jar propagates them.
-        assert client.cookies.get("access_token"), "register endpoint must set session cookie"
-        csrf_token = client.cookies.get("csrf_token")
-        assert csrf_token, "register endpoint must set csrf_token cookie"
+        # 前端对所有网关请求都透传 content-app Authorization。
+        client.headers.update({"Authorization": _TEST_AUTHORIZATION})
+        current_user = client.get("/agent/auth/me")
+        assert current_user.status_code == 200, current_user.text
+        auth_uid = current_user.json()["id"]
 
-        # --- 2. Create a thread (require_existing=True on /runs/stream means
-        # we must call POST /agent/threads first; the React frontend does the
-        # same via the LangGraph SDK's threads.create) ---
+        # ``/runs/stream`` 要求线程已存在，与前端 LangGraph SDK 行为一致。
         import uuid as _uuid
 
         thread_id = str(_uuid.uuid4())
         created = client.post(
             "/agent/threads",
             json={"thread_id": thread_id, "metadata": {}},
-            headers={"X-CSRF-Token": csrf_token},
         )
         assert created.status_code == 200, created.text
 
-        # --- 3. POST /runs/stream with the bootstrap wire format ---
-        # This is the EXACT shape the React frontend sends after PR #2784:
+        # 使用前端 bootstrap 请求体：
         #   thread.submit(input, {config, context}) ->
         #   POST /agent/threads/{id}/runs/stream body =
         #     {assistant_id, input, config, context}
@@ -291,27 +274,23 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
             },
             "stream_mode": ["values"],
         }
-        # The /stream endpoint returns SSE; we drain it so the server-side
-        # background task (run_agent) gets to completion before we look at disk.
+        # 消费 SSE，等待服务端后台任务完成后再检查磁盘。
         with client.stream(
             "POST",
             f"/agent/threads/{thread_id}/runs/stream",
             json=body,
-            headers={"X-CSRF-Token": csrf_token},
         ) as resp:
             assert resp.status_code == 200, resp.read().decode()
             transcript = _drain_stream(resp)
 
-        # Sanity: the stream should have produced at least one event
+        # 至少应产生一个 SSE 事件。
         assert "event:" in transcript, f"no SSE events in response: {transcript[:500]!r}"
 
-        # --- 4. Verify filesystem outcome ---
+        # 检查已认证用户目录，不允许回退到 default。
         expected_dir = isolated_deer_flow_home / "users" / auth_uid / "agents" / agent_name
         default_dir = isolated_deer_flow_home / "users" / "default" / "agents" / agent_name
 
-        # The setup_agent tool runs inside the background asyncio task spawned
-        # by start_run; SSE-drain typically waits for it, but we add a bounded
-        # poll to be robust against scheduler jitter.
+        # 后台任务可能存在少量调度延迟，因此使用有界轮询。
         assert _wait_for_file(expected_dir / "SOUL.md", timeout=15.0), (
             "SOUL.md did not appear under users/<auth_uid>/agents/. "
             f"Expected: {expected_dir / 'SOUL.md'}. "
@@ -322,5 +301,5 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         soul_text = (expected_dir / "SOUL.md").read_text()
         assert agent_name in soul_text, f"unexpected SOUL content: {soul_text!r}"
 
-        # The smoking-gun assertion: the agent must NOT have landed in default/
+        # 关键回归断言：Agent 不能写入默认用户目录。
         assert not default_dir.exists(), f"REGRESSION: agent landed under users/default/{agent_name} instead of the authenticated user. Default-dir contents: {list(default_dir.rglob('*')) if default_dir.exists() else 'n/a'}"

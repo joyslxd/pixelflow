@@ -118,11 +118,14 @@ async def revise_plan_payload(
 3. scene_image_ratio 和 scene_image_size 只能从 creation_contract.image_model_capabilities 中选择。
 4. 模板中的苹果PRO、林晓、赵总监等内容只是结构示例，禁止复制到当前方案。
 5. 视频必须返回完整 scene_blueprints，并形成开场、展开、证明/高潮、收束的总分总结构。
-6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill；shot_description 由一个或多个中文段落组成，每段以独立局部整数秒范围开头，并显式使用“地点：”“主体：”“动作：”“景别：”“运镜：”“光影：”“声音：”“收束：”八个标签。段落数量根据动作阶段、景别、运镜、说话者、声音和叙事重点的变化自动决定，多段从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
+6. scene_blueprints 的镜头描述必须遵守下面的 Seedance Skill；shot_description 由一个或多个中文段落组成，每段以独立局部整数秒范围开头，并显式使用“地点：”“主体：”“动作：”“景别：”“运镜：”“光影：”“声音：”“收束：”八个标签。
+   段落数量根据动作阶段、景别、运镜、说话者、声音和叙事重点的变化自动决定，多段从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 7. asset_requirements 只允许写可独立生图的人物、物理环境和有形商品/道具。修改意见里的时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入任何资产数组。
-7.1 每个分镜的 characters、scenes、props 三个数组合并去重后最多 9 个资产。必须在策划时控制：若内容需要更多资产，应拆分分镜或重排时长、动作、对白与资产，使相关叙事一起移动且镜间连续；禁止先生成超限 Plan，也禁止截断、漏掉或删除全局资产来凑数。
+7.1 每个分镜的 characters、scenes、props 三个数组合并去重后最多 9 个资产。必须在策划时控制：若内容需要更多资产，应拆分分镜或重排时长、动作、对白与资产，使相关叙事一起移动且镜间连续；
+    禁止先生成超限 Plan，也禁止截断、漏掉或删除全局资产来凑数。
 8. 必须重新分析完整修订版 scene_blueprints 与用户修改意见，返回完整 asset_manifest。characters/scenes/props 必须分别与所有分镜 asset_requirements 的同名分类并集完全相等，不能少也不能多；三类名称全局唯一且必须是后续 @ 引用的最终展示名。
-9. asset_manifest.characters 每项包含 name、description、three_view_prompt；scenes/props 每项包含 name、description、image_prompt。描述和生图要求必须具体对应当前人物造型、物理环境或有形道具；同一资产跨分镜只列一次，人物服装或外观明显变化时使用不同且明确的名称。
+9. asset_manifest.characters 每项包含 name、description、three_view_prompt；scenes/props 每项包含 name、description、image_prompt。
+   描述和生图要求必须具体对应当前人物造型、物理环境或有形道具；同一资产跨分镜只列一次，人物服装或外观明显变化时使用不同且明确的名称。
 10. plan.md 第四章必须包含“全局资产清单”，并逐项展示与 asset_manifest 完全相同的名称、文字说明和生图要求。
 11. semantic_memory 等长期记忆只用于内部决策，禁止在 plan.md 中输出“长期记忆约束”、PowerMem、Skill 经验、Agent 阶段日志或记忆原文。
 12. 返回 JSON，不要 Markdown 代码围栏。
@@ -295,12 +298,14 @@ def _generation_prompt(
 - 整片采用总分总结构：开场建立钩子，展开推进因果，证明/高潮完成卖点验证，结尾收束结果和转化。
 - 返回完整 scene_blueprints；全局 start_sec/end_sec 必须从 0 开始连续，shot_description 使用当前分镜内部的局部秒段，多段描述必须从 0 秒无重叠、无缺口地连续覆盖到该镜 duration_sec。
 - 每个蓝图包含 scene_id、scene_index、title、structure_role、start_sec、end_sec、duration_sec、storyline、shot_description、narration、transition、asset_requirements。
-- 每个 shot_description 由一个或多个中文段落组成，每段以独立局部整数秒范围开头，并显式使用“地点：”“主体：”“动作：”“景别：”“运镜：”“光影：”“声音：”“收束：”八个标签；段落数量按动作阶段、景别、运镜、说话者、声音和叙事重点的变化自动决定，多段必须连续覆盖整镜。
+- 每个 shot_description 由一个或多个中文段落组成，每段以独立局部整数秒范围开头，并显式使用“地点：”“主体：”“动作：”“景别：”“运镜：”“光影：”“声音：”“收束：”八个标签；
+  段落数量按动作阶段、景别、运镜、说话者、声音和叙事重点的变化自动决定，多段必须连续覆盖整镜。
 - asset_requirements 只写可独立生图的语义实体：人物放 characters，物理环境放 scenes，有形商品/包装/工具放 props；此阶段不虚构图片 URL。
 - 每个分镜的 characters、scenes、props 合并去重后最多 9 个资产。若故事内容需要更多资产，必须在 Plan 阶段拆分分镜或重排时长、动作、对白与资产，保持故事连续；禁止生成超限分镜，也禁止通过截断、漏掉或删除全局资产凑数。
 - 时间段、段落标题、钩子/高潮/收束、镜头/运镜/光影/声音/风格/规格，以及 @图片N/@视频N 参考编号都不是资产名称，禁止放入 asset_requirements。
 - 必须返回完整 asset_manifest：characters、scenes、props 分别与所有 scene_blueprints.asset_requirements 的同类名称并集完全相等，不能少、不能多；三类名称全局唯一，并作为后续场景包和 @ 图片引用的最终展示名。
-- asset_manifest.characters 每项必须包含 name、description、three_view_prompt，明确同一人物的年龄感、外貌、发型、服装和正面/侧面/背面一致性；scenes/props 每项必须包含 name、description、image_prompt，明确环境或物件的外观、材质、色彩、光线等可执行生图要求。
+- asset_manifest.characters 每项必须包含 name、description、three_view_prompt，明确同一人物的年龄感、外貌、发型、服装和正面/侧面/背面一致性；
+  scenes/props 每项必须包含 name、description、image_prompt，明确环境或物件的外观、材质、色彩、光线等可执行生图要求。
 - 同一人物、场景或道具跨多个分镜复用时只列一次；人物出现明显服装、年龄阶段或外观变化时，必须拆成不同且明确的名称，并让对应分镜引用该名称。
 - 用户表单、选中创意和采集上下文中明确命名的人物、服装造型、物理场景、商品或道具都是强制资产；必须逐项进入对应分镜的 asset_requirements 和 asset_manifest，禁止替换成“目标用户”“人物角色”“真实使用场景”“产品”等泛化名称。
 - plan.md 第四章必须输出“全局资产清单”，逐项展示与 asset_manifest 完全相同的名称、文字说明和生图要求。

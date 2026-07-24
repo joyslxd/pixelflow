@@ -1,166 +1,64 @@
-"""Tests for LangGraph Server auth handler (langgraph_auth.py).
-
-Validates that the LangGraph auth layer enforces the same rules as Gateway:
-  cookie → JWT decode → DB lookup → token_version check → owner filter
-"""
+"""验证 LangGraph 兼容入口复用 content-app Authorization。"""
 
 import asyncio
-import os
-from datetime import timedelta
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
 
 import pytest
-
-os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-for-langgraph-auth-testing-min-32")
-
 from langgraph_sdk import Auth
 
-from app.gateway.auth.config import AuthConfig, set_auth_config
-from app.gateway.auth.jwt import create_access_token, decode_token
-from app.gateway.auth.models import User
+from app.gateway.content_app_auth import ContentAppAuthError, ContentAppUser
 from app.gateway.langgraph_auth import add_owner_filter, authenticate
 
-# ── Helpers ───────────────────────────────────────────────────────────────
 
-_JWT_SECRET = "test-secret-key-for-langgraph-auth-testing-min-32"
-
-
-@pytest.fixture(autouse=True)
-def _setup_auth_config():
-    set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
-    yield
-    set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
+def _request(authorization: str | None = None):
+    """构造只包含 LangGraph 鉴权所需字段的请求。"""
+    headers = {} if authorization is None else {"Authorization": authorization}
+    return SimpleNamespace(headers=headers)
 
 
-def _req(cookies=None, method="GET", headers=None):
-    return SimpleNamespace(cookies=cookies or {}, method=method, headers=headers or {})
+def test_missing_authorization_raises_401():
+    """缺少 Authorization 时保持 content-app 的未认证语义。"""
+    with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
+        asyncio.run(authenticate(_request()))
+
+    assert exc_info.value.status_code == 401
 
 
-def _user(user_id=None, token_version=0):
-    return User(email="test@example.com", password_hash="fakehash", system_role="user", id=user_id or uuid4(), token_version=token_version)
+def test_valid_authorization_returns_content_app_user_id():
+    """有效 Authorization 直接返回 content-app 用户 ID。"""
+    user = ContentAppUser(id="user-1", username="user-1")
+    authenticate_header = AsyncMock(return_value=user)
+
+    with patch("app.gateway.langgraph_auth.authenticate_authorization_header", authenticate_header):
+        result = asyncio.run(authenticate(_request("Bearer user-token")))
+
+    assert result == "user-1"
+    authenticate_header.assert_awaited_once_with("Bearer user-token")
 
 
-def _mock_provider(user=None):
-    p = AsyncMock()
-    p.get_user = AsyncMock(return_value=user)
-    return p
+def test_content_app_error_preserves_status_code():
+    """content-app 拒绝用户时不能降级成本地登录或其他状态码。"""
+    authenticate_header = AsyncMock(
+        side_effect=ContentAppAuthError(
+            status_code=403,
+            code="user_disabled",
+            message="该账号已被禁用",
+        )
+    )
 
+    with patch("app.gateway.langgraph_auth.authenticate_authorization_header", authenticate_header):
+        with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
+            asyncio.run(authenticate(_request("Bearer disabled-token")))
 
-# ── @auth.authenticate ───────────────────────────────────────────────────
-
-
-def test_no_cookie_raises_401():
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req()))
-    assert exc.value.status_code == 401
-    assert "Not authenticated" in str(exc.value.detail)
-
-
-def test_invalid_jwt_raises_401():
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req({"access_token": "garbage"})))
-    assert exc.value.status_code == 401
-    assert "Invalid token" in str(exc.value.detail)
-
-
-def test_expired_jwt_raises_401():
-    token = create_access_token("user-1", expires_delta=timedelta(seconds=-1))
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req({"access_token": token})))
-    assert exc.value.status_code == 401
-
-
-def test_user_not_found_raises_401():
-    token = create_access_token("ghost")
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(None)):
-        with pytest.raises(Auth.exceptions.HTTPException) as exc:
-            asyncio.run(authenticate(_req({"access_token": token})))
-        assert exc.value.status_code == 401
-        assert "User not found" in str(exc.value.detail)
-
-
-def test_token_version_mismatch_raises_401():
-    user = _user(token_version=2)
-    token = create_access_token(str(user.id), token_version=1)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        with pytest.raises(Auth.exceptions.HTTPException) as exc:
-            asyncio.run(authenticate(_req({"access_token": token})))
-        assert exc.value.status_code == 401
-        assert "revoked" in str(exc.value.detail).lower()
-
-
-def test_valid_token_returns_user_id():
-    user = _user(token_version=0)
-    token = create_access_token(str(user.id), token_version=0)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        result = asyncio.run(authenticate(_req({"access_token": token})))
-    assert result == str(user.id)
-
-
-def test_valid_token_matching_version():
-    user = _user(token_version=5)
-    token = create_access_token(str(user.id), token_version=5)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        result = asyncio.run(authenticate(_req({"access_token": token})))
-    assert result == str(user.id)
-
-
-# ── @auth.authenticate edge cases ────────────────────────────────────────
-
-
-def test_provider_exception_propagates():
-    """Provider raises → should not be swallowed silently."""
-    token = create_access_token("user-1")
-    p = AsyncMock()
-    p.get_user = AsyncMock(side_effect=RuntimeError("DB down"))
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=p):
-        with pytest.raises(RuntimeError, match="DB down"):
-            asyncio.run(authenticate(_req({"access_token": token})))
-
-
-def test_jwt_missing_ver_defaults_to_zero():
-    """JWT without 'ver' claim → decoded as ver=0, matches user with token_version=0."""
-    import jwt as pyjwt
-
-    uid = str(uuid4())
-    raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
-    user = _user(user_id=uid, token_version=0)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        result = asyncio.run(authenticate(_req({"access_token": raw})))
-    assert result == uid
-
-
-def test_jwt_missing_ver_rejected_when_user_version_nonzero():
-    """JWT without 'ver' (defaults 0) vs user with token_version=1 → 401."""
-    import jwt as pyjwt
-
-    uid = str(uuid4())
-    raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
-    user = _user(user_id=uid, token_version=1)
-    with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        with pytest.raises(Auth.exceptions.HTTPException) as exc:
-            asyncio.run(authenticate(_req({"access_token": raw})))
-        assert exc.value.status_code == 401
-
-
-def test_wrong_secret_raises_401():
-    """Token signed with different secret → 401."""
-    import jwt as pyjwt
-
-    raw = pyjwt.encode({"sub": "user-1", "exp": 9999999999, "ver": 0}, "wrong-secret-that-is-long-enough-32chars!", algorithm="HS256")
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req({"access_token": raw})))
-    assert exc.value.status_code == 401
-
-
-# ── @auth.on (owner filter) ──────────────────────────────────────────────
+    assert exc_info.value.status_code == 403
+    assert "禁用" in str(exc_info.value.detail)
 
 
 class _FakeUser:
-    """Minimal BaseUser-compatible object without langgraph_api.config dependency."""
+    """提供 LangGraph AuthContext 所需的最小用户结构。"""
 
     def __init__(self, identity: str):
         self.identity = identity
@@ -168,145 +66,55 @@ class _FakeUser:
         self.display_name = identity
 
 
-def _make_ctx(user_id):
-    return Auth.types.AuthContext(resource="threads", action="create", user=_FakeUser(user_id), permissions=[])
+def _context(user_id: str):
+    """构造 owner filter 使用的最小鉴权上下文。"""
+    return Auth.types.AuthContext(
+        resource="threads",
+        action="create",
+        user=_FakeUser(user_id),
+        permissions=[],
+    )
 
 
-def test_filter_injects_user_id():
+def test_owner_filter_injects_user_id():
+    """新建资源时写入当前 content-app 用户。"""
     value = {}
-    asyncio.run(add_owner_filter(_make_ctx("user-a"), value))
+
+    result = asyncio.run(add_owner_filter(_context("user-a"), value))
+
     assert value["metadata"]["user_id"] == "user-a"
+    assert result == {"user_id": "user-a"}
 
 
-def test_filter_preserves_existing_metadata():
+def test_owner_filter_preserves_other_metadata():
+    """用户隔离字段不能覆盖标题等业务元数据。"""
     value = {"metadata": {"title": "hello"}}
-    asyncio.run(add_owner_filter(_make_ctx("user-a"), value))
-    assert value["metadata"]["user_id"] == "user-a"
-    assert value["metadata"]["title"] == "hello"
+
+    asyncio.run(add_owner_filter(_context("user-a"), value))
+
+    assert value["metadata"] == {"title": "hello", "user_id": "user-a"}
 
 
-def test_filter_returns_user_id_dict():
-    result = asyncio.run(add_owner_filter(_make_ctx("user-x"), {}))
-    assert result == {"user_id": "user-x"}
-
-
-def test_filter_read_write_consistency():
-    value = {}
-    filter_dict = asyncio.run(add_owner_filter(_make_ctx("user-1"), value))
-    assert value["metadata"]["user_id"] == filter_dict["user_id"]
-
-
-def test_different_users_different_filters():
-    f_a = asyncio.run(add_owner_filter(_make_ctx("a"), {}))
-    f_b = asyncio.run(add_owner_filter(_make_ctx("b"), {}))
-    assert f_a["user_id"] != f_b["user_id"]
-
-
-def test_filter_overrides_conflicting_user_id():
-    """If value already has a different user_id in metadata, it gets overwritten."""
+def test_owner_filter_overrides_forged_user_id():
+    """调用方伪造的 owner 必须由当前登录用户覆盖。"""
     value = {"metadata": {"user_id": "attacker"}}
-    asyncio.run(add_owner_filter(_make_ctx("real-owner"), value))
+
+    asyncio.run(add_owner_filter(_context("real-owner"), value))
+
     assert value["metadata"]["user_id"] == "real-owner"
 
 
-def test_filter_with_empty_metadata():
-    """Explicit empty metadata dict is fine."""
-    value = {"metadata": {}}
-    result = asyncio.run(add_owner_filter(_make_ctx("user-z"), value))
-    assert value["metadata"]["user_id"] == "user-z"
-    assert result == {"user_id": "user-z"}
+def test_langgraph_json_uses_shared_auth_handler():
+    """LangGraph 配置继续指向共享 content-app 鉴权模块。"""
+    config = json.loads((Path(__file__).parent.parent / "langgraph.json").read_text(encoding="utf-8"))
 
-
-# ── Gateway parity ───────────────────────────────────────────────────────
-
-
-def test_shared_jwt_secret():
-    token = create_access_token("user-1", token_version=3)
-    payload = decode_token(token)
-    from app.gateway.auth.errors import TokenError
-
-    assert not isinstance(payload, TokenError)
-    assert payload.sub == "user-1"
-    assert payload.ver == 3
-
-
-def test_langgraph_json_has_auth_path():
-    import json
-
-    config = json.loads((Path(__file__).parent.parent / "langgraph.json").read_text())
     assert "auth" in config
     assert "langgraph_auth" in config["auth"]["path"]
 
 
-def test_auth_handler_has_both_layers():
+def test_auth_handler_registers_authenticate_and_owner_filter():
+    """兼容入口必须同时注册身份校验和 owner filter。"""
     from app.gateway.langgraph_auth import auth
 
     assert auth._authenticate_handler is not None
     assert len(auth._global_handlers) == 1
-
-
-# ── CSRF in LangGraph auth ──────────────────────────────────────────────
-
-
-def test_csrf_get_no_check():
-    """GET requests skip CSRF — should proceed to JWT validation."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req(method="GET")))
-    # Rejected by missing cookie, NOT by CSRF
-    assert exc.value.status_code == 401
-    assert "Not authenticated" in str(exc.value.detail)
-
-
-def test_csrf_post_missing_token():
-    """POST without CSRF token → 403."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req(method="POST", cookies={"access_token": "some-jwt"})))
-    assert exc.value.status_code == 403
-    assert "CSRF token missing" in str(exc.value.detail)
-
-
-def test_csrf_post_mismatched_token():
-    """POST with mismatched CSRF tokens → 403."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(
-            authenticate(
-                _req(
-                    method="POST",
-                    cookies={"access_token": "some-jwt", "csrf_token": "real-token"},
-                    headers={"x-csrf-token": "wrong-token"},
-                )
-            )
-        )
-    assert exc.value.status_code == 403
-    assert "mismatch" in str(exc.value.detail)
-
-
-def test_csrf_post_matching_token_proceeds_to_jwt():
-    """POST with matching CSRF tokens passes CSRF check, then fails on JWT."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(
-            authenticate(
-                _req(
-                    method="POST",
-                    cookies={"access_token": "garbage", "csrf_token": "same-token"},
-                    headers={"x-csrf-token": "same-token"},
-                )
-            )
-        )
-    # Past CSRF, rejected by JWT decode
-    assert exc.value.status_code == 401
-    assert "Invalid token" in str(exc.value.detail)
-
-
-def test_csrf_put_requires_token():
-    """PUT also requires CSRF."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req(method="PUT", cookies={"access_token": "jwt"})))
-    assert exc.value.status_code == 403
-
-
-def test_csrf_delete_requires_token():
-    """DELETE also requires CSRF."""
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(authenticate(_req(method="DELETE", cookies={"access_token": "jwt"})))
-    assert exc.value.status_code == 403

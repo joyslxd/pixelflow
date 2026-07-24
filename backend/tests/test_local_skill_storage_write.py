@@ -10,6 +10,16 @@ import pytest
 from deerflow.skills.storage import get_or_new_skill_storage
 
 
+def _create_symlink(target, link) -> None:
+    """创建测试符号链接，仅在 Windows 缺少对应权限时跳过。"""
+    try:
+        os.symlink(target, link)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("当前 Windows 环境未授予创建符号链接的权限")
+        raise
+
+
 @pytest.fixture()
 def storage(tmp_path):
     return get_or_new_skill_storage(skills_path=str(tmp_path))
@@ -124,7 +134,7 @@ def test_rejects_dotdot_only(storage):
 def test_rejects_symlink_pointing_outside(tmp_path, storage, skill_dir):
     outside = tmp_path / "outside.txt"
     link = skill_dir / "escape_link.txt"
-    os.symlink(outside, link)
+    _create_symlink(outside, link)
     with pytest.raises(ValueError, match="skill directory"):
         storage.write_custom_skill("demo-skill", "escape_link.txt", "x")
 
@@ -133,7 +143,7 @@ def test_rejects_symlink_dir_pointing_outside(tmp_path, storage, skill_dir):
     outside_dir = tmp_path / "outside_dir"
     outside_dir.mkdir()
     link_dir = skill_dir / "linked_dir"
-    os.symlink(outside_dir, link_dir)
+    _create_symlink(outside_dir, link_dir)
     with pytest.raises(ValueError, match="skill directory"):
         storage.write_custom_skill("demo-skill", "linked_dir/file.txt", "x")
 
@@ -148,7 +158,7 @@ def test_allows_symlink_within_skill_dir(tmp_path, storage, skill_dir):
     real_file = skill_dir / "real.md"
     real_file.write_text("real")
     link = skill_dir / "alias.md"
-    os.symlink(real_file, link)
+    _create_symlink(real_file, link)
     # Should not raise
     storage.write_custom_skill("demo-skill", "alias.md", "updated")
     # resolve() writes through to the real target file

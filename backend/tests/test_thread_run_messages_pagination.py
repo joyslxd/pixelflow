@@ -9,6 +9,7 @@ from _router_auth_helpers import make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
 from deerflow.runtime import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -18,9 +19,16 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 # ---------------------------------------------------------------------------
 
 
+_STORE_USER = User(
+    email="store-owner@example.com",
+    password_hash="x",
+    system_role="user",
+)
+
+
 def _make_app(event_store=None, run_manager=None):
     """Build a test FastAPI app with stub auth and mocked state."""
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: _STORE_USER)
     app.include_router(thread_runs.router)
 
     if event_store is not None:
@@ -49,6 +57,7 @@ def _make_store_only_run_manager() -> RunManager:
             "store-only-run",
             thread_id="thread-store",
             assistant_id="lead_agent",
+            user_id=str(_STORE_USER.id),
             status="running",
             multitask_strategy="reject",
             metadata={},

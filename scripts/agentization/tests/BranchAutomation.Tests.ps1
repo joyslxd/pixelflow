@@ -353,6 +353,95 @@ Describe "Agent 分支自动化入口" {
         @($pythonCommands | Where-Object { $_.FilePath -eq $pythonPath }).Count | Should Be 2
     }
 
+    It "M03 最终门禁只运行权威定向测试并使用项目 Python" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M03" -GateType "Final" -PlanOnly)
+        $versionCommands = @($plan | Where-Object { $_.Arguments -contains "import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" })
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $expectedTests = @(
+            "tests/test_agent_runtime_context_externalizer.py",
+            "tests/test_agent_runtime_context_assembler.py",
+            "tests/test_agent_runtime_token_meter.py",
+            "tests/test_agent_runtime_context_profiles.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_config.py",
+            "tests/test_profile_config.py",
+            "tests/test_pixelflow_memory_helper.py"
+        )
+
+        $versionCommands.Count | Should Be 1
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        ($versionCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        ($versionCommands[0].Arguments -join "`n") | Should Be (
+            @(
+                "-c",
+                "import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+            ) -join "`n"
+        )
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check", "pixelflow/agent_runtime/context") +
+                $expectedTests
+            ) -join "`n"
+        )
+    }
+
+    It "M01 在 Event Outbox 权威清单完成前必须 fail-closed" {
+        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M01" -GateType "Final" -PlanOnly } | Should Throw
+    }
+
+    It "未配置权威测试清单的后端模块必须 fail-closed" {
+        foreach ($moduleId in @("M02", "M04", "M05", "M06")) {
+            { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
+        }
+    }
+
+    It "M07 和 M12 前端门禁包含全量测试、lint 和生产构建" {
+        foreach ($moduleId in @("M07", "M12")) {
+            $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly)
+            $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
+
+            $webCommands.Count | Should Be 3
+            @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test" }).Count | Should Be 1
+            @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm lint" }).Count | Should Be 1
+            @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
+        }
+    }
+
+    It "M08 到 M11 在后端权威清单完成前必须 fail-closed" {
+        foreach ($moduleId in @("M08", "M09", "M10", "M11")) {
+            { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
+        }
+    }
+
+    It "M13 保留后端全量门禁并使用项目 Python" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M13" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        (($pytestCommands[0].Arguments -join " ") -eq "-m pytest -q") | Should Be $true
+        (($ruffCommands[0].Arguments -join " ") -eq "-m ruff check .") | Should Be $true
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test:agent-runtime-contracts" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm lint" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
+    }
+
+    It "缺少项目虚拟环境时不得回退到 PATH Python" {
+        $topology = New-AutomationTestTopology
+
+        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $topology.Repository -ModuleId "M03" -GateType "Final" -PlanOnly } | Should Throw
+    }
+
     It "M00 首次集成门禁只聚合 M00 范围命令" {
         $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M00" -GateType "Final" -PlanOnly)
         $pythonCommand = @($plan | Where-Object { ($_.Arguments -contains "pytest") -and ($_.Arguments -contains "tests/test_agent_runtime_config.py") })

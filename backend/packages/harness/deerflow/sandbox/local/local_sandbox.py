@@ -167,20 +167,24 @@ class LocalSandbox(Sandbox):
         Returns:
             Container path if mapping exists, otherwise original path
         """
-        normalized_path = path.replace("\\", "/")
-        path_str = str(Path(normalized_path).resolve())
+        normalized_path = path.replace("\\", os.sep).replace("/", os.sep)
+        resolved_path = Path(normalized_path).resolve()
 
         # Try each mapping (longest local path first for more specific matches)
         for mapping in sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True):
-            local_path_resolved = str(Path(mapping.local_path).resolve())
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
-                # Replace the local path prefix with container path
-                relative = path_str[len(local_path_resolved) :].lstrip("/")
-                resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
-                return resolved
+            local_path_resolved = Path(mapping.local_path).resolve()
+            try:
+                relative = resolved_path.relative_to(local_path_resolved)
+            except ValueError:
+                continue
+
+            container_path = mapping.container_path.rstrip("/") or "/"
+            if not relative.parts:
+                return container_path
+            return f"{container_path}/{relative.as_posix()}"
 
         # No mapping found, return original path
-        return path_str
+        return str(resolved_path)
 
     def _reverse_resolve_paths_in_output(self, output: str) -> str:
         """
@@ -204,10 +208,10 @@ class LocalSandbox(Sandbox):
         # Match paths like /Users/... or other absolute paths
         result = output
         for mapping in sorted_mappings:
-            # Escape the local path for use in regex
-            escaped_local = re.escape(str(Path(mapping.local_path).resolve()))
-            # Match the local path followed by optional path components with either separator
-            pattern = re.compile(escaped_local + r"(?:[/\\][^\s\"';&|<>()]*)?")
+            # 同时匹配 Windows 与 POSIX 分隔符，并要求命中完整路径段。
+            escaped_local = re.escape(Path(mapping.local_path).resolve().as_posix()).replace("/", r"[/\\]")
+            flags = re.IGNORECASE if os.name == "nt" else 0
+            pattern = re.compile(escaped_local + r"(?=$|[/\\])(?:[/\\][^\s\"';&|<>()]*)?", flags)
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
@@ -286,7 +290,7 @@ class LocalSandbox(Sandbox):
     def _get_shell() -> str:
         """Detect available shell executable with fallback."""
         shell = LocalSandbox._find_first_available_shell(("/bin/zsh", "/bin/bash", "/bin/sh", "sh"))
-        if shell is not None:
+        if shell is not None and (os.name != "nt" or LocalSandbox._is_msys_shell(shell)):
             return shell
 
         if os.name == "nt":
@@ -333,6 +337,8 @@ class LocalSandbox(Sandbox):
                 shell=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
                 env=env,
             )
@@ -343,6 +349,8 @@ class LocalSandbox(Sandbox):
                 shell=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
             )
         output = result.stdout

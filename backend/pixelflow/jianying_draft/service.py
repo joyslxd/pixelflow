@@ -47,6 +47,7 @@ class _JianyingDraftJob:
     key: tuple[str, str]
     result: JianyingDraftResult
     completed_at: datetime | None = None
+    completion_order: int | None = None
     replaced_by_job_id: str | None = None
     task: asyncio.Task[None] | None = None
     terminal_experience_claimed: bool = False
@@ -83,6 +84,7 @@ class JianyingDraftService:
         self._replaced_jobs: OrderedDict[str, _ReplacedJianyingDraftJob] = OrderedDict()
         self._lock = asyncio.Lock()
         self._closed = False
+        self._completion_sequence = 0
 
     @property
     def job_count(self) -> int:
@@ -336,12 +338,12 @@ class JianyingDraftService:
     ) -> tuple[bool, _JianyingDraftJob | None]:
         reclaimed_job: _JianyingDraftJob | None = None
         while len(self._jobs) >= _MAX_JOBS:
-            terminal_jobs = [(job_id, job) for job_id, job in self._jobs.items() if job.completed_at is not None]
+            terminal_jobs = [(job_id, job) for job_id, job in self._jobs.items() if job.completion_order is not None]
             if not terminal_jobs:
                 return False, None
             job_id, job = min(
                 terminal_jobs,
-                key=lambda item: item[1].completed_at,
+                key=lambda item: item[1].completion_order,
             )
             self._jobs.pop(job_id)
             if job_id == recyclable_job_id:
@@ -455,4 +457,6 @@ class JianyingDraftService:
             )
             if job.result.status in _TERMINAL_STATUSES:
                 job.completed_at = datetime.now()
+                self._completion_sequence += 1
+                job.completion_order = self._completion_sequence
                 job.task = None

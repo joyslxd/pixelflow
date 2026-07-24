@@ -69,10 +69,27 @@ if ($GateType -eq "Phase") {
     }
 }
 
+$backendModuleIds = @("M00", "M00-A", "M02", "M03", "M04", "M05", "M06", "M13")
+$pythonExecutable = $null
+if ($backendModuleIds -contains $ModuleId) {
+    $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
+}
+
 $commands = New-Object System.Collections.Generic.List[object]
 $commands.Add([pscustomobject]@{ WorkingDirectory = $root; FilePath = "git"; Arguments = @("diff", "--check") })
+if ($pythonExecutable) {
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @(
+                "-c",
+                "import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+            )
+        }
+    )
+}
 if ($ModuleId -eq "M00") {
-    $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
     $commands.Add([pscustomobject]@{ WorkingDirectory = $root; FilePath = "powershell"; Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`$r=Invoke-Pester -Script 'scripts/agentization/tests' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_agent_runtime_config.py", "tests/test_gateway_app_import_profile.py", "tests/test_profile_config.py", "tests/test_openapi_operation_ids.py", "-q") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", "pixelflow/agent_runtime", "app/gateway/profile_config.py", "app/gateway/app.py", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_agent_runtime_config.py", "tests/test_gateway_app_import_profile.py", "tests/test_profile_config.py", "tests/test_openapi_operation_ids.py") })
@@ -82,7 +99,6 @@ if ($ModuleId -eq "M00") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
 }
 elseif ($ModuleId -eq "M00-A") {
-    $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
     $commands.Add([pscustomobject]@{ WorkingDirectory = $root; FilePath = "powershell"; Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`$r=Invoke-Pester -Script 'scripts/agentization/tests' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_openapi_operation_ids.py", "-q") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", "pixelflow/agent_runtime", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py") })
@@ -90,16 +106,46 @@ elseif ($ModuleId -eq "M00-A") {
 elseif ($ModuleId -eq "M00-B") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "node"; Arguments = @("--test", "tests") })
 }
-elseif ($ModuleId -match "^M0[1-6]$") {
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = "python"; Arguments = @("-m", "pytest", "-q") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = "python"; Arguments = @("-m", "ruff", "check", "pixelflow", "app/gateway", "tests") })
+elseif ($ModuleId -eq "M01") {
+    throw "模块 M01 的 M01.5 Event Outbox 权威测试清单尚未建立；禁止在最终切片完成前提前放行。"
 }
-elseif ($ModuleId -match "^M(0[7-9]|1[0-2])$") {
+elseif ($ModuleId -eq "M03") {
+    $m03Tests = @(
+        "tests/test_agent_runtime_context_externalizer.py",
+        "tests/test_agent_runtime_context_assembler.py",
+        "tests/test_agent_runtime_token_meter.py",
+        "tests/test_agent_runtime_context_profiles.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_config.py",
+        "tests/test_profile_config.py",
+        "tests/test_pixelflow_memory_helper.py"
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m03Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check", "pixelflow/agent_runtime/context") + $m03Tests
+        }
+    )
+}
+elseif ($ModuleId -match "^M0(2|4|5|6)$") {
+    throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
+}
+elseif ($ModuleId -match "^M(07|12)$") {
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
 }
+elseif ($ModuleId -match "^M(0[8-9]|1[0-1])$") {
+    throw "模块 $ModuleId 尚未建立包含后端范围的权威测试清单；禁止只运行前端门禁，请先由模块 owner 按 test-matrix.md 配置。"
+}
 elseif ($ModuleId -eq "M13") {
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = "python"; Arguments = @("-m", "pytest", "-q") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "-q") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", ".") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test:agent-runtime-contracts") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
 }
 
