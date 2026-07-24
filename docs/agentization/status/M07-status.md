@@ -4,12 +4,16 @@
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
-- 当前切片：M07.2
+- 当前切片：M07.3
 - base SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
-- 当前唯一写入者：已释放（M07.1 完成）
+- 当前唯一写入者：已释放（M07.2 完成）
 - 开始时间：`2026-07-24 07:19:26 +0800`
 - M07.1 完成时间：`2026-07-24 08:30:24 +0800`
 - M07.1 已释放文件：`web/src/lib/supervisor/api.ts`、`web/tests/supervisorApi.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.1.md`
+- M07.2 开始时间：`2026-07-24 08:48:36 +0800`
+- M07.2 锁定文件：`web/src/lib/supervisor/events.ts`、`web/tests/supervisorEvents.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.2.md`
+- M07.2 完成时间：`2026-07-24 09:12:20 +0800`
+- M07.2 已释放文件：`web/src/lib/supervisor/events.ts`、`web/tests/supervisorEvents.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.2.md`
 
 ## 开工检查
 
@@ -20,7 +24,7 @@
 ## 切片
 
 - [x] M07.1 API transport（2h）
-- [ ] M07.2 SSE/cursor/gap/reconnect（2.5h）
+- [x] M07.2 SSE/cursor/gap/reconnect（2.5h）
 - [ ] M07.3 reducer 四维状态机（2.5h）
 - [ ] M07.4 conversation hook/Abort 隔离（2h）
 - [ ] M07.5 legacy snapshot adapter（2h）
@@ -28,6 +32,16 @@
 ## 恢复提示
 
 本模块不改 `WorkspacePage.tsx`。全部使用 fixture/mock server 开发，先证明重复/乱序事件和切换对话安全。
+
+## M07.2 完成记录
+
+- 实现：新增 Supervisor SSE 事件流 Client，支持 `/agent` 路径、Authorization 延迟注入、CRLF 与分块 frame 解析、cursor 断点续传、`event_id + sequence` 幂等、乱序丢弃、sequence gap 的 Snapshot 恢复、瞬时网络重连、跨对话 fail-closed、Abort/close 和安全错误文案。
+- 边界：SSE 连接在未完成 frame 中途结束时丢弃残片并从最后成功 cursor 重连；Snapshot 恢复的普通异常转换为固定安全错误并停止，不进入无限网络重连；消费回调异常和致命协议错误会终止并清理 reader。
+- TDD：基线 `226/226`；初始模块缺失 RED；首轮实现 `234/236` 后 GREEN `236/236`；自审边界 RED `238/240` 后 GREEN `240/240`；reader 清理 RED `240/241` 后 GREEN `241/241`；独立审核整改 RED `242/244` 后最终 GREEN `244/244`。
+- 验证：`npm test`（`244/244`）、`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建只有既存 chunk 体积提醒。未调用真实付费 API。
+- 审核：独立只读 reviewer `/root/m07_2_reviewer` 第二轮结论 `Ready`，无 Critical/Important；Minor 建议记录在测试报告中，不阻塞本片。
+- 环境：本机没有可执行的 PowerShell；按仓库 fail-closed 条件完成人工中文规范检查，无新增配置、无解释性英文注释，Corepack 签名 keyid 问题下使用 npm 兜底且未修改锁文件。
+- 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.3 reducer 四维状态机`。
 
 ## M07.1 完成记录
 
