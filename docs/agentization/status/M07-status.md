@@ -1,6 +1,6 @@
 # M07 前端 Supervisor 事件 Runtime
 
-- phase：`integration_blocked`
+- phase：`ready_for_integration`
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
@@ -102,5 +102,5 @@
 - 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.2 SSE/cursor/gap/reconnect`。
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`blocked`
-- integration failure evidence：`候选 codex/integrate-m07-20260724-101936-a7219105 已保留；Agent 未更新；错误类型 RuntimeException`
+- checkpoint_status：`ready`
+- integration failure evidence：`上次候选因旧 Corepack 不认识 pnpm 新签名 key 而阻塞；现已升级到 Corepack 0.34.1，并固定兼容 Node.js 22.12.0 的 pnpm 10.12.4，corepack pnpm --version 验证通过；等待全新单槽候选复跑权威门禁`
