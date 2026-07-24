@@ -69,7 +69,7 @@ if ($GateType -eq "Phase") {
     }
 }
 
-$backendModuleIds = @("M00", "M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M13")
+$backendModuleIds = @("M00", "M00-A", "M02", "M03", "M04", "M05", "M06", "M13")
 $pythonExecutable = $null
 if ($backendModuleIds -contains $ModuleId) {
     $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
@@ -107,30 +107,7 @@ elseif ($ModuleId -eq "M00-B") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "node"; Arguments = @("--test", "tests") })
 }
 elseif ($ModuleId -eq "M01") {
-    $m01Tests = @(
-        "tests/test_agent_runtime_conversation_cas.py",
-        "tests/test_agent_runtime_migration.py",
-        "tests/test_agent_runtime_repositories.py",
-        "tests/test_agent_runtime_turn_inbox.py",
-        "tests/test_pixelflow_task_store.py",
-        "tests/test_pixelflow_conversations_router.py",
-        "tests/test_pixelflow_jianying_draft_router.py"
-    )
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m01Tests + @("-q") })
-    $commands.Add(
-        [pscustomobject]@{
-            WorkingDirectory = (Join-Path $root "backend")
-            FilePath = $pythonExecutable
-            Arguments = @(
-                "-m", "ruff", "check",
-                "pixelflow/agent_runtime/persistence",
-                "pixelflow/tasks",
-                "app/gateway/routers/pixelflow_conversations.py",
-                "packages/harness/deerflow/persistence/migrations/versions",
-                "packages/harness/deerflow/persistence/models/__init__.py"
-            ) + $m01Tests
-        }
-    )
+    throw "模块 M01 的 M01.5 Event Outbox 权威测试清单尚未建立；禁止在最终切片完成前提前放行。"
 }
 elseif ($ModuleId -eq "M03") {
     $m03Tests = @(
@@ -155,9 +132,13 @@ elseif ($ModuleId -eq "M03") {
 elseif ($ModuleId -match "^M0(2|4|5|6)$") {
     throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
 }
-elseif ($ModuleId -match "^M(0[7-9]|1[0-2])$") {
+elseif ($ModuleId -match "^M(07|12)$") {
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
+}
+elseif ($ModuleId -match "^M(0[8-9]|1[0-1])$") {
+    throw "模块 $ModuleId 尚未建立包含后端范围的权威测试清单；禁止只运行前端门禁，请先由模块 owner 按 test-matrix.md 配置。"
 }
 elseif ($ModuleId -eq "M13") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "-q") })
