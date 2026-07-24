@@ -118,4 +118,26 @@
 - remote guard：首次脚本推进前及完整记录最终推进前均重新 fetch；Agent、dev 和 M03 三条远端引用必须与各自冻结值完全一致，否则中止推送并保持 Agent 不变
 - rollback：如需撤回，基于本记录定位 M03 集成提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M03 状态、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有设计和 content-app API 变化
-- 2026-07-24 18:35:10 +08:00：M07 最终模块 候选通过，模块提交 `a5a7b75aa2e9ed857bdefd70f7f79d6ae1d7cbaf` 已纳入最新 Agent/dev 基线。
+
+### 0004 / 2026-07-24 / M07 最终模块集成
+
+- module：`M07`
+- source branch / SHA：`origin/codex/agent-0.8.4-m07-web-runtime@a5a7b75aa2e9ed857bdefd70f7f79d6ae1d7cbaf`
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@6a1779c549d941f347ad030ee51056cfb16e329a` → `020edc749e1c7615048c699f23afb4498beca9b2`
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交已是冻结 Agent 祖先，没有产生额外 dev 合并
+- candidate：`codex/integrate-m07-20260724-103456-607ebb93`；由“最新 Agent + 最新 dev + M07 增量”创建的全新候选，没有复用上次阻塞候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M07.5`，`checkpoint_commit=a5a7b75aa2e9ed857bdefd70f7f79d6ae1d7cbaf`，此前 `last_integrated_commit` 为空
+- trigger / single slot：远端状态恢复为 `ready_for_integration` 且提交已 push；开发者人工启动唯一单槽任务，最终状态为 `merged`，`checkpoint_status=integrated`
+- file ownership：模块五个切片均已释放写锁；候选只纳入 M07 前端 Runtime、测试、状态和集成记录，没有进入 M12 或其他模块
+- feature flag：保持默认 `off + [] + 0 + false`，没有接管现有业务
+- production：未发布；未修改生产运行模式、intent 范围、Feature Flag 或生产配置，没有发布批准记录
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：修复 Corepack 签名环境后，M07 Final `CommandCount=4`；`corepack pnpm test`、`corepack pnpm lint`、`corepack pnpm build-prod` 和 `git diff --check` 全部通过
+- conflicts：最新 Agent、最新 dev 和 M07 增量合入候选时无内容冲突；首次候选仅因本机旧 Corepack 不认识 pnpm 新签名 key 而阻塞，修复为 Corepack `0.34.1` 与 pnpm `10.12.4` 后使用全新候选通过
+- migration/configuration：无 migration、无仓库配置键变化；前端依赖按既有 lockfile 冻结安装，没有修改依赖声明或锁文件
+- Chinese engineering policy：M07 切片与状态提交、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁
+- smoke：只执行 M07 非付费前端权威门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行 M12 或其他下一切片，未修改 dev，未发布生产，未把自动化状态提升为 `automation_active`
+- remote guard：权威门禁后重新 fetch；Agent、dev 和 M07 三条远端引用与冻结值一致后才执行原子更新，集成记录补正前再次复核 Agent 远端未变化
+- rollback：如需撤回，基于本记录定位 M07 集成提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M07 状态、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有设计和 content-app API 变化
