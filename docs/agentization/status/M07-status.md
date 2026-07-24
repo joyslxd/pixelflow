@@ -4,9 +4,9 @@
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
-- 当前切片：M07.4
+- 当前切片：M07.5
 - base SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
-- 当前唯一写入者：已释放（M07.3 完成）
+- 当前唯一写入者：已释放（M07.4 完成）
 - 开始时间：`2026-07-24 07:19:26 +0800`
 - M07.1 完成时间：`2026-07-24 08:30:24 +0800`
 - M07.1 已释放文件：`web/src/lib/supervisor/api.ts`、`web/tests/supervisorApi.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.1.md`
@@ -19,6 +19,11 @@
 - M07.3 锁定文件：`web/src/lib/supervisor/reducer.ts`、`web/tests/supervisorReducer.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.3.md`
 - M07.3 完成时间：`2026-07-24 10:50:15 +0800`
 - M07.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/tests/supervisorReducer.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.3.md`
+- M07.4 开始时间：`2026-07-24 14:43:56 +0800`
+- M07.4 唯一写入者：已释放
+- M07.4 锁定文件：`web/src/hooks/useSupervisorConversation.ts`、`web/tests/useSupervisorConversation.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.4.md`；独立审核要求增加真实 React `StrictMode` 挂载验证，仍在既有测试文件内完成，无需新增依赖或扩大写入范围
+- M07.4 完成时间：`2026-07-24 15:14:57 +0800`
+- M07.4 已释放文件：`web/src/hooks/useSupervisorConversation.ts`、`web/tests/useSupervisorConversation.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.4.md`
 
 ## 开工检查
 
@@ -31,12 +36,23 @@
 - [x] M07.1 API transport（2h）
 - [x] M07.2 SSE/cursor/gap/reconnect（2.5h）
 - [x] M07.3 reducer 四维状态机（2.5h）
-- [ ] M07.4 conversation hook/Abort 隔离（2h）
+- [x] M07.4 conversation hook/Abort 隔离（2h）
 - [ ] M07.5 legacy snapshot adapter（2h）
 
 ## 恢复提示
 
 本模块不改 `WorkspacePage.tsx`。全部使用 fixture/mock server 开发，先证明重复/乱序事件和切换对话安全。
+
+## M07.4 完成记录
+
+- 实现：新增 Supervisor conversation controller 与 React hook，按 Snapshot 恢复点订阅 SSE，统一 Turn、interrupt、status 和手动 Snapshot 刷新入口。
+- 边界：共享 AbortController 与 generation 隔离切换/卸载后的迟到 Snapshot、事件、错误和 API 结算；reducer 未接受事件时 SSE 同步失败关闭，不推进私有恢复点；不自动重发已接受 Turn。
+- TDD：基线 `255/255`；初始模块缺失 RED；首轮 GREEN `260/260`；自审边界 RED `260/262` 后 GREEN `262/262`；独立审核整改复现无限恢复和迟到结算，最终 GREEN `265/265`。
+- 验证：`npm test`（`265/265`）、`npm run test:agent-runtime-contracts`（`9/9`）、`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建只有既存 chunk 体积提醒。未调用真实付费 API。
+- 审核：独立只读 reviewer `/root/m07_4_reviewer` 第二轮结论 `Ready`，无 Critical、Important 或 Minor；首轮 3 项 Important 均已通过跨层测试和 RED/GREEN 关闭。
+- 环境：本机没有可执行的 PowerShell；按仓库 fail-closed 条件完成人工中文规范检查，无新增配置、依赖或人工代码注释，未修改锁文件。
+- 阶段：M07.4 不是 `phased-rollout-plan.md` 检查点，也不是模块最后一片，不写阶段或模块集成就绪状态。
+- 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.5 legacy snapshot adapter`；本次不执行 M07.5。
 
 ## M07.3 完成记录
 
