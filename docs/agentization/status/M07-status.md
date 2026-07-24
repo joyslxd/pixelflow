@@ -1,6 +1,6 @@
 # M07 前端 Supervisor 事件 Runtime
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
@@ -100,7 +100,7 @@
 - 环境：Corepack 因签名 keyid 错误不可用，按仓库兜底流程使用 npm；未修改锁文件。
 - 外部调用：未调用任何真实付费 API。
 - 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.2 SSE/cursor/gap/reconnect`。
-- last_integrated_commit：`—`
+- last_integrated_commit：`a5a7b75aa2e9ed857bdefd70f7f79d6ae1d7cbaf`
 - locked files：`无`
-- checkpoint_status：`ready`
-- integration failure evidence：`上次候选因旧 Corepack 不认识 pnpm 新签名 key 而阻塞；现已升级到 Corepack 0.34.1，并固定兼容 Node.js 22.12.0 的 pnpm 10.12.4，corepack pnpm --version 验证通过；等待全新单槽候选复跑权威门禁`
+- checkpoint_status：`integrated`
+- integration failure evidence：`无`
