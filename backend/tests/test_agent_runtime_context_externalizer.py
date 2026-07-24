@@ -207,6 +207,29 @@ async def test_externalizer_extracts_bounded_safe_head_and_tail_for_plain_tool_t
 
 
 @pytest.mark.asyncio
+async def test_externalizer_redacts_quoted_json_credentials_from_snippet() -> None:
+    from pixelflow.agent_runtime.context.externalizer import ContextPayloadExternalizer
+
+    payload = _payload()
+    payload["recent_messages"][0]["context_snippet"] = '调用结果 {"api_key":"secret-value","token":"session-value","status":"ok"}'
+    externalizer = ContextPayloadExternalizer(
+        store=_PayloadStore(),
+        externalize_min_bytes=1_000,
+    )
+
+    result = await externalizer.externalize(
+        user_id="user-1",
+        conversation_id="conv-1",
+        payload=payload,
+    )
+
+    snippet = result.payload["recent_messages"][0]["content"]["snippet"]
+    assert "secret-value" not in snippet
+    assert "session-value" not in snippet
+    assert snippet.count("[已隐藏凭据]") == 2
+
+
+@pytest.mark.asyncio
 async def test_externalizer_rejects_reference_that_cannot_reduce_prompt() -> None:
     from pixelflow.agent_runtime.context.externalizer import ContextPayloadExternalizer
 

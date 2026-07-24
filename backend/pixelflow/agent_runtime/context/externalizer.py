@@ -18,8 +18,10 @@ _TOOL_FIELDS = ("tool_output", "tool_result")
 _ARTIFACT_FIELDS = ("artifact", "artifact_payload")
 _URL_PATTERN = re.compile(r"https?://[^\s\"']+", flags=re.IGNORECASE)
 _CREDENTIAL_PATTERN = re.compile(
-    r"\b(authorization|token|api[_ -]?key|secret|password)\b"
-    r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+    r"(?P<key_quote>[\"']?)"
+    r"\b(?P<key>authorization|token|api[_ -]?key|secret|password)\b"
+    r"(?P=key_quote)\s*[:=]\s*(?:bearer\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
     flags=re.IGNORECASE,
 )
 _BEARER_PATTERN = re.compile(r"\bbearer\s+[^\s,;]+", flags=re.IGNORECASE)
@@ -123,7 +125,7 @@ def _content_hash(payload: JsonValue) -> tuple[str, int]:
 def _truncate_snippet(value: str, max_chars: int) -> str:
     without_urls = _URL_PATTERN.sub("[已隐藏链接]", value)
     without_credentials = _CREDENTIAL_PATTERN.sub(
-        lambda match: f"{match.group(1)}=[已隐藏凭据]",
+        lambda match: f"{match.group('key')}=[已隐藏凭据]",
         without_urls,
     )
     compact = " ".join(_BEARER_PATTERN.sub("Bearer [已隐藏凭据]", without_credentials).split())
