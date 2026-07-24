@@ -15,6 +15,7 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const contractOnly = process.argv.includes("--contracts");
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-"));
 const typeTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-contract-types-"));
+const hookTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-hook-tests-"));
 const moduleDirectory = path.join(temporaryRoot, "modules");
 const apiDirectory = path.join(temporaryRoot, "api");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
@@ -26,6 +27,12 @@ const agentRuntimeContractFixture = path.resolve(
   "fixtures",
   "agent_runtime",
   "contracts-v1.json",
+);
+const supervisorLegacyAdapterFixture = path.join(
+  webRoot,
+  "tests",
+  "fixtures",
+  "supervisorLegacySnapshots.json",
 );
 const generatedAgentRuntimeTypeTest = path.join(
   typeTestRoot,
@@ -151,6 +158,31 @@ function compileApiModule() {
   writeFileSync(apiPath, compiledApi);
 }
 
+function compileHookModule() {
+  run(process.execPath, [
+    tscEntry,
+    "src/hooks/useSupervisorConversation.ts",
+    "src/lib/authStorage.ts",
+    "src/lib/supervisor/api.ts",
+    "src/lib/supervisor/contracts.ts",
+    "src/lib/supervisor/events.ts",
+    "src/lib/supervisor/reducer.ts",
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--rootDir",
+    "src",
+    "--outDir",
+    hookTestRoot,
+    "--skipLibCheck",
+    "--strict",
+  ]);
+  writeFileSync(path.join(hookTestRoot, "package.json"), JSON.stringify({ type: "module" }));
+}
+
 function moduleUrl(directory, fileName) {
   return pathToFileURL(path.join(directory, fileName)).href;
 }
@@ -178,12 +210,17 @@ try {
       "src/lib/sceneAssetFailures.ts",
       "src/lib/sceneMentions.ts",
       "src/lib/scenePackages.ts",
+      "src/lib/supervisor/api.ts",
       "src/lib/supervisor/contracts.ts",
+      "src/lib/supervisor/events.ts",
+      "src/lib/supervisor/legacyAdapter.ts",
+      "src/lib/supervisor/reducer.ts",
       "src/lib/time.ts",
       "src/lib/videoRequirementConfig.ts",
       "src/lib/workflowTaskBoard.ts",
     ]);
     compileApiModule();
+    compileHookModule();
   }
 
   const testFiles = contractOnly
@@ -212,6 +249,15 @@ try {
       SCENE_ASSET_FAILURES_TEST_MODULE: path.join(moduleDirectory, "sceneAssetFailures.js"),
       SCENE_MENTIONS_TEST_MODULE: moduleUrl(moduleDirectory, "sceneMentions.js"),
       SCENE_PACKAGES_TEST_MODULE: moduleUrl(moduleDirectory, "scenePackages.js"),
+      SUPERVISOR_API_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/api.js"),
+      SUPERVISOR_EVENTS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/events.js"),
+      SUPERVISOR_HOOK_TEST_MODULE: moduleUrl(hookTestRoot, "hooks/useSupervisorConversation.js"),
+      SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE: moduleUrl(
+        moduleDirectory,
+        "supervisor/legacyAdapter.js",
+      ),
+      SUPERVISOR_LEGACY_ADAPTER_FIXTURE: supervisorLegacyAdapterFixture,
+      SUPERVISOR_REDUCER_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/reducer.js"),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),
       WORKFLOW_TASK_BOARD_TEST_MODULE: moduleUrl(moduleDirectory, "workflowTaskBoard.js"),
@@ -220,4 +266,5 @@ try {
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
   rmSync(typeTestRoot, { recursive: true, force: true });
+  rmSync(hookTestRoot, { recursive: true, force: true });
 }

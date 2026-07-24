@@ -1,0 +1,146 @@
+{
+  "conversation_id": "conv-legacy-1",
+  "pending_pairs": [
+    {
+      "camel": "pendingMessageJob",
+      "snake": "pending_message_job",
+      "value": {
+        "job_id": "job-message",
+        "conversation_id": "conv-legacy-1",
+        "marker": "message"
+      }
+    },
+    {
+      "camel": "pendingIntakeJob",
+      "snake": "pending_intake_job",
+      "value": {
+        "job_id": "job-intake",
+        "conversation_id": "conv-legacy-1",
+        "marker": "intake"
+      }
+    },
+    {
+      "camel": "pendingDirectionJob",
+      "snake": "pending_direction_job",
+      "value": {
+        "job_id": "job-direction",
+        "conversation_id": "conv-legacy-1",
+        "marker": "direction"
+      }
+    },
+    {
+      "camel": "pendingPlanJob",
+      "snake": "pending_plan_job",
+      "value": {
+        "job_id": "job-plan",
+        "conversation_id": "conv-legacy-1",
+        "marker": "plan"
+      }
+    },
+    {
+      "camel": "pendingPlanRevisionRequest",
+      "snake": "pending_plan_revision_request",
+      "value": {
+        "conversationId": "conv-legacy-1",
+        "marker": "plan-revision-request"
+      }
+    },
+    {
+      "camel": "pendingPlanRevisionChoice",
+      "snake": "pending_plan_revision_choice",
+      "value": {
+        "conversationId": "conv-legacy-1",
+        "marker": "plan-revision-choice"
+      }
+    },
+    {
+      "camel": "pendingImageEditRequest",
+      "snake": "pending_image_edit_request",
+      "value": {
+        "conversationId": "conv-legacy-1",
+        "marker": "image-edit-request"
+      }
+    },
+    {
+      "camel": "pendingImageJob",
+      "snake": "pending_image_job",
+      "value": {
+        "job_id": "job-image",
+        "conversation_id": "conv-legacy-1",
+        "marker": "image"
+      }
+    },
+    {
+      "camel": "pendingImageRevision",
+      "snake": "pending_image_revision",
+      "value": {
+        "conversationId": "conv-legacy-1",
+        "marker": "image-revision"
+      }
+    },
+    {
+      "camel": "pendingScenePackageJob",
+      "snake": "pending_scene_package_job",
+      "value": {
+        "job_id": "job-scene-package",
+        "conversation_id": "conv-legacy-1",
+        "marker": "scene-package"
+      }
+    },
+    {
+      "camel": "pendingVideoJob",
+      "snake": "pending_video_job",
+      "value": {
+        "job_id": "job-video",
+        "conversation_id": "conv-legacy-1",
+        "marker": "video"
+      }
+    },
+    {
+      "camel": "pendingVideoRevision",
+      "snake": "pending_video_revision",
+      "value": {
+        "conversationId": "conv-legacy-1",
+        "marker": "video-revision"
+      }
+    },
+    {
+      "camel": "pendingPptJob",
+      "snake": "pending_ppt_job",
+      "value": {
+        "job_id": "job-ppt",
+        "conversation_id": "conv-legacy-1",
+        "marker": "ppt"
+      }
+    },
+    {
+      "camel": "pendingJianyingDraftJob",
+      "snake": "pending_jianying_draft_job",
+      "value": {
+        "job_id": "job-jianying",
+        "conversation_id": "conv-legacy-1",
+        "marker": "jianying"
+      }
+    }
+  ],
+  "artifact_types": [
+    "brief",
+    "results",
+    "segments",
+    "edit",
+    "qc",
+    "directions",
+    "plan",
+    "image_prepare",
+    "image_edit_options",
+    "image_result",
+    "video_scene_packages",
+    "video_quality_review",
+    "video_analysis_result",
+    "video_result",
+    "jianying_draft",
+    "ppt_outline",
+    "ppt_images",
+    "ppt_file"
+  ]
+}
