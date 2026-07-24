@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -61,6 +62,26 @@ class OperationRecord(ContractModel):
     updated_at: datetime
 
 
+class EventDeliveryClaim(ContractModel):
+    """返回 Event Outbox 当前租约及投递尝试次数。"""
+
+    event: AgentEvent
+    delivery_attempts: int = Field(ge=1)
+    lease_owner: str = Field(min_length=1)
+    lease_expires_at: datetime
+
+
+@dataclass
+class _MemoryEventDeliveryState:
+    """保存内存实现中不进入线合同的 Event 投递状态。"""
+
+    status: str = "pending"
+    delivery_attempts: int = 0
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    published_at: datetime | None = None
+
+
 @runtime_checkable
 class AgentRuntimeRepository(Protocol):
     """约束内存与 SQL 实现具有相同的所有者隔离语义。"""
@@ -104,6 +125,34 @@ class AgentRuntimeRepository(Protocol):
 
     async def list_events(self, user_id: str, conversation_id: str) -> list[AgentEvent]: ...
 
+    async def list_events_after_cursor(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        cursor: str | None,
+        limit: int = 100,
+    ) -> list[AgentEvent] | None: ...
+
+    async def claim_next_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None: ...
+
+    async def complete_event_delivery(
+        self,
+        user_id: str,
+        event_id: str,
+        *,
+        lease_owner: str,
+        published_at: datetime,
+    ) -> AgentEvent | None: ...
+
     async def create_operation(self, user_id: str, record: OperationRecord) -> OperationRecord: ...
 
     async def get_operation(self, user_id: str, job_id: str) -> OperationRecord | None: ...
@@ -146,14 +195,36 @@ def _database_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _event_query_limit(limit: int) -> int:
+    if isinstance(limit, bool) or limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    return limit
+
+
+def _event_lease(
+    lease_owner: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> tuple[str, datetime, datetime]:
+    owner = _require_text("lease_owner", lease_owner, 128)
+    normalized_now = _normalize_datetime("now", now)
+    normalized_expiry = _normalize_datetime(
+        "lease_expires_at",
+        lease_expires_at,
+    )
+    if normalized_expiry <= normalized_now:
+        raise ValueError("lease_expires_at must be later than now")
+    return owner, normalized_now, normalized_expiry
+
+
 @asynccontextmanager
-async def _turn_write_transaction(
+async def _repository_write_transaction(
     session: AsyncSession,
     sqlite_write_lock: asyncio.Lock | None,
 ) -> AsyncIterator[None]:
     if session.get_bind().dialect.name == "sqlite":
         if sqlite_write_lock is None:
-            raise RuntimeError("SQLite Turn 写事务缺少 Engine 级进程内锁")
+            raise RuntimeError("SQLite Repository 写事务缺少 Engine 级进程内锁")
         # 同一 Engine 先串行写事务，再获取数据库写锁覆盖跨 Engine/进程并发。
         async with sqlite_write_lock:
             await session.execute(text("BEGIN IMMEDIATE"))
@@ -307,6 +378,11 @@ class MemoryAgentRuntimeRepository:
         self._event_ids: set[str] = set()
         self._event_sequence_keys: set[tuple[str, int]] = set()
         self._event_cursor_keys: set[tuple[str, str]] = set()
+        self._event_delivery: dict[
+            tuple[str, str],
+            _MemoryEventDeliveryState,
+        ] = {}
+        self._event_write_lock = asyncio.Lock()
         self._operations: dict[tuple[str, str], OperationRecord] = {}
         self._operation_ids: set[str] = set()
         self._operation_idempotency_keys: set[str] = set()
@@ -470,16 +546,46 @@ class MemoryAgentRuntimeRepository:
         normalized = _normalize_event(record)
         sequence_key = (normalized.conversation_id, normalized.sequence)
         cursor_key = (normalized.conversation_id, normalized.cursor)
-        if (
-            normalized.event_id in self._event_ids
-            or sequence_key in self._event_sequence_keys
-            or cursor_key in self._event_cursor_keys
-        ):
-            raise AgentRuntimeRecordConflictError("AgentEvent 记录已存在")
-        self._event_ids.add(normalized.event_id)
-        self._event_sequence_keys.add(sequence_key)
-        self._event_cursor_keys.add(cursor_key)
-        self._events[(owner, normalized.event_id)] = _clone(normalized)
+        async with self._event_write_lock:
+            conversation_records = [
+                (record_owner, existing)
+                for (record_owner, _), existing in self._events.items()
+                if existing.conversation_id == normalized.conversation_id
+            ]
+            if any(
+                record_owner != owner
+                for record_owner, _ in conversation_records
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "AgentEvent conversation 已被其他所有者占用"
+                )
+            expected_sequence = (
+                1
+                if not conversation_records
+                else max(
+                    existing.sequence
+                    for _, existing in conversation_records
+                )
+                + 1
+            )
+            if normalized.sequence != expected_sequence:
+                raise AgentRuntimeRecordConflictError(
+                    "AgentEvent sequence 必须连续递增"
+                )
+            if (
+                normalized.event_id in self._event_ids
+                or sequence_key in self._event_sequence_keys
+                or cursor_key in self._event_cursor_keys
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "AgentEvent 记录已存在"
+                )
+            owner_key = (owner, normalized.event_id)
+            self._event_ids.add(normalized.event_id)
+            self._event_sequence_keys.add(sequence_key)
+            self._event_cursor_keys.add(cursor_key)
+            self._events[owner_key] = _clone(normalized)
+            self._event_delivery[owner_key] = _MemoryEventDeliveryState()
         return _clone(normalized)
 
     async def get_event(self, user_id: str, event_id: str) -> AgentEvent | None:
@@ -497,6 +603,140 @@ class MemoryAgentRuntimeRepository:
         ]
         records.sort(key=lambda record: (record.sequence, record.event_id))
         return [_clone(record) for record in records]
+
+    async def list_events_after_cursor(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        cursor: str | None,
+        limit: int = 100,
+    ) -> list[AgentEvent] | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        page_size = _event_query_limit(limit)
+        records = [
+            record
+            for (record_owner, _), record in self._events.items()
+            if record_owner == owner
+            and record.conversation_id == conversation
+        ]
+        records.sort(key=lambda record: (record.sequence, record.event_id))
+        if cursor is None:
+            return [_clone(record) for record in records[:page_size]]
+        normalized_cursor = _require_text("cursor", cursor, 128)
+        anchor = next(
+            (
+                record
+                for record in records
+                if record.cursor == normalized_cursor
+            ),
+            None,
+        )
+        if anchor is None:
+            return None
+        return [
+            _clone(record)
+            for record in records
+            if record.sequence > anchor.sequence
+        ][:page_size]
+
+    async def claim_next_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        worker, normalized_now, normalized_expiry = _event_lease(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        async with self._event_write_lock:
+            owner_keys = [
+                owner_key
+                for owner_key, record in self._events.items()
+                if owner_key[0] == owner
+                and record.conversation_id == conversation
+                and self._event_delivery[owner_key].status != "published"
+            ]
+            owner_keys.sort(
+                key=lambda owner_key: (
+                    self._events[owner_key].sequence,
+                    self._events[owner_key].event_id,
+                )
+            )
+            if not owner_keys:
+                return None
+            owner_key = owner_keys[0]
+            state = self._event_delivery[owner_key]
+            if state.status == "delivering":
+                if (
+                    state.lease_expires_at is None
+                    or state.lease_expires_at > normalized_now
+                ):
+                    return None
+            state.status = "delivering"
+            state.delivery_attempts += 1
+            state.lease_owner = worker
+            state.lease_expires_at = normalized_expiry
+            return EventDeliveryClaim(
+                event=_clone(self._events[owner_key]),
+                delivery_attempts=state.delivery_attempts,
+                lease_owner=worker,
+                lease_expires_at=normalized_expiry,
+            )
+
+    async def complete_event_delivery(
+        self,
+        user_id: str,
+        event_id: str,
+        *,
+        lease_owner: str,
+        published_at: datetime,
+    ) -> AgentEvent | None:
+        owner = _require_text("user_id", user_id, 64)
+        owner_key = (
+            owner,
+            _require_text("event_id", event_id, 64),
+        )
+        worker = _require_text("lease_owner", lease_owner, 128)
+        completed_at = _normalize_datetime(
+            "published_at",
+            published_at,
+        )
+        async with self._event_write_lock:
+            event = self._events.get(owner_key)
+            if event is None:
+                return None
+            state = self._event_delivery[owner_key]
+            if state.status == "published":
+                return _clone(event)
+            if (
+                state.status != "delivering"
+                or state.lease_owner != worker
+                or state.lease_expires_at is None
+                or completed_at >= state.lease_expires_at
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "AgentEvent 投递租约无效"
+                )
+            state.status = "published"
+            state.published_at = completed_at
+            return _clone(event)
 
     async def create_operation(self, user_id: str, record: OperationRecord) -> OperationRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -639,7 +879,7 @@ class SQLAgentRuntimeRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
         bind = session_factory.kw.get("bind")
-        self._sqlite_turn_write_lock = (
+        self._sqlite_write_lock = (
             _SQLITE_ENGINE_WRITE_LOCKS.setdefault(bind, asyncio.Lock())
             if isinstance(bind, AsyncEngine) and bind.dialect.name == "sqlite"
             else None
@@ -744,9 +984,9 @@ class SQLAgentRuntimeRepository:
         )
         try:
             async with self._session_factory() as session:
-                async with _turn_write_transaction(
+                async with _repository_write_transaction(
                     session,
-                    self._sqlite_turn_write_lock,
+                    self._sqlite_write_lock,
                 ):
                     existing = (
                         await session.scalars(statement)
@@ -857,9 +1097,9 @@ class SQLAgentRuntimeRepository:
             .with_for_update()
         )
         async with self._session_factory() as session:
-            async with _turn_write_transaction(
+            async with _repository_write_transaction(
                 session,
-                self._sqlite_turn_write_lock,
+                self._sqlite_write_lock,
             ):
                 rows = (await session.scalars(statement)).all()
                 if any(
@@ -928,22 +1168,59 @@ class SQLAgentRuntimeRepository:
     async def create_event(self, user_id: str, record: AgentEvent) -> AgentEvent:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_event(record)
-        await self._insert(
-            PixelFlowAgentEventRow(
-                schema_version=normalized.schema_version,
-                event_id=normalized.event_id,
-                sequence=normalized.sequence,
-                cursor=normalized.cursor,
-                conversation_id=normalized.conversation_id,
-                user_id=owner,
-                run_id=normalized.run_id,
-                occurred_at=normalized.occurred_at,
-                event_type=normalized.type.value,
-                payload_json=normalized.payload,
-                delivery_status="pending",
-                delivery_attempts=0,
+        last_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.conversation_id
+                == normalized.conversation_id,
             )
+            .order_by(PixelFlowAgentEventRow.sequence.desc())
+            .limit(1)
+            .with_for_update()
         )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    last_row = (
+                        await session.scalars(last_statement)
+                    ).first()
+                    if last_row is not None and last_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError(
+                            "AgentEvent conversation 已被其他所有者占用"
+                        )
+                    expected_sequence = (
+                        1
+                        if last_row is None
+                        else last_row.sequence + 1
+                    )
+                    if normalized.sequence != expected_sequence:
+                        raise AgentRuntimeRecordConflictError(
+                            "AgentEvent sequence 必须连续递增"
+                        )
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=normalized.schema_version,
+                            event_id=normalized.event_id,
+                            sequence=normalized.sequence,
+                            cursor=normalized.cursor,
+                            conversation_id=normalized.conversation_id,
+                            user_id=owner,
+                            run_id=normalized.run_id,
+                            occurred_at=normalized.occurred_at,
+                            event_type=normalized.type.value,
+                            payload_json=normalized.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+                    await session.flush()
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError(
+                "记录主键或唯一业务键已经被占用"
+            ) from None
         return _clone(normalized)
 
     async def get_event(self, user_id: str, event_id: str) -> AgentEvent | None:
@@ -970,6 +1247,172 @@ class SQLAgentRuntimeRepository:
         async with self._session_factory() as session:
             rows = (await session.scalars(statement)).all()
         return [_event_from_row(row) for row in rows]
+
+    async def list_events_after_cursor(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        cursor: str | None,
+        limit: int = 100,
+    ) -> list[AgentEvent] | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        page_size = _event_query_limit(limit)
+        after_sequence: int | None = None
+        async with self._session_factory() as session:
+            if cursor is not None:
+                anchor_statement = select(
+                    PixelFlowAgentEventRow
+                ).where(
+                    PixelFlowAgentEventRow.user_id == owner,
+                    PixelFlowAgentEventRow.conversation_id
+                    == conversation,
+                    PixelFlowAgentEventRow.cursor
+                    == _require_text("cursor", cursor, 128),
+                )
+                anchor = (
+                    await session.scalars(anchor_statement)
+                ).one_or_none()
+                if anchor is None:
+                    return None
+                after_sequence = anchor.sequence
+            statement = (
+                select(PixelFlowAgentEventRow)
+                .where(
+                    PixelFlowAgentEventRow.user_id == owner,
+                    PixelFlowAgentEventRow.conversation_id
+                    == conversation,
+                )
+                .order_by(
+                    PixelFlowAgentEventRow.sequence.asc(),
+                    PixelFlowAgentEventRow.event_id.asc(),
+                )
+                .limit(page_size)
+            )
+            if after_sequence is not None:
+                statement = statement.where(
+                    PixelFlowAgentEventRow.sequence > after_sequence
+                )
+            rows = (await session.scalars(statement)).all()
+        return [_event_from_row(row) for row in rows]
+
+    async def claim_next_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        worker, normalized_now, normalized_expiry = _event_lease(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.conversation_id
+                == conversation,
+                PixelFlowAgentEventRow.delivery_status.in_(
+                    ("pending", "delivering")
+                ),
+            )
+            .order_by(
+                PixelFlowAgentEventRow.sequence.asc(),
+                PixelFlowAgentEventRow.event_id.asc(),
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).first()
+                if row is None:
+                    return None
+                if row.delivery_status == "delivering":
+                    if row.lease_expires_at is None:
+                        return None
+                    if (
+                        _database_utc(row.lease_expires_at)
+                        > normalized_now
+                    ):
+                        return None
+                row.delivery_status = "delivering"
+                row.delivery_attempts += 1
+                row.lease_owner = worker
+                row.lease_expires_at = normalized_expiry
+                await session.flush()
+                return EventDeliveryClaim(
+                    event=_event_from_row(row),
+                    delivery_attempts=row.delivery_attempts,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
+
+    async def complete_event_delivery(
+        self,
+        user_id: str,
+        event_id: str,
+        *,
+        lease_owner: str,
+        published_at: datetime,
+    ) -> AgentEvent | None:
+        owner = _require_text("user_id", user_id, 64)
+        event_identity = _require_text("event_id", event_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        completed_at = _normalize_datetime(
+            "published_at",
+            published_at,
+        )
+        statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.event_id == event_identity,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                if row is None:
+                    return None
+                if row.delivery_status == "published":
+                    return _event_from_row(row)
+                if (
+                    row.delivery_status != "delivering"
+                    or row.lease_owner != worker
+                    or row.lease_expires_at is None
+                    or completed_at
+                    >= _database_utc(row.lease_expires_at)
+                ):
+                    raise AgentRuntimeRecordConflictError(
+                        "AgentEvent 投递租约无效"
+                    )
+                row.delivery_status = "published"
+                row.published_at = completed_at
+                await session.flush()
+                return _event_from_row(row)
 
     async def create_operation(self, user_id: str, record: OperationRecord) -> OperationRecord:
         owner = _require_text("user_id", user_id, 64)

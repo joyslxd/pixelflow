@@ -11,6 +11,7 @@ from .models import (
 from .repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
+    EventDeliveryClaim,
     MemoryAgentRuntimeRepository,
     OperationRecord,
     SQLAgentRuntimeRepository,
@@ -20,6 +21,7 @@ __all__ = [
     "AGENT_RUNTIME_TABLES",
     "AgentRuntimeRecordConflictError",
     "AgentRuntimeRepository",
+    "EventDeliveryClaim",
     "MemoryAgentRuntimeRepository",
     "OperationRecord",
     "PixelFlowAgentContextSummaryRow",

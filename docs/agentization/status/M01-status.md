@@ -1,16 +1,16 @@
 # M01 持久化、CAS、Turn Inbox 与 Event Outbox
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：A
-- reviewer：`/root/m01_4_independent_review`
+- reviewer：`/root/m01_5_independent_review`
 - base Agent SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
 - branch：`codex/agent-0.8.4-m01-runtime-store`
 - 依赖：M00（已进入 `feature/agent_0.8.4_boguan`）
 - 当前切片：`M01.5`
-- 最近完成：`M01.4`
+- 最近完成：`M01.5`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
-- 本切片开始时间：`未开始`
+- 本切片开始时间：`2026-07-24T17:49:53+08:00`
 
 ## 切片
 
@@ -18,7 +18,7 @@
 - [x] M01.2 SQL/Memory Repository（3h）
 - [x] M01.3 revision/CAS/服务端保留 namespace（2.5h）
 - [x] M01.4 Turn Inbox 幂等和顺序领取（2h）
-- [ ] M01.5 Event Outbox/sequence/cursor（2h）
+- [x] M01.5 Event Outbox/sequence/cursor（2h）
 
 ## M01.1 交付与验证
 
@@ -61,6 +61,16 @@
 - 独立审核首次仅发现 1 个 Minor 测试证据缺口；补齐 Memory/SQL 双实现并发入队合同后复审确认 Critical、Important、Minor 均无。
 - 本切片未实现 M01.5 Event Outbox，未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.4.md`。
 
+## M01.5 交付与验证
+
+- Repository Port 与 Memory/SQL 双实现新增 cursor 增量查询、租约 claim 和投递完成接口；冻结 `AgentEvent`、数据库表与 migration 保持不变。
+- `create_event()` 强制 conversation 从 `1` 开始连续递增；跳号、倒序、唯一键或跨 owner conversation 冲突 fail-closed。
+- cursor 查询支持从头、续读、末尾、未知和跨 owner 不存在语义；claim 严格阻塞有效租约后的后续事件，过期可接管，完成操作校验当前有效租约并支持幂等重放。
+- SQLite 同 Engine 使用共享异步锁，跨 Engine/进程使用 `BEGIN IMMEDIATE`；生产 SQL 使用 `SELECT ... FOR UPDATE`。Memory/SQL 并发 append 与 claim 合同全绿。
+- 新合同为 `13 passed, 1 warning`；完整 M01 精确范围门禁为 `222 passed, 1 warning`。ruff、`git diff --check` 与分支策略检查均通过。
+- 独立审核确认 Critical、Important、Minor 均为 0；未调用任何真实付费 API。完整记录见 `docs/agentization/test-reports/M01.5.md`。
+- 当前无远端 CI，自动化状态保持 `automation_local_ready`；M01 已满足最终单槽集成本地入口，但本任务不自动集成。
+
 ## 恢复提示
 
-下一次只执行 M01.5：先从远端恢复同一模块分支/worktree，复核 M01.4 Turn Inbox 幂等与按会话顺序领取合同，再以失败测试实现 Event Outbox 的 claim、sequence 和 cursor 投递；这是 M01 最后一片，必须运行完整模块门禁，绿色后才可写 `ready_for_integration`。
+M01 五个切片均已完成并达到 `ready_for_integration`。当前自动化状态为 `automation_local_ready`；下一步由开发者复制执行手册 9.10A 话术，在新的 Codex 任务中手动启动 M01 最终单槽集成。不得在本开发任务中自动修改 `feature/agent_0.8.4_boguan` 或继续 M02。
