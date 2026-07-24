@@ -141,3 +141,4 @@
 - remote guard：权威门禁后重新 fetch；Agent、dev 和 M07 三条远端引用与冻结值一致后才执行原子更新，集成记录补正前再次复核 Agent 远端未变化
 - rollback：如需撤回，基于本记录定位 M07 集成提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M07 状态、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有设计和 content-app API 变化
+- 2026-07-24 19:40:56 +08:00：M01 最终模块 候选通过，模块提交 `337a19124000892d319250497c56645821197ebb` 已纳入最新 Agent/dev 基线。
