@@ -125,7 +125,9 @@ elseif ($ModuleId -eq "M01") {
                 "-m", "ruff", "check",
                 "pixelflow/agent_runtime/persistence",
                 "pixelflow/tasks",
-                "app/gateway/routers/pixelflow_conversations.py"
+                "app/gateway/routers/pixelflow_conversations.py",
+                "packages/harness/deerflow/persistence/migrations/versions",
+                "packages/harness/deerflow/persistence/models/__init__.py"
             ) + $m01Tests
         }
     )
@@ -159,7 +161,10 @@ elseif ($ModuleId -match "^M(0[7-9]|1[0-2])$") {
 }
 elseif ($ModuleId -eq "M13") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "-q") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", "pixelflow", "app/gateway", "tests") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", ".") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test:agent-runtime-contracts") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
 }
 

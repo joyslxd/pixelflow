@@ -15,6 +15,8 @@
 | 根因 | 修复 |
 | --- | --- |
 | 后端模块门禁误用宽泛范围，且可回退到 PATH Python | 为 M01、M03 建立权威测试清单；M02/M04/M05/M06 未配置时 fail-closed；所有后端门禁强制使用项目虚拟环境并校验 Python 3.12 |
+| M01 Ruff 未覆盖模块拥有的 harness 持久化迁移与模型文件 | 把 migrations/versions 与 persistence models 纳入 M01 精确 Ruff 参数合同 |
+| M13 聚合门禁只构建前端，且后端 Ruff 不是全量 | M13 固定运行后端全量 pytest、`ruff check .`、前端合同测试、前端全量测试、lint 与生产构建 |
 | Docker/provisioner/Sandbox memory profile 文件已删除，但旧测试仍要求其存在 | 删除四组过期基础设施合同测试，保留当前 Gateway Dockerfile 与 CORS 合同测试 |
 | 网关仍残留本地 Cookie 注册、登录与用户表兼容合同 | 网关统一使用 content-app `Authorization`；运行时 E2E 在 content-app Client 边界替换外部鉴权，保留真实认证传播链 |
 | Skill 扫描指向仓库根目录的不存在路径 | 统一到 `backend/skills/public`，并让测试优先加载当前 worktree 的 harness 源码 |
@@ -49,10 +51,25 @@ Agentization Pester
 后端全量 Ruff
 All checks passed
 
+M01 模块扩展 Ruff
+All checks passed
+
+前端 Agent runtime 合同
+9 passed, 0 failed
+
+前端全量测试
+214 passed, 0 failed
+
+前端 lint
+tsc --noEmit 通过
+
+前端生产构建
+build-prod 通过
+
 中文工程规范
 Passed=True
-CommitCount=8
-ChangedPathCount=42
+CommitCount=10
+ChangedPathCount=43
 
 M03 模块分支权威 pytest
 119 passed, 1 warning
@@ -74,3 +91,14 @@ All checks passed
 4. 只有单槽候选同时包含修复分支与 M03 分支后，才能形成最终有效的真实 M03 Final 门禁证据。
 
 不得据此提前修改 M03 状态为 `ready_for_integration`。集成候选绿色后，再由集成流程写入对应状态。
+
+## 独立审核闭环
+
+独立 reviewer 首轮没有发现 Critical，提出 3 个 Important：
+
+1. M13 缺少前端测试/lint 且 Ruff 非全量；
+2. M01 Ruff 漏掉 harness 持久化文件；
+3. Pester 只验证测试文件“被包含”，没有验证参数集合精确相等。
+
+上述问题已全部修复并通过红绿 TDD：旧实现的新增 Pester 合同为 31 通过、2 失败；修复后全部
+45 项通过。最终增量复核不得存在未关闭的 Critical 或 Important。

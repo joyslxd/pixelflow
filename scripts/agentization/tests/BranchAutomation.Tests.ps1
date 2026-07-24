@@ -372,17 +372,19 @@ Describe "Agent 分支自动化入口" {
         $ruffCommands.Count | Should Be 1
         ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
         ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
-        foreach ($testPath in $expectedTests) {
-            ($pytestCommands[0].Arguments -contains $testPath) | Should Be $true
-        }
-        (($pytestCommands[0].Arguments -join " ") -eq "-m pytest -q") | Should Be $false
-        ($ruffCommands[0].Arguments -contains "pixelflow/agent_runtime/context") | Should Be $true
-        ($ruffCommands[0].Arguments -contains "pixelflow") | Should Be $false
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check", "pixelflow/agent_runtime/context") +
+                $expectedTests
+            ) -join "`n"
+        )
     }
 
     It "M01 最终门禁只运行运行时持久化权威测试" {
         $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M01" -GateType "Final" -PlanOnly)
         $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
         $expectedTests = @(
             "tests/test_agent_runtime_conversation_cas.py",
             "tests/test_agent_runtime_migration.py",
@@ -394,10 +396,21 @@ Describe "Agent 分支自动化入口" {
         )
 
         $pytestCommands.Count | Should Be 1
-        foreach ($testPath in $expectedTests) {
-            ($pytestCommands[0].Arguments -contains $testPath) | Should Be $true
-        }
-        ($pytestCommands[0].Arguments -contains "tests/test_agent_runtime_context_externalizer.py") | Should Be $false
+        $ruffCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @(
+                    "-m", "ruff", "check",
+                    "pixelflow/agent_runtime/persistence",
+                    "pixelflow/tasks",
+                    "app/gateway/routers/pixelflow_conversations.py",
+                    "packages/harness/deerflow/persistence/migrations/versions",
+                    "packages/harness/deerflow/persistence/models/__init__.py"
+                ) +
+                $expectedTests
+            ) -join "`n"
+        )
     }
 
     It "未配置权威测试清单的后端模块必须 fail-closed" {
@@ -410,13 +423,18 @@ Describe "Agent 分支自动化入口" {
         $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M13" -GateType "Final" -PlanOnly)
         $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
         $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
 
         $pytestCommands.Count | Should Be 1
         $ruffCommands.Count | Should Be 1
         (($pytestCommands[0].Arguments -join " ") -eq "-m pytest -q") | Should Be $true
-        (($ruffCommands[0].Arguments -join " ") -eq "-m ruff check pixelflow app/gateway tests") | Should Be $true
+        (($ruffCommands[0].Arguments -join " ") -eq "-m ruff check .") | Should Be $true
         ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
         ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test:agent-runtime-contracts" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm lint" }).Count | Should Be 1
+        @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
     }
 
     It "缺少项目虚拟环境时不得回退到 PATH Python" {
