@@ -488,14 +488,13 @@ class TestMultipleMounts:
             ],
         )
 
-        # Mock subprocess to capture the resolved command
+        # 替换进程调用，只校验命令中的路径映射，不依赖宿主机安装 POSIX shell。
         captured = {}
-        original_run = __import__("subprocess").run
 
         def mock_run(*args, **kwargs):
             if len(args) > 0:
                 captured["command"] = args[0]
-            return original_run(*args, **kwargs)
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
 
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.run", mock_run)
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._get_shell", lambda self: "/bin/sh")

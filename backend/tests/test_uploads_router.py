@@ -527,7 +527,12 @@ def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
     thread_uploads_dir.mkdir(parents=True)
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("protected", encoding="utf-8")
-    (thread_uploads_dir / "victim.txt").symlink_to(outside_file)
+    try:
+        (thread_uploads_dir / "victim.txt").symlink_to(outside_file)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("当前 Windows 环境未授予创建符号链接的权限")
+        raise
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
@@ -552,7 +557,12 @@ def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     missing_target = tmp_path / "missing-target.txt"
-    (thread_uploads_dir / "victim.txt").symlink_to(missing_target)
+    try:
+        (thread_uploads_dir / "victim.txt").symlink_to(missing_target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("当前 Windows 环境未授予创建符号链接的权限")
+        raise
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True

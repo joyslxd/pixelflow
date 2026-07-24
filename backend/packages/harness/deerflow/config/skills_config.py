@@ -7,10 +7,10 @@ from deerflow.config.runtime_paths import project_root, resolve_path
 
 
 def _legacy_skills_candidates() -> tuple[Path, ...]:
-    """Return source-tree skills locations for monorepo compatibility."""
+    """返回源码树中的兼容 Skill 目录，优先使用 PixelFlow 后端真实目录。"""
     backend_dir = Path(__file__).resolve().parents[4]
     repo_root = backend_dir.parent
-    return (repo_root / "skills",)
+    return (backend_dir / "skills", repo_root / "skills")
 
 
 class SkillsConfig(BaseModel):
