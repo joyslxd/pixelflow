@@ -17,6 +17,7 @@ from ..contracts import (
     ContextSummary,
     WorkflowRecord,
 )
+from .externalizer import ContextPayloadExternalizer
 from .profiles import ModelContextProfile, resolve_model_context_profile
 from .token_meter import TokenMeter, get_context_budget_policy
 
@@ -206,6 +207,7 @@ class ContextAssembler:
         recent_message_limit: int = 20,
         memory_limit: int = 5,
         token_meter: TokenMeter | None = None,
+        externalizer: ContextPayloadExternalizer | None = None,
     ) -> None:
         if isinstance(recent_message_limit, bool) or not isinstance(recent_message_limit, int) or recent_message_limit <= 0:
             raise ValueError("recent_message_limit 必须是正整数")
@@ -224,6 +226,7 @@ class ContextAssembler:
         self._recent_message_limit = recent_message_limit
         self._memory_limit = memory_limit
         self._token_meter = token_meter or TokenMeter()
+        self._externalizer = externalizer
 
     async def assemble(self, request: ContextRequest) -> ContextEnvelope:
         """先完成隔离和版本校验，再检索非关键长期记忆并计算预算。"""
@@ -283,6 +286,20 @@ class ContextAssembler:
             profile=resolution.profile,
             policy=self._policy,
         )
+        if self._externalizer is not None and budget_report.compaction_level >= 1:
+            externalized = await self._externalizer.externalize(
+                user_id=request.user_id,
+                conversation_id=request.conversation_id,
+                payload=payload,
+            )
+            if externalized.externalized:
+                payload = externalized.payload
+                estimated_input_tokens = self._token_estimator(deepcopy(payload))
+                budget_report = self._token_meter.measure(
+                    estimated_input_tokens=estimated_input_tokens,
+                    profile=resolution.profile,
+                    policy=self._policy,
+                )
         payload["budget_report"] = budget_report
         return ContextEnvelope.model_validate(payload)
 
