@@ -1,12 +1,12 @@
 # M07 前端 Supervisor 事件 Runtime
 
-- phase：`ready_for_integration`
+- phase：`integration_blocked`
 - owner：B
 - branch：`codex/agent-0.8.4-m07-web-runtime`
 - 依赖：M00
 - 当前切片：M07.5
 - base SHA：`5826c741180b58c9e8d3cdbbcb092d38e5f04b0d`
-- 当前唯一写入者：已释放（M07.5 完成）
+- 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-24 07:19:26 +0800`
 - M07.1 完成时间：`2026-07-24 08:30:24 +0800`
 - M07.1 已释放文件：`web/src/lib/supervisor/api.ts`、`web/tests/supervisorApi.test.mjs`、`web/scripts/run-tests.mjs`、`docs/agentization/status/M07-status.md`、`docs/agentization/test-reports/M07.1.md`
@@ -100,3 +100,7 @@
 - 环境：Corepack 因签名 keyid 错误不可用，按仓库兜底流程使用 npm；未修改锁文件。
 - 外部调用：未调用任何真实付费 API。
 - 下一步：后续开发者需重新执行安全预检并取得唯一写入权后，才能串行开始 `M07.2 SSE/cursor/gap/reconnect`。
+- last_integrated_commit：`—`
+- locked files：`无`
+- checkpoint_status：`blocked`
+- integration failure evidence：`候选 codex/integrate-m07-20260724-101936-a7219105 已保留；Agent 未更新；错误类型 RuntimeException`
