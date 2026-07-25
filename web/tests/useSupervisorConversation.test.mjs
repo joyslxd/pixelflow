@@ -15,8 +15,9 @@ const {
 const { createSupervisorEventStreamClient } = await import(eventsModuleUrl);
 const encoder = new TextEncoder();
 
-function projection(conversationId, sequence = 0) {
+function projection(conversationId, sequence = 0, contextVersion = 0) {
   return {
+    context_version: contextVersion,
     conversationId,
     run: { runId: null, status: "idle", updatedAt: null },
     compression: {
@@ -225,7 +226,7 @@ test("控制器先恢复当前对话 Snapshot，再从恢复点订阅事件", as
     conversationId: "conv-1",
     api: createApiFake(async (conversationId, options) => {
       snapshotCalls.push({ conversationId, signal: options.signal });
-      return projection(conversationId, 4);
+      return projection(conversationId, 4, 12);
     }),
     eventStream: stream.client,
   });
@@ -241,6 +242,7 @@ test("控制器先恢复当前对话 Snapshot，再从恢复点订阅事件", as
   assert.equal(stream.subscriptions[0].options.conversationId, "conv-1");
   assert.equal(stream.subscriptions[0].options.cursor, "cursor-4");
   assert.equal(stream.subscriptions[0].options.sequence, 4);
+  assert.equal(controller.getContextVersion(), 12);
   assert.equal(controller.getState().connection.status, "connected");
 
   stream.subscriptions[0].options.onEvent(event("conv-1", 5));
@@ -250,6 +252,34 @@ test("控制器先恢复当前对话 Snapshot，再从恢复点订阅事件", as
 
   unsubscribe();
   controller.dispose();
+});
+
+test("Snapshot 缺失或非法 context_version 时失败关闭且不订阅事件", async () => {
+  const invalidSnapshots = [
+    (() => {
+      const snapshot = projection("conv-1");
+      delete snapshot.context_version;
+      return snapshot;
+    })(),
+    projection("conv-1", 0, -1),
+    projection("conv-1", 0, 1.5),
+  ];
+
+  for (const snapshot of invalidSnapshots) {
+    const stream = createEventStreamFake();
+    const controller = createSupervisorConversationController({
+      conversationId: "conv-1",
+      api: createApiFake(async () => snapshot),
+      eventStream: stream.client,
+    });
+
+    await controller.start();
+
+    assert.equal(controller.getContextVersion(), null);
+    assert.equal(controller.getState().connection.status, "fatal");
+    assert.equal(stream.subscriptions.length, 0);
+    controller.dispose();
+  }
 });
 
 test("切换对话后取消旧 Snapshot，并拒绝忽略 AbortSignal 的迟到结果", async () => {
@@ -310,7 +340,7 @@ test("sequence gap 通过当前会话 Snapshot 原地恢复后返回新恢复点
     conversationId: "conv-1",
     api: createApiFake(async (conversationId) => {
       snapshotCount += 1;
-      return projection(conversationId, snapshotCount === 1 ? 1 : 8);
+      return projection(conversationId, snapshotCount === 1 ? 1 : 8, snapshotCount === 1 ? 12 : 13);
     }),
     eventStream: stream.client,
   });
@@ -324,6 +354,7 @@ test("sequence gap 通过当前会话 Snapshot 原地恢复后返回新恢复点
 
   assert.deepEqual(resume, { cursor: "cursor-8", sequence: 8 });
   assert.equal(controller.getState().resume.sequence, 8);
+  assert.equal(controller.getContextVersion(), 13);
   assert.equal(snapshotCount, 2);
 
   controller.dispose();
@@ -465,6 +496,48 @@ test("effect 清理重放后可在同一控制器上重新建立当前对话订�
   assert.equal(controller.getState().resume.sequence, 2);
 
   controller.dispose();
+});
+
+test("frontend_v2 禁用 Hook 时不请求网络，切到 Supervisor 后才恢复 Snapshot", async () => {
+  const dom = installTestDom();
+  const stream = createEventStreamFake();
+  let snapshotCount = 0;
+  const api = createApiFake(async (conversationId) => {
+    snapshotCount += 1;
+    return projection(conversationId, 1, 9);
+  });
+  const rendered = [];
+
+  function Harness({ enabled }) {
+    const result = useSupervisorConversation("conv-1", {
+      enabled,
+      api,
+      eventStream: stream.client,
+    });
+    rendered.push(result);
+    return null;
+  }
+
+  const root = createRoot(dom.container);
+  try {
+    await act(async () => {
+      root.render(React.createElement(Harness, { enabled: false }));
+    });
+    assert.equal(snapshotCount, 0);
+    assert.equal(stream.subscriptions.length, 0);
+    assert.equal(rendered.at(-1).contextVersion, null);
+
+    await act(async () => {
+      root.render(React.createElement(Harness, { enabled: true }));
+    });
+    assert.equal(snapshotCount, 1);
+    assert.equal(stream.subscriptions.length, 1);
+    assert.equal(rendered.at(-1).contextVersion, 9);
+    assert.equal(rendered.at(-1).state.connection.status, "connected");
+  } finally {
+    await act(async () => root.unmount());
+    dom.restore();
+  }
 });
 
 test("StrictMode 挂载、切换和卸载隔离旧 Snapshot、事件与错误", async () => {

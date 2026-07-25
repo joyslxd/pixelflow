@@ -317,14 +317,14 @@ function applyCompressionStarted(
   const queued = optionalNonNegativeInteger(
     event.payload,
     "queued_input_count",
-    state.compression.queuedInputCount,
+    0,
   );
   if (!queued.valid) return withInvalidEvent(state);
   return {
     ...withEventResumePoint(state, event),
     compression: {
       status: "compacting",
-      progressPercent: 0,
+      progressPercent: null,
       queuedInputCount: queued.value,
       lastOutcome: null,
       updatedAt: event.occurred_at,
@@ -342,13 +342,17 @@ function applyCompressionProgressed(
     "queued_input_count",
     state.compression.queuedInputCount,
   );
-  if (!isPercentage(progress) || !queued.valid) return withInvalidEvent(state);
+  if ((progress !== undefined && !isPercentage(progress)) || !queued.valid) {
+    return withInvalidEvent(state);
+  }
   if (state.compression.status !== "compacting") return withEventResumePoint(state, event);
   return {
     ...withEventResumePoint(state, event),
     compression: {
       ...state.compression,
-      progressPercent: Math.max(state.compression.progressPercent ?? 0, progress),
+      progressPercent: progress === undefined
+        ? state.compression.progressPercent
+        : Math.max(state.compression.progressPercent ?? 0, progress),
       queuedInputCount: queued.value,
       updatedAt: event.occurred_at,
     },
@@ -360,11 +364,7 @@ function applyCompressionTerminal(
   event: AgentEventEnvelope,
   outcome: Exclude<SupervisorCompressionOutcome, null>,
 ): SupervisorRuntimeState {
-  const queued = optionalNonNegativeInteger(
-    event.payload,
-    "queued_input_count",
-    state.compression.queuedInputCount,
-  );
+  const queued = optionalNonNegativeInteger(event.payload, "queued_input_count", 0);
   if (!queued.valid) return withInvalidEvent(state);
   if (state.compression.status !== "compacting") return withEventResumePoint(state, event);
   return {
@@ -374,7 +374,7 @@ function applyCompressionTerminal(
       progressPercent: outcome === "completed"
         ? 100
         : state.compression.progressPercent,
-      queuedInputCount: queued.value,
+      queuedInputCount: 0,
       lastOutcome: outcome,
       updatedAt: event.occurred_at,
     },
@@ -508,8 +508,7 @@ function isProjectionStateConsistent(
   if (!runIdMatchesStatus) return false;
 
   const compression = projection.compression;
-  if (compression.status === "compacting"
-    && (compression.lastOutcome !== null || compression.progressPercent === null)) {
+  if (compression.status === "compacting" && compression.lastOutcome !== null) {
     return false;
   }
   if (compression.status === "blocked" && compression.lastOutcome !== "failed") {

@@ -63,6 +63,7 @@ import {
   restoredConversationMessages,
   shouldApplyVisibleConversationSideEffect,
 } from "@/lib/conversationRouting";
+import { useSupervisorConversation } from "@/hooks/useSupervisorConversation";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
@@ -107,9 +108,33 @@ import {
   type WorkflowFlowKind,
   type WorkflowProgressSnapshot,
 } from "@/lib/workflowTaskBoard";
+import type { JsonObject, OrchestrationMode, TurnStartRequest } from "@/lib/supervisor/contracts";
+import {
+  resolveWorkspaceOrchestrationMode,
+  resolveWorkspaceInteractionPolicy,
+  resolveWorkspaceRuntimePolicy,
+} from "@/lib/supervisor/legacyAdapter";
+import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
+
+interface ConversationOwnership {
+  conversationId: string;
+  orchestrationMode: OrchestrationMode;
+}
+
+interface PendingSupervisorTurn {
+  conversationId: string;
+  clientInputId: string;
+  content: string;
+  materials: Array<Record<string, unknown>>;
+}
+
+interface DeferredOwnershipInput {
+  routeConversationId: string;
+  input: string | AgentUserMessagePayload;
+}
 const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
 const now = () => formatClockTime(new Date().toISOString());
 
@@ -1681,7 +1706,7 @@ function normalizeMaterialStoryboardReferences(
 export function WorkspacePage() {
   const navigate = useNavigate();
   const { conversationId } = useParams<{ conversationId?: string }>();
-  // 页面可渲染状态：聊天消息、右侧画布、参数弹窗、流程 busy 态和 Brief 确认态。
+  // 页面可渲染状态：聊天消息、右侧画布、参数弹窗、旧运行时忙碌态和 Brief 确认态。
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
@@ -1695,7 +1720,7 @@ export function WorkspacePage() {
   const [pendingMaterials, setPendingMaterials] = useState<Array<Record<string, unknown>>>([]);
   const [referencedMaterials, setReferencedMaterials] = useState<SceneGlobalAssetReference[]>([]);
   const [composerPrefillRequest, setComposerPrefillRequest] = useState<{ id: string; content: string } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [legacyBusy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
   const [pendingPlanRevisionChoice, setPendingPlanRevisionChoice] = useState<PendingPlanRevisionChoice | null>(null);
@@ -1706,6 +1731,43 @@ export function WorkspacePage() {
   });
   const [, setJianyingDraftUiRevision] = useState(0);
   const [workflowProgress, setWorkflowProgress] = useState<WorkflowProgressSnapshot | null>(null);
+  const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>("frontend_v2");
+  const [orchestrationResolved, setOrchestrationResolved] = useState(true);
+  const [pendingSupervisorTurns, setPendingSupervisorTurns] = useState<PendingSupervisorTurn[]>([]);
+  const orchestrationModeRef = useRef<OrchestrationMode | null>("frontend_v2");
+  const deferredOwnershipInputsRef = useRef<DeferredOwnershipInput[]>([]);
+  const supervisorTurnInFlightRef = useRef(false);
+  const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(orchestrationMode, currentConversationId);
+  const runtimePolicy = orchestrationResolved
+    ? resolvedRuntimePolicy
+    : {
+      supervisorEnabled: false,
+      legacyRunnerEnabled: false,
+      legacyArtifactActionsEnabled: false,
+    };
+  // 新旧运行时共用同一个页面入口，但只有服务端明确分配 supervisor_v1 时才启动新 Hook。
+  // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
+  const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
+    enabled: runtimePolicy.supervisorEnabled,
+  });
+  const interactionPolicy = resolveWorkspaceInteractionPolicy({
+    mode: orchestrationMode,
+    conversationId: currentConversationId,
+    orchestrationResolved,
+    legacyBusy,
+    dialogOpen,
+    pendingPlanRevision: Boolean(pendingPlanRevisionChoice),
+    supervisorConnection: supervisorRuntime.state.connection.status,
+    supervisorRun: supervisorRuntime.state.run.status,
+    supervisorCompression: supervisorRuntime.state.compression.status,
+    pendingSupervisorTurns: pendingSupervisorTurns.length,
+  });
+  const runtimeNotice = resolveSupervisorRuntimeNotice({
+    enabled: runtimePolicy.supervisorEnabled,
+    runStatus: supervisorRuntime.state.run.status,
+    compression: supervisorRuntime.state.compression,
+    inputQueue: supervisorRuntime.state.inputQueue,
+  });
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
   useEffect(() => {
@@ -1722,7 +1784,7 @@ export function WorkspacePage() {
     };
     window.addEventListener("contentAppUserMessage", handler);
     return () => window.removeEventListener("contentAppUserMessage", handler);
-  }, []);
+  }, [orchestrationMode]);
 
   // 运行中上下文：这些值主要给异步 SSE 回调读取，不需要每次变化都触发 React 重渲染。
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
@@ -1815,6 +1877,12 @@ export function WorkspacePage() {
     conversationIdRef.current = id;
     setCurrentConversationId(id);
     setActiveConversationIdForTrace(id || null);
+  };
+
+  const setResolvedOrchestrationMode = (mode: OrchestrationMode) => {
+    orchestrationModeRef.current = mode;
+    setOrchestrationMode(mode);
+    setOrchestrationResolved(true);
   };
 
   const isCurrentConversation = (targetConversationId: string) => {
@@ -5885,6 +5953,8 @@ export function WorkspacePage() {
     setReferencedMaterials([]);
     setComposerPrefillRequest(null);
     setBusy(false);
+    setResolvedOrchestrationMode("frontend_v2");
+    setPendingSupervisorTurns([]);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
     seenEventIdsRef.current = new Set();
@@ -5918,6 +5988,11 @@ export function WorkspacePage() {
   };
 
   const applyConversation = async (detail: ConversationDetailResponse) => {
+    const resolvedMode = resolveWorkspaceOrchestrationMode({
+      conversation: detail.conversation,
+      messages: detail.messages,
+    });
+    setResolvedOrchestrationMode(resolvedMode);
     const snapshot = (detail.conversation.context || {}) as Partial<WorkspaceSnapshot>;
     const pendingImageEditRequest =
       snapshot.pendingImageEditRequest || ((detail.conversation.context || {}) as Record<string, unknown>).pending_image_edit_request || null;
@@ -6005,6 +6080,7 @@ export function WorkspacePage() {
       workflow_progress: restoredWorkflowProgress,
       messages: normalizedMessages,
     });
+    if (resolvedMode !== "frontend_v2") return;
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
         void resumePendingMessageJob(pendingMessageJob);
@@ -6113,7 +6189,7 @@ export function WorkspacePage() {
 
   const resumeVisiblePendingJobs = () => {
     const activeConversationId = conversationIdRef.current;
-    if (!activeConversationId || !pageVisibleRef.current) return;
+    if (!activeConversationId || !pageVisibleRef.current || orchestrationModeRef.current !== "frontend_v2") return;
     const pendingMessageJob = pendingMessageJobRef.current;
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === activeConversationId) {
       void resumePendingMessageJob(pendingMessageJob);
@@ -6189,6 +6265,8 @@ export function WorkspacePage() {
       setPendingCore("");
       setPendingFormValues({});
       setPendingMaterials([]);
+      setSelectedStoryboardMessageId("");
+      setSelectedPlanEditorMessageId("");
       pendingDialogContextRef.current = null;
       unsubRef.current();
       seenEventIdsRef.current = new Set();
@@ -6196,6 +6274,8 @@ export function WorkspacePage() {
       briefReadyShownRef.current = false;
       lastEventIdRef.current = 0;
       setActiveConversationId(conversationId);
+      orchestrationModeRef.current = null;
+      setOrchestrationResolved(false);
       setBusy(true);
       try {
         const detail = await api.resumeConversation(conversationId);
@@ -6210,6 +6290,15 @@ export function WorkspacePage() {
         if (!cancelled) {
           restoringRef.current = false;
           setBusy(false);
+          const deferredInputs = deferredOwnershipInputsRef.current.filter(
+            (item) => item.routeConversationId === conversationId,
+          );
+          deferredOwnershipInputsRef.current = deferredOwnershipInputsRef.current.filter(
+            (item) => item.routeConversationId !== conversationId,
+          );
+          for (const item of deferredInputs) {
+            window.setTimeout(() => void handleSend(item.input), 0);
+          }
         }
       }
     };
@@ -6224,7 +6313,7 @@ export function WorkspacePage() {
   }, [conversationId]);
 
   useEffect(() => {
-    if (restoringRef.current || !currentConversationId) return;
+    if (restoringRef.current || !currentConversationId || orchestrationModeRef.current !== "frontend_v2") return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       const snapshot = makeSnapshot(currentConversationId);
@@ -6242,25 +6331,119 @@ export function WorkspacePage() {
     return normalized.length > 18 ? `${normalized.slice(0, 18)}...` : normalized;
   };
 
-  const ensureConversation = async (title: string): Promise<string> => {
-    if (conversationIdRef.current) return conversationIdRef.current;
+  const ensureConversation = async (title: string): Promise<ConversationOwnership> => {
+    if (conversationIdRef.current) {
+      return {
+        conversationId: conversationIdRef.current,
+        orchestrationMode: orchestrationModeRef.current ?? "frontend_v2",
+      };
+    }
     const created = await api.createConversation({
       title: titleFromPrompt(title),
       last_phase: String(canvas.phase || "idle"),
       current_task_id: currentTaskId || null,
       context: makeSnapshot() as unknown as Record<string, unknown>,
     });
+    const createdMode = resolveWorkspaceOrchestrationMode(created);
     skipRouteRestoreConversationRef.current = created.conversation_id;
+    setResolvedOrchestrationMode(createdMode);
     setActiveConversationId(created.conversation_id);
     window.dispatchEvent(new Event("pixelflow-conversations-updated"));
     notifyContentAppConversationsUpdated(created.conversation_id);
-    return created.conversation_id;
+    return { conversationId: created.conversation_id, orchestrationMode: createdMode };
   };
 
   const normalizeSendInput = (input: string | AgentUserMessagePayload): AgentUserMessagePayload => {
     if (typeof input === "string") return { content: input, materials: [] };
     return { content: input.content, materials: Array.isArray(input.materials) ? input.materials : [] };
   };
+
+  const appendSupervisorNotice = (content: string, targetConversationId: string) => {
+    const notice: ChatMessage = {
+      id: uid(),
+      conversationId: targetConversationId,
+      role: "assistant",
+      content,
+      time: now(),
+    };
+    setMessages((items) => {
+      const nextItems = appendVisibleConversationMessage(items, {
+        activeConversationId: conversationIdRef.current,
+        targetConversationId,
+        message: notice,
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+  };
+
+  const handleSupervisorTurn = async (
+    pendingTurn: PendingSupervisorTurn,
+    contextVersion: number,
+  ): Promise<void> => {
+    const targetConversationId = pendingTurn.conversationId;
+    if (!targetConversationId || orchestrationModeRef.current !== "supervisor_v1") return;
+    setBusyForConversation(targetConversationId, true);
+    try {
+      // 每次写请求前重新读取 CAS 版本，避免上一轮 Turn 或事件消费后继续使用旧版本。
+      await supervisorRuntime.refreshSnapshot();
+      const expectedContextVersion = supervisorRuntime.getContextVersion() ?? contextVersion;
+      const request: TurnStartRequest = {
+        client_input_id: pendingTurn.clientInputId,
+        content: pendingTurn.content,
+        materials: pendingTurn.materials as JsonObject[],
+        reply_to_message_id: null,
+        artifact_refs: [],
+        expected_context_version: expectedContextVersion,
+      };
+      await supervisorRuntime.startTurn(request);
+      // Turn 已接受后刷新一次，让紧随其后的排队输入看到服务端最新版本。
+      try {
+        await supervisorRuntime.refreshSnapshot();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      appendSupervisorNotice("会话 Agent 请求失败，请稍后重试。", targetConversationId);
+    } finally {
+      setBusyForConversation(targetConversationId, false);
+    }
+  };
+
+  useEffect(() => {
+    const pendingTurn = pendingSupervisorTurns.find(
+      (item) => item.conversationId === currentConversationId,
+    );
+    if (!pendingTurn || orchestrationModeRef.current !== "supervisor_v1") return;
+    if (supervisorRuntime.state.connection.status === "fatal") {
+      setPendingSupervisorTurns((items) => items.filter(
+        (item) => item.clientInputId !== pendingTurn.clientInputId,
+      ));
+      appendSupervisorNotice("会话 Agent 状态恢复失败，请刷新后重试。", pendingTurn.conversationId);
+      return;
+    }
+    if (
+      supervisorRuntime.state.connection.status !== "connected"
+      || supervisorRuntime.contextVersion === null
+      || supervisorTurnInFlightRef.current
+    ) {
+      return;
+    }
+    supervisorTurnInFlightRef.current = true;
+    void handleSupervisorTurn(pendingTurn, supervisorRuntime.contextVersion)
+      .finally(() => {
+        supervisorTurnInFlightRef.current = false;
+        setPendingSupervisorTurns((items) => items.filter(
+          (item) => item.clientInputId !== pendingTurn.clientInputId,
+        ));
+      });
+  }, [
+    currentConversationId,
+    pendingSupervisorTurns,
+    supervisorRuntime.contextVersion,
+    supervisorRuntime.state.connection.status,
+  ]);
 
   const shouldUseRecoverableIntakeEntry = (
     text: string,
@@ -6285,11 +6468,31 @@ export function WorkspacePage() {
   };
 
   const handleSend = async (input: string | AgentUserMessagePayload) => {
+    if (restoringRef.current) {
+      deferredOwnershipInputsRef.current.push({
+        routeConversationId: routeConversationIdRef.current,
+        input,
+      });
+      return;
+    }
     const { content: text, materials = [] } = normalizeSendInput(input);
     let activeConversation = conversationIdRef.current;
     const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
-      activeConversation = await ensureConversation(text);
+      const ownership = await ensureConversation(text);
+      activeConversation = ownership.conversationId;
+      if (ownership.orchestrationMode === "supervisor_v1") {
+        setPendingSupervisorTurns((items) => items.some(
+          (item) => item.clientInputId === message.id,
+        ) ? items : [...items, {
+          conversationId: activeConversation,
+          clientInputId: message.id,
+          content: text,
+          materials,
+        }]);
+        if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+        return;
+      }
       const pendingPlanMessageJob = pendingMessageJobRef.current;
       if (pendingPlanMessageJob && isPendingPlanSaveForConversation(pendingPlanMessageJob, activeConversation)) {
         schedulePendingMessageJobResume(pendingPlanMessageJob, 0);
@@ -8313,7 +8516,12 @@ export function WorkspacePage() {
   };
 
   useEffect(() => {
-    if (restoringRef.current || !currentConversationId || !pageVisibleRef.current) return;
+    if (
+      restoringRef.current
+      || !currentConversationId
+      || !pageVisibleRef.current
+      || orchestrationModeRef.current !== "frontend_v2"
+    ) return;
     const visibleMessages = [...messages].reverse();
     const expiredImageResult = visibleMessages.find((message) => {
       if (messageConversationId(message, currentConversationId) !== currentConversationId) return false;
@@ -8336,9 +8544,10 @@ export function WorkspacePage() {
     progress: workflowProgress,
     messages,
   });
-  const workflowTaskBoard = derivedWorkflowTaskBoard
+  const workflowTaskBoard = runtimePolicy.legacyRunnerEnabled && derivedWorkflowTaskBoard
     ? { ...derivedWorkflowTaskBoard, workflowId: `${currentConversationId}:${derivedWorkflowTaskBoard.workflowId}` }
     : null;
+  const legacyArtifactActionsEnabled = runtimePolicy.legacyArtifactActionsEnabled;
 
   const jianyingDraftVersionForMessage = (msg: ChatMessage): string => {
     if (msg.artifact?.type === "jianying_draft") return msg.artifact.pendingJianyingDraftJob?.storyboard_version_id || "";
@@ -8384,35 +8593,38 @@ export function WorkspacePage() {
         referencedMaterials={referencedMaterials}
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         composerPrefillRequest={composerPrefillRequest}
-        busy={busy || dialogOpen || Boolean(pendingPlanRevisionChoice)}
+        composerDisabled={interactionPolicy.composer.disabled}
+        artifactActionsDisabled={interactionPolicy.artifact.actionsDisabled}
+        runtimeBusy={interactionPolicy.runtime.busy}
+        runtimeNotice={runtimeNotice}
         workflowTaskBoard={workflowTaskBoard}
-        onSelectDirection={handleSelectDirection}
-        onRegenerateDirections={handleRegenerateDirections}
-        onApprovePlan={handleApprovePlan}
-        onEditPlan={handleEditPlan}
-        onRevisePlan={handleRevisePlan}
-        onRollbackPlan={handleRollbackPlan}
-        onGenerateImage={handleGenerateImage}
-        onConfirmImageEditOptions={handleConfirmImageEditOptions}
-        onAcceptImageResult={handleAcceptImageResult}
-        onReviseImageResult={handleReviseImageResult}
-        onGenerateVideoFromScenePackages={handleGenerateVideoFromScenePackages}
-        onAcceptVideoResult={handleAcceptVideoResult}
-        onReviseVideoResult={handleReviseVideoResult}
+        onSelectDirection={legacyArtifactActionsEnabled ? handleSelectDirection : undefined}
+        onRegenerateDirections={legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined}
+        onApprovePlan={legacyArtifactActionsEnabled ? handleApprovePlan : undefined}
+        onEditPlan={legacyArtifactActionsEnabled ? handleEditPlan : undefined}
+        onRevisePlan={legacyArtifactActionsEnabled ? handleRevisePlan : undefined}
+        onRollbackPlan={legacyArtifactActionsEnabled ? handleRollbackPlan : undefined}
+        onGenerateImage={legacyArtifactActionsEnabled ? handleGenerateImage : undefined}
+        onConfirmImageEditOptions={legacyArtifactActionsEnabled ? handleConfirmImageEditOptions : undefined}
+        onAcceptImageResult={legacyArtifactActionsEnabled ? handleAcceptImageResult : undefined}
+        onReviseImageResult={legacyArtifactActionsEnabled ? handleReviseImageResult : undefined}
+        onGenerateVideoFromScenePackages={legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined}
+        onAcceptVideoResult={legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined}
+        onReviseVideoResult={legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined}
         onOpenVideoResult={handleOpenVideoResult}
-        onRegenerateVideoWithRevision={handleRegenerateVideoWithRevision}
-        onRetryImageResult={handleRetryImageResult}
-        onRetrySceneAssets={handleRetrySceneAssets}
-        onRetryVideoMerge={handleRetryVideoMerge}
-        onRetryVideoAnalysis={handleRetryVideoAnalysis}
-        onApprovePptOutline={handleApprovePptOutline}
-        onRevisePptOutline={handleRevisePptOutline}
-        onRegeneratePptImage={handleRegeneratePptImage}
-        onGeneratePptFile={handleGeneratePptFile}
-        onAcceptPptFile={handleAcceptPptFile}
-        onRegeneratePptFile={handleRegeneratePptFile}
-        onGenerateJianyingDraft={handleGenerateJianyingDraft}
-        onDownloadJianyingDraft={handleDownloadJianyingDraft}
+        onRegenerateVideoWithRevision={legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined}
+        onRetryImageResult={legacyArtifactActionsEnabled ? handleRetryImageResult : undefined}
+        onRetrySceneAssets={legacyArtifactActionsEnabled ? handleRetrySceneAssets : undefined}
+        onRetryVideoMerge={legacyArtifactActionsEnabled ? handleRetryVideoMerge : undefined}
+        onRetryVideoAnalysis={legacyArtifactActionsEnabled ? handleRetryVideoAnalysis : undefined}
+        onApprovePptOutline={legacyArtifactActionsEnabled ? handleApprovePptOutline : undefined}
+        onRevisePptOutline={legacyArtifactActionsEnabled ? handleRevisePptOutline : undefined}
+        onRegeneratePptImage={legacyArtifactActionsEnabled ? handleRegeneratePptImage : undefined}
+        onGeneratePptFile={legacyArtifactActionsEnabled ? handleGeneratePptFile : undefined}
+        onAcceptPptFile={legacyArtifactActionsEnabled ? handleAcceptPptFile : undefined}
+        onRegeneratePptFile={legacyArtifactActionsEnabled ? handleRegeneratePptFile : undefined}
+        onGenerateJianyingDraft={legacyArtifactActionsEnabled ? handleGenerateJianyingDraft : undefined}
+        onDownloadJianyingDraft={legacyArtifactActionsEnabled ? handleDownloadJianyingDraft : undefined}
         jianyingDraftCapability={jianyingDraftCapability}
         getJianyingDraftResult={getJianyingDraftResult}
         isJianyingDraftRunning={isJianyingDraftRunning}
@@ -8438,7 +8650,7 @@ export function WorkspacePage() {
           }
         }}
       />
-      {canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (
+      {legacyArtifactActionsEnabled && canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (
         <Suspense fallback={<aside className="flex h-full w-[52vw] min-w-[680px] items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft">正在加载 Markdown 编辑器…</aside>}>
           <PlanMarkdownEditor
             planVersion={selectedPlanEditorMessage.artifact.plan.plan_version || 1}
@@ -8454,13 +8666,19 @@ export function WorkspacePage() {
       ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
         <StoryboardPanel
           msg={selectedStoryboardMessage}
-          onUpdateVideoScenePackage={(sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)}
-          onReferenceGlobalAsset={handleReferenceGlobalAsset}
-          onDeleteGlobalAsset={handleDeleteGlobalAsset}
-          onReplaceGlobalAsset={handleReplaceGlobalAsset}
-          onAddGlobalAsset={(assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)}
-          onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
-          onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
+          onUpdateVideoScenePackage={legacyArtifactActionsEnabled
+            ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
+            : undefined}
+          onReferenceGlobalAsset={legacyArtifactActionsEnabled ? handleReferenceGlobalAsset : undefined}
+          onDeleteGlobalAsset={legacyArtifactActionsEnabled ? handleDeleteGlobalAsset : undefined}
+          onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
+          onAddGlobalAsset={legacyArtifactActionsEnabled
+            ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
+            : undefined}
+          onGenerateVideo={legacyArtifactActionsEnabled
+            ? () => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)
+            : undefined}
+          onRetrySceneAssets={legacyArtifactActionsEnabled ? () => handleRetrySceneAssets(selectedStoryboardMessage) : undefined}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
@@ -8470,9 +8688,9 @@ export function WorkspacePage() {
       ) : canvasOpen && (
         <CanvasPanel
           state={canvas}
-          onApprove={handleApprove}
-          onRevise={handleRevise}
-          onConfirmStage={handleConfirmStage}
+          onApprove={legacyArtifactActionsEnabled ? handleApprove : () => undefined}
+          onRevise={legacyArtifactActionsEnabled ? handleRevise : () => undefined}
+          onConfirmStage={legacyArtifactActionsEnabled ? handleConfirmStage : undefined}
           onSelectVideo={(video) => setCanvas((current) => ({ ...current, selectedVideo: video }))}
           onDownloadVideo={handleDownloadPreviewVideo}
           onClose={() => {
@@ -8483,7 +8701,7 @@ export function WorkspacePage() {
           briefConfirmed={briefConfirmed}
         />
       )}
-      {dialogOpen && (
+      {legacyArtifactActionsEnabled && dialogOpen && (
         <GenParamsDialog
           key={`${pendingIntent}:${pendingCore}`}
           open
@@ -8496,7 +8714,7 @@ export function WorkspacePage() {
         />
       )}
       <PlanRevisionDialog
-        open={Boolean(pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
+        open={Boolean(legacyArtifactActionsEnabled && pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
         feedback={pendingPlanRevisionChoice?.feedback || ""}
         onConfirm={(mode) => void handleConfirmPlanRevisionMode(mode)}
         onCancel={handleCancelPlanRevisionMode}

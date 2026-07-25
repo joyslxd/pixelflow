@@ -7,6 +7,8 @@ import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
 import { isJianyingDraftResultRetryable, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 import type { WorkflowTaskBoardModel } from "@/lib/workflowTaskBoard";
+import type { SupervisorRuntimeNoticeModel } from "@/lib/supervisor/runtimeNotice";
+import { ConversationRuntimeNotice } from "./ConversationRuntimeNotice";
 import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 
 interface ChatPanelProps {
@@ -47,7 +49,10 @@ interface ChatPanelProps {
   getJianyingDraftResult?: (msg: ChatMessage) => JianyingDraftJobResponse | null;
   isJianyingDraftRunning?: (msg: ChatMessage) => boolean;
   onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
-  busy?: boolean;
+  composerDisabled?: boolean;
+  artifactActionsDisabled?: boolean;
+  runtimeBusy?: boolean;
+  runtimeNotice?: SupervisorRuntimeNoticeModel | null;
   workflowTaskBoard?: WorkflowTaskBoardModel | null;
 }
 
@@ -109,7 +114,10 @@ export function ChatPanel({
   getJianyingDraftResult,
   isJianyingDraftRunning,
   onDownloadArtifact,
-  busy,
+  composerDisabled = false,
+  artifactActionsDisabled = false,
+  runtimeBusy = false,
+  runtimeNotice = null,
   workflowTaskBoard,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -131,7 +139,7 @@ export function ChatPanel({
   }, [messages.length]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col border-r border-line">
+    <div className="flex min-w-0 flex-1 flex-col border-r border-line" aria-busy={runtimeBusy || undefined}>
       <div className="flex h-12 shrink-0 items-center px-5 text-[14px] font-semibold text-ink">
         对话
       </div>
@@ -156,7 +164,7 @@ export function ChatPanel({
                 key={m.id}
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
-                actionsDisabled={Boolean(busy) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
+                actionsDisabled={Boolean(artifactActionsDisabled) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}
@@ -198,6 +206,7 @@ export function ChatPanel({
       </div>
 
       <div className="relative shrink-0 px-4 pb-4 pt-2">
+        <ConversationRuntimeNotice notice={runtimeNotice} />
         {workflowTaskBoard ? (
           <div className="relative z-0 mr-auto -mb-4 w-full max-w-[1080px] pl-6 pr-7">
             <WorkflowTaskBoard key={workflowTaskBoard.workflowId} model={workflowTaskBoard} />
@@ -209,7 +218,7 @@ export function ChatPanel({
             referencedMaterials={referencedMaterials}
             onRemoveReferencedMaterial={onRemoveReferencedMaterial}
             prefillRequest={composerPrefillRequest}
-            busy={busy}
+            disabled={composerDisabled}
           />
         </div>
       </div>

@@ -42,6 +42,7 @@ export interface SupervisorConversationControllerOptions {
 
 export interface SupervisorConversationController {
   getState(): SupervisorRuntimeState;
+  getContextVersion(): number | null;
   subscribe(listener: () => void): () => void;
   start(): Promise<void>;
   refreshSnapshot(): Promise<SupervisorEventResumePoint>;
@@ -60,6 +61,8 @@ export interface UseSupervisorConversationOptions {
 
 export interface UseSupervisorConversationResult {
   state: SupervisorRuntimeState;
+  contextVersion: number | null;
+  getContextVersion(): number | null;
   refreshSnapshot(): Promise<SupervisorEventResumePoint>;
   startTurn(request: TurnStartRequest): Promise<JsonValue>;
   respondToInterrupt(interruptId: string, request: JsonObject): Promise<JsonValue>;
@@ -68,6 +71,17 @@ export interface UseSupervisorConversationResult {
 
 function defaultProjectSnapshot(snapshot: JsonValue): SupervisorRuntimeProjection {
   return snapshot as unknown as SupervisorRuntimeProjection;
+}
+
+function readContextVersion(snapshot: JsonValue): number {
+  if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new TypeError("Supervisor Snapshot 上下文版本不合法");
+  }
+  const value = snapshot.context_version;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError("Supervisor Snapshot 上下文版本不合法");
+  }
+  return value as number;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -97,6 +111,7 @@ export function createSupervisorConversationController(
   let generation = 0;
   let started = false;
   let disposed = false;
+  let contextVersion: number | null = null;
 
   const publish = (nextState: SupervisorRuntimeState) => {
     if (nextState === state) return;
@@ -130,6 +145,14 @@ export function createSupervisorConversationController(
     }
     if (!isCurrent(session) || signal.aborted) throw cancellationError();
 
+    let snapshotContextVersion: number;
+    try {
+      snapshotContextVersion = readContextVersion(snapshot);
+    } catch {
+      dispatch({ type: "connection.state_changed", status: "fatal" });
+      throw new Error("Supervisor Snapshot 状态不合法");
+    }
+
     let projection: SupervisorRuntimeProjection;
     try {
       projection = projectSnapshot(snapshot, conversationId);
@@ -143,9 +166,11 @@ export function createSupervisorConversationController(
       throw new Error("Supervisor Snapshot 状态不合法");
     }
 
+    contextVersion = snapshotContextVersion;
     dispatch({ type: "snapshot.hydrated", snapshot: projection });
     if (!isCurrent(session) || signal.aborted) throw cancellationError();
     if (state.connection.status === "fatal") {
+      contextVersion = null;
       throw new Error("Supervisor Snapshot 状态不合法");
     }
     return { ...state.resume };
@@ -251,6 +276,7 @@ export function createSupervisorConversationController(
     disposed = true;
     started = false;
     generation += 1;
+    contextVersion = null;
     lifecycleController?.abort(cancellationError());
     lifecycleController = null;
     eventSubscription?.close();
@@ -259,6 +285,7 @@ export function createSupervisorConversationController(
 
   return {
     getState: () => state,
+    getContextVersion: () => contextVersion,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -294,6 +321,11 @@ export function useSupervisorConversation(
     controller.getState,
     controller.getState,
   );
+  const contextVersion = controller.getContextVersion();
+  const getContextVersion = useCallback(
+    () => controller.getContextVersion(),
+    [controller],
+  );
 
   useEffect(() => {
     if (enabled) void controller.start();
@@ -322,9 +354,11 @@ export function useSupervisorConversation(
 
   return useMemo(() => ({
     state,
+    contextVersion,
+    getContextVersion,
     refreshSnapshot,
     startTurn,
     respondToInterrupt,
     getRunStatus,
-  }), [getRunStatus, refreshSnapshot, respondToInterrupt, startTurn, state]);
+  }), [contextVersion, getContextVersion, getRunStatus, refreshSnapshot, respondToInterrupt, startTurn, state]);
 }

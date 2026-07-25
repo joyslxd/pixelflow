@@ -193,7 +193,7 @@ test("失败草稿结果卡绕过旧消息锁定且只受忙碌或服务状态�
   assert.match(chatPanelSource, /const keepRecoverableActions = hasRecoverableArtifactAction\(m\)/);
   assert.match(
     chatPanelSource,
-    /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions\)\}/,
+    /actionsDisabled=\{Boolean\(artifactActionsDisabled\) \|\| \(!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions\)\}/,
   );
   assert.match(
     messageBubbleSource,

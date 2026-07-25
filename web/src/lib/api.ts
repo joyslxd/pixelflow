@@ -7,6 +7,7 @@ import type {
   JianyingDraftJobResponse,
   JianyingDraftStartRequest,
 } from "./jianyingDraft";
+import type { OrchestrationMode } from "./supervisor/contracts";
 
 export type {
   JianyingDraftCapability,
@@ -152,6 +153,8 @@ export interface ConversationSummaryResponse {
   current_task_id: string | null;
   last_phase: string;
   context: Record<string, unknown>;
+  orchestration_mode?: OrchestrationMode; // 服务端为新建对话分配的固定运行时归属；缺失时前端安全回退旧运行时。
+  orchestration_version?: 1; // 服务端归属合同版本；缺失或非法版本不得启用 Supervisor。
   created_at: string;
   updated_at: string;
 }

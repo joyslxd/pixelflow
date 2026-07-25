@@ -145,10 +145,9 @@ function resolvePending(
 
 function resolveOrchestration(
   conversation: Record<string, unknown>,
-  context: Record<string, unknown>,
 ): { mode: OrchestrationMode; version: 1 } {
-  const rawMode = conversation.orchestration_mode ?? context.orchestration_mode;
-  const rawVersion = conversation.orchestration_version ?? context.orchestration_version;
+  const rawMode = conversation.orchestration_mode;
+  const rawVersion = conversation.orchestration_version;
   if (rawMode === undefined && rawVersion === undefined) {
     return { mode: "frontend_v2", version: 1 };
   }
@@ -158,6 +157,130 @@ function resolveOrchestration(
     return fail();
   }
   return { mode: rawMode as OrchestrationMode, version: 1 };
+}
+
+/**
+ * 解析 Workspace 当前会话的编排归属。
+ *
+ * 服务端归属是唯一权威；缺失、非法或仍有旧 pending 任务时，必须回退到旧
+ * frontend_v2，避免新旧运行时同时推进同一个计费流程。
+ */
+export function resolveWorkspaceOrchestrationMode(value: unknown): OrchestrationMode {
+  if (!isRecord(value)) return "frontend_v2";
+  const conversation = isRecord(value.conversation) ? value.conversation : value;
+  if (conversation.context !== undefined && !isRecord(conversation.context)) return "frontend_v2";
+  const context = isRecord(conversation.context) ? conversation.context : {};
+  try {
+    const orchestration = resolveOrchestration(conversation);
+    if (orchestration.mode !== "supervisor_v1") return orchestration.mode;
+    const conversationId = conversation.conversation_id;
+    if (!isNonEmptyString(conversationId)) return "frontend_v2";
+    const pending = resolvePending(context, conversationId);
+    return Object.values(pending).some((item) => item !== null)
+      ? "frontend_v2"
+      : orchestration.mode;
+  } catch {
+    return "frontend_v2";
+  }
+}
+
+export interface WorkspaceRuntimePolicy {
+  supervisorEnabled: boolean;
+  legacyRunnerEnabled: boolean;
+  legacyArtifactActionsEnabled: boolean;
+}
+
+/**
+ * 把会话归属转换为互斥的页面运行策略。
+ *
+ * Supervisor 只有在已取得对话 ID 时才能挂载；旧 runner 和旧产物动作始终
+ * 同开同关，避免前端绕过 Supervisor 直接启动供应商阶段。
+ */
+export function resolveWorkspaceRuntimePolicy(
+  mode: OrchestrationMode,
+  conversationId: string,
+): WorkspaceRuntimePolicy {
+  const supervisorEnabled = mode === "supervisor_v1" && conversationId.trim().length > 0;
+  const legacyRunnerEnabled = mode === "frontend_v2";
+  return {
+    supervisorEnabled,
+    legacyRunnerEnabled,
+    legacyArtifactActionsEnabled: legacyRunnerEnabled,
+  };
+}
+
+export interface WorkspaceInteractionPolicyInput {
+  mode: OrchestrationMode;
+  conversationId: string;
+  orchestrationResolved: boolean;
+  legacyBusy: boolean;
+  dialogOpen: boolean;
+  pendingPlanRevision: boolean;
+  supervisorConnection?: "idle" | "connecting" | "connected" | "reconnecting" | "fatal";
+  supervisorRun?: "idle" | "running" | "waiting_user" | "paused" | "failed" | "completed";
+  supervisorCompression?: "idle" | "compacting" | "blocked";
+  pendingSupervisorTurns?: number;
+}
+
+export interface WorkspaceInteractionPolicy {
+  composer: {
+    disabled: boolean;
+    canQueue: boolean;
+  };
+  artifact: {
+    actionsDisabled: boolean;
+  };
+  runtime: {
+    busy: boolean;
+    mode: OrchestrationMode;
+  };
+}
+
+/**
+ * 将页面交互拆成输入框、产物动作和运行时三条独立策略。
+ *
+ * 旧 frontend_v2 仍然保持“业务处理中不能继续输入或操作产物”的兼容行为；
+ * supervisor_v1 则允许输入先进入服务端 Turn 队列，同时不把预览、下载等只读
+ * 产物入口误锁死。真正会启动旧供应商任务的 handler 仍由运行时归属单独裁剪。
+ */
+export function resolveWorkspaceInteractionPolicy(
+  input: WorkspaceInteractionPolicyInput,
+): WorkspaceInteractionPolicy {
+  const hasConversation = input.conversationId.trim().length > 0;
+  const legacyInteractionBlocked = input.legacyBusy || input.dialogOpen || input.pendingPlanRevision;
+  const supervisorConnection = input.supervisorConnection || "idle";
+  const supervisorRuntimeBusy = (input.pendingSupervisorTurns ?? 0) > 0
+    || input.supervisorRun === "running"
+    || input.supervisorCompression === "compacting"
+    || supervisorConnection === "connecting"
+    || supervisorConnection === "reconnecting";
+  const runtimeBusy = !input.orchestrationResolved
+    || (input.mode === "frontend_v2" ? input.legacyBusy : supervisorRuntimeBusy);
+
+  if (!input.orchestrationResolved || (input.mode === "supervisor_v1" && !hasConversation)) {
+    return {
+      composer: { disabled: true, canQueue: false },
+      artifact: { actionsDisabled: true },
+      runtime: { busy: true, mode: input.mode },
+    };
+  }
+
+  if (input.mode === "supervisor_v1") {
+    return {
+      composer: {
+        disabled: supervisorConnection === "fatal",
+        canQueue: supervisorConnection !== "fatal",
+      },
+      artifact: { actionsDisabled: false },
+      runtime: { busy: runtimeBusy, mode: input.mode },
+    };
+  }
+
+  return {
+    composer: { disabled: legacyInteractionBlocked, canQueue: false },
+    artifact: { actionsDisabled: legacyInteractionBlocked },
+    runtime: { busy: runtimeBusy, mode: input.mode },
+  };
 }
 
 function resolveArtifact(message: Record<string, unknown>): JsonObject | null {
@@ -256,7 +379,7 @@ export function projectLegacyConversationSnapshot(value: unknown): LegacyConvers
   const messages = makeMessageIdsUnique(value.messages
     .map((message) => projectMessage(message, conversationId))
     .filter((message): message is LegacyMessageViewModel => message !== null));
-  const orchestration = resolveOrchestration(conversation, context);
+  const orchestration = resolveOrchestration(conversation);
   const artifacts = messages.flatMap((message): LegacyArtifactViewModel[] => {
     if (!message.artifact) return [];
     return [{
