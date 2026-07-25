@@ -1,10 +1,10 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`ready_for_phase_integration`
+- phase：`phase_integrated`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
-- 当前切片：M12.3
+- 当前切片：`M12.4`
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
 - 当前唯一写入者：`尚未领取`
@@ -13,8 +13,8 @@
 - release_id：`R1`
 - checkpoint_slice：`M12.3`
 - checkpoint_commit：`4d9931811f23eb306f2bf8b8dc33357aacbb46e4`
-- last_integrated_commit：—
-- checkpoint_status：`ready`
+- last_integrated_commit：`af3f7c1ec64044c6c05307b533e4fac621d3c282`
+- checkpoint_status：`phase_integrated:R1`
 
 ## 切片
 
@@ -75,3 +75,5 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 阶段门禁：固定实现提交 `4d9931811f23eb306f2bf8b8dc33357aacbb46e4` 后，按 `Invoke-AgentModuleGate.ps1` 的 `M12 / Phase / R1 / M12.3` 权威范围执行 `git diff --check`、`corepack pnpm test`、`corepack pnpm lint`、`corepack pnpm build-prod`，全部通过；聚合测试为 `296/296`，生产构建只有既存 chunk 体积提醒。
 - 状态：`R1-assist-ui` 阶段门禁和中文规范人工等价检查均绿色，M12 已登记 `ready_for_phase_integration`、`checkpoint_status=ready`；唯一写入权和 M12.3 文件锁已释放，等待开发者人工启动单槽阶段集成。
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
+- locked files：`无`
+- integration failure evidence：`无`
