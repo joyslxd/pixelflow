@@ -96,6 +96,18 @@ class PixelFlowConversationRow(Base):
 
     conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    orchestration_mode: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="frontend_v2",
+        server_default="frontend_v2",
+    )
+    orchestration_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
     title: Mapped[str] = mapped_column(String(200), default="")
     current_task_id: Mapped[str | None] = mapped_column(String(64), index=True)
     last_phase: Mapped[str] = mapped_column(String(32), default="idle", index=True)

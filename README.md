@@ -14,6 +14,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
+| 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；业务推进权仍属于现有 v2 阶段工作流，生产继续默认关闭 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
@@ -35,6 +36,8 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 flowchart LR
   FE["Web 前端<br/>React + Vite"] --> GW["FastAPI Gateway<br/>/agent/*"]
   GW --> PF["PixelFlow 业务层<br/>intake / creative / generate / skills"]
+  GW --> Runtime["Agent Runtime<br/>Turn / Snapshot / SSE / Context"]
+  Runtime --> Store
   PF --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
   PF --> Store["Task / Conversation Store"]
   PF --> PM["PowerMem HTTP sidecar<br/>semantic memory"]
@@ -55,6 +58,7 @@ pixelflow/
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
 │   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
+│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩与排队
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
@@ -175,11 +179,18 @@ flowchart TD
 | 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息，兼容旧同步调用 |
 | 对话 | POST | `/agent/conversations/{conversation_id}/messages/start` | 启动可恢复消息保存 job |
 | 对话 | GET | `/agent/conversations/{conversation_id}/messages/jobs/{job_id}` | 查询消息保存 job |
+| 会话 Runtime | POST | `/agent/conversations/{conversation_id}/turns/start` | 幂等登记统一输入与 Turn |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/agent-snapshot` | 恢复 run、压缩、队列、消息和 cursor |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/agent-events` | 按 cursor 断点续传 Runtime SSE |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/turns/jobs/{run_id}` | SSE 不可用时查询原 Turn，不重新创建 |
+| 会话 Runtime | POST | `/agent/conversations/{conversation_id}/interrupts/{interrupt_id}/responses` | R1 返回旧 v2 仍拥有人工确认权的稳定冲突合同 |
 | 对话 | PATCH | `/agent/conversations/{conversation_id}/messages/{message_id}` | 更新对话消息内容或 payload |
 | 对话 | GET | `/agent/conversations/{conversation_id}/trace` | 内部调试专用：查看该对话的 LLM/供应商调用 trace，需要 content-app `ROLE_ADMIN` |
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+R1 的 `assist / [] / 100 / true` 只写入 `backend/config.dev.yml`，用于测试环境覆盖全部新对话。`backend/config.prod.yml` 未增加这些键，仍由代码默认值保持 `off / [] / 0 / false`；历史对话和运行中任务不会迁移。生产启用需要在 M13.1 候选进入 Agent 后另行取得发布负责人的明确批准。
 
 ## 剪映草稿流程
 

@@ -1,10 +1,17 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`not_started`
+- phase：`in_progress`
 - owner：A+B；当周单一集成人
-- branch：计划 `codex/agent-0.8.4-m13-integration`
+- branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：M13.1
+- 当前切片：`M13.1`
+- base Agent SHA：`f03f733115fb0ddd554dcb434f368cef5f09b39e`
+- 当前唯一写入者：`/root`
+- 开始时间：`2026-07-25 13:38:00 +08:00`
+- 当前锁定文件：`docs/agentization/status/M13-status.md`、`docs/agentization/test-reports/M13.1-R1.md`；实现与测试文件待基线审计后按最小范围补充
+- release_id：`R1`
+- checkpoint_slice：`M13.1`
+- checkpoint_status：`pending`
 - 当前发布门禁：`not_eligible`；M13.1 切片通过后先写 `ready_for_phase_integration:R1`，人工触发的单槽候选绿色进入 Agent 后再写 `awaiting_release_approval:R1`
 - 生产配置：未变更；切片通过不等于生产上线
 
@@ -36,3 +43,13 @@
 ## 恢复提示
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
+
+## M13.1 实现检查点记录
+
+- 依赖：M00-I.1、M01、M03、M04、M07 和 M12.3/R1 均已进入 base Agent `f03f733`；最新 dev `fb745077` 是该 Agent 的祖先，dev→Agent 预检为 `up_to_date`。
+- 测试候选：`backend/config.dev.yml` 为 `assist / [] / 100 / true`，进程内 Gateway 连续 32 个新对话全部冻结为 assist；生产配置未修改，默认仍为 `off / [] / 0 / false`。
+- 实现：完成 R1 Turn 原子登记、migration/OpenAPI、60% 外置、75%/85% 摘要、持久化队列/租约/Snapshot、旧流程接力、queued 可见性和同会话 pending 写入串行化。
+- 回归：真实 message job 不能越序接力 queued Turn；历史非法 marker 由 Snapshot 安全清理且不改变队列顺序。
+- 审核：独立 Reviewer 最终 Critical/Important/Minor 均为 0，`Ready to merge: Yes`。
+- 提交前阶段门禁：`M13 / Phase / R1 / M13.1` 返回 `Passed=True`、`CommandCount=8`；实现提交后仍需在固定 SHA 上重跑，绿色才允许登记 `ready_for_phase_integration:R1`。
+- 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。

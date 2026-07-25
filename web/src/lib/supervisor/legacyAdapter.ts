@@ -46,6 +46,7 @@ export interface LegacyConversationViewModel {
   conversationId: string;
   orchestrationMode: OrchestrationMode;
   orchestrationVersion: 1;
+  agentRuntimeMode: WorkspaceAgentRuntimeMode;
   title: string;
   currentTaskId: string | null;
   lastPhase: string;
@@ -61,6 +62,33 @@ const INVALID_PENDING = "历史对话 pending 状态不合法";
 const CONFLICTING_PENDING = "历史对话 pending 状态不一致";
 const INVALID_PENDING_OWNER = "历史对话 pending 状态归属不合法";
 const CONFLICTING_ARTIFACT = "历史对话 artifact 状态不一致";
+
+export type WorkspaceAgentRuntimeMode = "off" | "shadow" | "assist" | "primary";
+
+export interface ConversationWriteSequencer {
+  run<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
+}
+
+export function createConversationWriteSequencer(): ConversationWriteSequencer {
+  const tails = new Map<string, Promise<void>>();
+  return {
+    async run<T>(conversationId: string, operation: () => Promise<T>): Promise<T> {
+      const previous = tails.get(conversationId) || Promise.resolve();
+      let releaseCurrent: () => void = () => {};
+      const current = new Promise<void>((resolve) => {
+        releaseCurrent = resolve;
+      });
+      tails.set(conversationId, current);
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        releaseCurrent();
+        if (tails.get(conversationId) === current) tails.delete(conversationId);
+      }
+    },
+  };
+}
 
 function fail(message = INVALID_SNAPSHOT): never {
   throw new TypeError(message);
@@ -184,10 +212,75 @@ export function resolveWorkspaceOrchestrationMode(value: unknown): Orchestration
   }
 }
 
+/**
+ * 只读取服务端保留的 Runtime 命名空间，普通业务 context 字段不能伪造接入状态。
+ */
+export function resolveWorkspaceAgentRuntimeMode(
+  value: unknown,
+): WorkspaceAgentRuntimeMode {
+  if (!isRecord(value)) return "off";
+  const conversation = isRecord(value.conversation) ? value.conversation : value;
+  if (!isRecord(conversation.context)) return "off";
+  const runtime = conversation.context.__agent_runtime;
+  if (!isRecord(runtime)) return "off";
+  const mode = runtime.mode;
+  const contextVersion = runtime.context_version;
+  if (
+    !["shadow", "assist", "primary"].includes(String(mode))
+    || !Array.isArray(runtime.enabled_intents)
+    || typeof runtime.context_compaction_enabled !== "boolean"
+    || !Number.isSafeInteger(contextVersion)
+    || Number(contextVersion) < 0
+  ) {
+    return "off";
+  }
+  return mode as WorkspaceAgentRuntimeMode;
+}
+
 export interface WorkspaceRuntimePolicy {
   supervisorEnabled: boolean;
   legacyRunnerEnabled: boolean;
   legacyArtifactActionsEnabled: boolean;
+}
+
+export type AssistHandoffAction =
+  | "register"
+  | "wait"
+  | "continue_legacy"
+  | "acknowledge"
+  | "failed";
+
+export interface AssistHandoffPolicyInput {
+  registrationStatus: "pending" | "registered";
+  serverInputStatus?: "sending" | "queued" | "processing" | "accepted" | "failed";
+  continueLegacy: boolean;
+  legacyBusy: boolean;
+  dialogOpen: boolean;
+  pendingPlanRevision: boolean;
+}
+
+/**
+ * assist 只在服务端确认当前 Turn 可执行后接力旧流程。
+ *
+ * queued/sending 以及尚未从 Snapshot 找到的 Turn 必须等待，刷新恢复时也不会
+ * 重新提交旧流程；不需要旧流程的 Turn 则只确认交接完成。
+ */
+export function resolveAssistHandoffAction(
+  input: AssistHandoffPolicyInput,
+): AssistHandoffAction {
+  if (input.registrationStatus === "pending") return "register";
+  if (
+    input.serverInputStatus === undefined
+    || input.serverInputStatus === "queued"
+    || input.serverInputStatus === "sending"
+    || input.legacyBusy
+    || input.dialogOpen
+    || input.pendingPlanRevision
+  ) {
+    return "wait";
+  }
+  if (input.serverInputStatus === "failed") return "failed";
+  return input.continueLegacy ? "continue_legacy" : "acknowledge";
 }
 
 /**
@@ -199,8 +292,14 @@ export interface WorkspaceRuntimePolicy {
 export function resolveWorkspaceRuntimePolicy(
   mode: OrchestrationMode,
   conversationId: string,
+  agentRuntimeMode: WorkspaceAgentRuntimeMode = "off",
 ): WorkspaceRuntimePolicy {
-  const supervisorEnabled = mode === "supervisor_v1" && conversationId.trim().length > 0;
+  const hasConversation = conversationId.trim().length > 0;
+  const supervisorEnabled = hasConversation && (
+    mode === "supervisor_v1"
+    || agentRuntimeMode === "assist"
+    || agentRuntimeMode === "shadow"
+  );
   const legacyRunnerEnabled = mode === "frontend_v2";
   return {
     supervisorEnabled,
@@ -380,6 +479,7 @@ export function projectLegacyConversationSnapshot(value: unknown): LegacyConvers
     .map((message) => projectMessage(message, conversationId))
     .filter((message): message is LegacyMessageViewModel => message !== null));
   const orchestration = resolveOrchestration(conversation);
+  const agentRuntimeMode = resolveWorkspaceAgentRuntimeMode(conversation);
   const artifacts = messages.flatMap((message): LegacyArtifactViewModel[] => {
     if (!message.artifact) return [];
     return [{
@@ -395,6 +495,7 @@ export function projectLegacyConversationSnapshot(value: unknown): LegacyConvers
       ? "frontend_v2"
       : orchestration.mode,
     orchestrationVersion: orchestration.version,
+    agentRuntimeMode,
     title: conversation.title,
     currentTaskId: currentTaskId ?? null,
     lastPhase: conversation.last_phase,

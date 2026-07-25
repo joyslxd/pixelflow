@@ -21,6 +21,28 @@ gateway:
 
 # PixelFlow 业务配置；对应短视频生成 Agent 自己的 Service/Client 参数。
 pixelflow:
+  # M13.1/R1 测试候选的 Agent Runtime 配置；仅开发/测试 profile 使用。
+  agent_runtime:
+    # 用途：选择新对话的 Runtime 接入层级；assist 只接管 Turn、SSE、恢复和压缩，
+    # 业务阶段仍由旧 v2 Controller/Service 推进。类型为 off/shadow/assist/primary，
+    # 代码默认 off；修改后需重启，只影响重启后新建对话；回滚为 off。
+    # 用途：冻结测试候选运行模式；影响：新对话挂载统一会话层但不接管业务推进。
+    mode: "assist"
+    # 用途：限定 primary 可接管的 intent；R1 必须为空数组，表示不接管任何图片、视频、
+    # PPT 或视频分析业务。类型为数组，默认空；修改后需重启且只影响新对话；
+    # R1 回滚继续保持空数组，后续阶段须经独立发布批准才能增加取值。
+    # 用途：限定 primary 接管范围；影响：空数组保证 R1 不接管任何业务 intent。
+    enabled_intents: []
+    # 用途：设置重启后新建对话接入 Runtime 的覆盖比例；R1 测试候选取 100，确保测试环境
+    # 覆盖全部新对话。类型为 0-100 的整数，代码默认 0；修改后需重启且不改历史对话；
+    # 回滚为 0。本项禁止照搬到生产 profile。
+    # 用途：设置测试候选覆盖比例；影响：100 让重启后的全部新对话进入 assist。
+    new_conversation_rollout_percent: 100
+    # 用途：开启 R1 上下文压缩、排队和恢复投影；true 会让新对话使用持久化压缩协调，
+    # false 完全停用该能力。类型为布尔值，代码默认 false；修改后需重启且只影响新对话；
+    # 回滚为 false。
+    # 用途：启用测试候选压缩能力；影响：新对话会执行预算、压缩、排队和恢复。
+    context_compaction_enabled: true
   # PixelFlow 独立业务库 MySQL 连接串；留空时复用 DeerFlow 的 sqlite/内存存储。
   mysql_url: ""
   # 是否启用 mem0 记忆能力；当前默认关闭，避免本地缺少外部依赖时报错。

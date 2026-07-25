@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # lifespan 入口再调用一次，保证测试或特殊 ASGI 加载路径也已经完成 profile 初始化。
     load_profile_config()
+    agent_runtime_config = validate_agent_runtime_startup_config()
 
     # 启动时加载配置并检查必要环境变量。startup_config 是一次性启动快照，只用于
     # 日志级别、LangGraph runtime 引擎和 channels 等必须重启才生效的基础设施。
@@ -157,6 +158,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_task_store = SQLPixelFlowTaskStore(sf) if sf is not None else MemoryPixelFlowTaskStore()
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
+
+        from pixelflow.agent_runtime.persistence import (
+            MemoryCompactionQueueRepository,
+            SQLCompactionQueueRepository,
+        )
+        from pixelflow.agent_runtime.runtime_compaction import (
+            build_agent_context_compactor,
+        )
+        from pixelflow.agent_runtime.service import AgentRuntimeService
+
+        task_store = app.state.pixelflow_task_store
+        if isinstance(task_store, SQLPixelFlowTaskStore):
+            agent_runtime_repository = SQLCompactionQueueRepository(
+                task_store.session_factory,
+            )
+        else:
+            agent_runtime_repository = MemoryCompactionQueueRepository()
+        context_compactor = (
+            build_agent_context_compactor(
+                task_store=task_store,
+                repository=agent_runtime_repository,
+                app_config=startup_config,
+            )
+            if agent_runtime_config.context_compaction_enabled
+            else None
+        )
+        app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
+            config=agent_runtime_config,
+            repository=agent_runtime_repository,
+            task_store=task_store,
+            context_compactor=context_compactor,
+        )
+        logger.info(
+            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s",
+            agent_runtime_config.mode,
+            agent_runtime_config.new_conversation_rollout_percent,
+        )
 
         from pixelflow.tracing import configure_trace_sink
 

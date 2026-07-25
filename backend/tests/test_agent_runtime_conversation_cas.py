@@ -398,6 +398,8 @@ def test_conversation_revision_migration_backfills_existing_rows_and_is_reversib
     inspector = inspect(engine)
     assert {column["name"] for column in inspector.get_columns("pixelflow_conversations")} == {
         "conversation_id",
+        "orchestration_mode",
+        "orchestration_version",
         "revision",
     }
     assert "ix_pf_conversation_revision_m01_3" in {
@@ -407,10 +409,11 @@ def test_conversation_revision_migration_backfills_existing_rows_and_is_reversib
     with engine.connect() as connection:
         assert connection.execute(
             text(
-                "SELECT revision FROM pixelflow_conversations "
+                "SELECT revision, orchestration_mode, orchestration_version "
+                "FROM pixelflow_conversations "
                 "WHERE conversation_id = 'legacy-conversation'"
             )
-        ).scalar_one() == 1
+        ).one() == (1, "frontend_v2", 1)
     engine.dispose()
 
     command.downgrade(config, "20260724_01")

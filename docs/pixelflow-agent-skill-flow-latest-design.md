@@ -855,6 +855,11 @@ flowchart TD
 | `PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT=0` | 新对话接管比例；M00 默认 0，只接受 0–100 的十进制整数 |
 | `PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED=false` | 是否启用新 Runtime 上下文压缩；M00 默认关闭，不启动压缩流程 |
 
+M13.1/R1 模块候选只在 `config.dev.yml` 将上述四项冻结为
+`assist / [] / 100 / true`，用于测试环境覆盖全部新对话；`config.prod.yml`
+不增加对应键，继续使用代码默认 `off / [] / 0 / false`。该候选不迁移历史对话，
+也不改变生产 Feature Flag；生产启用必须等 R1 候选进入 Agent 后再取得独立发布批准。
+
 配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
 
 ## 14. 文件更新要求
@@ -955,7 +960,9 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-25，M00 已完成合同、唯一 fixture、默认关闭启动配置和本地门禁基础设施，M01 业务持久化/Turn Inbox/Event Outbox 与 M03 Context 预算/组装已经进入 Agent 集成分支；M04 的结构化摘要、四阈值压缩、压缩锁/输入队列、生命周期事件和事实验证已经在模块分支完成最终门禁，仍需按执行手册 9.10A 完成人工触发的单槽集成。M02、M05–M13 尚未完成，现有图片、视频、PPT 和视频分析流程仍未被新 Runtime 接管。实施期间必须区分“模块实现/已进入 Agent”和“已经发布生产”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-25，M00-I.1 已完成，M01、M03、M04、M07 和 M12.3 的 R1 增量已经进入 Agent 集成分支。M13.1 正在独立模块分支形成 R1 `assist` 候选：新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但 `orchestration_mode` 仍固定为 `frontend_v2`，现有图片、视频、PPT 和视频分析阶段工作流继续拥有业务推进权；旧消息 API 复用同一 `client_input_id`，避免双写重复。候选完成只可登记 `ready_for_phase_integration:R1`，必须经执行手册 9.10A 的人工单槽候选绿色进入 Agent 后，才能登记阶段已集成并等待独立生产发布批准。实施期间必须区分“模块实现/已进入 Agent”和“已经发布生产”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+
+R1 Turn 登记在同一 Repository 事务内完成幂等检查、上下文 CAS、可见用户消息、Turn 和首批 Outbox 事件；冲突请求不能留下半成品。自动压缩从本次登记得到的稳定 `message_id` 精确保护当前输入的文本、materials、reply 和 artifact refs，不依赖同秒消息的排序猜测。旧 v2 只有在该 Turn 进入 `accepted/processing` 后才用同一个客户端 UUID 启动既有可恢复消息 job；后端只接受当前用户、当前对话、稳定消息 ID 和 job registry 全部匹配的 job 作为接力证据，并在保存 pending context 的同一 Conversation Store 临界区写入服务端 `legacy_handoff` marker。Runtime 随后幂等完成当前 Turn、领取下一条并补齐 `input.state_changed` 事件；任一步中断时 marker 保留，下一次 Snapshot 按 marker 继续补偿，客户端伪造 context 不能提前完成 Turn。刷新或断线只恢复 conversation context、Snapshot、SSE cursor 与原 job，前端不会把 `queued` 输入重新提交。
 
 目标方案采用四阶段上线：
 
@@ -968,7 +975,9 @@ corepack pnpm build
 
 R1 的 conversation 压缩锁由永久数据库协调行和短事务租约实现，协调状态为 `idle`、`active` 或 `retry_required`，使用随机 fencing token 阻止过期 worker 收尾。普通 Turn 与压缩专用入口都先锁同一协调行；压缩执行期间输入由后端直接持久化为 `queued`，成功后原子切回 `idle` 并只把最早输入迁移为 `processing`，失败或暂停则保留 `retry_required` 恢复标记和全部排队输入，继续阻止超窗处理，后续 worker 从原队列接管，前端不重新发送。
 
-结构化摘要由增量 `SummaryBuilder` 生成，并在返回持久化边界前强制经过 `SummaryVerifier`。调用方必须给出本轮仍然有效的用户目标、已确认决定、否定约束、Workflow 状态、未决问题、Artifact 证据引用和稳定 ID；Verifier 使用精确匹配保证这些关键事实 100% 保留，同时复算摘要语义与消息覆盖范围的 `sha256` 内容 hash。已经解决或发生权威变更的事实必须由调用方从新一轮验证基线中显式移除，不能依赖模糊相似度或让摘要模型自行判断。Plan、创作合同、场景蓝图、资产清单、pending action/job 和 operation 始终留在业务权威通道，不进入摘要输入，也不由 Verifier 改写。
+60% 阶段真实调用 M03 `ContextPayloadExternalizer`：完整大型 tool/artifact 载荷按用户、对话、来源和内容 hash 幂等写入 `pixelflow_agent_context_payloads`，模型副本只保留稳定 `external_ref`、hash、原字节数和安全片段；SQL Store 支持跨进程恢复，Memory Store 仅用于本地开发。外置不会改写原消息，完整当前输入也绝不外置；72%/92% 的 `SummaryBuilder` 只接收脱水后的消息副本，token 重计量和实际摘要输入使用同一份数据，避免低估。85% 的 Workflow 层级摘要用 `stage_version + context_version` 作为覆盖证据，保存前重建整份有效 context；只有候选严格缩小时才持久化，未变版本在下一 Turn 不再重复计入，候选放大则保持原输入和未覆盖状态。
+
+结构化摘要由增量 `SummaryBuilder` 生成，并在返回持久化边界前强制经过 `SummaryVerifier`。调用方必须给出本轮仍然有效的用户目标、已确认决定、关键业务事实、否定约束、Workflow 状态、未决问题、Artifact 证据引用和稳定 ID；关键业务事实至少覆盖商品/产品/品牌、颜色、材质、时长、比例/画幅、模型、数量、用途、风格、尺寸/分辨率、文案、声音、语言、受众和平台，稳定 ID 同时从正文及白名单 payload 字段提取。Verifier 使用精确匹配保证这些关键事实 100% 保留，同时复算摘要语义与消息覆盖范围的 `sha256` 内容 hash。已经解决或发生权威变更的事实必须由调用方从新一轮验证基线中显式移除，不能依赖模糊相似度或让摘要模型自行判断。Plan、创作合同、场景蓝图、资产清单、pending action/job 和 operation 始终留在业务权威通道，不由 Verifier 改写。
 
 压缩 Runtime 在取得 conversation 租约后，把 `context.compression_started`、每个成功压缩动作对应的 `context.compression_progressed`、成功收尾的 `context.compression_completed` 和暂停/异常的 `context.compression_failed` 先写入 M01 Event Outbox；同一 conversation 继续使用单调 sequence 和不透明 cursor，并发抢占 sequence 时重新读取尾部后有限重试。事件 payload 只包含公开状态、动作、步骤、安全 reason code 和冻结提示文案，不包含摘要正文、token 数、内部 prompt、用户原文、异常字符串、Authorization、API key 或完整 URL。`already_running` 不重复写 started；进度事件写入失败按 fail-closed 进入 `retry_required`，不能被 92% 最小上下文 fallback 当作压缩成功吞掉。
 

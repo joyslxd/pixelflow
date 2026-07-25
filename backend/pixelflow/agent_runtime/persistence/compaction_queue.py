@@ -81,6 +81,15 @@ class CompactionQueueRepository(Protocol):
         now: datetime,
     ) -> TurnRecord: ...
 
+    async def complete_turn_and_claim_next(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        now: datetime,
+    ) -> tuple[TurnRecord, TurnRecord | None]: ...
+
     async def finish_compaction(
         self,
         user_id: str,
@@ -337,7 +346,25 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
             lease_state = self._compaction_leases.get(normalized.conversation_id)
             if lease_state is not None and lease_state[0] != owner:
                 raise AgentRuntimeRecordConflictError("conversation 压缩租约已经属于其他所有者")
-            queued = normalized.model_copy(update={"status": (TurnStatus.QUEUED if lease_state is not None else TurnStatus.ACCEPTED)})
+            has_execution_owner = any(
+                turn.conversation_id == normalized.conversation_id
+                and turn.status
+                in {
+                    TurnStatus.ACCEPTED,
+                    TurnStatus.PROCESSING,
+                }
+                for (turn_owner, _), turn in self._turns.items()
+                if turn_owner == owner
+            )
+            queued = normalized.model_copy(
+                update={
+                    "status": (
+                        TurnStatus.QUEUED
+                        if lease_state is not None or has_execution_owner
+                        else TurnStatus.ACCEPTED
+                    ),
+                },
+            )
             client_key = (
                 queued.conversation_id,
                 str(queued.client_input_id),
@@ -370,6 +397,75 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
                 user_id,
                 conversation,
             )
+
+    async def complete_turn_and_claim_next(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        now: datetime,
+    ) -> tuple[TurnRecord, TurnRecord | None]:
+        """确认旧 v2 已持久化接力点，再按 Inbox 顺序领取下一 Turn。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        normalized_now = _normalize_datetime("now", now)
+        normalized_turn_id = _require_text("turn_id", turn_id, 64)
+        async with self._compaction_write_lock:
+            owner_key = (owner, normalized_turn_id)
+            current = self._turns.get(owner_key)
+            if current is None or current.conversation_id != conversation:
+                raise AgentRuntimeRecordConflictError("Turn 不存在或不属于当前会话")
+            if current.status not in {
+                TurnStatus.ACCEPTED,
+                TurnStatus.PROCESSING,
+                TurnStatus.COMPLETED,
+            }:
+                raise AgentRuntimeRecordConflictError("只有已接力 Turn 可以完成")
+            completed = current.model_copy(
+                update={"status": TurnStatus.COMPLETED},
+            )
+            self._turns[owner_key] = _clone(completed)
+            if conversation in self._compaction_leases:
+                return _clone(completed), None
+            active = [
+                turn
+                for (record_owner, _), turn in self._turns.items()
+                if record_owner == owner
+                and turn.conversation_id == conversation
+                and turn.turn_id != normalized_turn_id
+                and turn.status is TurnStatus.PROCESSING
+            ]
+            if active:
+                return _clone(completed), None
+            candidates = [
+                (key, turn)
+                for key, turn in self._turns.items()
+                if key[0] == owner
+                and turn.conversation_id == conversation
+                and turn.status
+                in {TurnStatus.ACCEPTED, TurnStatus.QUEUED}
+            ]
+            candidates.sort(
+                key=lambda item: (
+                    item[1].created_at,
+                    item[1].turn_id,
+                ),
+            )
+            if not candidates:
+                return _clone(completed), None
+            next_key, next_turn = candidates[0]
+            claimed = next_turn.model_copy(
+                update={"status": TurnStatus.PROCESSING},
+            )
+            self._turns[next_key] = _clone(claimed)
+            del normalized_now
+            return _clone(completed), _clone(claimed)
 
     async def finish_compaction(
         self,
@@ -654,6 +750,111 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
             user_id,
             conversation_id,
         )
+
+    async def complete_turn_and_claim_next(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        now: datetime,
+    ) -> tuple[TurnRecord, TurnRecord | None]:
+        """在协调行短事务中完成旧 v2 接力并领取最早排队输入。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text(
+            "conversation_id",
+            conversation_id,
+            64,
+        )
+        normalized_turn_id = _require_text("turn_id", turn_id, 64)
+        normalized_now = _normalize_datetime("now", now)
+        await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=normalized_now,
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                coordination = (
+                    await session.scalars(
+                        self._coordination_statement(conversation),
+                    )
+                ).one()
+                if coordination.user_id != owner:
+                    raise AgentRuntimeRecordConflictError(
+                        "conversation 压缩协调行已经属于其他所有者",
+                    )
+                target = (
+                    await session.scalars(
+                        select(PixelFlowAgentTurnRow)
+                        .where(
+                            PixelFlowAgentTurnRow.user_id == owner,
+                            PixelFlowAgentTurnRow.conversation_id
+                            == conversation,
+                            PixelFlowAgentTurnRow.turn_id
+                            == normalized_turn_id,
+                        )
+                        .with_for_update(),
+                    )
+                ).one_or_none()
+                if target is None:
+                    raise AgentRuntimeRecordConflictError(
+                        "Turn 不存在或不属于当前会话",
+                    )
+                if target.status not in {
+                    TurnStatus.ACCEPTED.value,
+                    TurnStatus.PROCESSING.value,
+                    TurnStatus.COMPLETED.value,
+                }:
+                    raise AgentRuntimeRecordConflictError(
+                        "只有已接力 Turn 可以完成",
+                    )
+                target.status = TurnStatus.COMPLETED.value
+                target.updated_at = normalized_now
+                if coordination.state != "idle":
+                    await session.flush()
+                    return _turn_from_row(target), None
+
+                turns = (
+                    await session.scalars(
+                        self._active_turn_statement(
+                            owner,
+                            conversation,
+                        ),
+                    )
+                ).all()
+                if any(
+                    turn.status == TurnStatus.PROCESSING.value
+                    for turn in turns
+                ):
+                    await session.flush()
+                    return _turn_from_row(target), None
+                next_turn = next(
+                    (
+                        turn
+                        for turn in turns
+                        if turn.status
+                        in {
+                            TurnStatus.ACCEPTED.value,
+                            TurnStatus.QUEUED.value,
+                        }
+                    ),
+                    None,
+                )
+                if next_turn is not None:
+                    next_turn.status = TurnStatus.PROCESSING.value
+                    next_turn.updated_at = normalized_now
+                await session.flush()
+                return (
+                    _turn_from_row(target),
+                    None
+                    if next_turn is None
+                    else _turn_from_row(next_turn),
+                )
 
     async def finish_compaction(
         self,
