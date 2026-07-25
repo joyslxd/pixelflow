@@ -482,6 +482,7 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
         user_id=user_id,
         conversation_id=conversation_id,
         pending_message_job=pending_message_job,
+        replacement_context=replacement_context,
     )
     if handoff_marker is not None:
         marker_client_input_id = uuid.UUID(
@@ -501,6 +502,12 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
         fields["_agent_runtime_patch"] = {
             "legacy_handoff": handoff_marker,
         }
+        # 接力标记只用于本次 Controller 请求，不能作为业务快照长期暴露。
+        if isinstance(replacement_context, dict):
+            sanitized_context = dict(replacement_context)
+            sanitized_context.pop("legacy_handoff", None)
+            sanitized_context.pop("legacyHandoff", None)
+            fields["context"] = sanitized_context
     try:
         updated = await _task_store(request).update_conversation(
             conversation_id,
@@ -789,34 +796,48 @@ def _validated_runtime_handoff_marker(
     user_id: str,
     conversation_id: str,
     pending_message_job: object,
+    replacement_context: object,
 ) -> dict[str, str] | None:
-    """只接受本进程已登记且归属匹配的旧流程消息 job 作为接力证据。"""
+    """校验旧流程接力证据，避免前端随意完成尚未处理的 Runtime Turn。"""
 
-    if not isinstance(pending_message_job, dict):
+    if isinstance(pending_message_job, dict) and pending_message_job.get("kind") == "conversation_message":
+        job_id = pending_message_job.get("job_id")
+        client_input_id = pending_message_job.get("source_message_id")
+        if not isinstance(job_id, str) or not isinstance(client_input_id, str):
+            return None
+        try:
+            normalized_client_input_id = str(uuid.UUID(client_input_id))
+        except ValueError:
+            return None
+        job = _CONVERSATION_MESSAGE_JOBS.get(job_id)
+        expected_message_id = _conversation_message_id(
+            conversation_id,
+            {"client_message_id": normalized_client_input_id},
+        )
+        if not isinstance(job, dict) or job.get("user_id") != user_id or job.get("conversation_id") != conversation_id or job.get("message_id") != expected_message_id or job.get("status") not in {"running", "completed"}:
+            return None
+        return {
+            "client_input_id": normalized_client_input_id,
+            "job_id": job_id,
+            "message_id": expected_message_id,
+            "status": "pending_ack",
+        }
+
+    # 图片、视频、PPT 等旧 v2 直接流程没有 conversation_message job，
+    # 由前端在旧流程真正完成后提交受限的通用接力标记。
+    if not isinstance(replacement_context, dict):
         return None
-    if pending_message_job.get("kind") != "conversation_message":
+    marker = replacement_context.get("legacy_handoff") or replacement_context.get("legacyHandoff")
+    if not isinstance(marker, dict) or marker.get("source") != "frontend_v2":
         return None
-    job_id = pending_message_job.get("job_id")
-    client_input_id = pending_message_job.get("source_message_id")
-    if not isinstance(job_id, str) or not isinstance(
-        client_input_id,
-        str,
-    ):
+    client_input_id = marker.get("client_input_id") or marker.get("clientInputId")
+    if not isinstance(client_input_id, str):
         return None
     try:
         normalized_client_input_id = str(uuid.UUID(client_input_id))
     except ValueError:
         return None
-    job = _CONVERSATION_MESSAGE_JOBS.get(job_id)
-    expected_message_id = _conversation_message_id(
-        conversation_id,
-        {"client_message_id": normalized_client_input_id},
-    )
-    if not isinstance(job, dict) or job.get("user_id") != user_id or job.get("conversation_id") != conversation_id or job.get("message_id") != expected_message_id or job.get("status") not in {"running", "completed"}:
-        return None
     return {
         "client_input_id": normalized_client_input_id,
-        "job_id": job_id,
-        "message_id": expected_message_id,
         "status": "pending_ack",
     }

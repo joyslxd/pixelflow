@@ -124,6 +124,10 @@ def merge_revision_contract(
     current_image_count = current_contract.get("image_count") if current_contract else None
     if relative_image_count is not None and isinstance(current_image_count, int) and not isinstance(current_image_count, bool):
         explicit_patch["image_count"] = current_image_count + relative_image_count
+    # 手工编辑器把执行合同展示为只读；即使模型误返回数量补丁，也不能改动未明确编辑的生成数量。
+    if MANUAL_PLAN_EDIT_MARKER in str(revision_feedback or "") and "image_count" not in explicit_patch:
+        if current_image_count is not None:
+            merged["image_count"] = copy.deepcopy(current_image_count)
     merged.update(explicit_patch)
     return merged
 

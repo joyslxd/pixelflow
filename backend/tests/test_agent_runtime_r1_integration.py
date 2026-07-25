@@ -125,6 +125,21 @@ class _ThresholdStageExecutor:
         return CompactionStageResult(estimated_input_tokens=next_tokens)
 
 
+class _FailOnceStageExecutor:
+    """首次压缩失败，后续 worker 接管时降到目标预算。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("首次压缩失败")
+        return CompactionStageResult(
+            estimated_input_tokens=request.target_input_tokens,
+        )
+
+
 class _StaticBudgetGuard:
     """让排队集成测试稳定触发 level-1，而不改任何生产阈值。"""
 
@@ -741,6 +756,78 @@ async def test_r1_externalizes_payload_before_summary_and_keeps_full_current_inp
     assert current.payload["materials"] == [current_material]
     assert current.payload["reply_to_message_id"] == "reply-r1-001"
     assert current.payload["artifact_refs"] == ["artifact:r1-current"]
+
+
+@pytest.mark.asyncio
+async def test_r1_budget_excludes_legacy_revision_snapshot_but_keeps_store() -> None:
+    """旧前端修订快照只用于恢复，不重复进入 Agent 提示词预算。"""
+
+    from app.gateway.routers import pixelflow_conversations
+
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=_assist_config(),
+        repository=repository,
+        task_store=task_store,
+        clock=lambda: NOW,
+    )
+    large_snapshot = {
+        "conversationId": "r1-legacy-revision",
+        "artifact": {
+            "plan": "完整 Plan 恢复数据" * 10_000,
+            "intent": "video",
+        },
+    }
+    assignment = service.assignment_for_new_conversation(
+        {
+            "creation_contract": {
+                "duration_seconds": 15,
+                "ratio": "9:16",
+            },
+            "pendingVideoRevision": large_snapshot,
+            "pending_video_revision": large_snapshot,
+        },
+    )
+    conversation = await task_store.create_conversation(
+        pixelflow_conversations.PixelFlowConversationRecord(
+            conversation_id="r1-legacy-revision",
+            user_id=str(USER_ID),
+            context=assignment.context,
+        ),
+    )
+    current_message = PixelFlowConversationMessageRecord(
+        message_id="r1-legacy-revision-current",
+        conversation_id=conversation.conversation_id,
+        user_id=str(USER_ID),
+        role="user",
+        content="只修改第二个分镜，保持总时长不变",
+        payload={},
+        created_at=NOW.isoformat(),
+    )
+    await task_store.append_conversation_message(current_message)
+    guard = ContextBudgetGuard(
+        task_store=task_store,
+        repository=repository,
+        model_name=R1_TEST_MODEL,
+        model_profiles={R1_TEST_MODEL: _r1_test_profile()},
+        clock=lambda: NOW,
+    )
+
+    request = await guard.build_request(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+        current_message_id=current_message.message_id,
+    )
+    restored = await task_store.get_conversation(
+        conversation.conversation_id,
+        user_id=str(USER_ID),
+    )
+
+    assert request.budget_report.estimated_input_tokens < 5_000
+    assert restored is not None
+    assert restored.context["pendingVideoRevision"] == large_snapshot
+    assert restored.context["pending_video_revision"] == large_snapshot
 
 
 @pytest.mark.asyncio
@@ -1790,6 +1877,91 @@ async def test_r1_compaction_queue_and_recovery_snapshot_share_one_repository() 
     assert len(handed_off.input_queue) == 1
     assert handed_off.input_queue[0].client_input_id == str(queued_input_id)
     assert handed_off.input_queue[0].status == "processing"
+
+
+@pytest.mark.asyncio
+async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -> None:
+    """失败标记由后续读取唤醒，原 Turn 不重发并进入 processing。"""
+
+    from app.gateway.routers import pixelflow_conversations
+
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    executor = _FailOnceStageExecutor()
+    runtime = ConversationCompactionRuntime(
+        coordinator=ContextCompactionCoordinator(
+            executor=executor,
+            summary_model_name="r1-static-profile",
+            model_profiles={},
+            clock=lambda: NOW,
+        ),
+        repository=repository,
+        lease_owner="m13-r1-recovery-worker",
+        lease_ttl=timedelta(minutes=5),
+        event_sink=RepositoryCompactionEventOutbox(
+            repository=repository,
+        ),
+        clock=lambda: NOW,
+    )
+    service = AgentRuntimeService(
+        config=_assist_config(),
+        repository=repository,
+        task_store=task_store,
+        context_compactor=AutomaticConversationCompactor(
+            budget_guard=_StaticBudgetGuard(),
+            runtime=runtime,
+        ),
+        clock=lambda: NOW,
+    )
+    assignment = service.assignment_for_new_conversation({})
+    conversation = await task_store.create_conversation(
+        pixelflow_conversations.PixelFlowConversationRecord(
+            conversation_id="r1-compaction-retry",
+            user_id=str(USER_ID),
+            context=assignment.context,
+        ),
+    )
+
+    started = await service.start_turn(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+        request={
+            "client_input_id": str(CLIENT_INPUT_ID),
+            "content": "失败后继续原请求",
+            "materials": [],
+            "reply_to_message_id": None,
+            "artifact_refs": [],
+            "expected_context_version": 0,
+        },
+    )
+    assert started.status == "queued"
+
+    await service.events_after(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+        cursor=None,
+    )
+    for _ in range(20):
+        recovered = await repository.get_turn(
+            str(USER_ID),
+            started.turn_id,
+        )
+        if recovered is not None and recovered.status.value == "processing":
+            break
+        await asyncio.sleep(0)
+
+    assert recovered is not None
+    assert recovered.status.value == "processing"
+    events = await repository.list_events(
+        str(USER_ID),
+        conversation.conversation_id,
+    )
+    assert [event.type for event in events][-2:] == [
+        AgentEventType.CONTEXT_COMPRESSION_COMPLETED,
+        AgentEventType.INPUT_STATE_CHANGED,
+    ]
+    assert events[-1].payload["status"] == "processing"
+    await service.aclose()
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -244,6 +245,10 @@ class AgentRuntimeService:
         self._event_outbox = RepositoryCompactionEventOutbox(
             repository=repository,
         )
+        self._compaction_recovery_tasks: dict[
+            tuple[str, str],
+            asyncio.Task[None],
+        ] = {}
 
     def assignment_for_new_conversation(
         self,
@@ -404,6 +409,8 @@ class AgentRuntimeService:
             owner,
             conversation_id,
         )
+        if lease is not None and lease.lease_expires_at <= self._clock():
+            self._schedule_compaction_recovery(owner, conversation_id)
         queued_ids = [turn.turn_id for turn in turns if turn.status is TurnStatus.QUEUED]
         input_queue = [
             RuntimeInputProjection(
@@ -534,25 +541,143 @@ class AgentRuntimeService:
             )
         if next_turn is None:
             return
+        await self._append_processing_event(
+            user_id=owner,
+            conversation_id=conversation_id,
+            turn=next_turn,
+            occurred_at=occurred_at,
+        )
+
+    async def _append_processing_event(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        turn: TurnRecord,
+        occurred_at: datetime,
+    ) -> None:
+        """幂等补齐队首进入 processing 的事件，驱动 assist 前端接力旧流程。"""
+
         existing_events = await self.repository.list_events(
-            owner,
+            user_id,
             conversation_id,
         )
-        if any(event.type is AgentEventType.INPUT_STATE_CHANGED and event.payload.get("turn_id") == next_turn.turn_id and event.payload.get("status") == TurnStatus.PROCESSING.value for event in existing_events):
+        if any(event.type is AgentEventType.INPUT_STATE_CHANGED and event.payload.get("turn_id") == turn.turn_id and event.payload.get("status") == TurnStatus.PROCESSING.value for event in existing_events):
             return
         await self._event_outbox.append(
-            owner,
+            user_id,
             conversation_id=conversation_id,
-            run_id=next_turn.turn_id,
+            run_id=turn.turn_id,
             event_type=AgentEventType.INPUT_STATE_CHANGED,
             payload={
-                "client_input_id": str(next_turn.client_input_id),
-                "turn_id": next_turn.turn_id,
+                "client_input_id": str(turn.client_input_id),
+                "turn_id": turn.turn_id,
                 "status": TurnStatus.PROCESSING.value,
                 "queue_position": None,
             },
             occurred_at=occurred_at,
         )
+
+    def _schedule_compaction_recovery(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> None:
+        """由 Snapshot/SSE/轮询读取轻量唤醒失败压缩，不阻塞恢复接口。"""
+
+        if not self.config.context_compaction_enabled or self._context_compactor is None:
+            return
+        key = (user_id, conversation_id)
+        existing = self._compaction_recovery_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._recover_compaction(
+                user_id=user_id,
+                conversation_id=conversation_id,
+            ),
+            name=f"pixelflow-compaction-recovery-{conversation_id}",
+        )
+        self._compaction_recovery_tasks[key] = task
+
+        def _discard(completed: asyncio.Task[None]) -> None:
+            if self._compaction_recovery_tasks.get(key) is completed:
+                self._compaction_recovery_tasks.pop(key, None)
+
+        task.add_done_callback(_discard)
+
+    async def _recover_compaction(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+    ) -> None:
+        """用持久化 Turn 和稳定消息 ID 接管过期或 retry_required 压缩租约。"""
+
+        try:
+            lease = await self.repository.get_compaction_lease(
+                user_id,
+                conversation_id,
+            )
+            now = self._clock()
+            if lease is None or lease.lease_expires_at > now:
+                return
+            pending_turn = next(
+                (
+                    turn
+                    for turn in await self.repository.list_turns(
+                        user_id,
+                        conversation_id,
+                    )
+                    if turn.status in {
+                        TurnStatus.ACCEPTED,
+                        TurnStatus.QUEUED,
+                    }
+                ),
+                None,
+            )
+            if pending_turn is None:
+                return
+            retry = getattr(
+                self._context_compactor,
+                "retry_compaction",
+                None,
+            )
+            if retry is None:
+                return
+            result = await retry(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                run_id=pending_turn.turn_id,
+                current_message_id=_message_id(
+                    conversation_id,
+                    pending_turn.client_input_id,
+                ),
+            )
+            if result.next_turn is not None:
+                await self._append_processing_event(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    turn=result.next_turn,
+                    occurred_at=self._clock(),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Agent Runtime 压缩恢复失败并保留原队列：异常类型=%s",
+                type(exc).__name__,
+            )
+
+    async def aclose(self) -> None:
+        """停止进程内恢复任务；持久化队列由下一进程继续接管。"""
+
+        tasks = tuple(self._compaction_recovery_tasks.values())
+        self._compaction_recovery_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def legacy_handoff_is_eligible(
         self,
@@ -646,12 +771,21 @@ class AgentRuntimeService:
         )
         if conversation is None:
             raise LookupError("Conversation not found")
-        return await self.repository.list_events_after_cursor(
+        events = await self.repository.list_events_after_cursor(
             user_id,
             conversation_id,
             cursor=cursor,
             limit=limit,
         )
+        if events is not None and any(
+            event.type is AgentEventType.CONTEXT_COMPRESSION_FAILED
+            for event in events
+        ):
+            self._schedule_compaction_recovery(
+                user_id.strip(),
+                conversation_id,
+            )
+        return events
 
     async def get_run(
         self,
@@ -671,6 +805,11 @@ class AgentRuntimeService:
         turn = await self.repository.get_turn(user_id, run_id)
         if turn is None or turn.conversation_id != conversation_id:
             return None
+        if turn.status is TurnStatus.QUEUED:
+            self._schedule_compaction_recovery(
+                user_id.strip(),
+                conversation_id,
+            )
         return AgentTurnJobResponse(
             turn_id=turn.turn_id,
             run_id=turn.turn_id,

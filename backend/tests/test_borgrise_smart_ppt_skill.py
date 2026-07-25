@@ -110,6 +110,34 @@ def test_generate_ppt_image_normalizes_string_task_result(monkeypatch):
     assert result["smart_ppt_project_id"] == 88
 
 
+def test_generate_ppt_content_json_keeps_explicit_pages_and_downgrades_subheadings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_make_request(endpoint, data=None, **kwargs):
+        captured["endpoint"] = endpoint
+        captured["data"] = data
+        return {"success": True, "data": {"taskId": "task-content-1", "smartPptProjectId": 88}}
+
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+    monkeypatch.setattr(
+        run_generation,
+        "poll_task",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "data": {"status": "completed", "result": {"contentJson": [{"title": "P1"}]}},
+        },
+    )
+
+    outline = "# 发布会\n## P1. 封面\n### 页面说明\n### 视觉要求\n## P2. 产品\n### 卖点"
+    result = run_generation.generate_ppt_content_json(outline, "极简商务", 88)
+
+    assert result["content_json"] == [{"title": "P1"}]
+    assert captured["endpoint"] == "/picture/smart-ppt/generatePptContentToJson"
+    assert captured["data"]["originalOutline"] == (
+        "# 发布会\n## P1. 封面\n**页面说明**\n**视觉要求**\n## P2. 产品\n**卖点**"
+    )
+
+
 def test_borgrise_smart_ppt_skill_maps_file_result(monkeypatch):
     def fake_generate_ppt_file(**kwargs):
         assert kwargs == {"file_urls": ["https://x/1.png"], "smart_ppt_project_id": 88}

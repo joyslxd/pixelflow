@@ -342,6 +342,8 @@ interface WorkspaceSnapshot {
   pending_image_job?: PendingImageJob | null;
   pendingImageRevision?: PendingConversationArtifact | null;
   pending_image_revision?: PendingConversationArtifact | null;
+  pendingPptOutlineRevision?: PendingConversationArtifact | null;
+  pending_ppt_outline_revision?: PendingConversationArtifact | null;
   pendingScenePackageJob?: PendingScenePackageJob | null;
   pending_scene_package_job?: PendingScenePackageJob | null;
   pendingVideoJob?: PendingVideoJob | null;
@@ -1439,6 +1441,18 @@ function latestImageResultArtifactForConversation(messages: ChatMessage[], conve
   return undefined;
 }
 
+function latestPptRevisionRequestedForConversation(
+  messages: ChatMessage[],
+  conversationId: string,
+  content: string,
+): boolean {
+  if (!/(大纲|页|结构|封面|市场痛点|产品卖点|营销计划|总结)/u.test(content)) return false;
+  return messages.some(
+    (message) => messageConversationId(message, conversationId) === conversationId
+      && Boolean(message.artifact?.pptSummary),
+  );
+}
+
 function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
@@ -1803,6 +1817,9 @@ export function WorkspacePage() {
   const agentRuntimeModeRef = useRef<WorkspaceAgentRuntimeMode | null>("off");
   const deferredOwnershipInputsRef = useRef<DeferredOwnershipInput[]>([]);
   const supervisorTurnInFlightRef = useRef<Set<string>>(new Set());
+  // 旧 v2 接力可能持续数秒；在接力完成并写回上下文前，禁止同一 Turn 被
+  // Runtime effect 因状态刷新重复执行，避免重复计费或重复启动供应商任务。
+  const supervisorLegacyHandoffClaimedRef = useRef<Set<string>>(new Set());
   const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(
     orchestrationMode,
     currentConversationId,
@@ -3522,11 +3539,25 @@ export function WorkspacePage() {
         const normalized = updater([...current]).filter(
           (item) => item.conversationId === targetConversationId,
         );
+        const completedLegacyTurn = current.find(
+          (item) => item.conversationId === targetConversationId
+            && item.continueLegacy
+            && item.registrationStatus === "registered"
+            && !normalized.some((next) => next.clientInputId === item.clientInputId),
+        );
         await updateConversationWithProgress(targetConversationId, {
           context: {
             ...makeSnapshot(targetConversationId),
             pendingAgentRuntimeTurns: normalized,
             pending_agent_runtime_turns: normalized,
+            ...(completedLegacyTurn
+              ? {
+                  legacy_handoff: {
+                    source: "frontend_v2",
+                    client_input_id: completedLegacyTurn.clientInputId,
+                  },
+                }
+              : {}),
           } as unknown as Record<string, unknown>,
         });
         // 只有服务端恢复上下文落库后才向注册 effect 暴露 Turn；
@@ -6018,6 +6049,7 @@ export function WorkspacePage() {
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     imageRevisionArtifactRef.current = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
+    pptOutlineRevisionArtifactRef.current = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     videoRevisionArtifactRef.current = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
@@ -6102,6 +6134,10 @@ export function WorkspacePage() {
         imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
       pending_image_revision:
         imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
+      pendingPptOutlineRevision:
+        pptOutlineRevisionArtifactRef.current?.conversationId === snapshotConversationId ? pptOutlineRevisionArtifactRef.current : null,
+      pending_ppt_outline_revision:
+        pptOutlineRevisionArtifactRef.current?.conversationId === snapshotConversationId ? pptOutlineRevisionArtifactRef.current : null,
       pendingScenePackageJob:
         pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
       pending_scene_package_job:
@@ -6187,6 +6223,7 @@ export function WorkspacePage() {
     setWorkflowProgress(null);
     pptDoneConversationIdsRef.current = new Set();
     planRevisionArtifactRef.current = null;
+    pptOutlineRevisionArtifactRef.current = null;
     setPendingPlanRevisionChoice(null);
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
@@ -6216,6 +6253,7 @@ export function WorkspacePage() {
     const pendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
+    const pendingPptOutlineRevision = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     const pendingVideoRevision = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
@@ -6277,6 +6315,8 @@ export function WorkspacePage() {
       pending_image_job: pendingImageJob,
       pendingImageRevision,
       pending_image_revision: pendingImageRevision,
+      pendingPptOutlineRevision,
+      pending_ppt_outline_revision: pendingPptOutlineRevision,
       pendingVideoRevision,
       pending_video_revision: pendingVideoRevision,
       pendingPptJob,
@@ -6440,6 +6480,85 @@ export function WorkspacePage() {
       void resumePendingJianyingDraftJob(pendingJianyingDraftJob);
     }
   };
+
+  // 刷新或压缩完成后，服务端 Turn 可能已经进入 processing，但旧版页面内存里的
+  // pendingSupervisorTurns 已丢失。这里按服务端队列和已保存用户消息重建接力 DTO，
+  // 类似从数据库恢复一条待执行的 Service Command，绝不重新注册或重复计费。
+  useEffect(() => {
+    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+      || agentRuntimeModeRef.current === "assist"
+      || agentRuntimeModeRef.current === "shadow";
+    if (
+      !currentConversationId
+      || !runtimeAttached
+      || supervisorRuntime.state.connection.status !== "connected"
+    ) return;
+    const localIds = new Set(
+      pendingSupervisorTurns
+        .filter((item) => item.conversationId === currentConversationId)
+        .map((item) => item.clientInputId),
+    );
+    const recoverableInput = supervisorRuntime.state.inputQueue.find(
+      (item) => ["accepted", "processing", "queued"].includes(item.status)
+        && !localIds.has(item.clientInputId),
+    );
+    if (!recoverableInput) return;
+    const sourceMessage = messagesRef.current.find(
+      (message) => message.id === recoverableInput.clientInputId
+        && messageConversationId(message, currentConversationId) === currentConversationId
+        && message.role === "user",
+    );
+    if (!sourceMessage) return;
+
+    const lastPhase = workflowProgressConversationIdRef.current === currentConversationId
+      ? workflowProgressRef.current?.last_phase || ""
+      : "";
+    if (!imageRevisionArtifactRef.current) {
+      const imageArtifact = latestImageResultArtifactForConversation(messagesRef.current, currentConversationId);
+      const looksLikeRevision = /修改|重新生成|背景|轮廓光|亮明|保持不变/u.test(sourceMessage.content);
+      if (imageArtifact && (lastPhase === "image_regeneration_running" || looksLikeRevision)) {
+        imageRevisionArtifactRef.current = {
+          conversationId: currentConversationId,
+          artifact: imageArtifact,
+        };
+      }
+    }
+    if (!pptOutlineRevisionArtifactRef.current && latestPptRevisionRequestedForConversation(messagesRef.current, currentConversationId, sourceMessage.content)) {
+      const outlineMessage = [...messagesRef.current]
+        .reverse()
+        .find((message) => messageConversationId(message, currentConversationId) === currentConversationId && message.artifact?.pptSummary);
+      if (outlineMessage?.artifact) {
+        pptOutlineRevisionArtifactRef.current = {
+          conversationId: currentConversationId,
+          artifact: outlineMessage.artifact,
+        };
+      }
+    }
+
+    const recoveredTurn: PendingSupervisorTurn = {
+      conversationId: currentConversationId,
+      clientInputId: recoverableInput.clientInputId,
+      content: sourceMessage.content,
+      materials: sourceMessage.materials || [],
+      continueLegacy: orchestrationModeRef.current === "frontend_v2",
+      registrationStatus: "registered",
+      runId: recoverableInput.turnId || undefined,
+    };
+    void persistPendingSupervisorTurns(
+      (current) => current.some((item) => item.clientInputId === recoveredTurn.clientInputId)
+        ? current
+        : [recoveredTurn, ...current],
+      currentConversationId,
+    ).catch(() => {});
+  }, [
+    currentConversationId,
+    agentRuntimeMode,
+    pendingSupervisorTurns,
+    orchestrationMode,
+    orchestrationResolved,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.inputQueue,
+  ]);
 
   useEffect(() => {
     const handleVisibilityResume = () => {
@@ -6636,10 +6755,20 @@ export function WorkspacePage() {
   };
 
   useEffect(() => {
-    const pendingTurn = pendingSupervisorTurns.find(
-      (item) => item.conversationId === currentConversationId
-        && !supervisorTurnInFlightRef.current.has(item.clientInputId),
-    );
+    // 恢复时优先处理尚未提交到 Runtime 的输入；已注册 Turn 则优先选择
+    // Snapshot 中仍存在的 input，避免已失效的旧 registered Turn 一直 wait，
+    // 阻塞后续输入。
+    const candidateTurns = pendingSupervisorTurns
+      .filter(
+        (item) => item.conversationId === currentConversationId
+          && !supervisorTurnInFlightRef.current.has(item.clientInputId)
+          && !supervisorLegacyHandoffClaimedRef.current.has(item.clientInputId),
+      );
+    const pendingTurn = candidateTurns.find((item) => item.registrationStatus === "pending")
+      || candidateTurns.find((item) => supervisorRuntime.state.inputQueue.some(
+        (serverItem) => serverItem.clientInputId === item.clientInputId,
+      ))
+      || candidateTurns[0];
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow";
@@ -6651,12 +6780,10 @@ export function WorkspacePage() {
     const serverInput = supervisorRuntime.state.inputQueue.find(
       (item) => item.clientInputId === pendingTurn.clientInputId,
     );
-    if (
-      supervisorRuntime.state.connection.status !== "connected"
-      || supervisorRuntime.contextVersion === null
-    ) {
-      return;
-    }
+    // Snapshot 的 contextVersion 只作为 CAS 优化值；恢复阶段它可能尚未从
+    // 外部 Store 反映到本次 render。真正注册前 handleSupervisorTurn 会再读
+    // 一次最新 Snapshot，因此不能因为这里暂时为 null 而把已落库 Turn 卡死。
+    if (supervisorRuntime.state.connection.status !== "connected") return;
     if (serverInput) ensurePendingSupervisorTurnVisible(pendingTurn);
     const handoffAction = resolveAssistHandoffAction({
       registrationStatus: pendingTurn.registrationStatus,
@@ -6673,7 +6800,11 @@ export function WorkspacePage() {
         return;
       }
       supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+      if (handoffAction === "continue_legacy") {
+        supervisorLegacyHandoffClaimedRef.current.add(pendingTurn.clientInputId);
+      }
       const continueRegisteredTurn = async () => {
+        let handoffPersisted = false;
         if (handoffAction === "acknowledge") {
           await persistPendingSupervisorTurns(
             (current) => current.filter(
@@ -6681,33 +6812,44 @@ export function WorkspacePage() {
             ),
             pendingTurn.conversationId,
           );
+          handoffPersisted = true;
           return;
         }
-        await handleSend(
-          {
-            content: pendingTurn.content,
-            materials: pendingTurn.materials,
-          },
-          {
-            skipRuntimeRegistration: true,
-            clientInputId: pendingTurn.clientInputId,
-          },
-        );
-        await persistPendingSupervisorTurns(
-          (current) => current.filter(
-            (item) => item.clientInputId !== pendingTurn.clientInputId,
-          ),
-          pendingTurn.conversationId,
-        );
-        await supervisorRuntime.refreshSnapshot().catch(() => {});
+        try {
+          await handleSend(
+            {
+              content: pendingTurn.content,
+              materials: pendingTurn.materials,
+            },
+            {
+              skipRuntimeRegistration: true,
+              clientInputId: pendingTurn.clientInputId,
+            },
+          );
+          await persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          );
+          handoffPersisted = true;
+          await supervisorRuntime.refreshSnapshot().catch(() => {});
+        } finally {
+          if (handoffPersisted) {
+            supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
+          }
+        }
       };
       void continueRegisteredTurn().finally(() => {
         supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+        if (handoffAction === "acknowledge") {
+          supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
+        }
       });
       return;
     }
     supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
-    void handleSupervisorTurn(pendingTurn, supervisorRuntime.contextVersion)
+    void handleSupervisorTurn(pendingTurn, supervisorRuntime.getContextVersion() ?? 0)
       .then(async (registered) => {
         if (!registered) return;
         const registeredTurn: PendingSupervisorTurn = {
@@ -6730,11 +6872,15 @@ export function WorkspacePage() {
       });
   }, [
     currentConversationId,
+    agentRuntimeMode,
     dialogOpen,
     legacyBusy,
+    orchestrationMode,
+    orchestrationResolved,
     pendingPlanRevisionChoice,
     pendingSupervisorTurns,
     supervisorRuntime.contextVersion,
+    supervisorRuntime.getContextVersion,
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.inputQueue,
   ]);
@@ -6955,7 +7101,6 @@ export function WorkspacePage() {
     }
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {
       const flowMaterials = mergeMaterials(pendingImageRevisionArtifact.materials, materials);
-      imageRevisionArtifactRef.current = null;
       setBusyForConversation(activeConversation, true);
       pushAssistant("已收到图片修改意见，正在重新准备参数并生成图片…", activeConversation);
       try {
@@ -7019,7 +7164,10 @@ export function WorkspacePage() {
           intake_context: pendingImageRevisionArtifact.intakeContext,
           materials: flowMaterials,
           image_prepare: imagePrepare,
+          pendingImageRevision: null,
+          pending_image_revision: null,
         });
+        imageRevisionArtifactRef.current = null;
         await resumePendingImageJob(pendingImageJob);
       } catch (err) {
         pushAssistant(`图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
@@ -7479,6 +7627,17 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     pptOutlineRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
     pushAssistant("请在输入框填写 PPT 大纲修改意见，我会基于当前大纲继续更新。", targetConversationId);
+    if (targetConversationId) {
+      void updateConversationWithProgress(targetConversationId, {
+          last_phase: "ppt_outline_revision_requested",
+          context: {
+            ...makeSnapshot(targetConversationId),
+            pendingPptOutlineRevision: pptOutlineRevisionArtifactRef.current,
+            pending_ppt_outline_revision: pptOutlineRevisionArtifactRef.current,
+          } as unknown as Record<string, unknown>,
+        }, { intent: "ppt" })
+        .catch(() => {});
+    }
   };
 
   const handleRegeneratePptImage = async (msg: ChatMessage, pageIndex: number) => {
@@ -8661,8 +8820,6 @@ export function WorkspacePage() {
   async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    const processedKey = beginArtifactAction(msg, targetConversationId);
-    if (!processedKey) return;
     videoRevisionArtifactRef.current = null;
     markVideoResultAccepted(msg.id, targetConversationId);
     pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
@@ -8678,8 +8835,6 @@ export function WorkspacePage() {
   function handleReviseVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    const processedKey = beginArtifactAction(msg, targetConversationId);
-    if (!processedKey) return;
     videoRevisionArtifactRef.current = {
       conversationId: targetConversationId,
       artifact: {

@@ -362,6 +362,7 @@ PPT 异步规则：
 - Python 网关对前端暴露 `/agent/flows/ppt/*/start` 和 `/agent/flows/ppt/jobs/{job_id}`，前端轮询 Python job，避免浏览器请求长时间阻塞。
 - PPT 页面图片生成时后端会先返回全部页面的 `running` 状态，之后每完成一页就更新 job result；前端在同一张 PPT 页面图片卡片中逐页回显，文案展示为动态“图片生成中...”。多页图片可以在 Python job 内并发调度，但 content-app 生成任务创建 POST 由 `run_generation.py` 串行提交，轮询结果可并行等待。
 - PPT 页面图片处于 `running` 时不展示重新生成按钮；已生成或失败后才允许单页重试。单页重试必须原位更新该页小格子，不能追加新的整组 PPT 图片卡片；只要存在 running 或 failed 页面，“开始生成PPT附件”按钮必须隐藏。
+- `generatePptContentToJson` 发送前，如果确认的大纲使用 `## P1`、`## P2` 等显式页标题，页内 `###` 子标题会降级为加粗普通内容，避免 SmartPPT 把页内小节误拆成额外页面；显式页数以大纲为准。
 - PPT 轮询超时默认 2 小时：`BORGRISE_PPT_POLL_TIMEOUT=7200`。
 - content-app 返回额度不足时，job 状态为 `quota_paused`，前端提示充值后回到同一对话继续。
 

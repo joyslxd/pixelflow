@@ -101,6 +101,18 @@ _PAYLOAD_IDENTIFIER_KEYS = {
     "operation_id",
     "operationId",
 }
+_LEGACY_REVISION_SNAPSHOT_KEYS = {
+    "pendingImageRevision",
+    "pendingPlanRevision",
+    "pendingPptOutlineRevision",
+    "pendingVideoRevision",
+    "pending_image_revision",
+    "pending_plan_revision",
+    "pending_ppt_outline_revision",
+    "pending_video_revision",
+}
+
+
 class AgentContextCompactor(Protocol):
     """描述 Turn 登记后自动评估并压缩同一 conversation 的能力。"""
 
@@ -112,6 +124,15 @@ class AgentContextCompactor(Protocol):
         run_id: str,
         current_message_id: str,
     ) -> ConversationCompactionRunResult | None: ...
+
+    async def retry_compaction(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        run_id: str,
+        current_message_id: str,
+    ) -> ConversationCompactionRunResult: ...
 
 
 def _json_value(value: object) -> object:
@@ -224,9 +245,14 @@ def _stage_message_tokens(message) -> int:
 
 
 def _business_context(context: dict) -> dict:
-    """预算必须保留业务事实，只排除 Runtime 自己的内部元数据。"""
+    """保留业务事实，但不把旧前端的完整修订恢复快照重复放进模型输入。"""
 
-    return {key: deepcopy(value) for key, value in context.items() if key != AGENT_RUNTIME_CONTEXT_KEY}
+    return {
+        key: deepcopy(value)
+        for key, value in context.items()
+        if key != AGENT_RUNTIME_CONTEXT_KEY
+        and key not in _LEGACY_REVISION_SNAPSHOT_KEYS
+    }
 
 
 def _ordered_unique(values) -> tuple[str, ...]:
@@ -914,6 +940,33 @@ class AutomaticConversationCompactor:
         )
         if request.budget_report.compaction_level == 0:
             return None
+        context_token = _CURRENT_MESSAGE_ID.set(current_message_id)
+        externalized_token = _EXTERNALIZED_MESSAGES.set(None)
+        try:
+            return await self._runtime.compact(
+                user_id,
+                request,
+                run_id=run_id,
+            )
+        finally:
+            _EXTERNALIZED_MESSAGES.reset(externalized_token)
+            _CURRENT_MESSAGE_ID.reset(context_token)
+
+    async def retry_compaction(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        run_id: str,
+        current_message_id: str,
+    ) -> ConversationCompactionRunResult:
+        """接管 retry_required 时即使重新计量已低于阈值，也要释放旧租约并领取队首。"""
+
+        request = await self._budget_guard.build_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            current_message_id=current_message_id,
+        )
         context_token = _CURRENT_MESSAGE_ID.set(current_message_id)
         externalized_token = _EXTERNALIZED_MESSAGES.set(None)
         try:

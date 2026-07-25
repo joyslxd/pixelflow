@@ -134,9 +134,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
-        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.engine import get_engine, get_session_factory
         from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
+
+        # SQLite/DeerFlow 复用旧库时不会自动执行 PixelFlow 业务 Alembic 迁移。
+        # 先幂等补齐对话列，再把同一 session factory 注入 Repository，避免新旧
+        # 对话接口在 ORM 查询阶段因缺列统一返回 500。
+        persistence_engine = get_engine()
+        if persistence_engine is not None:
+            from pixelflow.tasks import ensure_sql_conversation_schema
+
+            await ensure_sql_conversation_schema(persistence_engine)
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
@@ -208,6 +217,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
+            pixelflow_agent_runtime_service = getattr(
+                app.state,
+                "pixelflow_agent_runtime_service",
+                None,
+            )
+            if pixelflow_agent_runtime_service is not None:
+                await pixelflow_agent_runtime_service.aclose()
+                logger.info("PixelFlow Agent Runtime closed")
             pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
             if pixelflow_jianying_draft_service is not None:
                 await pixelflow_jianying_draft_service.aclose()

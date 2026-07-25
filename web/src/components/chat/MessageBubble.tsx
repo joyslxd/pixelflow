@@ -999,7 +999,7 @@ export function MessageBubble({
                     <button
                       type="button"
                       onClick={() => onRegeneratePptImage?.(msg, page.page_index)}
-                      className="absolute right-2 top-2 hidden h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink shadow-sm hover:text-accent group-hover:flex"
+                      className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink opacity-0 shadow-sm transition-opacity hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
                       aria-label="重新生成本页"
                     >
                       <RefreshCw size={15} />

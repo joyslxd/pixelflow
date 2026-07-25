@@ -33,6 +33,50 @@ from pixelflow.tasks.model import (
 )
 
 
+def _ensure_sql_conversation_schema(sync_connection) -> None:
+    """为运行中的旧业务库补齐对话新列，并创建缺失的消息表。
+
+    生产环境通常由 Alembic 管理结构；但 DeerFlow 的 SQLite 开发/测试库会被
+    直接复用，启动时不会自动执行业务迁移。这里仅做幂等的兼容修复，保证 M13.1
+    新增的编排归属和 CAS revision 不会让历史对话接口整体返回 500。
+    """
+
+    from sqlalchemy import inspect
+
+    inspector = inspect(sync_connection)
+    conversation_table = PixelFlowConversationRow.__table__
+    message_table = PixelFlowConversationMessageRow.__table__
+    if not inspector.has_table(conversation_table.name):
+        conversation_table.metadata.create_all(
+            sync_connection,
+            tables=[conversation_table, message_table],
+        )
+        return
+
+    columns = {str(column["name"]) for column in inspector.get_columns(conversation_table.name)}
+    missing_columns = {
+        "revision": "INTEGER NOT NULL DEFAULT 1",
+        "orchestration_mode": "VARCHAR(24) NOT NULL DEFAULT 'frontend_v2'",
+        "orchestration_version": "INTEGER NOT NULL DEFAULT 1",
+    }
+    for name, definition in missing_columns.items():
+        if name in columns:
+            continue
+        # 只使用固定的内部列名和定义，避免把外部输入拼接到 DDL。
+        sync_connection.execute(text(f"ALTER TABLE {conversation_table.name} ADD COLUMN {name} {definition}"))
+
+    # 消息表是独立于旧对话表创建的；不存在时补建即可。
+    if not inspector.has_table(message_table.name):
+        message_table.metadata.create_all(sync_connection, tables=[message_table])
+
+
+async def ensure_sql_conversation_schema(engine) -> None:
+    """启动期幂等修复 SQLite/DeerFlow 共享库中的对话结构。"""
+
+    async with engine.begin() as connection:
+        await connection.run_sync(_ensure_sql_conversation_schema)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
