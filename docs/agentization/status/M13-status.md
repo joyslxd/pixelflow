@@ -1,23 +1,25 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`in_progress`
+- phase：`ready_for_phase_integration`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
 - 当前切片：`M13.1`
 - base Agent SHA：`f03f733115fb0ddd554dcb434f368cef5f09b39e`
-- 当前唯一写入者：`/root`
+- 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
-- 当前锁定文件：`docs/agentization/status/M13-status.md`、`docs/agentization/test-reports/M13.1-R1.md`；实现与测试文件待基线审计后按最小范围补充
+- M13.1 已释放文件：本切片实现、migration、测试、配置、AGENTS/README/最新设计、状态和测试报告全部解除写锁
 - release_id：`R1`
 - checkpoint_slice：`M13.1`
-- checkpoint_status：`pending`
-- 当前发布门禁：`not_eligible`；M13.1 切片通过后先写 `ready_for_phase_integration:R1`，人工触发的单槽候选绿色进入 Agent 后再写 `awaiting_release_approval:R1`
+- checkpoint_commit：`e4eb45838d20bf110841aa360f24d699b32ead3d`
+- last_integrated_commit：—
+- checkpoint_status：`ready`
+- 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
 - 生产配置：未变更；切片通过不等于生产上线
 
 ## 切片
 
-- [ ] M13.1 / R1 assist、压缩 UI/恢复、旧流程等价、全部新对话100%（2.5h）
+- [x] M13.1 / R1 assist、压缩 UI/恢复、旧流程等价、全部新对话100%（2.5h）
 - [ ] M13.2 / R2 视频 replay/shadow/黄金对话/mock E2E、`primary(video)+100%`（3h）
 - [ ] M13.3 / R3 图片/编辑、PPT、视频分析 mock E2E、`primary(四类intent)+100%`（3h）
 - [ ] M13.4 / R4 五流程全量、保持100%、kill switch/回滚（2.5h）
@@ -35,7 +37,7 @@
 
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
-| R1 | `not_eligible` | 未批准 | 保持发布前原值 | — |
+| R1 | `ready_for_phase_integration:R1` | 未批准 | 保持发布前原值 | M13.1 非付费阶段门禁绿色；待 9.10A 单槽集成 |
 | R2 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
@@ -51,5 +53,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 实现：完成 R1 Turn 原子登记、migration/OpenAPI、60% 外置、75%/85% 摘要、持久化队列/租约/Snapshot、旧流程接力、queued 可见性和同会话 pending 写入串行化。
 - 回归：真实 message job 不能越序接力 queued Turn；历史非法 marker 由 Snapshot 安全清理且不改变队列顺序。
 - 审核：独立 Reviewer 最终 Critical/Important/Minor 均为 0，`Ready to merge: Yes`。
-- 提交前阶段门禁：`M13 / Phase / R1 / M13.1` 返回 `Passed=True`、`CommandCount=8`；实现提交后仍需在固定 SHA 上重跑，绿色才允许登记 `ready_for_phase_integration:R1`。
+- 检查点：实现与中文规范修复已固定到 `e4eb45838d20bf110841aa360f24d699b32ead3d`。
+- 最终阶段门禁：在上述固定检查点运行 `M13 / Phase / R1 / M13.1`，返回 `Passed=True`、`CommandCount=8`；中文工程规范覆盖 2 个提交、27 个变更路径并通过。
+- 当前停止点：`ready_for_phase_integration:R1`；等待开发者复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，人工触发单槽阶段集成。
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
