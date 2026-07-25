@@ -47,7 +47,9 @@ interface ChatPanelProps {
   getJianyingDraftResult?: (msg: ChatMessage) => JianyingDraftJobResponse | null;
   isJianyingDraftRunning?: (msg: ChatMessage) => boolean;
   onDownloadArtifact?: (msg: ChatMessage, url: string) => void;
-  busy?: boolean;
+  composerDisabled?: boolean;
+  artifactActionsDisabled?: boolean;
+  runtimeBusy?: boolean;
   workflowTaskBoard?: WorkflowTaskBoardModel | null;
 }
 
@@ -109,7 +111,9 @@ export function ChatPanel({
   getJianyingDraftResult,
   isJianyingDraftRunning,
   onDownloadArtifact,
-  busy,
+  composerDisabled = false,
+  artifactActionsDisabled = false,
+  runtimeBusy = false,
   workflowTaskBoard,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -131,7 +135,7 @@ export function ChatPanel({
   }, [messages.length]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col border-r border-line">
+    <div className="flex min-w-0 flex-1 flex-col border-r border-line" aria-busy={runtimeBusy || undefined}>
       <div className="flex h-12 shrink-0 items-center px-5 text-[14px] font-semibold text-ink">
         对话
       </div>
@@ -156,7 +160,7 @@ export function ChatPanel({
                 key={m.id}
                 msg={m}
                 isLatestVideoScenePackage={isLatestVideoScenePackage}
-                actionsDisabled={Boolean(busy) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
+                actionsDisabled={Boolean(artifactActionsDisabled) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
                 showProgressLoading={m.id === latestProgressMessageId}
                 onOpenArtifact={onOpenArtifact}
                 onSelectDirection={onSelectDirection}
@@ -209,7 +213,7 @@ export function ChatPanel({
             referencedMaterials={referencedMaterials}
             onRemoveReferencedMaterial={onRemoveReferencedMaterial}
             prefillRequest={composerPrefillRequest}
-            busy={busy}
+            disabled={composerDisabled}
           />
         </div>
       </div>

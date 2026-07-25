@@ -209,6 +209,80 @@ export function resolveWorkspaceRuntimePolicy(
   };
 }
 
+export interface WorkspaceInteractionPolicyInput {
+  mode: OrchestrationMode;
+  conversationId: string;
+  orchestrationResolved: boolean;
+  legacyBusy: boolean;
+  dialogOpen: boolean;
+  pendingPlanRevision: boolean;
+  supervisorConnection?: "idle" | "connecting" | "connected" | "reconnecting" | "fatal";
+  supervisorRun?: "idle" | "running" | "waiting_user" | "paused" | "failed" | "completed";
+  supervisorCompression?: "idle" | "compacting" | "blocked";
+  pendingSupervisorTurns?: number;
+}
+
+export interface WorkspaceInteractionPolicy {
+  composer: {
+    disabled: boolean;
+    canQueue: boolean;
+  };
+  artifact: {
+    actionsDisabled: boolean;
+  };
+  runtime: {
+    busy: boolean;
+    mode: OrchestrationMode;
+  };
+}
+
+/**
+ * 将页面交互拆成输入框、产物动作和运行时三条独立策略。
+ *
+ * 旧 frontend_v2 仍然保持“业务处理中不能继续输入或操作产物”的兼容行为；
+ * supervisor_v1 则允许输入先进入服务端 Turn 队列，同时不把预览、下载等只读
+ * 产物入口误锁死。真正会启动旧供应商任务的 handler 仍由运行时归属单独裁剪。
+ */
+export function resolveWorkspaceInteractionPolicy(
+  input: WorkspaceInteractionPolicyInput,
+): WorkspaceInteractionPolicy {
+  const hasConversation = input.conversationId.trim().length > 0;
+  const legacyInteractionBlocked = input.legacyBusy || input.dialogOpen || input.pendingPlanRevision;
+  const supervisorConnection = input.supervisorConnection || "idle";
+  const supervisorRuntimeBusy = (input.pendingSupervisorTurns ?? 0) > 0
+    || input.supervisorRun === "running"
+    || input.supervisorCompression === "compacting"
+    || supervisorConnection === "connecting"
+    || supervisorConnection === "reconnecting";
+  const runtimeBusy = !input.orchestrationResolved
+    || (input.mode === "frontend_v2" ? input.legacyBusy : supervisorRuntimeBusy);
+
+  if (!input.orchestrationResolved || (input.mode === "supervisor_v1" && !hasConversation)) {
+    return {
+      composer: { disabled: true, canQueue: false },
+      artifact: { actionsDisabled: true },
+      runtime: { busy: true, mode: input.mode },
+    };
+  }
+
+  if (input.mode === "supervisor_v1") {
+    return {
+      composer: {
+        disabled: supervisorConnection === "fatal",
+        canQueue: supervisorConnection !== "fatal",
+      },
+      artifact: { actionsDisabled: false },
+      runtime: { busy: runtimeBusy, mode: input.mode },
+    };
+  }
+
+  return {
+    composer: { disabled: legacyInteractionBlocked, canQueue: false },
+    artifact: { actionsDisabled: legacyInteractionBlocked },
+    runtime: { busy: runtimeBusy, mode: input.mode },
+  };
+}
+
 function resolveArtifact(message: Record<string, unknown>): JsonObject | null {
   const payload = message.payload === undefined
     ? null

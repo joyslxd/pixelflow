@@ -111,6 +111,7 @@ import {
 import type { JsonObject, OrchestrationMode, TurnStartRequest } from "@/lib/supervisor/contracts";
 import {
   resolveWorkspaceOrchestrationMode,
+  resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
 } from "@/lib/supervisor/legacyAdapter";
 
@@ -1704,7 +1705,7 @@ function normalizeMaterialStoryboardReferences(
 export function WorkspacePage() {
   const navigate = useNavigate();
   const { conversationId } = useParams<{ conversationId?: string }>();
-  // 页面可渲染状态：聊天消息、右侧画布、参数弹窗、流程 busy 态和 Brief 确认态。
+  // 页面可渲染状态：聊天消息、右侧画布、参数弹窗、旧运行时忙碌态和 Brief 确认态。
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [canvas, setCanvas] = useState<CanvasState>(EMPTY_CANVAS);
   const [canvasOpen, setCanvasOpen] = useState(false);
@@ -1718,7 +1719,7 @@ export function WorkspacePage() {
   const [pendingMaterials, setPendingMaterials] = useState<Array<Record<string, unknown>>>([]);
   const [referencedMaterials, setReferencedMaterials] = useState<SceneGlobalAssetReference[]>([]);
   const [composerPrefillRequest, setComposerPrefillRequest] = useState<{ id: string; content: string } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [legacyBusy, setBusy] = useState(false);
   const [briefConfirmed, setBriefConfirmed] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState("");
   const [pendingPlanRevisionChoice, setPendingPlanRevisionChoice] = useState<PendingPlanRevisionChoice | null>(null);
@@ -1743,11 +1744,22 @@ export function WorkspacePage() {
       legacyRunnerEnabled: false,
       legacyArtifactActionsEnabled: false,
     };
-
   // 新旧运行时共用同一个页面入口，但只有服务端明确分配 supervisor_v1 时才启动新 Hook。
   // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
+  });
+  const interactionPolicy = resolveWorkspaceInteractionPolicy({
+    mode: orchestrationMode,
+    conversationId: currentConversationId,
+    orchestrationResolved,
+    legacyBusy,
+    dialogOpen,
+    pendingPlanRevision: Boolean(pendingPlanRevisionChoice),
+    supervisorConnection: supervisorRuntime.state.connection.status,
+    supervisorRun: supervisorRuntime.state.run.status,
+    supervisorCompression: supervisorRuntime.state.compression.status,
+    pendingSupervisorTurns: pendingSupervisorTurns.length,
   });
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
@@ -8574,7 +8586,9 @@ export function WorkspacePage() {
         referencedMaterials={referencedMaterials}
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         composerPrefillRequest={composerPrefillRequest}
-        busy={busy || dialogOpen || Boolean(pendingPlanRevisionChoice)}
+        composerDisabled={interactionPolicy.composer.disabled}
+        artifactActionsDisabled={interactionPolicy.artifact.actionsDisabled}
+        runtimeBusy={interactionPolicy.runtime.busy}
         workflowTaskBoard={workflowTaskBoard}
         onSelectDirection={legacyArtifactActionsEnabled ? handleSelectDirection : undefined}
         onRegenerateDirections={legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined}

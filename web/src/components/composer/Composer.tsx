@@ -9,11 +9,11 @@ interface ComposerProps {
   referencedMaterials?: Array<Record<string, unknown>>;
   onRemoveReferencedMaterial?: (key: string) => void;
   prefillRequest?: { id: string; content: string } | null;
-  busy?: boolean;
+  disabled?: boolean;
 }
 
 /** 极简对话输入框。参数不在这里填 —— 检测到视频生成意图后再弹参数面板。 */
-export function Composer({ onSubmit, referencedMaterials = [], onRemoveReferencedMaterial, prefillRequest, busy }: ComposerProps) {
+export function Composer({ onSubmit, referencedMaterials = [], onRemoveReferencedMaterial, prefillRequest, disabled = false }: ComposerProps) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -23,7 +23,7 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragDepthRef = useRef(0);
   const hasReferencedMaterials = referencedMaterials.length > 0;
-  const canSend = !busy && !uploading && (text.trim().length > 0 || (!hasReferencedMaterials && attachments.length > 0));
+  const canSend = !disabled && !uploading && (text.trim().length > 0 || (!hasReferencedMaterials && attachments.length > 0));
 
   useEffect(() => {
     if (referencedMaterials.length > 0) textareaRef.current?.focus();
@@ -65,7 +65,7 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
     const imageFiles = imageFilesFromDataTransfer(event.clipboardData);
     if (imageFiles.length === 0) return;
     event.preventDefault();
-    if (busy || uploading) {
+    if (disabled || uploading) {
       setUploadError("当前任务处理中，暂时无法添加图片素材");
       return;
     }
@@ -73,14 +73,14 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
   };
 
   const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
-    if (!hasFileTransfer(event.dataTransfer) || busy || uploading) return;
+    if (!hasFileTransfer(event.dataTransfer) || disabled || uploading) return;
     event.preventDefault();
     dragDepthRef.current += 1;
     setIsDraggingFiles(true);
   };
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
-    if (!hasFileTransfer(event.dataTransfer) || busy || uploading) return;
+    if (!hasFileTransfer(event.dataTransfer) || disabled || uploading) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
   };
@@ -97,7 +97,7 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
     event.preventDefault();
     dragDepthRef.current = 0;
     setIsDraggingFiles(false);
-    if (busy || uploading) {
+    if (disabled || uploading) {
       setUploadError("当前任务处理中，暂时无法添加图片素材");
       return;
     }
@@ -185,7 +185,7 @@ export function Composer({ onSubmit, referencedMaterials = [], onRemoveReference
         <button
           type="button"
           onClick={selectFiles}
-          disabled={busy || uploading}
+          disabled={disabled || uploading}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-soft transition-colors hover:bg-canvas hover:text-ink disabled:opacity-40"
           aria-label="添加素材"
         >

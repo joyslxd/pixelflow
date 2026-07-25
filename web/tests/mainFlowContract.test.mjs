@@ -788,12 +788,14 @@ test("closing the requirement dialog cancels and terminates the pending flow", (
   assert.match(workspaceSource, /onCancel=\{handleCancelParamsDialog\}/, "GenParamsDialog X must call the flow-cancel handler");
 });
 
-test("only the latest artifact card can trigger actions while idle and all actions are blocked while busy", () => {
-  assert.match(workspaceSource, /busy=\{busy \|\| dialogOpen \|\| Boolean\(pendingPlanRevisionChoice\)\}/, "open dialogs must keep the chat in busy mode");
+test("交互策略分别控制输入框、产物动作和运行时忙碌态", () => {
+  assert.match(workspaceSource, /interactionPolicy\.composer\.disabled/, "composer must use the composer policy");
+  assert.match(workspaceSource, /interactionPolicy\.artifact\.actionsDisabled/, "artifact actions must use the artifact policy");
+  assert.match(workspaceSource, /interactionPolicy\.runtime\.busy/, "runtime busy must remain separately observable");
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
   assert.match(chatPanelSource, /isLatestActionableQualityReview/, "ChatPanel must keep the latest QC result card actionable after analysis");
   assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");
-  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(busy\) \|\| \(!isLatestActionableQualityReview &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while busy or on older artifacts except the current QC result and recoverable failure cards");
+  assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(artifactActionsDisabled\) \|\| \(!isLatestActionableQualityReview &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while the artifact policy is locked or on older artifacts except the current QC result and recoverable failure cards");
   assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
   assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");
 });
