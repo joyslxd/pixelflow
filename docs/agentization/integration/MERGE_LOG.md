@@ -191,3 +191,4 @@
 - rollback：如需撤回，基于本记录定位 M04 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M04 状态、BOARD、MERGE_LOG、AGENTS、agentization README/architecture、最新流程设计和 M04 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-25 11:53:25 +08:00：M12 阶段 R1 候选通过，模块提交 `af3f7c1ec64044c6c05307b533e4fac621d3c282` 已纳入最新 Agent/dev 基线。
+- 2026-07-25 19:42:25 +08:00：M13 阶段 R1 候选通过，模块提交 `328fb535bb2c03790bd1bb189781b9cd64aa1567` 已纳入最新 Agent/dev 基线。
