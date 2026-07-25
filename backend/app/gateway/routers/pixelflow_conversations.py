@@ -505,8 +505,7 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
         updated = await _task_store(request).update_conversation(
             conversation_id,
             user_id=user_id,
-            expected_revision=expected_revision,
-            **fields,
+            expected_revision=expected_revision, **fields,
         )
     except ConversationRevisionConflictError as exc:
         raise HTTPException(

@@ -169,13 +169,11 @@ class _SafeSummaryEngine:
         previous = source.previous_summary or SummarySemanticSnapshot()
         message_ids = tuple(message.message_id for message in source.new_messages)
         return SummarySemanticSnapshot(
-            user_goals=(
-                *previous.user_goals,
+            user_goals=(*previous.user_goals,
                 *(f"保留目标:{message_id}" for message_id in message_ids),
             ),
             confirmed_decisions=previous.confirmed_decisions,
-            negative_constraints=(
-                *previous.negative_constraints,
+            negative_constraints=(*previous.negative_constraints,
                 *(f"禁止删除:{message_id}" for message_id in message_ids),
             ),
             workflow_states=dict(previous.workflow_states),
@@ -612,8 +610,7 @@ async def test_r1_real_summary_stage_preserves_authoritative_business_state() ->
     assert summaries[-1].negative_constraints == [f"禁止删除:{message_id}" for message_id in old_message_ids]
     assert restored is not None
     assert {key: value for key, value in restored.context.items() if key != AGENT_RUNTIME_CONTEXT_KEY} == business_context
-    assert {message.message_id: message.content for message in messages} == {
-        **old_contents,
+    assert {message.message_id: message.content for message in messages} == {**old_contents,
         messages[-1].message_id: "当前输入必须保留",
     }
 
@@ -1851,8 +1848,7 @@ async def test_r1_concurrent_turns_use_idempotency_and_context_cas() -> None:
             service.start_turn(
                 user_id=str(USER_ID),
                 conversation_id=conversation.conversation_id,
-                request={
-                    **first_request,
+                request={**first_request,
                     "client_input_id": str(client_input_id),
                     "content": f"并发 CAS {client_input_id}",
                     "expected_context_version": 1,
@@ -1889,10 +1885,9 @@ async def test_r1_sql_turn_registration_is_atomic_across_service_instances() -> 
         await connection.run_sync(
             lambda sync_connection: Base.metadata.create_all(
                 sync_connection,
-                tables=[
+                tables=[*AGENT_RUNTIME_TABLES,
                     PixelFlowConversationRow.__table__,
                     PixelFlowConversationMessageRow.__table__,
-                    *AGENT_RUNTIME_TABLES,
                 ],
             ),
         )
@@ -1934,8 +1929,7 @@ async def test_r1_sql_turn_registration_is_atomic_across_service_instances() -> 
                 service.start_turn(
                     user_id=str(USER_ID),
                     conversation_id=conversation.conversation_id,
-                    request={
-                        **base_request,
+                    request={**base_request,
                         "client_input_id": str(CLIENT_INPUT_ID),
                     },
                 )
@@ -1953,8 +1947,7 @@ async def test_r1_sql_turn_registration_is_atomic_across_service_instances() -> 
                 service.start_turn(
                     user_id=str(USER_ID),
                     conversation_id=conversation.conversation_id,
-                    request={
-                        **base_request,
+                    request={**base_request,
                         "client_input_id": str(client_input_id),
                         "expected_context_version": 1,
                     },
