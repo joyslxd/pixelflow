@@ -166,3 +166,4 @@
 - remote guard：模块修复 push 前和最终候选原子更新前均重新读取 Agent、dev、M01 三条远端引用；三者与冻结值一致后才推进
 - rollback：如需撤回，基于本记录定位 M01 候选中的业务、门禁和状态提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M01 状态、M01 门禁修复报告、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有改变设计合同或 content-app API
+- 2026-07-25 09:13:36 +08:00：M04 最终模块 候选通过，模块提交 `7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a` 已纳入最新 Agent/dev 基线。
