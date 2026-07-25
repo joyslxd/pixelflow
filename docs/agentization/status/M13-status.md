@@ -11,7 +11,7 @@
 - M13.1 已释放文件：本切片实现、migration、测试、配置、AGENTS/README/最新设计、状态和测试报告全部解除写锁
 - release_id：`R1`
 - checkpoint_slice：`M13.1`
-- checkpoint_commit：`93169c7fd1e2b4a771830fdd71b393519f5101b8`
+- checkpoint_commit：`c86d181787dfca875cd8f267b709859fc82efb28`
 - last_integrated_commit：`—`
 - checkpoint_status：`ready`
 - 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
@@ -37,7 +37,7 @@
 
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
-| R1 | `ready_for_phase_integration:R1` | 未批准 | 保持发布前原值 | M13.1 非付费阶段门禁绿色；固定入口已修复，待重新触发 9.10A 单槽集成 |
+| R1 | `ready_for_phase_integration:R1` | 未批准 | 保持发布前原值 | 业务检查点 `e4eb458` 的非付费阶段门禁绿色；固定入口回归 41 项绿色，待新候选重新触发 9.10A |
 | R2 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
@@ -53,9 +53,9 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 实现：完成 R1 Turn 原子登记、migration/OpenAPI、60% 外置、75%/85% 摘要、持久化队列/租约/Snapshot、旧流程接力、queued 可见性和同会话 pending 写入串行化。
 - 回归：真实 message job 不能越序接力 queued Turn；历史非法 marker 由 Snapshot 安全清理且不改变队列顺序。
 - 审核：独立 Reviewer 最终 Critical/Important/Minor 均为 0，`Ready to merge: Yes`。
-- 检查点：原业务实现与中文规范修复固定在 `e4eb45838d20bf110841aa360f24d699b32ead3d`；包含固定门禁入口、PowerShell 5.1 回归合同和修复报告的可重试检查点固定在 `93169c7fd1e2b4a771830fdd71b393519f5101b8`。
-- 最终阶段门禁：在上述固定检查点运行 `M13 / Phase / R1 / M13.1`，返回 `Passed=True`、`CommandCount=8`；中文工程规范覆盖 2 个提交、27 个变更路径并通过。
-- 当前停止点：`ready_for_phase_integration:R1`；等待开发者在新的独立任务中复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，并把 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript` 创建全新候选；禁止复用历史失败候选。
+- 检查点：原业务实现与中文规范修复固定在 `e4eb45838d20bf110841aa360f24d699b32ead3d`；初版门禁修复 `93169c7fd1e2b4a771830fdd71b393519f5101b8` 已被独立审查修正，当前权威可重试检查点为 `c86d181787dfca875cd8f267b709859fc82efb28`。
+- 最终阶段门禁：八项 `M13 / Phase / R1 / M13.1` 只在历史业务检查点 `e4eb45838d20bf110841aa360f24d699b32ead3d` 返回过 `Passed=True`、`CommandCount=8`；本次门禁入口修复没有重跑八项业务命令，新候选必须完整重跑后才能进入 Agent。
+- 当前停止点：`ready_for_phase_integration:R1`；等待开发者在新的独立任务中复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，从已 push 的 M13 分支/worktree 调用修复后的 `scripts/agentization/Integrate-AgentModule.ps1`，并把同一分支的 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript` 创建全新候选；禁止复用历史失败候选。
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
 - 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
 - locked files：`无`
