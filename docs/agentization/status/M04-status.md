@@ -106,6 +106,7 @@
 - 中文规范：新增/修改注释、docstring、计划、状态和测试报告均使用中文主体说明；本切片没有新增或修改配置项。提交后门禁首次把 Python 列表解包的行首 `*` 误识别为人工注释，已改为行为等价的显式 `extend` 并复跑 31 项摘要测试，再由同一门禁验证。
 - commit/push：本状态文件所在 M04.5 中文独立提交；提交级中文门禁通过后推送到 `origin/codex/agent-0.8.4-m04-context-compaction`，远端以该提交为准。
 - 阶段状态：M04.5 是模块最后一片且不是阶段中间检查点；M04 Final 绿色后写 `ready_for_integration`，不更新 `status/BOARD.md`，不直接启动单槽集成。
+- 集成前元数据规范化：最终集成任务将 `checkpoint_commit` 固定为 M04.5 远端实现提交，并把尚未集成的 `last_integrated_commit` 统一记为规范空值 `—`；本次只修正集成脚本可解析的状态元数据，不修改业务代码、测试清单或门禁结论。
 - 下一步第一动作：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术，并在同一条消息中明确模块号 `M04`，手动启动唯一单槽最终集成；不得继续不存在的 M04.6。
 
 ## 恢复提示
@@ -113,8 +114,8 @@
 业务合同永不摘要；原始消息永不删除。现有 DeerFlow middleware 是复用基础和安全网，不单独满足前端感知/排队需求。
 - release_id：`R1`
 - checkpoint_slice：`M04.5`
-- checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
-- last_integrated_commit：`无`
+- checkpoint_commit：`5ab2f692cb525b6d59e539cc80d7696b99dda5c1`
+- last_integrated_commit：`—`
 - locked files：`无`
 - checkpoint_status：`ready_for_integration`
 - integration failure evidence：`无`
