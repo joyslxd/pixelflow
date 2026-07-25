@@ -166,4 +166,27 @@
 - remote guard：模块修复 push 前和最终候选原子更新前均重新读取 Agent、dev、M01 三条远端引用；三者与冻结值一致后才推进
 - rollback：如需撤回，基于本记录定位 M01 候选中的业务、门禁和状态提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M01 状态、M01 门禁修复报告、BOARD 和 MERGE_LOG；未修改 `docs/pixelflow-agent-skill-flow-latest-design.md` 或 `CONTENT_APP_API_CALLS.md`，因为本次没有改变设计合同或 content-app API
-- 2026-07-25 09:13:36 +08:00：M04 最终模块 候选通过，模块提交 `7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a` 已纳入最新 Agent/dev 基线。
+### 0006 / 2026-07-25 / M04 最终模块集成
+
+- module：`M04`
+- source branch / SHA：`origin/codex/agent-0.8.4-m04-context-compaction@7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a`；其中 M04.5 实现与 Final 门禁提交为 `5ab2f692cb525b6d59e539cc80d7696b99dda5c1`，后续提交只规范最终集成元数据
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@d20762935ad8bd994a24e332f4237da7a1aaf591` → `37055164367c25a2b4aebe69ebb22600b47251fa`；本完整交接记录随同一候选再次防漂移复核并快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m04-context-compaction@890a089474b4215fdaaaba651d70832083878d32`
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：`codex/integrate-m04-20260725-011234-0f2661e4`；按“最新 Agent + 最新 dev + M04 增量”创建的全新候选，没有复用任何旧候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M04.5`，实现检查点 `checkpoint_commit=5ab2f692cb525b6d59e539cc80d7696b99dda5c1`，集成源 HEAD 为状态规范化后的 `7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a`；此前 `last_integrated_commit=—`，最终写为集成源 HEAD
+- trigger / single slot：远端状态为 `ready_for_integration` 且提交已 push；开发者人工启动唯一单槽任务，集成前确认全局锁可独占、无其他集成人；最终状态 `merged`，`checkpoint_status=integrated`
+- file ownership：M04 五个切片均已完成并释放写锁；候选只纳入 M04 上下文压缩 Runtime、additive migration、权威门禁、测试与文档，没有执行 M02、M05、M12 或其他模块切片
+- feature flag：保持默认 `off + [] + 0 + false`，没有接管现有业务
+- production：未发布；未修改生产运行模式、intent 范围、Feature Flag 或生产配置，没有发布批准记录
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：M04 Final `Passed=True`、`CommandCount=5`；项目 Python `3.12.13`；权威范围覆盖 18 个 Agent Runtime 测试文件、DeerFlow summarization/dynamic context、Harness boundary 和限定 Ruff；M04.5 模块报告记录 Runtime `333 passed, 1 warning`、边界 `39 passed, 1 warning`，warning 为既有 LangGraph pending deprecation
+- reviewer：M04.5 独立复审 Critical 0、Important 0、Minor 0，“是否可提交：是”；本次集成候选再次执行同一冻结范围的权威门禁
+- conflicts：最新 Agent、最新 dev 和 M04 增量合入候选时无内容冲突；集成前只把状态中的 `checkpoint_commit` 固定为远端实现提交，并将未集成空值规范为 `—`
+- migration/configuration：新增 additive migration `20260725_03_compaction_locks.py`；没有新增或修改配置键，Agent Runtime 启动配置仍保持默认关闭
+- Chinese engineering policy：M04 五个切片、状态规范化提交、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁；本次没有新增或修改配置项
+- smoke：只执行 M04 非付费本地权威门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一切片，未修改 dev，未发布生产，未把自动化状态提升为 `automation_active`
+- remote guard：候选门禁完成后，脚本重新读取 Agent、dev、M04 三条远端引用；三者与冻结值一致后才执行原子更新；完整交接记录推送前再次执行同样的防漂移检查
+- rollback：如需撤回，基于本记录定位 M04 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M04 状态、BOARD、MERGE_LOG、AGENTS、agentization README/architecture、最新流程设计和 M04 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
