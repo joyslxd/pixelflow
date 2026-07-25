@@ -29,7 +29,7 @@
 | M09 | PPT Adapter | B | `not_started` | 0/4 | M00；联调 M06 | — |
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
 | M11 | 视频生成 Adapter | B | `not_started` | 0/5 | M00；联调 M05/M06 | — |
-| M12 | 交互 UI 与 Legacy 迁移 | B | `not_started` | 0/5 | M07 | — |
+| M12 | 交互 UI 与 Legacy 迁移 | B | `phase_integrated` | 0/5 | M07 | `af3f7c1` |
 | M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `not_started` | 0/5 | 各批次按阶段依赖；最终 M01–M12 | — |
 
 ## 当前文件所有权
