@@ -257,7 +257,16 @@ try {
             Invoke-AgentGit -RepositoryPath $candidatePath -Arguments @("merge", "--no-ff", $moduleSha, "-m", "集成($ModuleId)：纳入模块检查点") | Out-Null
         }
         & (Join-Path $PSScriptRoot "Test-ChineseEngineeringPolicy.ps1") -RepositoryPath $candidatePath -BaseRef $agentSha -HeadRef "HEAD" | Out-Null
-        Invoke-AgentGateScript -GateScript $GateScript -RepositoryPath $candidatePath | Out-Null
+        # 用途：把本次单槽任务冻结的 Agent SHA 只在门禁调用期间传给固定入口；调用结束后恢复原进程环境，避免污染后续任务。
+        $frozenAgentEnvironmentName = "PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA"
+        $previousFrozenAgentSha = [System.Environment]::GetEnvironmentVariable($frozenAgentEnvironmentName, "Process")
+        try {
+            [System.Environment]::SetEnvironmentVariable($frozenAgentEnvironmentName, $agentSha, "Process")
+            Invoke-AgentGateScript -GateScript $GateScript -RepositoryPath $candidatePath | Out-Null
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable($frozenAgentEnvironmentName, $previousFrozenAgentSha, "Process")
+        }
         $successPhase = if ($GateType -eq "Phase") { "phase_integrated" } else { "merged" }
         $successCheckpointStatus = if ($GateType -eq "Phase") { "phase_integrated:$ReleaseId" } else { "integrated" }
         $nextSlice = ""

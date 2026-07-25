@@ -9,6 +9,7 @@ $RequiredScripts = @(
     "Sync-DevToAgent.ps1",
     "Start-AgentModule.ps1",
     "Invoke-AgentModuleGate.ps1",
+    "Invoke-M13R1PhaseGate.ps1",
     "Integrate-AgentModule.ps1",
     "Reconcile-DevToAgent.ps1"
 )
@@ -187,6 +188,34 @@ function Get-RemoteBranchSha {
         throw "无法读取测试远端分支：$Branch"
     }
     return ($lines -split "\s+")[0]
+}
+
+function Set-FakeM13CanonicalGate {
+    param([hashtable]$Topology)
+
+    $fakeGateDirectory = Join-Path $Topology.Repository "scripts\agentization"
+    New-Item -ItemType Directory -Path $fakeGateDirectory -Force | Out-Null
+    $fakeGate = @'
+param(
+    [string]$RepositoryPath,
+    [string]$ModuleId,
+    [string]$GateType,
+    [string]$ReleaseId,
+    [string]$Slice,
+    [string]$ChinesePolicyBaseRef,
+    [switch]$PlanOnly
+)
+[pscustomobject]@{
+    RepositoryPath = $RepositoryPath
+    ModuleId = $ModuleId
+    GateType = $GateType
+    ReleaseId = $ReleaseId
+    Slice = $Slice
+    ChinesePolicyBaseRef = $ChinesePolicyBaseRef
+    PlanOnly = [bool]$PlanOnly
+}
+'@
+    Set-Content -LiteralPath (Join-Path $fakeGateDirectory "Invoke-AgentModuleGate.ps1") -Value $fakeGate -Encoding UTF8
 }
 
 function Remove-TestRoot {
@@ -535,6 +564,94 @@ Describe "Agent 分支自动化入口" {
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
     }
 
+    It "M13 R1 固定入口绑定冻结 Agent 和唯一阶段参数" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        $expectedAgent = Get-RemoteBranchSha -Topology $topology -Branch "feature/agent_0.8.4_boguan"
+
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $expectedAgent, "Process")
+            $result = & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $result.RepositoryPath | Should Be ([System.IO.Path]::GetFullPath($topology.Repository))
+        $result.ModuleId | Should Be "M13"
+        $result.GateType | Should Be "Phase"
+        $result.ReleaseId | Should Be "R1"
+        $result.Slice | Should Be "M13.1"
+        $result.ChinesePolicyBaseRef | Should Be $expectedAgent
+        $result.PlanOnly | Should Be $true
+    }
+
+    It "M13 R1 固定入口缺少冻结 Agent 跟踪引用时 fail-closed" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        $thrown = $false
+        $message = ""
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $null, "Process")
+            try {
+                & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly | Out-Null
+            }
+            catch {
+                $thrown = $true
+                $message = $_.Exception.Message
+            }
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $thrown | Should Be $true
+        $message | Should Match "缺少集成器冻结 Agent SHA"
+    }
+
+    It "M13 R1 固定入口拒绝不是候选祖先的冻结 Agent SHA" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        Add-DevCommit -Topology $topology
+        $devSha = Get-RemoteBranchSha -Topology $topology -Branch "feature/dev_0.8.4_boguan"
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        $thrown = $false
+        $message = ""
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $devSha, "Process")
+            try {
+                & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly | Out-Null
+            }
+            catch {
+                $thrown = $true
+                $message = $_.Exception.Message
+            }
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $thrown | Should Be $true
+        $message | Should Match "不是当前 M13 R1 候选的祖先"
+    }
+
+    It "M13 R1 固定入口使用 Windows PowerShell 5.1 可识别的脚本编码" {
+        $scriptPath = Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1"
+        $bytes = [System.IO.File]::ReadAllBytes($scriptPath)
+        $text = [System.IO.File]::ReadAllText($scriptPath, [System.Text.Encoding]::UTF8)
+        $crlfCount = [regex]::Matches($text, "`r`n").Count
+        $bareLfCount = [regex]::Matches($text, "(?<!`r)`n").Count
+        $attributeOutput = & git -C $RepositoryRoot check-attr eol -- "scripts/agentization/Invoke-M13R1PhaseGate.ps1"
+
+        $PSVersionTable.PSVersion.Major | Should Be 5
+        (($bytes[0..2] | ForEach-Object { $_.ToString("X2") }) -join " ") | Should Be "EF BB BF"
+        ($crlfCount -gt 0) | Should Be $true
+        $bareLfCount | Should Be 0
+        ($attributeOutput -join "`n") | Should Match "eol: crlf"
+    }
+
     It "缺少项目虚拟环境时不得回退到 PATH Python" {
         $topology = New-AutomationTestTopology
 
@@ -595,6 +712,31 @@ Describe "Agent 分支自动化入口" {
         $confirmedAgain.Status | Should Be "already_integrated"
         $resumed = & (Join-Path $AgentizationRoot "Start-AgentModule.ps1") -RepositoryPath $topology.Repository -ModuleId "M12" -Slice "M12.4" -Writer "下一切片测试者" -WorktreeRoot (Join-Path $topology.Root "module-worktrees") -RemoteName "origin" -SkipFetch
         $resumed.Action | Should Be "created"
+    }
+
+    It "单槽集成向门禁传递并恢复冻结 Agent SHA" {
+        $topology = New-AutomationTestTopology
+        $moduleBranch = Add-M13PhaseCheckpoint -Topology $topology -ReleaseId "R1" -Slice "M13.1"
+        $expectedAgent = Get-RemoteBranchSha -Topology $topology -Branch "feature/agent_0.8.4_boguan"
+        $gateScript = Join-Path $topology.Root "Assert-Frozen-Agent-Gate.ps1"
+        $gateContent = @"
+param([string]`$RepositoryPath)
+if (`$env:PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA -ne "$expectedAgent") {
+    throw "集成器没有向门禁传递本次冻结的 Agent SHA。"
+}
+"@
+        Set-Content -LiteralPath $gateScript -Value $gateContent -Encoding UTF8
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "调用前值", "Process")
+            $result = & (Join-Path $AgentizationRoot "Integrate-AgentModule.ps1") -RepositoryPath $topology.Repository -ModuleId "M13" -ModuleBranch $moduleBranch -GateType "Phase" -ReleaseId "R1" -Slice "M13.1" -RemoteName "origin" -CandidateRoot (Join-Path $topology.Root "integration") -GateScript $gateScript -SkipFetch -Apply
+            [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process") | Should Be "调用前值"
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $result.Status | Should Be "integrated"
     }
 
     It "同一模块后续检查点只集成 last_integrated_commit 之后的增量" {

@@ -481,6 +481,8 @@ class PixelFlowAssetRecord:
 class PixelFlowConversationRecord:
     conversation_id: str
     user_id: str | None
+    orchestration_mode: str = "frontend_v2"
+    orchestration_version: int = 1
     title: str = ""
     current_task_id: str | None = None
     last_phase: str = "idle"
@@ -493,6 +495,8 @@ class PixelFlowConversationRecord:
         return {
             "conversation_id": self.conversation_id,
             "user_id": self.user_id,
+            "orchestration_mode": self.orchestration_mode,
+            "orchestration_version": self.orchestration_version,
             "title": self.title,
             "current_task_id": self.current_task_id,
             "last_phase": self.last_phase,
@@ -631,6 +635,8 @@ def _conversation_row_to_record(row: PixelFlowConversationRow) -> PixelFlowConve
     return PixelFlowConversationRecord(
         conversation_id=row.conversation_id,
         user_id=row.user_id,
+        orchestration_mode=row.orchestration_mode or "frontend_v2",
+        orchestration_version=row.orchestration_version or 1,
         title=row.title or "",
         current_task_id=row.current_task_id,
         last_phase=row.last_phase or "idle",
@@ -657,6 +663,12 @@ class SQLPixelFlowTaskStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._sf = session_factory
         self._conversation_locks = _new_conversation_locks()
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """暴露同库 Session 工厂，让 Agent Runtime Repository 复用业务事务边界。"""
+
+        return self._sf
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         async with self._sf() as session:
@@ -830,6 +842,8 @@ class SQLPixelFlowTaskStore:
             row = PixelFlowConversationRow(
                 conversation_id=record.conversation_id,
                 user_id=record.user_id,
+                orchestration_mode=record.orchestration_mode,
+                orchestration_version=record.orchestration_version,
                 title=record.title,
                 current_task_id=record.current_task_id,
                 last_phase=record.last_phase,
@@ -906,6 +920,15 @@ class SQLPixelFlowTaskStore:
                             if getattr(row, attr) != value:
                                 setattr(row, attr, value)
                                 changed = True
+                    runtime_patch = fields.get("_agent_runtime_patch")
+                    if isinstance(runtime_patch, dict):
+                        patched_context = _patch_agent_runtime_context(
+                            row.context_json,
+                            runtime_patch,
+                        )
+                        if patched_context != row.context_json:
+                            row.context_json = patched_context
+                            changed = True
                     if changed:
                         row.revision = (
                             _require_conversation_revision(row.revision) + 1
@@ -1235,6 +1258,15 @@ class MemoryPixelFlowTaskStore:
                     if getattr(record, key) != value:
                         setattr(record, key, value)
                         changed = True
+            runtime_patch = fields.get("_agent_runtime_patch")
+            if isinstance(runtime_patch, dict):
+                patched_context = _patch_agent_runtime_context(
+                    record.context,
+                    runtime_patch,
+                )
+                if patched_context != record.context:
+                    record.context = patched_context
+                    changed = True
             if changed:
                 record.revision = (
                     _require_conversation_revision(record.revision) + 1

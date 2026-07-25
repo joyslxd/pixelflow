@@ -8,14 +8,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
+from pixelflow.agent_runtime.contracts import TurnStartRequest
+from pixelflow.agent_runtime.service import (
+    AgentRuntimeContextConflictError,
+    AgentRuntimeService,
+    AgentRuntimeSnapshotResponse,
+    AgentRuntimeUnavailableError,
+    AgentTurnJobResponse,
+    AgentTurnStartResponse,
+)
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
     PixelFlowConversationMessageRecord,
@@ -25,8 +36,10 @@ from pixelflow.tasks import (
 )
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
+logger = logging.getLogger(__name__)
 
 _CONVERSATION_MESSAGE_JOBS: dict[str, dict[str, Any]] = {}
+_CONVERSATION_MESSAGE_JOB_KEYS: dict[tuple[str, str, str], str] = {}
 _MAX_CONVERSATION_MESSAGE_JOBS = 300
 
 
@@ -107,6 +120,8 @@ class ConversationMessageUpdateRequest(BaseModel):
 class ConversationResponse(BaseModel):
     conversation_id: str
     user_id: str | None = None
+    orchestration_mode: str = "frontend_v2"
+    orchestration_version: int = Field(default=1, ge=1)
     title: str = ""
     current_task_id: str | None = None
     last_phase: str = "idle"
@@ -171,6 +186,42 @@ def _task_store(request: Request) -> PixelFlowTaskStore:
     return store
 
 
+def _agent_runtime_service(request: Request) -> AgentRuntimeService:
+    service = getattr(
+        request.app.state,
+        "pixelflow_agent_runtime_service",
+        None,
+    )
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PixelFlow Agent Runtime not available",
+        )
+    return service
+
+
+def _runtime_http_exception(exc: Exception) -> HTTPException:
+    """把 Service 异常稳定映射为新 Runtime API 的 HTTP 合同。"""
+
+    if isinstance(exc, AgentRuntimeUnavailableError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "agent_runtime_unavailable"},
+        )
+    if isinstance(exc, AgentRuntimeContextConflictError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_runtime_context_conflict",
+                "expected_context_version": exc.expected_context_version,
+                "current_context_version": exc.current_context_version,
+            },
+        )
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail="Conversation not found")
+    return HTTPException(status_code=500, detail="Agent Runtime request failed")
+
+
 def _conversation_response(record: PixelFlowConversationRecord) -> ConversationResponse:
     return ConversationResponse(**record.to_dict())
 
@@ -199,17 +250,201 @@ async def _conversation_detail(
 async def create_conversation(body: ConversationCreateRequest, request: Request) -> ConversationResponse:
     user_id = await get_current_user(request)
     title = body.title.strip() or "新的对话"
+    service = getattr(
+        request.app.state,
+        "pixelflow_agent_runtime_service",
+        None,
+    )
+    if service is None:
+        context = sanitize_client_conversation_context(body.context)
+        orchestration_mode = "frontend_v2"
+        orchestration_version = 1
+    else:
+        assignment = service.assignment_for_new_conversation(body.context)
+        context = assignment.context
+        orchestration_mode = assignment.orchestration_mode.value
+        orchestration_version = assignment.orchestration_version
     record = await _task_store(request).create_conversation(
         PixelFlowConversationRecord(
             conversation_id=uuid.uuid4().hex,
             user_id=user_id,
+            orchestration_mode=orchestration_mode,
+            orchestration_version=orchestration_version,
             title=title,
             current_task_id=body.current_task_id,
             last_phase=body.last_phase,
-            context=sanitize_client_conversation_context(body.context),
+            context=context,
         )
     )
     return _conversation_response(record)
+
+
+@router.post(
+    "/{conversation_id}/turns/start",
+    response_model=AgentTurnStartResponse,
+)
+async def start_agent_turn(
+    conversation_id: str,
+    body: TurnStartRequest,
+    request: Request,
+) -> AgentTurnStartResponse:
+    """保存统一输入并注册可幂等恢复的 Turn。"""
+
+    user_id = await get_current_user(request)
+    try:
+        return await _agent_runtime_service(request).start_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request=body,
+        )
+    except (
+        AgentRuntimeContextConflictError,
+        AgentRuntimeUnavailableError,
+        LookupError,
+    ) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.get(
+    "/{conversation_id}/agent-snapshot",
+    response_model=AgentRuntimeSnapshotResponse,
+)
+async def get_agent_snapshot(
+    conversation_id: str,
+    request: Request,
+) -> AgentRuntimeSnapshotResponse:
+    """返回刷新、断网或切换对话后的唯一权威恢复快照。"""
+
+    user_id = await get_current_user(request)
+    try:
+        return await _agent_runtime_service(request).snapshot(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.get("/{conversation_id}/agent-events")
+async def stream_agent_events(
+    conversation_id: str,
+    request: Request,
+    cursor: str | None = Query(default=None),
+) -> StreamingResponse:
+    """按持久化 cursor 提供可断点续传的 SSE；未知 cursor 要求重载快照。"""
+
+    user_id = await get_current_user(request)
+    service = _agent_runtime_service(request)
+    try:
+        initial = await service.events_after(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            cursor=cursor,
+        )
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+    if initial is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "agent_runtime_cursor_unknown"},
+        )
+
+    async def event_stream():
+        current_cursor = cursor
+        pending = initial
+        idle_polls = 0
+        while True:
+            for event in pending:
+                current_cursor = event.cursor
+                payload = event.model_dump_json()
+                yield f"data: {payload}\n\n"
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(1)
+            try:
+                next_events = await service.events_after(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    cursor=current_cursor,
+                )
+            except (AgentRuntimeUnavailableError, LookupError):
+                return
+            if next_events is None:
+                yield ('event: reload_required\ndata: {"code":"agent_runtime_cursor_unknown"}\n\n')
+                return
+            pending = next_events
+            idle_polls = 0 if pending else idle_polls + 1
+            if idle_polls >= 15:
+                yield ": heartbeat\n\n"
+                idle_polls = 0
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/{conversation_id}/turns/jobs/{run_id}",
+    response_model=AgentTurnJobResponse,
+)
+async def get_agent_turn_job(
+    conversation_id: str,
+    run_id: str,
+    request: Request,
+) -> AgentTurnJobResponse:
+    """SSE 不可用时只轮询原 run，不重新创建 Turn。"""
+
+    user_id = await get_current_user(request)
+    try:
+        result = await _agent_runtime_service(request).get_run(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Turn run not found")
+    return result
+
+
+@router.post(
+    "/{conversation_id}/interrupts/{interrupt_id}/responses",
+    status_code=409,
+)
+async def respond_to_agent_interrupt(
+    conversation_id: str,
+    interrupt_id: str,
+    body: dict[str, Any],
+    request: Request,
+) -> None:
+    """R1 assist 的人工确认仍由旧 v2 业务 Controller 处理。"""
+
+    user_id = await get_current_user(request)
+    try:
+        conversation = await _agent_runtime_service(
+            request,
+        ).require_conversation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    del body
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+            "interrupt_id": interrupt_id,
+        },
+    )
 
 
 @router.get("", response_model=ConversationListResponse)
@@ -234,6 +469,38 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
     user_id = await get_current_user(request)
     fields = body.model_dump(exclude_unset=True)
     expected_revision = fields.pop("expected_revision", None)
+    replacement_context = fields.get("context")
+    pending_message_job = (
+        replacement_context.get(
+            "pendingMessageJob",
+            replacement_context.get("pending_message_job"),
+        )
+        if isinstance(replacement_context, dict)
+        else None
+    )
+    handoff_marker = _validated_runtime_handoff_marker(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        pending_message_job=pending_message_job,
+    )
+    if handoff_marker is not None:
+        marker_client_input_id = uuid.UUID(
+            handoff_marker["client_input_id"],
+        )
+        if not await _agent_runtime_service(
+            request,
+        ).legacy_handoff_is_eligible(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            client_input_id=marker_client_input_id,
+        ):
+            handoff_marker = None
+    if handoff_marker is not None:
+        # 普通 context 替换和补偿 marker 由同一 Conversation Store
+        # 临界区提交；进程在后续 ack 前退出时，刷新仍可幂等续做。
+        fields["_agent_runtime_patch"] = {
+            "legacy_handoff": handoff_marker,
+        }
     try:
         updated = await _task_store(request).update_conversation(
             conversation_id,
@@ -251,6 +518,27 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
         ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    if handoff_marker is not None:
+        try:
+            reconciled = await _agent_runtime_service(
+                request,
+            ).reconcile_pending_legacy_handoff(
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - marker 已持久化，刷新时继续补偿
+            logger.warning(
+                "Agent Runtime 旧流程接力等待恢复：异常类型=%s",
+                type(exc).__name__,
+            )
+        else:
+            if reconciled:
+                refreshed = await _task_store(request).get_conversation(
+                    conversation_id,
+                    user_id=user_id,
+                )
+                if refreshed is not None:
+                    updated = refreshed
     return _conversation_response(updated)
 
 
@@ -303,11 +591,25 @@ async def start_append_conversation_message(
     store = _task_store(request)
     if await store.get_conversation(conversation_id, user_id=user_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    message_id = _conversation_message_id(conversation_id, body.payload)
+    job_key = (user_id, conversation_id, message_id)
+    existing_job_id = _CONVERSATION_MESSAGE_JOB_KEYS.get(job_key)
+    existing_job = None if existing_job_id is None else _CONVERSATION_MESSAGE_JOBS.get(existing_job_id)
+    if existing_job is not None and existing_job.get("status") != "failed":
+        status = str(existing_job.get("status") or "running")
+        return ConversationMessageJobStartResponse(
+            ok=True,
+            job_id=existing_job_id,
+            status=status,
+            message=_conversation_message_job_message(status),
+        )
     job_id = uuid.uuid4().hex
+    _CONVERSATION_MESSAGE_JOB_KEYS[job_key] = job_id
     _CONVERSATION_MESSAGE_JOBS[job_id] = {
         "status": "running",
         "conversation_id": conversation_id,
         "user_id": user_id,
+        "message_id": message_id,
         "result": None,
         "error": None,
     }
@@ -433,12 +735,16 @@ async def _run_append_conversation_message_job(
     body: ConversationMessageCreateRequest,
     user_id: str | None,
 ) -> None:
+    message_id = _CONVERSATION_MESSAGE_JOBS.get(job_id, {}).get(
+        "message_id",
+    )
     try:
         result = await _append_conversation_message(store, conversation_id, body, user_id=user_id)
         _CONVERSATION_MESSAGE_JOBS[job_id] = {
             "status": "completed",
             "conversation_id": conversation_id,
             "user_id": user_id,
+            "message_id": message_id,
             "result": result,
             "error": None,
         }
@@ -447,6 +753,7 @@ async def _run_append_conversation_message_job(
             "status": "failed",
             "conversation_id": conversation_id,
             "user_id": user_id,
+            "message_id": message_id,
             "result": None,
             "error": str(exc),
         }
@@ -457,7 +764,16 @@ def _trim_conversation_message_jobs() -> None:
     if overflow <= 0:
         return
     for job_id in list(_CONVERSATION_MESSAGE_JOBS.keys())[:overflow]:
-        _CONVERSATION_MESSAGE_JOBS.pop(job_id, None)
+        removed = _CONVERSATION_MESSAGE_JOBS.pop(job_id, None)
+        if not isinstance(removed, dict):
+            continue
+        message_id = removed.get("message_id")
+        conversation_id = removed.get("conversation_id")
+        user_id = removed.get("user_id")
+        if all(isinstance(value, str) for value in (message_id, conversation_id, user_id)):
+            key = (user_id, conversation_id, message_id)
+            if _CONVERSATION_MESSAGE_JOB_KEYS.get(key) == job_id:
+                _CONVERSATION_MESSAGE_JOB_KEYS.pop(key, None)
 
 
 def _conversation_message_job_message(status: str) -> str:
@@ -466,3 +782,41 @@ def _conversation_message_job_message(status: str) -> str:
     if status == "failed":
         return "对话消息保存失败。"
     return "对话消息保存中。"
+
+
+def _validated_runtime_handoff_marker(
+    *,
+    user_id: str,
+    conversation_id: str,
+    pending_message_job: object,
+) -> dict[str, str] | None:
+    """只接受本进程已登记且归属匹配的旧流程消息 job 作为接力证据。"""
+
+    if not isinstance(pending_message_job, dict):
+        return None
+    if pending_message_job.get("kind") != "conversation_message":
+        return None
+    job_id = pending_message_job.get("job_id")
+    client_input_id = pending_message_job.get("source_message_id")
+    if not isinstance(job_id, str) or not isinstance(
+        client_input_id,
+        str,
+    ):
+        return None
+    try:
+        normalized_client_input_id = str(uuid.UUID(client_input_id))
+    except ValueError:
+        return None
+    job = _CONVERSATION_MESSAGE_JOBS.get(job_id)
+    expected_message_id = _conversation_message_id(
+        conversation_id,
+        {"client_message_id": normalized_client_input_id},
+    )
+    if not isinstance(job, dict) or job.get("user_id") != user_id or job.get("conversation_id") != conversation_id or job.get("message_id") != expected_message_id or job.get("status") not in {"running", "completed"}:
+        return None
+    return {
+        "client_input_id": normalized_client_input_id,
+        "job_id": job_id,
+        "message_id": expected_message_id,
+        "status": "pending_ack",
+    }

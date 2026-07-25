@@ -27,7 +27,8 @@ except ImportError:
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # migration 只接管 Alembic 日志，不能禁用进程内已经初始化的业务 logger。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -21,6 +21,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 能力线 | 主要入口 | Java 类比 | 当前用途 |
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
+| R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -79,6 +80,12 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 ## 当前主流程
 
 前端工作台主流程不是一次性自由聊天，而是阶段化编排：
+
+M13.1/R1 测试候选在主流程入口前增加统一会话层：测试 profile 对全部新对话冻结
+`assist / enabled_intents=[] / 100% / context_compaction=true`，先原子保存可见消息和
+Turn，再通过 Snapshot/SSE 投影压缩 Notice 与输入队列；旧 v2 只有在服务端 Turn
+进入可执行状态后才继续，并复用同一个 `client_input_id`。刷新只查询权威 Snapshot
+和原 job，不自动重发。历史对话、运行中任务及生产 profile 均不迁移或自动启用。
 
 ```text
 用户输入 + 附件

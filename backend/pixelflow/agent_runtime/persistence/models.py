@@ -160,6 +160,47 @@ class PixelFlowAgentContextSummaryRow(Base):
     )
 
 
+class PixelFlowAgentContextPayloadRow(Base):
+    """幂等保存从模型输入外置的完整 tool/artifact 载荷。"""
+
+    __tablename__ = "pixelflow_agent_context_payloads"
+
+    payload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(256), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(71), nullable=False)
+    original_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _timestamp_type(),
+        nullable=False,
+        default=_now,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "conversation_id",
+            "source_kind",
+            "source_ref",
+            "content_hash",
+            name="uq_pf_agent_context_payloads_identity",
+        ),
+        CheckConstraint(
+            "source_kind IN ('tool', 'artifact')",
+            name="ck_pf_agent_context_payloads_kind",
+        ),
+        Index(
+            "ix_pf_agent_context_payloads_owner_created",
+            "user_id",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+
 class PixelFlowAgentEventRow(Base):
     """保存先落库、后投递的 conversation 事件 Outbox。"""
 
@@ -234,3 +275,6 @@ AGENT_RUNTIME_TABLES = (
     PixelFlowAgentEventRow.__table__,
     PixelFlowAgentOperationRow.__table__,
 )
+
+# 支撑表不改变 M01 冻结的五类业务投影合同，但必须随 Runtime 一起建库。
+AGENT_RUNTIME_SUPPORT_TABLES = (PixelFlowAgentContextPayloadRow.__table__,)

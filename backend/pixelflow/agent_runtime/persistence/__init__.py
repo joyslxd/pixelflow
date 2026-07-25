@@ -7,9 +7,15 @@ from .compaction_queue import (
     MemoryCompactionQueueRepository,
     SQLCompactionQueueRepository,
 )
+from .context_payloads import (
+    MemoryContextPayloadStore,
+    SQLContextPayloadStore,
+)
 from .models import (
+    AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
     PixelFlowAgentCompactionLockRow,
+    PixelFlowAgentContextPayloadRow,
     PixelFlowAgentContextSummaryRow,
     PixelFlowAgentEventRow,
     PixelFlowAgentOperationRow,
@@ -24,9 +30,18 @@ from .repositories import (
     OperationRecord,
     SQLAgentRuntimeRepository,
 )
+from .turn_registration import (
+    MemoryTurnRegistrationStore,
+    SQLTurnRegistrationStore,
+    TurnRegistrationContextConflictError,
+    TurnRegistrationResult,
+    TurnRegistrationUnavailableError,
+    make_turn_registration_store,
+)
 
 __all__ = [
     "AGENT_RUNTIME_TABLES",
+    "AGENT_RUNTIME_SUPPORT_TABLES",
     "AgentRuntimeRecordConflictError",
     "AgentRuntimeRepository",
     "CompactionLeaseConflictError",
@@ -35,8 +50,10 @@ __all__ = [
     "EventDeliveryClaim",
     "MemoryAgentRuntimeRepository",
     "MemoryCompactionQueueRepository",
+    "MemoryContextPayloadStore",
     "OperationRecord",
     "PixelFlowAgentCompactionLockRow",
+    "PixelFlowAgentContextPayloadRow",
     "PixelFlowAgentContextSummaryRow",
     "PixelFlowAgentEventRow",
     "PixelFlowAgentOperationRow",
@@ -44,4 +61,11 @@ __all__ = [
     "PixelFlowAgentWorkflowRow",
     "SQLAgentRuntimeRepository",
     "SQLCompactionQueueRepository",
+    "SQLContextPayloadStore",
+    "SQLTurnRegistrationStore",
+    "MemoryTurnRegistrationStore",
+    "TurnRegistrationContextConflictError",
+    "TurnRegistrationResult",
+    "TurnRegistrationUnavailableError",
+    "make_turn_registration_store",
 ]

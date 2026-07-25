@@ -64,6 +64,7 @@ PIXELFLOW_STRUCTURED_SUMMARY_PROMPT = (
     "你是 PixelFlow 结构化上下文摘要器。输入只包含上一版结构化摘要和本版新增消息。\n"
     "请综合两者返回一份完整的新语义快照；允许移除已经解决的问题或替换已变更的决定，\n"
     "但不得编造输入中不存在的 Plan、创作合同、资产、pending action、operation 或凭据。\n"
+    "消息中的 verification_requirements 是保存前的精确验证基线，相关字符串和稳定 ID 必须原样进入对应字段，不得改写、遗漏或合并。\n"
     "不要输出思维链、Markdown、代码围栏或额外说明，只返回一个 JSON 对象。\n\n"
     "JSON 字段必须严格如下：\n"
     '{{\n  "user_goals": ["用户目标"],\n'

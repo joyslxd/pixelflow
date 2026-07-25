@@ -1,16 +1,25 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`not_started`
+- phase：`ready_for_phase_integration`
 - owner：A+B；当周单一集成人
-- branch：计划 `codex/agent-0.8.4-m13-integration`
+- branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：M13.1
-- 当前发布门禁：`not_eligible`；M13.1 切片通过后先写 `ready_for_phase_integration:R1`，人工触发的单槽候选绿色进入 Agent 后再写 `awaiting_release_approval:R1`
+- 当前切片：`M13.1`
+- base Agent SHA：`f03f733115fb0ddd554dcb434f368cef5f09b39e`
+- 当前唯一写入者：`尚未领取`
+- 开始时间：`2026-07-25 13:38:00 +08:00`
+- M13.1 已释放文件：本切片实现、migration、测试、配置、AGENTS/README/最新设计、状态和测试报告全部解除写锁
+- release_id：`R1`
+- checkpoint_slice：`M13.1`
+- checkpoint_commit：`c86d181787dfca875cd8f267b709859fc82efb28`
+- last_integrated_commit：`—`
+- checkpoint_status：`ready`
+- 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
 - 生产配置：未变更；切片通过不等于生产上线
 
 ## 切片
 
-- [ ] M13.1 / R1 assist、压缩 UI/恢复、旧流程等价、全部新对话100%（2.5h）
+- [x] M13.1 / R1 assist、压缩 UI/恢复、旧流程等价、全部新对话100%（2.5h）
 - [ ] M13.2 / R2 视频 replay/shadow/黄金对话/mock E2E、`primary(video)+100%`（3h）
 - [ ] M13.3 / R3 图片/编辑、PPT、视频分析 mock E2E、`primary(四类intent)+100%`（3h）
 - [ ] M13.4 / R4 五流程全量、保持100%、kill switch/回滚（2.5h）
@@ -28,7 +37,7 @@
 
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
-| R1 | `not_eligible` | 未批准 | 保持发布前原值 | — |
+| R1 | `ready_for_phase_integration:R1` | 未批准 | 保持发布前原值 | 业务检查点 `e4eb458` 的非付费阶段门禁绿色；固定入口回归 41 项绿色，待新候选重新触发 9.10A |
 | R2 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
@@ -36,3 +45,18 @@
 ## 恢复提示
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
+
+## M13.1 实现检查点记录
+
+- 依赖：M00-I.1、M01、M03、M04、M07 和 M12.3/R1 均已进入 base Agent `f03f733`；最新 dev `fb745077` 是该 Agent 的祖先，dev→Agent 预检为 `up_to_date`。
+- 测试候选：`backend/config.dev.yml` 为 `assist / [] / 100 / true`，进程内 Gateway 连续 32 个新对话全部冻结为 assist；生产配置未修改，默认仍为 `off / [] / 0 / false`。
+- 实现：完成 R1 Turn 原子登记、migration/OpenAPI、60% 外置、75%/85% 摘要、持久化队列/租约/Snapshot、旧流程接力、queued 可见性和同会话 pending 写入串行化。
+- 回归：真实 message job 不能越序接力 queued Turn；历史非法 marker 由 Snapshot 安全清理且不改变队列顺序。
+- 审核：独立 Reviewer 最终 Critical/Important/Minor 均为 0，`Ready to merge: Yes`。
+- 检查点：原业务实现与中文规范修复固定在 `e4eb45838d20bf110841aa360f24d699b32ead3d`；初版门禁修复 `93169c7fd1e2b4a771830fdd71b393519f5101b8` 已被独立审查修正，当前权威可重试检查点为 `c86d181787dfca875cd8f267b709859fc82efb28`。
+- 最终阶段门禁：八项 `M13 / Phase / R1 / M13.1` 只在历史业务检查点 `e4eb45838d20bf110841aa360f24d699b32ead3d` 返回过 `Passed=True`、`CommandCount=8`；本次门禁入口修复没有重跑八项业务命令，新候选必须完整重跑后才能进入 Agent。
+- 当前停止点：`ready_for_phase_integration:R1`；等待开发者在新的独立任务中复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，从已 push 的 M13 分支/worktree 调用修复后的 `scripts/agentization/Integrate-AgentModule.ps1`，并把同一分支的 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript` 创建全新候选；禁止复用历史失败候选。
+- 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
+- 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
+- locked files：`无`
+- integration failure evidence：`候选 codex/integrate-r1-m13-20260725-101433-647397f6 已保留；Agent 未更新；错误类型 ParameterBindingException`
