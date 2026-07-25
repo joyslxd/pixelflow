@@ -1,6 +1,6 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`ready_for_phase_integration`
+- phase：`phase_integration_blocked`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
@@ -12,8 +12,8 @@
 - release_id：`R1`
 - checkpoint_slice：`M13.1`
 - checkpoint_commit：`e4eb45838d20bf110841aa360f24d699b32ead3d`
-- last_integrated_commit：—
-- checkpoint_status：`ready`
+- last_integrated_commit：`—`
+- checkpoint_status：`blocked:R1`
 - 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
 - 生产配置：未变更；切片通过不等于生产上线
 
@@ -57,3 +57,5 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 最终阶段门禁：在上述固定检查点运行 `M13 / Phase / R1 / M13.1`，返回 `Passed=True`、`CommandCount=8`；中文工程规范覆盖 2 个提交、27 个变更路径并通过。
 - 当前停止点：`ready_for_phase_integration:R1`；等待开发者复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，人工触发单槽阶段集成。
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
+- locked files：`无`
+- integration failure evidence：`候选 codex/integrate-r1-m13-20260725-101433-647397f6 已保留；Agent 未更新；错误类型 ParameterBindingException`
