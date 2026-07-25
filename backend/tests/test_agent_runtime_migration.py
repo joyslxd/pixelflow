@@ -1,10 +1,20 @@
-"""M01.1 Agent Runtime 行模型与 additive migration 结构合同。"""
+"""Agent Runtime 行模型与 additive migration 结构合同。"""
 
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import JSON, DateTime, Integer, String, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Integer,
+    String,
+    UniqueConstraint,
+    create_engine,
+    inspect,
+    text,
+)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_ROOT = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "persistence" / "migrations"
@@ -35,6 +45,16 @@ EXPECTED_TABLE_COLUMNS = {
         "target_workflow_id",
         "decision_json",
         "expected_context_version",
+        "created_at",
+        "updated_at",
+    },
+    "pixelflow_agent_compaction_locks": {
+        "conversation_id",
+        "user_id",
+        "state",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
         "created_at",
         "updated_at",
     },
@@ -98,6 +118,7 @@ EXPECTED_TABLE_COLUMNS = {
 EXPECTED_PRIMARY_KEYS = {
     "pixelflow_agent_workflows": ("workflow_id",),
     "pixelflow_agent_turns": ("inbox_sequence",),
+    "pixelflow_agent_compaction_locks": ("conversation_id",),
     "pixelflow_agent_context_summaries": ("summary_id",),
     "pixelflow_agent_events": ("outbox_id",),
     "pixelflow_agent_operations": ("job_id",),
@@ -111,6 +132,11 @@ EXPECTED_AUTOINCREMENT_COLUMNS = {
 EXPECTED_NULLABLE_COLUMNS = {
     "pixelflow_agent_workflows": {"pending_external_job_json"},
     "pixelflow_agent_turns": {"target_workflow_id", "decision_json"},
+    "pixelflow_agent_compaction_locks": {
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+    },
     "pixelflow_agent_context_summaries": {
         "previous_summary_id",
         "covered_sequence_start",
@@ -151,6 +177,16 @@ EXPECTED_COLUMN_TYPE_FAMILIES = {
         "target_workflow_id": "string",
         "decision_json": "json",
         "expected_context_version": "integer",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+    },
+    "pixelflow_agent_compaction_locks": {
+        "conversation_id": "string",
+        "user_id": "string",
+        "state": "string",
+        "lease_owner": "string",
+        "lease_token": "string",
+        "lease_expires_at": "datetime",
         "created_at": "datetime",
         "updated_at": "datetime",
     },
@@ -217,6 +253,7 @@ EXPECTED_UNIQUE_COLUMN_SETS = {
         frozenset({"turn_id"}),
         frozenset({"conversation_id", "client_input_id"}),
     },
+    "pixelflow_agent_compaction_locks": set(),
     "pixelflow_agent_context_summaries": {
         frozenset({"conversation_id", "version"}),
     },
@@ -244,12 +281,22 @@ EXPECTED_UNIQUE_CONSTRAINTS = {
     },
 }
 
+EXPECTED_CHECK_CONSTRAINTS = {
+    "pixelflow_agent_compaction_locks": {
+        "ck_pf_agent_compaction_locks_lease_fields",
+        "ck_pf_agent_compaction_locks_state",
+    },
+}
+
 EXPECTED_INDEXES = {
     "pixelflow_agent_workflows": {
         "ix_pf_agent_workflows_conversation_updated",
         "ix_pf_agent_workflows_owner_conversation",
     },
     "pixelflow_agent_turns": {"ix_pf_agent_turns_owner_queue"},
+    "pixelflow_agent_compaction_locks": {
+        "ix_pf_agent_compaction_locks_owner_expiry",
+    },
     "pixelflow_agent_context_summaries": {"ix_pf_agent_summaries_owner_version"},
     "pixelflow_agent_events": {
         "ix_pf_agent_events_delivery",
@@ -301,23 +348,13 @@ def test_agent_runtime_models_register_frozen_tables_and_mysql_bootstrap():
         for column in table.columns:
             assert _type_family(column.type) == EXPECTED_COLUMN_TYPE_FAMILIES[table_name][column.name]
             assert column.nullable is (column.name in EXPECTED_NULLABLE_COLUMNS[table_name])
-        assert {
-            column.name
-            for column in table.columns
-            if column.autoincrement is True
-        } == EXPECTED_AUTOINCREMENT_COLUMNS.get(table_name, set())
-        unique_constraints = {
-            frozenset(column.name for column in constraint.columns)
-            for constraint in table.constraints
-            if isinstance(constraint, UniqueConstraint)
-        }
+        assert {column.name for column in table.columns if column.autoincrement is True} == EXPECTED_AUTOINCREMENT_COLUMNS.get(table_name, set())
+        unique_constraints = {frozenset(column.name for column in constraint.columns) for constraint in table.constraints if isinstance(constraint, UniqueConstraint)}
         assert unique_constraints == EXPECTED_UNIQUE_COLUMN_SETS[table_name]
-        unique_names = {
-            constraint.name
-            for constraint in table.constraints
-            if isinstance(constraint, UniqueConstraint)
-        }
+        unique_names = {constraint.name for constraint in table.constraints if isinstance(constraint, UniqueConstraint)}
         assert unique_names.issuperset(EXPECTED_UNIQUE_CONSTRAINTS.get(table_name, set()))
+        check_names = {constraint.name for constraint in table.constraints if isinstance(constraint, CheckConstraint)}
+        assert check_names == EXPECTED_CHECK_CONSTRAINTS.get(table_name, set())
         assert {index.name for index in table.indexes} == EXPECTED_INDEXES.get(table_name, set())
 
 
@@ -339,23 +376,19 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
     inspector = inspect(engine)
     assert set(EXPECTED_TABLE_COLUMNS).issubset(inspector.get_table_names())
     for table_name, expected_columns in EXPECTED_TABLE_COLUMNS.items():
-        reflected_columns = {
-            column["name"]: column
-            for column in inspector.get_columns(table_name)
-        }
+        reflected_columns = {column["name"]: column for column in inspector.get_columns(table_name)}
         assert set(reflected_columns) == expected_columns
         assert set(EXPECTED_COLUMN_TYPE_FAMILIES[table_name]) == expected_columns
         assert tuple(inspector.get_pk_constraint(table_name)["constrained_columns"]) == EXPECTED_PRIMARY_KEYS[table_name]
         for column_name, column in reflected_columns.items():
             assert _type_family(column["type"]) == EXPECTED_COLUMN_TYPE_FAMILIES[table_name][column_name]
             assert column["nullable"] is (column_name in EXPECTED_NULLABLE_COLUMNS[table_name])
-        unique_column_sets = {
-            frozenset(item["column_names"])
-            for item in inspector.get_unique_constraints(table_name)
-        }
+        unique_column_sets = {frozenset(item["column_names"]) for item in inspector.get_unique_constraints(table_name)}
         assert unique_column_sets == EXPECTED_UNIQUE_COLUMN_SETS[table_name]
         unique_names = {item["name"] for item in inspector.get_unique_constraints(table_name)}
         assert unique_names.issuperset(EXPECTED_UNIQUE_CONSTRAINTS.get(table_name, set()))
+        check_names = {item["name"] for item in inspector.get_check_constraints(table_name)}
+        assert check_names == EXPECTED_CHECK_CONSTRAINTS.get(table_name, set())
         index_names = {item["name"] for item in inspector.get_indexes(table_name)}
         assert index_names == EXPECTED_INDEXES.get(table_name, set())
     with engine.begin() as connection:
@@ -386,12 +419,8 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
                 ),
                 {"event_id": f"event-{suffix}", "sequence": 1 if suffix == "a" else 2, "cursor": f"cursor-{suffix}"},
             )
-        turn_sequences = connection.execute(
-            text("SELECT inbox_sequence FROM pixelflow_agent_turns ORDER BY inbox_sequence")
-        ).scalars().all()
-        event_ids = connection.execute(
-            text("SELECT outbox_id FROM pixelflow_agent_events ORDER BY outbox_id")
-        ).scalars().all()
+        turn_sequences = connection.execute(text("SELECT inbox_sequence FROM pixelflow_agent_turns ORDER BY inbox_sequence")).scalars().all()
+        event_ids = connection.execute(text("SELECT outbox_id FROM pixelflow_agent_events ORDER BY outbox_id")).scalars().all()
         assert turn_sequences == [1, 2]
         assert event_ids == [1, 2]
         assert connection.execute(text("SELECT value FROM legacy_sentinel WHERE id = 1")).scalar_one() == "keep-me"

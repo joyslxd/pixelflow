@@ -82,17 +82,19 @@ def _summary(
     unresolved: list[str] | None = None,
     artifacts: list[str] | None = None,
     covered_end: int | None = None,
+    previous_summary_id: str | None = None,
     conversation_id: str = "conv-1",
 ) -> ContextSummary:
     return ContextSummary(
         summary_id=summary_id,
         conversation_id=conversation_id,
         version=version,
+        previous_summary_id=(previous_summary_id if previous_summary_id is not None else (f"{summary_id}-previous" if version > 1 else None)),
         content_hash=f"sha256:{summary_id}",
         user_goals=["制作商品素材"],
         unresolved_questions=unresolved or [],
         artifact_evidence_refs=artifacts or [],
-        covered_message_ids=[],
+        covered_message_ids=([f"msg-{sequence}" for sequence in range(1, covered_end + 1)] if covered_end is not None else []),
         covered_sequence_start=1 if covered_end is not None else None,
         covered_sequence_end=covered_end,
         compression_model="summary-model",
@@ -173,6 +175,7 @@ async def test_assembler_selects_relevant_context_in_deterministic_order() -> No
         unresolved=["还需确认尺寸"],
         artifacts=["artifact:conversation-summary"],
         covered_end=2,
+        previous_summary_id="conversation-v1",
     )
     target_summary = _summary(
         "image-v3",
@@ -219,7 +222,11 @@ async def test_assembler_selects_relevant_context_in_deterministic_order() -> No
             ),
             WorkflowSummaryRecord(
                 workflow_id="wf-video",
-                summary=_summary("video-v2", version=2),
+                summary=_summary(
+                    "video-v2",
+                    version=2,
+                    previous_summary_id="video-v1",
+                ),
             ),
             WorkflowSummaryRecord(
                 workflow_id="wf-ppt",

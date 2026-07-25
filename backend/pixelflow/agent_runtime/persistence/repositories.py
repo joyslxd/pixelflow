@@ -26,6 +26,7 @@ from ..contracts import (
 )
 from ..contracts.base import ContractModel
 from .models import (
+    PixelFlowAgentCompactionLockRow,
     PixelFlowAgentContextSummaryRow,
     PixelFlowAgentEventRow,
     PixelFlowAgentOperationRow,
@@ -33,9 +34,7 @@ from .models import (
     PixelFlowAgentWorkflowRow,
 )
 
-_SQLITE_ENGINE_WRITE_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = (
-    WeakKeyDictionary()
-)
+_SQLITE_ENGINE_WRITE_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = WeakKeyDictionary()
 
 
 class AgentRuntimeRecordConflictError(RuntimeError):
@@ -405,11 +404,7 @@ class MemoryAgentRuntimeRepository:
     async def list_workflows(self, user_id: str, conversation_id: str) -> list[WorkflowRecord]:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        records = [
-            record
-            for (record_owner, _), record in self._workflows.items()
-            if record_owner == owner and record.conversation_id == conversation
-        ]
+        records = [record for (record_owner, _), record in self._workflows.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.updated_at, record.workflow_id), reverse=True)
         return [_clone(record) for record in records]
 
@@ -441,9 +436,7 @@ class MemoryAgentRuntimeRepository:
         existing_owner_key = self._turn_client_keys.get(client_key)
         if existing_owner_key is not None:
             if existing_owner_key[0] != owner:
-                raise AgentRuntimeRecordConflictError(
-                    "Turn 幂等键已经被其他所有者占用"
-                )
+                raise AgentRuntimeRecordConflictError("Turn 幂等键已经被其他所有者占用")
             return _clone(self._turns[existing_owner_key])
         return await self.create_turn(owner, normalized)
 
@@ -468,11 +461,7 @@ class MemoryAgentRuntimeRepository:
     async def list_turns(self, user_id: str, conversation_id: str) -> list[TurnRecord]:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        owner_keys = [
-            owner_key
-            for owner_key, record in self._turns.items()
-            if owner_key[0] == owner and record.conversation_id == conversation
-        ]
+        owner_keys = [owner_key for owner_key, record in self._turns.items() if owner_key[0] == owner and record.conversation_id == conversation]
         owner_keys.sort(key=self._turn_owner_sequences.__getitem__)
         return [_clone(self._turns[owner_key]) for owner_key in owner_keys]
 
@@ -500,17 +489,12 @@ class MemoryAgentRuntimeRepository:
             }
         ]
         owner_keys.sort(key=self._turn_owner_sequences.__getitem__)
-        if any(
-            self._turns[owner_key].status is TurnStatus.PROCESSING
-            for owner_key in owner_keys
-        ):
+        if any(self._turns[owner_key].status is TurnStatus.PROCESSING for owner_key in owner_keys):
             return None
         if not owner_keys:
             return None
         owner_key = owner_keys[0]
-        claimed = self._turns[owner_key].model_copy(
-            update={"status": TurnStatus.PROCESSING}
-        )
+        claimed = self._turns[owner_key].model_copy(update={"status": TurnStatus.PROCESSING})
         self._turns[owner_key] = _clone(claimed)
         return _clone(claimed)
 
@@ -533,11 +517,7 @@ class MemoryAgentRuntimeRepository:
     async def list_summaries(self, user_id: str, conversation_id: str) -> list[ContextSummary]:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        records = [
-            record
-            for (record_owner, _), record in self._summaries.items()
-            if record_owner == owner and record.conversation_id == conversation
-        ]
+        records = [record for (record_owner, _), record in self._summaries.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.version, record.summary_id))
         return [_clone(record) for record in records]
 
@@ -547,39 +527,14 @@ class MemoryAgentRuntimeRepository:
         sequence_key = (normalized.conversation_id, normalized.sequence)
         cursor_key = (normalized.conversation_id, normalized.cursor)
         async with self._event_write_lock:
-            conversation_records = [
-                (record_owner, existing)
-                for (record_owner, _), existing in self._events.items()
-                if existing.conversation_id == normalized.conversation_id
-            ]
-            if any(
-                record_owner != owner
-                for record_owner, _ in conversation_records
-            ):
-                raise AgentRuntimeRecordConflictError(
-                    "AgentEvent conversation 已被其他所有者占用"
-                )
-            expected_sequence = (
-                1
-                if not conversation_records
-                else max(
-                    existing.sequence
-                    for _, existing in conversation_records
-                )
-                + 1
-            )
+            conversation_records = [(record_owner, existing) for (record_owner, _), existing in self._events.items() if existing.conversation_id == normalized.conversation_id]
+            if any(record_owner != owner for record_owner, _ in conversation_records):
+                raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+            expected_sequence = 1 if not conversation_records else max(existing.sequence for _, existing in conversation_records) + 1
             if normalized.sequence != expected_sequence:
-                raise AgentRuntimeRecordConflictError(
-                    "AgentEvent sequence 必须连续递增"
-                )
-            if (
-                normalized.event_id in self._event_ids
-                or sequence_key in self._event_sequence_keys
-                or cursor_key in self._event_cursor_keys
-            ):
-                raise AgentRuntimeRecordConflictError(
-                    "AgentEvent 记录已存在"
-                )
+                raise AgentRuntimeRecordConflictError("AgentEvent sequence 必须连续递增")
+            if normalized.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
+                raise AgentRuntimeRecordConflictError("AgentEvent 记录已存在")
             owner_key = (owner, normalized.event_id)
             self._event_ids.add(normalized.event_id)
             self._event_sequence_keys.add(sequence_key)
@@ -596,11 +551,7 @@ class MemoryAgentRuntimeRepository:
     async def list_events(self, user_id: str, conversation_id: str) -> list[AgentEvent]:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        records = [
-            record
-            for (record_owner, _), record in self._events.items()
-            if record_owner == owner and record.conversation_id == conversation
-        ]
+        records = [record for (record_owner, _), record in self._events.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.sequence, record.event_id))
         return [_clone(record) for record in records]
 
@@ -619,31 +570,18 @@ class MemoryAgentRuntimeRepository:
             64,
         )
         page_size = _event_query_limit(limit)
-        records = [
-            record
-            for (record_owner, _), record in self._events.items()
-            if record_owner == owner
-            and record.conversation_id == conversation
-        ]
+        records = [record for (record_owner, _), record in self._events.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.sequence, record.event_id))
         if cursor is None:
             return [_clone(record) for record in records[:page_size]]
         normalized_cursor = _require_text("cursor", cursor, 128)
         anchor = next(
-            (
-                record
-                for record in records
-                if record.cursor == normalized_cursor
-            ),
+            (record for record in records if record.cursor == normalized_cursor),
             None,
         )
         if anchor is None:
             return None
-        return [
-            _clone(record)
-            for record in records
-            if record.sequence > anchor.sequence
-        ][:page_size]
+        return [_clone(record) for record in records if record.sequence > anchor.sequence][:page_size]
 
     async def claim_next_event(
         self,
@@ -666,13 +604,7 @@ class MemoryAgentRuntimeRepository:
             lease_expires_at,
         )
         async with self._event_write_lock:
-            owner_keys = [
-                owner_key
-                for owner_key, record in self._events.items()
-                if owner_key[0] == owner
-                and record.conversation_id == conversation
-                and self._event_delivery[owner_key].status != "published"
-            ]
+            owner_keys = [owner_key for owner_key, record in self._events.items() if owner_key[0] == owner and record.conversation_id == conversation and self._event_delivery[owner_key].status != "published"]
             owner_keys.sort(
                 key=lambda owner_key: (
                     self._events[owner_key].sequence,
@@ -684,10 +616,7 @@ class MemoryAgentRuntimeRepository:
             owner_key = owner_keys[0]
             state = self._event_delivery[owner_key]
             if state.status == "delivering":
-                if (
-                    state.lease_expires_at is None
-                    or state.lease_expires_at > normalized_now
-                ):
+                if state.lease_expires_at is None or state.lease_expires_at > normalized_now:
                     return None
             state.status = "delivering"
             state.delivery_attempts += 1
@@ -725,15 +654,8 @@ class MemoryAgentRuntimeRepository:
             state = self._event_delivery[owner_key]
             if state.status == "published":
                 return _clone(event)
-            if (
-                state.status != "delivering"
-                or state.lease_owner != worker
-                or state.lease_expires_at is None
-                or completed_at >= state.lease_expires_at
-            ):
-                raise AgentRuntimeRecordConflictError(
-                    "AgentEvent 投递租约无效"
-                )
+            if state.status != "delivering" or state.lease_owner != worker or state.lease_expires_at is None or completed_at >= state.lease_expires_at:
+                raise AgentRuntimeRecordConflictError("AgentEvent 投递租约无效")
             state.status = "published"
             state.published_at = completed_at
             return _clone(event)
@@ -747,11 +669,7 @@ class MemoryAgentRuntimeRepository:
             normalized.stage_version,
             normalized.attempt,
         )
-        if (
-            normalized.job_id in self._operation_ids
-            or normalized.idempotency_key in self._operation_idempotency_keys
-            or stage_key in self._operation_stage_keys
-        ):
+        if normalized.job_id in self._operation_ids or normalized.idempotency_key in self._operation_idempotency_keys or stage_key in self._operation_stage_keys:
             raise AgentRuntimeRecordConflictError("Operation 记录已存在")
         self._operation_ids.add(normalized.job_id)
         self._operation_idempotency_keys.add(normalized.idempotency_key)
@@ -767,11 +685,7 @@ class MemoryAgentRuntimeRepository:
     async def list_operations(self, user_id: str, conversation_id: str) -> list[OperationRecord]:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        records = [
-            record
-            for (record_owner, _), record in self._operations.items()
-            if record_owner == owner and record.conversation_id == conversation
-        ]
+        records = [record for (record_owner, _), record in self._operations.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.created_at, record.job_id))
         return [_clone(record) for record in records]
 
@@ -864,9 +778,7 @@ def _operation_from_row(row: PixelFlowAgentOperationRow) -> OperationRecord:
             "idempotency_key": row.idempotency_key,
             "next_poll_at": None if row.next_poll_at is None else _database_utc(row.next_poll_at),
             "lease_owner": row.lease_owner,
-            "lease_expires_at": (
-                None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
-            ),
+            "lease_expires_at": (None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)),
             "created_at": _database_utc(row.created_at),
             "updated_at": _database_utc(row.updated_at),
         }
@@ -879,11 +791,7 @@ class SQLAgentRuntimeRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
         bind = session_factory.kw.get("bind")
-        self._sqlite_write_lock = (
-            _SQLITE_ENGINE_WRITE_LOCKS.setdefault(bind, asyncio.Lock())
-            if isinstance(bind, AsyncEngine) and bind.dialect.name == "sqlite"
-            else None
-        )
+        self._sqlite_write_lock = _SQLITE_ENGINE_WRITE_LOCKS.setdefault(bind, asyncio.Lock()) if isinstance(bind, AsyncEngine) and bind.dialect.name == "sqlite" else None
 
     async def _insert(self, row: object) -> None:
         async with self._session_factory() as session:
@@ -893,6 +801,59 @@ class SQLAgentRuntimeRepository:
             except IntegrityError:
                 await session.rollback()
                 raise AgentRuntimeRecordConflictError("记录主键或唯一业务键已经被占用") from None
+
+    async def _ensure_compaction_coordination_row(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+        owner_conflict_is_absent: bool = False,
+    ) -> bool:
+        """先落一条永久协调行，让所有 Turn 写入与领取锁定同一对象。"""
+
+        statement = select(PixelFlowAgentCompactionLockRow).where(PixelFlowAgentCompactionLockRow.conversation_id == conversation_id)
+        existing_turn_owners_statement = select(PixelFlowAgentTurnRow.user_id).where(PixelFlowAgentTurnRow.conversation_id == conversation_id).with_for_update()
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    existing = (await session.scalars(statement.with_for_update())).one_or_none()
+                    if existing is not None:
+                        if existing.user_id != user_id:
+                            if owner_conflict_is_absent:
+                                return False
+                            raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者")
+                        return True
+                    existing_turn_owners = set((await session.scalars(existing_turn_owners_statement)).all())
+                    if existing_turn_owners - {user_id}:
+                        if owner_conflict_is_absent:
+                            return False
+                        raise AgentRuntimeRecordConflictError("conversation 既有 Turn 已经属于其他所有者")
+                    session.add(
+                        PixelFlowAgentCompactionLockRow(
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                            state="idle",
+                            lease_owner=None,
+                            lease_token=None,
+                            lease_expires_at=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+        except IntegrityError:
+            async with self._session_factory() as session:
+                existing = (await session.scalars(statement)).one_or_none()
+            if existing is None:
+                raise AgentRuntimeRecordConflictError("conversation 压缩协调行创建失败") from None
+            if existing.user_id != user_id:
+                if owner_conflict_is_absent:
+                    return False
+                raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者") from None
+        return True
 
     async def create_workflow(self, user_id: str, record: WorkflowRecord) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -907,11 +868,7 @@ class SQLAgentRuntimeRepository:
                 current_stage=normalized.current_stage,
                 stage_version=normalized.stage_version,
                 creation_contract_snapshot_json=normalized.creation_contract_snapshot,
-                pending_external_job_json=(
-                    None
-                    if normalized.pending_external_job is None
-                    else normalized.pending_external_job.model_dump(mode="json")
-                ),
+                pending_external_job_json=(None if normalized.pending_external_job is None else normalized.pending_external_job.model_dump(mode="json")),
                 latest_artifact_refs_json=normalized.latest_artifact_refs,
                 context_version=normalized.context_version,
                 created_at=normalized.created_at,
@@ -936,8 +893,7 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentWorkflowRow)
             .where(
                 PixelFlowAgentWorkflowRow.user_id == owner,
-                PixelFlowAgentWorkflowRow.conversation_id
-                == _require_text("conversation_id", conversation_id, 64),
+                PixelFlowAgentWorkflowRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
             )
             .order_by(PixelFlowAgentWorkflowRow.updated_at.desc(), PixelFlowAgentWorkflowRow.workflow_id.desc())
         )
@@ -948,21 +904,46 @@ class SQLAgentRuntimeRepository:
     async def create_turn(self, user_id: str, record: TurnRecord) -> TurnRecord:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_turn(record)
-        await self._insert(
-            PixelFlowAgentTurnRow(
-                turn_id=normalized.turn_id,
-                conversation_id=normalized.conversation_id,
-                user_id=owner,
-                client_input_id=str(normalized.client_input_id),
-                status=normalized.status.value,
-                target_workflow_id=normalized.target_workflow_id,
-                decision_json=None if normalized.decision is None else normalized.decision.model_dump(mode="json"),
-                expected_context_version=normalized.expected_context_version,
-                created_at=normalized.created_at,
-                updated_at=normalized.created_at,
-            )
+        await self._ensure_compaction_coordination_row(
+            owner,
+            normalized.conversation_id,
+            now=normalized.created_at,
         )
-        return _clone(normalized)
+        coordination_statement = select(PixelFlowAgentCompactionLockRow).where(PixelFlowAgentCompactionLockRow.conversation_id == normalized.conversation_id).with_for_update()
+        stored_status = normalized.status
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    coordination = (await session.scalars(coordination_statement)).one()
+                    if coordination.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者")
+                    if coordination.state in {"active", "retry_required"}:
+                        if normalized.status not in {
+                            TurnStatus.ACCEPTED,
+                            TurnStatus.QUEUED,
+                        }:
+                            raise AgentRuntimeRecordConflictError("压缩未结束时只能保存待执行 Turn")
+                        stored_status = TurnStatus.QUEUED
+                    session.add(
+                        PixelFlowAgentTurnRow(
+                            turn_id=normalized.turn_id,
+                            conversation_id=normalized.conversation_id,
+                            user_id=owner,
+                            client_input_id=str(normalized.client_input_id),
+                            status=stored_status.value,
+                            target_workflow_id=normalized.target_workflow_id,
+                            decision_json=(None if normalized.decision is None else normalized.decision.model_dump(mode="json")),
+                            expected_context_version=(normalized.expected_context_version),
+                            created_at=normalized.created_at,
+                            updated_at=normalized.created_at,
+                        )
+                    )
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("记录主键或唯一业务键已经被占用") from None
+        return _clone(normalized.model_copy(update={"status": stored_status}))
 
     async def enqueue_turn(
         self,
@@ -971,14 +952,18 @@ class SQLAgentRuntimeRepository:
     ) -> TurnRecord:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_turn(record)
+        await self._ensure_compaction_coordination_row(
+            owner,
+            normalized.conversation_id,
+            now=normalized.created_at,
+        )
+        coordination_statement = select(PixelFlowAgentCompactionLockRow).where(PixelFlowAgentCompactionLockRow.conversation_id == normalized.conversation_id).with_for_update()
         statement = (
             select(PixelFlowAgentTurnRow)
             .where(
                 PixelFlowAgentTurnRow.user_id == owner,
-                PixelFlowAgentTurnRow.conversation_id
-                == normalized.conversation_id,
-                PixelFlowAgentTurnRow.client_input_id
-                == str(normalized.client_input_id),
+                PixelFlowAgentTurnRow.conversation_id == normalized.conversation_id,
+                PixelFlowAgentTurnRow.client_input_id == str(normalized.client_input_id),
             )
             .with_for_update()
         )
@@ -988,46 +973,45 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
-                    existing = (
-                        await session.scalars(statement)
-                    ).one_or_none()
+                    coordination = (await session.scalars(coordination_statement)).one()
+                    if coordination.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者")
+                    existing = (await session.scalars(statement)).one_or_none()
                     if existing is not None:
+                        if coordination.state in {"active", "retry_required"} and existing.status == TurnStatus.ACCEPTED.value:
+                            existing.status = TurnStatus.QUEUED.value
+                            existing.updated_at = datetime.now(UTC)
+                            await session.flush()
                         return _turn_from_row(existing)
+                    stored_status = normalized.status
+                    if coordination.state in {"active", "retry_required"}:
+                        if normalized.status not in {
+                            TurnStatus.ACCEPTED,
+                            TurnStatus.QUEUED,
+                        }:
+                            raise AgentRuntimeRecordConflictError("压缩未结束时只能保存待执行 Turn")
+                        stored_status = TurnStatus.QUEUED
                     session.add(
                         PixelFlowAgentTurnRow(
                             turn_id=normalized.turn_id,
                             conversation_id=normalized.conversation_id,
                             user_id=owner,
-                            client_input_id=str(
-                                normalized.client_input_id
-                            ),
-                            status=normalized.status.value,
+                            client_input_id=str(normalized.client_input_id),
+                            status=stored_status.value,
                             target_workflow_id=normalized.target_workflow_id,
-                            decision_json=(
-                                None
-                                if normalized.decision is None
-                                else normalized.decision.model_dump(
-                                    mode="json"
-                                )
-                            ),
-                            expected_context_version=(
-                                normalized.expected_context_version
-                            ),
+                            decision_json=(None if normalized.decision is None else normalized.decision.model_dump(mode="json")),
+                            expected_context_version=(normalized.expected_context_version),
                             created_at=normalized.created_at,
                             updated_at=normalized.created_at,
                         )
                     )
         except IntegrityError:
             async with self._session_factory() as session:
-                existing = (
-                    await session.scalars(statement)
-                ).one_or_none()
+                existing = (await session.scalars(statement)).one_or_none()
             if existing is not None:
                 return _turn_from_row(existing)
-            raise AgentRuntimeRecordConflictError(
-                "记录主键或唯一业务键已经被占用"
-            ) from None
-        return _clone(normalized)
+            raise AgentRuntimeRecordConflictError("记录主键或唯一业务键已经被占用") from None
+        return _clone(normalized.model_copy(update={"status": stored_status}))
 
     async def get_turn(self, user_id: str, turn_id: str) -> TurnRecord | None:
         owner = _require_text("user_id", user_id, 64)
@@ -1061,8 +1045,7 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentTurnRow)
             .where(
                 PixelFlowAgentTurnRow.user_id == owner,
-                PixelFlowAgentTurnRow.conversation_id
-                == _require_text("conversation_id", conversation_id, 64),
+                PixelFlowAgentTurnRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
             )
             .order_by(PixelFlowAgentTurnRow.inbox_sequence.asc())
         )
@@ -1081,6 +1064,29 @@ class SQLAgentRuntimeRepository:
             conversation_id,
             64,
         )
+        coordination_exists_statement = select(PixelFlowAgentCompactionLockRow.conversation_id).where(PixelFlowAgentCompactionLockRow.conversation_id == conversation)
+        turn_exists_statement = (
+            select(PixelFlowAgentTurnRow.inbox_sequence)
+            .where(
+                PixelFlowAgentTurnRow.user_id == owner,
+                PixelFlowAgentTurnRow.conversation_id == conversation,
+            )
+            .limit(1)
+        )
+        async with self._session_factory() as session:
+            coordination_exists = (await session.scalars(coordination_exists_statement)).first()
+            if coordination_exists is None:
+                turn_exists = (await session.scalars(turn_exists_statement)).first()
+                if turn_exists is None:
+                    return None
+        if not await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=datetime.now(UTC),
+            owner_conflict_is_absent=True,
+        ):
+            return None
+        coordination_statement = select(PixelFlowAgentCompactionLockRow).where(PixelFlowAgentCompactionLockRow.conversation_id == conversation).with_for_update()
         active_statuses = (
             TurnStatus.ACCEPTED.value,
             TurnStatus.QUEUED.value,
@@ -1101,11 +1107,13 @@ class SQLAgentRuntimeRepository:
                 session,
                 self._sqlite_write_lock,
             ):
+                coordination = (await session.scalars(coordination_statement)).one()
+                if coordination.user_id != owner:
+                    raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者")
+                if coordination.state in {"active", "retry_required"}:
+                    return None
                 rows = (await session.scalars(statement)).all()
-                if any(
-                    row.status == TurnStatus.PROCESSING.value
-                    for row in rows
-                ):
+                if any(row.status == TurnStatus.PROCESSING.value for row in rows):
                     return None
                 if not rows:
                     return None
@@ -1156,8 +1164,7 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentContextSummaryRow)
             .where(
                 PixelFlowAgentContextSummaryRow.user_id == owner,
-                PixelFlowAgentContextSummaryRow.conversation_id
-                == _require_text("conversation_id", conversation_id, 64),
+                PixelFlowAgentContextSummaryRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
             )
             .order_by(PixelFlowAgentContextSummaryRow.version.asc(), PixelFlowAgentContextSummaryRow.summary_id.asc())
         )
@@ -1171,8 +1178,7 @@ class SQLAgentRuntimeRepository:
         last_statement = (
             select(PixelFlowAgentEventRow)
             .where(
-                PixelFlowAgentEventRow.conversation_id
-                == normalized.conversation_id,
+                PixelFlowAgentEventRow.conversation_id == normalized.conversation_id,
             )
             .order_by(PixelFlowAgentEventRow.sequence.desc())
             .limit(1)
@@ -1184,22 +1190,12 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
-                    last_row = (
-                        await session.scalars(last_statement)
-                    ).first()
+                    last_row = (await session.scalars(last_statement)).first()
                     if last_row is not None and last_row.user_id != owner:
-                        raise AgentRuntimeRecordConflictError(
-                            "AgentEvent conversation 已被其他所有者占用"
-                        )
-                    expected_sequence = (
-                        1
-                        if last_row is None
-                        else last_row.sequence + 1
-                    )
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    expected_sequence = 1 if last_row is None else last_row.sequence + 1
                     if normalized.sequence != expected_sequence:
-                        raise AgentRuntimeRecordConflictError(
-                            "AgentEvent sequence 必须连续递增"
-                        )
+                        raise AgentRuntimeRecordConflictError("AgentEvent sequence 必须连续递增")
                     session.add(
                         PixelFlowAgentEventRow(
                             schema_version=normalized.schema_version,
@@ -1218,9 +1214,7 @@ class SQLAgentRuntimeRepository:
                     )
                     await session.flush()
         except IntegrityError:
-            raise AgentRuntimeRecordConflictError(
-                "记录主键或唯一业务键已经被占用"
-            ) from None
+            raise AgentRuntimeRecordConflictError("记录主键或唯一业务键已经被占用") from None
         return _clone(normalized)
 
     async def get_event(self, user_id: str, event_id: str) -> AgentEvent | None:
@@ -1239,8 +1233,7 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentEventRow)
             .where(
                 PixelFlowAgentEventRow.user_id == owner,
-                PixelFlowAgentEventRow.conversation_id
-                == _require_text("conversation_id", conversation_id, 64),
+                PixelFlowAgentEventRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
             )
             .order_by(PixelFlowAgentEventRow.sequence.asc(), PixelFlowAgentEventRow.event_id.asc())
         )
@@ -1266,18 +1259,12 @@ class SQLAgentRuntimeRepository:
         after_sequence: int | None = None
         async with self._session_factory() as session:
             if cursor is not None:
-                anchor_statement = select(
-                    PixelFlowAgentEventRow
-                ).where(
+                anchor_statement = select(PixelFlowAgentEventRow).where(
                     PixelFlowAgentEventRow.user_id == owner,
-                    PixelFlowAgentEventRow.conversation_id
-                    == conversation,
-                    PixelFlowAgentEventRow.cursor
-                    == _require_text("cursor", cursor, 128),
+                    PixelFlowAgentEventRow.conversation_id == conversation,
+                    PixelFlowAgentEventRow.cursor == _require_text("cursor", cursor, 128),
                 )
-                anchor = (
-                    await session.scalars(anchor_statement)
-                ).one_or_none()
+                anchor = (await session.scalars(anchor_statement)).one_or_none()
                 if anchor is None:
                     return None
                 after_sequence = anchor.sequence
@@ -1285,8 +1272,7 @@ class SQLAgentRuntimeRepository:
                 select(PixelFlowAgentEventRow)
                 .where(
                     PixelFlowAgentEventRow.user_id == owner,
-                    PixelFlowAgentEventRow.conversation_id
-                    == conversation,
+                    PixelFlowAgentEventRow.conversation_id == conversation,
                 )
                 .order_by(
                     PixelFlowAgentEventRow.sequence.asc(),
@@ -1295,9 +1281,7 @@ class SQLAgentRuntimeRepository:
                 .limit(page_size)
             )
             if after_sequence is not None:
-                statement = statement.where(
-                    PixelFlowAgentEventRow.sequence > after_sequence
-                )
+                statement = statement.where(PixelFlowAgentEventRow.sequence > after_sequence)
             rows = (await session.scalars(statement)).all()
         return [_event_from_row(row) for row in rows]
 
@@ -1325,11 +1309,8 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentEventRow)
             .where(
                 PixelFlowAgentEventRow.user_id == owner,
-                PixelFlowAgentEventRow.conversation_id
-                == conversation,
-                PixelFlowAgentEventRow.delivery_status.in_(
-                    ("pending", "delivering")
-                ),
+                PixelFlowAgentEventRow.conversation_id == conversation,
+                PixelFlowAgentEventRow.delivery_status.in_(("pending", "delivering")),
             )
             .order_by(
                 PixelFlowAgentEventRow.sequence.asc(),
@@ -1349,10 +1330,7 @@ class SQLAgentRuntimeRepository:
                 if row.delivery_status == "delivering":
                     if row.lease_expires_at is None:
                         return None
-                    if (
-                        _database_utc(row.lease_expires_at)
-                        > normalized_now
-                    ):
+                    if _database_utc(row.lease_expires_at) > normalized_now:
                         return None
                 row.delivery_status = "delivering"
                 row.delivery_attempts += 1
@@ -1399,16 +1377,8 @@ class SQLAgentRuntimeRepository:
                     return None
                 if row.delivery_status == "published":
                     return _event_from_row(row)
-                if (
-                    row.delivery_status != "delivering"
-                    or row.lease_owner != worker
-                    or row.lease_expires_at is None
-                    or completed_at
-                    >= _database_utc(row.lease_expires_at)
-                ):
-                    raise AgentRuntimeRecordConflictError(
-                        "AgentEvent 投递租约无效"
-                    )
+                if row.delivery_status != "delivering" or row.lease_owner != worker or row.lease_expires_at is None or completed_at >= _database_utc(row.lease_expires_at):
+                    raise AgentRuntimeRecordConflictError("AgentEvent 投递租约无效")
                 row.delivery_status = "published"
                 row.published_at = completed_at
                 await session.flush()
@@ -1455,8 +1425,7 @@ class SQLAgentRuntimeRepository:
             select(PixelFlowAgentOperationRow)
             .where(
                 PixelFlowAgentOperationRow.user_id == owner,
-                PixelFlowAgentOperationRow.conversation_id
-                == _require_text("conversation_id", conversation_id, 64),
+                PixelFlowAgentOperationRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
             )
             .order_by(PixelFlowAgentOperationRow.created_at.asc(), PixelFlowAgentOperationRow.job_id.asc())
         )

@@ -141,7 +141,7 @@ def _summary(
         workflow_states={"wf-1": "running"},
         unresolved_questions=["是否需要透明背景"],
         artifact_evidence_refs=["artifact-1"],
-        covered_message_ids=["message-1"],
+        covered_message_ids=["message-1", "message-2"],
         covered_sequence_start=1,
         covered_sequence_end=2,
         compression_model="fake-summary-model",
@@ -460,9 +460,7 @@ async def test_repository_contract_normalizes_all_aware_datetimes_to_utc(kind: R
             ),
         }
     )
-    turn = _turn("turn-1", "00000000-0000-0000-0000-000000000001").model_copy(
-        update={"created_at": local_time}
-    )
+    turn = _turn("turn-1", "00000000-0000-0000-0000-000000000001").model_copy(update={"created_at": local_time})
     summary = _summary("summary-1", 1).model_copy(update={"created_at": local_time})
     event = _event("event-1", 1).model_copy(update={"occurred_at": local_time})
     operation = _operation("job-1").model_copy(
@@ -508,25 +506,15 @@ def _records_with_naive_datetimes() -> list[tuple[str, Any]]:
         ("updated_at", _workflow("wf-updated").model_copy(update={"updated_at": naive})),
         (
             "next_poll_at",
-            _workflow("wf-next-poll").model_copy(
-                update={
-                    "pending_external_job": _external_job("wf-next-poll").model_copy(update={"next_poll_at": naive})
-                }
-            ),
+            _workflow("wf-next-poll").model_copy(update={"pending_external_job": _external_job("wf-next-poll").model_copy(update={"next_poll_at": naive})}),
         ),
         (
             "lease_expires_at",
-            _workflow("wf-lease").model_copy(
-                update={
-                    "pending_external_job": _external_job("wf-lease").model_copy(update={"lease_expires_at": naive})
-                }
-            ),
+            _workflow("wf-lease").model_copy(update={"pending_external_job": _external_job("wf-lease").model_copy(update={"lease_expires_at": naive})}),
         ),
         (
             "created_at",
-            _turn("turn-naive", "00000000-0000-0000-0000-000000000001").model_copy(
-                update={"created_at": naive}
-            ),
+            _turn("turn-naive", "00000000-0000-0000-0000-000000000001").model_copy(update={"created_at": naive}),
         ),
         ("created_at", _summary("summary-naive", 1).model_copy(update={"created_at": naive})),
         ("occurred_at", _event("event-naive", 1).model_copy(update={"occurred_at": naive})),
@@ -561,11 +549,10 @@ def _record_with_overlong_field(record_type: str, field: str, max_length: int) -
     if record_type == "workflow":
         return _workflow("wf-length").model_copy(update={field: value})
     if record_type == "turn":
-        return _turn("turn-length", "00000000-0000-0000-0000-000000000001").model_copy(
-            update={field: value}
-        )
+        return _turn("turn-length", "00000000-0000-0000-0000-000000000001").model_copy(update={field: value})
     if record_type == "summary":
-        return _summary("summary-length", 1).model_copy(update={field: value})
+        version = 2 if field == "previous_summary_id" else 1
+        return _summary("summary-length", version).model_copy(update={field: value})
     if record_type == "event":
         return _event("event-length", 1).model_copy(update={field: value})
     return _operation("job-length").model_copy(update={field: value})

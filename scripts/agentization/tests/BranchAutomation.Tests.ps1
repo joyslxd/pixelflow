@@ -439,8 +439,62 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
+    It "M04 最终门禁覆盖压缩事实、事件、队列和相邻 Runtime 边界" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M04" -GateType "Final" -PlanOnly)
+        $versionCommands = @($plan | Where-Object { $_.Arguments -contains "import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)" })
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $expectedRuntimeTests = @(
+            "tests/test_agent_runtime_compaction_coordinator.py",
+            "tests/test_agent_runtime_compaction_events.py",
+            "tests/test_agent_runtime_compaction_queue.py",
+            "tests/test_agent_runtime_config.py",
+            "tests/test_agent_runtime_context_assembler.py",
+            "tests/test_agent_runtime_context_externalizer.py",
+            "tests/test_agent_runtime_context_profiles.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_conversation_cas.py",
+            "tests/test_agent_runtime_event_outbox.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_agent_runtime_migration.py",
+            "tests/test_agent_runtime_repositories.py",
+            "tests/test_agent_runtime_structured_summaries.py",
+            "tests/test_agent_runtime_summary_builder.py",
+            "tests/test_agent_runtime_summary_verification.py",
+            "tests/test_agent_runtime_token_meter.py",
+            "tests/test_agent_runtime_turn_inbox.py"
+        )
+        $expectedBoundaryTests = @(
+            "tests/test_summarization_middleware.py",
+            "tests/test_dynamic_context_middleware.py",
+            "tests/test_harness_boundary.py"
+        )
+        $expectedRuffPaths = @(
+            "packages/harness/deerflow/persistence/migrations/versions/20260725_03_compaction_locks.py",
+            "pixelflow/agent_runtime/context",
+            "pixelflow/agent_runtime/persistence"
+        )
+
+        $versionCommands.Count | Should Be 1
+        $pytestCommands.Count | Should Be 2
+        $ruffCommands.Count | Should Be 1
+        @($pytestCommands | Where-Object { $_.FilePath -eq $versionCommands[0].FilePath }).Count | Should Be 2
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedRuntimeTests + @("-q")) -join "`n")
+        ($pytestCommands[1].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedBoundaryTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedRuntimeTests +
+                $expectedBoundaryTests
+            ) -join "`n"
+        )
+    }
+
     It "未配置权威测试清单的后端模块必须 fail-closed" {
-        foreach ($moduleId in @("M02", "M04", "M05", "M06")) {
+        foreach ($moduleId in @("M02", "M05", "M06")) {
             { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
         }
     }
