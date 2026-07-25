@@ -9,6 +9,7 @@ $RequiredScripts = @(
     "Sync-DevToAgent.ps1",
     "Start-AgentModule.ps1",
     "Invoke-AgentModuleGate.ps1",
+    "Invoke-M13R1PhaseGate.ps1",
     "Integrate-AgentModule.ps1",
     "Reconcile-DevToAgent.ps1"
 )
@@ -533,6 +534,62 @@ Describe "Agent 分支自动化入口" {
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test" }).Count | Should Be 1
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm lint" }).Count | Should Be 1
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
+    }
+
+    It "M13 R1 固定入口绑定冻结 Agent 和唯一阶段参数" {
+        $topology = New-AutomationTestTopology
+        $fakeGateDirectory = Join-Path $topology.Repository "scripts\agentization"
+        New-Item -ItemType Directory -Path $fakeGateDirectory -Force | Out-Null
+        $fakeGate = @'
+param(
+    [string]$RepositoryPath,
+    [string]$ModuleId,
+    [string]$GateType,
+    [string]$ReleaseId,
+    [string]$Slice,
+    [string]$ChinesePolicyBaseRef,
+    [switch]$PlanOnly
+)
+[pscustomobject]@{
+    RepositoryPath = $RepositoryPath
+    ModuleId = $ModuleId
+    GateType = $GateType
+    ReleaseId = $ReleaseId
+    Slice = $Slice
+    ChinesePolicyBaseRef = $ChinesePolicyBaseRef
+    PlanOnly = [bool]$PlanOnly
+}
+'@
+        Set-Content -LiteralPath (Join-Path $fakeGateDirectory "Invoke-AgentModuleGate.ps1") -Value $fakeGate -Encoding UTF8
+        Invoke-TestGit -RepositoryPath $topology.Repository -Arguments @("fetch", "origin", "feature/agent_0.8.4_boguan") | Out-Null
+        $expectedAgent = Get-RemoteBranchSha -Topology $topology -Branch "feature/agent_0.8.4_boguan"
+
+        $result = & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly
+
+        $result.RepositoryPath | Should Be ([System.IO.Path]::GetFullPath($topology.Repository))
+        $result.ModuleId | Should Be "M13"
+        $result.GateType | Should Be "Phase"
+        $result.ReleaseId | Should Be "R1"
+        $result.Slice | Should Be "M13.1"
+        $result.ChinesePolicyBaseRef | Should Be $expectedAgent
+        $result.PlanOnly | Should Be $true
+    }
+
+    It "M13 R1 固定入口缺少冻结 Agent 跟踪引用时 fail-closed" {
+        $topology = New-AutomationTestTopology
+        Invoke-TestGit -RepositoryPath $topology.Repository -Arguments @("update-ref", "-d", "refs/remotes/origin/feature/agent_0.8.4_boguan") | Out-Null
+
+        { & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly } | Should Throw
+    }
+
+    It "M13 R1 固定入口使用 Windows PowerShell 5.1 可识别的脚本编码" {
+        $scriptPath = Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1"
+        $bytes = [System.IO.File]::ReadAllBytes($scriptPath)
+        $text = [System.IO.File]::ReadAllText($scriptPath, [System.Text.Encoding]::UTF8)
+
+        $PSVersionTable.PSVersion.Major | Should Be 5
+        (($bytes[0..2] | ForEach-Object { $_.ToString("X2") }) -join " ") | Should Be "EF BB BF"
+        $text.Contains("`r`n") | Should Be $true
     }
 
     It "缺少项目虚拟环境时不得回退到 PATH Python" {
