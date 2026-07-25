@@ -215,6 +215,7 @@ try {
       "src/lib/supervisor/events.ts",
       "src/lib/supervisor/legacyAdapter.ts",
       "src/lib/supervisor/reducer.ts",
+      "src/lib/supervisor/runtimeNotice.ts",
       "src/lib/time.ts",
       "src/lib/videoRequirementConfig.ts",
       "src/lib/workflowTaskBoard.ts",
@@ -258,6 +259,10 @@ try {
       ),
       SUPERVISOR_LEGACY_ADAPTER_FIXTURE: supervisorLegacyAdapterFixture,
       SUPERVISOR_REDUCER_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/reducer.js"),
+      SUPERVISOR_RUNTIME_NOTICE_TEST_MODULE: moduleUrl(
+        moduleDirectory,
+        "supervisor/runtimeNotice.js",
+      ),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),
       WORKFLOW_TASK_BOARD_TEST_MODULE: moduleUrl(moduleDirectory, "workflowTaskBoard.js"),

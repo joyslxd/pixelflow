@@ -129,7 +129,7 @@ test("compression 状态机覆盖开始、单调进度、完成、失败和重�
   }));
   assert.deepEqual(state.compression, {
     status: "compacting",
-    progressPercent: 0,
+    progressPercent: null,
     queuedInputCount: 2,
     lastOutcome: null,
     updatedAt: "2026-07-24T02:00:01Z",
@@ -171,8 +171,8 @@ test("compression 状态机覆盖开始、单调进度、完成、失败和重�
   }));
   assert.deepEqual(state.compression, {
     status: "blocked",
-    progressPercent: 0,
-    queuedInputCount: 1,
+    progressPercent: null,
+    queuedInputCount: 0,
     lastOutcome: "failed",
     updatedAt: "2026-07-24T02:00:07Z",
   });
@@ -181,6 +181,111 @@ test("compression 状态机覆盖开始、单调进度、完成、失败和重�
   }));
   assert.equal(state.compression.status, "compacting");
   assert.equal(state.compression.lastOutcome, null);
+});
+
+test("compression 状态机兼容 M04 真实事件并在终态清理旧排队计数", () => {
+  let state = createSupervisorRuntimeState("conv-1");
+  state = supervisorRuntimeReducer(state, {
+    type: "connection.state_changed",
+    status: "connecting",
+  });
+  state = supervisorRuntimeReducer(state, {
+    type: "connection.state_changed",
+    status: "connected",
+  });
+  state = supervisorRuntimeReducer(state, {
+    type: "snapshot.hydrated",
+    snapshot: {
+      conversationId: "conv-1",
+      run: {
+        runId: "run-1",
+        status: "running",
+        updatedAt: "2026-07-24T02:00:09Z",
+      },
+      compression: {
+        status: "compacting",
+        progressPercent: 60,
+        queuedInputCount: 2,
+        lastOutcome: null,
+        updatedAt: "2026-07-24T02:00:09Z",
+      },
+      inputQueue: [
+        {
+          clientInputId: "input-1",
+          turnId: "turn-1",
+          status: "queued",
+          queuePosition: 1,
+          updatedAt: "2026-07-24T02:00:09Z",
+        },
+      ],
+      resume: { cursor: "cursor-9", sequence: 9 },
+    },
+  });
+
+  state = receive(state, event(10, "context.compression_progressed", {
+    status: "running",
+    action: "summarize_old_messages",
+    step: 1,
+  }));
+  assert.equal(state.connection.status, "connected");
+  assert.equal(state.compression.progressPercent, 60);
+  assert.deepEqual(state.resume, { cursor: "cursor-10", sequence: 10 });
+
+  state = receive(state, event(11, "context.compression_completed", {
+    status: "completed",
+    message: "上下文整理完成",
+  }));
+  assert.equal(state.compression.status, "idle");
+  assert.equal(state.compression.queuedInputCount, 0);
+  assert.deepEqual(state.resume, { cursor: "cursor-11", sequence: 11 });
+
+  state = receive(state, event(12, "input.state_changed", {
+    client_input_id: "input-1",
+    turn_id: "turn-1",
+    status: "processing",
+  }));
+  assert.equal(state.inputQueue[0].status, "processing");
+
+  state = receive(state, event(13, "context.compression_started", {
+    status: "running",
+    message: "正在整理上下文",
+  }));
+  assert.equal(state.compression.progressPercent, null);
+  state = receive(state, event(14, "context.compression_progressed", {
+    status: "running",
+    action: "trim_tool_results",
+    step: 1,
+  }));
+  assert.equal(state.compression.progressPercent, null);
+  state = receive(state, event(15, "context.compression_failed", {
+    status: "retry_required",
+    reason_code: "hard_gate_compaction_failed",
+    message: "稍后重试",
+  }));
+  assert.equal(state.connection.status, "connected");
+  assert.deepEqual(state.compression, {
+    status: "blocked",
+    progressPercent: null,
+    queuedInputCount: 0,
+    lastOutcome: "failed",
+    updatedAt: "2026-07-24T02:00:15Z",
+  });
+  assert.deepEqual(state.resume, { cursor: "cursor-15", sequence: 15 });
+});
+
+test("compression 事件显式携带非法百分比时保持失败关闭", () => {
+  let state = createSupervisorRuntimeState("conv-1");
+  state = receive(state, event(1, "context.compression_started", {
+    status: "running",
+  }));
+  state = receive(state, event(2, "context.compression_progressed", {
+    status: "running",
+    action: "summarize_old_messages",
+    step: 1,
+    progress_percent: 101,
+  }));
+  assert.equal(state.connection.status, "fatal");
+  assert.deepEqual(state.resume, { cursor: "cursor-1", sequence: 1 });
 });
 
 test("input queue 按 client_input_id 幂等更新且服务端接管后不被本地失败回退", () => {

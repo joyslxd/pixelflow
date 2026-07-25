@@ -7,6 +7,8 @@ import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import type { CreativeDirectionResponse, ImageEditModelSelection } from "@/lib/api";
 import { isJianyingDraftResultRetryable, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 import type { WorkflowTaskBoardModel } from "@/lib/workflowTaskBoard";
+import type { SupervisorRuntimeNoticeModel } from "@/lib/supervisor/runtimeNotice";
+import { ConversationRuntimeNotice } from "./ConversationRuntimeNotice";
 import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 
 interface ChatPanelProps {
@@ -50,6 +52,7 @@ interface ChatPanelProps {
   composerDisabled?: boolean;
   artifactActionsDisabled?: boolean;
   runtimeBusy?: boolean;
+  runtimeNotice?: SupervisorRuntimeNoticeModel | null;
   workflowTaskBoard?: WorkflowTaskBoardModel | null;
 }
 
@@ -114,6 +117,7 @@ export function ChatPanel({
   composerDisabled = false,
   artifactActionsDisabled = false,
   runtimeBusy = false,
+  runtimeNotice = null,
   workflowTaskBoard,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
@@ -202,6 +206,7 @@ export function ChatPanel({
       </div>
 
       <div className="relative shrink-0 px-4 pb-4 pt-2">
+        <ConversationRuntimeNotice notice={runtimeNotice} />
         {workflowTaskBoard ? (
           <div className="relative z-0 mr-auto -mb-4 w-full max-w-[1080px] pl-6 pr-7">
             <WorkflowTaskBoard key={workflowTaskBoard.workflowId} model={workflowTaskBoard} />

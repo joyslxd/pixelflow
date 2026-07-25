@@ -4,12 +4,12 @@
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
-- 当前切片：M12.2
+- 当前切片：M12.3
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
-- M12.2 模块分支基线：`3c999dc2f1e6f601380a568fd8beb14e41daf613`
+- M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
 - 当前唯一写入者：`/root`
-- 开始时间：`2026-07-25 10:09:00 +0800`
-- M12.2 锁定文件：`web/src/pages/WorkspacePage.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/components/composer/Composer.tsx`、`web/src/lib/supervisor/legacyAdapter.ts`、`web/tests/workspaceOrchestrationMode.test.mjs`、`web/tests/mainFlowContract.test.mjs`、`web/tests/jianyingDraftUiContract.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.2.md`
+- 开始时间：`2026-07-25 11:16:05 +0800`
+- M12.3 锁定文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
 - release_id：R1（M12.3 中间检查点）/ R2（最终）
 - checkpoint_slice：M12.3
 - checkpoint_status：pending
@@ -18,7 +18,7 @@
 
 - [x] M12.1 orchestration mode 双运行时挂载（2h）
 - [x] M12.2 拆分 busy/action policy（2h）
-- [ ] M12.3 压缩 Notice/排队 badge（2h）
+- [x] M12.3 压缩 Notice/排队 badge（2h）
 - [ ] M12.4 reply/artifact/interrupt/mention 元数据（2.5h）
 - [ ] M12.5 消息/进度/历史/task board 投影（2.5h）
 
@@ -57,3 +57,18 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 状态：M12.2 已完成但 M12 模块仍为 `in_progress`；本片不是阶段检查点，不写 `ready_for_phase_integration` 或 `ready_for_integration`，不更新 `status/BOARD.md`，不触发集成。
 - 提交与推送：本状态和测试报告随 M12.2 独立中文提交推送到 `origin/codex/agent-0.8.4-m12-workspace-ui` 后停止。
 - 下一步：`M12.3 压缩 Notice/排队 badge`；该片是 R1 阶段检查点，必须由开发者重新启动并复用本模块分支/worktree，本任务不得自动进入。
+
+## M12.3 完成记录
+
+- 完成时间：`2026-07-25 11:30:09 +0800`
+- 实现：新增独立的 `ConversationRuntimeNotice` 和稳定 ViewModel，在 Composer 上方展示压缩开始、不确定或明确进度、完成、可恢复失败及排队 badge；`WorkspacePage` 只负责从 Supervisor reducer 状态装配 ViewModel。
+- 运行时合同：reducer 兼容 M04 已进入 Agent 的真实 `status/action/step` 压缩事件；缺少 `progress_percent` 时保持不确定进度或已有快照进度并推进 cursor，显式非法百分比仍失败关闭。
+- 排队权威：badge 只从 `inputQueue` 中的 `queued` 项派生数量和最小位置；压缩终态清理兼容字段中的旧计数，避免 Snapshot 恢复后长期显示虚高队列。
+- 双运行时隔离：Notice 只在服务端归属为 `supervisor_v1` 时启用；`frontend_v2` 不展示，也未改变旧 runner、供应商 `/start` 或 M12.4 元数据提交合同。
+- 可访问性：开始、完成、队列使用 `status`，失败使用 `alert`，统一 `aria-live=polite`；只有后端明确提供百分比时展示带 `aria-valuenow` 的进度条，不伪造精确进度。
+- TDD：首次新增 ViewModel 合同测试时以模块缺失形成预期 RED，最小实现后达到 `293/293`；首轮审核发现真实 M04 payload 漂移后，新增合同测试得到 `3 failed / 293 passed` 的二次 RED，整改后 `npm test` 最终 `296/296` 通过。
+- 验证：`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建仅有既存 chunk 体积提醒；未调用真实或付费 API。
+- 独立审核：`/root/m12_3_reviewer` 首轮发现 2 项 Important；整改后二轮结论 `Ready`，Critical/Important/Minor 均为 0，Reviewer 未修改文件、未提交、未推送、未调用真实或付费 API。
+- 中文规范：本机无 `pwsh`/Windows PowerShell，按脚本 fail-closed 条件完成人工等价检查；新增和修改的人工说明、状态和报告均为中文，本片无新增配置、依赖或锁文件。
+- 状态：本实现提交先固定 M12.3 代码、测试和证据，模块暂保持 `in_progress`、`checkpoint_status=pending`；固定提交上的 `R1-assist-ui` 阶段门禁绿色后，另以只修改本状态文件的中文提交登记 `ready_for_phase_integration`。
+- 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。

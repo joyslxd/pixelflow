@@ -114,6 +114,7 @@ import {
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
 } from "@/lib/supervisor/legacyAdapter";
+import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -1760,6 +1761,12 @@ export function WorkspacePage() {
     supervisorRun: supervisorRuntime.state.run.status,
     supervisorCompression: supervisorRuntime.state.compression.status,
     pendingSupervisorTurns: pendingSupervisorTurns.length,
+  });
+  const runtimeNotice = resolveSupervisorRuntimeNotice({
+    enabled: runtimePolicy.supervisorEnabled,
+    runStatus: supervisorRuntime.state.run.status,
+    compression: supervisorRuntime.state.compression,
+    inputQueue: supervisorRuntime.state.inputQueue,
   });
 
   // 接收来自 content-app 的用户消息（通过 postMessage + CustomEvent）
@@ -8589,6 +8596,7 @@ export function WorkspacePage() {
         composerDisabled={interactionPolicy.composer.disabled}
         artifactActionsDisabled={interactionPolicy.artifact.actionsDisabled}
         runtimeBusy={interactionPolicy.runtime.busy}
+        runtimeNotice={runtimeNotice}
         workflowTaskBoard={workflowTaskBoard}
         onSelectDirection={legacyArtifactActionsEnabled ? handleSelectDirection : undefined}
         onRegenerateDirections={legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined}
