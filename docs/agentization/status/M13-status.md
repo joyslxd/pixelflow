@@ -1,10 +1,10 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`ready_for_phase_integration`
+- phase：`phase_integrated`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：`M13.1`
+- 当前切片：`M13.2`
 - base Agent SHA：`f03f733115fb0ddd554dcb434f368cef5f09b39e`
 - 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
@@ -12,8 +12,8 @@
 - release_id：`R1`
 - checkpoint_slice：`M13.1`
 - checkpoint_commit：`c86d181787dfca875cd8f267b709859fc82efb28`
-- last_integrated_commit：`—`
-- checkpoint_status：`ready`
+- last_integrated_commit：`328fb535bb2c03790bd1bb189781b9cd64aa1567`
+- checkpoint_status：`phase_integrated:R1`
 - 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
 - 生产配置：未变更；切片通过不等于生产上线
 
@@ -59,4 +59,4 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
 - 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
 - locked files：`无`
-- integration failure evidence：`候选 codex/integrate-r1-m13-20260725-101433-647397f6 已保留；Agent 未更新；错误类型 ParameterBindingException`
+- integration failure evidence：`无`
