@@ -14,7 +14,7 @@
 - checkpoint_commit：`c86d181787dfca875cd8f267b709859fc82efb28`
 - last_integrated_commit：`328fb535bb2c03790bd1bb189781b9cd64aa1567`
 - checkpoint_status：`phase_integrated:R1`
-- 当前发布门禁：`ready_for_phase_integration:R1`；人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R1` 和 `awaiting_release_approval:R1`
+- 当前发布门禁：`awaiting_release_approval:R1`；M13.1 单槽候选已绿色进入 Agent，生产发布仍须唯一发布负责人另行批准
 - 生产配置：未变更；切片通过不等于生产上线
 
 ## 切片
@@ -37,7 +37,7 @@
 
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
-| R1 | `ready_for_phase_integration:R1` | 未批准 | 保持发布前原值 | 业务检查点 `e4eb458` 的非付费阶段门禁绿色；固定入口回归 41 项绿色，待新候选重新触发 9.10A |
+| R1 | `awaiting_release_approval:R1` | 未批准 | 保持发布前原值 | 单槽候选 `codex/integrate-r1-m13-20260725-113904-ddf38e34` 完整执行八项非付费阶段门禁并进入 Agent；模块增量 `328fb53` |
 | R2 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
@@ -54,8 +54,8 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 回归：真实 message job 不能越序接力 queued Turn；历史非法 marker 由 Snapshot 安全清理且不改变队列顺序。
 - 审核：独立 Reviewer 最终 Critical/Important/Minor 均为 0，`Ready to merge: Yes`。
 - 检查点：原业务实现与中文规范修复固定在 `e4eb45838d20bf110841aa360f24d699b32ead3d`；初版门禁修复 `93169c7fd1e2b4a771830fdd71b393519f5101b8` 已被独立审查修正，当前权威可重试检查点为 `c86d181787dfca875cd8f267b709859fc82efb28`。
-- 最终阶段门禁：八项 `M13 / Phase / R1 / M13.1` 只在历史业务检查点 `e4eb45838d20bf110841aa360f24d699b32ead3d` 返回过 `Passed=True`、`CommandCount=8`；本次门禁入口修复没有重跑八项业务命令，新候选必须完整重跑后才能进入 Agent。
-- 当前停止点：`ready_for_phase_integration:R1`；等待开发者在新的独立任务中复制执行手册 9.10A，明确模块 `M13`、release `R1`、slice `M13.1`，从已 push 的 M13 分支/worktree 调用修复后的 `scripts/agentization/Integrate-AgentModule.ps1`，并把同一分支的 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript` 创建全新候选；禁止复用历史失败候选。
+- 最终阶段门禁：全新候选 `codex/integrate-r1-m13-20260725-113904-ddf38e34` 通过 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 完整执行八项 `M13 / Phase / R1 / M13.1` 非付费权威门禁；远端 Agent、dev 与模块基线复核无漂移后已原子更新。
+- 当前停止点：`phase_integrated:R1`、`awaiting_release_approval:R1`；等待唯一发布负责人另行复制执行手册 9.17 的 R1 生产发布批准话术。不得自动修改生产配置、调用真实付费 API 或执行 M13.2。
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
 - 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
 - locked files：`无`
