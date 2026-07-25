@@ -1,18 +1,20 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`in_progress`
+- phase：`ready_for_phase_integration`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
 - 当前切片：M12.3
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
-- 当前唯一写入者：`/root`
+- 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 11:16:05 +0800`
-- M12.3 锁定文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
-- release_id：R1（M12.3 中间检查点）/ R2（最终）
-- checkpoint_slice：M12.3
-- checkpoint_status：pending
+- M12.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
+- release_id：`R1`
+- checkpoint_slice：`M12.3`
+- checkpoint_commit：`4d9931811f23eb306f2bf8b8dc33357aacbb46e4`
+- last_integrated_commit：—
+- checkpoint_status：`ready`
 
 ## 切片
 
@@ -70,5 +72,6 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 验证：`npm run lint`、`npm run build-prod`、`git diff --check` 全部通过；生产构建仅有既存 chunk 体积提醒；未调用真实或付费 API。
 - 独立审核：`/root/m12_3_reviewer` 首轮发现 2 项 Important；整改后二轮结论 `Ready`，Critical/Important/Minor 均为 0，Reviewer 未修改文件、未提交、未推送、未调用真实或付费 API。
 - 中文规范：本机无 `pwsh`/Windows PowerShell，按脚本 fail-closed 条件完成人工等价检查；新增和修改的人工说明、状态和报告均为中文，本片无新增配置、依赖或锁文件。
-- 状态：本实现提交先固定 M12.3 代码、测试和证据，模块暂保持 `in_progress`、`checkpoint_status=pending`；固定提交上的 `R1-assist-ui` 阶段门禁绿色后，另以只修改本状态文件的中文提交登记 `ready_for_phase_integration`。
+- 阶段门禁：固定实现提交 `4d9931811f23eb306f2bf8b8dc33357aacbb46e4` 后，按 `Invoke-AgentModuleGate.ps1` 的 `M12 / Phase / R1 / M12.3` 权威范围执行 `git diff --check`、`corepack pnpm test`、`corepack pnpm lint`、`corepack pnpm build-prod`，全部通过；聚合测试为 `296/296`，生产构建只有既存 chunk 体积提醒。
+- 状态：`R1-assist-ui` 阶段门禁和中文规范人工等价检查均绿色，M12 已登记 `ready_for_phase_integration`、`checkpoint_status=ready`；唯一写入权和 M12.3 文件锁已释放，等待开发者人工启动单槽阶段集成。
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
