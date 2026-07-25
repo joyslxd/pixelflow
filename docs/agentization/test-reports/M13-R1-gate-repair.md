@@ -19,10 +19,11 @@
 ## 修复内容
 
 - 新增 `scripts/agentization/Invoke-M13R1PhaseGate.ps1`，只绑定 `M13 / Phase / R1 / M13.1`。
-- 固定入口从 `refs/remotes/origin/feature/agent_0.8.4_boguan` 读取本次 fetch 后冻结的 Agent SHA，并验证该提交是候选 `HEAD` 的祖先。
+- `Integrate-AgentModule.ps1` 只在 GateScript 调用期间通过进程环境显式传入本次单槽任务冻结的 Agent SHA，并在 `finally` 中恢复调用前环境。
+- 固定入口只接受集成器显式传入的冻结 SHA，不再读取可变的远端跟踪引用；同时验证该提交是候选 `HEAD` 的祖先。
 - 固定入口把冻结 SHA 作为 `ChinesePolicyBaseRef` 传给候选内 canonical `Invoke-AgentModuleGate.ps1`；缺失引用、非法 SHA、非祖先或 canonical 脚本缺失时全部 fail-closed。
 - 脚本使用 UTF-8 BOM 和 CRLF，人工注释与错误信息全部使用中文。
-- M13 权威字段恢复为 `ready_for_phase_integration:R1`，原业务 checkpoint 不变；下一次必须创建全新候选。
+- 原业务 checkpoint `e4eb45838d20bf110841aa360f24d699b32ead3d` 保留为历史证据；M13 权威可重试 checkpoint 前移到包含全部门禁修复的实现提交，下一次必须创建全新候选。
 
 ## TDD 与验证
 
@@ -30,7 +31,10 @@
 2. RED：先加入三个固定入口合同但不创建生产脚本，完整 Pester 为 `36 passed, 3 failed`；失败分别来自入口缺失、固定调用无法执行和编码文件不存在。
 3. GREEN：加入最小固定入口并规范化编码后，新增参数绑定、Agent 引用 fail-closed、Windows PowerShell 5.1 编码三项合同全部通过；完整 Pester 为 `39 passed, 0 failed`。
 4. 固定入口 `PlanOnly` 通过受控测试仓库验证精确传递 `ModuleId=M13`、`GateType=Phase`、`ReleaseId=R1`、`Slice=M13.1` 和冻结 Agent SHA，没有运行 M13 业务命令。
-5. 编码合同确认前三字节为 `EF BB BF`，全部 49 个换行均为 CRLF。
+5. 首轮编码合同确认前三字节为 `EF BB BF`，当时 49 个换行均为 CRLF。
+6. 独立审查首次结论为 `With fixes`，指出可变远端引用、错误原因不精确的缺失引用测试、未锁定 CRLF 和 checkpoint 文案矛盾四项 Important。
+7. 第二轮 RED 为 `37 passed, 4 failed`，精确命中冻结 SHA 传递、缺失/非祖先 SHA、EOL 属性四项合同；修复后 GREEN 为 `41 passed, 0 failed`。
+8. `.gitattributes` 固定入口 `eol=crlf`；修复后脚本前三字节为 `EF BB BF`，48 个换行全部为 CRLF，裸 LF 为 0。
 
 ## 安全边界
 
@@ -43,4 +47,4 @@
 
 ## 下一步
 
-开发者另开一个独立任务重新执行 M13.1 / R1 9.10A 单槽集成。该任务必须重新 fetch 并冻结最新 Agent、dev 和 M13 远端引用，把仓库内 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript`，创建全新候选并重新运行八项权威非付费门禁。只有新候选绿色且远端基线未漂移后，才可以更新 Agent 并写 `phase_integrated:R1`、`awaiting_release_approval:R1`。
+开发者另开一个独立任务重新执行 M13.1 / R1 9.10A 单槽集成。该任务必须重新 fetch 并冻结最新 Agent、dev 和 M13 远端引用，从已 push 的 M13 分支/worktree 调用修复后的 `scripts/agentization/Integrate-AgentModule.ps1`，并把同一分支内 `scripts/agentization/Invoke-M13R1PhaseGate.ps1` 作为 `GateScript`，创建全新候选并重新运行八项权威非付费门禁。只有新候选绿色且远端基线未漂移后，才可以更新 Agent 并写 `phase_integrated:R1`、`awaiting_release_approval:R1`。

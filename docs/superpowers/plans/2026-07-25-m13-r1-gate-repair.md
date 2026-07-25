@@ -4,7 +4,7 @@
 
 **Goal:** 新增兼容 Windows PowerShell 5.1 的 M13.1 / R1 固定门禁入口，并把 M13 从失败关闭状态一致恢复为可重新触发状态。
 
-**Architecture:** 固定入口只接收候选仓库路径，读取 fetch 后冻结的 `origin/feature/agent_0.8.4_boguan` 跟踪引用作为中文工程门禁基线，再调用候选内 canonical `Invoke-AgentModuleGate.ps1`。公共集成器保持不变，状态恢复和修复证据只写入 M13 模块分支。
+**Architecture:** 固定入口只接收候选仓库路径；公共集成器在 GateScript 调用期间通过进程环境显式传入本次冻结的 Agent SHA，入口把它作为中文工程门禁基线，再调用候选内 canonical `Invoke-AgentModuleGate.ps1`。独立审查确认远端跟踪引用可变后，本计划以该显式传递合同为最终实现。
 
 **Tech Stack:** Windows PowerShell 5.1、Pester 3.4、Git、Markdown。
 
@@ -23,10 +23,12 @@
 
 **Files:**
 - Create: `scripts/agentization/Invoke-M13R1PhaseGate.ps1`
+- Create: `.gitattributes`
+- Modify: `scripts/agentization/Integrate-AgentModule.ps1`
 - Modify: `scripts/agentization/tests/BranchAutomation.Tests.ps1`
 
 **Interfaces:**
-- Consumes: `RepositoryPath: string`、可选 `PlanOnly: switch`、候选仓库内 `refs/remotes/origin/feature/agent_0.8.4_boguan`。
+- Consumes: `RepositoryPath: string`、可选 `PlanOnly: switch`、集成器进程环境中的精确冻结 Agent SHA。
 - Produces: 对 `Invoke-AgentModuleGate.ps1` 的固定调用：`ModuleId=M13`、`GateType=Phase`、`ReleaseId=R1`、`Slice=M13.1`、`ChinesePolicyBaseRef=<冻结 Agent SHA>`。
 
 - [ ] **Step 1: 写固定入口缺失时会失败的 Pester 合同**
@@ -103,15 +105,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 $root = [System.IO.Path]::GetFullPath(@($rootOutput)[-1].Trim())
 
-# 用途：读取本次 fetch 冻结的 Agent 基线；缺失或不是候选祖先时立即停止，禁止猜测或回退旧 SHA。
-$agentReference = "refs/remotes/origin/feature/agent_0.8.4_boguan"
-$agentOutput = & git -C $root rev-parse --verify "$agentReference^{commit}" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "缺少冻结 Agent 跟踪引用：$agentReference"
+# 用途：读取集成器显式冻结的 Agent SHA；缺失或不是候选祖先时立即停止，禁止从可变远端引用猜测。
+$agentSha = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+if ([string]::IsNullOrWhiteSpace($agentSha)) {
+    throw "缺少集成器冻结 Agent SHA。"
 }
-$agentSha = @($agentOutput)[-1].Trim()
+$agentSha = $agentSha.Trim()
 if ($agentSha -notmatch "^[0-9a-fA-F]{40}$") {
-    throw "冻结 Agent 跟踪引用不是合法提交 SHA。"
+    throw "集成器冻结 Agent SHA 不是合法提交。"
 }
 & git -C $root merge-base --is-ancestor $agentSha HEAD
 if ($LASTEXITCODE -ne 0) {
@@ -136,11 +137,11 @@ if ($PlanOnly) {
 & $moduleGateScript @gateParameters
 ```
 
-使用编码规范化命令把脚本保存为 UTF-8 BOM + CRLF。
+公共集成器必须在调用 GateScript 前设置 `PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA=$agentSha`，并在 `finally` 中恢复调用前值。使用编码规范化命令把固定入口保存为 UTF-8 BOM + CRLF，同时用 `.gitattributes` 固定 `eol=crlf`。
 
 - [ ] **Step 4: 增加 fail-closed 和编码回归测试**
 
-增加一个测试删除测试仓库中的 Agent 跟踪引用，并断言固定入口抛错；读取脚本前三个字节断言 `EF BB BF`，并确认测试进程是 Windows PowerShell 5.1。
+增加冻结 SHA 缺失、非祖先和集成器传递后恢复环境的真实边界测试；fake canonical gate 必须可成功执行，避免测试因后续错误误通过。读取脚本前三个字节断言 `EF BB BF`，断言无裸 LF、Git 属性为 `eol=crlf`，并确认测试进程是 Windows PowerShell 5.1。
 
 - [ ] **Step 5: 运行 GREEN 和完整 Pester**
 
@@ -159,12 +160,12 @@ Expected: 所有测试通过，新增测试不少于 2 项。
 - Create: `docs/agentization/test-reports/M13-R1-gate-repair.md`
 
 **Interfaces:**
-- Consumes: 原阻塞提交 `5f444442b05f073b74d9a691aaae06fbf32e0f07`、原 checkpoint `e4eb45838d20bf110841aa360f24d699b32ead3d`。
+- Consumes: 原阻塞提交 `5f444442b05f073b74d9a691aaae06fbf32e0f07`、历史业务 checkpoint `e4eb45838d20bf110841aa360f24d699b32ead3d`。
 - Produces: `phase=ready_for_phase_integration`、`checkpoint_status=ready`、`last_integrated_commit=—`，以及下一次必须使用新固定入口和全新候选的中文证据。
 
 - [ ] **Step 1: 一致恢复状态字段和停止点**
 
-只修改 M13 状态文件，把阻塞字段恢复为 ready，并把旧的“当前停止点”统一为下一次任务使用 `Invoke-M13R1PhaseGate.ps1` 重新触发；保留 checkpoint commit 和生产未变说明。
+只修改 M13 状态文件，把阻塞字段恢复为 ready，并把旧的“当前停止点”统一为下一次任务使用已修复的 `Integrate-AgentModule.ps1` 和 `Invoke-M13R1PhaseGate.ps1` 重新触发；原业务 checkpoint 作为历史证据保留，权威可重试 checkpoint 前移到最终门禁修复提交。
 
 - [ ] **Step 2: 写中文修复报告**
 

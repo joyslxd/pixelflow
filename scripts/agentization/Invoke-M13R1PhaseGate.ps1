@@ -16,15 +16,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 $root = [System.IO.Path]::GetFullPath(@($rootOutput)[-1].Trim())
 
-# 用途：读取本次 fetch 冻结的 Agent 基线；缺失或不是候选祖先时立即停止，禁止猜测或回退旧 SHA。
-$agentReference = "refs/remotes/origin/feature/agent_0.8.4_boguan"
-$agentOutput = & git -C $root rev-parse --verify "$agentReference^{commit}" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "缺少冻结 Agent 跟踪引用：$agentReference"
+# 用途：读取集成器在本次单槽任务中冻结的 Agent SHA；缺失时立即停止，禁止从可变远端引用猜测或回退旧 SHA。
+$agentSha = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+if ([string]::IsNullOrWhiteSpace($agentSha)) {
+    throw "缺少集成器冻结 Agent SHA。"
 }
-$agentSha = @($agentOutput)[-1].Trim()
+$agentSha = $agentSha.Trim()
 if ($agentSha -notmatch "^[0-9a-fA-F]{40}$") {
-    throw "冻结 Agent 跟踪引用不是合法提交 SHA。"
+    throw "集成器冻结 Agent SHA 不是合法提交。"
 }
 & git -C $root merge-base --is-ancestor $agentSha HEAD
 if ($LASTEXITCODE -ne 0) {

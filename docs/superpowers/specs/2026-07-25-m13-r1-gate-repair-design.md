@@ -22,25 +22,30 @@ M13 权威业务门禁没有开始执行，因此本次修复针对门禁入口�
 
 ### 方案三：新增 M13.1 / R1 固定门禁入口
 
-在 `scripts/agentization/` 新增受 Git 管理的固定入口，参数只接受候选仓库路径，从冻结的远端 Agent 跟踪引用取得中文工程门禁基线，再精确调用 `Invoke-AgentModuleGate.ps1` 的 `M13 / Phase / R1 / M13.1` 合同。脚本统一保存为 UTF-8 BOM 和 CRLF，符合仓库现有 PowerShell 文件格式。
+在 `scripts/agentization/` 新增受 Git 管理的固定入口，参数只接受候选仓库路径；公共集成器在门禁调用期间通过进程环境传入本次单槽任务已经冻结的 Agent SHA，固定入口再精确调用 `Invoke-AgentModuleGate.ps1` 的 `M13 / Phase / R1 / M13.1` 合同。脚本统一保存为 UTF-8 BOM 和 CRLF，符合仓库现有 PowerShell 文件格式。
 
-本次采用方案三。它不改变公共集成接口，且下一次任务可直接把该脚本传给 `Integrate-AgentModule.ps1 -GateScript`。
+本次采用方案三，并在独立审查后对公共集成器增加一项向后兼容的进程内冻结 SHA 传递合同。现有 GateScript 仍只接收 `RepositoryPath`，下一次任务可直接把固定入口传给已修复的 `Integrate-AgentModule.ps1 -GateScript`。
 
 ## 文件与职责
 
+- `scripts/agentization/Integrate-AgentModule.ps1`
+  - 在调用 GateScript 前把本次冻结的 Agent SHA 写入进程环境。
+  - 无论门禁成功或失败都恢复调用前环境，避免污染后续任务。
 - `scripts/agentization/Invoke-M13R1PhaseGate.ps1`
   - 解析候选仓库。
   - 固定 `M13 / Phase / R1 / M13.1`，禁止调用其他模块或切片。
-  - 从 `refs/remotes/origin/feature/agent_0.8.4_boguan` 读取本次 fetch 后冻结的 Agent SHA。
+  - 只接受集成器显式传入的冻结 Agent SHA，不读取可变远端跟踪引用。
   - 把该 SHA 作为 `ChinesePolicyBaseRef` 调用权威模块门禁。
   - 支持 `PlanOnly`，用于在不运行测试命令的情况下验证固定合同。
+- `.gitattributes`
+  - 固定 M13 R1 门禁入口检出为 CRLF，避免不同本地 Git EOL 策略重新引入解析风险。
 - `scripts/agentization/tests/BranchAutomation.Tests.ps1`
   - 把固定入口加入必备脚本列表。
   - 验证 Windows PowerShell 5.1 能解析并执行入口。
-  - 验证 `PlanOnly` 返回的仍是 M13 R1 八项非付费命令，且非法或缺失 Agent 跟踪引用时 fail-closed。
+  - 验证 `PlanOnly` 返回的仍是 M13 R1 八项非付费命令，且冻结 SHA 缺失、非法或不是候选祖先时 fail-closed。
 - `docs/agentization/status/M13-status.md`
   - 把权威字段恢复为 `phase=ready_for_phase_integration`、`checkpoint_status=ready`。
-  - 保留原 `checkpoint_commit`，因为业务实现没有变化。
+  - 原业务检查点保留为历史证据；权威可重试 `checkpoint_commit` 前移到包含门禁修复的实现提交。
   - 记录失败根因、修复提交和下一次必须创建全新候选的要求。
 - `docs/agentization/test-reports/M13-R1-gate-repair.md`
   - 记录 RED/GREEN、编码验证、限定测试结果和安全边界。
@@ -50,13 +55,13 @@ M13 权威业务门禁没有开始执行，因此本次修复针对门禁入口�
 1. 下一次独立 M13.1 / R1 任务 fetch 并冻结最新 Agent、dev、M13 远端引用。
 2. 任务确认 M13 权威状态为 `ready_for_phase_integration:R1`。
 3. 任务调用 `Integrate-AgentModule.ps1`，把仓库内的 `Invoke-M13R1PhaseGate.ps1` 作为 `GateScript`。
-4. 集成器创建全新候选，固定入口从本地远端跟踪引用取得已冻结 Agent SHA。
+4. 集成器创建全新候选，并只在 GateScript 调用期间显式传入已经冻结的 Agent SHA。
 5. 固定入口调用 canonical M13 R1 权威门禁。
 6. 集成器仍负责远端防漂移检查、原子更新和失败关闭；本修复不改变这些规则。
 
 ## 错误处理
 
-- 固定 Agent 跟踪引用不存在、不是 40 位提交 SHA、不是候选 HEAD 的祖先或权威门禁返回失败时，入口立即报错。
+- 集成器冻结 SHA 不存在、不是 40 位提交 SHA、不是候选 HEAD 的祖先或权威门禁返回失败时，入口立即报错。
 - 入口不得回退到状态文件中的旧 base SHA，也不得猜测 Agent 基线。
 - 修复完成后只恢复可重试状态；不会把状态写成 `phase_integrated:R1` 或 `awaiting_release_approval:R1`。
 - 历史失败候选继续保留用于审计，下一次集成必须创建全新候选。
@@ -65,7 +70,7 @@ M13 权威业务门禁没有开始执行，因此本次修复针对门禁入口�
 
 1. RED：先增加固定入口合同测试，确认因脚本不存在而失败。
 2. GREEN：加入最小固定入口后，在 Windows PowerShell 5.1 下通过解析和 `PlanOnly` 行为测试。
-3. 编码验证：断言入口文件以 UTF-8 BOM 开头并使用 CRLF，且 Windows PowerShell 5.1 AST 中存在 Agent SHA 与 canonical gate 的赋值语句。
+3. 编码验证：断言入口文件以 UTF-8 BOM 开头、全部换行均为 CRLF，并由 `.gitattributes` 固定 `eol=crlf`；Windows PowerShell 5.1 必须能执行真实参数绑定合同。
 4. 回归验证：运行 `BranchAutomation.Tests.ps1`，确保既有单槽、白名单、失败关闭和远端原子更新合同不受影响。
 5. 中文工程门禁：以当前远端 M13 阻塞提交为基线检查修复提交。
 6. 安全验证：确认 Agent、dev、BOARD、MERGE_LOG、生产配置未变化，自动化状态仍为 `automation_local_ready`。
