@@ -1,6 +1,6 @@
 # M04 全流程上下文压缩 Runtime
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：A
 - base Agent SHA：`d20762935ad8bd994a24e332f4237da7a1aaf591`
 - branch：`codex/agent-0.8.4-m04-context-compaction`
@@ -115,7 +115,7 @@
 - release_id：`R1`
 - checkpoint_slice：`M04.5`
 - checkpoint_commit：`5ab2f692cb525b6d59e539cc80d7696b99dda5c1`
-- last_integrated_commit：`—`
+- last_integrated_commit：`7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a`
 - locked files：`无`
-- checkpoint_status：`ready_for_integration`
+- checkpoint_status：`integrated`
 - integration failure evidence：`无`
