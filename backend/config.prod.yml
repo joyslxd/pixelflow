@@ -26,42 +26,42 @@ pixelflow:
     # 用途：选择新对话 Runtime 模式；枚举值，生产默认 off。
     # 修改后需重启且只影响新对话；未经发布批准不得开启，回滚为 off。
     # 影响：off 保持现有生产 v2 流程；该项不是敏感值。
-    mode: "off"
+    mode: "off"  # 用途：配置生产 Runtime 模式；影响：off 保持现有 v2 流程。
     # 用途：限定 primary 接管的业务 intent；数组，生产默认空。
     # 修改后需重启且只影响新对话；当前不得增加取值，回滚为空数组。
     # 影响：空数组不允许 Runtime 接管图片、视频、PPT 或视频分析；非敏感值。
-    enabled_intents: []
+    enabled_intents: []  # 用途：配置可接管 intent；影响：空数组不接管任何生产流程。
     # 用途：设置新建对话接入 Runtime 的比例；0-100 整数，生产默认 0。
     # 修改后需重启且只影响新对话；未经发布批准不得调大，回滚为 0。
     # 影响：0 表示全部生产新对话继续现有 v2 流程；非敏感值。
-    new_conversation_rollout_percent: 0
+    new_conversation_rollout_percent: 0  # 用途：配置新对话接入比例；影响：0 表示全部不接入。
     # 用途：控制上下文压缩、排队与恢复；布尔值，生产默认 false。
     # 修改后需重启且只影响新对话；未经发布批准不得开启，回滚为 false。
     # 影响：false 时生产不会启动新 Runtime 压缩流程；非敏感值。
-    context_compaction_enabled: false
+    context_compaction_enabled: false  # 用途：控制生产上下文压缩；影响：false 不启动新 Runtime 压缩。
     # 统一上下文预算；与开发环境保持相同结构，启用后所有当前和未来 Agent 节点共用。
     context_budget:
       # 用途：设置统一有效上下文窗口；整数，单位 K，1K=1024 tokens，默认 896，
       # 必须大于两项预留之和。修改后需重启，只影响新进程中的模型调用和新压缩判断；
       # 运行中任务沿用启动快照；回滚时恢复 896。该项不是敏感值。
       # 影响：896 对应 917504 tokens，并受模型已验证的 1000000 tokens 物理上限约束。
-      effective_context_k: 896
+      effective_context_k: 896  # 用途：配置统一有效窗口；影响：所有 Agent 按 917504 tokens 计算。
       # 用途：预留单次模型输出空间；正整数，单位 K，1K=1024 tokens，默认 32。
       # 修改后需重启，只影响新进程中的预算；调大将减少可用输入，回滚时恢复 32。
       # 影响：32 对应 32768 tokens，所有 Agent 节点使用相同输出预留；该项不是敏感值。
-      output_reserve_k: 32
+      output_reserve_k: 32  # 用途：配置输出预留；影响：统一为模型输出保留 32768 tokens。
       # 用途：预留协议开销、估算误差和供应商波动空间；正整数，单位 K，默认 32。
       # 修改后需重启，只影响新进程中的预算；调大将更早压缩，回滚时恢复 32。
       # 影响：32 对应 32768 tokens，所有 Agent 节点使用相同安全预留；该项不是敏感值。
-      safety_reserve_k: 32
+      safety_reserve_k: 32  # 用途：配置安全预留；影响：统一为协议和估算误差保留 32768 tokens。
       # 用途：要求实际模型存在当前有效且已验证的 context_profile；布尔值，默认 true。
       # 修改后需重启并影响新进程全部调用；false 会允许底层兼容性 128K 档案，回滚应保持 true。
       # 影响：true 时缺失、未验证或过期档案会启动失败，防止实际流程静默降级；该项不是敏感值。
-      require_verified_model_profile: true
+      require_verified_model_profile: true  # 用途：要求已验证模型档案；影响：缺失或失效时拒绝启动。
     # 用途：设置压缩失败后允许再次执行的最短间隔；正整数，单位秒，默认 30。
     # 修改后需重启，只影响之后新产生的失败租约；运行中已有租约保留持久化时间；
     # 回滚时恢复 30。影响：退避期内 Snapshot、SSE 和轮询只读状态，不制造重试风暴；非敏感值。
-    compaction_retry_backoff_seconds: 30
+    compaction_retry_backoff_seconds: 30  # 用途：配置失败退避；影响：30 秒内读取接口不重复调度。
   # PixelFlow 独立业务库 MySQL 连接串；生产建议填写真实 MySQL，留空则复用 DeerFlow 存储。
   mysql_url: ""
   # 是否启用 mem0 记忆能力；生产需要确认依赖和成本后再开启。
@@ -179,23 +179,23 @@ models:
       # 用途：声明模型物理上下文窗口；正整数，单位 tokens，默认按本档案 1000000。
       # 修改后需重启并影响新进程全部 Agent 调用；只能填供应商已确认值，回滚恢复 1000000。
       # 影响：统一 917504 tokens 有效窗口不得超过该上限；非敏感值，来源见 source。
-      max_context_tokens: 1000000
+      max_context_tokens: 1000000  # 用途：声明物理上下文上限；影响：有效窗口不得超过 1000000 tokens。
       # 用途：声明模型单次最大输出能力；正整数，单位 tokens，本档案取 32768。
       # 修改后需重启；必须小于 max_context_tokens，回滚恢复 32768。
       # 影响：Runtime 输出预留还会与该值取较小值；非敏感值，来源见 source。
-      max_output_tokens: 32768
+      max_output_tokens: 32768  # 用途：声明模型输出上限；影响：Runtime 输出预留不得超过该值。
       # 用途：声明 Token 估算策略；字符串，当前使用 conservative_estimate。
       # 修改后需重启并影响新预算估算；无可靠 tokenizer 前不要改，回滚恢复该值。
       # 影响：按保守估算触发压缩以降低溢出风险；非敏感值。
-      tokenizer_strategy: "conservative_estimate"
+      tokenizer_strategy: "conservative_estimate"  # 用途：选择 Token 估算策略；影响：按保守值触发压缩。
       # 用途：记录能力档案验证时间；带时区的 ISO-8601 字符串。
       # 修改后需重启；只应在重新验证供应商能力后更新，回滚恢复本次记录。
       # 影响：未来时间会被视为未验证并拒绝启动；非敏感值。
-      verified_at: "2026-07-26T00:00:00+08:00"
+      verified_at: "2026-07-26T00:00:00+08:00"  # 用途：记录档案验证时间；影响：未来时间会拒绝启动。
       # 用途：记录模型能力证据来源；非空字符串，变更时需同步验证记录。
       # 修改后需重启；不改变数值但用于审计，回滚恢复本次说明。
       # 影响：空值会被视为未验证并拒绝实际流程启动；不得填写 token、密钥或账号。
-      source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"
+      source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"  # 用途：记录能力证据；影响：空值会拒绝启动。
 
 # sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
 sandbox:
