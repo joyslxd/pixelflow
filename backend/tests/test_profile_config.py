@@ -157,6 +157,13 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
         "enabled_intents": ["video"],
         "new_conversation_rollout_percent": 100,
         "context_compaction_enabled": True,
+        "context_budget": {
+            "effective_context_k": 896,
+            "output_reserve_k": 32,
+            "safety_reserve_k": 32,
+            "require_verified_model_profile": True,
+        },
+        "compaction_retry_backoff_seconds": 30,
     }
     config_file.write_text(
         yaml.safe_dump(profile_data, allow_unicode=True, sort_keys=False),
@@ -177,6 +184,11 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS"] == '["video"]'
     assert os.environ["PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT"] == "100"
     assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED"] == "true"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K"] == "896"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K"] == "32"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K"] == "32"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE"] == "true"
+    assert os.environ["PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS"] == "30"
     assert os.environ["PIXELFLOW_MEDIA_SKILL"] == "borgrise"
     assert os.environ["PIXELFLOW_EDIT_SKILL"] == "ffmpeg"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_ENABLED"] == "true"
@@ -241,6 +253,13 @@ def test_explicit_invalid_agent_runtime_profile_value_fails_closed(
         "enabled_intents": [],
         "new_conversation_rollout_percent": 0,
         "context_compaction_enabled": False,
+        "context_budget": {
+            "effective_context_k": 896,
+            "output_reserve_k": 32,
+            "safety_reserve_k": 32,
+            "require_verified_model_profile": True,
+        },
+        "compaction_retry_backoff_seconds": 30,
     }
     profile_data["pixelflow"]["agent_runtime"][field_name] = invalid_value
     config_file.write_text(
@@ -274,6 +293,61 @@ def test_agent_runtime_profile_requires_an_object(
     from app.gateway.profile_config import load_profile_config
 
     with pytest.raises(ValueError, match="pixelflow.agent_runtime 必须是 YAML 对象"):
+        load_profile_config()
+
+
+@pytest.mark.parametrize(
+    ("context_budget", "message"),
+    [
+        (None, "context_budget 必须是 YAML 对象"),
+        ([], "context_budget 必须是 YAML 对象"),
+        (
+            {
+                "effective_context_k": 896,
+                "output_reserve_k": 32,
+                "safety_reserve_k": 32,
+                "require_verified_model_profile": True,
+                "unknown": 1,
+            },
+            "context_budget 包含不支持的配置键",
+        ),
+        (
+            {
+                "effective_context_k": None,
+                "output_reserve_k": 32,
+                "safety_reserve_k": 32,
+                "require_verified_model_profile": True,
+            },
+            "context_budget.effective_context_k",
+        ),
+    ],
+)
+def test_agent_runtime_context_budget_profile_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    context_budget: object,
+    message: str,
+) -> None:
+    config_file = tmp_path / "config.dev.yml"
+    _write_minimal_profile(config_file)
+    profile_data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    profile_data["pixelflow"]["agent_runtime"] = {
+        "mode": "off",
+        "enabled_intents": [],
+        "new_conversation_rollout_percent": 0,
+        "context_compaction_enabled": False,
+        "context_budget": context_budget,
+        "compaction_retry_backoff_seconds": 30,
+    }
+    config_file.write_text(
+        yaml.safe_dump(profile_data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PIXELFLOW_CONFIG_FILE", str(config_file))
+
+    from app.gateway.profile_config import load_profile_config
+
+    with pytest.raises(ValueError, match=message):
         load_profile_config()
 
 

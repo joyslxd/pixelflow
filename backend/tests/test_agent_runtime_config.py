@@ -11,6 +11,11 @@ _ENV_KEYS = {
     "PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS",
     "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
     "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
+    "PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K",
+    "PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K",
+    "PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K",
+    "PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE",
+    "PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS",
 }
 
 
@@ -29,6 +34,12 @@ def test_agent_runtime_defaults_are_fully_disabled() -> None:
     assert config.enabled_intents == ()
     assert config.new_conversation_rollout_percent == 0
     assert config.context_compaction_enabled is False
+    assert config.context_budget.effective_context_tokens == 896 * 1024
+    assert config.context_budget.output_reserve_tokens == 32 * 1024
+    assert config.context_budget.safety_reserve_tokens == 32 * 1024
+    assert config.context_budget.usable_input_tokens == 832 * 1024
+    assert config.context_budget.require_verified_model_profile is True
+    assert config.compaction_retry_backoff_seconds == 30
 
 
 def test_agent_runtime_accepts_explicit_approved_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,6 +49,17 @@ def test_agent_runtime_accepts_explicit_approved_values(monkeypatch: pytest.Monk
     monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS", '["video", "image"]')
     monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "100")
     monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED", "true")
+    monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K", "900")
+    monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K", "40")
+    monkeypatch.setenv("PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K", "20")
+    monkeypatch.setenv(
+        "PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE",
+        "false",
+    )
+    monkeypatch.setenv(
+        "PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS",
+        "45",
+    )
 
     config = load_agent_runtime_config_from_env()
 
@@ -45,6 +67,12 @@ def test_agent_runtime_accepts_explicit_approved_values(monkeypatch: pytest.Monk
     assert config.enabled_intents == ("video", "image")
     assert config.new_conversation_rollout_percent == 100
     assert config.context_compaction_enabled is True
+    assert config.context_budget.effective_context_tokens == 900 * 1024
+    assert config.context_budget.output_reserve_tokens == 40 * 1024
+    assert config.context_budget.safety_reserve_tokens == 20 * 1024
+    assert config.context_budget.usable_input_tokens == 840 * 1024
+    assert config.context_budget.require_verified_model_profile is False
+    assert config.compaction_retry_backoff_seconds == 45
 
 
 @pytest.mark.parametrize(
@@ -58,6 +86,14 @@ def test_agent_runtime_accepts_explicit_approved_values(monkeypatch: pytest.Monk
         ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "1.0"),
         ("PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT", "all"),
         ("PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED", "sometimes"),
+        ("PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K", "0"),
+        ("PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K", "-1"),
+        ("PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K", "1.5"),
+        (
+            "PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE",
+            "sometimes",
+        ),
+        ("PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS", "0"),
     ],
 )
 def test_agent_runtime_rejects_invalid_startup_values(
@@ -85,12 +121,27 @@ def test_agent_runtime_rejects_explicit_empty_intent_text(
 
 
 def test_agent_runtime_fields_have_chinese_usage_and_impact_descriptions() -> None:
-    from pixelflow.agent_runtime.config import AgentRuntimeConfig
+    from pixelflow.agent_runtime.config import (
+        AgentRuntimeConfig,
+        ContextBudgetConfig,
+    )
 
-    for field_name, field in AgentRuntimeConfig.model_fields.items():
-        description = field.description or ""
-        assert "用途" in description, field_name
-        assert "影响" in description, field_name
+    for model in (AgentRuntimeConfig, ContextBudgetConfig):
+        for field_name, field in model.model_fields.items():
+            description = field.description or ""
+            assert "用途" in description, field_name
+            assert "影响" in description, field_name
+
+
+def test_agent_runtime_rejects_reserves_that_exhaust_effective_context() -> None:
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+
+    with pytest.raises(ValueError, match="可用输入"):
+        ContextBudgetConfig(
+            effective_context_k=64,
+            output_reserve_k=32,
+            safety_reserve_k=32,
+        )
 
 
 def test_agent_runtime_loader_does_not_mutate_environment() -> None:
