@@ -19,10 +19,12 @@ from pixelflow.tasks import (
     SQLPixelFlowTaskStore,
 )
 
+from .config import AgentRuntimeConfig
 from .context import (
     CompactionSegment,
     CompactionStageRequest,
     CompactionStageResult,
+    ContextBudgetPolicyProvider,
     ContextCompactionCoordinator,
     ContextCompactionRequest,
     ConversationCompactionRunResult,
@@ -41,9 +43,7 @@ from .context import (
     TokenMeter,
     calculate_summary_content_hash,
     estimate_context_tokens,
-    get_context_budget_policy,
     parse_model_context_profiles,
-    resolve_model_context_profile,
 )
 from .context.externalizer import ContextPayloadExternalizer
 from .contracts import ContextSummary
@@ -391,6 +391,7 @@ class ContextBudgetGuard:
         repository: CompactionQueueRepository,
         model_name: str,
         model_profiles: Mapping[str, ModelContextProfile],
+        budget_policy_provider: ContextBudgetPolicyProvider | None = None,
         clock=None,
     ) -> None:
         normalized_model_name = model_name.strip()
@@ -400,6 +401,9 @@ class ContextBudgetGuard:
         self._repository = repository
         self._model_name = normalized_model_name
         self._model_profiles = dict(model_profiles)
+        self._budget_policy_provider = (
+            budget_policy_provider or ContextBudgetPolicyProvider()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
         self._token_meter = TokenMeter()
 
@@ -461,15 +465,15 @@ class ContextBudgetGuard:
             "business_context": _business_context(conversation.context),
         }
         estimated_input_tokens = estimate_context_tokens(payload)
-        resolution = resolve_model_context_profile(
+        profile = self._budget_policy_provider.resolve_model_profile(
             self._model_name,
             self._model_profiles,
             now=self._clock(),
         )
         budget_report = self._token_meter.measure(
             estimated_input_tokens=estimated_input_tokens,
-            profile=resolution.profile,
-            policy=get_context_budget_policy("supervisor"),
+            profile=profile,
+            policy=self._budget_policy_provider.policy_for("supervisor"),
         )
         return ContextCompactionRequest(
             conversation_id=conversation_id,
@@ -987,6 +991,7 @@ def build_agent_context_compactor(
     task_store: PixelFlowTaskStore,
     repository: CompactionQueueRepository,
     app_config,
+    agent_runtime_config: AgentRuntimeConfig,
 ) -> AutomaticConversationCompactor:
     """按启动快照装配真实摘要模型、四阈值 Coordinator 和租约 Runtime。"""
 
@@ -1014,6 +1019,14 @@ def build_agent_context_compactor(
     )
     summary_builder = SummaryBuilder(engine=summary_engine)
     model_profiles = parse_model_context_profiles(app_config.models)
+    budget_policy_provider = ContextBudgetPolicyProvider(
+        agent_runtime_config.context_budget,
+    )
+    budget_policy_provider.resolve_model_profile(
+        summary_model_name,
+        model_profiles,
+        now=datetime.now(UTC),
+    )
     payload_store = SQLContextPayloadStore(task_store.session_factory) if isinstance(task_store, SQLPixelFlowTaskStore) else MemoryContextPayloadStore()
     executor = RuntimeCompactionStageExecutor(
         task_store=task_store,
@@ -1027,12 +1040,16 @@ def build_agent_context_compactor(
         executor=executor,
         summary_model_name=summary_model_name,
         model_profiles=model_profiles,
+        budget_policy_provider=budget_policy_provider,
     )
     runtime = ConversationCompactionRuntime(
         coordinator=coordinator,
         repository=repository,
         lease_owner=f"gateway-r1-{uuid4().hex}",
         lease_ttl=timedelta(minutes=5),
+        retry_backoff=timedelta(
+            seconds=agent_runtime_config.compaction_retry_backoff_seconds,
+        ),
         event_sink=RepositoryCompactionEventOutbox(
             repository=repository,
         ),
@@ -1043,6 +1060,7 @@ def build_agent_context_compactor(
             repository=repository,
             model_name=summary_model_name,
             model_profiles=model_profiles,
+            budget_policy_provider=budget_policy_provider,
         ),
         runtime=runtime,
     )

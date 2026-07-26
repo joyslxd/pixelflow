@@ -9,8 +9,8 @@ import pytest
 
 def _profile(
     *,
-    max_context_tokens: int = 512 * 1024,
-    max_output_tokens: int = 64 * 1024,
+    max_context_tokens: int = 1_000_000,
+    max_output_tokens: int = 32 * 1024,
 ):
     from pixelflow.agent_runtime.context.profiles import ModelContextProfile
 
@@ -25,30 +25,26 @@ def _profile(
 
 
 @pytest.mark.parametrize(
-    ("node", "context_cap", "output_reserve", "safety_reserve"),
+    "node",
     [
-        ("supervisor", 256 * 1024, 8 * 1024, 32 * 1024),
-        ("image", 256 * 1024, 16 * 1024, 32 * 1024),
-        ("image_edit", 256 * 1024, 16 * 1024, 32 * 1024),
-        ("video", 384 * 1024, 32 * 1024, 48 * 1024),
-        ("ppt", 384 * 1024, 32 * 1024, 48 * 1024),
-        ("video_analysis", 512 * 1024, 48 * 1024, 64 * 1024),
-        ("summary", 384 * 1024, 24 * 1024, 48 * 1024),
+        "supervisor",
+        "image",
+        "image_edit",
+        "video",
+        "ppt",
+        "video_analysis",
+        "summary",
+        "future_agent",
     ],
 )
-def test_context_budget_policies_match_frozen_contract(
-    node: str,
-    context_cap: int,
-    output_reserve: int,
-    safety_reserve: int,
-) -> None:
+def test_context_budget_policies_use_one_config_for_every_node(node: str) -> None:
     from pixelflow.agent_runtime.context.token_meter import get_context_budget_policy
 
     policy = get_context_budget_policy(node)
 
-    assert policy.effective_context_cap_tokens == context_cap
-    assert policy.output_reserve_tokens == output_reserve
-    assert policy.safety_reserve_tokens == safety_reserve
+    assert policy.effective_context_cap_tokens == 896 * 1024
+    assert policy.output_reserve_tokens == 32 * 1024
+    assert policy.safety_reserve_tokens == 32 * 1024
 
 
 def test_token_meter_uses_verified_model_and_business_caps() -> None:
@@ -63,11 +59,11 @@ def test_token_meter_uses_verified_model_and_business_caps() -> None:
         policy=get_context_budget_policy("video"),
     )
 
-    assert report.effective_context_tokens == 384 * 1024
+    assert report.effective_context_tokens == 896 * 1024
     assert report.max_output_tokens == 32 * 1024
-    assert report.safety_reserve_tokens == 48 * 1024
-    assert report.usable_input_tokens == 304 * 1024
-    assert report.utilization == (120 * 1024) / (304 * 1024)
+    assert report.safety_reserve_tokens == 32 * 1024
+    assert report.usable_input_tokens == 832 * 1024
+    assert report.utilization == (120 * 1024) / (832 * 1024)
     assert report.compaction_level == 0
 
 
@@ -84,7 +80,7 @@ def test_token_meter_never_reserves_more_output_than_model_supports() -> None:
     )
 
     assert report.max_output_tokens == 4 * 1024
-    assert report.usable_input_tokens == 220 * 1024
+    assert report.usable_input_tokens == 860 * 1024
 
 
 def test_token_meter_preserves_conservative_profile_limit() -> None:
@@ -107,8 +103,8 @@ def test_token_meter_preserves_conservative_profile_limit() -> None:
 
     assert report.effective_context_tokens == 128 * 1024
     assert report.max_output_tokens == 8 * 1024
-    assert report.safety_reserve_tokens == 64 * 1024
-    assert report.usable_input_tokens == 56 * 1024
+    assert report.safety_reserve_tokens == 32 * 1024
+    assert report.usable_input_tokens == 88 * 1024
 
 
 @pytest.mark.parametrize(
@@ -203,8 +199,26 @@ def test_token_meter_rejects_budget_without_usable_input() -> None:
         )
 
 
-def test_unknown_context_budget_policy_is_rejected() -> None:
+def test_blank_context_budget_node_is_rejected() -> None:
     from pixelflow.agent_runtime.context.token_meter import get_context_budget_policy
 
-    with pytest.raises(ValueError, match="未知"):
-        get_context_budget_policy("unknown")
+    with pytest.raises(ValueError, match="不能为空"):
+        get_context_budget_policy(" ")
+
+
+def test_strict_budget_provider_rejects_unverified_model_profile() -> None:
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+    from pixelflow.agent_runtime.context.token_meter import (
+        ContextBudgetPolicyProvider,
+    )
+
+    provider = ContextBudgetPolicyProvider(
+        ContextBudgetConfig(require_verified_model_profile=True),
+    )
+
+    with pytest.raises(ValueError, match="已验证"):
+        provider.resolve_model_profile(
+            "missing-model",
+            {},
+            now=datetime(2026, 7, 24, tzinfo=UTC),
+        )

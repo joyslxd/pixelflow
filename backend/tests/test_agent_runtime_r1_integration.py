@@ -33,6 +33,7 @@ from pixelflow.agent_runtime.context import (
     SummaryVerificationError,
     TokenMeter,
     estimate_context_tokens,
+    get_context_budget_policy,
 )
 from pixelflow.agent_runtime.context.externalizer import (
     ContextPayloadExternalizer,
@@ -329,18 +330,35 @@ def test_r1_candidate_only_enables_assist_in_test_profile() -> None:
         (BACKEND_ROOT / "config.prod.yml").read_text(encoding="utf-8"),
     )
 
+    expected_budget = {
+        "effective_context_k": 896,
+        "output_reserve_k": 32,
+        "safety_reserve_k": 32,
+        "require_verified_model_profile": True,
+    }
     assert dev_profile["pixelflow"]["agent_runtime"] == {
         "mode": "assist",
         "enabled_intents": [],
         "new_conversation_rollout_percent": 100,
         "context_compaction_enabled": True,
+        "context_budget": expected_budget,
+        "compaction_retry_backoff_seconds": 30,
     }
-    assert "agent_runtime" not in prod_profile["pixelflow"]
+    assert prod_profile["pixelflow"]["agent_runtime"] == {
+        "mode": "off",
+        "enabled_intents": [],
+        "new_conversation_rollout_percent": 0,
+        "context_compaction_enabled": False,
+        "context_budget": expected_budget,
+        "compaction_retry_backoff_seconds": 30,
+    }
     assert AgentRuntimeConfig().model_dump(mode="python") == {
         "mode": "off",
         "enabled_intents": (),
         "new_conversation_rollout_percent": 0,
         "context_compaction_enabled": False,
+        "context_budget": expected_budget,
+        "compaction_retry_backoff_seconds": 30,
     }
 
 
@@ -403,11 +421,7 @@ async def test_r1_real_turn_path_automatically_triggers_all_context_thresholds(
     budget = TokenMeter().measure(
         estimated_input_tokens=0,
         profile=profile,
-        policy=ContextBudgetPolicy(
-            effective_context_cap_tokens=256 * 1024,
-            output_reserve_tokens=8 * 1024,
-            safety_reserve_tokens=32 * 1024,
-        ),
+        policy=get_context_budget_policy("supervisor"),
     )
     recording_guard = _RecordingBudgetGuard(
         ContextBudgetGuard(

@@ -2,23 +2,19 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
-from typing import Literal
+from collections.abc import Mapping
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..config import ContextBudgetConfig
 from ..contracts import ContextBudgetReport
-from .profiles import ModelContextProfile
+from .profiles import (
+    ModelContextProfile,
+    resolve_model_context_profile,
+)
 
-ContextBudgetNode = Literal[
-    "supervisor",
-    "image",
-    "image_edit",
-    "video",
-    "ppt",
-    "video_analysis",
-    "summary",
-]
+ContextBudgetNode = str
 
 
 class ContextBudgetPolicy(BaseModel):
@@ -31,46 +27,6 @@ class ContextBudgetPolicy(BaseModel):
     safety_reserve_tokens: int = Field(ge=0)
 
 
-_CONTEXT_BUDGET_POLICIES = MappingProxyType(
-    {
-        "supervisor": ContextBudgetPolicy(
-            effective_context_cap_tokens=256 * 1024,
-            output_reserve_tokens=8 * 1024,
-            safety_reserve_tokens=32 * 1024,
-        ),
-        "image": ContextBudgetPolicy(
-            effective_context_cap_tokens=256 * 1024,
-            output_reserve_tokens=16 * 1024,
-            safety_reserve_tokens=32 * 1024,
-        ),
-        "image_edit": ContextBudgetPolicy(
-            effective_context_cap_tokens=256 * 1024,
-            output_reserve_tokens=16 * 1024,
-            safety_reserve_tokens=32 * 1024,
-        ),
-        "video": ContextBudgetPolicy(
-            effective_context_cap_tokens=384 * 1024,
-            output_reserve_tokens=32 * 1024,
-            safety_reserve_tokens=48 * 1024,
-        ),
-        "ppt": ContextBudgetPolicy(
-            effective_context_cap_tokens=384 * 1024,
-            output_reserve_tokens=32 * 1024,
-            safety_reserve_tokens=48 * 1024,
-        ),
-        "video_analysis": ContextBudgetPolicy(
-            effective_context_cap_tokens=512 * 1024,
-            output_reserve_tokens=48 * 1024,
-            safety_reserve_tokens=64 * 1024,
-        ),
-        "summary": ContextBudgetPolicy(
-            effective_context_cap_tokens=384 * 1024,
-            output_reserve_tokens=24 * 1024,
-            safety_reserve_tokens=48 * 1024,
-        ),
-    },
-)
-
 _COMPACTION_THRESHOLDS = (
     (92, 4),
     (85, 3),
@@ -79,13 +35,59 @@ _COMPACTION_THRESHOLDS = (
 )
 
 
-def get_context_budget_policy(node: str) -> ContextBudgetPolicy:
-    """按统一节点名返回不可变预算策略。"""
+class ContextBudgetPolicyProvider:
+    """把一份启动配置统一提供给所有当前和未来 Agent 节点。"""
 
-    try:
-        return _CONTEXT_BUDGET_POLICIES[node]
-    except KeyError:
-        raise ValueError(f"未知的上下文预算节点：{node}") from None
+    def __init__(self, config: ContextBudgetConfig | None = None) -> None:
+        self._config = config or ContextBudgetConfig()
+        self._policy = ContextBudgetPolicy(
+            effective_context_cap_tokens=self._config.effective_context_tokens,
+            output_reserve_tokens=self._config.output_reserve_tokens,
+            safety_reserve_tokens=self._config.safety_reserve_tokens,
+        )
+
+    @property
+    def require_verified_model_profile(self) -> bool:
+        return self._config.require_verified_model_profile
+
+    def policy_for(self, node: str) -> ContextBudgetPolicy:
+        """节点名只用于审计，预算始终来自同一份配置。"""
+
+        if not isinstance(node, str) or not node.strip():
+            raise ValueError("上下文预算节点名不能为空")
+        return self._policy
+
+    def resolve_model_profile(
+        self,
+        model_name: str,
+        profiles: Mapping[str, ModelContextProfile],
+        *,
+        now: datetime,
+    ) -> ModelContextProfile:
+        """严格模式拒绝未验证档案，兼容模式仍保留底层保守解析。"""
+
+        resolution = resolve_model_context_profile(
+            model_name,
+            profiles,
+            now=now,
+        )
+        if (
+            self.require_verified_model_profile
+            and resolution.status != "verified"
+        ):
+            raise ValueError(
+                f"模型 {model_name} 缺少当前有效且已验证的 context_profile"
+            )
+        return resolution.profile
+
+
+_DEFAULT_POLICY_PROVIDER = ContextBudgetPolicyProvider()
+
+
+def get_context_budget_policy(node: str) -> ContextBudgetPolicy:
+    """兼容入口：所有节点均返回默认统一预算。"""
+
+    return _DEFAULT_POLICY_PROVIDER.policy_for(node)
 
 
 def _compaction_level(
@@ -167,6 +169,7 @@ class TokenMeter:
 __all__ = [
     "ContextBudgetNode",
     "ContextBudgetPolicy",
+    "ContextBudgetPolicyProvider",
     "TokenMeter",
     "get_context_budget_policy",
 ]

@@ -189,6 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 task_store=task_store,
                 repository=agent_runtime_repository,
                 app_config=startup_config,
+                agent_runtime_config=agent_runtime_config,
             )
             if agent_runtime_config.context_compaction_enabled
             else None

@@ -26,8 +26,11 @@ from ..persistence.compaction_queue import (
     ConversationCompactionLease,
 )
 from .compaction_events import CompactionEventSink
-from .profiles import ModelContextProfile, resolve_model_context_profile
-from .token_meter import TokenMeter, get_context_budget_policy
+from .profiles import ModelContextProfile
+from .token_meter import (
+    ContextBudgetPolicyProvider,
+    TokenMeter,
+)
 from .verification import (
     SummaryVerificationBaseline,
     SummaryVerifier,
@@ -621,6 +624,7 @@ class ContextCompactionCoordinator:
         summary_model_name: str,
         model_profiles: Mapping[str, ModelContextProfile],
         token_meter: TokenMeter | None = None,
+        budget_policy_provider: ContextBudgetPolicyProvider | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_model_name = summary_model_name.strip()
@@ -636,6 +640,9 @@ class ContextCompactionCoordinator:
         self._summary_model_name = normalized_model_name
         self._model_profiles = MappingProxyType(frozen_profiles)
         self._token_meter = token_meter or TokenMeter()
+        self._budget_policy_provider = (
+            budget_policy_provider or ContextBudgetPolicyProvider()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def coordinate(
@@ -793,15 +800,15 @@ class ContextCompactionCoordinator:
     def _summary_chunk_limit_tokens(self) -> int:
         """从摘要模型档案和 summary 节点策略计算不可伪造的分块上限。"""
 
-        resolution = resolve_model_context_profile(
+        profile = self._budget_policy_provider.resolve_model_profile(
             self._summary_model_name,
             self._model_profiles,
             now=self._clock(),
         )
         summary_budget = self._token_meter.measure(
             estimated_input_tokens=0,
-            profile=resolution.profile,
-            policy=get_context_budget_policy("summary"),
+            profile=profile,
+            policy=self._budget_policy_provider.policy_for("summary"),
         )
         return summary_budget.usable_input_tokens
 
