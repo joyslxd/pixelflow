@@ -23,6 +23,7 @@ from pixelflow.agent_runtime.context import (
     CompactionStageRequest,
     CompactionStageResult,
     ContextBudgetPolicy,
+    ContextBudgetPolicyProvider,
     ContextCompactionCoordinator,
     ContextCompactionRequest,
     ConversationCompactionRuntime,
@@ -527,6 +528,148 @@ async def test_r1_real_turn_path_automatically_triggers_all_context_thresholds(
     )
     assert stored_turn is not None
     assert stored_turn.status.value == "processing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intent", "index"),
+    [
+        ("image", 1),
+        ("video", 2),
+        ("ppt", 3),
+        ("video_analysis", 4),
+    ],
+)
+async def test_r1_all_intents_share_unified_budget_and_keep_current_materials(
+    intent: str,
+    index: int,
+) -> None:
+    """四类流程共用统一预算，自动压缩后完整保留当前图片材料。"""
+
+    from app.gateway.routers import pixelflow_conversations
+
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    runtime_config = _assist_config()
+    provider = ContextBudgetPolicyProvider(runtime_config.context_budget)
+    profile = ModelContextProfile(
+        model_name=R1_TEST_MODEL,
+        max_context_tokens=1_000_000,
+        max_output_tokens=32 * 1024,
+        tokenizer_strategy="conservative_estimate",
+        verified_at=NOW - timedelta(days=1),
+        source="M13.1 四流程统一预算非付费测试",
+    )
+    recording_guard = _RecordingBudgetGuard(
+        ContextBudgetGuard(
+            task_store=task_store,
+            repository=repository,
+            model_name=R1_TEST_MODEL,
+            model_profiles={R1_TEST_MODEL: profile},
+            budget_policy_provider=provider,
+            clock=lambda: NOW,
+        ),
+    )
+    executor = _ThresholdStageExecutor()
+    runtime = ConversationCompactionRuntime(
+        coordinator=ContextCompactionCoordinator(
+            executor=executor,
+            summary_model_name=R1_TEST_MODEL,
+            model_profiles={R1_TEST_MODEL: profile},
+            budget_policy_provider=provider,
+            clock=lambda: NOW,
+        ),
+        repository=repository,
+        lease_owner=f"r1-unified-{intent}",
+        lease_ttl=timedelta(minutes=5),
+        event_sink=RepositoryCompactionEventOutbox(repository=repository),
+        clock=lambda: NOW,
+    )
+    service = AgentRuntimeService(
+        config=runtime_config,
+        repository=repository,
+        task_store=task_store,
+        context_compactor=AutomaticConversationCompactor(
+            budget_guard=recording_guard,
+            runtime=runtime,
+        ),
+        clock=lambda: NOW,
+    )
+    assignment = service.assignment_for_new_conversation(
+        {
+            "intent": intent,
+            "workflowProgress": {
+                "intent": intent,
+                "current_step": "planning",
+            },
+        },
+    )
+    conversation = await task_store.create_conversation(
+        pixelflow_conversations.PixelFlowConversationRecord(
+            conversation_id=f"r1-unified-{intent}",
+            user_id=str(USER_ID),
+            context=assignment.context,
+        ),
+    )
+    await task_store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id=f"r1-unified-{intent}-history",
+            conversation_id=conversation.conversation_id,
+            user_id=str(USER_ID),
+            role="user",
+            content="H" * 520_000,
+            payload={},
+            created_at=(NOW - timedelta(minutes=1)).isoformat(),
+        ),
+    )
+    material = {
+        "url": f"https://cdn.example.test/{intent}.png",
+        "name": f"{intent}-当前参考图",
+    }
+    client_input_id = UUID(
+        f"33333333-3333-4333-8333-{index:012d}",
+    )
+
+    started = await service.start_turn(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+        request={
+            "client_input_id": str(client_input_id),
+            "content": f"继续{intent}流程并保留参考图",
+            "materials": [material],
+            "reply_to_message_id": None,
+            "artifact_refs": [],
+            "expected_context_version": 0,
+        },
+    )
+
+    report = recording_guard.requests[0].budget_report
+    assert report.effective_context_tokens == 917_504
+    assert report.max_output_tokens == 32_768
+    assert report.safety_reserve_tokens == 32_768
+    assert report.usable_input_tokens == 851_968
+    assert report.compaction_level >= 1
+    assert [request.action for request in executor.requests] == [
+        "externalize_payloads",
+    ]
+    events = await repository.list_events(
+        str(USER_ID),
+        conversation.conversation_id,
+    )
+    assert AgentEventType.CONTEXT_COMPRESSION_COMPLETED in {
+        event.type for event in events
+    }
+    messages = await task_store.list_conversation_messages(
+        conversation.conversation_id,
+        user_id=str(USER_ID),
+    )
+    current = next(
+        message
+        for message in messages
+        if message.payload.get("client_message_id") == str(client_input_id)
+    )
+    assert current.payload["materials"] == [material]
+    assert started.status == "accepted"
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,17 @@ models:
     model: gpt-4o-mini
     api_key: $OPENAI_API_KEY
     base_url: $OPENAI_API_BASE
+    context_profile:
+      # 用途：声明测试替身的物理上下文上限；影响：严格 Runtime 可以在生命周期 E2E 中启动。
+      max_context_tokens: 1000000
+      # 用途：声明测试替身的最大输出；影响：统一 32K 输出预留不会超过模型能力。
+      max_output_tokens: 32768
+      # 用途：选择无供应商 tokenizer 时的保守估算；影响：测试按 UTF-8 字节数执行预算。
+      tokenizer_strategy: conservative_estimate
+      # 用途：固定测试档案验证时间；影响：测试日期窗口内档案被判定为已验证。
+      verified_at: "2026-07-26T00:00:00+08:00"
+      # 用途：记录非生产档案来源；影响：审计可识别这是生命周期测试替身。
+      source: "运行生命周期 E2E 测试档案"
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 agents_api:
