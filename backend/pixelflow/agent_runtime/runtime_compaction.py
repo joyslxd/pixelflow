@@ -101,13 +101,15 @@ _PAYLOAD_IDENTIFIER_KEYS = {
     "operation_id",
     "operationId",
 }
-_LEGACY_REVISION_SNAPSHOT_KEYS = {
+_RECOVERY_ONLY_CONTEXT_KEYS = {
     "pendingImageRevision",
     "pendingPlanRevision",
+    "pendingPlanRevisionRequest",
     "pendingPptOutlineRevision",
     "pendingVideoRevision",
     "pending_image_revision",
     "pending_plan_revision",
+    "pending_plan_revision_request",
     "pending_ppt_outline_revision",
     "pending_video_revision",
 }
@@ -251,7 +253,7 @@ def _business_context(context: dict) -> dict:
         key: deepcopy(value)
         for key, value in context.items()
         if key != AGENT_RUNTIME_CONTEXT_KEY
-        and key not in _LEGACY_REVISION_SNAPSHOT_KEYS
+        and key not in _RECOVERY_ONLY_CONTEXT_KEYS
     }
 
 

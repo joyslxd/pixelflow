@@ -831,6 +831,78 @@ async def test_r1_budget_excludes_legacy_revision_snapshot_but_keeps_store() -> 
 
 
 @pytest.mark.asyncio
+async def test_r1_budget_excludes_plan_revision_request_but_keeps_store() -> None:
+    """Plan 修订请求只用于恢复，不得把完整 Plan 重复送入模型预算。"""
+
+    from app.gateway.routers import pixelflow_conversations
+
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=_assist_config(),
+        repository=repository,
+        task_store=task_store,
+        clock=lambda: NOW,
+    )
+    revision_request = {
+        "conversationId": "r1-plan-revision-request",
+        "artifact": {
+            "plan": "完整 Plan 修订恢复数据" * 12_000,
+            "intent": "video",
+        },
+    }
+    assignment = service.assignment_for_new_conversation(
+        {
+            "creation_contract": {
+                "duration_seconds": 30,
+                "ratio": "9:16",
+            },
+            "pendingPlanRevisionRequest": revision_request,
+            "pending_plan_revision_request": revision_request,
+        },
+    )
+    conversation = await task_store.create_conversation(
+        pixelflow_conversations.PixelFlowConversationRecord(
+            conversation_id="r1-plan-revision-request",
+            user_id=str(USER_ID),
+            context=assignment.context,
+        ),
+    )
+    current_message = PixelFlowConversationMessageRecord(
+        message_id="r1-plan-revision-current",
+        conversation_id=conversation.conversation_id,
+        user_id=str(USER_ID),
+        role="user",
+        content="只调整开头氛围，创作合同保持不变",
+        payload={},
+        created_at=NOW.isoformat(),
+    )
+    await task_store.append_conversation_message(current_message)
+    guard = ContextBudgetGuard(
+        task_store=task_store,
+        repository=repository,
+        model_name=R1_TEST_MODEL,
+        model_profiles={R1_TEST_MODEL: _r1_test_profile()},
+        clock=lambda: NOW,
+    )
+
+    request = await guard.build_request(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+        current_message_id=current_message.message_id,
+    )
+    restored = await task_store.get_conversation(
+        conversation.conversation_id,
+        user_id=str(USER_ID),
+    )
+
+    assert request.budget_report.estimated_input_tokens < 10_000
+    assert restored is not None
+    assert restored.context["pendingPlanRevisionRequest"] == revision_request
+    assert restored.context["pending_plan_revision_request"] == revision_request
+
+
+@pytest.mark.asyncio
 async def test_r1_hierarchical_summary_skips_unchanged_workflow_on_next_turn() -> None:
     """85% 汇总持久化 Workflow 版本证据，下一 Turn 不重复计入未变版本。"""
 
