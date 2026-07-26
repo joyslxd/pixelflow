@@ -152,23 +152,20 @@ ContextEnvelope
 统一计算：
 
 ```text
-effective_context = min(模型已验证的 max_context_tokens, 业务建议上限)
+effective_context = min(模型已验证的 max_context_tokens, context_budget.effective_context_k × 1024)
 usable_input = effective_context - max_output_tokens - safety_reserve_tokens
 utilization = estimated_input_tokens / usable_input
 ```
 
-建议上限比早期方案放大，但只有 AIRouter/模型能力验证成功后才能启用：
+R1 修复后的统一合同如下，`K` 固定表示 `1024 tokens`：
 
-| Agent/节点 | 建议有效窗口上限 | 输出预留 | 安全预留 | 未验证时降级 |
+| 适用范围 | 有效窗口 | 输出预留 | 安全预留 | 可用输入 |
 | --- | ---: | ---: | ---: | ---: |
-| Supervisor 路由与解释 | 256K | 8K | 32K | 128K 档案 |
-| 图片/图片编辑子图 | 256K | 16K | 32K | 128K 档案 |
-| 视频生成子图 | 384K | 32K | 48K | 128K 档案 |
-| PPT 子图 | 384K | 32K | 48K | 128K 档案 |
-| 视频分析子图 | 512K | 48K | 64K | 128K 档案 |
-| 摘要/压缩节点 | 384K，超出时分块 | 24K | 48K | 128K 分块 |
+| Supervisor、图片/编辑、视频、PPT、视频分析、摘要节点以及未来新增 Agent/流程 | 896K（917,504） | 32K（32,768） | 32K（32,768） | 832K（851,968） |
 
-模型档案至少配置：`max_context_tokens`、`max_output_tokens`、`tokenizer_strategy`、`verified_at`、`source`。缺失或过期时不能猜 256K/512K，必须使用 128K 保守档案并提前压缩。
+这四个预算值来自 `pixelflow.agent_runtime.context_budget`，代码不得再维护节点常量表。修改 YAML 后重启，所有当前和未来 Agent 节点自动采用新值；模型物理上限仍由 `models[].context_profile.max_context_tokens` 约束。当前 `deepseek-v4-pro` 的档案按已确认的 `1,000,000 tokens` 配置，因此还保留 `82,496 tokens` 物理余量。
+
+模型档案至少配置：`max_context_tokens`、`max_output_tokens`、`tokenizer_strategy`、`verified_at`、`source`。实际 PixelFlow 流程必须保持 `require_verified_model_profile=true`：缺失、未验证、未来时间或过期档案一律 fail-closed，不得走 128K。`profiles.py` 中的 128K 仅作为底层兼容解析和显式非严格单元测试能力，不是 R1–R4 的运行兜底。
 
 压缩阈值针对 `usable_input`：
 
@@ -180,6 +177,8 @@ utilization = estimated_input_tokens / usable_input
 | 92% | LLM 调用前硬闸门：同步压缩；失败则使用最小安全上下文或暂停，不允许直接超窗请求 |
 
 成功压缩目标是回落到 45% 以下。阈值按全局 Context Runtime 配置，所有现有和未来 workflow 自动继承，业务节点不得自己实现另一套压缩百分比。
+
+失败恢复使用 `pixelflow.agent_runtime.compaction_retry_backoff_seconds`。当前为 30 秒；失败事务必须持久化 `retry_not_before`，Snapshot、SSE 和 Run 轮询在退避期内只读状态，到期后才允许单次恢复。恢复期间的新输入继续原子入队，成功后按顺序执行，前端不得重发。
 
 ## 6. 前端可感知事件合同
 

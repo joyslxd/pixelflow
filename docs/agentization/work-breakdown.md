@@ -144,7 +144,7 @@ M00-I.1 在临时候选内执行固定顺序：`最新 Agent + 最新 dev → m0
 
 | 切片 | 时长 | 产物 | 验证 |
 | --- | ---: | --- | --- |
-| M03.1 | 2h | `ModelContextProfile`、过期/未验证降级和配置解析 | 256K/384K/512K/128K 档案测试 |
+| M03.1 | 2h | `ModelContextProfile`、过期/未验证降级和配置解析（历史底层能力；R1 实际流程后来改为严格统一档案） | 历史多档案/128K 兼容解析测试；业务运行合同以 M13.1 修复为准 |
 | M03.2 | 2.5h | TokenMeter 与 usable budget 计算，输出 safety/output reserve | 边界百分比测试 |
 | M03.3 | 2.5h | ContextEnvelope assembler：当前输入、目标 workflow、最近消息、摘要、PowerMem、artifact 引用 | 相关性、顺序、用户隔离测试 |
 | M03.4 | 2h | 大 tool/artifact 输出外置和最小片段提取 | business contract hash 不变；prompt 大小下降测试 |
@@ -316,6 +316,14 @@ R1 中间检查点：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色�
 | M13.3 / R3 | 3h | 图片/编辑、PPT、视频分析 mock E2E；重启、断线、并发、402 | `primary(四类intent) + 100%`，旧 API/flag-off 回归 |
 | M13.4 / R4 | 2.5h | 五主流程全量门禁、Shadow、kill switch/排空回滚 | 保持100%范围；全量非付费矩阵、稳定化报告和回滚记录 |
 | M13.5 / R4 | 2h | 经人工批准的真实供应商冒烟、运行手册、AGENTS/README/最新设计同步 | 真实报告与发布签字；不泄漏凭据 |
+
+M13.1 后续修复冻结以下跨阶段合同，M13.2–M13.5 必须继承：
+
+- dev/prod 均声明 `context_budget=896K/32K/32K`，`K=1024 tokens`；生产 Runtime 开关仍保持 `off`；
+- `deepseek-v4-pro` 的已验证物理窗口为 `1,000,000 tokens`，所有当前和未来 Agent/节点统一由配置生成预算，不得恢复 256K/384K/512K 节点表；
+- 实际业务保持 `require_verified_model_profile=true`，缺失或失效档案 fail-closed，128K 只用于底层兼容测试；
+- 压缩失败持久化 30 秒 `retry_not_before`，读取接口在到期前不得反复调度；Plan 修订恢复快照不得重复进入模型上下文；
+- R2/R3/R4 修改任何 Agent 或流程时，都必须复用共享 Provider，并继续验证图片附件、压缩期输入排队、成功恢复和失败受控重试。
 
 模块闸门：默认关闭无回归；重复计费/跨会话污染/鉴权泄漏/job 丢失为 0；回滚不强切运行中对话。
 

@@ -87,6 +87,17 @@ Turn，再通过 Snapshot/SSE 投影压缩 Notice 与输入队列；旧 v2 只�
 进入可执行状态后才继续，并复用同一个 `client_input_id`。刷新只查询权威 Snapshot
 和原 job，不自动重发。历史对话、运行中任务及生产 profile 均不迁移或自动启用。
 
+R1 修复后的上下文预算是跨 R2–R4 的强制合同：dev/prod profile 都配置
+`context_budget.effective_context_k=896`、`output_reserve_k=32`、
+`safety_reserve_k=32`，其中 `K=1024 tokens`；DeepSeek V4 Pro 的已验证
+`max_context_tokens=1000000`。全部当前和未来 Agent/节点必须通过共享
+`ContextBudgetPolicyProvider` 读取同一预算，不得增加节点级窗口常量。
+`require_verified_model_profile=true` 时缺失、未验证或过期档案必须 fail-closed，
+实际流程不得走底层 128K 兼容兜底。压缩失败持久化 30 秒 `retry_not_before`，
+Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照保留在 Store，
+但不得重复进入模型上下文。新增或修改流程必须验证附件完整、自动压缩、压缩期输入
+排队继续和失败受控重试。
+
 ```text
 用户输入 + 附件
   -> 采集 Agent 识别 intent

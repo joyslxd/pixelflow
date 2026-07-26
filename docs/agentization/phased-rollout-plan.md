@@ -74,6 +74,12 @@ pixelflow:
     enabled_intents: []
     new_conversation_rollout_percent: 100
     context_compaction_enabled: true
+    context_budget:
+      effective_context_k: 896
+      output_reserve_k: 32
+      safety_reserve_k: 32
+      require_verified_model_profile: true
+    compaction_retry_backoff_seconds: 30
 ```
 
 以上是 R1 获批后的**目标生产值**，不是 M13.1 测试通过后自动写入的值：
@@ -82,6 +88,9 @@ pixelflow:
 - `enabled_intents: []`：R1 不让任何图片/视频/PPT/视频分析 intent 进入 `primary`。
 - `new_conversation_rollout_percent: 100`：当前无真实外部用户，测试和生产获批后均让全部**新建对话**进入本阶段；历史对话和运行中任务不迁移。
 - `context_compaction_enabled: true`：允许 R1 新对话在达到预算阈值时压缩，并向前端发出“开始整理/整理完成”事件。
+- `context_budget`：`K=1024 tokens`；全部当前和未来 Agent 节点统一使用 896K 有效窗口、32K 输出预留和 32K 安全预留，可用输入为 832K（851,968 tokens）。R2–R4 新增 Agent、节点或流程不得再增加节点级窗口常量。
+- `require_verified_model_profile: true`：当前 `deepseek-v4-pro` 使用 `1,000,000 tokens` 已验证档案；实际流程缺档、未验证或过期时 fail-closed，不走 128K。
+- `compaction_retry_backoff_seconds: 30`：压缩失败事务持久化下一次重试时间；Snapshot/SSE/Run 在 30 秒内不重复唤醒，到期后恢复一次，排队输入继续执行。
 
 当前版本不设计也不实现用户白名单字段。以后真正存在外部用户并需要分群时，再单独设计基于后端认证 `user_id`/租户的发布策略；不得把尚未实现的白名单写成现有可配置能力。
 
@@ -93,7 +102,7 @@ M13.1 通过后先写 `ready_for_phase_integration:R1`；远端候选绿色并�
 - 压缩期间并发输入不丢失、不重复、不乱序。
 - SSE断线后按Cursor续传；gap时重新加载Snapshot。
 - Feature Flag关闭时旧流程行为和现有API合同不变。
-- 演示使用测试长对话或保守模型档案触发压缩，禁止为演示随意降低生产阈值。
+- 演示使用测试长对话按统一 832K 可用输入触发压缩，禁止为演示降低阈值、关闭严格模型档案或启用 128K 兼容兜底。
 
 ## 4. R2：视频会话 Agent MVP
 

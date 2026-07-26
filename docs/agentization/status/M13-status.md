@@ -60,3 +60,14 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
 - locked files：`无`
 - integration failure evidence：`无`
+
+## M13.1 / R1 统一预算与压缩恢复修复（2026-07-26）
+
+- 当前状态：`implementation_local_verified_browser_blocked`；代码、四类 intent 自动化、本地真实 Runtime、后端/前端可运行门禁和原设计文档已完成，Chrome 真实本地图片上传仍被扩展文件访问权限阻断。本节是原 M13.1 历史检查点之后的修复增量，不代表 R2 已启动，也不改变生产 `mode=off / rollout=0 / context_compaction_enabled=false`。
+- 已确认合同：DeepSeek V4 Pro 物理窗口 `1,000,000 tokens`；所有当前和未来 Agent/节点统一从 profile 读取 `896K` 有效窗口、`32K` 输出预留和 `32K` 安全预留，`K=1024 tokens`，可用输入 `851,968 tokens`。
+- 严格边界：dev/prod 都保存相同预算结构和模型档案，生产仅保持开关关闭；实际 Runtime 使用 `require_verified_model_profile=true`，缺失、未验证或过期档案不得走 128K。
+- 根因修复：Plan 修订恢复请求只留在权威 Store，不重复进入 Prompt；压缩失败持久化 `retry_not_before=失败时间+30秒`，Snapshot/SSE/Run 到期前不调度，到期后单次恢复。
+- R2–R4 继承要求：新增或修改 Agent、节点、Skill 或流程必须复用共享 `ContextBudgetPolicyProvider`，并验证附件完整、自动压缩、压缩期输入排队继续和失败受控重试；不得增加节点级窗口常量。
+- 验证结果：Runtime 重点回归 `202 passed`；后端可运行全集 `4583 passed, 19 skipped`，另有 6 个与本次无关的 Docker 脚本缺失基线失败；前端 `303 passed`、类型检查和测试构建通过；本地真实 SQLite Runtime 已完成 `560,117 bytes` Artifact 外置、压缩完成事件、当前参考图保留和 Turn 接续。
+- 待完成：在 Chrome 扩展开启“允许访问文件网址”并关闭遗留系统文件选择框后，补跑可见的真实本地图片上传与视频 plan.md 非付费流程；随后执行可用环境中的中文规范门禁。本机当前没有 PowerShell，不能伪造该门禁为绿色。
+- 详细证据：[M13.1 / R1 统一上下文预算与压缩恢复修复记录](../test-reports/M13.1-R1-context-budget-repair.md)。

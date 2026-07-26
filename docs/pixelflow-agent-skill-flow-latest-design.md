@@ -855,11 +855,18 @@ flowchart TD
 | `PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS=[]` | Agent Runtime 可接管 intent 列表；M00 默认空数组，只允许 `video/image/ppt/video_analysis` |
 | `PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT=0` | 新对话接管比例；M00 默认 0，只接受 0–100 的十进制整数 |
 | `PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED=false` | 是否启用新 Runtime 上下文压缩；M00 默认关闭，不启动压缩流程 |
+| `PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K=896` | 全部当前和未来 Agent/节点的统一有效窗口；`K=1024 tokens`，即 917,504 tokens |
+| `PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K=32` | 全部 Agent 统一输出预留 32K，即 32,768 tokens |
+| `PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K=32` | 全部 Agent 统一安全预留 32K，即 32,768 tokens；可用输入因此为 851,968 tokens |
+| `PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE=true` | 实际 Runtime 缺少有效验证档案时 fail-closed，不使用 128K 兼容兜底 |
+| `PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS=30` | 压缩失败后持久化 30 秒重试边界，读取接口到期前不重复唤醒 |
+| `models[].context_profile.max_context_tokens=1000000` | 当前 DeepSeek V4 Pro 已确认的物理上下文窗口；统一有效窗口还保留 82,496 tokens 余量 |
 
-M13.1/R1 模块候选只在 `config.dev.yml` 将上述四项冻结为
-`assist / [] / 100 / true`，用于测试环境覆盖全部新对话；`config.prod.yml`
-不增加对应键，继续使用代码默认 `off / [] / 0 / false`。该候选不迁移历史对话，
-也不改变生产 Feature Flag；生产启用必须等 R1 候选进入 Agent 后再取得独立发布批准。
+M13.1/R1 测试环境冻结为 `assist / [] / 100 / true`；生产配置显式保存
+`off / [] / 0 / false`。dev/prod 都保存相同的 896K/32K/32K 预算结构、30 秒退避和
+DeepSeek V4 Pro 1,000,000 tokens 已验证档案，避免未来 R2–R4 启用或新增节点时
+回落旧常量。配置修改后必须重启，统一影响新进程；历史对话和运行中任务不迁移。
+生产启用仍必须取得独立发布批准。
 
 配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
 
@@ -961,7 +968,9 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-25，M00-I.1 已完成，M01、M03、M04、M07 和 M12.3 的 R1 增量已经进入 Agent 集成分支。M13.1 正在独立模块分支形成 R1 `assist` 候选：新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但 `orchestration_mode` 仍固定为 `frontend_v2`，现有图片、视频、PPT 和视频分析阶段工作流继续拥有业务推进权；旧消息 API 复用同一 `client_input_id`，避免双写重复。候选完成只可登记 `ready_for_phase_integration:R1`，必须经执行手册 9.10A 的人工单槽候选绿色进入 Agent 后，才能登记阶段已集成并等待独立生产发布批准。实施期间必须区分“模块实现/已进入 Agent”和“已经发布生产”，不能把设计中的 API、状态或自动化描述成已经在线运行。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-26，R1 已完成原单槽集成，当前正在同一 Agent 分支修复真实长视频测试暴露的上下文问题：新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但 `orchestration_mode` 仍固定为 `frontend_v2`，现有图片、视频、PPT 和视频分析阶段工作流继续拥有业务推进权；旧消息 API 复用同一 `client_input_id`，避免双写重复。生产仍保持 `off`，不能把代码修复描述成已经发布。
+
+R1 修复后，`ContextBudgetPolicyProvider` 是所有当前和未来 Agent 节点的唯一预算来源：有效窗口 896K、输出预留 32K、安全预留 32K，`K=1024 tokens`；DeepSeek V4 Pro 的物理档案为 1,000,000 tokens。新增或修改 Agent/流程只提供用于审计的节点名，不得定义另一套窗口。实际 Runtime 严格校验档案，128K 只保留为底层兼容测试。Plan 修订恢复请求等大型恢复快照继续保存在 Conversation Store，但不重复进入模型 Prompt。
 
 R1 Turn 登记在同一 Repository 事务内完成幂等检查、上下文 CAS、可见用户消息、Turn 和首批 Outbox 事件；冲突请求不能留下半成品。自动压缩从本次登记得到的稳定 `message_id` 精确保护当前输入的文本、materials、reply 和 artifact refs，不依赖同秒消息的排序猜测。旧 v2 只有在该 Turn 进入 `accepted/processing` 后才用同一个客户端 UUID 启动既有可恢复消息 job；后端只接受当前用户、当前对话、稳定消息 ID 和 job registry 全部匹配的 job 作为接力证据，并在保存 pending context 的同一 Conversation Store 临界区写入服务端 `legacy_handoff` marker。Runtime 随后幂等完成当前 Turn、领取下一条并补齐 `input.state_changed` 事件；任一步中断时 marker 保留，下一次 Snapshot 按 marker 继续补偿，客户端伪造 context 不能提前完成 Turn。刷新或断线只恢复 conversation context、Snapshot、SSE cursor 与原 job，前端不会把 `queued` 输入重新提交。
 
@@ -974,7 +983,7 @@ R1 Turn 登记在同一 Repository 事务内完成幂等检查、上下文 CAS�
 | R3 | 第 13 个工作日 | 图片/图片编辑、PPT、视频分析接入同一 Supervisor 和 Context Runtime |
 | R4 | 第 16–18 个工作日 | 五条主流程全量 E2E、Shadow、回滚和新对话全面接管验收 |
 
-R1 的 conversation 压缩锁由永久数据库协调行和短事务租约实现，协调状态为 `idle`、`active` 或 `retry_required`，使用随机 fencing token 阻止过期 worker 收尾。普通 Turn 与压缩专用入口都先锁同一协调行；压缩执行期间输入由后端直接持久化为 `queued`，成功后原子切回 `idle` 并只把最早输入迁移为 `processing`，失败或暂停则保留 `retry_required` 恢复标记和全部排队输入，继续阻止超窗处理，后续 worker 从原队列接管，前端不重新发送。
+R1 的 conversation 压缩锁由永久数据库协调行和短事务租约实现，协调状态为 `idle`、`active` 或 `retry_required`，使用随机 fencing token 阻止过期 worker 收尾。普通 Turn 与压缩专用入口都先锁同一协调行；压缩执行期间输入由后端直接持久化为 `queued`，成功后原子切回 `idle` 并只把最早输入迁移为 `processing`。失败或暂停时保留全部排队输入，并原子持久化 `retry_not_before=失败时间+30秒`；Snapshot、SSE 和 Run 轮询在边界前只读状态、不创建恢复任务，边界到达后只唤醒一次，前端不重新发送。
 
 60% 阶段真实调用 M03 `ContextPayloadExternalizer`：完整大型 tool/artifact 载荷按用户、对话、来源和内容 hash 幂等写入 `pixelflow_agent_context_payloads`，模型副本只保留稳定 `external_ref`、hash、原字节数和安全片段；SQL Store 支持跨进程恢复，Memory Store 仅用于本地开发。外置不会改写原消息，完整当前输入也绝不外置；72%/92% 的 `SummaryBuilder` 只接收脱水后的消息副本，token 重计量和实际摘要输入使用同一份数据，避免低估。85% 的 Workflow 层级摘要用 `stage_version + context_version` 作为覆盖证据，保存前重建整份有效 context；只有候选严格缩小时才持久化，未变版本在下一 Turn 不再重复计入，候选放大则保持原输入和未覆盖状态。
 
