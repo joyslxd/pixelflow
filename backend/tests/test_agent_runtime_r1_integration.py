@@ -140,6 +140,16 @@ class _FailOnceStageExecutor:
         )
 
 
+class _MutableClock:
+    """允许集成测试精确推进到压缩重试边界。"""
+
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def __call__(self) -> datetime:
+        return self.current
+
+
 class _StaticBudgetGuard:
     """让排队集成测试稳定触发 level-1，而不改任何生产阈值。"""
 
@@ -1952,20 +1962,23 @@ async def test_r1_compaction_queue_and_recovery_snapshot_share_one_repository() 
 
 
 @pytest.mark.asyncio
-async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -> None:
-    """失败标记由后续读取唤醒，原 Turn 不重发并进入 processing。"""
+async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """退避期内读取不重试，到期后只恢复一次且原 Turn 不重发。"""
 
     from app.gateway.routers import pixelflow_conversations
 
     task_store = MemoryPixelFlowTaskStore()
     repository = MemoryCompactionQueueRepository()
     executor = _FailOnceStageExecutor()
+    clock = _MutableClock(NOW)
     runtime = ConversationCompactionRuntime(
         coordinator=ContextCompactionCoordinator(
             executor=executor,
             summary_model_name="r1-static-profile",
             model_profiles={},
-            clock=lambda: NOW,
+            clock=clock,
         ),
         repository=repository,
         lease_owner="m13-r1-recovery-worker",
@@ -1973,7 +1986,7 @@ async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -
         event_sink=RepositoryCompactionEventOutbox(
             repository=repository,
         ),
-        clock=lambda: NOW,
+        clock=clock,
     )
     service = AgentRuntimeService(
         config=_assist_config(),
@@ -1983,7 +1996,19 @@ async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -
             budget_guard=_StaticBudgetGuard(),
             runtime=runtime,
         ),
-        clock=lambda: NOW,
+        clock=clock,
+    )
+    scheduled_recoveries: list[tuple[str, str]] = []
+    schedule_recovery = service._schedule_compaction_recovery
+
+    def record_recovery_schedule(user_id: str, conversation_id: str) -> None:
+        scheduled_recoveries.append((user_id, conversation_id))
+        schedule_recovery(user_id, conversation_id)
+
+    monkeypatch.setattr(
+        service,
+        "_schedule_compaction_recovery",
+        record_recovery_schedule,
     )
     assignment = service.assignment_for_new_conversation({})
     conversation = await task_store.create_conversation(
@@ -2008,11 +2033,46 @@ async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -
     )
     assert started.status == "queued"
 
+    events_after_failure = await repository.list_events(
+        str(USER_ID),
+        conversation.conversation_id,
+    )
+    assert executor.calls == 1
+    assert scheduled_recoveries == []
+    for _ in range(3):
+        await service.snapshot(
+            user_id=str(USER_ID),
+            conversation_id=conversation.conversation_id,
+        )
+        await service.events_after(
+            user_id=str(USER_ID),
+            conversation_id=conversation.conversation_id,
+            cursor=None,
+        )
+        polled = await service.get_run(
+            user_id=str(USER_ID),
+            conversation_id=conversation.conversation_id,
+            run_id=started.run_id,
+        )
+        assert polled is not None
+        assert polled.status == "queued"
+        await asyncio.sleep(0)
+    assert executor.calls == 1
+    assert scheduled_recoveries == []
+    assert await repository.list_events(
+        str(USER_ID),
+        conversation.conversation_id,
+    ) == events_after_failure
+
+    clock.current = NOW + timedelta(seconds=30)
     await service.events_after(
         user_id=str(USER_ID),
         conversation_id=conversation.conversation_id,
         cursor=None,
     )
+    assert scheduled_recoveries == [
+        (str(USER_ID), conversation.conversation_id),
+    ]
     for _ in range(20):
         recovered = await repository.get_turn(
             str(USER_ID),
@@ -2024,6 +2084,7 @@ async def test_r1_failed_compaction_is_recovered_by_snapshot_or_event_reader() -
 
     assert recovered is not None
     assert recovered.status.value == "processing"
+    assert executor.calls == 2
     events = await repository.list_events(
         str(USER_ID),
         conversation.conversation_id,

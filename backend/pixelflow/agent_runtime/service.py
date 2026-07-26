@@ -32,6 +32,7 @@ from .contracts import (
 )
 from .persistence import (
     CompactionQueueRepository,
+    ConversationCompactionLease,
     TurnRegistrationContextConflictError,
     TurnRegistrationUnavailableError,
     make_turn_registration_store,
@@ -409,8 +410,11 @@ class AgentRuntimeService:
             owner,
             conversation_id,
         )
-        if lease is not None and lease.lease_expires_at <= self._clock():
-            self._schedule_compaction_recovery(owner, conversation_id)
+        await self._schedule_compaction_recovery_if_due(
+            owner,
+            conversation_id,
+            lease=lease,
+        )
         queued_ids = [turn.turn_id for turn in turns if turn.status is TurnStatus.QUEUED]
         input_queue = [
             RuntimeInputProjection(
@@ -606,6 +610,27 @@ class AgentRuntimeService:
 
         task.add_done_callback(_discard)
 
+    async def _schedule_compaction_recovery_if_due(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        lease: ConversationCompactionLease | None = None,
+    ) -> None:
+        """只在持久化退避时间到达后创建恢复任务。"""
+
+        if not self.config.context_compaction_enabled or self._context_compactor is None:
+            return
+        current_lease = lease
+        if current_lease is None:
+            current_lease = await self.repository.get_compaction_lease(
+                user_id,
+                conversation_id,
+            )
+        if current_lease is None or current_lease.lease_expires_at > self._clock():
+            return
+        self._schedule_compaction_recovery(user_id, conversation_id)
+
     async def _recover_compaction(
         self,
         *,
@@ -781,7 +806,7 @@ class AgentRuntimeService:
             event.type is AgentEventType.CONTEXT_COMPRESSION_FAILED
             for event in events
         ):
-            self._schedule_compaction_recovery(
+            await self._schedule_compaction_recovery_if_due(
                 user_id.strip(),
                 conversation_id,
             )
@@ -806,7 +831,7 @@ class AgentRuntimeService:
         if turn is None or turn.conversation_id != conversation_id:
             return None
         if turn.status is TurnStatus.QUEUED:
-            self._schedule_compaction_recovery(
+            await self._schedule_compaction_recovery_if_due(
                 user_id.strip(),
                 conversation_id,
             )
