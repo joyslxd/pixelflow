@@ -949,6 +949,7 @@ class ConversationCompactionRuntime:
         lease_owner: str,
         lease_ttl: timedelta,
         event_sink: CompactionEventSink,
+        retry_backoff: timedelta = timedelta(seconds=30),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_owner = lease_owner.strip()
@@ -956,6 +957,8 @@ class ConversationCompactionRuntime:
             raise ValueError("lease_owner 不能为空")
         if lease_ttl <= timedelta(0):
             raise ValueError("lease_ttl 必须大于零")
+        if retry_backoff <= timedelta(0):
+            raise ValueError("retry_backoff 必须大于零")
         if not isinstance(event_sink, CompactionEventSink):
             raise TypeError("event_sink 必须实现 CompactionEventSink")
         if not event_sink.is_bound_to(repository):
@@ -964,6 +967,7 @@ class ConversationCompactionRuntime:
         self._repository = repository
         self._lease_owner = normalized_owner
         self._lease_ttl = lease_ttl
+        self._retry_backoff = retry_backoff
         self._event_sink = event_sink
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -1044,13 +1048,15 @@ class ConversationCompactionRuntime:
             )
             result = ContextCompactionResult.model_validate(raw_result)
             if result.status == "paused":
+                failed_at = self._clock()
                 await self._repository.finish_compaction_with_event(
                     user_id,
                     lease.conversation_id,
                     lease_owner=lease.lease_owner,
                     lease_token=lease.lease_token,
-                    now=self._clock(),
+                    now=failed_at,
                     claim_next=False,
+                    retry_not_before=failed_at + self._retry_backoff,
                     run_id=normalized_run_id,
                     event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
                     payload={
@@ -1086,13 +1092,15 @@ class ConversationCompactionRuntime:
         except BaseException:
             if started_event_persisted:
                 try:
+                    failed_at = self._clock()
                     await self._repository.finish_compaction_with_event(
                         user_id,
                         lease.conversation_id,
                         lease_owner=lease.lease_owner,
                         lease_token=lease.lease_token,
-                        now=self._clock(),
+                        now=failed_at,
                         claim_next=False,
+                        retry_not_before=failed_at + self._retry_backoff,
                         run_id=normalized_run_id,
                         event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
                         payload={
@@ -1148,13 +1156,15 @@ class ConversationCompactionRuntime:
     ) -> None:
         """异常路径只写恢复标记，绝不消费已经持久化的输入。"""
 
+        failed_at = self._clock()
         await self._repository.finish_compaction(
             user_id,
             lease.conversation_id,
             lease_owner=lease.lease_owner,
             lease_token=lease.lease_token,
-            now=self._clock(),
+            now=failed_at,
             claim_next=False,
+            retry_not_before=failed_at + self._retry_backoff,
         )
 
 

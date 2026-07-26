@@ -99,6 +99,7 @@ class CompactionQueueRepository(Protocol):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
     ) -> TurnRecord | None: ...
 
     async def finish_compaction_with_event(
@@ -110,6 +111,7 @@ class CompactionQueueRepository(Protocol):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
         run_id: str,
         event_type: AgentEventType,
         payload: dict[str, JsonValue],
@@ -136,11 +138,26 @@ def _finish_parameters(
     lease_owner: str,
     lease_token: UUID,
     now: datetime,
-) -> tuple[str, UUID, datetime]:
+    claim_next: bool,
+    retry_not_before: datetime | None,
+) -> tuple[str, UUID, datetime, datetime | None]:
     owner = _require_text("lease_owner", lease_owner, 128)
     if not isinstance(lease_token, UUID):
         raise ValueError("lease_token must be a UUID")
-    return owner, lease_token, _normalize_datetime("now", now)
+    normalized_now = _normalize_datetime("now", now)
+    if claim_next:
+        if retry_not_before is not None:
+            raise ValueError("claim_next=true 时 retry_not_before 必须为空")
+        return owner, lease_token, normalized_now, None
+    if retry_not_before is None:
+        raise ValueError("claim_next=false 时必须提供 retry_not_before")
+    normalized_retry = _normalize_datetime(
+        "retry_not_before",
+        retry_not_before,
+    )
+    if normalized_retry <= normalized_now:
+        raise ValueError("retry_not_before 必须晚于 now")
+    return owner, lease_token, normalized_now, normalized_retry
 
 
 def _terminal_event(
@@ -476,6 +493,7 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
     ) -> TurnRecord | None:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text(
@@ -483,10 +501,12 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
             conversation_id,
             64,
         )
-        worker, token, normalized_now = _finish_parameters(
+        worker, token, normalized_now, normalized_retry = _finish_parameters(
             lease_owner,
             lease_token,
             now,
+            claim_next,
+            retry_not_before,
         )
         async with self._compaction_write_lock:
             state = self._compaction_leases.get(conversation)
@@ -508,7 +528,9 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
             if claim_next and any(self._turns[owner_key].status is TurnStatus.PROCESSING for owner_key in owner_keys):
                 raise CompactionLeaseConflictError("压缩结束时已有 processing Turn，拒绝重复领取")
             if not claim_next:
-                expired = state[1].model_copy(update={"lease_expires_at": normalized_now})
+                expired = state[1].model_copy(
+                    update={"lease_expires_at": normalized_retry},
+                )
                 self._compaction_leases[conversation] = (
                     owner,
                     _clone(expired),
@@ -532,6 +554,7 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
         run_id: str,
         event_type: AgentEventType,
         payload: dict[str, JsonValue],
@@ -544,10 +567,12 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
             conversation_id,
             64,
         )
-        worker, token, normalized_now = _finish_parameters(
+        worker, token, normalized_now, normalized_retry = _finish_parameters(
             lease_owner,
             lease_token,
             now,
+            claim_next,
+            retry_not_before,
         )
         async with self._compaction_write_lock:
             state = self._compaction_leases.get(conversation)
@@ -603,7 +628,9 @@ class MemoryCompactionQueueRepository(MemoryAgentRuntimeRepository):
                         claimed = self._turns[claimed_key].model_copy(update={"status": TurnStatus.PROCESSING})
                         self._turns[claimed_key] = _clone(claimed)
                 else:
-                    expired = state[1].model_copy(update={"lease_expires_at": normalized_now})
+                    expired = state[1].model_copy(
+                        update={"lease_expires_at": normalized_retry},
+                    )
                     self._compaction_leases[conversation] = (
                         owner,
                         _clone(expired),
@@ -865,6 +892,7 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
     ) -> TurnRecord | None:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text(
@@ -872,10 +900,12 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
             conversation_id,
             64,
         )
-        worker, token, normalized_now = _finish_parameters(
+        worker, token, normalized_now, normalized_retry = _finish_parameters(
             lease_owner,
             lease_token,
             now,
+            claim_next,
+            retry_not_before,
         )
         await self._ensure_compaction_coordination_row(
             owner,
@@ -898,7 +928,7 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
                     raise CompactionLeaseConflictError("压缩结束时已有 processing Turn，拒绝重复领取")
                 if not claim_next:
                     coordination.state = "retry_required"
-                    coordination.lease_expires_at = normalized_now
+                    coordination.lease_expires_at = normalized_retry
                     coordination.updated_at = normalized_now
                     await session.flush()
                     return None
@@ -935,6 +965,7 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
         lease_token: UUID,
         now: datetime,
         claim_next: bool,
+        retry_not_before: datetime | None = None,
         run_id: str,
         event_type: AgentEventType,
         payload: dict[str, JsonValue],
@@ -947,10 +978,12 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
             conversation_id,
             64,
         )
-        worker, token, normalized_now = _finish_parameters(
+        worker, token, normalized_now, normalized_retry = _finish_parameters(
             lease_owner,
             lease_token,
             now,
+            claim_next,
+            retry_not_before,
         )
         await self._ensure_compaction_coordination_row(
             owner,
@@ -1024,7 +1057,7 @@ class SQLCompactionQueueRepository(SQLAgentRuntimeRepository):
                             claimed = _turn_from_row(claimed_row)
                     else:
                         coordination.state = "retry_required"
-                        coordination.lease_expires_at = normalized_now
+                        coordination.lease_expires_at = normalized_retry
                     coordination.updated_at = normalized_now
                     await session.flush()
                     return claimed, _clone(event)

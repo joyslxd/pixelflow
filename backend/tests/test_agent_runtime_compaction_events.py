@@ -44,6 +44,7 @@ OWNER = "user-a"
 CONVERSATION = "conversation-a"
 RUN_ID = "run-a"
 NOW = datetime(2026, 7, 25, 6, 0, tzinfo=UTC)
+RETRY_BACKOFF = timedelta(seconds=30)
 
 
 @asynccontextmanager
@@ -385,7 +386,7 @@ async def test_progress_event_failure_stops_compaction_and_preserves_recovery_ma
     ]
     recovery = await queue_repository.get_compaction_lease(OWNER, CONVERSATION)
     assert recovery is not None
-    assert recovery.lease_expires_at <= NOW
+    assert recovery.lease_expires_at == NOW + RETRY_BACKOFF
 
 
 class _OutcomeCoordinator:
@@ -472,7 +473,7 @@ async def test_runtime_persists_safe_recoverable_failed_event(
     assert "用户原文" not in json.dumps(events[-1].payload, ensure_ascii=False)
     recovery = await queue_repository.get_compaction_lease(OWNER, CONVERSATION)
     assert recovery is not None
-    assert recovery.lease_expires_at <= NOW
+    assert recovery.lease_expires_at == NOW + RETRY_BACKOFF
 
 
 @pytest.mark.asyncio
