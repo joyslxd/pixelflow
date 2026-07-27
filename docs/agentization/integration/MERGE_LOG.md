@@ -206,4 +206,27 @@
 - ownership：现有阶段工作流继续拥有业务推进权；历史对话和运行中任务不迁移
 - exclusions：未执行 M02、M13.2/R2、`primary`、真实付费供应商测试或 Agent→dev 合并
 - synchronized docs：BOARD、M13 状态、MERGE_LOG 和 [R1 生产发布记录](../test-reports/M13.1-R1-production-release.md)
-- 2026-07-28 06:46:21 +08:00：M02 最终模块 候选通过，模块提交 `e77bdcd322cf76d706a7063cf5e64b428c64e109` 已纳入最新 Agent/dev 基线。
+### 0008 / 2026-07-28 / M02 最终模块集成
+
+- module：`M02`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m02-graph-kernel@e77bdcd322cf76d706a7063cf5e64b428c64e109`
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@390e2a3203dada5df1507a4a722c4efe03ce7365` 首次由脚本原子推进至 `a1e63e66f7416d7c6191fb157fd2f2e559d51be2`；完整交接记录随同一候选再次防漂移快进，最终以远端复读值为准
+- module state：脚本首次状态提交为 `fa86dcae3297838b8afdfaafc5298b64f63c519c`；完整交接随同一状态分支再次快进，最终以模块远端复读值为准
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：`codex/integrate-m02-20260727-224341-c8add0a7`；由“最新 Agent + 最新 dev + M02 增量”创建的全新候选，没有复用任何旧候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M02.4`，`checkpoint_commit=e77bdcd322cf76d706a7063cf5e64b428c64e109`，此前 `last_integrated_commit=—`，最终写为该检查点
+- trigger / single slot：远端状态为 `ready_for_integration`、实现提交已 push、M02 不在阶段检查点白名单中且只能走 Final；集成前确认全局单槽锁可独占、无其他集成人，最终状态为 `merged`，`checkpoint_status=integrated`
+- file ownership：M02 四个切片和独立审核均已释放写锁；候选只纳入 M02 图内核、Gateway 装配、权威门禁、测试和交接记录，没有执行 M05、M06、M13.2 或其他模块切片
+- feature flag：未修改生产运行模式、`enabled_intents`、rollout 比例或 Feature Flag；现有阶段工作流继续拥有业务推进权
+- production：未发布；没有生产配置、生产批准或真实供应商调用
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：`Integrate-AgentModule.ps1` 在新候选上运行 M02 Final 五项权威非付费门禁并返回 `integrated`；固定清单覆盖 Windows PowerShell 5.1 Pester、Python 3.12、171 项 M02 pytest 范围、限定 Ruff 和 `git diff --check`，全部命令返回绿色
+- reviewer：`/root/m02_4_fresh_independent_review` 最终复审 Critical 0、Important 0、Minor 0，`Ready to commit: Yes`；候选再次执行同一冻结范围的权威门禁
+- conflicts：最新 Agent、最新 dev 和 M02 增量合入候选时无内容冲突；脚本生成共享记录后仅补正 BOARD 的切片计数/下一步、模块恢复提示和本完整交接记录，不修改业务代码
+- migration/configuration：无 migration；`backend/langgraph.json` 新增独立 `pixelflow_agent_runtime` graph ID，并由同目录 `langgraph.schema.json` 对全部叶子配置提供逐项中文用途和影响说明；旧 `pixelflow`、`lead_agent` 保持不变
+- Chinese engineering policy：模块四个切片、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁；完整交接补正再次执行中文规范和差异检查
+- smoke：只执行 M02 本地非付费权威门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一切片，未修改 dev，未发布生产，未把自动化状态提升为 `automation_active`
+- remote guard：候选门禁后脚本重新读取 Agent、dev 和 M02 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同的防漂移检查
+- rollback：如需撤回，基于本记录定位 M02 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M02 状态、BOARD、MERGE_LOG 和 M02.1–M02.4 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
