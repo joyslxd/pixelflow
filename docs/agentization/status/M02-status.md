@@ -70,9 +70,14 @@
 - 边界：未修改旧 `backend/pixelflow/graph.py`、旧 `/agent/flows` 路由、两个长期 feature 分支、依赖或付费供应商调用；未创建切片子分支/worktree，未更新总看板，也未进入 M05。
 - 阶段：M02.4 是模块最后一片且不是 `phased-rollout-plan.md` 的中间检查点；完整模块门禁绿色后写 `ready_for_integration`。当前自动化仍为 `automation_local_ready`，本任务不得自动启动单槽集成。
 
-## 恢复提示
+## 最终单槽集成记录
 
-M02 已无下一切片。开发者必须新开一个 Codex 任务，复制 `branch-and-codex-runbook.md` 第 9.10A 节话术，并在同一条消息中明确模块号 `M02`，手动启动唯一单槽最终集成；不得继续不存在的 M02.5，也不得由本模块开发任务直接修改长期 Agent/dev 分支。
+- 候选：`codex/integrate-m02-20260727-224341-c8add0a7`，由冻结 Agent `390e2a3203dada5df1507a4a722c4efe03ce7365`、dev `fb7450775a227d891372c19eae1b308045c51e68` 和 M02 实现提交 `e77bdcd322cf76d706a7063cf5e64b428c64e109` 创建。
+- 门禁：`Integrate-AgentModule.ps1` 通过 M02 Final 固定入口执行五项权威非付费门禁；Pester、限定 pytest、限定 Ruff、Python 3.12 和 `git diff --check` 均返回绿色，未调用真实付费 API。
+- 原子更新：远端 Agent 由 `390e2a3203dada5df1507a4a722c4efe03ce7365` 首次推进为 `a1e63e66f7416d7c6191fb157fd2f2e559d51be2`；脚本首次 M02 状态提交为 `fa86dcae3297838b8afdfaafc5298b64f63c519c`，完整交接随同一状态分支再次防漂移快进，冻结 dev 保持不变。
+- 防漂移：门禁后重新读取 Agent、dev 和 M02 三条远端引用，均与冻结值一致后才执行原子更新；提交后复读确认实现提交和状态提交均为新 Agent 的祖先。
+- 交接：M02 已完成最终集成，不存在 M02.5 或其他后续切片；本次任务没有启动 M05、M06、M13.2/R2 或其他模块，没有修改生产模式、intent 范围和 Feature Flag。
+- 自动化：继续保持 `automation_local_ready`；当前没有 Jenkins 或其他远端 CI，不得记录为 `automation_active`。
 
 - last_integrated_commit：`e77bdcd322cf76d706a7063cf5e64b428c64e109`
 - locked files：`无`
