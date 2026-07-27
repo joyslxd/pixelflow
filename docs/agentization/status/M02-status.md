@@ -1,6 +1,6 @@
 # M02 LangGraph 会话/Workflow 内核
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：A
 - reviewer：`/root/m02_4_fresh_independent_review`
 - base Agent SHA：`390e2a3203dada5df1507a4a722c4efe03ce7365`
@@ -74,6 +74,7 @@
 
 M02 已无下一切片。开发者必须新开一个 Codex 任务，复制 `branch-and-codex-runbook.md` 第 9.10A 节话术，并在同一条消息中明确模块号 `M02`，手动启动唯一单槽最终集成；不得继续不存在的 M02.5，也不得由本模块开发任务直接修改长期 Agent/dev 分支。
 
-- last_integrated_commit：`—`
+- last_integrated_commit：`e77bdcd322cf76d706a7063cf5e64b428c64e109`
 - locked files：`无`
 - integration failure evidence：`无`
+- checkpoint_status：`integrated`
