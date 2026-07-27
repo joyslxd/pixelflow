@@ -26,6 +26,14 @@ test("plan cards do not expose backend consistency diagnostics to users", () => 
   );
 });
 
+test("点击 Agent 修改后隐藏当前 Plan 编辑入口并支持恢复", () => {
+  assert.match(messageBubbleSource, /!hidePlanEdit[\s\S]*onEditPlan/);
+  assert.match(chatPanelSource, /hidePlanEdit=\{isSupersededArtifact \|\| m\.id === agentRevisionSourceMessageId\}/);
+  assert.match(workspaceSource, /setAgentRevisionSourceMessageId\(msg\.id\)/);
+  assert.match(workspaceSource, /planRevisionArtifactRef\.current\?\.sourceMessageId[\s\S]*restoredPlanRevisionChoice\?\.sourceMessageId/);
+  assert.match(workspaceSource, /handleCancelPlanRevisionMode[\s\S]*setAgentRevisionSourceMessageId\(""\)/);
+});
+
 test("scene asset replacement keeps temporary local upload and adds persistent asset-library upload", () => {
   assert.match(sceneAssetReplacementPickerSource, /const uploadLocalImage = async/);
   assert.match(sceneAssetReplacementPickerSource, /source: "local_upload"/);

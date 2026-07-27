@@ -645,6 +645,7 @@ sequenceDiagram
 Plan 审核与版本规则：
 
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
+- Plan 卡片点击“Agent 修改”后立即隐藏当前卡片的“编辑”入口；等待修改意见、选择修改方式或执行 Agent 修订期间都保持隐藏，刷新恢复待处理上下文后仍保持一致。取消修改方式选择时恢复当前卡片的“编辑”入口，新 Plan 版本继续提供自己的“编辑”入口，已被后续产物替代的历史 Plan 不再展示该入口。
 - 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`。前端必须把 `pendingPlanJob` / `pending_plan_job` 写入 conversation context，恢复时只轮询已有 job，不得因刷新、离开或切换对话重新提交生成请求；同步 `/plan` 与 `/plan/revise` 仅保留兼容旧调用。
 - 当前创意内修改不得返回创意方向列表；job 完成后再保存 plan artifact，消息保存失败时继续复用已有 Plan 结果和消息 job。
 - 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。

@@ -23,6 +23,7 @@ interface ChatPanelProps {
   onApprovePlan?: (msg: ChatMessage) => void;
   onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
+  agentRevisionSourceMessageId?: string;
   onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
@@ -88,6 +89,7 @@ export function ChatPanel({
   onApprovePlan,
   onEditPlan,
   onRevisePlan,
+  agentRevisionSourceMessageId,
   onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
@@ -172,6 +174,7 @@ export function ChatPanel({
                 onApprovePlan={onApprovePlan}
                 onEditPlan={onEditPlan}
                 onRevisePlan={onRevisePlan}
+                hidePlanEdit={isSupersededArtifact || m.id === agentRevisionSourceMessageId}
                 onRollbackPlan={onRollbackPlan}
                 onGenerateImage={onGenerateImage}
                 onConfirmImageEditOptions={onConfirmImageEditOptions}

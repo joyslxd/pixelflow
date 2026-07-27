@@ -1784,6 +1784,7 @@ export function WorkspacePage() {
   const [selectedStoryboardMessageId, setSelectedStoryboardMessageId] = useState("");
   const [selectedPlanEditorMessageId, setSelectedPlanEditorMessageId] = useState("");
   const [savingPlanEdit, setSavingPlanEdit] = useState(false);
+  const [agentRevisionSourceMessageId, setAgentRevisionSourceMessageId] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
@@ -6084,7 +6085,13 @@ export function WorkspacePage() {
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     pendingPlanJobRef.current = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     planRevisionArtifactRef.current = snapshot.pendingPlanRevisionRequest || snapshot.pending_plan_revision_request || null;
-    setPendingPlanRevisionChoice(snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null);
+    const restoredPlanRevisionChoice = snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null;
+    setPendingPlanRevisionChoice(restoredPlanRevisionChoice);
+    setAgentRevisionSourceMessageId(
+      planRevisionArtifactRef.current?.sourceMessageId
+        || restoredPlanRevisionChoice?.sourceMessageId
+        || (pendingPlanJobRef.current?.kind === "plan_revision" ? pendingPlanJobRef.current.source_message_id : ""),
+    );
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
@@ -6265,6 +6272,7 @@ export function WorkspacePage() {
     planRevisionArtifactRef.current = null;
     pptOutlineRevisionArtifactRef.current = null;
     setPendingPlanRevisionChoice(null);
+    setAgentRevisionSourceMessageId("");
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
     briefReadyShownRef.current = false;
@@ -8248,6 +8256,7 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
+    setAgentRevisionSourceMessageId(msg.id);
     planRevisionArtifactRef.current = msg.artifact
       ? { conversationId: targetConversationId, artifact: msg.artifact, sourceMessageId: msg.id, processedKey }
       : null;
@@ -8356,6 +8365,7 @@ export function WorkspacePage() {
     const pending = pendingPlanRevisionChoice;
     if (!pending) return;
     setPendingPlanRevisionChoice(null);
+    setAgentRevisionSourceMessageId("");
     if (pending.processedKey) releaseArtifactAction(pending.processedKey);
     pushAssistant("已取消本次 plan.md 修改方式选择，当前 Plan 保持不变。", pending.conversationId);
     void updateConversationWithProgress(pending.conversationId, {
@@ -9130,6 +9140,7 @@ export function WorkspacePage() {
         onApprovePlan={legacyArtifactActionsEnabled ? handleApprovePlan : undefined}
         onEditPlan={legacyArtifactActionsEnabled ? handleEditPlan : undefined}
         onRevisePlan={legacyArtifactActionsEnabled ? handleRevisePlan : undefined}
+        agentRevisionSourceMessageId={agentRevisionSourceMessageId}
         onRollbackPlan={legacyArtifactActionsEnabled ? handleRollbackPlan : undefined}
         onGenerateImage={legacyArtifactActionsEnabled ? handleGenerateImage : undefined}
         onConfirmImageEditOptions={legacyArtifactActionsEnabled ? handleConfirmImageEditOptions : undefined}

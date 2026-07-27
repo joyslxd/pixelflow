@@ -20,6 +20,7 @@ interface MessageBubbleProps {
   onApprovePlan?: (msg: ChatMessage) => void;
   onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
+  hidePlanEdit?: boolean;
   onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
@@ -221,6 +222,7 @@ export function MessageBubble({
   onApprovePlan,
   onEditPlan,
   onRevisePlan,
+  hidePlanEdit = false,
   onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
@@ -598,14 +600,16 @@ export function MessageBubble({
                 <Check size={15} />
                 同意方案
               </button>
-              <button
-                type="button"
-                onClick={() => onEditPlan?.(msg)}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-              >
-                <Pencil size={15} />
-                编辑
-              </button>
+              {!hidePlanEdit ? (
+                <button
+                  type="button"
+                  onClick={() => onEditPlan?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <Pencil size={15} />
+                  编辑
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => onRevisePlan?.(msg)}
