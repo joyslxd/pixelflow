@@ -321,8 +321,8 @@ def test_r1_assist_assigns_runtime_to_all_new_conversations_without_taking_busin
     }
 
 
-def test_r1_candidate_only_enables_assist_in_test_profile() -> None:
-    """测试候选覆盖全部新对话，生产 profile 继续隐式采用 off+0%。"""
+def test_r1_release_enables_assist_for_all_new_conversations_in_dev_and_prod() -> None:
+    """R1 获批发布后，开发和生产 profile 都只对全部新对话启用 assist 与压缩。"""
 
     dev_profile = yaml.safe_load(
         (BACKEND_ROOT / "config.dev.yml").read_text(encoding="utf-8"),
@@ -346,10 +346,10 @@ def test_r1_candidate_only_enables_assist_in_test_profile() -> None:
         "compaction_retry_backoff_seconds": 30,
     }
     assert prod_profile["pixelflow"]["agent_runtime"] == {
-        "mode": "off",
+        "mode": "assist",
         "enabled_intents": [],
-        "new_conversation_rollout_percent": 0,
-        "context_compaction_enabled": False,
+        "new_conversation_rollout_percent": 100,
+        "context_compaction_enabled": True,
         "context_budget": expected_budget,
         "compaction_retry_backoff_seconds": 30,
     }
