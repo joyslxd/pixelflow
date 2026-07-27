@@ -206,3 +206,4 @@
 - ownership：现有阶段工作流继续拥有业务推进权；历史对话和运行中任务不迁移
 - exclusions：未执行 M02、M13.2/R2、`primary`、真实付费供应商测试或 Agent→dev 合并
 - synchronized docs：BOARD、M13 状态、MERGE_LOG 和 [R1 生产发布记录](../test-reports/M13.1-R1-production-release.md)
+- 2026-07-28 06:46:21 +08:00：M02 最终模块 候选通过，模块提交 `e77bdcd322cf76d706a7063cf5e64b428c64e109` 已纳入最新 Agent/dev 基线。

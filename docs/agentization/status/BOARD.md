@@ -19,7 +19,7 @@
 | --- | --- | --- | --- | ---: | --- | --- |
 | M00 | 合同、分支自动化、中文工程门禁、feature flag、测试入口 | A+B | `merged` | 5/5 | 无；门禁基线已修复；`automation_local_ready` | `9b7a292`（验收实现）；`1aba4ae` + `4514ffe`（基线修复与审核加固） |
 | M01 | 持久化、CAS、Inbox/Outbox | A | `merged` | 5/5 | 无；已进入 Agent | `337a191` |
-| M02 | LangGraph 会话/Workflow 内核 | A | `not_started` | 0/4 | M00、M01 | — |
+| M02 | LangGraph 会话/Workflow 内核 | A | `merged` | 0/4 | M00、M01 | `e77bdcd` |
 | M03 | 模型档案、预算、ContextEnvelope | A | `merged` | 4/4 | 无；已进入 Agent | `e43b5e9` |
 | M04 | 全局上下文压缩 | A | `merged` | 5/5 | 无；已进入 Agent | `7e4f4c3` |
 | M05 | Supervisor 决策与目标解析 | A | `not_started` | 0/5 | M02–M04 | — |
