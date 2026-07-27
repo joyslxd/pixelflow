@@ -522,8 +522,52 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
+    It "M02 最终门禁固定图内核、Gateway、旧图和分支脚本回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M02" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_dispatcher.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_checkpointer.py",
+            "tests/test_checkpointer_none_fix.py",
+            "tests/test_run_manager.py",
+            "tests/test_gateway_runtime_cleanup.py",
+            "tests/test_gateway_run_recovery.py",
+            "tests/test_harness_boundary.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_pixelflow_task_store.py",
+            "tests/test_openapi_operation_ids.py",
+            "tests/test_langgraph_auth.py"
+        )
+        $expectedRuffPaths = @(
+            "app/gateway/deps.py",
+            "app/gateway/pixelflow_agent_runtime.py",
+            "pixelflow/agent_runtime/graph"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
+    }
+
     It "未配置权威测试清单的后端模块必须 fail-closed" {
-        foreach ($moduleId in @("M02", "M05", "M06")) {
+        foreach ($moduleId in @("M05", "M06")) {
             { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
         }
     }

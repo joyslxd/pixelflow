@@ -223,6 +223,17 @@ backend/
 deployments run the Gateway embedded runtime; the file is kept for LangGraph
 tooling, Studio, or direct LangGraph Server compatibility.
 
+`langgraph.json` 的 `graphs` 叶子键说明如下：
+
+- `graphs.pixelflow`：保留旧 `/agent/flows` 阶段状态机入口；继续取值
+  `pixelflow:make_pixelflow_graph`，修改它会影响旧任务的创建和恢复。
+- `graphs.lead_agent`：保留 DeerFlow 通用 Agent 入口；继续取值
+  `deerflow.agents:make_lead_agent`，修改它会影响兼容运行时和 Studio 调试。
+- `graphs.pixelflow_agent_runtime`：注册会话级 Supervisor 新图，固定取值
+  `pixelflow.agent_runtime.graph:make_agent_runtime_graph`；Gateway 启动后使用共享
+  checkpointer 装配它，关闭时只释放新图引用，不提前关闭外层持久化资源。该键只提供新
+  graph ID，不会把历史 `pixelflow` thread 自动迁移到新 Runtime。
+
 ---
 
 ## Configuration

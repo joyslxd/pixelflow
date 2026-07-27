@@ -1,5 +1,12 @@
 """统一 Agent Runtime 图内核的公共合同。"""
 
+from .composition import (
+    AGENT_RUNTIME_GRAPH_ID,
+    AgentRuntimeGraphComposition,
+    build_agent_runtime_graph,
+    compose_agent_runtime_graph,
+    make_agent_runtime_graph,
+)
 from .dispatcher import WorkflowCommand, WorkflowCommandDispatcher
 from .interrupts import ResumableGraph, resume_graph_from_interrupt
 from .namespaces import (
@@ -16,6 +23,8 @@ from .registry import (
 from .state import SupervisorState, merge_workflow_records
 
 __all__ = [
+    "AGENT_RUNTIME_GRAPH_ID",
+    "AgentRuntimeGraphComposition",
     "FakeWorkflowRegistry",
     "GraphExecutionNamespace",
     "ResumableGraph",
@@ -24,6 +33,9 @@ __all__ = [
     "WorkflowCommandDispatcher",
     "WorkflowCommandHandler",
     "WorkflowRegistry",
+    "build_agent_runtime_graph",
+    "compose_agent_runtime_graph",
+    "make_agent_runtime_graph",
     "merge_workflow_records",
     "resume_graph_from_interrupt",
     "supervisor_namespace",

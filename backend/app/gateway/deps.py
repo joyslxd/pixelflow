@@ -116,6 +116,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
+        from app.gateway.pixelflow_agent_runtime import (
+            make_pixelflow_agent_graph_runtime,
+        )
+
+        await stack.enter_async_context(
+            make_pixelflow_agent_graph_runtime(
+                app,
+                checkpointer=app.state.checkpointer,
+            )
+        )
+
         # 初始化仓储层：所有 repository 共用同一个 session_factory。
         sf = get_session_factory()
         if sf is not None:

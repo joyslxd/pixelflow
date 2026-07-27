@@ -1,15 +1,17 @@
 # M02 LangGraph 会话/Workflow 内核
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：A
-- reviewer：`/root/m02_3_fresh_independent_review`
+- reviewer：`/root/m02_4_fresh_independent_review`
 - base Agent SHA：`390e2a3203dada5df1507a4a722c4efe03ce7365`
 - branch：`codex/agent-0.8.4-m02-graph-kernel`
 - 依赖：M00、M01
 - 当前切片：`M02.4`
-- 最近完成：`M02.3`
+- 最近完成：`M02.4`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
+- M02.4 开始时间：`2026-07-28 04:37:22 +08:00`
+- M02.4 完成时间：`2026-07-28 05:14:19 +08:00`
 - M02.3 开始时间：`2026-07-28 03:19:03 +08:00`
 - M02.3 完成时间：`2026-07-28 03:28:25 +08:00`
 - M02.2 开始时间：`2026-07-27 23:52:16 +08:00`
@@ -21,7 +23,7 @@
 - [x] M02.1 State/reducer/namespace（2h）
 - [x] M02.2 fake registry/dispatcher（2.5h）
 - [x] M02.3 interrupt/resume/projection 顺序（2.5h）
-- [ ] M02.4 composition/graph ID/lifespan（2h）
+- [x] M02.4 composition/graph ID/lifespan（2h）
 
 ## M02.1 完成记录
 
@@ -55,6 +57,23 @@
 - 文档与边界：当前最新设计、Agentization README 和根 AGENTS 已覆盖本片合同，无需重复改写；未实现 M02.4 composition/graph ID/lifespan，未修改旧 `backend/pixelflow/graph.py`、旧 graph ID、`backend/langgraph.json`、配置、依赖或长期 feature 分支。
 - 阶段：M02.3 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行阶段/完整模块门禁，不写 `ready_for_phase_integration` 或 `ready_for_integration`；当前自动化状态仍为 `automation_local_ready`。
 
+## M02.4 完成记录
+
+- 装配：新增统一 Agent Runtime 图 composition，将 M02.1–M02.3 的 SupervisorState、Workflow dispatcher、interrupt/resume 和 projection 原语组合为独立图；缺少 conversation 或 ActionDecision 时 fail-closed。
+- 图注册：新增独立 graph ID `pixelflow_agent_runtime`；`langgraph.json` 原 `pixelflow` 与 `lead_agent` 注册值保持不变，全部 JSON 叶子键已由同目录 `langgraph.schema.json` 建立逐项中文 schema description，并在 `backend/README.md` 说明三类 graph 的兼容边界。
+- 生命周期：Gateway 在共享 checkpointer 和 Store 创建后装配新图，退出时按 AsyncExitStack 逆序先清理新图引用，再释放 Store 和共享 checkpointer；新图 runtime 不越权关闭外层资源。
+- 重启与隔离：真实 InMemorySaver 证明图对象重建后可从原 interrupt 恢复；真实文件 AsyncSqliteSaver 关闭并重开后仍以原 interrupt ID 恢复；不同 conversation 即使使用同名 workflow 也不共享 checkpoint 状态。
+- TDD：初始因 `app.gateway.pixelflow_agent_runtime` 不存在形成预期 RED；最小实现后聚焦测试达到 `7 passed`。M02 Final 门禁计划先因 M02 权威清单缺失形成 `41 passed / 1 failed`，补齐计划后为 `42 passed`。
+- 审核整改：独立 reviewer 首轮发现旧 `/agent/flows` 路由不变量未被 Final 清单直接锁定；先把 `test_pixelflow_task_store.py` 写入计划断言并得到预期 RED，再补入权威 pytest/Ruff 清单，旧创建、SSE 和资产路由断言转绿。
+- 最终验证：M02 权威 pytest `171 passed, 1 warning`；Pester `42 passed, 0 failed`；Ruff、`git diff --check` 通过。完整执行 `Invoke-AgentModuleGate.ps1 -ModuleId M02 -GateType Final` 返回 `Passed=True`、`CommandCount=5`；提交级中文门禁先因 `langgraph.json` 缺同目录 schema 形成预期失败，补齐所有叶子键中文用途/影响 description 后转绿。唯一 warning 为既有 LangGraph pending deprecation。
+- 独立审核：全新只读 reviewer `/root/m02_4_fresh_independent_review` 首轮为 Critical 0、Important 1、Minor 0；整改复审为 Critical 0、Important 0、Minor 0，`Ready to commit: Yes`，全程未修改、暂存、提交或推送文件。
+- 边界：未修改旧 `backend/pixelflow/graph.py`、旧 `/agent/flows` 路由、两个长期 feature 分支、依赖或付费供应商调用；未创建切片子分支/worktree，未更新总看板，也未进入 M05。
+- 阶段：M02.4 是模块最后一片且不是 `phased-rollout-plan.md` 的中间检查点；完整模块门禁绿色后写 `ready_for_integration`。当前自动化仍为 `automation_local_ready`，本任务不得自动启动单槽集成。
+
 ## 恢复提示
 
-下一切片是最后一片 `M02.4 composition + 独立 graph ID + lifespan cleanup`。开始前必须重新 fetch、执行 dev→agent 安全预检、确认本片提交已在远端并重新领取唯一写入权；继续复用当前模块分支和 worktree，不得创建切片子分支/worktree。M02.4 必须运行完整模块门禁，绿色后才能写 `ready_for_integration` 并 push；不得替换旧 `backend/pixelflow/graph.py` 或旧 graph ID。
+M02 已无下一切片。开发者必须新开一个 Codex 任务，复制 `branch-and-codex-runbook.md` 第 9.10A 节话术，并在同一条消息中明确模块号 `M02`，手动启动唯一单槽最终集成；不得继续不存在的 M02.5，也不得由本模块开发任务直接修改长期 Agent/dev 分支。
+
+- last_integrated_commit：`—`
+- locked files：`无`
+- integration failure evidence：`无`
