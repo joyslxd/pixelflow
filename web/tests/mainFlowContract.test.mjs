@@ -771,6 +771,22 @@ test("failed direct image edit can reopen model options instead of blindly retry
   assert.match(retrySource, /releaseArtifactAction\(processedKey\)/, "reopening options should release the failed result action so the user can submit again");
 });
 
+test("全局素材编辑失败后重新打开专用参数卡并保留可恢复请求", () => {
+  const retryStart = workspaceSource.indexOf("const handleRetryImageResult = async");
+  const retryEnd = workspaceSource.indexOf("async function handleAcceptImageResult", retryStart);
+  const retrySource = workspaceSource.slice(retryStart, retryEnd);
+  const completionSource = handleCompletedImageAssetEditJobSource();
+  const sceneRetryIndex = retrySource.indexOf("sceneGlobalAssetReferenceFromMaterials");
+  const imagePrepareIndex = retrySource.indexOf("const imagePrepare = artifact.imagePrepare");
+  assert.notEqual(sceneRetryIndex, -1, "全局素材重试必须从持久化素材中恢复引用");
+  assert.notEqual(imagePrepareIndex, -1, "普通图片重试必须保留 imagePrepare 分支");
+  assert.ok(sceneRetryIndex < imagePrepareIndex, "全局素材重试必须先于普通图片 imagePrepare 门禁执行");
+  assert.match(retrySource, /pushSceneGlobalAssetEditOptions/, "全局素材重试必须重新打开专用模型参数卡");
+  assert.match(completionSource, /const retryRequest: PendingImageEditRequest/, "全局素材任务失败后必须构造可恢复编辑请求");
+  assert.match(completionSource, /imageEditRequest:\s*retryRequest/, "失败结果卡必须持久化可恢复编辑请求");
+  assert.match(completionSource, /\.\.\.uploadedReferenceMaterials\(failedRequest\.materials \|\| \[\]\)/, "融合重试必须保留用户上传的参考图");
+});
+
 test("ppt image pages stream partial status into the existing artifact card", () => {
   assert.match(apiSource, /type PptJobStatusCallback/, "PPT job polling must expose status callbacks");
   assert.match(apiSource, /startPptImagesJob:[\s\S]*onStatus\?: PptJobStatusCallback/, "PPT image job must accept a status callback");

@@ -4772,6 +4772,44 @@ export function WorkspacePage() {
     const quotaInsufficient = isQuotaInsufficientPayload(editResult);
     if (!editResult.ok || !nextUrl) {
       releaseArtifactAction(processedKey);
+      const failedRequest = pendingImageJob.request as ImageAssetEditJobRequest;
+      const retryMaterials = [
+        {
+          ...reference,
+          source_image_url: reference.source_image_url,
+          url: reference.source_image_url,
+          storyboard_message_id: storyboardMessage?.id || pendingImageJob.storyboard_message_id,
+        },
+        ...uploadedReferenceMaterials(failedRequest.materials || []),
+      ];
+      const retrySelection: ImageEditModelSelection = {
+        model: String(failedRequest.model || "gpt-image-2"),
+        ratio: String(failedRequest.ratio || defaultGlobalSceneAssetRatio(reference.asset_group)),
+        size: String(failedRequest.size || "4K"),
+      };
+      const retryRequest: PendingImageEditRequest = {
+        conversationId: targetConversationId,
+        prompt: String(failedRequest.prompt || ""),
+        formValues: {
+          image_goal: reference.name,
+          image_operation: "image_edit",
+          image_model: retrySelection.model,
+          image_size: retrySelection.ratio,
+          image_quality: retrySelection.size,
+        },
+        intakeContext: {
+          image_operation: "image_edit",
+          image_model: retrySelection.model,
+          image_size: retrySelection.ratio,
+          image_quality: retrySelection.size,
+          scene_global_asset_reference: reference,
+        },
+        materials: retryMaterials,
+        selection: retrySelection,
+        mode: isFusion ? "scene_global_asset_fusion" : "scene_global_asset_edit",
+        sceneGlobalAssetReference: reference,
+        storyboardMessageId: storyboardMessage?.id || pendingImageJob.storyboard_message_id,
+      };
       pushArtifact("全局素材图片编辑失败，请查看错误信息。", {
         type: "image_result",
         title: "全局素材图片编辑结果",
@@ -4789,8 +4827,10 @@ export function WorkspacePage() {
           raw: editResult.raw,
         },
         intent: "image",
-        materials: [reference],
-        imageRevisionFeedback: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+        materials: retryMaterials,
+        imageEditRequest: retryRequest as unknown as Record<string, unknown>,
+        imageEditConfirmedSelection: retrySelection,
+        imageRevisionFeedback: retryRequest.prompt,
       }, targetConversationId);
       await clearPendingImageJob(
         targetConversationId,
@@ -8425,13 +8465,30 @@ export function WorkspacePage() {
   };
 
   const handleRetryImageResult = async (msg: ChatMessage) => {
-    const imagePrepare = msg.artifact?.imagePrepare;
-    if (!imagePrepare || !msg.artifact?.imageResult || canAcceptImageResult(msg.artifact.imageResult)) return;
+    const artifact = msg.artifact;
+    if (!artifact?.imageResult || canAcceptImageResult(artifact.imageResult)) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const storedImageEditRequest = (artifact.imageEditRequest || {}) as Partial<PendingImageEditRequest>;
+    const sceneGlobalAssetReference = storedImageEditRequest.sceneGlobalAssetReference
+      || sceneGlobalAssetReferenceFromMaterials(artifact.materials || []);
+    if (sceneGlobalAssetReference) {
+      const processedKey = beginArtifactAction(msg, targetConversationId);
+      if (!processedKey) return;
+      releaseArtifactAction(processedKey);
+      await pushSceneGlobalAssetEditOptions(
+        sceneGlobalAssetReference,
+        String(storedImageEditRequest.prompt || artifact.imageRevisionFeedback || "图片编辑"),
+        targetConversationId,
+        (storedImageEditRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
+      );
+      return;
+    }
+    const imagePrepare = artifact.imagePrepare;
+    if (!imagePrepare) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    if (imagePrepare.method === "image_edit" && msg.artifact) {
-      const imageEditRequest = imageEditRequestFromArtifact(msg.artifact, targetConversationId);
+    if (imagePrepare.method === "image_edit") {
+      const imageEditRequest = imageEditRequestFromArtifact(artifact, targetConversationId);
       pendingImageEditRequestRef.current = imageEditRequest;
       releaseArtifactAction(processedKey);
       await showImageEditOptions(imageEditRequest);
@@ -8446,7 +8503,6 @@ export function WorkspacePage() {
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
       };
-      const artifact: ChatArtifact = msg.artifact;
       const started = await api.startImageGenerationJob(request);
       const pendingImageJob: PendingImageJob = {
         job_id: started.job_id,
