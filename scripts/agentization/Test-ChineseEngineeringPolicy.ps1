@@ -154,12 +154,16 @@ function Get-TripleQuotedLineNumbers {
 
     $numbers = New-Object System.Collections.Generic.List[int]
     $delimiter = $null
+    $recordAsDocstring = $false
     for ($index = 0; $index -lt $Lines.Count; $index++) {
         $line = $Lines[$index]
         if ($delimiter) {
-            $numbers.Add($index + 1)
+            if ($recordAsDocstring) {
+                $numbers.Add($index + 1)
+            }
             if ($line.Contains($delimiter)) {
                 $delimiter = $null
+                $recordAsDocstring = $false
             }
             continue
         }
@@ -176,10 +180,18 @@ function Get-TripleQuotedLineNumbers {
             $candidateDelimiter = "'''"
             $startIndex = $singleIndex
         }
-        $numbers.Add($index + 1)
+        # 用途：区分真正的独立 Python docstring 与赋值给变量的普通多行字符串；
+        # 影响：测试夹具中的 YAML/JSON 字符串不再被误报，独立英文 docstring 仍会被拒绝。
+        $recordAsDocstring = [string]::IsNullOrWhiteSpace($line.Substring(0, $startIndex))
+        if ($recordAsDocstring) {
+            $numbers.Add($index + 1)
+        }
         $remaining = $line.Substring($startIndex + 3)
         if (-not $remaining.Contains($candidateDelimiter)) {
             $delimiter = $candidateDelimiter
+        }
+        else {
+            $recordAsDocstring = $false
         }
     }
     return $numbers.ToArray()
