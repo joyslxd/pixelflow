@@ -192,3 +192,17 @@
 - synchronized docs：M04 状态、BOARD、MERGE_LOG、AGENTS、agentization README/architecture、最新流程设计和 M04 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-25 11:53:25 +08:00：M12 阶段 R1 候选通过，模块提交 `af3f7c1ec64044c6c05307b533e4fac621d3c282` 已纳入最新 Agent/dev 基线。
 - 2026-07-25 19:42:25 +08:00：M13 阶段 R1 候选通过，模块提交 `328fb535bb2c03790bd1bb189781b9cd64aa1567` 已纳入最新 Agent/dev 基线。
+
+### 0007 / 2026-07-27 / R1 生产发布
+
+- release：`R1`；唯一发布负责人已使用执行手册 9.17 明确批准 `assist + enabled_intents=[] + 100% + context_compaction=true`
+- production config：`38a782b0d6fdfa7fa3648bb1dce214179e5dba40`；预算保持 `896K/32K/32K`，严格模型档案保持开启，压缩失败退避保持 30 秒
+- model profile：`deepseek-v4-pro.max_context_tokens=1000000`，验证日期 `2026-07-26`，未配置过期时间
+- gate：生产配置定向回归 `95 passed`；M13 / Phase / R1 / M13.1 权威门禁 `Passed=True`、`CommandCount=8`；中文工程门禁通过
+- deployment：发布负责人确认已人工上传发布包并重启，启动日志正常且未报告红线异常；未提供截图
+- reachability：外部未认证访问生产 `/agent/health` 到达认证边界并返回 JSON `401`；该证据不冒充已认证功能 smoke
+- package：发布包 SHA-256 `E38CB918FA6870D5552736A40CD74E44E2C6409E8257C18114FA3199CFCAA31B`
+- rollback：`off / [] / 0 / false` 回滚包 SHA-256 `40657023C3BAE29B67B39C99D3BD1781D1C81680D1934B246D7D1CBE90828733`
+- ownership：现有阶段工作流继续拥有业务推进权；历史对话和运行中任务不迁移
+- exclusions：未执行 M02、M13.2/R2、`primary`、真实付费供应商测试或 Agent→dev 合并
+- synchronized docs：BOARD、M13 状态、MERGE_LOG 和 [R1 生产发布记录](../test-reports/M13.1-R1-production-release.md)
