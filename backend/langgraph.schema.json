@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PixelFlow LangGraph 配置说明",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "用途：声明 LangGraph 配置采用的官方校验规范；影响：修改取值会改变编辑器和工具使用的配置校验规则。"
+    },
+    "python_version": {
+      "type": "string",
+      "description": "用途：固定 LangGraph Runtime 使用的 Python 主次版本；影响：修改后会改变运行环境兼容范围并需要重建环境。"
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "用途：声明 LangGraph Server 装载的本地依赖目录；影响：修改后会改变图工厂和模块的可导入范围。",
+      "items": {
+        "type": "string",
+        "description": "用途：指定一个相对配置文件的依赖路径；影响：取值错误会导致对应 Python 包无法导入。"
+      }
+    },
+    "env": {
+      "type": "string",
+      "description": "用途：指定 LangGraph 工具读取的环境变量文件；影响：修改后只影响新启动的工具或 Server 进程，回滚时恢复原路径并重启。"
+    },
+    "graphs": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "用途：注册工具可加载的图 ID 与工厂；影响：子键变化会改变 Studio 或 LangGraph Server 可启动的图。",
+      "properties": {
+        "pixelflow": {
+          "type": "string",
+          "description": "用途：保留旧 PixelFlow 阶段状态机图工厂；影响：修改会影响历史 /agent/flows 任务的兼容创建和恢复。"
+        },
+        "lead_agent": {
+          "type": "string",
+          "description": "用途：注册 DeerFlow 通用 Agent 图工厂；影响：修改会影响兼容 Runtime 和 Studio 调试入口。"
+        },
+        "pixelflow_agent_runtime": {
+          "type": "string",
+          "description": "用途：注册会话级 Supervisor 新图工厂；影响：修改会影响新 Agent Runtime 图的工具装载，但不会自动迁移旧 pixelflow thread。"
+        }
+      },
+      "required": [
+        "pixelflow",
+        "lead_agent",
+        "pixelflow_agent_runtime"
+      ]
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "用途：配置 LangGraph Server 的鉴权实现；影响：子键变化会改变工具请求的身份校验行为。",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "用途：指定 LangGraph 鉴权工厂的模块路径；影响：修改或导入失败会使受保护的图请求无法完成鉴权。"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "checkpointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "用途：配置 LangGraph Server 的 checkpoint Provider；影响：子键变化会改变 thread 状态的持久化实现。",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "用途：指定异步 checkpointer 工厂的模块路径；影响：修改或导入失败会导致图无法保存和恢复 checkpoint。"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  "required": [
+    "$schema",
+    "python_version",
+    "dependencies",
+    "env",
+    "graphs",
+    "auth",
+    "checkpointer"
+  ]
+}
