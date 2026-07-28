@@ -230,4 +230,30 @@
 - remote guard：候选门禁后脚本重新读取 Agent、dev 和 M02 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同的防漂移检查
 - rollback：如需撤回，基于本记录定位 M02 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M02 状态、BOARD、MERGE_LOG 和 M02.1–M02.4 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
-- 2026-07-28 13:44:07 +08:00：M05 最终模块 候选通过，模块提交 `2c0c0bc7365beca611913318a210bb6d0987102a` 已纳入最新 Agent/dev 基线。
+### 0009 / 2026-07-28 / M05 最终模块集成
+
+- module：`M05`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m05-supervisor@2c0c0bc7365beca611913318a210bb6d0987102a`；M05.5 业务实现与 Final 检查点提交为 `5fe497626f618d9aed2f67c0fef86033442ab786`，后续提交只规范单槽元数据、记录安全阻塞并恢复集成入口
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@38310bb64385fe276edc0ad99c2f996db2c8c1f8` 由脚本原子推进至 `9c6d0937fc0369037377b9c075ddc91d3f55f5bf`；完整交接记录随同一候选再次防漂移快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m05-supervisor@983ee73ad5f9dc017d81beaa827b446d02bfe98a`
+- dependencies：M02 `e77bdcd322cf76d706a7063cf5e64b428c64e109`、M03 `e43b5e96ef177f7da856c8c86de95212cd0826cb`、M04 `7e4f4c34dff47c41c0f8cc9a519d68433fe40a2a` 均已是冻结 Agent 祖先
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：成功候选为 `codex/integrate-m05-20260728-054138-49267ca5`，严格按“最新 Agent + 最新 dev + M05 增量”创建；没有复用 blocked 候选
+- checkpoint：最终模块检查点，计划归属 `release_id=R2`，但 M05 不在中间阶段检查点白名单中；`checkpoint_slice=M05.5`，业务检查点 `5fe497626f618d9aed2f67c0fef86033442ab786`，集成源 HEAD `2c0c0bc7365beca611913318a210bb6d0987102a`，此前 `last_integrated_commit=—`，最终写为集成源 HEAD
+- trigger / single slot：远端状态为 `ready_for_integration`、提交已 push、唯一写入者和模块锁已释放；开发者人工启动唯一单槽任务，最终状态 `merged`，`checkpoint_status=integrated`
+- blocked history：首次调用在候选创建前因 `last_integrated_commit=无` 不符合脚本规范而停止，Agent 和模块远端均未变化；规范为 `—` 后创建候选 `codex/integrate-m05-20260728-053559-3206adb1`，其因本地临时 wrapper 的 UTF-8 无 BOM 与 Windows PowerShell 5.1 解析不兼容而写入 `integration_blocked`，Agent 保持不变。wrapper 改为 PowerShell 5.1 可解析入口后，在保留候选重跑 M05 Final 五项全绿，再恢复 `ready_for_integration` 并从三条最新远端引用创建成功候选
+- file ownership：候选只纳入 M05 Supervisor、M02 图路由适配、黄金集、M05 权威门禁和对应文档；没有执行或修改 M06、M11、M12.5、M13.2 及其他模块切片
+- feature flag：未修改生产运行模式、`enabled_intents`、rollout 比例或 Feature Flag；R1 的 `assist + [] + 100% + context_compaction=true` 生产状态保持不变
+- production：未发布 R2；没有把视频切到 `primary`，没有生产批准或真实供应商调用
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：`Integrate-AgentModule.ps1` 在全新成功候选上运行 M05 Final 并返回 `integrated`；固定五项非付费门禁覆盖 Windows PowerShell 5.1 Pester `43 passed`、Python 3.12、M05 权威 pytest `177 passed, 1 warning`、限定 Ruff 和 `git diff --check`。修复临时 wrapper 后，在保留 blocked 候选预先复跑同一入口也得到 `Passed=True`、`CommandCount=5`
+- quality metrics：51 条中文黄金集 action `50/51（98.04%）`、target `21/22（95.45%）`、歧义追问 `20/21（95.24%）`、计费动作误执行 `0`，均达到 M05 模块门槛
+- reviewer：M05.5 独立复审最终 Critical 0、Important 0、Minor 0，结论 `Ready to commit: Yes`；成功候选再次执行同一冻结范围的权威门禁
+- conflicts：最新 Agent、最新 dev 和 M05 增量合入成功候选时无内容冲突；两次前置阻塞均发生在临时元数据或本地 wrapper，不以手工挑选代码绕过门禁
+- migration/configuration：无 migration、无配置键变化
+- Chinese engineering policy：M05 五个切片、元数据规范化、阻塞恢复、候选中文合并提交、模块状态、BOARD、MERGE_LOG 和最新设计均通过本地中文规范门禁；本次没有新增或修改配置项
+- smoke：只执行 M05 本地非付费权威门禁；未调用真实图片、视频、PPT、剪映、LLM 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一切片，未修改 dev，未发布 R2，未把自动化状态提升为 `automation_active`
+- remote guard：成功候选门禁后脚本重新读取 Agent、dev 和 M05 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同防漂移检查
+- rollback：如需撤回，基于本记录定位 M05 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M05 状态、BOARD、MERGE_LOG、最新流程设计和 M05.5 黄金评估报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API

@@ -971,7 +971,7 @@ corepack pnpm build
 
 当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-26，R1 已完成原单槽集成，当前正在同一 Agent 分支修复真实长视频测试暴露的上下文问题：新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但 `orchestration_mode` 仍固定为 `frontend_v2`，现有图片、视频、PPT 和视频分析阶段工作流继续拥有业务推进权；旧消息 API 复用同一 `client_input_id`，避免双写重复。生产仍保持 `off`，不能把代码修复描述成已经发布。
 
-M05 模块分支的 Supervisor 图路由已经把 M05.3 `DecisionValidator` 接到 M02 图内核入口：校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。该实现尚处于 M05 模块分支，未完成 M05.5 黄金集和最终单槽集成，不代表 R2 已进入 Agent 或生产。
+M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 51 条中文离线黄金集达到 action 98.04%、target 95.45%、歧义追问 95.24%、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
 
 R1 修复后，`ContextBudgetPolicyProvider` 是所有当前和未来 Agent 节点的唯一预算来源：有效窗口 896K、输出预留 32K、安全预留 32K，`K=1024 tokens`；DeepSeek V4 Pro 的物理档案为 1,000,000 tokens。新增或修改 Agent/流程只提供用于审计的节点名，不得定义另一套窗口。实际 Runtime 严格校验档案，128K 只保留为底层兼容测试。Plan 修订恢复请求等大型恢复快照继续保存在 Conversation Store，但不重复进入模型 Prompt。
 
