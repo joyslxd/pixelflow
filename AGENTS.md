@@ -22,7 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
-| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 模块分支已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义；最终本地门禁已绿，等待人工单槽集成，尚未进入 Agent 长期分支 |
+| R2 External Job Coordinator | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义，并通过 Final 单槽集成进入 Agent 长期分支；生产仍保持 R1 `assist`，后续 Workflow 接线与 R2 发布继续受独立门禁约束 |
 | R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py`、`scene_packages.py` | 视频领域 Application Service + 权威 DTO | M11.1–M11.2 已冻结 intake/方向/Plan 及严格继承 Plan 的场景包与全局资产图；尚未接 Supervisor、供应商 Operation 或生产路由 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
