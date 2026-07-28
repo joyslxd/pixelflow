@@ -174,11 +174,39 @@ plan_review（等待人工审核）
 输入 HTTPS URL 集合。四类全局 ID 唯一，单镜最多 9 个引用，每个角色/场景/道具只
 接受一个 HTTPS 图片 URL，并按 `asset_id` 回填 mentions；同一资产跨镜复用但不重复创建资产记录。
 
-M11.2 没有注册 Supervisor handler，也没有接入供应商或付费 API。真实供应商 Operation、部分资产
-失败、额度暂停、重试、分镜生成与单镜修改属于 M11.3；merge/QC 属于 M11.4，剪映投影属于 M11.5。
-因此当前 v2、R1 `assist` 与生产 `off` 行为不变。后续接线必须复用现有 PowerMem helper、持久化
-Operation 和统一 `ContextBudgetPolicyProvider`，不得把 PowerMem HTTP、模型窗口常量或底层 128K
-兼容值写入本 Service。
+M11.2 没有注册 Supervisor handler，也没有接入供应商或付费 API。分镜 Operation、部分失败、
+额度暂停、重试和单镜修改由 M11.3 的独立 Service 承接；merge/QC 属于 M11.4，剪映投影属于 M11.5。
+
+### 4.3 M11.3 可恢复分镜生成、部分失败与单镜修改候选
+
+`backend/pixelflow/agent_workflows/video/video_generation.py` 新增
+`VideoSceneGenerationWorkflowService`。它类比 Java 的 Application Service：只消费 M11.2 人工确认后的
+权威场景包，为每个分镜通过 `OperationPort` 领取独立 Operation，首次必须覆盖全部分镜；刷新只查询原
+`job_id`，丢失时失败关闭，禁止用调用方传入的旧视频或场景子集绕过首次生成。pending 请求在每次恢复、
+Runtime 投影和结果回写前，都会从当前权威场景、合同及 pending scene ID 机械重建；模型、比例、清晰度、
+声音、真实整数秒时长、Prompt、参考 URL、mode 及业务幂等键任一漂移都会失败关闭。
+
+`VideoSceneAtomicOperationPort` 是 M11 对 M00 `OperationPort` 的视频专用 fail-closed 扩展合同。成功或失败
+终态必须原子绑定 `stage_version + Operation 身份 + provider_job_id + status + result_hash`；真实 M06
+适配尚未提供该原子能力时不得执行终态回写。当前状态会持久化每镜 terminal claim，并在恢复时重新计算
+成功的 `task_id/video_url/mode/endpoint/raw` 或失败的 `error/attempts/retryable/quota/raw` 摘要，防止把
+不可重试 4xx 篡改成新的计费重试，也防止并发 success/failure 或不同成功 URL 互相覆盖。
+
+额度不足使用统一 `is_quota_insufficient()` 识别 HTTP 402 和业务文案。首个额度失败立即阻止后续
+Provider start：只有可证明为 `CREATED` 且没有 `provider_job_id` 的兄弟 Operation 才会原子冻结为
+`quota_not_started`；已经 `POLLING` 或绑定 Provider ID 的兄弟继续查询原 job，绝不创建第二个任务。
+批量冻结中途崩溃后，同一输入会校验既有 result hash 并幂等补完。充值后的重试只领取 retryable 或
+quota-paused 分镜，已成功视频保持复用；HTTP 4xx、价格配置和能力不匹配必须先修改输入或分镜。
+
+单镜修改只允许故事线、镜头描述、旁白和引用资产，分镜身份、顺序、时长、转场及其他供应商字段保持
+不可变。修改后的秒级连续时间线、`@asset_id`、mentions 和最多 9 张参考图重新校验，Prompt 由同一机械
+函数重建；系统分别保存“已授权编辑谱系”和“待重生成 dirty 集合”，成功后只清除 dirty 标记，仍保留
+权威编辑谱系。实时 `generation_types` 非空时必须作为权威能力，未知或不兼容值失败关闭；每镜时长还必须
+属于实时 `durations_sec`，空能力快照才按旧合同 unknown 处理。
+
+M11.3 仍未注册 Supervisor handler，也未接入真实 content-app、LLM、PowerMem 或付费供应商，因此当前
+v2、R1 `assist` 与生产 `off` 行为不变。后续接线必须复用 PowerMem helper、持久化 Operation 和统一
+`ContextBudgetPolicyProvider`，不得把 PowerMem HTTP、模型窗口常量或底层 128K 兼容值写入本 Service。
 
 ## 5. Skill 清单
 

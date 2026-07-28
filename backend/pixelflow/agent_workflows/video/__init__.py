@@ -12,6 +12,16 @@ from .scene_packages import (
     VideoScenePackageWorkflowService,
     VideoScenePackageWorkflowState,
 )
+from .video_generation import (
+    VideoSceneAtomicOperationPort,
+    VideoSceneGenerationStage,
+    VideoSceneGenerationWorkflowService,
+    VideoSceneGenerationWorkflowState,
+    VideoSceneOperationTerminalClaim,
+    VideoSceneVideoStage,
+    VideoSceneVideoWorkflowService,
+    VideoSceneVideoWorkflowState,
+)
 
 __all__ = [
     "VideoPlanAuthoritySnapshot",
@@ -22,4 +32,12 @@ __all__ = [
     "VideoScenePackageStage",
     "VideoScenePackageWorkflowService",
     "VideoScenePackageWorkflowState",
+    "VideoSceneGenerationStage",
+    "VideoSceneGenerationWorkflowService",
+    "VideoSceneGenerationWorkflowState",
+    "VideoSceneAtomicOperationPort",
+    "VideoSceneOperationTerminalClaim",
+    "VideoSceneVideoStage",
+    "VideoSceneVideoWorkflowService",
+    "VideoSceneVideoWorkflowState",
 ]

@@ -591,13 +591,14 @@ Describe "Agent 分支自动化入口" {
     }
 
     It "M11 门禁固定视频 Workflow 后端全组与前端回归" {
-        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M11" -GateType "Slice" -Slice "M11.2" -PlanOnly)
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M11" -GateType "Slice" -Slice "M11.3" -PlanOnly)
         $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
         $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
         $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
         $expectedTests = @(
             "tests/test_agent_video_workflow_planning.py",
             "tests/test_agent_video_workflow_scene_packages.py",
+            "tests/test_agent_video_workflow_generation.py",
             "tests/test_pixelflow_intake_router.py",
             "tests/test_pixelflow_planning_router.py",
             "tests/test_creative_plan_markdown.py",
