@@ -88,6 +88,12 @@ class VideoSceneAtomicOperationPort(OperationPort, Protocol):
         result_hash: str,
     ) -> VideoSceneOperationTerminalClaim: ...
 
+    async def get_scene_operation_terminal_claim(
+        self,
+        *,
+        job_id: str,
+    ) -> VideoSceneOperationTerminalClaim | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class VideoSceneGenerationWorkflowState:

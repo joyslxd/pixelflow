@@ -263,6 +263,7 @@ elseif ($ModuleId -eq "M11") {
         "tests/test_agent_video_workflow_scene_packages.py",
         "tests/test_agent_video_workflow_generation.py",
         "tests/test_agent_video_workflow_postproduction.py",
+        "tests/test_agent_video_workflow_delivery.py",
         "tests/test_pixelflow_intake_router.py",
         "tests/test_pixelflow_planning_router.py",
         "tests/test_creative_plan_markdown.py",

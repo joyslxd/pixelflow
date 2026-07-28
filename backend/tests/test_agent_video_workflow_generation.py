@@ -121,6 +121,15 @@ class _AtomicFakeOperationPort(FakeOperationPort):
             self._terminal_result_hashes[current.job_id] = result_hash
             return VideoSceneOperationTerminalClaim(job=saved, result_hash=result_hash)
 
+    async def get_scene_operation_terminal_claim(self, *, job_id):
+        """读取可信假 Repository 中的分镜 Operation 终态。"""
+
+        job = await self.get(job_id)
+        result_hash = self._terminal_result_hashes.get(job_id)
+        if job is None or result_hash is None:
+            return None
+        return VideoSceneOperationTerminalClaim(job=job, result_hash=result_hash)
+
     async def finalize_video_operation(self, *, result_type, payload, stage_version, **kwargs):
         """为 M11.4 原子保存可查询的完整业务终态。"""
 

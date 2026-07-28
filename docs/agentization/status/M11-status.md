@@ -1,6 +1,6 @@
 # M11 视频生成 Workflow Adapter
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：B
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m11-video-workflow`
@@ -15,6 +15,8 @@
 - M11.3 完成时间：`2026-07-28 13:51:46 +08:00`
 - M11.4 开始时间：`2026-07-28 14:06:40 +08:00`
 - M11.4 完成时间：`2026-07-28 15:35:27 +08:00`
+- M11.5 开始时间：`2026-07-28 16:40:26 +08:00`
+- M11.5 完成时间：`2026-07-28 17:52:22 +08:00`
 
 ## 切片
 
@@ -22,7 +24,7 @@
 - [x] M11.2 场景包/全局资产图（3h）
 - [x] M11.3 分镜生成/部分失败/单镜修改（3h）
 - [x] M11.4 merge/QC/402/修改循环/最终结束（3h）
-- [ ] M11.5 剪映/版本/历史/下载（2h）
+- [x] M11.5 剪映/版本/历史/下载（2h）
 
 ## 恢复提示
 
@@ -88,3 +90,24 @@
 - 报告：完整证据见 `docs/agentization/test-reports/M11.4.md`。
 - 提交与推送：本状态随 M11.4 独立中文提交推送到 `origin/codex/agent-0.8.4-m11-video-workflow`。
 - 下一步：后续开发者重新执行安全预检并取得唯一写入权后，串行开始 `M11.5 剪映/版本/历史/下载`；本次不进入 M11.5。
+
+## M11.5 完成记录
+
+- 依赖与预检：本地 `HEAD`、远端 tracking 与远端模块分支均为 M11.4 提交 `ba2ae317f97851574b1195bcacfff584ac2e891f`；复用既有模块分支和 worktree，未修改两个长期 feature 分支，未创建切片分支或切片 worktree。
+- 实现：新增 `VideoDeliveryWorkflowService`，固化当前成功分镜生成剪映 DTO、FNV-1a 版本、历史入口、失败显式重试、1800 秒总超时以及草稿/最终视频两类下载投影。
+- 权威与幂等：M11.3 分镜终态、M11.4 后处理终态及剪映终态均回查可信 Repository；运行中和未过期成功任务按当前版本复用，`failed/timeout` 只有用户显式重试才创建下一 attempt，capability 不可用不创建空 Operation。
+- 交付语义：剪映只使用按 `scene_index` 排序的当前全部成功分镜，绝不使用合并视频；草稿 ZIP 下载只写历史，不完成“导出交付”，只有当前合并成品视频的明确下载才写 `deliveryDownloadedAt/deliveryDownloadedUrl`。新视频版本保留旧草稿历史，但清除旧最终视频下载证据。
+- 安全：失败结果移除 Provider ID、URL、文件名和过期时间，只保留安全公开消息；请求、Operation identity、stage version、来源 Artifact 和结果摘要任一漂移均失败关闭。
+- TDD：经历模块缺失、capability 空任务、pending 伪造、失败非公开字段、`not_configured` 恢复、公开错误、retry envelope、可信分镜终态、capability 状态伪造和 1800 秒超时等多轮 RED/GREEN，最终 M11.5 专项 `19 passed`。
+- 最终验证：M11 后端权威清单 `566 passed, 1 warning`，Feature Flag 关闭回归 `4 passed, 1 warning`，Web 全量 `305 passed`，BranchAutomation `43 passed`；Ruff、lint、build-prod、`git diff --check` 和中文工程规范通过。`Invoke-AgentModuleGate.ps1 -ModuleId M11 -GateType Final` 返回 `Passed=True / CommandCount=7`。唯一 warning 为既有 LangGraph pending deprecation。
+- 审核：独立只读 reviewer `/root/m11_5_independent_review` 最终结论 `Critical=0 / Important=0 / Minor=0 / Ready=Yes`；独立复跑 M11.3–M11.5 `67 passed`、剪映后端组合 `135 passed`、Web `305 passed`，并确认审核冻结 SHA 与收尾工作区一致。
+- 外部调用：未调用真实 content-app、LLM、PowerMem、图片、视频、PPT、剪映或其他付费供应商 API；未新增配置、依赖或锁文件变更。
+- 阶段：M11.5 是模块最后一片且不是 `phased-rollout-plan.md` 的中间检查点；完整模块门禁绿色后写 `ready_for_integration`，不更新 `status/BOARD.md` 或 `integration/MERGE_LOG.md`，不直接启动单槽集成。
+- 报告：完整证据见 `docs/agentization/test-reports/M11.5.md`。
+- 提交与推送：本状态随 M11.5 独立中文提交推送到 `origin/codex/agent-0.8.4-m11-video-workflow`。
+- 下一步：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术并明确模块号 `M11`，手动启动唯一单槽最终集成；不得继续不存在的 M11.6，也不得由本任务更新两个长期 feature 分支。
+
+- last_integrated_commit：`—`
+- locked files：`无`
+- checkpoint_status：`ready`
+- integration failure evidence：`无`

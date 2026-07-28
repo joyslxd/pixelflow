@@ -1,5 +1,6 @@
 """视频生成 Workflow 的阶段 Service 与权威业务快照。"""
 
+from .delivery import VideoDeliveryWorkflowService, VideoDeliveryWorkflowState
 from .planning import (
     VideoPlanAuthoritySnapshot,
     VideoPlanningStage,
@@ -35,6 +36,8 @@ from .video_generation import (
 )
 
 __all__ = [
+    "VideoDeliveryWorkflowService",
+    "VideoDeliveryWorkflowState",
     "VideoPlanAuthoritySnapshot",
     "VideoPlanningStage",
     "VideoPlanningWorkflowService",

@@ -112,7 +112,7 @@ flowchart TD
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py`、`creative/seedance_plan.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频先生成总分总结构、镜头调度、精确时长和资产清单；稳定 `asset_id` 后调用 Seedance Skill 专门写作全部分镜，严格校验后再发布 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan 与场景包权威快照、参考图、场景视频、合并视频 | M11.1–M11.2 已冻结 Plan 和场景包 Application Service；场景包只机械继承 Plan 蓝图与资产引用，不得另写一套故事；生产仍走原 v2 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`agent_workflows/video/video_generation.py`、`agent_workflows/video/postproduction.py`、`agent_workflows/video/delivery.py`、`pixelflow_video.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan、场景包、分镜视频、合并/QC、剪映历史与下载投影的权威快照 | M11.1–M11.5 已形成完整候选 Application Service 链；尚未注册 Supervisor handler，生产仍走原 v2 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、下载校验第三方 ZIP 并通过 content-app 原样上传 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
@@ -241,6 +241,34 @@ Runtime 投影只公开稳定的场景包、分镜视频、合并视频和 QC Ar
 
 M11.4 仍未注册 Supervisor handler，也未接入真实 content-app、PowerMem 或付费供应商。当前测试只使用
 本地 fake 验证 Operation、Skill 参数和修改循环；生产 v2、R1 `assist` 和 Feature Flag 行为保持不变。
+
+### 4.5 M11.5 剪映版本、历史入口与下载投影候选
+
+`backend/pixelflow/agent_workflows/video/delivery.py` 新增
+`VideoDeliveryWorkflowService`，只消费 M11.4 已合并、没有 pending 后处理 Operation，且处于
+`video_review/awaiting_user` 或用户明确结束后的权威状态。它从当前版本全部成功分镜机械构建
+`JianyingDraftRequest`，按 `scene_index` 排序并复用既有 FNV-1a
+`compute_storyboard_version_id()`；合并视频只作为最终下载目标，绝不进入剪映 scenes。
+
+剪映生成沿用 M11.4 的两阶段原子启动合同。capability 不可用或查询失败时不创建空 Operation；可用时
+`conversation_id + storyboard_version_id` 对应的请求摘要、显式 `retry_failed`、attempt 和幂等键会冻结在
+pending envelope。刷新只查询原 `job_id`，终态必须从可信 Repository 恢复并交叉验证 Operation identity、
+stage version、请求摘要、分镜数量、来源分镜 Artifact 和公开结果 DTO；嵌套的 M11.3 分镜终态也必须通过
+`get_scene_operation_terminal_claim` 逐项回查完整 job/result hash，不能用本地自洽 checkpoint 派生新的
+`storyboard_version_id`。Skill 总等待沿用既有 1800 秒上限，超时原子落为可显式重试的 `timeout`。
+运行中及未过期成功结果幂等复用；`failed/timeout` 只有用户显式重试才创建下一 attempt。失败结果会移除
+下载 URL、文件名和 Provider 内部 ID，只保留经过敏感信息过滤的公开消息；未配置状态不伪造成已创建任务。
+
+新分镜版本继续保留旧 `jianyingDraftRecords` 历史入口，但清除旧合并视频的最终下载证据。剪映 ZIP 下载
+只在对应历史记录写 `draftDownloadedAt/draftDownloadedUrl`，不会完成任务看板“导出交付”；只有当前
+`video_artifact_ref` 对应的合并成品视频被明确下载，才投影
+`deliveryDownloadedAt/deliveryDownloadedUrl`。同一合并视频在人工结束后保留草稿历史与下载证据，
+新合并版本不得继承旧证据。
+
+该候选复用现有 `JianyingDraftSkill` DTO 和剪映 Router/Service 的输入、版本与公开终态语义，但没有改写
+现有 Router、进程内 job registry 或第三方/content-app 调用合同，也未注册 Supervisor handler。M12.5/M13
+后续接线负责把 Runtime Artifact 映射到消息与对话上下文；当前生产 v2、R1 `assist`、Feature Flag、
+PowerMem 调用和真实供应商路径均保持不变。
 
 ## 5. Skill 清单
 
