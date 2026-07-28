@@ -286,3 +286,30 @@
 - rollback：如需撤回，基于本记录定位 M11 候选中的业务、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M11 状态、BOARD、MERGE_LOG 和 M11.1–M11.5 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-28 20:15:27 +08:00：M06 最终模块 候选通过，模块提交 `e8ed2be676304da00a7cc391eabb26a86cbf2aed` 已纳入最新 Agent/dev 基线。
+
+### 0011 / 2026-07-28 / M06 最终模块集成
+
+- module：`M06`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m06-external-jobs@e8ed2be676304da00a7cc391eabb26a86cbf2aed`；M06.5 业务实现提交为 `92108ff02a8ef46d0cab8d85aacd5be945185373`，后续提交只记录首次阻塞、共享文档冲突恢复和最新 Agent 防漂移复验
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@15a3ff2ef43b01acda5465a06b3c56af259d039d` 由脚本原子推进至 `e3d0a85eaf4616a68033e5de9f1a994ee201b9c5`；完整交接记录随同一成功候选再次防漂移快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m06-external-jobs@84c3899925a513cf80fc604a7c34932910ddf27e`
+- dependencies：M01 `337a19124000892d319250497c56645821197ebb`、M02 `e77bdcd322cf76d706a7063cf5e64b428c64e109` 均已是冻结 Agent 祖先
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：成功候选为 `codex/integrate-m06-20260728-121304-1f633dea`，严格按“最新 Agent + 最新 dev + M06 增量”创建；没有复用 blocked 候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M06.5`，冲突恢复后的检查点 `afff44c5b389ffa57db18ea89d3208506fb0a89d`，集成源 HEAD `e8ed2be676304da00a7cc391eabb26a86cbf2aed`，此前 `last_integrated_commit=—`，最终写为集成源 HEAD
+- trigger / single slot：远端状态恢复为 `ready_for_integration`、提交已 push、M06 不属于中间阶段检查点白名单且只允许 Final；唯一写入者和模块锁已释放，开发者明确授权本任务重新执行 9.10A，最终状态 `merged`、`checkpoint_status=integrated`
+- blocked history：首次候选 `codex/integrate-m06-20260728-112612-f2a7b3d2` 在合并阶段因 M11/M06 同时修改 `AGENTS.md` 和 `README.md` 的共享能力表而安全写入 `integration_blocked`，Agent 保持不变。原模块分支随后纳入最新 Agent，确定性保留 M11 与 M06 两条能力说明；第一次恢复门禁期间 Agent 又前进到 `15a3ff2ef43b01acda5465a06b3c56af259d039d`，任务按防漂移规则拒绝 push，再纳入最新基线并重复执行 Final 绿色后才恢复入口和创建全新成功候选
+- file ownership：候选只纳入 M06 External Job Coordinator、M11 已集成的 Agent 基线、权威门禁、测试和交接记录；没有执行 M12.5、M13.2 或其他模块切片
+- feature flag：未修改生产运行模式、`enabled_intents`、rollout 比例或 Feature Flag；R1 的 `assist + [] + 100% + context_compaction=true` 生产状态保持不变
+- production：未发布 R2；没有把视频切到 `primary`，没有生产批准或真实供应商调用
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：模块恢复 HEAD 和全新成功候选均执行 M06 Final 五项权威非付费门禁并返回 `Passed=True / CommandCount=5`；固定范围覆盖 Windows PowerShell 5.1 分支自动化、Python 3.12、Operation 状态机/租约/Provider Adapter/完成事件/重启恢复/旧流程的权威 pytest 清单、限定 Ruff 和 `git diff --check`
+- reviewer：M06.5 既有独立 reviewer `/root/m06_5_reviewer_fast` 最终结论 Critical / Important / Minor 均为 0，`Ready to commit/push：是`；冲突恢复只合并两条独立文档事实，成功候选再次执行同一冻结范围的权威门禁
+- conflicts：首次候选的两个文档冲突没有在 blocked 候选上续写；恢复提交 `585a54449d7e2995790932be0a6bade1d74bd893` 保留 M11/M06 两条能力说明，`afff44c5b389ffa57db18ea89d3208506fb0a89d` 再纳入门禁期间前进的 Agent。成功候选合入最新 M06 增量时无内容冲突
+- migration/configuration：无 migration、无配置键变化；M06 复用 M01 已落库的 Operation/Event 字段
+- Chinese engineering policy：M06 五个切片、阻塞/恢复提交、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁；本次没有新增或修改配置项
+- smoke：只执行 M06 本地 fake/mock 非付费权威门禁；未调用真实 content-app、图片、视频、PPT、视频分析、剪映、LLM、PowerMem 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一切片，未修改 dev，未发布 R2，未把自动化状态提升为 `automation_active`
+- remote guard：成功候选门禁后脚本重新读取 Agent、dev 和 M06 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同防漂移检查
+- rollback：如需撤回，基于本记录定位 M06 候选中的业务、恢复、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M06 状态、BOARD、MERGE_LOG、AGENTS、README、最新流程设计和 M06.1–M06.5 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
