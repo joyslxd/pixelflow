@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -38,6 +39,7 @@ class VideoPlanningStage(StrEnum):
     DIRECTION_REVIEW = "direction_review"
     PLAN_GENERATION = "plan_generation"
     PLAN_REVIEW = "plan_review"
+    PLAN_APPROVED = "plan_approved"
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -95,6 +97,38 @@ class VideoPlanAuthoritySnapshot:
         """返回独立副本，供 checkpointer 或 Artifact Repository 持久化。"""
 
         return self._payload()
+
+    def validate(self) -> None:
+        """重新校验恢复或直接构造的快照，防止历史权威数据被绕过。"""
+
+        payload = self._payload()
+        required_fields = {
+            "plan_markdown",
+            "plan_version",
+            "plan_history",
+            "creation_contract",
+            "scene_durations_sec",
+            "scene_blueprints",
+            "asset_manifest",
+            "restored_from_version",
+        }
+        if set(payload) != required_fields:
+            raise ValueError("Plan 权威快照字段必须完整且不得包含额外字段")
+        candidate = PlanMarkdownResult(
+            output_type="video",
+            plan_markdown=payload["plan_markdown"],
+            template_path=Path("video-plan-authority-snapshot.md"),
+            plan_version=payload["plan_version"],
+            plan_history=payload["plan_history"],
+            creation_contract=payload["creation_contract"],
+            scene_durations_sec=payload["scene_durations_sec"],
+            scene_blueprints=payload["scene_blueprints"],
+            asset_manifest=payload["asset_manifest"],
+            restored_from_version=payload["restored_from_version"],
+        )
+        validated = _validated_plan_payload(candidate)
+        if _canonical_json(validated, field_name="重新校验 Plan 权威快照") != self._payload_json:
+            raise ValueError("Plan 权威快照与规范化权威数据不一致")
 
     def _payload(self) -> dict[str, Any]:
         return json.loads(self._payload_json)
@@ -404,6 +438,25 @@ class VideoPlanningWorkflowService:
             stage=VideoPlanningStage.PLAN_REVIEW,
             status=WorkflowStatus.AWAITING_USER,
             active_plan=candidate,
+            now=now,
+        )
+
+    def approve_plan(
+        self,
+        state: VideoPlanningWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoPlanningWorkflowState:
+        """持久化用户显式同意动作，避免等待审核状态被误当成已审核。"""
+
+        _require_stage(state, VideoPlanningStage.PLAN_REVIEW)
+        if state.status is not WorkflowStatus.AWAITING_USER:
+            raise ValueError("只有等待人工审核的 Plan 才能记录用户同意")
+        _required_active_plan(state).validate()
+        return self._advance(
+            state,
+            stage=VideoPlanningStage.PLAN_APPROVED,
+            status=WorkflowStatus.RUNNING,
             now=now,
         )
 

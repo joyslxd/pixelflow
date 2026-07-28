@@ -6,10 +6,20 @@ from .planning import (
     VideoPlanningWorkflowService,
     VideoPlanningWorkflowState,
 )
+from .scene_packages import (
+    VideoScenePackageAuthoritySnapshot,
+    VideoScenePackageStage,
+    VideoScenePackageWorkflowService,
+    VideoScenePackageWorkflowState,
+)
 
 __all__ = [
     "VideoPlanAuthoritySnapshot",
     "VideoPlanningStage",
     "VideoPlanningWorkflowService",
     "VideoPlanningWorkflowState",
+    "VideoScenePackageAuthoritySnapshot",
+    "VideoScenePackageStage",
+    "VideoScenePackageWorkflowService",
+    "VideoScenePackageWorkflowState",
 ]

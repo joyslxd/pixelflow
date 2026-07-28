@@ -112,7 +112,7 @@ flowchart TD
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py`、`creative/seedance_plan.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频先生成总分总结构、镜头调度、精确时长和资产清单；稳定 `asset_id` 后调用 Seedance Skill 专门写作全部分镜，严格校验后再发布 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan 与场景包权威快照、参考图、场景视频、合并视频 | M11.1–M11.2 已冻结 Plan 和场景包 Application Service；场景包只机械继承 Plan 蓝图与资产引用，不得另写一套故事；生产仍走原 v2 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、下载校验第三方 ZIP 并通过 content-app 原样上传 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
@@ -153,10 +153,32 @@ intake
 只能切换到既有版本，不能新增或重写历史。现有恢复 Service 仅清理正文首尾空白时，快照重新绑定
 历史原文；其他内容差异继续 fail-closed。
 
-M11.1 尚未注册 Supervisor handler，也没有实现 M11.2 的场景包/全局资产图、M11.3 的供应商
-Operation、M11.4 的 merge/QC 或 M11.5 的剪映投影，因此当前 v2、R1 `assist` 与生产 `off`
-行为不变。后续接线必须复用现有 PowerMem helper 和统一 `ContextBudgetPolicyProvider`，不得把
-PowerMem HTTP、模型窗口常量或底层 128K 兼容值写入本 Service。
+### 4.2 M11.2 视频场景包与全局资产图候选
+
+`backend/pixelflow/agent_workflows/video/scene_packages.py` 新增
+`VideoScenePackageWorkflowService`，类比只允许消费已审核 DTO 的 Java Application Service。
+入口不信任直接构造或恢复的快照，会重新校验当前 Plan、完整连续历史、用户确认合同、分镜蓝图、
+资产并集和内容校验和，然后确定性进入：
+
+```text
+plan_review（等待人工审核）
+  -> plan_approved（显式同意动作已持久化）
+  -> generate_scene_assets
+  -> scene_package_review（必须人工确认，无倒计时）
+```
+
+`VideoScenePackageAuthoritySnapshot` 用规范 JSON 和 SHA-256 冻结来源 Plan 版本/校验和、输入素材图片 URL、
+精确总时长、创作合同、四类全局资产和场景包。蓝图 `scene_id/scene_index`、标题、时长、故事线、镜头正文、旁白、
+转场和确定性执行提示词必须逐项继承；`@asset_id` 仅允许由同一机械函数绑定，正文后追加故事、供应商
+额外字段或提示词改写都会失败关闭。执行提示词显式携带合同 `video_model`；素材图片必须逐镜完整继承
+输入 HTTPS URL 集合。四类全局 ID 唯一，单镜最多 9 个引用，每个角色/场景/道具只
+接受一个 HTTPS 图片 URL，并按 `asset_id` 回填 mentions；同一资产跨镜复用但不重复创建资产记录。
+
+M11.2 没有注册 Supervisor handler，也没有接入供应商或付费 API。真实供应商 Operation、部分资产
+失败、额度暂停、重试、分镜生成与单镜修改属于 M11.3；merge/QC 属于 M11.4，剪映投影属于 M11.5。
+因此当前 v2、R1 `assist` 与生产 `off` 行为不变。后续接线必须复用现有 PowerMem helper、持久化
+Operation 和统一 `ContextBudgetPolicyProvider`，不得把 PowerMem HTTP、模型窗口常量或底层 128K
+兼容值写入本 Service。
 
 ## 5. Skill 清单
 
@@ -705,6 +727,7 @@ Plan 审核与版本规则：
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包逐项消费该版本 `scene_blueprints[].asset_requirements + asset_manifest` 并重建 `@asset_id`/mentions，不使用第二次 LLM 或自由 prompt 改写最终资产。`asset_requirements` 只允许可生图实体，时间段、钩子/收束、段落编号、运镜、声音、风格规格和 `@图片N/@视频N` 均非法；初次生成和 Agent 修订会调用定向 LLM 修正资产数组，发布前再校验清单并集，失败时不创建参考图任务。
 - 场景包的 `characters/scenes/props/visual_style` 四类全局 ID 必须唯一；规范化前先保护已有 `@asset_id`，避免二次替换。任一分镜引用超过 9 张时返回包含分镜标识和引用数量的错误，不允许截断后继续生成。
+- M11.2 的权威快照还锁定场景包允许字段集合和确定性执行提示词；恢复到 `generate_scene_assets` 时必须重新建立 Plan 校验和、版本、合同、蓝图、资产图与快照内容之间的完整校验链。每项生成资产必须恰好提供一个 HTTPS URL，回填只允许增加同 `asset_id` mention 的 `image_url`，不得改写正式名称、说明、生图提示词或镜头正文。
 
 场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：
 

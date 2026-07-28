@@ -260,6 +260,7 @@ elseif ($ModuleId -match "^M(07|12)$") {
 elseif ($ModuleId -eq "M11") {
     $m11Tests = @(
         "tests/test_agent_video_workflow_planning.py",
+        "tests/test_agent_video_workflow_scene_packages.py",
         "tests/test_pixelflow_intake_router.py",
         "tests/test_pixelflow_planning_router.py",
         "tests/test_creative_plan_markdown.py",
