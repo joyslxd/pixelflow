@@ -32,6 +32,14 @@ from pixelflow.agent_runtime.graph import (
     resume_graph_from_interrupt,
     supervisor_namespace,
 )
+from pixelflow.agent_runtime.supervisor import (
+    ActionClassificationCandidate,
+    ActionClassificationRequest,
+    ActionClassificationTarget,
+    DecisionValidationRequest,
+    DeterministicResolution,
+    DeterministicResolutionStatus,
+)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 7, 28, tzinfo=UTC)
@@ -61,7 +69,7 @@ def _workflow(
     )
 
 
-def _decision() -> ActionDecision:
+def _decision(conversation_id: str) -> ActionDecision:
     """构造一条显式定位既有 Workflow 的继续命令。"""
 
     return ActionDecision(
@@ -75,7 +83,7 @@ def _decision() -> ActionDecision:
         clarification_question=None,
         patch={},
         reason_code="explicit_target",
-        idempotency_key="turn-1:continue",
+        idempotency_key=f"decision:turn-{conversation_id}",
     )
 
 
@@ -83,6 +91,35 @@ def _state(conversation_id: str, *, current_input: str = "继续") -> dict:
     """生成可直接交给 Supervisor 图的测试状态。"""
 
     workflow = _workflow(conversation_id=conversation_id)
+    decision = _decision(conversation_id)
+    candidate = ActionClassificationCandidate(
+        workflow_id=workflow.workflow_id,
+        intent=AgentIntent.IMAGE,
+        status=workflow.status,
+        current_stage=workflow.current_stage,
+        stage_version=workflow.stage_version,
+        context_version=workflow.context_version,
+        allowed_actions=(AgentAction.CONTINUE_WORKFLOW,),
+        targets=(
+            ActionClassificationTarget(
+                target_stage=workflow.current_stage,
+            ),
+        ),
+    )
+    classification_request = ActionClassificationRequest(
+        turn_id=f"turn-{conversation_id}",
+        content=current_input,
+        deterministic_resolution=DeterministicResolution(
+            status=DeterministicResolutionStatus.RESOLVED,
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.IMAGE,
+            target_workflow_id=workflow.workflow_id,
+            target_stage=workflow.current_stage,
+            reason_code="explicit_target",
+            candidate_workflow_ids=(workflow.workflow_id,),
+        ),
+        candidates=(candidate,),
+    )
     return {
         "conversation_id": conversation_id,
         "user_id": f"user-{conversation_id}",
@@ -92,7 +129,14 @@ def _state(conversation_id: str, *, current_input: str = "继续") -> dict:
         "context_version": 1,
         "workflows": {workflow.workflow_id: workflow},
         "active_workflow_id": workflow.workflow_id,
-        "decision": _decision(),
+        "decision": decision,
+        "decision_validation_request": DecisionValidationRequest(
+            decision=decision,
+            classification_request=classification_request,
+            current_candidates=(candidate,),
+            expected_context_version=1,
+            current_context_version=1,
+        ),
     }
 
 
@@ -183,9 +227,7 @@ async def test_composed_graph_resumes_original_sqlite_interrupt_after_reopen(
     database_path = tmp_path / "m02-composition.db"
     namespace = supervisor_namespace("conv-sqlite")
 
-    async with AsyncSqliteSaver.from_conn_string(
-        str(database_path)
-    ) as first_checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(str(database_path)) as first_checkpointer:
         await first_checkpointer.setup()
         first_graph = make_agent_runtime_graph(
             registry=_registry(_InterruptingHandler()),
@@ -198,9 +240,7 @@ async def test_composed_graph_resumes_original_sqlite_interrupt_after_reopen(
         interrupted = await first_graph.aget_state(namespace.as_runnable_config())
         original_interrupt_id = interrupted.interrupts[0].id
 
-    async with AsyncSqliteSaver.from_conn_string(
-        str(database_path)
-    ) as restarted_checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(str(database_path)) as restarted_checkpointer:
         await restarted_checkpointer.setup()
         restarted_graph = make_agent_runtime_graph(
             registry=_registry(_InterruptingHandler()),
@@ -266,25 +306,16 @@ async def test_gateway_graph_runtime_reuses_shared_checkpointer_and_cleans_state
 
     assert runtime.closed is True
     assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
-    assert [
-        item
-        async for item in checkpointer.alist(
-            {"configurable": {"thread_id": "still-open"}}
-        )
-    ] == []
+    assert [item async for item in checkpointer.alist({"configurable": {"thread_id": "still-open"}})] == []
 
 
 def test_langgraph_registry_adds_new_graph_without_replacing_old_graph() -> None:
     """工具注册表新增独立图 ID，同时保留旧 PixelFlow 图入口。"""
 
-    config = json.loads(
-        (BACKEND_ROOT / "langgraph.json").read_text(encoding="utf-8")
-    )
+    config = json.loads((BACKEND_ROOT / "langgraph.json").read_text(encoding="utf-8"))
 
     assert AGENT_RUNTIME_GRAPH_ID == "pixelflow_agent_runtime"
     assert config["graphs"]["pixelflow"] == "pixelflow:make_pixelflow_graph"
     assert config["graphs"]["lead_agent"] == "deerflow.agents:make_lead_agent"
-    assert config["graphs"][AGENT_RUNTIME_GRAPH_ID] == (
-        "pixelflow.agent_runtime.graph:make_agent_runtime_graph"
-    )
+    assert config["graphs"][AGENT_RUNTIME_GRAPH_ID] == ("pixelflow.agent_runtime.graph:make_agent_runtime_graph")
     assert make_pixelflow_graph().get_graph().nodes

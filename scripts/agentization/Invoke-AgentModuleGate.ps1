@@ -249,7 +249,48 @@ elseif ($ModuleId -eq "M04") {
         }
     )
 }
-elseif ($ModuleId -match "^M0(5|6)$") {
+elseif ($ModuleId -eq "M05") {
+    $m05Tests = @(
+        "tests/test_agent_runtime_supervisor_resolver.py",
+        "tests/test_agent_runtime_supervisor_classifier.py",
+        "tests/test_agent_runtime_supervisor_validator.py",
+        "tests/test_agent_runtime_supervisor_routing.py",
+        "tests/test_agent_runtime_supervisor_evaluation.py",
+        "tests/test_agent_runtime_graph_state.py",
+        "tests/test_agent_runtime_graph_dispatcher.py",
+        "tests/test_agent_runtime_graph_interrupts.py",
+        "tests/test_agent_runtime_graph_composition.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_openapi_operation_ids.py"
+    )
+    $m05RuffPaths = @(
+        "pixelflow/agent_runtime/supervisor",
+        "pixelflow/agent_runtime/graph"
+    )
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = $root
+            FilePath = "powershell"
+            Arguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "`$r=Invoke-Pester -Script 'scripts/agentization/tests/BranchAutomation.Tests.ps1' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }"
+            )
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m05Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m05RuffPaths + $m05Tests
+        }
+    )
+}
+elseif ($ModuleId -eq "M06") {
     throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
 }
 elseif ($ModuleId -match "^M(07|12)$") {

@@ -70,3 +70,6 @@ class SupervisorState(TypedDict, total=False):
     ]
     active_workflow_id: str | None
     decision: ActionDecision | None
+    decision_validation_request: Any
+    answer_message: AnyMessage | None
+    dispatch_workflow_id: str | None
