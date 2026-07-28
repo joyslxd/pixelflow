@@ -11,13 +11,14 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from ..contracts import (
     AgentEvent,
+    AgentEventType,
     ContextSummary,
     ExternalJobStatus,
     TurnRecord,
@@ -59,6 +60,16 @@ class OperationRecord(ContractModel):
     lease_expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class OperationTerminalEventRecord(ContractModel):
+    """原子结束 Operation 时写入 Outbox 的稳定事件内容。"""
+
+    event_id: str = Field(min_length=1)
+    cursor: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    occurred_at: datetime
+    payload: dict[str, JsonValue]
 
 
 class EventDeliveryClaim(ContractModel):
@@ -196,6 +207,31 @@ class AgentRuntimeRepository(Protocol):
         now: datetime,
         next_poll_at: datetime,
     ) -> OperationRecord | None: ...
+
+    async def finalize_operation_terminal(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        terminal_status: ExternalJobStatus,
+        lease_owner: str,
+        now: datetime,
+        event: OperationTerminalEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]: ...
+
+    async def claim_operation_completion_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None: ...
 
 
 def _require_text(field: str, value: str, max_length: int | None = None) -> str:
@@ -407,6 +443,91 @@ def _normalize_operation(record: OperationRecord) -> OperationRecord:
             }
         )
     )
+
+
+def _normalize_operation_terminal_event(
+    record: OperationTerminalEventRecord,
+) -> OperationTerminalEventRecord:
+    normalized = _clone(record)
+    return _clone(
+        normalized.model_copy(
+            update={
+                "event_id": _require_text(
+                    "event_id",
+                    normalized.event_id,
+                    64,
+                ),
+                "cursor": _require_text(
+                    "cursor",
+                    normalized.cursor,
+                    128,
+                ),
+                "run_id": _require_text(
+                    "run_id",
+                    normalized.run_id,
+                    64,
+                ),
+                "occurred_at": _normalize_datetime(
+                    "occurred_at",
+                    normalized.occurred_at,
+                ),
+            }
+        )
+    )
+
+
+def _require_operation_terminal_status(
+    status: ExternalJobStatus,
+) -> ExternalJobStatus:
+    if status not in {
+        ExternalJobStatus.SUCCEEDED,
+        ExternalJobStatus.FAILED,
+        ExternalJobStatus.TIMEOUT,
+    }:
+        raise AgentRuntimeRecordConflictError("Operation 目标不是本切片允许的终态")
+    return status
+
+
+def _build_operation_completion_event(
+    *,
+    conversation_id: str,
+    sequence: int,
+    record: OperationTerminalEventRecord,
+) -> AgentEvent:
+    return _normalize_event(
+        AgentEvent(
+            event_id=record.event_id,
+            sequence=sequence,
+            cursor=record.cursor,
+            conversation_id=conversation_id,
+            run_id=record.run_id,
+            occurred_at=record.occurred_at,
+            type=AgentEventType.EXTERNAL_JOB_STATE_CHANGED,
+            payload=record.payload,
+        )
+    )
+
+
+def _operation_completion_event_matches(
+    event: AgentEvent,
+    *,
+    conversation_id: str,
+    record: OperationTerminalEventRecord,
+) -> bool:
+    return (
+        event.event_id == record.event_id
+        and event.cursor == record.cursor
+        and event.conversation_id == conversation_id
+        and event.run_id == record.run_id
+        and event.type is AgentEventType.EXTERNAL_JOB_STATE_CHANGED
+        and event.payload == record.payload
+    )
+
+
+def _is_operation_completion_event(event: AgentEvent) -> bool:
+    """识别必须先恢复 Workflow、不能被通用发布器抢占的完成事件。"""
+
+    return event.type is AgentEventType.EXTERNAL_JOB_STATE_CHANGED and event.event_id.startswith("evt_job_done_")
 
 
 class MemoryAgentRuntimeRepository:
@@ -668,6 +789,8 @@ class MemoryAgentRuntimeRepository:
             if not owner_keys:
                 return None
             owner_key = owner_keys[0]
+            if _is_operation_completion_event(self._events[owner_key]):
+                return None
             state = self._event_delivery[owner_key]
             if state.status == "delivering":
                 if state.lease_expires_at is None or state.lease_expires_at > normalized_now:
@@ -874,6 +997,160 @@ class MemoryAgentRuntimeRepository:
             )
             self._operations[owner_key] = scheduled
             return _clone(scheduled)
+
+    async def finalize_operation_terminal(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        terminal_status: ExternalJobStatus,
+        lease_owner: str,
+        now: datetime,
+        event: OperationTerminalEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]:
+        """原子保存 Operation 终态和唯一完成事件。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text(
+            "provider_job_id",
+            provider_job_id,
+            128,
+        )
+        worker = _require_text("lease_owner", lease_owner, 128)
+        completed_at = _normalize_datetime("now", now)
+        target = _require_operation_terminal_status(terminal_status)
+        event_record = _normalize_operation_terminal_event(event)
+        operation_key = (owner, operation_id)
+        event_key = (owner, event_record.event_id)
+
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                current = self._operations.get(operation_key)
+                if current is None or current.conversation_id != conversation:
+                    raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                if current.provider_job_id != provider_id:
+                    raise AgentRuntimeRecordConflictError("Operation provider job ID 不一致")
+
+                if current.status in {
+                    ExternalJobStatus.SUCCEEDED,
+                    ExternalJobStatus.FAILED,
+                    ExternalJobStatus.TIMEOUT,
+                    ExternalJobStatus.EXPIRED,
+                }:
+                    existing_event = self._events.get(event_key)
+                    if (
+                        current.status is target
+                        and existing_event is not None
+                        and _operation_completion_event_matches(
+                            existing_event,
+                            conversation_id=conversation,
+                            record=event_record,
+                        )
+                    ):
+                        return _clone(current), _clone(existing_event)
+                    raise AgentRuntimeRecordConflictError("Operation 已保存不同终态或完成事件")
+
+                if current.status is not ExternalJobStatus.POLLING or current.lease_owner != worker or current.lease_expires_at is None or current.lease_expires_at <= completed_at:
+                    raise AgentRuntimeRecordConflictError("Operation 轮询租约无效")
+
+                conversation_events = [(record_owner, stored_event) for (record_owner, _), stored_event in self._events.items() if stored_event.conversation_id == conversation]
+                if any(record_owner != owner for record_owner, _ in conversation_events):
+                    raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                sequence = 1 if not conversation_events else max(stored_event.sequence for _, stored_event in conversation_events) + 1
+                cursor_key = (conversation, event_record.cursor)
+                sequence_key = (conversation, sequence)
+                if event_record.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
+                    raise AgentRuntimeRecordConflictError("Operation 完成事件身份已被占用")
+
+                completion_event = _build_operation_completion_event(
+                    conversation_id=conversation,
+                    sequence=sequence,
+                    record=event_record,
+                )
+                completed_operation = _clone(
+                    current.model_copy(
+                        update={
+                            "status": target,
+                            "next_poll_at": None,
+                            "lease_owner": None,
+                            "lease_expires_at": None,
+                            "updated_at": completed_at,
+                        }
+                    )
+                )
+
+                self._operations[operation_key] = completed_operation
+                self._event_ids.add(completion_event.event_id)
+                self._event_sequence_keys.add(sequence_key)
+                self._event_cursor_keys.add(cursor_key)
+                self._events[event_key] = _clone(completion_event)
+                self._event_delivery[event_key] = _MemoryEventDeliveryState()
+                return _clone(completed_operation), _clone(completion_event)
+
+    async def claim_operation_completion_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        """只领取指定 Operation 的终态事件，避免被其他 Outbox 事件阻塞。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        event_identity = _require_text("event_id", event_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        operation_key = (owner, operation_id)
+        event_key = (owner, event_identity)
+
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                operation = self._operations.get(operation_key)
+                event = self._events.get(event_key)
+                if (
+                    operation is None
+                    or operation.conversation_id != conversation
+                    or operation.status
+                    not in {
+                        ExternalJobStatus.SUCCEEDED,
+                        ExternalJobStatus.FAILED,
+                        ExternalJobStatus.TIMEOUT,
+                    }
+                    or event is None
+                    or event.conversation_id != conversation
+                    or event.type is not AgentEventType.EXTERNAL_JOB_STATE_CHANGED
+                    or event.payload.get("job_id") != operation_id
+                    or event.payload.get("status") != operation.status.value
+                ):
+                    return None
+                state = self._event_delivery[event_key]
+                if state.status == "published":
+                    return None
+                if state.status == "delivering" and state.lease_expires_at is not None and state.lease_expires_at > normalized_now:
+                    return None
+                state.status = "delivering"
+                state.delivery_attempts += 1
+                state.lease_owner = worker
+                state.lease_expires_at = normalized_expiry
+                return EventDeliveryClaim(
+                    event=_clone(event),
+                    delivery_attempts=state.delivery_attempts,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
 
 
 def _workflow_from_row(row: PixelFlowAgentWorkflowRow) -> WorkflowRecord:
@@ -1513,6 +1790,8 @@ class SQLAgentRuntimeRepository:
                 row = (await session.scalars(statement)).first()
                 if row is None:
                     return None
+                if _is_operation_completion_event(_event_from_row(row)):
+                    return None
                 if row.delivery_status == "delivering":
                     if row.lease_expires_at is None:
                         return None
@@ -1680,6 +1959,212 @@ class SQLAgentRuntimeRepository:
                 row.updated_at = normalized_now
                 await session.flush()
                 return _operation_from_row(row)
+
+    async def finalize_operation_terminal(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        terminal_status: ExternalJobStatus,
+        lease_owner: str,
+        now: datetime,
+        event: OperationTerminalEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]:
+        """在一个 SQL 事务中保存 Operation 终态与完成事件。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text(
+            "provider_job_id",
+            provider_job_id,
+            128,
+        )
+        worker = _require_text("lease_owner", lease_owner, 128)
+        completed_at = _normalize_datetime("now", now)
+        target = _require_operation_terminal_status(terminal_status)
+        event_record = _normalize_operation_terminal_event(event)
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        existing_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.event_id == event_record.event_id,
+            )
+            .with_for_update()
+        )
+        last_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.conversation_id == conversation,
+            )
+            .order_by(PixelFlowAgentEventRow.sequence.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    row = (await session.scalars(operation_statement)).one_or_none()
+                    if row is None:
+                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                    if row.provider_job_id != provider_id:
+                        raise AgentRuntimeRecordConflictError("Operation provider job ID 不一致")
+
+                    existing_event_row = (await session.scalars(existing_event_statement)).one_or_none()
+                    if row.status in {
+                        ExternalJobStatus.SUCCEEDED.value,
+                        ExternalJobStatus.FAILED.value,
+                        ExternalJobStatus.TIMEOUT.value,
+                        ExternalJobStatus.EXPIRED.value,
+                    }:
+                        existing_event = None if existing_event_row is None else _event_from_row(existing_event_row)
+                        if (
+                            row.status == target.value
+                            and existing_event is not None
+                            and _operation_completion_event_matches(
+                                existing_event,
+                                conversation_id=conversation,
+                                record=event_record,
+                            )
+                        ):
+                            return _operation_from_row(row), existing_event
+                        raise AgentRuntimeRecordConflictError("Operation 已保存不同终态或完成事件")
+
+                    current_expiry = None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                    if row.status != ExternalJobStatus.POLLING.value or row.lease_owner != worker or current_expiry is None or current_expiry <= completed_at:
+                        raise AgentRuntimeRecordConflictError("Operation 轮询租约无效")
+                    if existing_event_row is not None:
+                        raise AgentRuntimeRecordConflictError("Operation 完成事件身份已被占用")
+
+                    last_event_row = (await session.scalars(last_event_statement)).first()
+                    if last_event_row is not None and last_event_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    sequence = 1 if last_event_row is None else last_event_row.sequence + 1
+                    completion_event = _build_operation_completion_event(
+                        conversation_id=conversation,
+                        sequence=sequence,
+                        record=event_record,
+                    )
+
+                    row.status = target.value
+                    row.next_poll_at = None
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    row.updated_at = completed_at
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=completion_event.schema_version,
+                            event_id=completion_event.event_id,
+                            sequence=completion_event.sequence,
+                            cursor=completion_event.cursor,
+                            conversation_id=completion_event.conversation_id,
+                            user_id=owner,
+                            run_id=completion_event.run_id,
+                            occurred_at=completion_event.occurred_at,
+                            event_type=completion_event.type.value,
+                            payload_json=completion_event.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+                    await session.flush()
+                    completed_operation = _operation_from_row(row)
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("Operation 终态或完成事件发生并发冲突") from None
+        return completed_operation, completion_event
+
+    async def claim_operation_completion_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        """按稳定事件 ID 领取指定 Operation 的 Workflow 恢复投递。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        event_identity = _require_text("event_id", event_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.conversation_id == conversation,
+                PixelFlowAgentEventRow.event_id == event_identity,
+                PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_STATE_CHANGED.value,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                operation = (await session.scalars(operation_statement)).one_or_none()
+                row = (await session.scalars(event_statement)).one_or_none()
+                if (
+                    operation is None
+                    or operation.status
+                    not in {
+                        ExternalJobStatus.SUCCEEDED.value,
+                        ExternalJobStatus.FAILED.value,
+                        ExternalJobStatus.TIMEOUT.value,
+                    }
+                    or row is None
+                    or row.payload_json.get("job_id") != operation_id
+                    or row.payload_json.get("status") != operation.status
+                ):
+                    return None
+                if row.delivery_status == "published":
+                    return None
+                if row.delivery_status == "delivering":
+                    current_expiry = None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                    if current_expiry is not None and current_expiry > normalized_now:
+                        return None
+                row.delivery_status = "delivering"
+                row.delivery_attempts += 1
+                row.lease_owner = worker
+                row.lease_expires_at = normalized_expiry
+                await session.flush()
+                return EventDeliveryClaim(
+                    event=_event_from_row(row),
+                    delivery_attempts=row.delivery_attempts,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
 
     async def heartbeat_operation_lease(
         self,

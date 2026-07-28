@@ -22,7 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
-| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation Repository | M06.3 模块分支已建立稳定 operation 身份、请求摘要、状态迁移、重复 start claim、数据库轮询租约，以及现有 start/status Service 的五态 Provider Adapter；完成事件、Workflow 恢复及重启接管仍待 M06.4–M06.5，尚未进入 Agent 长期分支 |
+| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06.4 模块分支已建立稳定 operation 身份、数据库轮询租约、现有 start/status Service 的五态 Provider Adapter，以及 Operation 终态与完成事件的事务性 Outbox 和 Workflow 定向恢复；重启扫描、404/expired 与人工恢复仍待 M06.5，尚未进入 Agent 长期分支 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -112,9 +112,17 @@ operation 幂等键但不保存，status 只查询传入的原 provider job ID�
 映射为 `polling/succeeded/failed/paused_quota/timeout`。现有 DTO 中明确的
 供应商 raw 字段在边界递归剔除；未知状态、job ID 错配、其余敏感结果、带查询串
 完整 URL 和非法 JSON 一律 fail-closed。稳定 Snapshot 深度只读，序列化前再次
-执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。Operation 驱动的供应商
-启动、终态落库、Outbox、Graph resume 和重启恢复仍属后续切片；本模块增量也尚未
-进入 Agent 长期分支。
+执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。M06.4
+把 `succeeded/failed/timeout` 终态和 `external_job.state_changed` 完成事件放进
+同一个 Memory 临界区或 SQL 事务，重复终态只回读同一稳定事件。完成事件按内部
+job 派生 ID 领取独立投递租约，并把该 ID 作为 Workflow checkpoint 幂等键；进程在
+Provider 成功后或 Graph checkpoint 后退出，都只能重放同一事件，不能重新调用
+供应商 start。Operation 和完成事件的返回快照连同嵌套 JSON 都深度只读，同时仍可
+稳定序列化为普通 JSON。通用 Event Outbox worker 看到队首完成事件时必须停止，
+不能过滤它并越过 sequence 领取后续事件；Graph 返回后还必须用实际完成时间确认
+租约，租约已过期时保留事件等待同 ID 接管。`polling/paused_quota`
+不进入本片终态通道；shutdown/restart 扫描、
+404/expired 和人工恢复仍属 M06.5。本模块增量尚未进入 Agent 长期分支。
 
 ```text
 用户输入 + 附件

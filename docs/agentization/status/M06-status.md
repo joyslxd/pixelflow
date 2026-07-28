@@ -4,8 +4,8 @@
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
-- 当前切片：`M06.3`
-- 最近完成：`M06.3`
+- 当前切片：`M06.4`
+- 最近完成：`M06.4`
 - base Agent SHA：`340a7e42a5d1c918c3c662e29ce833da41665f82`
 - M06.1 开始时间：`2026-07-28T14:53:54+08:00`
 - M06.1 完成时间：`2026-07-28T15:07:21+08:00`
@@ -13,9 +13,23 @@
 - M06.2 完成时间：`2026-07-28T16:00:31+08:00`
 - M06.3 开始时间：`2026-07-28T16:22:27+08:00`
 - M06.3 完成时间：`2026-07-28T17:03:47+08:00`
+- M06.4 开始时间：`2026-07-28T17:18:06+08:00`
+- M06.4 完成时间：`2026-07-28T17:52:18+08:00`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m06-external-jobs`
+
+## M06.4 锁定范围
+
+- `backend/pixelflow/agent_runtime/jobs/**`
+- `backend/pixelflow/agent_runtime/persistence/repositories.py`
+- `backend/tests/test_agent_runtime_operation_completion.py`
+- `README.md`
+- `AGENTS.md`
+- `docs/pixelflow-agent-skill-flow-latest-design.md`
+- `docs/agentization/plans/2026-07-28-m06-4-operation-completion-resume.md`
+- `docs/agentization/test-reports/M06.4.md`
+- `docs/agentization/status/M06-status.md`
 
 ## M06.3 锁定范围
 
@@ -65,8 +79,23 @@
 - [x] M06.1 operation 幂等与状态机（2.5h）
 - [x] M06.2 DB lease/heartbeat/接管（3h）
 - [x] M06.3 provider job adapter（2.5h）
-- [ ] M06.4 graph resume/终态 claim/crash window（2.5h）
+- [x] M06.4 graph resume/终态 claim/crash window（2.5h）
 - [ ] M06.5 shutdown/restart/expired 恢复（2h）
+
+## M06.4 交付记录
+
+- 产物：新增 `OperationCompletionCoordinator`、`OperationCompletionDispatcher` 和 `WorkflowGraphResumePort`，Memory/SQL Repository 在同一临界区或事务内原子保存 Operation 终态与 `external_job.state_changed` 完成事件；复用现有表结构，不新增 migration。
+- 幂等与恢复：完成事件 ID、cursor 和 run ID 只从内部 job ID 稳定派生；Dispatcher 按事件 ID 领取定向投递租约，并把 `event_id` 作为 Graph checkpoint 幂等键。Provider 完成后、Graph checkpoint 前后发生进程退出都只重放同一持久化结果，不再次调用供应商 start。
+- 顺序与租约：通用 Outbox claim 先检查最小未发布 sequence，队首是 Operation 完成事件时返回空，不能越过它领取后续普通事件；Graph 返回后按实际完成时间确认租约，过期 worker 不能确认投递。
+- 只读合同：Operation 完成快照、事件 envelope、payload、嵌套业务结果和 Graph 入参均深度只读，同时 `model_dump(mode="json")` 与 `model_dump_json()` 仍输出普通 JSON。
+- TDD：首轮因 M06.4 类型缺失产生明确 ImportError；自审和独立审核追加通用 claim 抢占、完成后时钟、队首 sequence、深度只读和冻结容器序列化多轮 RED。最终 completion 为 `41 passed, 1 warning`，核心相关回归 `198 passed, 1 warning`，M00/M01/M02/M06 合并定向 `340 passed, 1 warning`，全部 Agent Runtime 扩展回归 `715 passed, 1 warning`。
+- 静态检查：变更 Python 路径的 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过。
+- 独立审核：`/root/m06_4_reviewer` 全程只读；三个有效 Important 均先补失败测试并修复，最终 Critical / Important / Minor 均无，`Ready to commit/push：是`。reviewer 独立复跑 completion `41 passed`、核心相关 `198 passed`、全部 Agent Runtime `715 passed`。
+- 隔离与成本：未新增或修改配置、数据库表/字段/索引/migration、HTTP API 或 content-app 合同，未调用真实图片、视频、PPT、视频分析、剪映、LLM 或其他付费服务，未修改两个长期 feature 分支，也未实现 M06.5 的扫描、shutdown/restart、404/expired 或人工恢复。
+- 文档：已同步 `README.md`、`AGENTS.md`、最新设计、实施计划、本状态和 `docs/agentization/test-reports/M06.4.md`；明确 M06.1–M06.4 仍未进入 Agent 长期分支。
+- 阶段状态：M06.4 不是 `phased-rollout-plan.md` 明确检查点或模块最终切片，保持 `in_progress`，不更新 `status/BOARD.md`，不写任何 ready 状态，也不触发 9.10A。
+- commit/push：本状态随 M06.4 中文独立提交推送到 `origin/codex/agent-0.8.4-m06-external-jobs`，远端以该提交为准。
+- 下一切片：M06.5 shutdown/restart recovery、job 404/expired 与人工恢复语义；必须由开发者后续明确启动并重新领取唯一 writer，继续使用同一模块分支/worktree。
 
 ## M06.3 交付记录
 

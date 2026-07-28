@@ -1,5 +1,14 @@
 """持久化 External Job Operation 领域能力。"""
 
+from .completion import (
+    OperationCompletionConflictError,
+    OperationCompletionCoordinator,
+    OperationCompletionDispatcher,
+    OperationCompletionDispatchError,
+    OperationCompletionRecord,
+    WorkflowGraphResumePort,
+    build_operation_completion_event_id,
+)
 from .coordinator import OperationCoordinator
 from .identity import (
     build_operation_idempotency_key,
@@ -25,6 +34,11 @@ from .state_machine import (
 __all__ = [
     "OPERATION_STATE_TRANSITIONS",
     "TERMINAL_OPERATION_STATUSES",
+    "OperationCompletionConflictError",
+    "OperationCompletionCoordinator",
+    "OperationCompletionDispatchError",
+    "OperationCompletionDispatcher",
+    "OperationCompletionRecord",
     "OperationCoordinator",
     "OperationLeaseCoordinator",
     "OperationStateConflictError",
@@ -34,6 +48,8 @@ __all__ = [
     "ProviderJobMappingError",
     "ProviderJobOutcome",
     "ProviderJobSnapshot",
+    "WorkflowGraphResumePort",
+    "build_operation_completion_event_id",
     "build_operation_idempotency_key",
     "build_operation_request",
     "ensure_operation_transition",
