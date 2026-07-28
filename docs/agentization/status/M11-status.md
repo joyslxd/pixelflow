@@ -1,6 +1,6 @@
 # M11 视频生成 Workflow Adapter
 
-- phase：`ready_for_integration`
+- phase：`integration_blocked`
 - owner：B
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m11-video-workflow`
@@ -109,5 +109,5 @@
 
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`ready`
-- integration failure evidence：`无`
+- checkpoint_status：`blocked`
+- integration failure evidence：`候选 codex/integrate-m11-20260728-102519-7a52afec 已保留；Agent 未更新；错误类型 RuntimeException`
