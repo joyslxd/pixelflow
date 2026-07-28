@@ -285,3 +285,4 @@
 - remote guard：成功候选门禁后脚本重新读取 Agent、dev 和 M11 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同防漂移检查
 - rollback：如需撤回，基于本记录定位 M11 候选中的业务、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M11 状态、BOARD、MERGE_LOG 和 M11.1–M11.5 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
+- 2026-07-28 20:15:27 +08:00：M06 最终模块 候选通过，模块提交 `e8ed2be676304da00a7cc391eabb26a86cbf2aed` 已纳入最新 Agent/dev 基线。
