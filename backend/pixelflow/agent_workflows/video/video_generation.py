@@ -700,8 +700,6 @@ def _generation_requests(
             else:
                 raise ValueError(f"当前视频模型能力不支持分镜生成模式 {mode}")
         prompt = _required_text(scene.get("prompt"), "分镜 prompt")
-        if len(prompt) > 2_500:
-            raise ValueError(f"分镜提示词最多 2500 个字符，当前为 {len(prompt)} 个字符")
         result.append(
             {
                 "scene_id": scene["scene_id"],

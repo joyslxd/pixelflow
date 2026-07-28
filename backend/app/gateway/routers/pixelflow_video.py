@@ -844,7 +844,6 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         duration = _provider_video_duration_seconds(scene.duration_ms, video_model)
         _validate_scene_video_request(
             mode=mode,
-            prompt=prompt,
             image_urls=image_urls,
             video_urls=_dedupe_urls(scene.video_urls),
             audio_urls=_dedupe_urls(scene.audio_urls),
@@ -1334,7 +1333,6 @@ def _validate_scene_video_mode_materials(
 def _validate_scene_video_request(
     *,
     mode: DirectVideoMode,
-    prompt: str,
     image_urls: list[str],
     video_urls: list[str],
     audio_urls: list[str],
@@ -1342,8 +1340,6 @@ def _validate_scene_video_request(
     creation_contract: VideoCreationContract | None,
 ) -> None:
     """调用 content-app 前按当前合同完成一次可解释校验。"""
-    if len(prompt) > 2500:
-        raise SceneVideoCapabilityError(f"分镜提示词最多2500个字符，当前为{len(prompt)}个字符")
     if len(image_urls) > _MAX_REFERENCE_IMAGE_COUNT:
         raise SceneVideoCapabilityError(f"最多只能选择{_MAX_REFERENCE_IMAGE_COUNT}张参考图，当前选择了{len(image_urls)}张")
     if len(video_urls) > 3:
@@ -1402,13 +1398,16 @@ def _build_scene_video_prompt(
     visual_style: str = "",
 ) -> str:
     """按结构化字段生成唯一的分镜视频提示词，避免重复拼接历史复合 prompt。"""
+    shot_text = _shot_description_text(scene.shot_description)
+    if not any((scene.storyline, shot_text, scene.narration, scene.transition)):
+        return str(scene.prompt or "").strip()
     style = _normalize_scene_prompt_field(visual_style, "视觉风格")
     if not style:
         style = _extract_legacy_visual_style(scene.prompt)
     fields = (
         ("视觉风格", style),
         ("故事线", scene.storyline),
-        ("镜头描述", _shot_description_text(scene.shot_description)),
+        ("镜头描述", shot_text),
         ("旁白", scene.narration),
         ("转场", scene.transition),
     )

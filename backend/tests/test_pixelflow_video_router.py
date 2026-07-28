@@ -91,11 +91,7 @@ def test_video_router_prepares_scene_packages(monkeypatch):
     assert set(data["scene_packages"][0]["shot_description"]) == {"text", "mentions"}
     assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
     assert data["scene_packages"][0]["shot_description"]["mentions"]
-    first_scene = data["scene_packages"][0]
-    assert first_scene["prompt"].startswith("视觉风格：")
-    assert first_scene["storyline"] not in first_scene["prompt"]
-    assert first_scene["narration"] not in first_scene["prompt"]
-    assert first_scene["shot_description"]["text"] not in first_scene["prompt"]
+    assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
 
 
 def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(monkeypatch):
@@ -1624,6 +1620,57 @@ def test_scene_video_prompt_extracts_only_visual_style_from_legacy_prompt() -> N
     assert "镜头描述：镜头描述：" not in prompt
     assert "旁白：旁白：" not in prompt
     assert "转场：转场：" not in prompt
+
+
+def test_long_scene_video_prompt_reaches_skill(monkeypatch) -> None:
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    calls: list[dict] = []
+
+    class FakeVideoSkill:
+        async def text_to_video(self, **kwargs):
+            calls.append(kwargs)
+            return GenerationResult(
+                ok=True,
+                task_id="long-prompt-task",
+                url="https://x/long-prompt.mp4",
+                raw={"endpoint": "/api/video/text-to-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    long_shot = (
+        "地点：演播室；主体：产品；动作：旋转展示；景别：近景；运镜：环绕；"
+        "光影：轮廓光；声音：节奏音乐；收束：品牌标识定格。"
+    ) * 50
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/video/generate-scenes",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 5000,
+                        "prompt": "视觉风格：高级广告摄影",
+                        "storyline": "产品在演播室中完成完整展示。",
+                        "shot_description": {"text": long_shot},
+                        "narration": "看见产品的每一处细节。",
+                        "transition": "在品牌标识定格后淡出。",
+                    }
+                ],
+                "model": "seedance-2.0",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert len(calls) == 1
+    assert len(calls[0]["prompt"]) > 2500
+    assert long_shot in calls[0]["prompt"]
 
 
 @pytest.mark.parametrize(

@@ -23,7 +23,9 @@
 
 **Files:**
 - Modify: `backend/tests/test_pixelflow_video_router.py`
+- Modify: `backend/tests/test_agent_video_workflow_generation.py`
 - Modify: `backend/app/gateway/routers/pixelflow_video.py`
+- Modify: `backend/pixelflow/agent_workflows/video/video_generation.py`
 
 **Interfaces:**
 - Consumes: `SceneGenerationItem`、`VideoCreationContract.visual_style`
@@ -151,27 +153,24 @@ git add backend/app/gateway/routers/pixelflow_video.py backend/tests/test_pixelf
 git commit -m "修复：统一组装视频分镜提示词" -m "移除旧复合提示词的重复拼接，并按视觉风格、故事线、镜头描述、旁白和转场的固定顺序生成最终提示词。"
 ```
 
-### Task 2: 新场景包只保存视觉风格兼容值
+### Task 2: 兼容历史纯 prompt 与 R1 冻结执行快照
 
 **Files:**
 - Modify: `backend/tests/test_pixelflow_video_router.py`
-- Modify: `backend/pixelflow/generate/scene_packages.py`
+- Verify: `backend/pixelflow/generate/scene_packages.py`
+- Verify: `backend/pixelflow/agent_workflows/video/scene_packages.py`
 
 **Interfaces:**
-- Consumes: `global_assets["visual_style"]`
-- Produces: `_scene_visual_style_prompt(visual_style: Any) -> str`
-- Preserves: `storyline`、`shot_description`、`narration`、`transition` 独立字段
+- Consumes: 历史只有 `scene.prompt` 的 v2 请求
+- Preserves: R1 `scene.prompt` 冻结执行快照及签名校验
+- Produces: 有结构化字段时重新组装、无结构化字段时原样使用旧 prompt
 
-- [ ] **Step 1: 写入新场景包 prompt 不再预拼接内容的失败测试**
+- [ ] **Step 1: 写入历史纯 prompt 原样执行的回归测试**
 
-扩展现有场景包生成测试，断言：
+使用已有只传 `prompt` 和参考图的场景视频测试，断言 Fake Skill 收到原始文本：
 
 ```python
-scene = data["scene_packages"][0]
-assert scene["prompt"].startswith("视觉风格：")
-assert scene["storyline"] not in scene["prompt"]
-assert scene["narration"] not in scene["prompt"]
-assert scene["shot_description"]["text"] not in scene["prompt"]
+assert calls[0]["prompt"] == "第一幕展示白色耳机"
 ```
 
 - [ ] **Step 2: 运行目标测试并确认 RED**
@@ -180,46 +179,40 @@ Run:
 
 ```bash
 cd backend
-uv run pytest tests/test_pixelflow_video_router.py -k "scene_package" -v
+uv run pytest tests/test_pixelflow_video_router.py -k "generates_scene_videos" -v
 ```
 
-Expected: 新断言失败，因为 `scene.prompt` 当前包含故事线、镜头描述和旁白。
+Expected: 在组装器首次改造后 FAIL，因为纯 prompt 被错误解释为视觉风格并添加标签。
 
-- [ ] **Step 3: 实现场景包视觉风格兼容值**
+- [ ] **Step 3: 实现历史纯 prompt 兼容**
 
-在 `backend/pixelflow/generate/scene_packages.py` 增加：
+在 `_build_scene_video_prompt()` 开头检测结构化字段：
 
 ```python
-def _scene_visual_style_prompt(visual_style: Any) -> str:
-    if isinstance(visual_style, dict):
-        value = _first_text(
-            visual_style.get("prompt"),
-            visual_style.get("description"),
-            visual_style.get("name"),
-        )
-    else:
-        value = _first_text(visual_style)
-    return f"视觉风格：{value}" if value else ""
+shot_text = _shot_description_text(scene.shot_description)
+if not any((scene.storyline, shot_text, scene.narration, scene.transition)):
+    return str(scene.prompt or "").strip()
 ```
 
-所有新建或规范化场景包的 `prompt` 统一改为 `_scene_visual_style_prompt(global_assets.get("visual_style"))`。不改动 `_build_scene_prompt()` 之外的 Plan、场景资产和 Seedance 镜头描述生成逻辑。
+不得修改 `scene_packages.py` 的 R1 权威 prompt 生成，也不得修改
+`agent_workflows/video/scene_packages.py` 对冻结执行快照的逐字校验。
 
-- [ ] **Step 4: 运行场景包测试并确认 GREEN**
+- [ ] **Step 4: 运行 v2 与 R1 场景包测试并确认 GREEN**
 
 Run:
 
 ```bash
 cd backend
-uv run pytest tests/test_pixelflow_video_router.py -k "scene_package" -v
+uv run pytest tests/test_pixelflow_video_router.py tests/test_video_scene_packages.py tests/test_agent_video_workflow_generation.py -v
 ```
 
-Expected: 场景包测试通过，结构化字段仍完整。
+Expected: v2 历史请求保持原 prompt；R1 冻结 prompt、恢复签名和防篡改测试全部通过。
 
-- [ ] **Step 5: 提交第二组代码**
+- [ ] **Step 5: 提交兼容修复**
 
 ```bash
-git add backend/pixelflow/generate/scene_packages.py backend/tests/test_pixelflow_video_router.py
-git commit -m "重构：场景包保留结构化提示词字段" -m "新场景包的 prompt 仅保存视觉风格兼容值，故事线、镜头描述、旁白和转场继续使用独立权威字段。"
+git add backend/app/gateway/routers/pixelflow_video.py backend/tests/test_pixelflow_video_router.py
+git commit -m "修复：兼容历史分镜提示词合同" -m "有结构化字段时统一组装，历史纯 prompt 和 R1 冻结执行快照保持原有语义。"
 ```
 
 ### Task 3: 删除 Python 2500 字符硬限制并同步合同文档
@@ -242,7 +235,8 @@ git commit -m "重构：场景包保留结构化提示词字段" -m "新场景�
 long_shot = "地点：演播室；主体：产品；动作：旋转展示；景别：近景；运镜：环绕；光影：轮廓光；声音：节奏音乐；收束：品牌标识定格。" * 30
 ```
 
-断言响应成功、Fake Skill 被调用一次，并且收到的 `prompt` 长度大于 2500。
+断言响应成功、Fake Skill 被调用一次，并且收到的 `prompt` 长度大于 2500。另在统一
+视频工作流中直接验证 `_generation_requests()` 接受同类超长权威 prompt。
 
 - [ ] **Step 2: 运行目标测试并确认 RED**
 
@@ -253,7 +247,8 @@ cd backend
 uv run pytest tests/test_pixelflow_video_router.py -k "long_scene_video_prompt_reaches_skill" -v
 ```
 
-Expected: FAIL，当前 `_validate_scene_video_request()` 返回“分镜提示词最多2500个字符”。
+Expected: 两条测试均 FAIL；v2 路由由 `_validate_scene_video_request()` 拦截，R1
+统一工作流由 `_generation_requests()` 拦截。
 
 - [ ] **Step 3: 删除字符硬限制**
 
@@ -264,7 +259,9 @@ if len(prompt) > 2500:
     raise SceneVideoCapabilityError(...)
 ```
 
-如果 `prompt` 参数不再用于该函数，则从签名和调用点移除，避免保留误导性参数；其他能力校验保持不变。
+如果 `prompt` 参数不再用于该函数，则从签名和调用点移除，避免保留误导性参数；同时
+删除 `agent_workflows/video/video_generation.py` 的同类长度判断，其他能力校验保持
+不变。
 
 - [ ] **Step 4: 同步接口调用合同**
 

@@ -305,6 +305,34 @@ def _with_concrete_asset_names(result):
     return replace(result, scene_blueprints=blueprints, asset_manifest=manifest, plan_history=history)
 
 
+def test_generation_requests_accept_prompt_over_2500_characters() -> None:
+    long_prompt = "完整分镜提示词。" * 400
+    scenes = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "duration_ms": 5000,
+            "prompt": long_prompt,
+            "storyline": "展示智能戒指的健康监测价值。",
+            "shot_description": {"text": "0-5秒：产品在晨光中旋转展示。"},
+            "narration": "健康数据，抬手可见。",
+            "transition": "淡出。",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        }
+    ]
+
+    requests = video_generation_module._generation_requests(
+        scenes,
+        ["scene-1"],
+        VIDEO_FORM,
+    )
+
+    assert requests[0]["prompt"] == long_prompt
+    assert len(requests[0]["prompt"]) > 2500
+
+
 @pytest.mark.asyncio
 async def test_start_claims_each_scene_once_and_keeps_contract_parameters():
     package_state = _reviewed_scene_package_state()
