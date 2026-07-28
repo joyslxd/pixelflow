@@ -1,6 +1,6 @@
 # M05 Supervisor 决策与目标解析
 
-- phase：`integration_blocked`
+- phase：`ready_for_integration`
 - owner：A
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m05-supervisor`
@@ -121,5 +121,5 @@
 - checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`blocked`
-- integration failure evidence：`候选 codex/integrate-m05-20260728-053559-3206adb1 已保留；Agent 未更新；错误类型 ParseException`
+- checkpoint_status：`ready_for_integration`
+- integration failure evidence：`候选 codex/integrate-m05-20260728-053559-3206adb1 因本地临时门禁 wrapper 的 PowerShell 5.1 解析错误而阻塞；Agent 未更新。wrapper 修复后在保留候选重跑 M05 Final，Passed=True、CommandCount=5；下次必须创建全新候选。`
