@@ -1,11 +1,11 @@
 # M06 持久化 External Job Coordinator
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
-- 当前切片：`M06.4`
-- 最近完成：`M06.4`
+- 当前切片：`M06.5`
+- 最近完成：`M06.5`
 - base Agent SHA：`340a7e42a5d1c918c3c662e29ce833da41665f82`
 - M06.1 开始时间：`2026-07-28T14:53:54+08:00`
 - M06.1 完成时间：`2026-07-28T15:07:21+08:00`
@@ -15,9 +15,26 @@
 - M06.3 完成时间：`2026-07-28T17:03:47+08:00`
 - M06.4 开始时间：`2026-07-28T17:18:06+08:00`
 - M06.4 完成时间：`2026-07-28T17:52:18+08:00`
+- M06.5 开始时间：`2026-07-28T18:18:17+08:00`
+- M06.5 完成时间：`2026-07-28T19:11:26+08:00`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m06-external-jobs`
+
+## M06.5 锁定范围
+
+- `backend/pixelflow/agent_runtime/jobs/**`
+- `backend/pixelflow/agent_runtime/persistence/repositories.py`
+- `backend/app/gateway/app.py`
+- `backend/tests/test_agent_runtime_operation_recovery.py`
+- `scripts/agentization/Invoke-AgentModuleGate.ps1`
+- `scripts/agentization/tests/BranchAutomation.Tests.ps1`
+- `README.md`
+- `AGENTS.md`
+- `docs/pixelflow-agent-skill-flow-latest-design.md`
+- `docs/agentization/plans/2026-07-28-m06-5-operation-recovery-runtime.md`
+- `docs/agentization/test-reports/M06.5.md`
+- `docs/agentization/status/M06-status.md`
 
 ## M06.4 锁定范围
 
@@ -80,7 +97,25 @@
 - [x] M06.2 DB lease/heartbeat/接管（3h）
 - [x] M06.3 provider job adapter（2.5h）
 - [x] M06.4 graph resume/终态 claim/crash window（2.5h）
-- [ ] M06.5 shutdown/restart/expired 恢复（2h）
+- [x] M06.5 shutdown/restart/expired 恢复（2h）
+
+## M06.5 交付记录
+
+- 产物：新增 `OperationStartCoordinator`、`OperationRecoveryRuntime`、`MappingProviderJobAdapterResolver`、人工恢复结果和固定 `OperationStartQuotaPausedError`；Memory/SQL Repository 增加 start lease、到期/完成候选扫描、额度暂停与人工恢复方法，不新增表、字段、索引或 migration。
+- 并发启动：同一 operation 的 start lease 非重入，并发请求只有胜者调用现有 Provider `start`，竞争者只回读同一内部 job；Authorization 和原始 provider 请求只存在于该次 Client 调用，Memory、Operation JSON 和 SQLite 文件均不保存。
+- 进程恢复：Runtime 只查询已持久化的原 provider job ID；shutdown 取消并等待本进程循环，不释放未完成租约或伪造终态。重启 worker 只能在租约过期后接管，继续 `status` 并恢复同一完成事件，不再次调用 start。
+- 402/404：status 402 或 `quota_paused` 保留原 provider job 并清除自动轮询，显式人工动作只重新安排原 job；start 402 没有 provider job，释放 start lease 后返回固定可重试异常。status 404 固定映射 `provider_job_expired`，原子落为 `expired` 与唯一完成事件，人工恢复只返回 `new_attempt_required`。
+- 韧性与时钟：单个 Provider、Repository 或 Graph 候选失败不阻塞同批任务或永久终止后台循环，安全日志只记固定阶段和异常类型；status 返回后重新读取时钟，租约已经过期的旧 worker 不能排期、暂停或提交终态。
+- 扫描边界：Memory 先过滤有效完成事件再限量；SQL 在数据库中 JOIN Event/Operation，校验 owner、conversation、job/status 与终态，按 outbox ID 稳定排序后应用 `scan_limit`，无效队首不能饿死真实候选，也不会全量物化或产生 N+1。
+- TDD：首轮 Python 因 recovery 类型缺失产生明确 ImportError，Pester 因 M06 门禁未配置为 `42 passed, 1 failed`；最小实现后为 `8 passed`。独立审核四项 Important 先得到缺失类型 collection error 与 `3 failed, 10 passed`，逐项修复和 SQL 有界 JOIN 复核后最终 recovery 为 `14 passed, 1 warning`。
+- 最后测试：M06 权威 pytest 集合 `351 passed, 1 warning`；全部 `test_agent_runtime_*` 为 `729 passed, 1 warning`；BranchAutomation Pester 为 `43 passed, 0 failed`。warning 仅来自既有 LangGraph pending deprecation。
+- Final 门禁：以 M06.4 远端提交 `e34fd977f5760adf613c72c8db0b6d0d044e812a` 为 `ChinesePolicyBaseRef` 执行 `Invoke-AgentModuleGate.ps1 -ModuleId M06 -GateType Final`，结果 `Passed=True`、`CommandCount=5`；覆盖 Python 3.12、Pester、351 项固定后端范围、旧流程/flag-off、Ruff 和差异检查。
+- 独立审核：`/root/m06_5_reviewer_fast` 全程只读；首轮 Important 4 和第二轮 SQL 无界读取 Important 1 均按失败合同或小步复核闭环，最终 Critical / Important / Minor 均为 0，`Ready to commit/push：是`。
+- 边界与成本：未装配尚未交付的 M08–M11 真实 Workflow/Provider，未新增或修改配置、HTTP API、Router、content-app 合同或两个长期 feature 分支，未调用图片、视频、PPT、视频分析、剪映、LLM 或其他真实付费 API。
+- 文档：已同步 `README.md`、`AGENTS.md`、最新设计、实施计划、本状态和 `docs/agentization/test-reports/M06.5.md`；M06 增量尚未进入 Agent 长期分支。
+- 阶段状态：M06.5 是模块最后一片，不是 `phased-rollout-plan.md` 的中间检查点；M06 Final 绿色后写 `ready_for_integration`，不更新 `status/BOARD.md`，不直接修改 Agent 或自动启动集成。
+- commit/push：本状态文件与实现属于 M06.5 同一个中文独立提交；提交级中文工程门禁通过后仅推送 `origin/codex/agent-0.8.4-m06-external-jobs`，远端以该提交为准。
+- 下一步第一动作：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术，并在同一条消息中明确模块号 `M06`，手动启动唯一单槽最终集成；不得继续不存在的 M06.6。
 
 ## M06.4 交付记录
 
@@ -141,3 +176,11 @@
 ## 恢复提示
 
 不能只依赖 checkpoint 保证不重复计费；必须覆盖“供应商已成功、checkpoint 尚未写入时进程崩溃”的窗口。
+
+- release_id：`R2`
+- checkpoint_slice：`M06.5`
+- checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
+- last_integrated_commit：`—`
+- locked files：`无`
+- checkpoint_status：`ready`
+- integration failure evidence：`无`

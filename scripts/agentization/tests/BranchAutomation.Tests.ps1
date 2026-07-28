@@ -607,8 +607,49 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
-    It "未配置权威测试清单的 M06 必须 fail-closed" {
-        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M06" -GateType "Final" -PlanOnly } | Should Throw
+    It "M06 最终门禁固定 Operation、重启恢复、旧流程和分支脚本回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M06" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_operation_coordinator.py",
+            "tests/test_agent_runtime_operation_leases.py",
+            "tests/test_agent_runtime_provider_job_adapter.py",
+            "tests/test_agent_runtime_operation_completion.py",
+            "tests/test_agent_runtime_operation_recovery.py",
+            "tests/test_agent_runtime_event_outbox.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_repositories.py",
+            "tests/test_agent_runtime_migration.py",
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_agent_runtime_config.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_gateway_runtime_cleanup.py",
+            "tests/test_gateway_run_recovery.py"
+        )
+        $expectedRuffPaths = @(
+            "pixelflow/agent_runtime/jobs",
+            "pixelflow/agent_runtime/persistence/repositories.py"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
     }
 
     It "M07 和 M12 前端门禁包含全量测试、lint 和生产构建" {

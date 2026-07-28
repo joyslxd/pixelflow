@@ -291,7 +291,49 @@ elseif ($ModuleId -eq "M05") {
     )
 }
 elseif ($ModuleId -eq "M06") {
-    throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
+    $m06Tests = @(
+        "tests/test_agent_runtime_operation_coordinator.py",
+        "tests/test_agent_runtime_operation_leases.py",
+        "tests/test_agent_runtime_provider_job_adapter.py",
+        "tests/test_agent_runtime_operation_completion.py",
+        "tests/test_agent_runtime_operation_recovery.py",
+        "tests/test_agent_runtime_event_outbox.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_repositories.py",
+        "tests/test_agent_runtime_migration.py",
+        "tests/test_agent_runtime_graph_state.py",
+        "tests/test_agent_runtime_graph_interrupts.py",
+        "tests/test_agent_runtime_graph_composition.py",
+        "tests/test_agent_runtime_config.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_gateway_runtime_cleanup.py",
+        "tests/test_gateway_run_recovery.py"
+    )
+    $m06RuffPaths = @(
+        "pixelflow/agent_runtime/jobs",
+        "pixelflow/agent_runtime/persistence/repositories.py"
+    )
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = $root
+            FilePath = "powershell"
+            Arguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "`$r=Invoke-Pester -Script 'scripts/agentization/tests/BranchAutomation.Tests.ps1' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }"
+            )
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m06Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m06RuffPaths + $m06Tests
+        }
+    )
 }
 elseif ($ModuleId -match "^M(07|12)$") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })

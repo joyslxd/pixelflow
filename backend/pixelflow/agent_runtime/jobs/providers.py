@@ -72,6 +72,7 @@ _REASON_CODES = Literal[
     "provider_business_failed",
     "provider_quota_insufficient",
     "provider_timeout",
+    "provider_job_expired",
 ]
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?:authorization|api[_-]?key|secret|password|credential)",
@@ -95,13 +96,14 @@ _UNSAFE_RESULT_KEYS = frozenset(
 
 
 class ProviderJobOutcome(StrEnum):
-    """Provider Job Adapter 对 Workflow 暴露的五类稳定结果。"""
+    """Provider Job Adapter 对 Workflow 暴露的六类稳定结果。"""
 
     POLLING = "polling"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     PAUSED_QUOTA = "paused_quota"
     TIMEOUT = "timeout"
+    EXPIRED = "expired"
 
 
 _SNAPSHOT_CONTRACT = {
@@ -125,12 +127,17 @@ _SNAPSHOT_CONTRACT = {
         "provider_timeout",
         "供应商任务等待超时。",
     ),
+    ProviderJobOutcome.EXPIRED: (
+        "provider_job_expired",
+        "供应商原任务已过期，需要用户手动重新发起。",
+    ),
 }
 _RESULT_FORBIDDEN_OUTCOMES = frozenset(
     {
         ProviderJobOutcome.FAILED,
         ProviderJobOutcome.PAUSED_QUOTA,
         ProviderJobOutcome.TIMEOUT,
+        ProviderJobOutcome.EXPIRED,
     }
 )
 
@@ -193,7 +200,7 @@ class ProviderJobSnapshot(ContractModel):
 
     @model_validator(mode="after")
     def validate_stable_contract(self) -> ProviderJobSnapshot:
-        """固定五态与 reason/message 的一一映射。"""
+        """固定六态与 reason/message 的一一映射。"""
 
         expected_reason, expected_message = _SNAPSHOT_CONTRACT[self.outcome]
         if self.reason_code != expected_reason or self.message != expected_message:
@@ -227,7 +234,7 @@ class ExistingJobService(Protocol):
 
 
 class ProviderJobAdapter:
-    """调用现有 Service，并把供应商状态映射为稳定五态结果。"""
+    """调用现有 Service，并把供应商状态映射为稳定六态结果。"""
 
     def __init__(self, service: ExistingJobService) -> None:
         self._service = service
@@ -342,6 +349,13 @@ def _map_call_exception(
             outcome=ProviderJobOutcome.PAUSED_QUOTA,
             reason_code="provider_quota_insufficient",
             message="额度不足，当前任务已暂停，可在充值后继续。",
+        )
+    if status_code in {404, "404"}:
+        return _snapshot(
+            provider_job_id=provider_job_id,
+            outcome=ProviderJobOutcome.EXPIRED,
+            reason_code="provider_job_expired",
+            message="供应商原任务已过期，需要用户手动重新发起。",
         )
     raise ProviderJobCallError() from None
 

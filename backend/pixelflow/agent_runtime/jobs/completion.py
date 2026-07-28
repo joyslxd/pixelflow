@@ -26,6 +26,7 @@ _TERMINAL_STATUS_BY_OUTCOME = {
     ProviderJobOutcome.SUCCEEDED: ExternalJobStatus.SUCCEEDED,
     ProviderJobOutcome.FAILED: ExternalJobStatus.FAILED,
     ProviderJobOutcome.TIMEOUT: ExternalJobStatus.TIMEOUT,
+    ProviderJobOutcome.EXPIRED: ExternalJobStatus.EXPIRED,
 }
 
 
@@ -204,7 +205,7 @@ class OperationCompletionCoordinator:
         lease_owner: str,
         now: datetime,
     ) -> OperationCompletionRecord:
-        """保存成功、业务失败或超时终态；其他结果拒绝进入完成通道。"""
+        """保存成功、业务失败、超时或过期终态；其他结果拒绝进入完成通道。"""
 
         operation_id = _require_job_id(job_id)
         normalized_snapshot = ProviderJobSnapshot.model_validate(snapshot.model_dump(mode="json"))

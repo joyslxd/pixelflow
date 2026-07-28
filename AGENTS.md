@@ -22,7 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
-| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06.4 模块分支已建立稳定 operation 身份、数据库轮询租约、现有 start/status Service 的五态 Provider Adapter，以及 Operation 终态与完成事件的事务性 Outbox 和 Workflow 定向恢复；重启扫描、404/expired 与人工恢复仍待 M06.5，尚未进入 Agent 长期分支 |
+| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 模块分支已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义；最终本地门禁已绿，等待人工单槽集成，尚未进入 Agent 长期分支 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -109,7 +109,7 @@ M06.1 的 operation 身份固定为 `workflow_id + stage + stage_version + attem
 失去 heartbeat 和排期权限。M06.3 新增的 `ProviderJobAdapter` 只作为
 现有 v2 start/status Service 的防腐 Client：start 显式透传单次 Authorization 和
 operation 幂等键但不保存，status 只查询传入的原 provider job ID；现有 DTO 被统一
-映射为 `polling/succeeded/failed/paused_quota/timeout`。现有 DTO 中明确的
+映射为 `polling/succeeded/failed/paused_quota/timeout/expired`。现有 DTO 中明确的
 供应商 raw 字段在边界递归剔除；未知状态、job ID 错配、其余敏感结果、带查询串
 完整 URL 和非法 JSON 一律 fail-closed。稳定 Snapshot 深度只读，序列化前再次
 执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。M06.4
@@ -120,9 +120,17 @@ Provider 成功后或 Graph checkpoint 后退出，都只能重放同一事件�
 供应商 start。Operation 和完成事件的返回快照连同嵌套 JSON 都深度只读，同时仍可
 稳定序列化为普通 JSON。通用 Event Outbox worker 看到队首完成事件时必须停止，
 不能过滤它并越过 sequence 领取后续事件；Graph 返回后还必须用实际完成时间确认
-租约，租约已过期时保留事件等待同 ID 接管。`polling/paused_quota`
-不进入本片终态通道；shutdown/restart 扫描、
-404/expired 和人工恢复仍属 M06.5。本模块增量尚未进入 Agent 长期分支。
+租约，租约已过期时保留事件等待同 ID 接管。M06.5 的
+`OperationStartCoordinator` 再用 start lease 保证并发请求只调用一次供应商 start；
+只有单次调用边界持有 Authorization 和原请求，持久层仍只保存请求摘要与 provider
+job ID。`OperationRecoveryRuntime` 按数据库候选和租约恢复原 job，关闭时只取消
+本进程任务，不伪造终态或释放未完成租约；新进程在租约过期后继续。每个候选和每轮
+扫描都有安全异常隔离，慢 status 返回后重新读取时钟，过期 worker 不能提交结果。
+status 402 清除自动轮询计划，用户动作只恢复原 provider job；start 402 返回固定
+可重试错误。HTTP 404 固定映射 `expired` 完成事件，原 Operation 禁止重开，只能由
+上层创建新 attempt。SQL 恢复扫描先在数据库中联结并过滤有效完成事件，再稳定排序和
+限制批量，不会被无效队首饿死或无界物化。本模块最终本地门禁已绿，但增量尚未进入
+Agent 长期分支。
 
 ```text
 用户输入 + 附件

@@ -15,7 +15,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
 | 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；所有 Agent 共用配置驱动的 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案；业务推进权仍属于现有 v2 阶段工作流，生产继续关闭 |
-| 持久化 External Job Coordinator | M06.4 模块分支切片 | 已建立 operation 幂等身份、数据库轮询租约、现有 start/status Service 的五态防腐适配，以及 Operation 终态与 `external_job.state_changed` 完成事件的事务性 Outbox；完成事件按稳定 ID 和投递租约恢复原 Workflow，重复终态、双 worker 与 checkpoint 前后崩溃只重放同一事件，不重新启动供应商任务。shutdown/restart 扫描、404/expired 与人工恢复仍由 M06.5 实现，本模块增量尚未进入 Agent 长期分支 |
+| 持久化 External Job Coordinator | M06 模块分支已就绪 | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库，M06 最终本地门禁已绿，模块增量等待人工单槽集成进入 Agent 长期分支 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |

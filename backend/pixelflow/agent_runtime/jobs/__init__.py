@@ -24,6 +24,15 @@ from .providers import (
     ProviderJobOutcome,
     ProviderJobSnapshot,
 )
+from .recovery import (
+    MappingProviderJobAdapterResolver,
+    OperationManualRecoveryAction,
+    OperationManualRecoveryResult,
+    OperationRecoveryRuntime,
+    OperationStartCoordinator,
+    OperationStartQuotaPausedError,
+    ProviderJobAdapterResolver,
+)
 from .state_machine import (
     OPERATION_STATE_TRANSITIONS,
     TERMINAL_OPERATION_STATUSES,
@@ -43,7 +52,14 @@ __all__ = [
     "OperationLeaseCoordinator",
     "OperationStateConflictError",
     "ExistingJobService",
+    "MappingProviderJobAdapterResolver",
+    "OperationManualRecoveryAction",
+    "OperationManualRecoveryResult",
+    "OperationRecoveryRuntime",
+    "OperationStartCoordinator",
+    "OperationStartQuotaPausedError",
     "ProviderJobAdapter",
+    "ProviderJobAdapterResolver",
     "ProviderJobCallError",
     "ProviderJobMappingError",
     "ProviderJobOutcome",

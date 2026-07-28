@@ -12,7 +12,7 @@ from uuid import UUID
 from weakref import WeakKeyDictionary
 
 from pydantic import Field, JsonValue
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -70,6 +70,13 @@ class OperationTerminalEventRecord(ContractModel):
     run_id: str = Field(min_length=1)
     occurred_at: datetime
     payload: dict[str, JsonValue]
+
+
+class OwnedOperationRecord(ContractModel):
+    """仅供进程级恢复扫描使用的 Operation 所有者快照。"""
+
+    user_id: str = Field(min_length=1)
+    operation: OperationRecord
 
 
 class EventDeliveryClaim(ContractModel):
@@ -175,6 +182,53 @@ class AgentRuntimeRepository(Protocol):
 
     async def list_operations(self, user_id: str, conversation_id: str) -> list[OperationRecord]: ...
 
+    async def list_due_operations(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]: ...
+
+    async def list_pending_operation_completions(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]: ...
+
+    async def claim_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def complete_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def release_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None: ...
+
     async def claim_operation_lease(
         self,
         user_id: str,
@@ -206,6 +260,25 @@ class AgentRuntimeRepository(Protocol):
         lease_owner: str,
         now: datetime,
         next_poll_at: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def pause_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def resume_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        now: datetime,
     ) -> OperationRecord | None: ...
 
     async def finalize_operation_terminal(
@@ -303,6 +376,16 @@ def _operation_poll_schedule(
     if normalized_next_poll <= normalized_now:
         raise ValueError("next_poll_at must be later than now")
     return normalized_now, normalized_next_poll
+
+
+def _recovery_scan_window(
+    now: datetime,
+    limit: int,
+) -> tuple[datetime, int]:
+    normalized_now = _normalize_datetime("now", now)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 1000:
+        raise ValueError("limit must be an integer between 1 and 1000")
+    return normalized_now, limit
 
 
 @asynccontextmanager
@@ -483,8 +566,9 @@ def _require_operation_terminal_status(
         ExternalJobStatus.SUCCEEDED,
         ExternalJobStatus.FAILED,
         ExternalJobStatus.TIMEOUT,
+        ExternalJobStatus.EXPIRED,
     }:
-        raise AgentRuntimeRecordConflictError("Operation 目标不是本切片允许的终态")
+        raise AgentRuntimeRecordConflictError("Operation 目标不是允许的终态")
     return status
 
 
@@ -879,6 +963,221 @@ class MemoryAgentRuntimeRepository:
         records.sort(key=lambda record: (record.created_at, record.job_id))
         return [_clone(record) for record in records]
 
+    async def list_due_operations(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]:
+        """按稳定顺序返回无有效租约的到期轮询任务。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        candidates: list[OwnedOperationRecord] = []
+        async with self._operation_write_lock:
+            for (owner, _), record in self._operations.items():
+                lease_pair_valid = (record.lease_owner is None) == (record.lease_expires_at is None)
+                lease_available = record.lease_expires_at is None or record.lease_expires_at <= normalized_now
+                if record.status is ExternalJobStatus.POLLING and record.provider_job_id is not None and record.next_poll_at is not None and record.next_poll_at <= normalized_now and lease_pair_valid and lease_available:
+                    candidates.append(
+                        OwnedOperationRecord(
+                            user_id=owner,
+                            operation=_clone(record),
+                        )
+                    )
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.operation.next_poll_at,
+                candidate.operation.created_at,
+                candidate.operation.job_id,
+            )
+        )
+        return [_clone(candidate) for candidate in candidates[:normalized_limit]]
+
+    async def list_pending_operation_completions(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]:
+        """返回尚未投递或投递租约已过期的 Operation 完成事件。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        candidates: list[tuple[int, OwnedOperationRecord]] = []
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                for event_key, event in self._events.items():
+                    if event.type is not AgentEventType.EXTERNAL_JOB_STATE_CHANGED:
+                        continue
+                    state = self._event_delivery[event_key]
+                    if state.status == "published":
+                        continue
+                    if state.status == "delivering" and state.lease_expires_at is not None and state.lease_expires_at > normalized_now:
+                        continue
+                    job_id = event.payload.get("job_id")
+                    if not isinstance(job_id, str):
+                        continue
+                    owner = event_key[0]
+                    operation = self._operations.get((owner, job_id))
+                    if (
+                        operation is None
+                        or operation.conversation_id != event.conversation_id
+                        or operation.status
+                        not in {
+                            ExternalJobStatus.SUCCEEDED,
+                            ExternalJobStatus.FAILED,
+                            ExternalJobStatus.TIMEOUT,
+                            ExternalJobStatus.EXPIRED,
+                        }
+                        or event.payload.get("status") != operation.status.value
+                    ):
+                        continue
+                    candidates.append(
+                        (
+                            event.sequence,
+                            OwnedOperationRecord(
+                                user_id=owner,
+                                operation=_clone(operation),
+                            ),
+                        )
+                    )
+        candidates.sort(key=lambda candidate: candidate[0])
+        return [_clone(candidate) for _, candidate in candidates[:normalized_limit]]
+
+    async def claim_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        """仅让一个请求领取尚未调用 Provider 的 created Operation。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.CREATED
+                or record.provider_job_id is not None
+                or (record.lease_owner is None) != (record.lease_expires_at is None)
+                or (record.lease_expires_at is not None and record.lease_expires_at > normalized_now)
+            ):
+                return None
+            claimed = _clone(
+                record.model_copy(
+                    update={
+                        "lease_owner": worker,
+                        "lease_expires_at": normalized_expiry,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = claimed
+            return _clone(claimed)
+
+    async def complete_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None:
+        """绑定原 provider job ID，并把 start lease 转为轮询计划。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text("provider_job_id", provider_job_id, 128)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now, normalized_next_poll = _operation_poll_schedule(
+            now,
+            next_poll_at,
+        )
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.CREATED
+                or record.provider_job_id is not None
+                or record.lease_owner != worker
+                or record.lease_expires_at is None
+                or record.lease_expires_at <= normalized_now
+            ):
+                return None
+            started = _clone(
+                record.model_copy(
+                    update={
+                        "provider_job_id": provider_id,
+                        "status": ExternalJobStatus.POLLING,
+                        "next_poll_at": normalized_next_poll,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = started
+            return _clone(started)
+
+    async def release_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """在明确未创建 provider job 时释放 start lease，等待用户重试。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now = _normalize_datetime("now", now)
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.CREATED
+                or record.provider_job_id is not None
+                or record.lease_owner != worker
+                or record.lease_expires_at is None
+                or record.lease_expires_at <= normalized_now
+            ):
+                return None
+            released = _clone(
+                record.model_copy(
+                    update={
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = released
+            return _clone(released)
+
     async def claim_operation_lease(
         self,
         user_id: str,
@@ -997,6 +1296,86 @@ class MemoryAgentRuntimeRepository:
             )
             self._operations[owner_key] = scheduled
             return _clone(scheduled)
+
+    async def pause_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """额度不足时保留原 job，并停止自动轮询。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now = _normalize_datetime("now", now)
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.POLLING
+                or record.provider_job_id is None
+                or record.lease_owner != worker
+                or record.lease_expires_at is None
+                or record.lease_expires_at <= normalized_now
+            ):
+                return None
+            paused = _clone(
+                record.model_copy(
+                    update={
+                        "next_poll_at": None,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = paused
+            return _clone(paused)
+
+    async def resume_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """由用户动作重新安排额度暂停的原 provider job。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        normalized_now = _normalize_datetime("now", now)
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.POLLING
+                or record.provider_job_id is None
+                or record.next_poll_at is not None
+                or record.lease_owner is not None
+                or record.lease_expires_at is not None
+            ):
+                return None
+            resumed = _clone(
+                record.model_copy(
+                    update={
+                        "next_poll_at": normalized_now,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = resumed
+            return _clone(resumed)
 
     async def finalize_operation_terminal(
         self,
@@ -1128,6 +1507,7 @@ class MemoryAgentRuntimeRepository:
                         ExternalJobStatus.SUCCEEDED,
                         ExternalJobStatus.FAILED,
                         ExternalJobStatus.TIMEOUT,
+                        ExternalJobStatus.EXPIRED,
                     }
                     or event is None
                     or event.conversation_id != conversation
@@ -1912,6 +2292,235 @@ class SQLAgentRuntimeRepository:
             rows = (await session.scalars(statement)).all()
         return [_operation_from_row(row) for row in rows]
 
+    async def list_due_operations(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]:
+        """按稳定顺序返回无有效租约的到期轮询任务。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.status == ExternalJobStatus.POLLING.value,
+                PixelFlowAgentOperationRow.provider_job_id.is_not(None),
+                PixelFlowAgentOperationRow.next_poll_at.is_not(None),
+                PixelFlowAgentOperationRow.next_poll_at <= normalized_now,
+                or_(
+                    and_(
+                        PixelFlowAgentOperationRow.lease_owner.is_(None),
+                        PixelFlowAgentOperationRow.lease_expires_at.is_(None),
+                    ),
+                    and_(
+                        PixelFlowAgentOperationRow.lease_owner.is_not(None),
+                        PixelFlowAgentOperationRow.lease_expires_at.is_not(None),
+                        PixelFlowAgentOperationRow.lease_expires_at <= normalized_now,
+                    ),
+                ),
+            )
+            .order_by(
+                PixelFlowAgentOperationRow.next_poll_at.asc(),
+                PixelFlowAgentOperationRow.created_at.asc(),
+                PixelFlowAgentOperationRow.job_id.asc(),
+            )
+            .limit(normalized_limit)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.scalars(statement)).all()
+        return [
+            OwnedOperationRecord(
+                user_id=row.user_id,
+                operation=_operation_from_row(row),
+            )
+            for row in rows
+        ]
+
+    async def list_pending_operation_completions(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationRecord]:
+        """返回尚未投递或投递租约已过期的 Operation 完成事件。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        terminal_statuses = (
+            ExternalJobStatus.SUCCEEDED.value,
+            ExternalJobStatus.FAILED.value,
+            ExternalJobStatus.TIMEOUT.value,
+            ExternalJobStatus.EXPIRED.value,
+        )
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .join(
+                PixelFlowAgentEventRow,
+                and_(
+                    PixelFlowAgentOperationRow.user_id == PixelFlowAgentEventRow.user_id,
+                    PixelFlowAgentOperationRow.conversation_id == PixelFlowAgentEventRow.conversation_id,
+                    PixelFlowAgentOperationRow.job_id == PixelFlowAgentEventRow.payload_json["job_id"].as_string(),
+                ),
+            )
+            .where(
+                PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_STATE_CHANGED.value,
+                PixelFlowAgentOperationRow.status.in_(terminal_statuses),
+                PixelFlowAgentEventRow.payload_json["status"].as_string() == PixelFlowAgentOperationRow.status,
+                or_(
+                    PixelFlowAgentEventRow.delivery_status == "pending",
+                    and_(
+                        PixelFlowAgentEventRow.delivery_status == "delivering",
+                        PixelFlowAgentEventRow.lease_expires_at.is_not(None),
+                        PixelFlowAgentEventRow.lease_expires_at <= normalized_now,
+                    ),
+                ),
+            )
+            .order_by(PixelFlowAgentEventRow.outbox_id.asc())
+            .limit(normalized_limit)
+        )
+        async with self._session_factory() as session:
+            operation_rows = (await session.scalars(operation_statement)).all()
+        return [
+            OwnedOperationRecord(
+                user_id=operation.user_id,
+                operation=_operation_from_row(operation),
+            )
+            for operation in operation_rows
+        ]
+
+    async def claim_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        """仅让一个请求领取尚未调用 Provider 的 created Operation。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.CREATED.value or row.provider_job_id is not None or (row.lease_owner is None) != (current_expiry is None) or (current_expiry is not None and current_expiry > normalized_now):
+                    return None
+                row.lease_owner = worker
+                row.lease_expires_at = normalized_expiry
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def complete_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None:
+        """绑定原 provider job ID，并把 start lease 转为轮询计划。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text("provider_job_id", provider_job_id, 128)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now, normalized_next_poll = _operation_poll_schedule(
+            now,
+            next_poll_at,
+        )
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.CREATED.value or row.provider_job_id is not None or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now:
+                    return None
+                row.provider_job_id = provider_id
+                row.status = ExternalJobStatus.POLLING.value
+                row.next_poll_at = normalized_next_poll
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def release_operation_start(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """在明确未创建 provider job 时释放 start lease，等待用户重试。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now = _normalize_datetime("now", now)
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.CREATED.value or row.provider_job_id is not None or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now:
+                    return None
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
     async def claim_operation_lease(
         self,
         user_id: str,
@@ -2142,6 +2751,7 @@ class SQLAgentRuntimeRepository:
                         ExternalJobStatus.SUCCEEDED.value,
                         ExternalJobStatus.FAILED.value,
                         ExternalJobStatus.TIMEOUT.value,
+                        ExternalJobStatus.EXPIRED.value,
                     }
                     or row is None
                     or row.payload_json.get("job_id") != operation_id
@@ -2203,6 +2813,83 @@ class SQLAgentRuntimeRepository:
                 if row is None or row.status != ExternalJobStatus.POLLING.value or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now or normalized_expiry <= current_expiry:
                     return None
                 row.lease_expires_at = normalized_expiry
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def pause_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """额度不足时保留原 job，并停止自动轮询。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now = _normalize_datetime("now", now)
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.POLLING.value or row.provider_job_id is None or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now:
+                    return None
+                row.next_poll_at = None
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def resume_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        now: datetime,
+    ) -> OperationRecord | None:
+        """由用户动作重新安排额度暂停的原 provider job。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        normalized_now = _normalize_datetime("now", now)
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                if row is None or row.status != ExternalJobStatus.POLLING.value or row.provider_job_id is None or row.next_poll_at is not None or row.lease_owner is not None or row.lease_expires_at is not None:
+                    return None
+                row.next_poll_at = normalized_now
                 row.updated_at = normalized_now
                 await session.flush()
                 return _operation_from_row(row)
