@@ -1,4 +1,4 @@
-"""Supervisor 的确定性解析与结构化分类入口。"""
+"""Supervisor 的确定性解析、结构化分类与决策校验入口。"""
 
 from .classifier import (
     ActionClassificationCandidate,
@@ -16,6 +16,11 @@ from .resolver import (
     ExplicitActionSignal,
     ResolverCandidate,
 )
+from .validator import (
+    DecisionValidationError,
+    DecisionValidationRequest,
+    DecisionValidator,
+)
 
 __all__ = [
     "ActionClassificationCandidate",
@@ -23,6 +28,9 @@ __all__ = [
     "ActionClassificationTarget",
     "DecisionClassificationError",
     "DecisionModel",
+    "DecisionValidationError",
+    "DecisionValidationRequest",
+    "DecisionValidator",
     "DeterministicResolution",
     "DeterministicResolutionRequest",
     "DeterministicResolutionStatus",

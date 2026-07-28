@@ -5,9 +5,11 @@
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m05-supervisor`
 - 依赖：M02、M03、M04
-- 当前切片：`M05.3`
+- 当前切片：`M05.4`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
+- M05.3 开始时间：`2026-07-28T10:43:53+08:00`
+- M05.3 完成时间：`2026-07-28T11:15:07+08:00`
 - M05.2 开始时间：`2026-07-28T10:09:07+08:00`
 - M05.2 完成时间：`2026-07-28T10:29:08+08:00`
 - M05.1 开始时间：`2026-07-28T08:40:27+08:00`
@@ -18,7 +20,7 @@
 
 - [x] M05.1 deterministic target resolver（2.5h）
 - [x] M05.2 LLM structured classifier（3h）
-- [ ] M05.3 validator/version/risk gate（2.5h）
+- [x] M05.3 validator/version/risk gate（2.5h）
 - [ ] M05.4 clarify/answer/command 图路由（2h）
 - [ ] M05.5 中文黄金集和评估（2h）
 
@@ -54,6 +56,23 @@
 - commit/push：本状态文件随 M05.2 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m05-supervisor`，远端以该提交为准。
 - 阶段状态：M05.2 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行 Phase/M05 Final 门禁，不更新 `status/BOARD.md`，不写任何 ready 状态，也不触发 9.10A 或自动继续 M05.3。
 - 下一切片第一动作：开发者手动启动 M05.3 后，恢复同一模块分支/worktree，确认 M05.2 远端提交并重新领取唯一 writer；先用失败测试冻结 `DecisionValidator` 的 allowed-actions、context version、置信度和计费风险闸门。
+
+## M05.3 交付记录
+
+- 产物：新增不可变 `DecisionValidationRequest`、公开安全错误 `DecisionValidationError` 与 `DecisionValidator`；在任何 Graph command 派发前重新校验分类快照、当前权威候选、会话 context version、Workflow stage/context version、状态、intent、stage/artifact 引用、幂等键和动作白名单。
+- 动作白名单：现有 Workflow 动作必须同时出现在分类快照和当前 `allowed_actions`；`answer_only`、`clarify`、`start_workflow` 无论是否携带 target 都必须命中当前 `allowed_global_actions`。Validator 因确认要求、低置信度或目标歧义自动降级为 `clarify` 时也重新校验全局白名单，禁止借安全降级绕过 fail-closed 边界。
+- 风险闸门：冻结 `<0.55` 必须追问、`0.55–0.82` 只允许目标唯一的非计费动作、`>=0.82` 仍须通过权威状态与目标校验；`continue_workflow`、`modify_workflow`、`regenerate_stage`、`retry_failed` 会同时比较分类快照与当前状态中的唯一 stage/artifact 目标对，多个 interrupt、图片、PPT 页或分镜一律追问，显式解析到唯一产物时才可批准。
+- 安全结果：所有追问副本清空 workflow、stage、artifact、patch，并保留固定幂等键；错误只公开短 reason code，不包含用户内容、候选状态明细或模型思维链。
+- 范围隔离：本切片只完成 Validator/version/risk gate，不实现 M05.4 的 clarify/answer/command 图路由，不写 Runtime Store、不触发 Graph command、不调用供应商，也不包含 M05.5 黄金集。
+- 修改文件：新增 `backend/pixelflow/agent_runtime/supervisor/validator.py` 与 `backend/tests/test_agent_runtime_supervisor_validator.py`；更新 Supervisor 导出和本状态文件。现有最新设计、Agentization 架构、合同、工作拆分和测试矩阵已覆盖本片冻结合同，无需重复改写；未修改配置、`status/BOARD.md` 或两个长期 feature 分支。
+- TDD 证据：初始 Validator 导入得到 collection error；随后非法动作、会话/Workflow 版本冲突、状态和引用陈旧、确定性 evidence、幂等键、置信度边界、计费与非计费歧义、全局动作及新 Workflow 边界均先得到 RED 再最小实现为 GREEN。独立审核发现的同一 Workflow 多产物、targeted 全局动作绕过、内部降级追问绕过、目标对静默变化和多 interrupt 继续等反例，也分别先得到单项 `1 failed` 再修复。
+- 最后测试：Validator 聚焦测试为 `34 passed, 1 warning`；全部 `test_agent_runtime_*` 为 `510 passed, 1 warning`。warning 仅来自既有 LangGraph pending deprecation。
+- 静态检查：变更 Python 路径 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过。
+- 独立审核：首轮 Critical 0、Important 2、Minor 0，发现同一 Workflow 多产物和全局白名单绕过；整改后第二轮补充发现 `continue_workflow` 多 interrupt 未纳入细粒度目标闸门。全部问题按独立失败测试最小修复，最终复审 Critical、Important、Minor 均为 0，结论“可提交”，审核者独立鲜跑 `510 passed, 1 warning`。
+- 中文规范：新增/修改注释和 docstring 均使用中文说明；本切片没有配置变更。提交级中文工程门禁通过后才允许 push。
+- commit/push：本状态文件随 M05.3 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m05-supervisor`，远端以该提交为准。
+- 阶段状态：M05.3 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行 Phase/M05 Final 门禁，不更新 `status/BOARD.md`，不写任何 ready 状态，也不触发 9.10A 或自动继续 M05.4。
+- 下一切片第一动作：开发者手动启动 M05.4 后，恢复同一模块分支/worktree，确认 M05.3 远端提交并重新领取唯一 writer；先用失败测试冻结 `clarify`、`answer_only` 与业务 command 的 Graph 路由隔离，确保只有通过 M05.3 Validator 的 command 才可进入业务子图。
 
 ## 恢复提示
 
