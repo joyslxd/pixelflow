@@ -116,6 +116,7 @@ import {
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
 import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
+import { projectSupervisorWorkflowProgress } from "@/lib/supervisor/workspaceProjection";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -1845,6 +1846,27 @@ export function WorkspacePage() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    if (
+      !runtimePolicy.supervisorEnabled
+      || supervisorRuntime.state.connection.status !== "connected"
+      || supervisorRuntime.state.conversationId !== currentConversationId
+    ) return;
+    messagesRef.current = supervisorRuntime.state.messages;
+    setMessages(supervisorRuntime.state.messages);
+    const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
+    workflowProgressConversationIdRef.current = currentConversationId;
+    workflowProgressRef.current = nextProgress;
+    setWorkflowProgress(nextProgress);
+  }, [
+    currentConversationId,
+    runtimePolicy.supervisorEnabled,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.conversationId,
+    supervisorRuntime.state.messages,
+    supervisorRuntime.state.workflows,
+  ]);
 
   useEffect(() => {
     let disposed = false;
@@ -6507,6 +6529,9 @@ export function WorkspacePage() {
       const ownership = await ensureConversation(text);
       activeConversation = ownership.conversationId;
       if (ownership.orchestrationMode === "supervisor_v1") {
+        const restoredInterruptId = supervisorRuntime.state.conversationId === activeConversation
+          ? supervisorRuntime.state.interrupt?.interruptId ?? null
+          : null;
         setPendingSupervisorTurns((items) => items.some(
           (item) => item.clientInputId === message.id,
         ) ? items : [...items, {
@@ -6516,7 +6541,7 @@ export function WorkspacePage() {
           materials,
           replyToMessageId,
           artifactRefs,
-          interruptId,
+          interruptId: interruptId ?? restoredInterruptId,
         }]);
         setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
@@ -8573,7 +8598,9 @@ export function WorkspacePage() {
     progress: workflowProgress,
     messages,
   });
-  const workflowTaskBoard = runtimePolicy.legacyRunnerEnabled && derivedWorkflowTaskBoard
+  const workflowTaskBoard = (
+    runtimePolicy.legacyRunnerEnabled || runtimePolicy.supervisorEnabled
+  ) && derivedWorkflowTaskBoard
     ? { ...derivedWorkflowTaskBoard, workflowId: `${currentConversationId}:${derivedWorkflowTaskBoard.workflowId}` }
     : null;
   const legacyArtifactActionsEnabled = runtimePolicy.legacyArtifactActionsEnabled;

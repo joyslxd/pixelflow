@@ -8,8 +8,10 @@
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
 - M12.4 模块分支基线：`b69a13eaebfec53bdccf7e374e1824c01f14058d`
-- 当前唯一写入者：`尚未领取`
-- 开始时间：`—`
+- M12.5 模块分支基线：`c0e3d94ad308794d2fb1914bcc5b66c625f8506b`
+- 当前唯一写入者：`/root`
+- 开始时间：`2026-07-28 20:02:19 +08:00`
+- M12.5 locked files：`web/src/lib/supervisor/workspaceProjection.ts`、`web/src/lib/supervisor/reducer.ts`、`web/src/hooks/useSupervisorConversation.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/workspaceOrchestrationMode.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.5.md`
 - M12.4 已释放文件：`web/src/lib/authStorage.ts`、`web/src/lib/supervisor/turnSubmission.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/authStorage.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.4.md`
 - M12.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
 - release_id：`R1`
@@ -24,7 +26,7 @@
 - [x] M12.2 拆分 busy/action policy（2h）
 - [x] M12.3 压缩 Notice/排队 badge（2h）
 - [x] M12.4 reply/artifact/interrupt/mention 元数据（2.5h）
-- [ ] M12.5 消息/进度/历史/task board 投影（2.5h）
+- [x] M12.5 消息/进度/历史/task board 投影（2.5h）
 
 R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `ready_for_phase_integration` 并停止；开发者按执行手册 9.10A 人工触发单槽候选，绿色进入 Agent 后写 `phase_integrated`。M12.4 仍需开发者再次手动启动，继续复用本模块分支。
 
@@ -93,3 +95,17 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 中文规范：push 前使用仓库 `Test-ChineseEngineeringPolicy.ps1` 对本片独立中文提交、人工注释和配置边界执行检查；本片新增/修改说明均为中文，无新增配置、依赖或锁文件。
 - 状态：M12.4 是普通中间切片，M12 保持 `in_progress`；不写 `ready_for_phase_integration` 或 `ready_for_integration`，不运行阶段/最终模块门禁，不更新 `status/BOARD.md` 或集成记录。
 - 下一步：`M12.5 消息/进度/历史/task board 投影`；唯一写入权和本片文件锁已释放，必须由开发者重新启动任务并复用当前模块分支/worktree，本任务到此停止。
+
+## M12.5 完成记录
+
+- 完成时间：`2026-07-28 20:30:40 +08:00`
+- 实现：新增独立 `workspaceProjection` Application Service，把 Supervisor Snapshot 与 SSE 的持久化消息、Artifact、Workflow 和 interrupt 严格转换为页面 ViewModel；Reducer 统一维护恢复状态，`WorkspacePage` 在连接完成且对话归属一致时用权威消息替换旧 detail 历史，并复用既有 task board。
+- 消息与事件：`message.upserted` 按 `client_message_id/message_id` 稳定 ID 原位更新，Artifact 与消息在同一事件原子投影；`workflow.progressed` 按 `workflow_id/stage_version/updated_at` 幂等更新。冻结合同的直载 DTO 与当前后端包装形状均兼容，重复/旧 sequence 不回退，sequence gap 不应用越级数据而等待 Snapshot。
+- 历史与任务看板：Snapshot 完整恢复消息材料、Artifact、Workflow 和当前 interrupt；最新 Workflow 确定性映射为既有 `WorkflowProgressSnapshot`，图片、视频、PPT 显示任务看板，`video_analysis` 不显示；最终交付状态仍只读取最新消息 Artifact 的下载记录。
+- 运行时隔离：全部投影先校验 `conversation_id`，切换对话后旧 Hook 与旧事件不能写入新页面；恢复的 interrupt 仅在状态所属对话等于当前目标对话时进入 M12.4 单路响应。`frontend_v2` 继续使用原历史与 runner，Supervisor 未新增或恢复任何旧供应商 `/start`。
+- TDD：首轮新增 M12.5 合同测试并接入聚合编译，`npm test` 因 `workspaceProjection.ts` 缺失得到预期 `TS6053` RED；最小实现转绿后补齐直载事件、sequence gap、安全错误、多工作流目标和 task board 回归，最终 `npm test` 为 `315/315`。
+- 验证：`npm test`（`315/315`）、`npm run lint`、`npm run build-prod` 和 `git diff --check` 全部通过；生产构建仅有既存 chunk 体积提醒，未调用真实或付费 API。
+- 独立审核：`/root/m12_5_reviewer` 首轮结论 `Not Ready`，Critical 0、Important 1、Minor 0，指出事件只接受包装形状；兼容冻结直载 DTO 并保留当前后端包装后，二轮结论 `Ready`，Critical/Important/Minor 均为 0。Reviewer 全程只读，未修改文件、未提交、未推送、未调用真实或付费 API。
+- 中文规范：新增人工说明、状态和报告均使用中文；本片未新增配置、依赖或锁文件。实现提交固定后使用仓库中文工程规范脚本和 M12 Final 权威门禁复核全部待推送提交。
+- 状态：M12.5 是模块最后一片；当前先保持 `in_progress` 并固定实现提交。以固定 SHA 完成 M12 Final 门禁后，才单独写 `ready_for_integration`、释放唯一写入权和文件锁并 push；不更新 `status/BOARD.md` 或集成记录。
+- 边界：不创建切片子分支，不修改两个长期 feature 分支，不自动进入其他切片或单槽集成；当前自动化状态为 `automation_local_ready`。

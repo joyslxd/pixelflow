@@ -1,0 +1,438 @@
+import type {
+  AgentEventEnvelope,
+  ExternalJobRef,
+  JsonObject,
+  JsonValue,
+  WorkflowRecord,
+} from "./contracts.js";
+import {
+  EXTERNAL_JOB_STATUS_VALUES,
+  WORKFLOW_KIND_VALUES,
+  WORKFLOW_STATUS_VALUES,
+} from "./contracts.js";
+import type { SupervisorRuntimeProjection } from "./reducer.js";
+import type { WorkflowProgressSnapshot } from "../workflowTaskBoard.js";
+
+type SupervisorArtifactType = (typeof ARTIFACT_TYPE_VALUES)[number];
+
+export interface SupervisorChatArtifact {
+  type: SupervisorArtifactType;
+  title: string;
+  description: string;
+  actionLabel: string;
+  [key: string]: unknown;
+}
+
+export interface SupervisorChatMessage {
+  id: string;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  time: string;
+  materials?: JsonObject[];
+  artifact?: SupervisorChatArtifact;
+}
+
+export interface SupervisorInterruptProjection {
+  interruptId: string;
+  conversationId: string;
+  payload: JsonObject;
+}
+
+export interface SupervisorWorkspaceProjection {
+  messages: SupervisorChatMessage[];
+  workflows: WorkflowRecord[];
+  interrupt: SupervisorInterruptProjection | null;
+}
+
+const WORKSPACE_PROJECTION_ERROR = "Supervisor 工作区投影状态不合法";
+const ARTIFACT_TYPE_VALUES = [
+  "brief",
+  "results",
+  "segments",
+  "edit",
+  "qc",
+  "directions",
+  "plan",
+  "image_prepare",
+  "image_edit_options",
+  "image_result",
+  "video_scene_packages",
+  "video_quality_review",
+  "video_analysis_result",
+  "video_result",
+  "jianying_draft",
+  "ppt_outline",
+  "ppt_images",
+  "ppt_file",
+] as const;
+
+function fail(): never {
+  throw new TypeError(WORKSPACE_PROJECTION_ERROR);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isIsoTime(value: unknown): value is string {
+  return isNonEmptyString(value) && Number.isFinite(Date.parse(value));
+}
+
+function includesValue<TValue extends string>(
+  values: readonly TValue[],
+  value: unknown,
+): value is TValue {
+  return typeof value === "string" && (values as readonly string[]).includes(value);
+}
+
+function cloneJsonValue(value: unknown, seen = new Set<object>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "object") return fail();
+  if (seen.has(value)) return fail();
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((item) => cloneJsonValue(item, seen));
+    const cloned: JsonObject = {};
+    for (const [key, item] of Object.entries(value)) {
+      cloned[key] = cloneJsonValue(item, seen);
+    }
+    return cloned;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function cloneJsonObject(value: unknown): JsonObject {
+  const cloned = cloneJsonValue(value);
+  return isRecord(cloned) ? cloned as JsonObject : fail();
+}
+
+function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function readArtifact(
+  message: Record<string, unknown>,
+  payload: JsonObject,
+): SupervisorChatArtifact | null {
+  const direct = message.artifact === undefined || message.artifact === null
+    ? null
+    : cloneJsonObject(message.artifact);
+  const nested = payload.artifact === undefined || payload.artifact === null
+    ? null
+    : cloneJsonObject(payload.artifact);
+  if (direct && nested && !jsonValuesEqual(direct, nested)) return fail();
+  const artifact = direct ?? nested;
+  if (!artifact) return null;
+  if (!includesValue(ARTIFACT_TYPE_VALUES, artifact.type)
+    || typeof artifact.title !== "string"
+    || typeof artifact.description !== "string"
+    || typeof artifact.actionLabel !== "string") {
+    return fail();
+  }
+  return artifact as unknown as SupervisorChatArtifact;
+}
+
+function readMaterials(message: Record<string, unknown>, payload: JsonObject): JsonObject[] {
+  const value = message.materials ?? payload.materials ?? [];
+  if (!Array.isArray(value)) return fail();
+  return value.map((item) => cloneJsonObject(item));
+}
+
+function projectMessage(value: unknown, conversationId: string): SupervisorChatMessage | null {
+  if (!isRecord(value)) return fail();
+  if (value.role === "system") return null;
+  if (value.role !== "user" && value.role !== "assistant") return fail();
+  for (const owner of [value.conversation_id, value.conversationId]) {
+    if (owner !== undefined && owner !== conversationId) return fail();
+  }
+  const payload = value.payload === undefined ? {} : cloneJsonObject(value.payload);
+  const messageId = isNonEmptyString(payload.client_message_id)
+    ? payload.client_message_id
+    : value.message_id ?? value.id;
+  const time = value.created_at ?? value.time ?? "";
+  if (!isNonEmptyString(messageId) || typeof value.content !== "string" || typeof time !== "string") {
+    return fail();
+  }
+  const materials = readMaterials(value, payload);
+  const artifact = readArtifact(value, payload);
+  return {
+    id: messageId,
+    conversationId,
+    role: value.role,
+    content: value.content,
+    time,
+    ...(materials.length > 0 ? { materials } : {}),
+    ...(artifact ? { artifact } : {}),
+  };
+}
+
+function upsertMessage(
+  messages: readonly SupervisorChatMessage[],
+  message: SupervisorChatMessage,
+): SupervisorChatMessage[] {
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index < 0) return [...messages, message];
+  const next = [...messages];
+  next[index] = message;
+  return next;
+}
+
+function projectMessages(value: unknown, conversationId: string): SupervisorChatMessage[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return fail();
+  let messages: SupervisorChatMessage[] = [];
+  for (const item of value) {
+    const message = projectMessage(item, conversationId);
+    if (message) messages = upsertMessage(messages, message);
+  }
+  return messages;
+}
+
+function projectExternalJob(value: unknown, workflowId: string): ExternalJobRef | null {
+  if (value === null) return null;
+  if (!isRecord(value)
+    || !isNonEmptyString(value.job_id)
+    || (value.provider_job_id !== null && !isNonEmptyString(value.provider_job_id))
+    || value.workflow_id !== workflowId
+    || !isNonEmptyString(value.stage)
+    || !includesValue(EXTERNAL_JOB_STATUS_VALUES, value.status)
+    || !isPositiveInteger(value.attempt)
+    || !isNonEmptyString(value.idempotency_key)
+    || (value.next_poll_at !== null && !isIsoTime(value.next_poll_at))
+    || (value.lease_owner !== null && !isNonEmptyString(value.lease_owner))
+    || (value.lease_expires_at !== null && !isIsoTime(value.lease_expires_at))) {
+    return fail();
+  }
+  return {
+    job_id: value.job_id,
+    provider_job_id: value.provider_job_id,
+    workflow_id: value.workflow_id,
+    stage: value.stage,
+    status: value.status,
+    attempt: value.attempt,
+    idempotency_key: value.idempotency_key,
+    next_poll_at: value.next_poll_at,
+    lease_owner: value.lease_owner,
+    lease_expires_at: value.lease_expires_at,
+  };
+}
+
+function projectWorkflow(value: unknown, conversationId: string): WorkflowRecord {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.workflow_id)
+    || value.conversation_id !== conversationId
+    || !includesValue(WORKFLOW_KIND_VALUES, value.kind)
+    || !includesValue(WORKFLOW_STATUS_VALUES, value.status)
+    || !isNonEmptyString(value.current_stage)
+    || !isPositiveInteger(value.stage_version)
+    || !Array.isArray(value.latest_artifact_refs)
+    || !value.latest_artifact_refs.every(isNonEmptyString)
+    || !isPositiveInteger(value.context_version)
+    || !isIsoTime(value.created_at)
+    || !isIsoTime(value.updated_at)) {
+    return fail();
+  }
+  return {
+    workflow_id: value.workflow_id,
+    conversation_id: conversationId,
+    kind: value.kind,
+    status: value.status,
+    current_stage: value.current_stage,
+    stage_version: value.stage_version,
+    creation_contract_snapshot: cloneJsonObject(value.creation_contract_snapshot),
+    pending_external_job: projectExternalJob(value.pending_external_job, value.workflow_id),
+    latest_artifact_refs: [...value.latest_artifact_refs],
+    context_version: value.context_version,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+  };
+}
+
+function upsertWorkflow(
+  workflows: readonly WorkflowRecord[],
+  workflow: WorkflowRecord,
+): WorkflowRecord[] {
+  const index = workflows.findIndex((item) => item.workflow_id === workflow.workflow_id);
+  if (index < 0) return [...workflows, workflow];
+  const current = workflows[index];
+  if (workflow.stage_version < current.stage_version) return [...workflows];
+  if (workflow.stage_version === current.stage_version) {
+    const currentTime = Date.parse(current.updated_at);
+    const nextTime = Date.parse(workflow.updated_at);
+    if (nextTime < currentTime) return [...workflows];
+    if (nextTime === currentTime
+      && !jsonValuesEqual(
+        cloneJsonValue(current as unknown as Record<string, unknown>),
+        cloneJsonValue(workflow as unknown as Record<string, unknown>),
+      )) {
+      return fail();
+    }
+  }
+  const next = [...workflows];
+  next[index] = workflow;
+  return next;
+}
+
+function projectWorkflows(value: unknown, conversationId: string): WorkflowRecord[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return fail();
+  let workflows: WorkflowRecord[] = [];
+  for (const item of value) workflows = upsertWorkflow(workflows, projectWorkflow(item, conversationId));
+  return workflows;
+}
+
+function projectInterrupt(value: unknown, conversationId: string): SupervisorInterruptProjection | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) return fail();
+  const interruptId = value.interrupt_id ?? value.interruptId;
+  const owner = value.conversation_id ?? value.conversationId;
+  if (!isNonEmptyString(interruptId)) return fail();
+  if (owner !== undefined && owner !== conversationId) return fail();
+  return {
+    interruptId,
+    conversationId,
+    payload: value.payload === undefined
+      ? cloneJsonObject(value)
+      : cloneJsonObject(value.payload),
+  };
+}
+
+export function cloneSupervisorWorkspaceProjection(
+  value: unknown,
+  conversationId: string,
+): SupervisorWorkspaceProjection {
+  if (!isRecord(value)) return fail();
+  return {
+    messages: projectMessages(value.messages, conversationId),
+    workflows: projectWorkflows(value.workflows, conversationId),
+    interrupt: projectInterrupt(value.interrupt, conversationId),
+  };
+}
+
+export function projectSupervisorSnapshot(
+  value: JsonValue,
+  conversationId: string,
+): SupervisorRuntimeProjection {
+  if (!isRecord(value) || value.conversationId !== conversationId) return fail();
+  const workspace = cloneSupervisorWorkspaceProjection(value, conversationId);
+  return {
+    conversationId,
+    run: value.run as unknown as SupervisorRuntimeProjection["run"],
+    compression: value.compression as unknown as SupervisorRuntimeProjection["compression"],
+    inputQueue: value.inputQueue as unknown as SupervisorRuntimeProjection["inputQueue"],
+    resume: value.resume as unknown as SupervisorRuntimeProjection["resume"],
+    ...workspace,
+  };
+}
+
+export function applySupervisorWorkspaceEvent(
+  workspace: SupervisorWorkspaceProjection,
+  event: AgentEventEnvelope,
+): SupervisorWorkspaceProjection {
+  switch (event.type) {
+    case "message.upserted": {
+      const rawMessage = event.payload.message ?? event.payload;
+      const message = projectMessage(rawMessage, event.conversation_id);
+      return message ? { ...workspace, messages: upsertMessage(workspace.messages, message) } : workspace;
+    }
+    case "workflow.progressed": {
+      const rawWorkflow = event.payload.workflow ?? event.payload;
+      const workflow = projectWorkflow(rawWorkflow, event.conversation_id);
+      return { ...workspace, workflows: upsertWorkflow(workspace.workflows, workflow) };
+    }
+    case "interrupt.opened": {
+      const rawInterrupt = event.payload.interrupt ?? event.payload;
+      const interrupt = projectInterrupt(rawInterrupt, event.conversation_id);
+      if (!interrupt) return fail();
+      return { ...workspace, interrupt };
+    }
+    case "interrupt.closed": {
+      const interruptId = event.payload.interrupt_id;
+      if (!isNonEmptyString(interruptId)) return fail();
+      if (!workspace.interrupt || workspace.interrupt.interruptId !== interruptId) return workspace;
+      return { ...workspace, interrupt: null };
+    }
+    default:
+      return workspace;
+  }
+}
+
+function normalizedVideoPhase(stage: string): string {
+  const phases: Record<string, string> = {
+    intake: "intake_running",
+    direction_generation: "creative_directions_running",
+    direction_review: "creative_directions_ready",
+    plan_generation: "plan_generation_running",
+    plan_review: "plan_review_pending",
+    plan_approved: "plan_approved",
+    prepare_scene_packages: "scene_package_running",
+    generate_scene_assets: "scene_asset_generation_running",
+    scene_package_review: "scene_package_ready",
+    generate_scene_videos: "video_generation_running",
+    scene_video_review: "video_review_pending",
+    merge_video: "video_merge_running",
+    quality_review: "video_quality_review_running",
+    video_review: "video_review_pending",
+    completed: "video_accepted",
+  };
+  return phases[stage] ?? stage;
+}
+
+function phaseForWorkflow(workflow: WorkflowRecord): string {
+  let phase = workflow.kind === "video"
+    ? normalizedVideoPhase(workflow.current_stage)
+    : workflow.current_stage;
+  if (workflow.status === "cancelled") return "form_cancelled";
+  if (workflow.status === "paused_quota" && !phase.includes("quota_paused")) {
+    phase = `${phase}_quota_paused`;
+  }
+  if (workflow.status === "failed" && !phase.includes("failed")) phase = `${phase}_failed`;
+  if (workflow.status === "completed" && workflow.kind === "image") return "image_accepted";
+  if (workflow.status === "completed" && workflow.kind === "ppt") return "ppt_done";
+  return phase;
+}
+
+function latestWorkflow(workflows: readonly WorkflowRecord[]): WorkflowRecord | null {
+  return [...workflows].sort((left, right) => (
+    Date.parse(right.updated_at) - Date.parse(left.updated_at)
+    || right.stage_version - left.stage_version
+    || right.workflow_id.localeCompare(left.workflow_id)
+  ))[0] ?? null;
+}
+
+export function projectSupervisorWorkflowProgress(
+  workflows: readonly WorkflowRecord[],
+): WorkflowProgressSnapshot | null {
+  const workflow = latestWorkflow(workflows);
+  if (!workflow || workflow.kind === "video_analysis") return null;
+  const sourceMessageId = workflow.creation_contract_snapshot.source_message_id;
+  const flowKind = workflow.creation_contract_snapshot.flow_kind === "direct_image_edit"
+    ? "direct_image_edit"
+    : "standard";
+  const scenePackageStage = workflow.current_stage === "prepare_scene_packages"
+    || workflow.current_stage === "generate_scene_assets"
+    ? workflow.current_stage
+    : workflow.current_stage === "scene_package_review"
+      ? "completed"
+      : null;
+  return {
+    version: 1,
+    intent: workflow.kind,
+    flow_kind: flowKind,
+    source_message_id: isNonEmptyString(sourceMessageId) ? sourceMessageId : workflow.workflow_id,
+    last_phase: phaseForWorkflow(workflow),
+    scene_package_stage: scenePackageStage,
+    updated_at: workflow.updated_at,
+  };
+}

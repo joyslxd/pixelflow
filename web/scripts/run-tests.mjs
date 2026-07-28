@@ -217,6 +217,7 @@ try {
       "src/lib/supervisor/reducer.ts",
       "src/lib/supervisor/runtimeNotice.ts",
       "src/lib/supervisor/turnSubmission.ts",
+      "src/lib/supervisor/workspaceProjection.ts",
       "src/lib/time.ts",
       "src/lib/videoRequirementConfig.ts",
       "src/lib/workflowTaskBoard.ts",
@@ -267,6 +268,10 @@ try {
       SUPERVISOR_TURN_SUBMISSION_TEST_MODULE: moduleUrl(
         moduleDirectory,
         "supervisor/turnSubmission.js",
+      ),
+      SUPERVISOR_WORKSPACE_PROJECTION_TEST_MODULE: moduleUrl(
+        moduleDirectory,
+        "supervisor/workspaceProjection.js",
       ),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),

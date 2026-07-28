@@ -42,6 +42,9 @@ test("初始四维状态保持空闲且拒绝空对话标识", () => {
       updatedAt: null,
     },
     inputQueue: [],
+    messages: [],
+    workflows: [],
+    interrupt: null,
     resume: { cursor: null, sequence: 0 },
   });
   assert.throws(
@@ -373,7 +376,16 @@ test("重复、乱序和跨对话事件不改变状态，sequence gap 保留恢�
     error: "Supervisor 事件序列需要恢复",
   });
 
-  state = receive(state, event(2, "message.upserted", { message_id: "msg-1" }));
+  state = receive(state, event(2, "message.upserted", {
+    message: {
+      message_id: "msg-1",
+      conversation_id: "conv-1",
+      role: "assistant",
+      content: "已恢复消息",
+      payload: {},
+      created_at: "2026-07-24T02:00:02Z",
+    },
+  }));
   assert.equal(state.run.status, "running");
   assert.deepEqual(state.resume, { cursor: "cursor-2", sequence: 2 });
 });
