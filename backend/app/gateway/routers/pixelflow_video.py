@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -836,7 +837,10 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 "attempts": attempt,
             }
         mode = mode_override or _select_scene_video_mode(scene, image_urls, creation_contract=contract)
-        prompt = _build_scene_video_prompt(scene)
+        prompt = _build_scene_video_prompt(
+            scene,
+            visual_style=contract.visual_style if contract is not None else "",
+        )
         duration = _provider_video_duration_seconds(scene.duration_ms, video_model)
         _validate_scene_video_request(
             mode=mode,
@@ -1389,17 +1393,69 @@ def _provider_video_duration_seconds(duration_ms: int, model: str | None) -> int
     return seconds
 
 
-def _build_scene_video_prompt(scene: SceneGenerationItem) -> str:
-    pieces = [scene.prompt]
-    if scene.storyline:
-        pieces.append(f"故事线：{scene.storyline}")
-    if scene.shot_description:
-        pieces.append(f"镜头描述：{_shot_description_text(scene.shot_description)}")
-    if scene.narration:
-        pieces.append(f"旁白：{scene.narration}")
-    if scene.transition:
-        pieces.append(f"转场：{scene.transition}")
-    return "\n".join(piece for piece in pieces if piece).strip()
+_SCENE_PROMPT_FIELD_LABELS = ("视觉风格", "故事线", "镜头描述", "旁白", "转场")
+
+
+def _build_scene_video_prompt(
+    scene: SceneGenerationItem,
+    *,
+    visual_style: str = "",
+) -> str:
+    """按结构化字段生成唯一的分镜视频提示词，避免重复拼接历史复合 prompt。"""
+    style = _normalize_scene_prompt_field(visual_style, "视觉风格")
+    if not style:
+        style = _extract_legacy_visual_style(scene.prompt)
+    fields = (
+        ("视觉风格", style),
+        ("故事线", scene.storyline),
+        ("镜头描述", _shot_description_text(scene.shot_description)),
+        ("旁白", scene.narration),
+        ("转场", scene.transition),
+    )
+    pieces: list[str] = []
+    seen_non_shot_values: set[str] = set()
+    for label, value in fields:
+        normalized = _normalize_scene_prompt_field(value, label)
+        if not normalized:
+            continue
+        if label != "镜头描述":
+            dedupe_key = re.sub(r"\s+", "", normalized)
+            if dedupe_key in seen_non_shot_values:
+                continue
+            seen_non_shot_values.add(dedupe_key)
+        pieces.append(f"{label}：{normalized}")
+    return "\n".join(pieces)
+
+
+def _normalize_scene_prompt_field(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    label_pattern = rf"^(?:{re.escape(label)}\s*[：:]\s*)+"
+    text = re.sub(label_pattern, "", text).strip()
+    normalized_lines: list[str] = []
+    for line in text.splitlines():
+        normalized_line = re.sub(r"[ \t]+", " ", line).strip()
+        if normalized_line and (not normalized_lines or normalized_lines[-1] != normalized_line):
+            normalized_lines.append(normalized_line)
+    return "\n".join(normalized_lines)
+
+
+def _extract_legacy_visual_style(prompt: str) -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        return ""
+    labels_pattern = "|".join(re.escape(label) for label in _SCENE_PROMPT_FIELD_LABELS)
+    match = re.search(
+        rf"(?:^|[\n；;])\s*视觉风格\s*[：:]\s*(.*?)(?=(?:[\n；;]\s*(?:{labels_pattern})\s*[：:])|$)",
+        text,
+        flags=re.DOTALL,
+    )
+    if match:
+        return _normalize_scene_prompt_field(match.group(1), "视觉风格")
+    if re.search(rf"(?:^|[\n；;])\s*(?:{labels_pattern})\s*[：:]", text):
+        return ""
+    return _normalize_scene_prompt_field(text, "视觉风格")
 
 
 def _shot_description_text(shot_description: dict[str, Any]) -> str:

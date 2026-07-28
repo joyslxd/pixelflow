@@ -1555,6 +1555,73 @@ def test_scene_video_prompt_keeps_authoritative_plan_transition() -> None:
     assert "转场：顺着水滴运动方向切到拉链特写。" in prompt
 
 
+def test_scene_video_prompt_uses_structured_fields_once_in_fixed_order() -> None:
+    from app.gateway.routers.pixelflow_video import SceneGenerationItem, _build_scene_video_prompt
+
+    shot_description = (
+        "0-6秒：地点：地铁口；主体：通勤者；动作：抬起背包；景别：中景；"
+        "运镜：缓慢推进；光影：清晨逆光；声音：雨声；收束：定格品牌标识。"
+    )
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=6000,
+        prompt=(
+            "故事线：雨滴落在背包表面。\n"
+            "镜头描述：旧镜头。\n"
+            "视觉风格：电影写实。\n"
+            "旁白：旧旁白。"
+        ),
+        storyline="雨滴落在背包表面。",
+        shot_description={"text": shot_description},
+        narration="下雨也能从容通勤。",
+        transition="顺着雨滴方向切到拉链特写。",
+    )
+
+    prompt = _build_scene_video_prompt(scene, visual_style="高级电影写实")
+
+    assert prompt.splitlines() == [
+        "视觉风格：高级电影写实",
+        "故事线：雨滴落在背包表面。",
+        f"镜头描述：{shot_description}",
+        "旁白：下雨也能从容通勤。",
+        "转场：顺着雨滴方向切到拉链特写。",
+    ]
+    assert prompt.count("雨滴落在背包表面。") == 1
+    for required_dimension in ("地点", "主体", "动作", "景别", "运镜", "光影", "声音", "收束"):
+        assert required_dimension in prompt
+
+
+def test_scene_video_prompt_extracts_only_visual_style_from_legacy_prompt() -> None:
+    from app.gateway.routers.pixelflow_video import SceneGenerationItem, _build_scene_video_prompt
+
+    scene = SceneGenerationItem(
+        scene_id="scene-1",
+        scene_index=1,
+        duration_ms=4000,
+        prompt="故事线：旧故事；镜头描述：旧镜头；视觉风格：冷调写实；旁白：旧旁白",
+        storyline="新故事",
+        shot_description={
+            "text": (
+                "镜头描述：地点：实验室；主体：研究员；动作：观察样本；景别：近景；"
+                "运镜：固定；光影：冷白光；声音：仪器声；收束：样本进入焦点。"
+            )
+        },
+        narration="旁白：观察微观变化。",
+        transition="转场：淡出。",
+    )
+
+    prompt = _build_scene_video_prompt(scene)
+
+    assert prompt.startswith("视觉风格：冷调写实")
+    assert "旧故事" not in prompt
+    assert "旧镜头" not in prompt
+    assert "旧旁白" not in prompt
+    assert "镜头描述：镜头描述：" not in prompt
+    assert "旁白：旁白：" not in prompt
+    assert "转场：转场：" not in prompt
+
+
 @pytest.mark.parametrize(
     ("generation_mode", "generation_types", "image_urls", "video_urls"),
     [
