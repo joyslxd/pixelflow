@@ -4,14 +4,28 @@
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
-- 当前切片：`M06.1`
-- 最近完成：`M06.1`
+- 当前切片：`M06.2`
+- 最近完成：`M06.2`
 - base Agent SHA：`340a7e42a5d1c918c3c662e29ce833da41665f82`
 - M06.1 开始时间：`2026-07-28T14:53:54+08:00`
 - M06.1 完成时间：`2026-07-28T15:07:21+08:00`
+- M06.2 开始时间：`2026-07-28T15:44:47+08:00`
+- M06.2 完成时间：`2026-07-28T16:00:31+08:00`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m06-external-jobs`
+
+## M06.2 锁定范围
+
+- `backend/pixelflow/agent_runtime/jobs/**`
+- `backend/pixelflow/agent_runtime/persistence/repositories.py`
+- `backend/tests/test_agent_runtime_operation_leases.py`
+- `README.md`
+- `AGENTS.md`
+- `docs/pixelflow-agent-skill-flow-latest-design.md`
+- `docs/agentization/plans/2026-07-28-m06-2-operation-leases.md`
+- `docs/agentization/test-reports/M06.2.md`
+- `docs/agentization/status/M06-status.md`
 
 ## M06.1 锁定范围
 
@@ -34,10 +48,24 @@
 ## 切片
 
 - [x] M06.1 operation 幂等与状态机（2.5h）
-- [ ] M06.2 DB lease/heartbeat/接管（3h）
+- [x] M06.2 DB lease/heartbeat/接管（3h）
 - [ ] M06.3 provider job adapter（2.5h）
 - [ ] M06.4 graph resume/终态 claim/crash window（2.5h）
 - [ ] M06.5 shutdown/restart/expired 恢复（2h）
+
+## M06.2 交付记录
+
+- 产物：新增 `OperationLeaseCoordinator`，Memory/SQL Repository 增加到期领取、heartbeat 和下次轮询排期三个原子方法；复用 M01 已落库字段，不新增表、字段、索引或 migration。
+- 竞争边界：只有 `polling + provider_job_id + next_poll_at <= now` 的 operation 可领取；SQL 在事务中锁行，SQLite 使用 `BEGIN IMMEDIATE`，两个独立 Engine/worker 同时竞争只保留一个胜出者。
+- 租约边界：有效期内同 worker 重领只回读且不隐式续期，heartbeat 必须严格延长；持有者原子写入未来 `next_poll_at` 并释放 lease，过期边界允许新 worker 接管，旧 worker 随即失去 heartbeat 和排期权限。
+- 隔离与安全：所有租约写入同时匹配用户、对话和内部 job；不匹配统一返回不可领取。未保存供应商原始请求、Authorization、token 或密钥，未修改配置、HTTP API、content-app 合同或两个长期 feature 分支。
+- TDD：初始因 `OperationLeaseCoordinator` 不存在而 RED；定向 GREEN 为 `32 passed`，相关合同回归 `171 passed`，全部 Agent Runtime 扩展回归 `608 passed`。唯一 warning 为既有 LangChain pending deprecation。
+- 静态检查：变更 Python 路径的 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过。
+- 独立审核：`/root/m06_2_reviewer` 全程只读，最终结论为无 Critical / Important / Minor；独立复跑 operation、lease、Repository pytest 为 `148 passed`。
+- 文档：已同步 `README.md`、`AGENTS.md`、最新设计、实施计划、本状态和 `docs/agentization/test-reports/M06.2.md`；明确 M06.1–M06.2 仍未进入 Agent 长期分支。
+- 阶段状态：M06.2 不是阶段检查点或模块最终切片，保持 `in_progress`，不更新 `status/BOARD.md`，不写任何 ready 状态，也不自动继续 M06.3。
+- commit/push：本状态随 M06.2 中文独立提交推送到 `origin/codex/agent-0.8.4-m06-external-jobs`，远端以该提交为准。
+- 下一切片：M06.3 Provider Job Adapter；必须由开发者后续明确启动并重新领取唯一 writer，继续使用同一模块分支/worktree。
 
 ## M06.1 交付记录
 

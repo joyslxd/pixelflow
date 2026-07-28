@@ -164,6 +164,39 @@ class AgentRuntimeRepository(Protocol):
 
     async def list_operations(self, user_id: str, conversation_id: str) -> list[OperationRecord]: ...
 
+    async def claim_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def heartbeat_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None: ...
+
+    async def schedule_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None: ...
+
 
 def _require_text(field: str, value: str, max_length: int | None = None) -> str:
     normalized = value.strip()
@@ -206,7 +239,7 @@ def _event_query_limit(limit: int) -> int:
     return limit
 
 
-def _event_lease(
+def _lease_window(
     lease_owner: str,
     now: datetime,
     lease_expires_at: datetime,
@@ -220,6 +253,20 @@ def _event_lease(
     if normalized_expiry <= normalized_now:
         raise ValueError("lease_expires_at must be later than now")
     return owner, normalized_now, normalized_expiry
+
+
+def _operation_poll_schedule(
+    now: datetime,
+    next_poll_at: datetime,
+) -> tuple[datetime, datetime]:
+    normalized_now = _normalize_datetime("now", now)
+    normalized_next_poll = _normalize_datetime(
+        "next_poll_at",
+        next_poll_at,
+    )
+    if normalized_next_poll <= normalized_now:
+        raise ValueError("next_poll_at must be later than now")
+    return normalized_now, normalized_next_poll
 
 
 @asynccontextmanager
@@ -392,6 +439,7 @@ class MemoryAgentRuntimeRepository:
         self._operation_ids: set[str] = set()
         self._operation_idempotency_keys: set[str] = set()
         self._operation_stage_keys: set[tuple[str, str, int, int]] = set()
+        self._operation_write_lock = asyncio.Lock()
 
     async def create_workflow(self, user_id: str, record: WorkflowRecord) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -604,7 +652,7 @@ class MemoryAgentRuntimeRepository:
             conversation_id,
             64,
         )
-        worker, normalized_now, normalized_expiry = _event_lease(
+        worker, normalized_now, normalized_expiry = _lease_window(
             lease_owner,
             now,
             lease_expires_at,
@@ -675,12 +723,13 @@ class MemoryAgentRuntimeRepository:
             normalized.stage_version,
             normalized.attempt,
         )
-        if normalized.job_id in self._operation_ids or normalized.idempotency_key in self._operation_idempotency_keys or stage_key in self._operation_stage_keys:
-            raise AgentRuntimeRecordConflictError("Operation 记录已存在")
-        self._operation_ids.add(normalized.job_id)
-        self._operation_idempotency_keys.add(normalized.idempotency_key)
-        self._operation_stage_keys.add(stage_key)
-        self._operations[(owner, normalized.job_id)] = _clone(normalized)
+        async with self._operation_write_lock:
+            if normalized.job_id in self._operation_ids or normalized.idempotency_key in self._operation_idempotency_keys or stage_key in self._operation_stage_keys:
+                raise AgentRuntimeRecordConflictError("Operation 记录已存在")
+            self._operation_ids.add(normalized.job_id)
+            self._operation_idempotency_keys.add(normalized.idempotency_key)
+            self._operation_stage_keys.add(stage_key)
+            self._operations[(owner, normalized.job_id)] = _clone(normalized)
         return _clone(normalized)
 
     async def get_operation(self, user_id: str, job_id: str) -> OperationRecord | None:
@@ -706,6 +755,125 @@ class MemoryAgentRuntimeRepository:
         records = [record for (record_owner, _), record in self._operations.items() if record_owner == owner and record.conversation_id == conversation]
         records.sort(key=lambda record: (record.created_at, record.job_id))
         return [_clone(record) for record in records]
+
+    async def claim_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if record is None or record.conversation_id != conversation or record.status is not ExternalJobStatus.POLLING or record.provider_job_id is None or record.next_poll_at is None or record.next_poll_at > normalized_now:
+                return None
+            if (record.lease_owner is None) != (record.lease_expires_at is None):
+                return None
+            if record.lease_owner == worker and record.lease_expires_at is not None and record.lease_expires_at > normalized_now:
+                return _clone(record)
+            if record.lease_expires_at is not None and record.lease_expires_at > normalized_now:
+                return None
+            claimed = _clone(
+                record.model_copy(
+                    update={
+                        "lease_owner": worker,
+                        "lease_expires_at": normalized_expiry,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = claimed
+            return _clone(claimed)
+
+    async def heartbeat_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if (
+                record is None
+                or record.conversation_id != conversation
+                or record.status is not ExternalJobStatus.POLLING
+                or record.lease_owner != worker
+                or record.lease_expires_at is None
+                or record.lease_expires_at <= normalized_now
+                or normalized_expiry <= record.lease_expires_at
+            ):
+                return None
+            extended = _clone(
+                record.model_copy(
+                    update={
+                        "lease_expires_at": normalized_expiry,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = extended
+            return _clone(extended)
+
+    async def schedule_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now, normalized_next_poll = _operation_poll_schedule(
+            now,
+            next_poll_at,
+        )
+        owner_key = (owner, operation_id)
+        async with self._operation_write_lock:
+            record = self._operations.get(owner_key)
+            if record is None or record.conversation_id != conversation or record.status is not ExternalJobStatus.POLLING or record.lease_owner != worker or record.lease_expires_at is None or record.lease_expires_at <= normalized_now:
+                return None
+            scheduled = _clone(
+                record.model_copy(
+                    update={
+                        "next_poll_at": normalized_next_poll,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "updated_at": normalized_now,
+                    }
+                )
+            )
+            self._operations[owner_key] = scheduled
+            return _clone(scheduled)
 
 
 def _workflow_from_row(row: PixelFlowAgentWorkflowRow) -> WorkflowRecord:
@@ -1318,7 +1486,7 @@ class SQLAgentRuntimeRepository:
             conversation_id,
             64,
         )
-        worker, normalized_now, normalized_expiry = _event_lease(
+        worker, normalized_now, normalized_expiry = _lease_window(
             lease_owner,
             now,
             lease_expires_at,
@@ -1464,3 +1632,135 @@ class SQLAgentRuntimeRepository:
         async with self._session_factory() as session:
             rows = (await session.scalars(statement)).all()
         return [_operation_from_row(row) for row in rows]
+
+    async def claim_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                if row is None or row.status != ExternalJobStatus.POLLING.value or row.provider_job_id is None or row.next_poll_at is None or _database_utc(row.next_poll_at) > normalized_now:
+                    return None
+                current_expiry = None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if (row.lease_owner is None) != (current_expiry is None):
+                    return None
+                if row.lease_owner == worker and current_expiry is not None and current_expiry > normalized_now:
+                    return _operation_from_row(row)
+                if current_expiry is not None and current_expiry > normalized_now:
+                    return None
+                row.lease_owner = worker
+                row.lease_expires_at = normalized_expiry
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def heartbeat_operation_lease(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.POLLING.value or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now or normalized_expiry <= current_expiry:
+                    return None
+                row.lease_expires_at = normalized_expiry
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)
+
+    async def schedule_operation_poll(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        normalized_now, normalized_next_poll = _operation_poll_schedule(
+            now,
+            next_poll_at,
+        )
+        statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                row = (await session.scalars(statement)).one_or_none()
+                current_expiry = None if row is None or row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                if row is None or row.status != ExternalJobStatus.POLLING.value or row.lease_owner != worker or current_expiry is None or current_expiry <= normalized_now:
+                    return None
+                row.next_poll_at = normalized_next_poll
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = normalized_now
+                await session.flush()
+                return _operation_from_row(row)

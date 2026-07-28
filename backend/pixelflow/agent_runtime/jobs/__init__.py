@@ -6,6 +6,7 @@ from .identity import (
     build_operation_request,
     hash_operation_request,
 )
+from .leases import OperationLeaseCoordinator
 from .state_machine import (
     OPERATION_STATE_TRANSITIONS,
     TERMINAL_OPERATION_STATUSES,
@@ -17,6 +18,7 @@ __all__ = [
     "OPERATION_STATE_TRANSITIONS",
     "TERMINAL_OPERATION_STATUSES",
     "OperationCoordinator",
+    "OperationLeaseCoordinator",
     "OperationStateConflictError",
     "build_operation_idempotency_key",
     "build_operation_request",
