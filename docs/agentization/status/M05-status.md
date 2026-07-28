@@ -119,7 +119,7 @@
 - release_id：`R2`
 - checkpoint_slice：`M05.5`
 - checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
-- last_integrated_commit：`无`
+- last_integrated_commit：`—`
 - locked files：`无`
 - checkpoint_status：`ready_for_integration`
 - integration failure evidence：`无`
