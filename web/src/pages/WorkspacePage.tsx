@@ -108,13 +108,14 @@ import {
   type WorkflowFlowKind,
   type WorkflowProgressSnapshot,
 } from "@/lib/workflowTaskBoard";
-import type { JsonObject, OrchestrationMode, TurnStartRequest } from "@/lib/supervisor/contracts";
+import type { OrchestrationMode } from "@/lib/supervisor/contracts";
 import {
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
+import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
 
 let seq = 0;
 const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
@@ -129,6 +130,9 @@ interface PendingSupervisorTurn {
   clientInputId: string;
   content: string;
   materials: Array<Record<string, unknown>>;
+  replyToMessageId: string | null;
+  artifactRefs: string[];
+  interruptId: string | null;
 }
 
 interface DeferredOwnershipInput {
@@ -2692,7 +2696,9 @@ export function WorkspacePage() {
   };
 
   const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
-    const material = selectedStoryboardMessageId ? { ...asset, scene_global_asset_action: "edit" as const, storyboard_message_id: selectedStoryboardMessageId } : { ...asset, scene_global_asset_action: "edit" as const };
+    const material = selectedStoryboardMessageId
+      ? { ...asset, conversation_id: currentConversationId, scene_global_asset_action: "edit" as const, storyboard_message_id: selectedStoryboardMessageId }
+      : { ...asset, conversation_id: currentConversationId, scene_global_asset_action: "edit" as const };
     setReferencedMaterials((items) => {
       const next = items.filter((item) => item.asset_id !== material.asset_id);
       return [material, ...next].slice(0, 1);
@@ -2700,7 +2706,9 @@ export function WorkspacePage() {
   };
 
   const handleDeleteGlobalAsset = (asset: SceneGlobalAssetReference) => {
-    const material = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    const material = selectedStoryboardMessageId
+      ? { ...asset, conversation_id: currentConversationId, storyboard_message_id: selectedStoryboardMessageId }
+      : { ...asset, conversation_id: currentConversationId };
     const deleteMaterial = { ...material, scene_global_asset_action: "delete" as const };
     setReferencedMaterials((items) => {
       const next = items.filter((item) => item.asset_id !== deleteMaterial.asset_id);
@@ -6355,7 +6363,13 @@ export function WorkspacePage() {
 
   const normalizeSendInput = (input: string | AgentUserMessagePayload): AgentUserMessagePayload => {
     if (typeof input === "string") return { content: input, materials: [] };
-    return { content: input.content, materials: Array.isArray(input.materials) ? input.materials : [] };
+    return {
+      content: input.content,
+      materials: Array.isArray(input.materials) ? input.materials : [],
+      reply_to_message_id: input.reply_to_message_id ?? null,
+      artifact_refs: Array.isArray(input.artifact_refs) ? input.artifact_refs : [],
+      interrupt_id: input.interrupt_id ?? null,
+    };
   };
 
   const appendSupervisorNotice = (content: string, targetConversationId: string) => {
@@ -6388,15 +6402,20 @@ export function WorkspacePage() {
       // 每次写请求前重新读取 CAS 版本，避免上一轮 Turn 或事件消费后继续使用旧版本。
       await supervisorRuntime.refreshSnapshot();
       const expectedContextVersion = supervisorRuntime.getContextVersion() ?? contextVersion;
-      const request: TurnStartRequest = {
-        client_input_id: pendingTurn.clientInputId,
+      const submission = buildSupervisorSubmission({
+        conversationId: targetConversationId,
+        clientInputId: pendingTurn.clientInputId,
         content: pendingTurn.content,
-        materials: pendingTurn.materials as JsonObject[],
-        reply_to_message_id: null,
-        artifact_refs: [],
-        expected_context_version: expectedContextVersion,
-      };
-      await supervisorRuntime.startTurn(request);
+        materials: pendingTurn.materials,
+        replyToMessageId: pendingTurn.replyToMessageId,
+        artifactRefs: pendingTurn.artifactRefs,
+        interruptId: pendingTurn.interruptId,
+      }, expectedContextVersion);
+      if (submission.kind === "interrupt") {
+        await supervisorRuntime.respondToInterrupt(submission.interruptId, submission.request);
+      } else {
+        await supervisorRuntime.startTurn(submission.request);
+      }
       // Turn 已接受后刷新一次，让紧随其后的排队输入看到服务端最新版本。
       try {
         await supervisorRuntime.refreshSnapshot();
@@ -6475,7 +6494,13 @@ export function WorkspacePage() {
       });
       return;
     }
-    const { content: text, materials = [] } = normalizeSendInput(input);
+    const {
+      content: text,
+      materials = [],
+      reply_to_message_id: replyToMessageId = null,
+      artifact_refs: artifactRefs = [],
+      interrupt_id: interruptId = null,
+    } = normalizeSendInput(input);
     let activeConversation = conversationIdRef.current;
     const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
     try {
@@ -6489,7 +6514,11 @@ export function WorkspacePage() {
           clientInputId: message.id,
           content: text,
           materials,
+          replyToMessageId,
+          artifactRefs,
+          interruptId,
         }]);
+        setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
         return;
       }
@@ -8669,8 +8698,12 @@ export function WorkspacePage() {
           onUpdateVideoScenePackage={legacyArtifactActionsEnabled
             ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
             : undefined}
-          onReferenceGlobalAsset={legacyArtifactActionsEnabled ? handleReferenceGlobalAsset : undefined}
-          onDeleteGlobalAsset={legacyArtifactActionsEnabled ? handleDeleteGlobalAsset : undefined}
+          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
+            ? handleReferenceGlobalAsset
+            : undefined}
+          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
+            ? handleDeleteGlobalAsset
+            : undefined}
           onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)

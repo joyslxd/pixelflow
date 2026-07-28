@@ -216,6 +216,7 @@ try {
       "src/lib/supervisor/legacyAdapter.ts",
       "src/lib/supervisor/reducer.ts",
       "src/lib/supervisor/runtimeNotice.ts",
+      "src/lib/supervisor/turnSubmission.ts",
       "src/lib/time.ts",
       "src/lib/videoRequirementConfig.ts",
       "src/lib/workflowTaskBoard.ts",
@@ -262,6 +263,10 @@ try {
       SUPERVISOR_RUNTIME_NOTICE_TEST_MODULE: moduleUrl(
         moduleDirectory,
         "supervisor/runtimeNotice.js",
+      ),
+      SUPERVISOR_TURN_SUBMISSION_TEST_MODULE: moduleUrl(
+        moduleDirectory,
+        "supervisor/turnSubmission.js",
       ),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),

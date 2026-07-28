@@ -1,14 +1,16 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`phase_integrated`
+- phase：`in_progress`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
-- 当前切片：`M12.4`
+- 当前切片：`M12.5`
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
+- M12.4 模块分支基线：`b69a13eaebfec53bdccf7e374e1824c01f14058d`
 - 当前唯一写入者：`尚未领取`
-- 开始时间：`2026-07-25 11:16:05 +0800`
+- 开始时间：`—`
+- M12.4 已释放文件：`web/src/lib/authStorage.ts`、`web/src/lib/supervisor/turnSubmission.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/authStorage.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.4.md`
 - M12.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
 - release_id：`R1`
 - checkpoint_slice：`M12.3`
@@ -21,7 +23,7 @@
 - [x] M12.1 orchestration mode 双运行时挂载（2h）
 - [x] M12.2 拆分 busy/action policy（2h）
 - [x] M12.3 压缩 Notice/排队 badge（2h）
-- [ ] M12.4 reply/artifact/interrupt/mention 元数据（2.5h）
+- [x] M12.4 reply/artifact/interrupt/mention 元数据（2.5h）
 - [ ] M12.5 消息/进度/历史/task board 投影（2.5h）
 
 R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `ready_for_phase_integration` 并停止；开发者按执行手册 9.10A 人工触发单槽候选，绿色进入 Agent 后写 `phase_integrated`。M12.4 仍需开发者再次手动启动，继续复用本模块分支。
@@ -77,3 +79,17 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
 - locked files：`无`
 - integration failure evidence：`无`
+
+## M12.4 完成记录
+
+- 完成时间：`2026-07-28 19:39:41 +0800`
+- 实现：新增独立 `buildSupervisorSubmission()` 提交 Service，将同一 Composer 输入确定性转换为冻结的 `TurnStartRequest` 或 interrupt response；reply、Artifact 引用、场景素材 `asset_id/storyboard_message_id/artifact_ref/mention_ref` 均沿现有 DTO 提交，不新增 `mention_refs` HTTP 字段。
+- 目标安全：消息引用冲突和素材跨会话归属失败关闭；Artifact 引用按出现顺序去空、去重并只接受 `artifact:` 引用；素材先复制为合法 JSON，错误只返回固定安全提示，不回显用户内容或底层异常。
+- interrupt 幂等：存在合法 `interrupt_id` 时只调用 `respondToInterrupt()`，以同一 `client_input_id` 作为稳定 `client_response_id`，不额外创建 Turn；普通输入继续携带最新 `expected_context_version` 走 `startTurn()`。
+- 场景 mention：Supervisor 只释放分镜面板的“引用/删除素材”元数据入口，并附带当前 `conversation_id`；替换、生成、重试和其他旧供应商动作仍由 `legacyArtifactActionsEnabled` 隔离，`frontend_v2` 原路径不变。
+- TDD：首轮以缺少 `turnSubmission.ts` 得到预期 `TS6053` RED，最小实现后达到 `302/302`；自审新增 Supervisor 场景引用可达性合同得到 `302 passed / 1 failed` RED，修复后达到 `303/303`；补齐可信 content-app 桥接回归后最终 `npm test` 为 `304/304`。
+- 验证：主审核与独立 Reviewer 均完成 `npm test`（`304/304`）、`npm run lint`、`npm run build-prod` 和 `git diff --check`，全部通过；生产构建仅有既存 chunk 体积提醒，未调用真实或付费 API。
+- 独立审核：`/root/m12_4_reviewer` 只读审核结论 `Ready`，Critical/Important/Minor 均为 0；Reviewer 未修改文件、未提交、未推送，并确认冻结 DTO、interrupt 单路由、跨会话隔离、旧运行时兼容和 M12.5 边界。
+- 中文规范：push 前使用仓库 `Test-ChineseEngineeringPolicy.ps1` 对本片独立中文提交、人工注释和配置边界执行检查；本片新增/修改说明均为中文，无新增配置、依赖或锁文件。
+- 状态：M12.4 是普通中间切片，M12 保持 `in_progress`；不写 `ready_for_phase_integration` 或 `ready_for_integration`，不运行阶段/最终模块门禁，不更新 `status/BOARD.md` 或集成记录。
+- 下一步：`M12.5 消息/进度/历史/task board 投影`；唯一写入权和本片文件锁已释放，必须由开发者重新启动任务并复用当前模块分支/worktree，本任务到此停止。

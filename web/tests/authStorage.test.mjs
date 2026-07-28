@@ -11,6 +11,7 @@ const {
   normalizeAuthorization,
   saveAuthorization,
   isTrustedContentAppOrigin,
+  setupContentAppAuthorizationListener,
 } = await import(moduleUrl);
 
 function makeStorage(initial = {}) {
@@ -84,4 +85,59 @@ test("isTrustedContentAppOrigin accepts local, test, and production content-app 
   assert.equal(isTrustedContentAppOrigin("https://test-video.borgrise.com"), true);
   assert.equal(isTrustedContentAppOrigin("https://video.borgrise.com"), true);
   assert.equal(isTrustedContentAppOrigin("https://example.com"), false);
+});
+
+test("可信 content-app 用户消息会保留 Supervisor 目标定位元数据", () => {
+  const originalWindow = globalThis.window;
+  const originalCustomEvent = globalThis.CustomEvent;
+  const listeners = new Map();
+  const dispatched = [];
+  globalThis.window = {
+    location: { origin: "http://localhost:5174" },
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    },
+    dispatchEvent(event) {
+      dispatched.push(event);
+      return true;
+    },
+  };
+  globalThis.CustomEvent = class {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+
+  try {
+    const cleanup = setupContentAppAuthorizationListener();
+    listeners.get("message")({
+      origin: "http://localhost:5174",
+      data: {
+        type: "AGENT_USER_MESSAGE",
+        content: "同意这个方案",
+        materials: [{ artifact_ref: "artifact:video-plan:wf_001:v1:hash" }],
+        reply_to_message_id: "msg_plan_001",
+        artifact_refs: ["artifact:video-plan:wf_001:v1:hash"],
+        interrupt_id: "interrupt_plan_001",
+      },
+    });
+
+    assert.deepEqual(window.__CONTENT_APP_USER_MESSAGE__, {
+      content: "同意这个方案",
+      materials: [{ artifact_ref: "artifact:video-plan:wf_001:v1:hash" }],
+      reply_to_message_id: "msg_plan_001",
+      artifact_refs: ["artifact:video-plan:wf_001:v1:hash"],
+      interrupt_id: "interrupt_plan_001",
+    });
+    assert.deepEqual(dispatched[0].detail, window.__CONTENT_APP_USER_MESSAGE__);
+    cleanup();
+    assert.equal(listeners.has("message"), false);
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.CustomEvent = originalCustomEvent;
+  }
 });
