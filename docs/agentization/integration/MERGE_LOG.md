@@ -258,3 +258,30 @@
 - rollback：如需撤回，基于本记录定位 M05 候选中的模块、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M05 状态、BOARD、MERGE_LOG、最新流程设计和 M05.5 黄金评估报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-28 19:05:38 +08:00：M11 最终模块 候选通过，模块提交 `5ed26af7efd9fdd7c02d842873461428653f85c8` 已纳入最新 Agent/dev 基线。
+
+### 0010 / 2026-07-28 / M11 最终模块集成
+
+- module：`M11`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m11-video-workflow@5ed26af7efd9fdd7c02d842873461428653f85c8`；M11.5 业务检查点为 `2b003c4bf50ed71eeb7b3b361ab7cd73df1f2050`，后续提交只记录首次阻塞、门禁恢复和单槽状态
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@340a7e42a5d1c918c3c662e29ce833da41665f82` 由脚本原子推进至 `18f83f082d2a4ed43ed75cfdf935851f020cdeac`；完整交接记录随同一成功候选再次防漂移快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m11-video-workflow@d3890131320a28c91efe44d057cef1f5d095b35e`
+- dependencies：M05 已进入冻结 Agent；M11 对尚未完成的 M06 真实 Operation 适配保持 fail-closed，R2 真实联调仍须等待 M06，未用非原子实现绕过
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先
+- candidate：成功候选为 `codex/integrate-m11-20260728-110448-578e18ae`，严格按“最新 Agent + 最新 dev + M11 增量”创建，并在全新 worktree 内按 `pnpm-lock.yaml` 安装依赖；没有复用 blocked 候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M11.5`，业务检查点 `2b003c4bf50ed71eeb7b3b361ab7cd73df1f2050`，集成源 HEAD `5ed26af7efd9fdd7c02d842873461428653f85c8`，此前 `last_integrated_commit=—`，最终写为集成源 HEAD
+- trigger / single slot：远端状态已恢复为 `ready_for_integration`、提交已 push、唯一写入者和模块锁已释放；开发者人工启动唯一单槽任务，最终状态 `merged`，`checkpoint_status=integrated`
+- blocked history：首次候选 `codex/integrate-m11-20260728-102519-7a52afec` 因全新 worktree 缺少 `web/node_modules` 和本地 TypeScript 编译器而安全写入 `integration_blocked`，Agent 保持不变；使用 `pnpm.cmd install --frozen-lockfile` 补齐依赖后，在保留候选复跑 M11 Final 得到 `Passed=True / CommandCount=7`，再以中文恢复提交 `5ed26af7` 开放入口并创建全新成功候选
+- file ownership：候选只纳入 M11 视频 Workflow Adapter、权威门禁、测试和交接记录；没有执行或修改 M06、M12.5、M13.2 及其他模块切片
+- feature flag：未修改生产运行模式、`enabled_intents`、rollout 比例或 Feature Flag；R1 的 `assist + [] + 100% + context_compaction=true` 生产状态保持不变
+- production：未发布 R2；没有把视频切到 `primary`，没有生产批准或真实供应商调用
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：保留候选恢复验证和全新成功候选均执行 M11 Final 七项权威非付费门禁并返回 `Passed=True / CommandCount=7`；冻结范围覆盖 M11 后端权威清单、Feature Flag 关闭回归、Windows PowerShell 5.1 分支自动化、限定 Ruff、Web 全量测试、lint、`build-prod` 和 `git diff --check`
+- reviewer：`/root/m11_5_independent_review` 最终结论 `Critical=0 / Important=0 / Minor=0 / Ready=Yes`；独立复跑 M11.3–M11.5、剪映后端组合和 Web 全量均绿色，成功候选再次执行同一冻结范围的权威门禁
+- conflicts：最新 Agent、最新 dev 和 M11 增量合入成功候选时无内容冲突；前次阻塞只修复本地依赖并通过完整门禁恢复，没有人工挑选代码或复用 blocked 候选
+- migration/configuration：无 migration、无配置键和依赖声明变化；全新候选只按既有锁文件安装本地依赖，没有修改 `package.json` 或锁文件
+- Chinese engineering policy：M11 五个切片、恢复提交、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁；本次没有新增或修改配置项
+- smoke：只执行 M11 本地 fake/mock 非付费权威门禁；未调用真实 content-app、图片、视频、PPT、剪映、LLM、PowerMem 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一切片，未修改 dev，未发布 R2，未把自动化状态提升为 `automation_active`
+- remote guard：成功候选门禁后脚本重新读取 Agent、dev 和 M11 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同防漂移检查
+- rollback：如需撤回，基于本记录定位 M11 候选中的业务、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M11 状态、BOARD、MERGE_LOG 和 M11.1–M11.5 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
