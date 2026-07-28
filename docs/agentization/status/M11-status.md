@@ -1,6 +1,6 @@
 # M11 视频生成 Workflow Adapter
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：B
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m11-video-workflow`
@@ -107,7 +107,7 @@
 - 提交与推送：本状态随 M11.5 独立中文提交推送到 `origin/codex/agent-0.8.4-m11-video-workflow`。
 - 下一步：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术并明确模块号 `M11`，手动启动唯一单槽最终集成；不得继续不存在的 M11.6，也不得由本任务更新两个长期 feature 分支。
 
-- last_integrated_commit：`—`
+- last_integrated_commit：`5ed26af7efd9fdd7c02d842873461428653f85c8`
 - locked files：`无`
-- checkpoint_status：`ready`
-- integration failure evidence：`无；保留候选 codex/integrate-m11-20260728-102519-7a52afec 已补齐本地前端依赖，并于冻结 Agent 340a7e42a5d1c918c3c662e29ce833da41665f82 上复跑 M11 Final，Passed=True / CommandCount=7；恢复入口后必须创建全新候选，不得复用保留候选`
+- checkpoint_status：`integrated`
+- integration failure evidence：`无`
