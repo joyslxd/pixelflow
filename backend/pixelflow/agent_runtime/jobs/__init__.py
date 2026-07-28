@@ -7,6 +7,14 @@ from .identity import (
     hash_operation_request,
 )
 from .leases import OperationLeaseCoordinator
+from .providers import (
+    ExistingJobService,
+    ProviderJobAdapter,
+    ProviderJobCallError,
+    ProviderJobMappingError,
+    ProviderJobOutcome,
+    ProviderJobSnapshot,
+)
 from .state_machine import (
     OPERATION_STATE_TRANSITIONS,
     TERMINAL_OPERATION_STATUSES,
@@ -20,6 +28,12 @@ __all__ = [
     "OperationCoordinator",
     "OperationLeaseCoordinator",
     "OperationStateConflictError",
+    "ExistingJobService",
+    "ProviderJobAdapter",
+    "ProviderJobCallError",
+    "ProviderJobMappingError",
+    "ProviderJobOutcome",
+    "ProviderJobSnapshot",
     "build_operation_idempotency_key",
     "build_operation_request",
     "ensure_operation_transition",

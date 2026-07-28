@@ -4,16 +4,31 @@
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
-- 当前切片：`M06.2`
-- 最近完成：`M06.2`
+- 当前切片：`M06.3`
+- 最近完成：`M06.3`
 - base Agent SHA：`340a7e42a5d1c918c3c662e29ce833da41665f82`
 - M06.1 开始时间：`2026-07-28T14:53:54+08:00`
 - M06.1 完成时间：`2026-07-28T15:07:21+08:00`
 - M06.2 开始时间：`2026-07-28T15:44:47+08:00`
 - M06.2 完成时间：`2026-07-28T16:00:31+08:00`
+- M06.3 开始时间：`2026-07-28T16:22:27+08:00`
+- M06.3 完成时间：`2026-07-28T17:03:47+08:00`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - worktree：`E:\IntelliJIDEA\secondWorkSpaces\cmyqCode\pixelflow-worktrees\m06-external-jobs`
+
+## M06.3 锁定范围
+
+- `backend/pixelflow/agent_runtime/jobs/**`
+- `backend/pixelflow/agent_runtime/ports.py`
+- `backend/pixelflow/agent_runtime/fakes.py`
+- `backend/tests/test_agent_runtime_provider_job_adapter.py`
+- `README.md`
+- `AGENTS.md`
+- `docs/pixelflow-agent-skill-flow-latest-design.md`
+- `docs/agentization/plans/2026-07-28-m06-3-provider-job-adapter.md`
+- `docs/agentization/test-reports/M06.3.md`
+- `docs/agentization/status/M06-status.md`
 
 ## M06.2 锁定范围
 
@@ -49,9 +64,23 @@
 
 - [x] M06.1 operation 幂等与状态机（2.5h）
 - [x] M06.2 DB lease/heartbeat/接管（3h）
-- [ ] M06.3 provider job adapter（2.5h）
+- [x] M06.3 provider job adapter（2.5h）
 - [ ] M06.4 graph resume/终态 claim/crash window（2.5h）
 - [ ] M06.5 shutdown/restart/expired 恢复（2h）
+
+## M06.3 交付记录
+
+- 产物：新增 `ProviderJobAdapter`、`ExistingJobService` Protocol 和深度只读 `ProviderJobSnapshot`，把现有 v2 Mapping/Pydantic start/status DTO 归一为 `polling/succeeded/failed/paused_quota/timeout` 五态；不修改现有 Router。
+- 兼容边界：支持真实 `quota_paused` 别名、直接异常属性或 httpx response 的 HTTP 402、结构化额度标记、内置/httpx 超时；现有 DTO 中明确的 `raw/raw_response/provider_response/response_body` 字段先递归剔除，剩余业务 JSON 才进入 Snapshot。
+- 安全边界：provider job ID 固定受限字符和 255 字符上限，拒绝 URL、空白和疑似凭据形态；敏感键、普通字符串中的 Authorization/Bearer/token、带 userinfo/query/fragment 的 HTTP(S) URL、非法 JSON、非有限浮点和未知状态均 fail-closed。Snapshot 固定 outcome/reason/message 对应关系，顶层和嵌套结果不可变，序列化前再次校验；错误输入和供应商异常原文不回显。
+- TDD：首轮因 Adapter 不存在产生明确 ImportError；自审和独立审核持续追加多轮 RED，覆盖非布尔 `ok`、真实 DTO raw、状态别名、job ID、凭据值、公开模型绕过、赋值残留与嵌套篡改。最终定向 GREEN 为 `66 passed`，相关合同回归 `237 passed`，全部 Agent Runtime 扩展回归 `674 passed`。唯一 warning 为既有 LangChain pending deprecation。
+- 静态检查：变更 Python 路径的 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过。
+- 独立审核：`/root/m06_3_reviewer` 全程只读，独立复跑 Provider Adapter、operation 与 lease 为 `144 passed`；最终结论为无 Critical / Important / Minor，`Ready to commit/push：是`。
+- 隔离与成本：未新增或修改配置、数据库表/字段/索引/migration、HTTP API 或 content-app 合同，未调用真实图片、视频、PPT、视频分析、剪映、LLM 或其他付费服务，未修改两个长期 feature 分支。
+- 文档：已同步 `README.md`、`AGENTS.md`、最新设计、实施计划、本状态和 `docs/agentization/test-reports/M06.3.md`；明确 M06.1–M06.3 仍未进入 Agent 长期分支。
+- 阶段状态：M06.3 不是 `phased-rollout-plan.md` 明确检查点或模块最终切片，保持 `in_progress`，不更新 `status/BOARD.md`，不写任何 ready 状态，也不自动继续 M06.4。
+- commit/push：本状态随 M06.3 中文独立提交推送到 `origin/codex/agent-0.8.4-m06-external-jobs`，远端以该提交为准。
+- 下一切片：M06.4 完成事件、Workflow Graph resume、终态 claim 和“Provider 成功/checkpoint 前崩溃”窗口；必须由开发者后续明确启动并重新领取唯一 writer，继续使用同一模块分支/worktree。
 
 ## M06.2 交付记录
 

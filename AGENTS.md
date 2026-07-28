@@ -22,7 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
-| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Operation Repository | M06.2 模块分支已建立稳定 operation 身份、请求摘要、状态迁移、重复 start claim，以及双 worker 数据库 lease、heartbeat、`next_poll_at` 和过期接管；Provider Client、完成恢复及重启接管仍待 M06.3–M06.5，尚未进入 Agent 长期分支 |
+| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation Repository | M06.3 模块分支已建立稳定 operation 身份、请求摘要、状态迁移、重复 start claim、数据库轮询租约，以及现有 start/status Service 的五态 Provider Adapter；完成事件、Workflow 恢复及重启接管仍待 M06.4–M06.5，尚未进入 Agent 长期分支 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -106,8 +106,15 @@ M06.1 的 operation 身份固定为 `workflow_id + stage + stage_version + attem
 `provider_job_id` 已落库且 `next_poll_at` 到期的任务可被一个 worker 领取；有效租约
 内同 worker 重领只回读，不自动延长，heartbeat 必须严格续到更晚时间。轮询后原子
 写入未来 `next_poll_at` 并释放租约；过期边界允许新 worker 接管，旧 worker 随即
-失去 heartbeat 和排期权限。该模块分支仍不具备供应商启动、完成事件、工作流恢复或
-重启接管，也尚未进入 Agent 长期分支。
+失去 heartbeat 和排期权限。M06.3 新增的 `ProviderJobAdapter` 只作为
+现有 v2 start/status Service 的防腐 Client：start 显式透传单次 Authorization 和
+operation 幂等键但不保存，status 只查询传入的原 provider job ID；现有 DTO 被统一
+映射为 `polling/succeeded/failed/paused_quota/timeout`。现有 DTO 中明确的
+供应商 raw 字段在边界递归剔除；未知状态、job ID 错配、其余敏感结果、带查询串
+完整 URL 和非法 JSON 一律 fail-closed。稳定 Snapshot 深度只读，序列化前再次
+执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。Operation 驱动的供应商
+启动、终态落库、Outbox、Graph resume 和重启恢复仍属后续切片；本模块增量也尚未
+进入 Agent 长期分支。
 
 ```text
 用户输入 + 附件
