@@ -22,6 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等 Service + Operation Repository | M06.1 模块分支已建立稳定 operation 身份、请求摘要、状态迁移和重复 start claim；lease、Provider Client、完成恢复及重启接管仍待 M06.2–M06.5，尚未进入 Agent 长期分支 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -97,6 +98,12 @@ R1 修复后的上下文预算是跨 R2–R4 的强制合同：dev/prod profile 
 Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照保留在 Store，
 但不得重复进入模型上下文。新增或修改流程必须验证附件完整、自动压缩、压缩期输入
 排队继续和失败受控重试。
+
+M06.1 的 operation 身份固定为 `workflow_id + stage + stage_version + attempt`，
+幂等键使用带版本的规范哈希，供应商请求仅保存规范 SHA-256。相同 start 重试或并发
+竞争只能返回同一内部 job；相同身份但请求摘要不同必须 fail-closed。当前切片只建立
+`created/polling/succeeded/failed/timeout/expired` 的迁移合同和首次 claim，
+不得把它描述成已经具备 lease 轮询、供应商启动、工作流恢复或重启接管。
 
 ```text
 用户输入 + 附件
@@ -469,6 +476,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 | 图片/视频生成准备逻辑 | `backend/pixelflow/generate/` |
 | PowerMem 语义记忆 Client 和现有记忆上下文整理 | `backend/pixelflow/memory/` |
 | 新 Agent Runtime 的模型预算、结构化摘要与全局上下文压缩 | `backend/pixelflow/agent_runtime/context/` |
+| 新 Agent Runtime 的 operation 幂等、状态机和后续外部任务协调 | `backend/pixelflow/agent_runtime/jobs/` |
 | 第三方 API、上传、轮询、错误归一 | `backend/pixelflow/skills/` |
 | 任务、会话、资产持久化 | `backend/pixelflow/tasks/` |
 | 用户偏好 | `backend/pixelflow/preferences/` |

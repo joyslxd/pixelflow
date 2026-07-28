@@ -156,6 +156,12 @@ class AgentRuntimeRepository(Protocol):
 
     async def get_operation(self, user_id: str, job_id: str) -> OperationRecord | None: ...
 
+    async def get_operation_by_idempotency_key(
+        self,
+        user_id: str,
+        idempotency_key: str,
+    ) -> OperationRecord | None: ...
+
     async def list_operations(self, user_id: str, conversation_id: str) -> list[OperationRecord]: ...
 
 
@@ -681,6 +687,18 @@ class MemoryAgentRuntimeRepository:
         owner = _require_text("user_id", user_id, 64)
         record = self._operations.get((owner, _require_text("job_id", job_id, 64)))
         return None if record is None else _clone(record)
+
+    async def get_operation_by_idempotency_key(
+        self,
+        user_id: str,
+        idempotency_key: str,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        key = _require_text("idempotency_key", idempotency_key, 255)
+        for (record_owner, _), record in self._operations.items():
+            if record_owner == owner and record.idempotency_key == key:
+                return _clone(record)
+        return None
 
     async def list_operations(self, user_id: str, conversation_id: str) -> list[OperationRecord]:
         owner = _require_text("user_id", user_id, 64)
@@ -1414,6 +1432,20 @@ class SQLAgentRuntimeRepository:
         statement = select(PixelFlowAgentOperationRow).where(
             PixelFlowAgentOperationRow.user_id == owner,
             PixelFlowAgentOperationRow.job_id == _require_text("job_id", job_id, 64),
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+        return None if row is None else _operation_from_row(row)
+
+    async def get_operation_by_idempotency_key(
+        self,
+        user_id: str,
+        idempotency_key: str,
+    ) -> OperationRecord | None:
+        owner = _require_text("user_id", user_id, 64)
+        statement = select(PixelFlowAgentOperationRow).where(
+            PixelFlowAgentOperationRow.user_id == owner,
+            PixelFlowAgentOperationRow.idempotency_key == _require_text("idempotency_key", idempotency_key, 255),
         )
         async with self._session_factory() as session:
             row = (await session.scalars(statement)).one_or_none()

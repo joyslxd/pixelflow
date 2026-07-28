@@ -15,6 +15,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
 | 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；所有 Agent 共用配置驱动的 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案；业务推进权仍属于现有 v2 阶段工作流，生产继续关闭 |
+| 持久化 External Job Coordinator | M06.1 模块分支切片 | 已建立 operation 四段身份、规范请求哈希、显式状态迁移表和重复 start claim；只持久化摘要而不保存 Authorization。lease、供应商适配、完成恢复和重启接管仍由 M06.2–M06.5 后续切片实现，本切片尚未进入 Agent 长期分支 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
@@ -58,7 +59,7 @@ pixelflow/
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
 │   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
-│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩与排队
+│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩、排队与 operation 幂等
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好

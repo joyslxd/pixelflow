@@ -973,6 +973,8 @@ corepack pnpm build
 
 M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 51 条中文离线黄金集达到 action 98.04%、target 95.45%、歧义追问 95.24%、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
 
+M06.1 在独立模块分支建立持久化 External Job 的首段领域合同：operation 幂等身份固定为 `workflow_id + stage + stage_version + attempt`，生成带版本的固定长度哈希键；供应商 JSON 请求经过稳定排序和 UTF-8 编码后只保存 `sha256`，Authorization、token 和原始请求体不进入 operation 表。相同 start 的顺序重试或并发竞争回读同一内部 job，相同身份被不同摘要复用时 fail-closed。状态表允许 `created` 进入 `polling` 或终态、`polling` 进入终态、同状态幂等重放，并禁止终态重开。该切片尚未进入 Agent 长期分支，也不包含 M06.2–M06.5 的 lease、Provider Adapter、完成事件、workflow resume 或重启接管。
+
 R1 修复后，`ContextBudgetPolicyProvider` 是所有当前和未来 Agent 节点的唯一预算来源：有效窗口 896K、输出预留 32K、安全预留 32K，`K=1024 tokens`；DeepSeek V4 Pro 的物理档案为 1,000,000 tokens。新增或修改 Agent/流程只提供用于审计的节点名，不得定义另一套窗口。实际 Runtime 严格校验档案，128K 只保留为底层兼容测试。Plan 修订恢复请求等大型恢复快照继续保存在 Conversation Store，但不重复进入模型 Prompt。
 
 R1 Turn 登记在同一 Repository 事务内完成幂等检查、上下文 CAS、可见用户消息、Turn 和首批 Outbox 事件；冲突请求不能留下半成品。自动压缩从本次登记得到的稳定 `message_id` 精确保护当前输入的文本、materials、reply 和 artifact refs，不依赖同秒消息的排序猜测。旧 v2 只有在该 Turn 进入 `accepted/processing` 后才用同一个客户端 UUID 启动既有可恢复消息 job；后端只接受当前用户、当前对话、稳定消息 ID 和 job registry 全部匹配的 job 作为接力证据，并在保存 pending context 的同一 Conversation Store 临界区写入服务端 `legacy_handoff` marker。Runtime 随后幂等完成当前 Turn、领取下一条并补齐 `input.state_changed` 事件；任一步中断时 marker 保留，下一次 Snapshot 按 marker 继续补偿，客户端伪造 context 不能提前完成 Turn。刷新或断线只恢复 conversation context、Snapshot、SSE cursor 与原 job，前端不会把 `queued` 输入重新提交。
