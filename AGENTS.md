@@ -22,6 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R2 External Job Coordinator 候选 | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 模块分支已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义；最终本地门禁已绿，等待人工单槽集成，尚未进入 Agent 长期分支 |
 | R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py`、`scene_packages.py` | 视频领域 Application Service + 权威 DTO | M11.1–M11.2 已冻结 intake/方向/Plan 及严格继承 Plan 的场景包与全局资产图；尚未接 Supervisor、供应商 Operation 或生产路由 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
@@ -100,6 +101,39 @@ R1 修复后的上下文预算是跨 R2–R4 的强制合同：dev/prod profile 
 Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照保留在 Store，
 但不得重复进入模型上下文。新增或修改流程必须验证附件完整、自动压缩、压缩期输入
 排队继续和失败受控重试。
+
+M06.1 的 operation 身份固定为 `workflow_id + stage + stage_version + attempt`，
+幂等键使用带版本的规范哈希，供应商请求仅保存规范 SHA-256。相同 start 重试或并发
+竞争只能返回同一内部 job；相同身份但请求摘要不同必须 fail-closed。M06.2 继续为
+`polling` operation 增加按用户、对话和 job 隔离的数据库 lease：仅
+`provider_job_id` 已落库且 `next_poll_at` 到期的任务可被一个 worker 领取；有效租约
+内同 worker 重领只回读，不自动延长，heartbeat 必须严格续到更晚时间。轮询后原子
+写入未来 `next_poll_at` 并释放租约；过期边界允许新 worker 接管，旧 worker 随即
+失去 heartbeat 和排期权限。M06.3 新增的 `ProviderJobAdapter` 只作为
+现有 v2 start/status Service 的防腐 Client：start 显式透传单次 Authorization 和
+operation 幂等键但不保存，status 只查询传入的原 provider job ID；现有 DTO 被统一
+映射为 `polling/succeeded/failed/paused_quota/timeout/expired`。现有 DTO 中明确的
+供应商 raw 字段在边界递归剔除；未知状态、job ID 错配、其余敏感结果、带查询串
+完整 URL 和非法 JSON 一律 fail-closed。稳定 Snapshot 深度只读，序列化前再次
+执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。M06.4
+把 `succeeded/failed/timeout` 终态和 `external_job.state_changed` 完成事件放进
+同一个 Memory 临界区或 SQL 事务，重复终态只回读同一稳定事件。完成事件按内部
+job 派生 ID 领取独立投递租约，并把该 ID 作为 Workflow checkpoint 幂等键；进程在
+Provider 成功后或 Graph checkpoint 后退出，都只能重放同一事件，不能重新调用
+供应商 start。Operation 和完成事件的返回快照连同嵌套 JSON 都深度只读，同时仍可
+稳定序列化为普通 JSON。通用 Event Outbox worker 看到队首完成事件时必须停止，
+不能过滤它并越过 sequence 领取后续事件；Graph 返回后还必须用实际完成时间确认
+租约，租约已过期时保留事件等待同 ID 接管。M06.5 的
+`OperationStartCoordinator` 再用 start lease 保证并发请求只调用一次供应商 start；
+只有单次调用边界持有 Authorization 和原请求，持久层仍只保存请求摘要与 provider
+job ID。`OperationRecoveryRuntime` 按数据库候选和租约恢复原 job，关闭时只取消
+本进程任务，不伪造终态或释放未完成租约；新进程在租约过期后继续。每个候选和每轮
+扫描都有安全异常隔离，慢 status 返回后重新读取时钟，过期 worker 不能提交结果。
+status 402 清除自动轮询计划，用户动作只恢复原 provider job；start 402 返回固定
+可重试错误。HTTP 404 固定映射 `expired` 完成事件，原 Operation 禁止重开，只能由
+上层创建新 attempt。SQL 恢复扫描先在数据库中联结并过滤有效完成事件，再稳定排序和
+限制批量，不会被无效队首饿死或无界物化。本模块最终本地门禁已绿，但增量尚未进入
+Agent 长期分支。
 
 ```text
 用户输入 + 附件
@@ -474,6 +508,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 | 图片/视频生成准备逻辑 | `backend/pixelflow/generate/` |
 | PowerMem 语义记忆 Client 和现有记忆上下文整理 | `backend/pixelflow/memory/` |
 | 新 Agent Runtime 的模型预算、结构化摘要与全局上下文压缩 | `backend/pixelflow/agent_runtime/context/` |
+| 新 Agent Runtime 的 operation 幂等、状态机和后续外部任务协调 | `backend/pixelflow/agent_runtime/jobs/` |
 | 第三方 API、上传、轮询、错误归一 | `backend/pixelflow/skills/` |
 | 任务、会话、资产持久化 | `backend/pixelflow/tasks/` |
 | 用户偏好 | `backend/pixelflow/preferences/` |

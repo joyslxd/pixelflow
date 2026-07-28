@@ -15,6 +15,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
 | 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；所有 Agent 共用配置驱动的 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案；业务推进权仍属于现有 v2 阶段工作流，生产继续关闭 |
+| 持久化 External Job Coordinator | M06 模块分支已就绪 | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库，M06 最终本地门禁已绿，模块增量等待人工单槽集成进入 Agent 长期分支 |
 | 视频 Workflow Adapter | M11.2 开发候选 | 已建立视频 intake/方向/Plan 权威快照，并新增严格消费已审核 Plan 的场景包与全局资产图 Application Service；当前仍未接入 Supervisor、供应商 Operation 或生产路由 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
@@ -59,7 +60,7 @@ pixelflow/
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
 │   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
-│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩与排队
+│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩、排队与 operation/Provider Job 协调
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
