@@ -22,7 +22,7 @@
 | M02 | LangGraph 会话/Workflow 内核 | A | `merged` | 4/4 | 无；已进入 Agent | `e77bdcd` |
 | M03 | 模型档案、预算、ContextEnvelope | A | `merged` | 4/4 | 无；已进入 Agent | `e43b5e9` |
 | M04 | 全局上下文压缩 | A | `merged` | 5/5 | 无；已进入 Agent | `7e4f4c3` |
-| M05 | Supervisor 决策与目标解析 | A | `not_started` | 0/5 | M02–M04 | — |
+| M05 | Supervisor 决策与目标解析 | A | `merged` | 0/5 | M02–M04 | `2c0c0bc` |
 | M06 | 持久化 External Job Coordinator | A | `not_started` | 0/5 | M01、M02 | — |
 | M07 | 前端 Supervisor 事件 Runtime | B | `merged` | 5/5 | M00 | `a5a7b75` |
 | M08 | 图片/图片编辑 Adapter | B | `not_started` | 0/4 | M00；联调 M06 | — |
