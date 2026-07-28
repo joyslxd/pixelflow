@@ -28,7 +28,7 @@
 | M08 | 图片/图片编辑 Adapter | B | `not_started` | 0/4 | M00；联调 M06 | — |
 | M09 | PPT Adapter | B | `not_started` | 0/4 | M00；联调 M06 | — |
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
-| M11 | 视频生成 Adapter | B | `not_started` | 0/5 | M00；联调 M05/M06 | — |
+| M11 | 视频生成 Adapter | B | `merged` | 0/5 | M00；联调 M05/M06 | `5ed26af` |
 | M12 | 交互 UI 与 Legacy 迁移 | B | `phase_integrated` | 0/5 | M07 | `af3f7c1` |
 | M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 1/5 | R1 已发布生产；R2–R4 仍按阶段依赖和独立批准执行 | `328fb53` |
 
