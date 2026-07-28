@@ -1,6 +1,6 @@
 # M06 持久化 External Job Coordinator
 
-- phase：`ready_for_integration`
+- phase：`integration_blocked`
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
@@ -182,5 +182,5 @@
 - checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`ready`
-- integration failure evidence：`无`
+- checkpoint_status：`blocked`
+- integration failure evidence：`候选 codex/integrate-m06-20260728-112612-f2a7b3d2 已保留；Agent 未更新；错误类型 RuntimeException`
