@@ -13,6 +13,8 @@ from pixelflow.agent_runtime.contracts import ExternalJobStatus, OperationReques
 from pixelflow.agent_runtime.fakes import FakeOperationPort
 from pixelflow.agent_runtime.ports import OperationConflictError
 from pixelflow.agent_workflows.video import (
+    VideoOperationStartClaim,
+    VideoOperationTerminalClaim,
     VideoPlanningWorkflowService,
     VideoSceneGenerationStage,
     VideoSceneGenerationWorkflowService,
@@ -58,6 +60,7 @@ class _AtomicFakeOperationPort(FakeOperationPort):
         super().__init__()
         self._terminal_lock = asyncio.Lock()
         self._terminal_result_hashes: dict[str, str] = {}
+        self._video_terminal_claims: dict[str, VideoOperationTerminalClaim] = {}
 
     async def finalize_scene_operation(
         self,
@@ -117,6 +120,86 @@ class _AtomicFakeOperationPort(FakeOperationPort):
             )
             self._terminal_result_hashes[current.job_id] = result_hash
             return VideoSceneOperationTerminalClaim(job=saved, result_hash=result_hash)
+
+    async def finalize_video_operation(self, *, result_type, payload, stage_version, **kwargs):
+        """为 M11.4 原子保存可查询的完整业务终态。"""
+
+        claim = await self.finalize_scene_operation(**kwargs)
+        terminal = VideoOperationTerminalClaim(
+            job=claim.job,
+            result_hash=claim.result_hash,
+            result_type=result_type,
+            payload=copy.deepcopy(dict(payload)),
+            stage_version=stage_version,
+        )
+        existing = self._video_terminal_claims.get(claim.job.job_id)
+        if existing is not None and existing != terminal:
+            raise OperationConflictError("视频 Operation 业务终态冲突")
+        self._video_terminal_claims[claim.job.job_id] = terminal
+        return copy.deepcopy(terminal)
+
+    async def get_video_operation_terminal_claim(self, *, job_id):
+        """读取可信假 Repository 中的 M11.4 业务终态。"""
+
+        claim = self._video_terminal_claims.get(job_id)
+        return copy.deepcopy(claim) if claim is not None else None
+
+    async def claim_video_operation_start(self, *, expected, owner, now, lease_seconds):
+        """以可过期租约领取 M11.4 外调前启动权。"""
+
+        async with self._terminal_lock:
+            current = await self.get(expected.job_id)
+            if current is None:
+                raise KeyError(expected.job_id)
+            expected_identity = (
+                expected.job_id,
+                expected.workflow_id,
+                expected.stage,
+                expected.attempt,
+                expected.idempotency_key,
+            )
+            current_identity = (
+                current.job_id,
+                current.workflow_id,
+                current.stage,
+                current.attempt,
+                current.idempotency_key,
+            )
+            if current_identity != expected_identity:
+                raise OperationConflictError("Operation 启动身份漂移")
+            lease_available = current.lease_expires_at is None or current.lease_expires_at <= now
+            if current.status is ExternalJobStatus.CREATED and current.provider_job_id is None and lease_available:
+                saved = await self.save(
+                    current.model_copy(
+                        update={
+                            "lease_owner": owner,
+                            "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                        }
+                    )
+                )
+                return VideoOperationStartClaim(job=saved, acquired=True)
+            return VideoOperationStartClaim(job=current, acquired=False)
+
+    async def mark_video_operation_call_started(self, *, expected, owner, now):
+        """原子标记已进入不可自动接管的供应商外调窗口。"""
+
+        async with self._terminal_lock:
+            current = await self.get(expected.job_id)
+            if current != expected or current.status is not ExternalJobStatus.CREATED:
+                raise OperationConflictError("视频 Operation 外调开始状态漂移")
+            if current.lease_owner != owner or current.lease_expires_at is None:
+                raise OperationConflictError("视频 Operation 外调开始租约不匹配")
+            if current.lease_expires_at <= now:
+                raise OperationConflictError("视频 Operation 外调开始租约已过期")
+            return await self.save(
+                current.model_copy(
+                    update={
+                        "status": ExternalJobStatus.POLLING,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    }
+                )
+            )
 
 
 class _BarrierAtomicFakeOperationPort(_AtomicFakeOperationPort):

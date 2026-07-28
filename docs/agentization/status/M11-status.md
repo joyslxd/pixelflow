@@ -5,7 +5,7 @@
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m11-video-workflow`
 - 依赖：M00；真实联调依赖 M05/M06
-- 当前切片：`M11.4`
+- 当前切片：`M11.5`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
 - M11.1 开始时间：`2026-07-28 09:51:58 +08:00`
@@ -13,13 +13,15 @@
 - M11.2 完成时间：`2026-07-28 12:07:54 +08:00`
 - M11.3 开始时间：`2026-07-28 12:30:00 +08:00`
 - M11.3 完成时间：`2026-07-28 13:51:46 +08:00`
+- M11.4 开始时间：`2026-07-28 14:06:40 +08:00`
+- M11.4 完成时间：`2026-07-28 15:35:27 +08:00`
 
 ## 切片
 
 - [x] M11.1 intake/Plan/修订/恢复/权威快照（3h）
 - [x] M11.2 场景包/全局资产图（3h）
 - [x] M11.3 分镜生成/部分失败/单镜修改（3h）
-- [ ] M11.4 merge/QC/402/修改循环/最终结束（3h）
+- [x] M11.4 merge/QC/402/修改循环/最终结束（3h）
 - [ ] M11.5 剪映/版本/历史/下载（2h）
 
 ## 恢复提示
@@ -70,3 +72,19 @@
 - 报告：完整证据见 `docs/agentization/test-reports/M11.3.md`。
 - 提交与推送：本状态随 M11.3 独立中文提交推送到 `origin/codex/agent-0.8.4-m11-video-workflow`。
 - 下一步：后续开发者重新执行安全预检并取得唯一写入权后，串行开始 `M11.4 merge/QC/402/修改循环/最终结束`；本次不进入 M11.4。
+
+## M11.4 完成记录
+
+- 依赖与预检：本地 `HEAD`、远端 tracking 和远端模块分支均为 M11.3 提交 `c4086981`；复用既有模块分支和 worktree，未修改两个长期 feature 分支，未创建切片分支或切片 worktree。
+- 实现：新增 `VideoPostProductionWorkflowService` 和 `VideoPostProductionAtomicOperationPort`，固化 merge、QAAgent QC、HTTP 402 暂停、修改循环和最终人工结束。
+- 计费与恢复安全：两阶段启动协议只在 mark 前允许过期租约安全接管，mark 后失败关闭且不得自动二次调用；重复 merge/QC 从可信 Repository 恢复首次终态业务载荷。
+- 权威边界：可信终态原子保存 Operation、阶段版本、结果类型、摘要和安全载荷；决策边界交叉验证 Repository。Operation 幂等键绑定机械请求摘要，完整 checkpoint 或 feedback/key 双重伪造均失败关闭。
+- QC 与版本：首次用户意见清洗后冻结并进入既有 QC DTO，retry 不得改写；merge 后修改不能绕过 QC；回交 M11.3 后 stage/context version 严格递增，未修改分镜继续复用。
+- TDD：经历初版合同、独立审核七类缺陷、完整自洽 checkpoint 伪造和 feedback 冻结等多轮 RED/GREEN，最终专项 `16 passed`、相邻回归 `48 passed`。
+- 验证：M11 后端权威清单 `546 passed`，Ruff、Web test/lint/build-prod、`git diff --check` 和中文工程规范通过；M11 Slice Gate `Passed=True / CommandCount=7`，BranchAutomation `43 passed`。
+- 审核：独立只读 reviewer `/root/m11_4_independent_review` 最终结论 `Critical=0 / Important=0 / Minor=0 / Ready=Yes`；独立复跑专项 `16 passed`、相邻回归 `48 passed`，并完成双重伪造对抗。
+- 外部调用：未调用真实 content-app、LLM、PowerMem、图片、视频、PPT、剪映或其他付费供应商 API；未新增配置、依赖或锁文件变更。
+- 阶段：M11.4 不是阶段检查点且不是模块最后一片，`phase` 保持 `in_progress`，不写任何集成就绪状态，不触发单槽集成。
+- 报告：完整证据见 `docs/agentization/test-reports/M11.4.md`。
+- 提交与推送：本状态随 M11.4 独立中文提交推送到 `origin/codex/agent-0.8.4-m11-video-workflow`。
+- 下一步：后续开发者重新执行安全预检并取得唯一写入权后，串行开始 `M11.5 剪映/版本/历史/下载`；本次不进入 M11.5。

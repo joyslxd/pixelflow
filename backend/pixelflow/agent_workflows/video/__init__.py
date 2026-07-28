@@ -6,6 +6,17 @@ from .planning import (
     VideoPlanningWorkflowService,
     VideoPlanningWorkflowState,
 )
+from .postproduction import (
+    VideoMergeSkillPort,
+    VideoOperationStartClaim,
+    VideoOperationTerminalClaim,
+    VideoPostProductionAtomicOperationPort,
+    VideoPostProductionStage,
+    VideoPostProductionWorkflowService,
+    VideoPostProductionWorkflowState,
+    VideoQualityReviewSkillPort,
+    VideoQualityReviewWorkflowResult,
+)
 from .scene_packages import (
     VideoScenePackageAuthoritySnapshot,
     VideoScenePackageStage,
@@ -40,4 +51,13 @@ __all__ = [
     "VideoSceneVideoStage",
     "VideoSceneVideoWorkflowService",
     "VideoSceneVideoWorkflowState",
+    "VideoMergeSkillPort",
+    "VideoOperationStartClaim",
+    "VideoOperationTerminalClaim",
+    "VideoPostProductionAtomicOperationPort",
+    "VideoPostProductionStage",
+    "VideoPostProductionWorkflowService",
+    "VideoPostProductionWorkflowState",
+    "VideoQualityReviewSkillPort",
+    "VideoQualityReviewWorkflowResult",
 ]

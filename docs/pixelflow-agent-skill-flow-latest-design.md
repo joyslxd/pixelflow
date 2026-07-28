@@ -208,6 +208,40 @@ M11.3 仍未注册 Supervisor handler，也未接入真实 content-app、LLM、P
 v2、R1 `assist` 与生产 `off` 行为不变。后续接线必须复用 PowerMem helper、持久化 Operation 和统一
 `ContextBudgetPolicyProvider`，不得把 PowerMem HTTP、模型窗口常量或底层 128K 兼容值写入本 Service。
 
+### 4.4 M11.4 可恢复合并、QAAgent QC 与人工结束候选
+
+`backend/pixelflow/agent_workflows/video/postproduction.py` 新增
+`VideoPostProductionWorkflowService`。它只消费 M11.3 已进入人工审核、全部分镜成功且没有 pending、失败或
+dirty 分镜的权威状态。合并请求始终按 `scene_index` 排序；单分镜仍领取并原子完成 Operation，但直接复用
+该分镜 HTTPS 视频，不调用供应商 merge。多分镜调用现有 `VideoGenerationSkill.merge_videos` 合同，只传
+`video_urls/duration/size/model`，不得把内部场景摘要扩散为供应商 DTO 字段。
+
+合并成功后直接进入 `video_review`。用户可以显式确认结束，也可以提出修改后启动唯一的
+`VideoQualityReviewSkill`；视频没有超时自动结束，下载或后续剪映动作也不代替人工确认。用户首次提出修改时
+必须提供意见，该意见经清洗后冻结，重试不得改写。QAAgent QC 只通过现有
+`merged_video_url/scene_videos/scene_packages/brief/materials/user_feedback/ratio/size` 合同调用 content-app，
+不执行本地二次质检。merge 成功后不得直接修改分镜绕过 QC；QC 成功后保留报告、问题、受影响分镜和修订提示，
+QC 自身失败时，用户仍可只按自己的意见选择当前版本分镜。两种路径最终都复用 M11.3 的单镜白名单修改与
+dirty 重生，回交前先提升来源状态版本，保证 `stage_version/context_version` 严格单调；未修改分镜视频继续复用，
+新版本再重新领取独立 merge Operation。
+
+merge 与 QC 各自持有可恢复 Operation，刷新只查询原 `job_id`，丢失时失败关闭。供应商外调前必须通过
+`VideoPostProductionAtomicOperationPort` 的两阶段协议原子取得唯一启动权：第一阶段只在 `CREATED` 上绑定
+30 秒外调前租约，进程在外调标记前崩溃时可由过期租约安全接管；第二阶段原子标记 `POLLING` 后才允许调用
+供应商，此后即使进程崩溃也不得自动接管或二次计费。重复调用遇终态时从可信 Repository 恢复完整业务载荷，
+遇仍在运行的 Operation 时只返回原引用。成功或失败终态还必须由同一 Port 原子持久化 Operation 身份、
+供应商任务 ID、status、stage version、result type、result hash 和安全载荷，并提供按 `job_id` 查询的权威终态。
+checkpoint 同时保存投影 claim，在恢复、修改和结束决策边界必须回查 Repository，再校验 stage version、attempt、
+幂等键、结果摘要及合并视频/分镜载荷；Operation 幂等键还包含机械重建请求的 SHA-256，因而 QC pending 和
+终态都绑定首次冻结的 `user_feedback`，不能在领取后改写。即使调用方整体重算 checkpoint 的 SHA-256，也
+不能伪造可结束状态。
+M06 尚未提供真实适配时不得用普通 `save` 降级。HTTP 402 或额度文案会暂停当前阶段，只有用户明确重试才领取
+下一 attempt。供应商原始结果递归清除 Authorization、Bearer、token、API key 等凭据和 URL 查询参数；
+Runtime 投影只公开稳定的场景包、分镜视频、合并视频和 QC Artifact 引用。
+
+M11.4 仍未注册 Supervisor handler，也未接入真实 content-app、PowerMem 或付费供应商。当前测试只使用
+本地 fake 验证 Operation、Skill 参数和修改循环；生产 v2、R1 `assist` 和 Feature Flag 行为保持不变。
+
 ## 5. Skill 清单
 
 ### 5.1 采集类 Skill
