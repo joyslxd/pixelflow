@@ -1,6 +1,6 @@
 # M06 持久化 External Job Coordinator
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
@@ -191,7 +191,7 @@
 - release_id：`R2`
 - checkpoint_slice：`M06.5`
 - checkpoint_commit：`afff44c5b389ffa57db18ea89d3208506fb0a89d`
-- last_integrated_commit：`—`
+- last_integrated_commit：`e8ed2be676304da00a7cc391eabb26a86cbf2aed`
 - locked files：`无`
-- checkpoint_status：`ready`
-- integration failure evidence：`首次候选的 AGENTS.md/README.md 冲突已解决，最新 Agent 已由 afff44c5b389ffa57db18ea89d3208506fb0a89d 纳入；原 blocked 候选仅保留审计`
+- checkpoint_status：`integrated`
+- integration failure evidence：`无`
