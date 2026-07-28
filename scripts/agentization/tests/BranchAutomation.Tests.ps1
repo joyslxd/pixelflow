@@ -566,10 +566,49 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
-    It "未配置权威测试清单的后端模块必须 fail-closed" {
-        foreach ($moduleId in @("M05", "M06")) {
-            { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
-        }
+    It "M05 最终门禁固定 Supervisor、图路由、黄金集和旧流程回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M05" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_supervisor_resolver.py",
+            "tests/test_agent_runtime_supervisor_classifier.py",
+            "tests/test_agent_runtime_supervisor_validator.py",
+            "tests/test_agent_runtime_supervisor_routing.py",
+            "tests/test_agent_runtime_supervisor_evaluation.py",
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_dispatcher.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_openapi_operation_ids.py"
+        )
+        $expectedRuffPaths = @(
+            "pixelflow/agent_runtime/supervisor",
+            "pixelflow/agent_runtime/graph"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
+    }
+
+    It "未配置权威测试清单的 M06 必须 fail-closed" {
+        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M06" -GateType "Final" -PlanOnly } | Should Throw
     }
 
     It "M07 和 M12 前端门禁包含全量测试、lint 和生产构建" {

@@ -8,6 +8,20 @@ from .classifier import (
     DecisionModel,
     LLMActionClassifier,
 )
+from .evaluation import (
+    ACTION_ACCURACY_THRESHOLD,
+    BILLING_MISEXECUTION_THRESHOLD,
+    CLARIFICATION_RECALL_THRESHOLD,
+    TARGET_ACCURACY_THRESHOLD,
+    SupervisorDecisionLabel,
+    SupervisorEvaluationReport,
+    SupervisorGoldenCase,
+    SupervisorGoldenDataset,
+    evaluate_supervisor_cases,
+    evaluate_supervisor_golden_dataset,
+    load_supervisor_golden_dataset,
+    render_supervisor_evaluation_report,
+)
 from .resolver import (
     DeterministicResolution,
     DeterministicResolutionRequest,
@@ -32,10 +46,13 @@ from .validator import (
 
 __all__ = [
     "ANSWER_ONLY_NODE",
+    "ACTION_ACCURACY_THRESHOLD",
     "ActionClassificationCandidate",
     "ActionClassificationRequest",
     "ActionClassificationTarget",
+    "BILLING_MISEXECUTION_THRESHOLD",
     "CLARIFICATION_NODE",
+    "CLARIFICATION_RECALL_THRESHOLD",
     "DecisionClassificationError",
     "DecisionModel",
     "DecisionValidationError",
@@ -50,6 +67,15 @@ __all__ = [
     "ROUTE_ACTION_NODE",
     "ResolverCandidate",
     "SupervisorActionRouter",
+    "SupervisorDecisionLabel",
+    "SupervisorEvaluationReport",
+    "SupervisorGoldenCase",
+    "SupervisorGoldenDataset",
     "SupervisorRoutingError",
+    "TARGET_ACCURACY_THRESHOLD",
     "WORKFLOW_COMMAND_NODE",
+    "evaluate_supervisor_cases",
+    "evaluate_supervisor_golden_dataset",
+    "load_supervisor_golden_dataset",
+    "render_supervisor_evaluation_report",
 ]

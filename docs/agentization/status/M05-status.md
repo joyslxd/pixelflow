@@ -1,14 +1,16 @@
 # M05 Supervisor 决策与目标解析
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：A
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m05-supervisor`
 - 依赖：M02、M03、M04
 - 当前切片：`M05.5`
-- 最近完成：`M05.4`
+- 最近完成：`M05.5`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
+- M05.5 开始时间：`2026-07-28T12:52:36+08:00`
+- M05.5 完成时间：`2026-07-28T13:19:13+08:00`
 - M05.4 开始时间：`2026-07-28T12:03:59+08:00`
 - M05.4 完成时间：`2026-07-28T12:22:18+08:00`
 - M05.3 开始时间：`2026-07-28T10:43:53+08:00`
@@ -25,7 +27,7 @@
 - [x] M05.2 LLM structured classifier（3h）
 - [x] M05.3 validator/version/risk gate（2.5h）
 - [x] M05.4 clarify/answer/command 图路由（2h）
-- [ ] M05.5 中文黄金集和评估（2h）
+- [x] M05.5 中文黄金集和评估（2h）
 
 ## M05.1 交付记录
 
@@ -93,6 +95,31 @@
 - 阶段状态：M05.4 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行 Phase/M05 Final 门禁，不更新 `status/BOARD.md`，不写 `ready_for_phase_integration` 或 `ready_for_integration`，也不触发 9.10A 或自动继续 M05.5。
 - 下一切片第一动作：开发者手动启动 M05.5 后，恢复同一模块分支/worktree，确认 M05.4 远端提交并重新领取唯一 writer；先用失败测试冻结中文黄金集 schema 与离线评估器，再验证 action、target、歧义追问召回和计费误执行四项模块门槛。
 
+## M05.5 交付记录
+
+- 产物：新增严格 `SupervisorDecisionLabel`、`SupervisorGoldenCase/Dataset`、`SupervisorEvaluationReport` 与离线评估/稳定 Markdown 渲染入口；51 条中文黄金集覆盖全部 9 类 `AgentAction`，报告与 fixture 逐字复算，不调用 LLM、供应商或付费 API。
+- 指标：action 为 `50/51（98.04%）`，target Workflow/Artifact 为 `21/22（95.45%）`，歧义追问为 `20/21（95.24%）`，计费动作误执行为 `0`；四项均达到 `≥92% / ≥95% / ≥95% / =0` 的 M05 模块门槛。
+- 防稀释边界：数据集至少 40 条、target 分母至少 20、clarify 分母至少 10，必须覆盖全部动作；同时拒绝重复 `case_id` 和仅更换 ID 的相同规范化中文输入+完整期望标签，不能靠复制正确样例虚高指标。
+- 计费安全：潜在计费动作只要 action、intent、Workflow 或 Artifact 任一不符合期望即计为误执行；无目标样例不进入 target 分母，错误 `start_workflow` intent 仍会被误计费指标捕获。
+- 权威门禁：`Invoke-AgentModuleGate.ps1` 为 M05 固定 Supervisor、图路由、合同、旧流程、OpenAPI、Pester 与 Ruff 清单；M06 继续 fail-closed，未回退后端全量或越权执行其他模块门禁。
+- TDD 证据：最初因评估模块不存在得到 collection error；最小实现后依次得到 `3 failed, 2 passed` 和缺少报告的 `1 failed, 4 passed`，补齐 fixture/报告后为 `5 passed`。独立审核的语义重复与错误 intent 反例先稳定得到 `2 failed, 4 passed`，最小整改后为 `6 passed, 1 warning`。
+- 最后测试：M05 权威 pytest 集合为 `177 passed, 1 warning`；全部 `test_agent_runtime_*` 为 `530 passed, 1 warning`；BranchAutomation Pester 为 `43 passed, 0 failed`。warning 仅来自既有 LangGraph pending deprecation。
+- 静态检查：Supervisor/Graph 与权威测试的 Ruff 通过，新增评估文件 `ruff format --check` 通过，`git diff --check` 通过。
+- 独立审核：首轮 Critical 0、Important 2、Minor 0，发现换 ID 的同语义样例可稀释分母、同动作错误 intent 可漏记误计费；两项均按失败测试修复。第二轮 Critical/Important/Minor 均为 0，`Ready to commit: Yes`，并独立鲜跑聚焦 pytest、Ruff、格式、差异、报告与 Final PlanOnly。
+- 中文规范：新增/修改 docstring、状态和报告均使用中文主体说明；JSON 为测试 fixture，不是配置，本切片没有新增或修改配置项，也没有真实凭据、用户长 Prompt 或完整供应商 URL。
+- Final 门禁：以 M05.4 远端提交 `ae04eb3ad2d0f653a83d9287af8661de506d05a1` 为 `ChinesePolicyBaseRef` 执行正式 `Invoke-AgentModuleGate.ps1 -ModuleId M05 -GateType Final`，结果 `Passed=True`、`CommandCount=5`；最终状态 amend 后复跑同一门禁再 push。
+- commit/push：本状态文件与实现属于 M05.5 同一个中文独立提交；最终门禁和提交级中文规范检查通过后，仅推送 `origin/codex/agent-0.8.4-m05-supervisor`，远端以该提交为准。
+- 阶段状态：M05.5 是模块最后一片，不是 `phased-rollout-plan.md` 的中间检查点；M05 Final 绿色后写 `ready_for_integration`，不更新总看板、不直接修改 Agent、不自动开始单槽集成或其他模块。
+- 下一步第一动作：当前自动化状态为 `automation_local_ready`。开发者新开一个 Codex 任务，复制执行手册 9.10A 话术，并在同一条消息中明确模块号 `M05`，手动启动唯一单槽最终集成；不得继续不存在的 M05.6。
+
 ## 恢复提示
 
 任何目标不唯一的计费动作都必须追问。只保存 reason code，不保存思维链。
+
+- release_id：`R2`
+- checkpoint_slice：`M05.5`
+- checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
+- last_integrated_commit：`无`
+- locked files：`无`
+- checkpoint_status：`ready_for_integration`
+- integration failure evidence：`无`
