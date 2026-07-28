@@ -119,6 +119,45 @@ flowchart TD
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
 | 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
 
+### 4.1 M11.1 视频前置规划 Workflow Adapter 候选
+
+`backend/pixelflow/agent_workflows/video/planning.py` 新增确定性的
+`VideoPlanningWorkflowService`，类比 Java 的视频领域 Application Service。它不调用
+LLM、content-app 或 PowerMem，而是消费现有采集/策划 Service 已完成记忆读取和业务处理后
+返回的 `FormValidationResult`、三个创意方向与 `PlanMarkdownResult`，只负责执行以下合法转换：
+
+```text
+intake
+  +-> form_cancelled（关闭需求表单后的取消终态）
+  +-> direction_generation
+  -> direction_review（必须恰好三个方向并等待显式选择；可显式返回重新生成）
+  -> plan_generation
+  -> plan_review（等待人工审核）
+```
+
+每次转换同时递增 `stage_version` 和 `context_version`，拒绝阶段越权、无时区或倒退时间。
+通用 `WorkflowRecord.creation_contract_snapshot` 只投影当前创作合同；完整 Plan Markdown、
+`scene_blueprints`、`asset_manifest` 和全版本历史保留在 `VideoPlanAuthoritySnapshot` 业务通道，
+通过规范 JSON 与 SHA-256 内容校验生成稳定逻辑 Artifact 引用，不进入可被摘要改写的消息通道。
+所有输入、属性读取结果和通用投影都与内部快照隔离，调用方后续修改嵌套字典或数组不能污染权威数据。
+
+采集确认要求 `confirmed_by_user=true`，且不能提前写入只属于 Plan 的场景图规格。首版 Plan
+必须逐字段继承采集阶段已确认的时长、画幅、视频/图片模型及其能力等基础合同；仅允许补充
+`scene_image_ratio/scene_image_size/scene_image_spec_source` 三项完整场景图规格，并校验比例与尺寸
+属于图片模型的已确认能力。发布快照前再次验证 `VideoCreationContract`、总时长精确相等、每镜 4–15 秒、连续时间线、
+蓝图时长数组、资产清单与蓝图资产并集，以及当前版本与同版本历史完全一致。初版只能是唯一
+`v1`。当前载荷和每个历史版本都必须保留用户确认状态，场景图规格必须三项齐全且受图片模型能力约束。
+修订失败保持原版本，成功修订只能在未改写历史前缀的前提下追加下一个连续版本；在 Adapter
+尚未提供重新确认模型能力的入口前，合同版本、意图、模型选择模式、视频/图片模型及两份能力快照
+均不得漂移。历史恢复
+只能切换到既有版本，不能新增或重写历史。现有恢复 Service 仅清理正文首尾空白时，快照重新绑定
+历史原文；其他内容差异继续 fail-closed。
+
+M11.1 尚未注册 Supervisor handler，也没有实现 M11.2 的场景包/全局资产图、M11.3 的供应商
+Operation、M11.4 的 merge/QC 或 M11.5 的剪映投影，因此当前 v2、R1 `assist` 与生产 `off`
+行为不变。后续接线必须复用现有 PowerMem helper 和统一 `ContextBudgetPolicyProvider`，不得把
+PowerMem HTTP、模型窗口常量或底层 128K 兼容值写入本 Service。
+
 ## 5. Skill 清单
 
 ### 5.1 采集类 Skill

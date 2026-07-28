@@ -22,6 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py` | 视频领域 Application Service + 权威 DTO | M11.1 只冻结 intake 取消、三个方向及重生成、Plan 发布/修订/恢复和投影合同；尚未接 Supervisor、场景包或供应商任务，不改变现有 v2/生产路由 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -206,7 +207,7 @@ Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/contract.py`、`creative/duration.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill、PlanRevisionSkill、PlanRestoreSkill | 图片/视频按独立模板调用 LLM 生成 Plan，校验模型能力与精确时长，维护版本历史 |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环；当前创意内修订不得重新生成方向，历史版本支持回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | VideoPlanningWorkflowService、ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | M11.1 先以确定性 Service 固化 intake 取消、方向重生成和 Plan 权威快照；后续切片仍须严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载第三方 ZIP、校验后原样通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
