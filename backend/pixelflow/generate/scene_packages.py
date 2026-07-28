@@ -39,6 +39,8 @@ def prepare_video_scene_packages(
     target_duration_ms: int = DEFAULT_TARGET_DURATION_MS,
     scene_blueprints: list[dict[str, Any]] | None = None,
     asset_manifest: dict[str, Any] | None = None,
+    *,
+    authority_mode: bool = False,
 ) -> dict[str, Any]:
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
@@ -63,7 +65,7 @@ def prepare_video_scene_packages(
     direction_title = _first_text(selected_direction.get("title"), selected_direction.get("direction_title"), "创意方向")
     direction_description = _first_text(selected_direction.get("description"), selected_direction.get("direction_description"), "")
     plan_summary = _summarize_plan(plan_markdown)
-    material_urls = _extract_material_image_urls(materials)
+    material_urls = extract_material_image_urls(materials)
 
     scenes = []
     stage_templates = _stage_templates(scene_count)
@@ -115,7 +117,22 @@ def prepare_video_scene_packages(
             )
         )
         prompt = (
-            _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets["visual_style"])
+            (
+                build_authoritative_scene_prompt(
+                    storyline,
+                    shot_description,
+                    narration,
+                    global_assets["visual_style"],
+                    video_model=_first_text(form_values.get("video_model")),
+                )
+                if authority_mode
+                else _build_prompt_from_scene_fields(
+                    storyline,
+                    shot_description,
+                    narration,
+                    global_assets["visual_style"],
+                )
+            )
             if blueprint
             else _build_scene_prompt(
                 product_name=product_name,
@@ -134,8 +151,8 @@ def prepare_video_scene_packages(
         )
         scenes.append(
             {
-                "scene_id": f"scene-{index}",
-                "scene_index": index,
+                "scene_id": str(blueprint["scene_id"]) if blueprint and authority_mode else f"scene-{index}",
+                "scene_index": int(blueprint["scene_index"]) if blueprint and authority_mode else index,
                 "title": str(blueprint["title"]) if blueprint else stage["name"],
                 "duration_ms": duration,
                 "storyline": storyline,
@@ -408,7 +425,7 @@ def _normalize_llm_scene_packages(
         return []
     if not isinstance(raw_scenes, list):
         raw_scenes = []
-    material_urls = _extract_material_image_urls(materials)
+    material_urls = extract_material_image_urls(materials)
     normalized: list[dict[str, Any]] = []
     elapsed_ms = 0
     stage_templates = _stage_templates(len(durations))
@@ -907,12 +924,26 @@ def _normalize_shot_description(
     if not text:
         text = _legacy_shot_description_text(value, fallback["text"])
     mentions = _normalize_shot_mentions(value.get("mentions"), reference_asset_ids, global_assets)
-    normalized_text = _ensure_reference_asset_tokens(
-        _normalize_shot_text(text),
+    normalized_text = bind_scene_reference_tokens(
+        text,
         reference_asset_ids,
         global_assets,
     )
     return {"text": normalized_text, "mentions": mentions}
+
+
+def bind_scene_reference_tokens(
+    text: str,
+    reference_asset_ids: list[str],
+    global_assets: dict[str, Any],
+) -> str:
+    """按固定规则规范镜头正文，并只机械绑定已声明的全局资产引用。"""
+
+    return _ensure_reference_asset_tokens(
+        _normalize_shot_text(text),
+        reference_asset_ids,
+        global_assets,
+    )
 
 
 def _ensure_reference_asset_tokens(
@@ -1459,6 +1490,28 @@ def _build_prompt_from_scene_fields(
     return f"故事线：{storyline}。" + "；".join(part for part in shot_parts if not part.endswith("："))
 
 
+def build_authoritative_scene_prompt(
+    storyline: str,
+    shot_description: dict[str, Any],
+    narration: str,
+    visual_style: Any,
+    *,
+    video_model: str,
+) -> str:
+    """只根据权威分镜字段构造后续执行提示词。"""
+
+    model_name = _first_text(video_model)
+    if not model_name:
+        raise ValueError("权威场景包执行提示词缺少 video_model")
+    prompt = _build_prompt_from_scene_fields(
+        storyline,
+        shot_description,
+        narration,
+        visual_style,
+    )
+    return f"视频模型：{model_name}。{prompt}"
+
+
 def _shot_description_text(shot_description: dict[str, Any]) -> str:
     text = _first_text(shot_description.get("text"))
     if text:
@@ -1472,7 +1525,9 @@ def _summarize_plan(plan_markdown: str) -> str:
     return candidates[0][:80] if candidates else "plan.md中的创作方案"
 
 
-def _extract_material_image_urls(materials: list[dict[str, Any]]) -> list[str]:
+def extract_material_image_urls(materials: list[dict[str, Any]]) -> list[str]:
+    """按固定字段顺序提取去重后的素材图片 URL。"""
+
     urls: list[str] = []
     for material in materials:
         for key in ("url", "image_url", "imageUrl", "download_url", "downloadUrl", "artifact_url", "artifactUrl"):
