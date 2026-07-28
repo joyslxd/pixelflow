@@ -5,9 +5,12 @@
 - base Agent SHA：`38310bb64385fe276edc0ad99c2f996db2c8c1f8`
 - branch：`codex/agent-0.8.4-m05-supervisor`
 - 依赖：M02、M03、M04
-- 当前切片：`M05.4`
+- 当前切片：`M05.5`
+- 最近完成：`M05.4`
 - 当前唯一写入者：`尚未领取`
 - 当前锁定文件：`无`
+- M05.4 开始时间：`2026-07-28T12:03:59+08:00`
+- M05.4 完成时间：`2026-07-28T12:22:18+08:00`
 - M05.3 开始时间：`2026-07-28T10:43:53+08:00`
 - M05.3 完成时间：`2026-07-28T11:15:07+08:00`
 - M05.2 开始时间：`2026-07-28T10:09:07+08:00`
@@ -21,7 +24,7 @@
 - [x] M05.1 deterministic target resolver（2.5h）
 - [x] M05.2 LLM structured classifier（3h）
 - [x] M05.3 validator/version/risk gate（2.5h）
-- [ ] M05.4 clarify/answer/command 图路由（2h）
+- [x] M05.4 clarify/answer/command 图路由（2h）
 - [ ] M05.5 中文黄金集和评估（2h）
 
 ## M05.1 交付记录
@@ -73,6 +76,22 @@
 - commit/push：本状态文件随 M05.3 中文独立提交；提交级门禁通过后推送到 `origin/codex/agent-0.8.4-m05-supervisor`，远端以该提交为准。
 - 阶段状态：M05.3 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行 Phase/M05 Final 门禁，不更新 `status/BOARD.md`，不写任何 ready 状态，也不触发 9.10A 或自动继续 M05.4。
 - 下一切片第一动作：开发者手动启动 M05.4 后，恢复同一模块分支/worktree，确认 M05.3 远端提交并重新领取唯一 writer；先用失败测试冻结 `clarify`、`answer_only` 与业务 command 的 Graph 路由隔离，确保只有通过 M05.3 Validator 的 command 才可进入业务子图。
+
+## M05.4 交付记录
+
+- 产物：新增 `SupervisorActionRouter` 和安全短码 `SupervisorRoutingError`，把 M05.3 `DecisionValidator` 接到 M02 图入口；图内冻结 `answer_only`、`clarification` 与 `dispatch_workflow` 三个分支，只有校验后的业务命令可以进入 Workflow dispatcher。
+- 状态隔离：`answer_only` 只追加 ID 必须等于 `assistant:{decision.idempotency_key}` 的纯助手消息，拒绝借旧消息 ID 覆盖和 tool call，不改 Workflow、active workflow、stage/context version 或 pending job；`clarify` 只打开包含公开问题、reason code 和幂等键的真实 LangGraph interrupt，定向恢复前后均不调用业务处理器。
+- 权威绑定：路由前同时校验 state decision 与分类快照一致，重新执行 allowed-actions、版本、置信度和计费风险闸门，并把分类请求绑定当前 `turn_id`、去除首尾空白后的 `current_input`、会话 context version 及 Workflow conversation/kind/status/stage/version 投影；任何输入、快照或投影漂移均 fail-closed。
+- 新建与派发：`start_workflow` 的分类决策继续保持无目标，通过校验后才由 conversation 与决策幂等键派生稳定 `wf_...` ID，并通过 dispatcher 的专用预分配参数传入；现有 Workflow 命令要求已校验路由目标与决策目标一致，投影更新后清除临时派发 ID。
+- 错误安全：决策、校验请求和 Workflow 投影的 Pydantic 解析失败分别归一为 `invalid_decision`、`invalid_validation_request` 和 `invalid_workflow_projection`，使用无原异常链的公开短码，不回显用户输入、恶意字段值或内部状态。
+- TDD 证据：开工基线为 `510 passed`；首轮路由测试先得到 `6 failed, 1 passed`，最小三路分流后为 `7 passed`。随后 Turn/会话版本/Workflow 投影绑定先得到 `3 failed, 7 passed`，回答消息 ID 防覆盖先得到 `1 failed, 10 passed`；独立审核的当前输入漂移先得到 `1 failed, 11 passed`，原始 Pydantic 异常泄漏先得到 `2 failed, 12 passed`，逐项最小修复后聚焦最终为 `14 passed, 1 warning`。
+- 最后测试：全部 `test_agent_runtime_*` 为 `524 passed, 1 warning`；图装配与 M05.4 路由合计为 `19 passed, 1 warning`。warning 仅来自既有 LangGraph pending deprecation。
+- 静态检查：7 个变更 Python 路径的 `ruff check`、`ruff format --check` 和 `git diff --check` 均通过。
+- 独立审核：全新只读 reviewer `/root/m05_4_independent_review` 首轮分两次报告 Important 2，分别发现分类请求未绑定当前输入和 Pydantic 错误可能回显恶意输入；全部按独立失败测试整改。最终复审 Critical、Important、Minor 均为 0，`Ready to commit: Yes`，并独立鲜跑 `14/19/524` 项 pytest 与静态检查。
+- 文档与边界：已同步 `docs/pixelflow-agent-skill-flow-latest-design.md` 的当前实现边界；本切片未修改配置、总看板或两个长期 feature 分支，未进入 M05.5，未调用真实供应商或付费 API。
+- commit/push：本状态文件随 M05.4 中文独立提交；提交级中文工程门禁通过后推送到 `origin/codex/agent-0.8.4-m05-supervisor`，远端以该提交为准。
+- 阶段状态：M05.4 不是 `phased-rollout-plan.md` 明确列出的阶段检查点，也不是模块最后一片，因此保持 `in_progress`，不运行 Phase/M05 Final 门禁，不更新 `status/BOARD.md`，不写 `ready_for_phase_integration` 或 `ready_for_integration`，也不触发 9.10A 或自动继续 M05.5。
+- 下一切片第一动作：开发者手动启动 M05.5 后，恢复同一模块分支/worktree，确认 M05.4 远端提交并重新领取唯一 writer；先用失败测试冻结中文黄金集 schema 与离线评估器，再验证 action、target、歧义追问召回和计费误执行四项模块门槛。
 
 ## 恢复提示
 

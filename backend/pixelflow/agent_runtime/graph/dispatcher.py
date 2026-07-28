@@ -59,6 +59,8 @@ class WorkflowCommandDispatcher:
         self,
         state: Mapping[str, Any],
         decision: ActionDecision,
+        *,
+        preallocated_workflow_id: str | None = None,
     ) -> WorkflowRecord:
         """派发一条业务命令，不负责更新 Supervisor 投影。"""
 
@@ -67,6 +69,10 @@ class WorkflowCommandDispatcher:
             raise ValueError("非业务命令不可派发到 Workflow")
 
         target_workflow_id = normalized_decision.target_workflow_id
+        if preallocated_workflow_id is not None:
+            if normalized_decision.action != AgentAction.START_WORKFLOW or target_workflow_id is not None:
+                raise ValueError("预分配 workflow_id 只允许用于无目标的新建动作")
+            target_workflow_id = preallocated_workflow_id
         if target_workflow_id is None:
             raise ValueError("业务命令必须提供 target_workflow_id")
 
