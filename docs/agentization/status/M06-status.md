@@ -1,6 +1,6 @@
 # M06 持久化 External Job Coordinator
 
-- phase：`integration_blocked`
+- phase：`ready_for_integration`
 - owner：A
 - branch：`codex/agent-0.8.4-m06-external-jobs`
 - 依赖：M01、M02
@@ -173,14 +173,23 @@
 - commit/push：本状态随 M06.1 中文独立提交推送到 `origin/codex/agent-0.8.4-m06-external-jobs`，远端以该提交为准。
 - 下一切片：M06.2 数据库 lease、heartbeat、`next_poll_at` 与过期接管；必须由开发者后续明确启动并重新领取唯一 writer，继续使用同一模块分支/worktree。
 
+## 2026-07-28 单槽阻塞恢复记录
+
+- 首次 9.10A 候选 `codex/integrate-m06-20260728-112612-f2a7b3d2` 在合并阶段发现 `AGENTS.md` 和 `README.md` 同时包含 M11、M06 新能力行，因共享表格同位置修改而安全阻塞；Agent 保持 `63be7958244486efabd5b78075cd10df11e9ef7d`。
+- 恢复时先快进远端阻塞状态，再把冻结 Agent `63be7958244486efabd5b78075cd10df11e9ef7d` 以中文 merge commit 纳入原 M06 模块分支；冲突解析只保留两条独立能力说明，没有修改 M06/M11 业务实现或两个长期 feature 分支。
+- 冲突恢复提交：`585a54449d7e2995790932be0a6bade1d74bd893`；M06 与 M11 的门禁 PlanOnly 均能解析各自权威清单。
+- 恢复后重新执行 `Invoke-AgentModuleGate.ps1 -ModuleId M06 -GateType Final -ChinesePolicyBaseRef 63be7958244486efabd5b78075cd10df11e9ef7d`，结果 `Passed=True`、`CommandCount=5`。
+- 本次恢复只运行本地 Pester、固定 pytest、Ruff、Python 3.12 和差异检查，没有调用真实图片、视频、PPT、视频分析、剪映、LLM、PowerMem 或其他付费 API。
+- 首次 blocked 候选继续保留审计，不复用；恢复状态 push 后必须重新 fetch 三条远端引用，并由 9.10A 创建全新 M06 Final 候选。
+
 ## 恢复提示
 
 不能只依赖 checkpoint 保证不重复计费；必须覆盖“供应商已成功、checkpoint 尚未写入时进程崩溃”的窗口。
 
 - release_id：`R2`
 - checkpoint_slice：`M06.5`
-- checkpoint_commit：`本状态文件所在提交；push 后以远端 SHA 为准`
+- checkpoint_commit：`585a54449d7e2995790932be0a6bade1d74bd893`
 - last_integrated_commit：`—`
 - locked files：`无`
-- checkpoint_status：`blocked`
-- integration failure evidence：`候选 codex/integrate-m06-20260728-112612-f2a7b3d2 已保留；Agent 未更新；错误类型 RuntimeException`
+- checkpoint_status：`ready`
+- integration failure evidence：`首次候选的 AGENTS.md/README.md 冲突已由 585a54449d7e2995790932be0a6bade1d74bd893 解决；原 blocked 候选仅保留审计`
