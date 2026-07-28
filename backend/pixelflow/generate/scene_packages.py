@@ -63,7 +63,6 @@ def prepare_video_scene_packages(
     target_audience = _first_text(form_values.get("target_audience"), selected_direction.get("target_audience"), "目标用户")
     conversion_goal = _first_text(form_values.get("conversion_goal"), selected_direction.get("conversion_goal"), "转化")
     direction_title = _first_text(selected_direction.get("title"), selected_direction.get("direction_title"), "创意方向")
-    direction_description = _first_text(selected_direction.get("description"), selected_direction.get("direction_description"), "")
     plan_summary = _summarize_plan(plan_markdown)
     material_urls = extract_material_image_urls(materials)
 
@@ -116,39 +115,7 @@ def prepare_video_scene_packages(
                 global_assets=global_assets,
             )
         )
-        prompt = (
-            (
-                build_authoritative_scene_prompt(
-                    storyline,
-                    shot_description,
-                    narration,
-                    global_assets["visual_style"],
-                    video_model=_first_text(form_values.get("video_model")),
-                )
-                if authority_mode
-                else _build_prompt_from_scene_fields(
-                    storyline,
-                    shot_description,
-                    narration,
-                    global_assets["visual_style"],
-                )
-            )
-            if blueprint
-            else _build_scene_prompt(
-                product_name=product_name,
-                product_category=product_category,
-                target_audience=target_audience,
-                conversion_goal=conversion_goal,
-                direction_title=direction_title,
-                direction_description=direction_description,
-                storyline=storyline,
-                narration=narration,
-                stage_name=stage["name"],
-                shot_description=shot_description,
-                visual_style=global_assets["visual_style"],
-                video_ratio=_first_text(form_values.get("video_ratio"), "9:16"),
-            )
-        )
+        prompt = _scene_visual_style_prompt(global_assets["visual_style"])
         scenes.append(
             {
                 "scene_id": str(blueprint["scene_id"]) if blueprint and authority_mode else f"scene-{index}",
@@ -444,16 +411,7 @@ def _normalize_llm_scene_packages(
             reference_asset_ids=reference_asset_ids,
             global_assets=global_assets,
         )
-        prompt = (
-            _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style"))
-            if blueprint
-            else _first_text(
-                raw.get("prompt"),
-                raw.get("creation_prompt"),
-                raw.get("shot_prompt"),
-                _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style")),
-            )
-        )
+        prompt = _scene_visual_style_prompt(global_assets.get("visual_style"))
         if not storyline or not shot_description.get("text") or not prompt:
             return []
         title = str(blueprint["title"]) if blueprint else _first_text(raw.get("title"), f"场景 {index}")
@@ -1488,6 +1446,19 @@ def _build_prompt_from_scene_fields(
     if narration:
         shot_parts.append(f"旁白：{narration}")
     return f"故事线：{storyline}。" + "；".join(part for part in shot_parts if not part.endswith("："))
+
+
+def _scene_visual_style_prompt(visual_style: Any) -> str:
+    """场景包 prompt 仅保存视觉风格，其他创作内容由结构化字段承载。"""
+    if isinstance(visual_style, dict):
+        value = _first_text(
+            visual_style.get("prompt"),
+            visual_style.get("description"),
+            visual_style.get("name"),
+        )
+    else:
+        value = _first_text(visual_style)
+    return f"视觉风格：{value}" if value else ""
 
 
 def build_authoritative_scene_prompt(

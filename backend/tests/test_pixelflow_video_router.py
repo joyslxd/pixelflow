@@ -91,7 +91,11 @@ def test_video_router_prepares_scene_packages(monkeypatch):
     assert set(data["scene_packages"][0]["shot_description"]) == {"text", "mentions"}
     assert "地点:@" in data["scene_packages"][0]["shot_description"]["text"]
     assert data["scene_packages"][0]["shot_description"]["mentions"]
-    assert "苹果降噪耳机 Pro" in data["scene_packages"][0]["prompt"]
+    first_scene = data["scene_packages"][0]
+    assert first_scene["prompt"].startswith("视觉风格：")
+    assert first_scene["storyline"] not in first_scene["prompt"]
+    assert first_scene["narration"] not in first_scene["prompt"]
+    assert first_scene["shot_description"]["text"] not in first_scene["prompt"]
 
 
 def test_video_router_derives_scene_timeline_from_confirmed_creation_contract(monkeypatch):
