@@ -179,6 +179,8 @@
 - 恢复时先快进远端阻塞状态，再把冻结 Agent `63be7958244486efabd5b78075cd10df11e9ef7d` 以中文 merge commit 纳入原 M06 模块分支；冲突解析只保留两条独立能力说明，没有修改 M06/M11 业务实现或两个长期 feature 分支。
 - 冲突恢复提交：`585a54449d7e2995790932be0a6bade1d74bd893`；M06 与 M11 的门禁 PlanOnly 均能解析各自权威清单。
 - 恢复后重新执行 `Invoke-AgentModuleGate.ps1 -ModuleId M06 -GateType Final -ChinesePolicyBaseRef 63be7958244486efabd5b78075cd10df11e9ef7d`，结果 `Passed=True`、`CommandCount=5`。
+- 上述门禁期间 Agent 又从 `63be7958244486efabd5b78075cd10df11e9ef7d` 前进到 `15a3ff2ef43b01acda5465a06b3c56af259d039d`，恢复任务按防漂移规则拒绝 push；新提交只涉及视频提示词修复且不修改 M06 共享入口文档。
+- M06 随后通过中文 merge commit `afff44c5b389ffa57db18ea89d3208506fb0a89d` 纳入最新 Agent，并以 `15a3ff2ef43b01acda5465a06b3c56af259d039d` 为 `ChinesePolicyBaseRef` 重新执行 M06 Final，结果 `Passed=True`、`CommandCount=5`。
 - 本次恢复只运行本地 Pester、固定 pytest、Ruff、Python 3.12 和差异检查，没有调用真实图片、视频、PPT、视频分析、剪映、LLM、PowerMem 或其他付费 API。
 - 首次 blocked 候选继续保留审计，不复用；恢复状态 push 后必须重新 fetch 三条远端引用，并由 9.10A 创建全新 M06 Final 候选。
 
@@ -188,8 +190,8 @@
 
 - release_id：`R2`
 - checkpoint_slice：`M06.5`
-- checkpoint_commit：`585a54449d7e2995790932be0a6bade1d74bd893`
+- checkpoint_commit：`afff44c5b389ffa57db18ea89d3208506fb0a89d`
 - last_integrated_commit：`—`
 - locked files：`无`
 - checkpoint_status：`ready`
-- integration failure evidence：`首次候选的 AGENTS.md/README.md 冲突已由 585a54449d7e2995790932be0a6bade1d74bd893 解决；原 blocked 候选仅保留审计`
+- integration failure evidence：`首次候选的 AGENTS.md/README.md 冲突已解决，最新 Agent 已由 afff44c5b389ffa57db18ea89d3208506fb0a89d 纳入；原 blocked 候选仅保留审计`
