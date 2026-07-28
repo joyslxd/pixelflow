@@ -1,6 +1,6 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
@@ -9,9 +9,9 @@
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
 - M12.4 模块分支基线：`b69a13eaebfec53bdccf7e374e1824c01f14058d`
 - M12.5 模块分支基线：`c0e3d94ad308794d2fb1914bcc5b66c625f8506b`
-- 当前唯一写入者：`/root`
-- 开始时间：`2026-07-28 20:02:19 +08:00`
-- M12.5 locked files：`web/src/lib/supervisor/workspaceProjection.ts`、`web/src/lib/supervisor/reducer.ts`、`web/src/hooks/useSupervisorConversation.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/workspaceOrchestrationMode.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.5.md`
+- 当前唯一写入者：`尚未领取`
+- 开始时间：`—`
+- M12.5 已释放文件：`web/src/lib/supervisor/workspaceProjection.ts`、`web/src/lib/supervisor/reducer.ts`、`web/src/hooks/useSupervisorConversation.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/workspaceOrchestrationMode.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.5.md`
 - M12.4 已释放文件：`web/src/lib/authStorage.ts`、`web/src/lib/supervisor/turnSubmission.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/authStorage.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.4.md`
 - M12.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
 - release_id：`R1`
@@ -106,6 +106,12 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - TDD：首轮新增 M12.5 合同测试并接入聚合编译，`npm test` 因 `workspaceProjection.ts` 缺失得到预期 `TS6053` RED；最小实现转绿后补齐直载事件、sequence gap、安全错误、多工作流目标和 task board 回归，最终 `npm test` 为 `315/315`。
 - 验证：`npm test`（`315/315`）、`npm run lint`、`npm run build-prod` 和 `git diff --check` 全部通过；生产构建仅有既存 chunk 体积提醒，未调用真实或付费 API。
 - 独立审核：`/root/m12_5_reviewer` 首轮结论 `Not Ready`，Critical 0、Important 1、Minor 0，指出事件只接受包装形状；兼容冻结直载 DTO 并保留当前后端包装后，二轮结论 `Ready`，Critical/Important/Minor 均为 0。Reviewer 全程只读，未修改文件、未提交、未推送、未调用真实或付费 API。
-- 中文规范：新增人工说明、状态和报告均使用中文；本片未新增配置、依赖或锁文件。实现提交固定后使用仓库中文工程规范脚本和 M12 Final 权威门禁复核全部待推送提交。
-- 状态：M12.5 是模块最后一片；当前先保持 `in_progress` 并固定实现提交。以固定 SHA 完成 M12 Final 门禁后，才单独写 `ready_for_integration`、释放唯一写入权和文件锁并 push；不更新 `status/BOARD.md` 或集成记录。
+- 中文规范：以开工基线 `c0e3d94ad308794d2fb1914bcc5b66c625f8506b` 到固定实现提交执行仓库中文工程规范脚本并通过；新增人工说明、状态和报告均为中文，本片未新增配置、依赖或锁文件。
+- Final 门禁：固定实现提交 `4753d62a7509ea8b5725bd324a07e495f45d42f6` 后，执行 `Invoke-AgentModuleGate.ps1 -ModuleId M12 -GateType Final`，结果 `Passed=True / CommandCount=4`；`git diff --check`、`corepack pnpm test`（`315/315`）、`corepack pnpm lint`、`corepack pnpm build-prod` 全部通过，生产构建仅有既存 chunk 体积提醒。
+- 工具链说明：本机 Corepack 初始因上游签名 keyid 轮换失败，捆绑的 `pnpm 9.9.0` 又不能解析仓库现有 pnpm 10 工作区配置；将 Corepack 运行时固定到机器已安装的 `pnpm 10.34.4` 后原样重跑权威门禁并通过，未修改 `package.json`、`pnpm-workspace.yaml` 或锁文件。
+- 状态：M12.5 是模块最后一片，完整 M12 Final 门禁绿色，M12 已写 `ready_for_integration`；唯一写入权和全部文件锁已释放，不更新 `status/BOARD.md` 或集成记录。
 - 边界：不创建切片子分支，不修改两个长期 feature 分支，不自动进入其他切片或单槽集成；当前自动化状态为 `automation_local_ready`。
+- final checkpoint commit：`4753d62a7509ea8b5725bd324a07e495f45d42f6`
+- final gate status：`passed`
+- locked files：`无`
+- integration failure evidence：`无`
