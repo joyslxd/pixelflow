@@ -22,6 +22,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
 | R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py`、`scene_packages.py` | 视频领域 Application Service + 权威 DTO | M11.1–M11.2 已冻结 intake/方向/Plan 及严格继承 Plan 的场景包与全局资产图；尚未接 Supervisor、供应商 Operation 或生产路由 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -54,17 +55,19 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 20. `backend/pixelflow/creative/contract.py`
 21. `backend/pixelflow/creative/duration.py`
 22. `backend/pixelflow/generate/image_prepare.py`
-23. `backend/pixelflow/generate/scene_packages.py`
-24. `backend/pixelflow/generate/seedance_prompt.py`
-25. `backend/pixelflow/skills/base.py`
-26. `backend/pixelflow/skills/borgrise/skill.py`
-27. `backend/pixelflow/skills/borgrise/run_generation.py`
-28. `web/src/pages/WorkspacePage.tsx`
-29. `web/src/lib/api.ts`
-30. `web/src/components/chat/MessageBubble.tsx`
-31. `web/src/components/composer/GenParamsDialog.tsx`
-32. `web/src/components/canvas/StoryboardPanel.tsx`
-33. `web/src/components/canvas/SceneMentionEditor.tsx`
+23. `backend/pixelflow/agent_workflows/video/planning.py`
+24. `backend/pixelflow/agent_workflows/video/scene_packages.py`
+25. `backend/pixelflow/generate/scene_packages.py`
+26. `backend/pixelflow/generate/seedance_prompt.py`
+27. `backend/pixelflow/skills/base.py`
+28. `backend/pixelflow/skills/borgrise/skill.py`
+29. `backend/pixelflow/skills/borgrise/run_generation.py`
+30. `web/src/pages/WorkspacePage.tsx`
+31. `web/src/lib/api.ts`
+32. `web/src/components/chat/MessageBubble.tsx`
+33. `web/src/components/composer/GenParamsDialog.tsx`
+34. `web/src/components/canvas/StoryboardPanel.tsx`
+35. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
@@ -206,7 +209,7 @@ Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/contract.py`、`creative/duration.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill、PlanRevisionSkill、PlanRestoreSkill | 图片/视频按独立模板调用 LLM 生成 Plan，校验模型能力与精确时长，维护版本历史 |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环；当前创意内修订不得重新生成方向，历史版本支持回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | VideoPlanningWorkflowService、VideoScenePackageWorkflowService、ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | M11.1–M11.2 已以确定性 Service 固化 intake/方向/Plan 权威快照，以及严格继承 Plan 的场景包和全局资产图；后续切片接入供应商 Operation、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载第三方 ZIP、校验后原样通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
@@ -377,6 +380,7 @@ SmartPPT接口：
 - 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
 - 视频 Plan 必须同时发布结构化 `asset_manifest` 和固定“全局资产清单”第四章。角色项包含最终名称、文字说明、`three_view_prompt`；场景/道具项包含最终名称、文字说明、`image_prompt`。三类名称全局唯一，并分别与所有蓝图 `asset_requirements` 的同类并集完全一致；初次生成、Agent 修订、手工编辑和历史回退都必须版本化保存。
 - 场景包必须消费当前激活 Plan 的 `scene_blueprints + asset_manifest`，不得再按总时长重新切分、重写故事内容或调用第二次 LLM 分析资产；只机械映射全局资产、`@asset_id` 和 mentions。缺少清单的旧 Plan 必须先重新生成或修订，不能继续生成场景包。
+- M11.2 的 `VideoScenePackageWorkflowService` 要求 `plan_review` 先经用户显式同意并持久化为 `plan_approved`，再进入 `generate_scene_assets` 和 `scene_package_review`；边界重新校验当前 Plan 与完整历史并冻结场景包 SHA-256 权威快照。场景 ID/顺序/时长、叙事字段、执行提示词和允许字段集合都必须等于权威蓝图或确定性机械结果；供应商追加字段、追加故事或改写提示词一律失败关闭。
 - 权威蓝图中的人物、场景和道具需求必须逐项进入全局资产，四类全局 ID（含 `visual_style.asset_id`）必须唯一；已有 `@asset_id` 不得被名称规范化再次替换。任一分镜引用超过 9 张时直接返回包含分镜编号和引用数的明确错误，不得静默截断。
 - 全局资产名称、场景包名称和前端 `shot_description.mentions[].name` 必须等于最终 Plan 名称；旧缓存名称不能覆盖全局正式名称。每个清单资产只创建一个图片任务并只绑定一个图片 URL，同一资产跨分镜复用时不得重复生图。
 - 场景资产调用 content-app 时，提示词必须合并最终 Plan 清单的正式名称、`description` 和 `three_view_prompt/image_prompt`，不能只取生图字段而丢失文字说明里的外观、材质或颜色约束。
@@ -390,6 +394,7 @@ SmartPPT接口：
 - 镜头描述由 `generate/seedance_prompt.py` 应用 vendored `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 必须显式携带用户确认的 `video_model`，并经过秒级时间码、`@asset_id` 和最多 9 张引用校验。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 保留两个输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
+- M11.2 仅接受每个清单资产恰好一个 HTTPS 图片 URL 并按 `asset_id` 回填 mentions；真实供应商 Operation、部分失败、额度暂停、重试和单镜生成属于 M11.3，不得提前塞入本 Service。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
 - 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后先展示候选图，用户确认后才替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑或融合失败卡片必须保存 `imageEditRequest`、素材引用、修改意见、模型参数、场景包来源和上传参考图；点击“重新生成图片”时必须先于普通图片的 `imagePrepare` 判断恢复 `scene_global_asset` 上下文并重新打开参数确认卡，确认后调用对应 `/edit-asset/start` 或 `/fuse-asset/start`，不能静默退出或掉回普通采集 Agent。历史失败卡片缺少完整请求时，至少从 `materials.source="scene_global_asset"` 恢复引用、修改意见和编辑链路。
 - 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。

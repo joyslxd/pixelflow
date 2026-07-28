@@ -112,12 +112,163 @@ flowchart TD
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py`、`creative/seedance_plan.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频先生成总分总结构、镜头调度、精确时长和资产清单；稳定 `asset_id` 后调用 Seedance Skill 专门写作全部分镜，严格校验后再发布 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | 场景包、参考图、场景视频、合并视频 | 场景包直接消费 Plan 蓝图且只解析全局资产与 @引用，不得另写一套故事；主流程仍是多场景片段生成后合并 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`agent_workflows/video/video_generation.py`、`agent_workflows/video/postproduction.py`、`agent_workflows/video/delivery.py`、`pixelflow_video.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan、场景包、分镜视频、合并/QC、剪映历史与下载投影的权威快照 | M11.1–M11.5 已形成完整候选 Application Service 链；尚未注册 Supervisor handler，生产仍走原 v2 |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、下载校验第三方 ZIP 并通过 content-app 原样上传 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
 | 对话恢复 Agent | `pixelflow_conversations.py`、`tasks/store.py` | conversation_id、user_id | 对话详情、消息、上下文 | 防止切换对话时异步结果串到当前页 |
 | 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
+
+### 4.1 M11.1 视频前置规划 Workflow Adapter 候选
+
+`backend/pixelflow/agent_workflows/video/planning.py` 新增确定性的
+`VideoPlanningWorkflowService`，类比 Java 的视频领域 Application Service。它不调用
+LLM、content-app 或 PowerMem，而是消费现有采集/策划 Service 已完成记忆读取和业务处理后
+返回的 `FormValidationResult`、三个创意方向与 `PlanMarkdownResult`，只负责执行以下合法转换：
+
+```text
+intake
+  +-> form_cancelled（关闭需求表单后的取消终态）
+  +-> direction_generation
+  -> direction_review（必须恰好三个方向并等待显式选择；可显式返回重新生成）
+  -> plan_generation
+  -> plan_review（等待人工审核）
+```
+
+每次转换同时递增 `stage_version` 和 `context_version`，拒绝阶段越权、无时区或倒退时间。
+通用 `WorkflowRecord.creation_contract_snapshot` 只投影当前创作合同；完整 Plan Markdown、
+`scene_blueprints`、`asset_manifest` 和全版本历史保留在 `VideoPlanAuthoritySnapshot` 业务通道，
+通过规范 JSON 与 SHA-256 内容校验生成稳定逻辑 Artifact 引用，不进入可被摘要改写的消息通道。
+所有输入、属性读取结果和通用投影都与内部快照隔离，调用方后续修改嵌套字典或数组不能污染权威数据。
+
+采集确认要求 `confirmed_by_user=true`，且不能提前写入只属于 Plan 的场景图规格。首版 Plan
+必须逐字段继承采集阶段已确认的时长、画幅、视频/图片模型及其能力等基础合同；仅允许补充
+`scene_image_ratio/scene_image_size/scene_image_spec_source` 三项完整场景图规格，并校验比例与尺寸
+属于图片模型的已确认能力。发布快照前再次验证 `VideoCreationContract`、总时长精确相等、每镜 4–15 秒、连续时间线、
+蓝图时长数组、资产清单与蓝图资产并集，以及当前版本与同版本历史完全一致。初版只能是唯一
+`v1`。当前载荷和每个历史版本都必须保留用户确认状态，场景图规格必须三项齐全且受图片模型能力约束。
+修订失败保持原版本，成功修订只能在未改写历史前缀的前提下追加下一个连续版本；在 Adapter
+尚未提供重新确认模型能力的入口前，合同版本、意图、模型选择模式、视频/图片模型及两份能力快照
+均不得漂移。历史恢复
+只能切换到既有版本，不能新增或重写历史。现有恢复 Service 仅清理正文首尾空白时，快照重新绑定
+历史原文；其他内容差异继续 fail-closed。
+
+### 4.2 M11.2 视频场景包与全局资产图候选
+
+`backend/pixelflow/agent_workflows/video/scene_packages.py` 新增
+`VideoScenePackageWorkflowService`，类比只允许消费已审核 DTO 的 Java Application Service。
+入口不信任直接构造或恢复的快照，会重新校验当前 Plan、完整连续历史、用户确认合同、分镜蓝图、
+资产并集和内容校验和，然后确定性进入：
+
+```text
+plan_review（等待人工审核）
+  -> plan_approved（显式同意动作已持久化）
+  -> generate_scene_assets
+  -> scene_package_review（必须人工确认，无倒计时）
+```
+
+`VideoScenePackageAuthoritySnapshot` 用规范 JSON 和 SHA-256 冻结来源 Plan 版本/校验和、输入素材图片 URL、
+精确总时长、创作合同、四类全局资产和场景包。蓝图 `scene_id/scene_index`、标题、时长、故事线、镜头正文、旁白、
+转场和确定性执行提示词必须逐项继承；`@asset_id` 仅允许由同一机械函数绑定，正文后追加故事、供应商
+额外字段或提示词改写都会失败关闭。执行提示词显式携带合同 `video_model`；素材图片必须逐镜完整继承
+输入 HTTPS URL 集合。四类全局 ID 唯一，单镜最多 9 个引用，每个角色/场景/道具只
+接受一个 HTTPS 图片 URL，并按 `asset_id` 回填 mentions；同一资产跨镜复用但不重复创建资产记录。
+
+M11.2 没有注册 Supervisor handler，也没有接入供应商或付费 API。分镜 Operation、部分失败、
+额度暂停、重试和单镜修改由 M11.3 的独立 Service 承接；merge/QC 属于 M11.4，剪映投影属于 M11.5。
+
+### 4.3 M11.3 可恢复分镜生成、部分失败与单镜修改候选
+
+`backend/pixelflow/agent_workflows/video/video_generation.py` 新增
+`VideoSceneGenerationWorkflowService`。它类比 Java 的 Application Service：只消费 M11.2 人工确认后的
+权威场景包，为每个分镜通过 `OperationPort` 领取独立 Operation，首次必须覆盖全部分镜；刷新只查询原
+`job_id`，丢失时失败关闭，禁止用调用方传入的旧视频或场景子集绕过首次生成。pending 请求在每次恢复、
+Runtime 投影和结果回写前，都会从当前权威场景、合同及 pending scene ID 机械重建；模型、比例、清晰度、
+声音、真实整数秒时长、Prompt、参考 URL、mode 及业务幂等键任一漂移都会失败关闭。
+
+`VideoSceneAtomicOperationPort` 是 M11 对 M00 `OperationPort` 的视频专用 fail-closed 扩展合同。成功或失败
+终态必须原子绑定 `stage_version + Operation 身份 + provider_job_id + status + result_hash`；真实 M06
+适配尚未提供该原子能力时不得执行终态回写。当前状态会持久化每镜 terminal claim，并在恢复时重新计算
+成功的 `task_id/video_url/mode/endpoint/raw` 或失败的 `error/attempts/retryable/quota/raw` 摘要，防止把
+不可重试 4xx 篡改成新的计费重试，也防止并发 success/failure 或不同成功 URL 互相覆盖。
+
+额度不足使用统一 `is_quota_insufficient()` 识别 HTTP 402 和业务文案。首个额度失败立即阻止后续
+Provider start：只有可证明为 `CREATED` 且没有 `provider_job_id` 的兄弟 Operation 才会原子冻结为
+`quota_not_started`；已经 `POLLING` 或绑定 Provider ID 的兄弟继续查询原 job，绝不创建第二个任务。
+批量冻结中途崩溃后，同一输入会校验既有 result hash 并幂等补完。充值后的重试只领取 retryable 或
+quota-paused 分镜，已成功视频保持复用；HTTP 4xx、价格配置和能力不匹配必须先修改输入或分镜。
+
+单镜修改只允许故事线、镜头描述、旁白和引用资产，分镜身份、顺序、时长、转场及其他供应商字段保持
+不可变。修改后的秒级连续时间线、`@asset_id`、mentions 和最多 9 张参考图重新校验，Prompt 由同一机械
+函数重建；系统分别保存“已授权编辑谱系”和“待重生成 dirty 集合”，成功后只清除 dirty 标记，仍保留
+权威编辑谱系。实时 `generation_types` 非空时必须作为权威能力，未知或不兼容值失败关闭；每镜时长还必须
+属于实时 `durations_sec`，空能力快照才按旧合同 unknown 处理。
+
+M11.3 仍未注册 Supervisor handler，也未接入真实 content-app、LLM、PowerMem 或付费供应商，因此当前
+v2、R1 `assist` 与生产 `off` 行为不变。后续接线必须复用 PowerMem helper、持久化 Operation 和统一
+`ContextBudgetPolicyProvider`，不得把 PowerMem HTTP、模型窗口常量或底层 128K 兼容值写入本 Service。
+
+### 4.4 M11.4 可恢复合并、QAAgent QC 与人工结束候选
+
+`backend/pixelflow/agent_workflows/video/postproduction.py` 新增
+`VideoPostProductionWorkflowService`。它只消费 M11.3 已进入人工审核、全部分镜成功且没有 pending、失败或
+dirty 分镜的权威状态。合并请求始终按 `scene_index` 排序；单分镜仍领取并原子完成 Operation，但直接复用
+该分镜 HTTPS 视频，不调用供应商 merge。多分镜调用现有 `VideoGenerationSkill.merge_videos` 合同，只传
+`video_urls/duration/size/model`，不得把内部场景摘要扩散为供应商 DTO 字段。
+
+合并成功后直接进入 `video_review`。用户可以显式确认结束，也可以提出修改后启动唯一的
+`VideoQualityReviewSkill`；视频没有超时自动结束，下载或后续剪映动作也不代替人工确认。用户首次提出修改时
+必须提供意见，该意见经清洗后冻结，重试不得改写。QAAgent QC 只通过现有
+`merged_video_url/scene_videos/scene_packages/brief/materials/user_feedback/ratio/size` 合同调用 content-app，
+不执行本地二次质检。merge 成功后不得直接修改分镜绕过 QC；QC 成功后保留报告、问题、受影响分镜和修订提示，
+QC 自身失败时，用户仍可只按自己的意见选择当前版本分镜。两种路径最终都复用 M11.3 的单镜白名单修改与
+dirty 重生，回交前先提升来源状态版本，保证 `stage_version/context_version` 严格单调；未修改分镜视频继续复用，
+新版本再重新领取独立 merge Operation。
+
+merge 与 QC 各自持有可恢复 Operation，刷新只查询原 `job_id`，丢失时失败关闭。供应商外调前必须通过
+`VideoPostProductionAtomicOperationPort` 的两阶段协议原子取得唯一启动权：第一阶段只在 `CREATED` 上绑定
+30 秒外调前租约，进程在外调标记前崩溃时可由过期租约安全接管；第二阶段原子标记 `POLLING` 后才允许调用
+供应商，此后即使进程崩溃也不得自动接管或二次计费。重复调用遇终态时从可信 Repository 恢复完整业务载荷，
+遇仍在运行的 Operation 时只返回原引用。成功或失败终态还必须由同一 Port 原子持久化 Operation 身份、
+供应商任务 ID、status、stage version、result type、result hash 和安全载荷，并提供按 `job_id` 查询的权威终态。
+checkpoint 同时保存投影 claim，在恢复、修改和结束决策边界必须回查 Repository，再校验 stage version、attempt、
+幂等键、结果摘要及合并视频/分镜载荷；Operation 幂等键还包含机械重建请求的 SHA-256，因而 QC pending 和
+终态都绑定首次冻结的 `user_feedback`，不能在领取后改写。即使调用方整体重算 checkpoint 的 SHA-256，也
+不能伪造可结束状态。
+M06 尚未提供真实适配时不得用普通 `save` 降级。HTTP 402 或额度文案会暂停当前阶段，只有用户明确重试才领取
+下一 attempt。供应商原始结果递归清除 Authorization、Bearer、token、API key 等凭据和 URL 查询参数；
+Runtime 投影只公开稳定的场景包、分镜视频、合并视频和 QC Artifact 引用。
+
+M11.4 仍未注册 Supervisor handler，也未接入真实 content-app、PowerMem 或付费供应商。当前测试只使用
+本地 fake 验证 Operation、Skill 参数和修改循环；生产 v2、R1 `assist` 和 Feature Flag 行为保持不变。
+
+### 4.5 M11.5 剪映版本、历史入口与下载投影候选
+
+`backend/pixelflow/agent_workflows/video/delivery.py` 新增
+`VideoDeliveryWorkflowService`，只消费 M11.4 已合并、没有 pending 后处理 Operation，且处于
+`video_review/awaiting_user` 或用户明确结束后的权威状态。它从当前版本全部成功分镜机械构建
+`JianyingDraftRequest`，按 `scene_index` 排序并复用既有 FNV-1a
+`compute_storyboard_version_id()`；合并视频只作为最终下载目标，绝不进入剪映 scenes。
+
+剪映生成沿用 M11.4 的两阶段原子启动合同。capability 不可用或查询失败时不创建空 Operation；可用时
+`conversation_id + storyboard_version_id` 对应的请求摘要、显式 `retry_failed`、attempt 和幂等键会冻结在
+pending envelope。刷新只查询原 `job_id`，终态必须从可信 Repository 恢复并交叉验证 Operation identity、
+stage version、请求摘要、分镜数量、来源分镜 Artifact 和公开结果 DTO；嵌套的 M11.3 分镜终态也必须通过
+`get_scene_operation_terminal_claim` 逐项回查完整 job/result hash，不能用本地自洽 checkpoint 派生新的
+`storyboard_version_id`。Skill 总等待沿用既有 1800 秒上限，超时原子落为可显式重试的 `timeout`。
+运行中及未过期成功结果幂等复用；`failed/timeout` 只有用户显式重试才创建下一 attempt。失败结果会移除
+下载 URL、文件名和 Provider 内部 ID，只保留经过敏感信息过滤的公开消息；未配置状态不伪造成已创建任务。
+
+新分镜版本继续保留旧 `jianyingDraftRecords` 历史入口，但清除旧合并视频的最终下载证据。剪映 ZIP 下载
+只在对应历史记录写 `draftDownloadedAt/draftDownloadedUrl`，不会完成任务看板“导出交付”；只有当前
+`video_artifact_ref` 对应的合并成品视频被明确下载，才投影
+`deliveryDownloadedAt/deliveryDownloadedUrl`。同一合并视频在人工结束后保留草稿历史与下载证据，
+新合并版本不得继承旧证据。
+
+该候选复用现有 `JianyingDraftSkill` DTO 和剪映 Router/Service 的输入、版本与公开终态语义，但没有改写
+现有 Router、进程内 job registry 或第三方/content-app 调用合同，也未注册 Supervisor handler。M12.5/M13
+后续接线负责把 Runtime Artifact 映射到消息与对话上下文；当前生产 v2、R1 `assist`、Feature Flag、
+PowerMem 调用和真实供应商路径均保持不变。
 
 ## 5. Skill 清单
 
@@ -666,6 +817,7 @@ Plan 审核与版本规则：
 - 图片和视频分别使用 `templates/plan_image.md` 与 `templates/plan_video.md`，前端展示名称都叫 `plan.md`。
 - 后续生成只能读取当前激活 Plan 版本及其 `creation_contract`。视频场景包逐项消费该版本 `scene_blueprints[].asset_requirements + asset_manifest` 并重建 `@asset_id`/mentions，不使用第二次 LLM 或自由 prompt 改写最终资产。`asset_requirements` 只允许可生图实体，时间段、钩子/收束、段落编号、运镜、声音、风格规格和 `@图片N/@视频N` 均非法；初次生成和 Agent 修订会调用定向 LLM 修正资产数组，发布前再校验清单并集，失败时不创建参考图任务。
 - 场景包的 `characters/scenes/props/visual_style` 四类全局 ID 必须唯一；规范化前先保护已有 `@asset_id`，避免二次替换。任一分镜引用超过 9 张时返回包含分镜标识和引用数量的错误，不允许截断后继续生成。
+- M11.2 的权威快照还锁定场景包允许字段集合和确定性执行提示词；恢复到 `generate_scene_assets` 时必须重新建立 Plan 校验和、版本、合同、蓝图、资产图与快照内容之间的完整校验链。每项生成资产必须恰好提供一个 HTTPS URL，回填只允许增加同 `asset_id` mention 的 `image_url`，不得改写正式名称、说明、生图提示词或镜头正文。
 
 场景视频接口选择（`video_model_capabilities.generation_types` 有值时为权威能力；空值代表旧合同 unknown）：
 

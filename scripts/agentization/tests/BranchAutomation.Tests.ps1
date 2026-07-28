@@ -623,10 +623,78 @@ Describe "Agent 分支自动化入口" {
         }
     }
 
-    It "M08 到 M11 在后端权威清单完成前必须 fail-closed" {
-        foreach ($moduleId in @("M08", "M09", "M10", "M11")) {
+    It "M08 到 M10 在后端权威清单完成前必须 fail-closed" {
+        foreach ($moduleId in @("M08", "M09", "M10")) {
             { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
         }
+    }
+
+    It "M11 门禁固定视频 Workflow 后端全组与前端回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M11" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
+        $expectedTests = @(
+            "tests/test_agent_video_workflow_planning.py",
+            "tests/test_agent_video_workflow_scene_packages.py",
+            "tests/test_agent_video_workflow_generation.py",
+            "tests/test_agent_video_workflow_postproduction.py",
+            "tests/test_agent_video_workflow_delivery.py",
+            "tests/test_pixelflow_intake_router.py",
+            "tests/test_pixelflow_planning_router.py",
+            "tests/test_creative_plan_markdown.py",
+            "tests/test_video_creation_contract.py",
+            "tests/test_plan_asset_manifest.py",
+            "tests/test_plan_asset_manifest_integration.py",
+            "tests/test_plan_scene_blueprint.py",
+            "tests/test_scene_blueprint_quality.py",
+            "tests/test_seedance_plan_authoring.py",
+            "tests/test_seedance_prompt_skill.py",
+            "tests/test_video_scene_packages.py",
+            "tests/test_scene_assets.py",
+            "tests/test_scene_semantic_qc.py",
+            "tests/test_borgrise_authorization_passthrough.py",
+            "tests/test_borgrise_generation_create_serialization.py",
+            "tests/test_borgrise_poll.py",
+            "tests/test_borgrise_project_id.py",
+            "tests/test_borgrise_quota_detection.py",
+            "tests/test_borgrise_video_payloads.py",
+            "tests/test_pixelflow_video_router.py",
+            "tests/test_borgrise_video_qc_skill.py",
+            "tests/test_video_quality_review.py",
+            "tests/test_jianying_draft_config.py",
+            "tests/test_jianying_draft_models.py",
+            "tests/test_jianying_draft_http_skill.py",
+            "tests/test_jianying_draft_service.py",
+            "tests/test_pixelflow_jianying_draft_router.py",
+            "tests/test_pixelflow_jianying_draft_lifespan.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_openapi_operation_ids.py"
+        )
+        $expectedRuffPaths = @(
+            "app/gateway/routers/pixelflow_intake.py",
+            "app/gateway/routers/pixelflow_planning.py",
+            "app/gateway/routers/pixelflow_video.py",
+            "app/gateway/routers/pixelflow_jianying_draft.py",
+            "pixelflow/agent_workflows/video",
+            "pixelflow/creative",
+            "pixelflow/generate/scene_packages.py",
+            "pixelflow/generate/seedance_prompt.py",
+            "pixelflow/jianying_draft",
+            "pixelflow/qc/scene_semantic.py",
+            "pixelflow/qc/video_review.py",
+            "pixelflow/skills/borgrise"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be ((@("-m", "ruff", "check") + $expectedRuffPaths + $expectedTests) -join "`n")
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "test" }).Count | Should Be 1
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "lint" }).Count | Should Be 1
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "build-prod" }).Count | Should Be 1
     }
 
     It "M13 保留后端全量门禁并使用项目 Python" {
