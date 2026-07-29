@@ -80,7 +80,18 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 状态：`R1-assist-ui` 阶段门禁和中文规范人工等价检查均绿色，M12 已登记 `ready_for_phase_integration`、`checkpoint_status=ready`；唯一写入权和 M12.3 文件锁已释放，等待开发者人工启动单槽阶段集成。
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
 - locked files：`无`
-- integration failure evidence：`候选 codex/integrate-m12-20260729-004147-406e3815 已保留；Agent 未更新；错误类型 RuntimeException`
+- integration failure evidence：`docs/agentization/test-reports/M12-final-integration-blocked-20260729.md`
+
+## M12 最终单槽集成阻塞记录
+
+- 阻塞时间：`2026-07-29 08:41:51 +0800`
+- 冻结远端：Agent `6c25a7bf7eae3a7a806874f5299926898d1c039a`；dev `fb7450775a227d891372c19eae1b308045c51e68`；M12 `1bb603f08a01e3a2b0fc238ceb6240f1b49ee447`。
+- 候选：`codex/integrate-m12-20260729-004147-406e3815`，由仓库 `Integrate-AgentModule.ps1` 按最新 Agent、最新 dev 和 M12 最终增量创建并保留。
+- 阻塞原因：合入 M12 增量时，`web/src/pages/WorkspacePage.tsx` 出现 6 个语义耦合冲突块，涉及 R1 `assist/shadow` Turn 接力、M12 目标元数据、interrupt 单路响应以及 Snapshot/SSE 消息与任务投影；不能依据文本优先级安全自动选择。
+- 门禁状态：候选未完成合并，因此 M12 Final 权威门禁未开始；不得沿用模块分支上的历史绿色结果代替候选门禁。
+- 长期分支：Agent 保持冻结 SHA 未变化；dev 未修改；M12 仅追加 `integration_blocked` 状态和本安全证据。
+- 安全边界：未调用真实图片、视频、PPT、剪映、LLM、PowerMem 或其他付费 API；未修改生产配置，未执行其他模块或切片，自动化状态保持 `automation_local_ready`。
+- 恢复要求：由 M12 模块修复任务基于最新 Agent 明确整合上述两组语义并重新执行 M12 Final 门禁；恢复为 `ready_for_integration` 并 push 后，必须重新人工启动 9.10A，创建全新候选，禁止复用本 blocked 候选。
 
 ## M12.4 完成记录
 
