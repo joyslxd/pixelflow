@@ -1,26 +1,26 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`phase_integrated`
+- phase：`ready_for_phase_integration`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
 - 当前切片：`M13.2`
-- base Agent SHA：`f03f733115fb0ddd554dcb434f368cef5f09b39e`
+- base Agent SHA：`2b7bd44813dbbe63836e8fd2434c0b9be08af404`
 - 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
-- M13.1 已释放文件：本切片实现、migration、测试、配置、AGENTS/README/最新设计、状态和测试报告全部解除写锁
-- release_id：`R1`
-- checkpoint_slice：`M13.1`
-- checkpoint_commit：`c86d181787dfca875cd8f267b709859fc82efb28`
+- M13.2 已释放文件：R2 Runtime/Graph/创建路由、dev 配置、前端接力、定向测试、AGENTS/README/最新设计、状态和测试报告全部解除写锁
+- release_id：`R2`
+- checkpoint_slice：`M13.2`
+- checkpoint_commit：`d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
 - last_integrated_commit：`328fb535bb2c03790bd1bb189781b9cd64aa1567`
-- checkpoint_status：`phase_integrated:R1`
-- 当前发布门禁：`released:R1`；唯一发布负责人已批准并确认人工上传、重启和启动日志正常
+- checkpoint_status：`ready`
+- 当前发布门禁：`released:R1 / ready_for_phase_integration:R2`；开发者人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R2` 和 `awaiting_release_approval:R2`
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
 ## 切片
 
 - [x] M13.1 / R1 assist、压缩 UI/恢复、旧流程等价、全部新对话100%（2.5h）
-- [ ] M13.2 / R2 视频 replay/shadow/黄金对话/mock E2E、`primary(video)+100%`（3h）
+- [x] M13.2 / R2 视频 replay/shadow/黄金对话/mock E2E、`primary(video)+100%`（3h）
 - [ ] M13.3 / R3 图片/编辑、PPT、视频分析 mock E2E、`primary(四类intent)+100%`（3h）
 - [ ] M13.4 / R4 五流程全量、保持100%、kill switch/回滚（2.5h）
 - [ ] M13.5 / R4 经批准真实冒烟/文档/发布签字（2h）
@@ -45,6 +45,19 @@
 ## 恢复提示
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
+
+## M13.2 / R2 实现检查点记录（2026-07-29）
+
+- 依赖：M13.1 已完成集成与人工生产发布；M02、M05、M06、M11、M12.4–M12.5 均为 base Agent `2b7bd448` 的祖先，最新 dev 已进入该 Agent 基线。生产继续保持 R1 `assist / [] / 100 / true`。
+- 测试候选：dev profile 精确为 `primary / [video] / 100 / true`。连续 32 个明确视频新对话全部冻结为 `supervisor_v1`；图片和无法唯一判断的首轮输入保持 `frontend_v2`，但继续挂载 R1 Turn、Snapshot/SSE、压缩和恢复。
+- 回放边界：新增 `SupervisorReplayRuntime`，`off/assist` 在 Handler 前关闭，Shadow 只生成冻结决策、标准命令 DTO 和预算报告，不进入 Workflow Handler、Operation 或 PowerMem record；primary 才调用 M02/M05 图内核。
+- 视频命令：`WorkflowCommand` 增加 user、Turn、当前输入、materials、reply 和 Artifact 引用；视频 Handler 必填并深拷贝附件，尚未进入 R2 的其他 Workflow 保持 M02 路由内核兼容。
+- mock E2E：以 M11 `VideoPlanningWorkflowService` 作为 Handler、M06 `OperationStartCoordinator` 与固定 Provider fake 串起视频首轮；刷新/协调器重建复用同一 operation 和 provider job，供应商 start 增量为 0。
+- 黄金对话：R2 视频子集 13 条覆盖全部 9 类 `AgentAction`，action、target 和追问召回均为 100%，计费误执行为 0。
+- 上下文合同：回放只通过共享 `ContextBudgetPolicyProvider` 读取 896K/32K/32K，DeepSeek V4 Pro 档案固定为 1,000,000 tokens 且缺失已验证档案失败关闭；压缩期 Turn 排队、30 秒失败退避、同 Turn 与附件恢复均有定向测试。未增加视频节点窗口常量或 128K 业务兜底。
+- 非付费边界：所有测试只使用 Memory Store、fixture 和 fake；未调用真实图片、视频、PPT、剪映、LLM、content-app、PowerMem 或其他付费 API。未修改 `backend/config.prod.yml`，未执行 M13.3。
+- 测试与审核：完整证据见 [M13.2 / R2 测试与审核记录](../test-reports/M13.2-R2.md)。实现提交完成并复核中文规范后，只允许再修改本状态文件登记 R2 检查点。
+- 自动化：保持 `automation_local_ready`。当前 macOS 没有 PowerShell；通用 M13 命令已逐项等价执行。后端全量除仓库既有的 6 个 `scripts/docker.sh` 缺失用例外为 `5057 passed, 19 skipped`，该同一基线问题已记录在 M13.1；R2 定向、Ruff、Web 合同/全量/lint/build 均绿色。
 
 ## M13.1 / R1 生产发布（2026-07-27）
 

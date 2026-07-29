@@ -11,6 +11,7 @@ if (!adapterModuleUrl) {
 
 const {
   createConversationWriteSequencer,
+  inferInitialRuntimeIntent,
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceAgentRuntimeMode,
   resolveWorkspaceRuntimePolicy,
@@ -183,6 +184,18 @@ test("R1 assist 同时挂载统一会话基础设施与旧业务 runner", () => 
     legacyRunnerEnabled: true,
     legacyArtifactActionsEnabled: true,
   });
+});
+
+test("R2 primary 先挂载统一会话层，并只对明确视频首轮提示申请接管", () => {
+  assert.deepEqual(resolveWorkspaceRuntimePolicy("frontend_v2", "conv-m13-r2", "primary"), {
+    supervisorEnabled: true,
+    legacyRunnerEnabled: true,
+    legacyArtifactActionsEnabled: true,
+  });
+  assert.equal(inferInitialRuntimeIntent("用这张参考图生成一条 30 秒商品视频"), "video");
+  assert.equal(inferInitialRuntimeIntent("请拆解分析这个视频"), "video_analysis");
+  assert.equal(inferInitialRuntimeIntent("做一张商品主图"), "image");
+  assert.equal(inferInitialRuntimeIntent("帮我处理一下"), null);
 });
 
 test("R1 assist 只在服务端 Turn 可执行后接力旧流程", () => {

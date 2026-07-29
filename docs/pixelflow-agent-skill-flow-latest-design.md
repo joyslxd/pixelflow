@@ -1121,7 +1121,9 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。截至 2026-07-26，R1 已完成原单槽集成，当前正在同一 Agent 分支修复真实长视频测试暴露的上下文问题：新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但 `orchestration_mode` 仍固定为 `frontend_v2`，现有图片、视频、PPT 和视频分析阶段工作流继续拥有业务推进权；旧消息 API 复用同一 `client_input_id`，避免双写重复。生产仍保持 `off`，不能把代码修复描述成已经发布。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 开发候选只把 dev profile 改为 `primary / enabled_intents=[video] / 100% / true`；创建 Controller 接收保守的首轮 intent 提示，服务端只允许命中启动快照中的 `enabled_intents`，明确视频新对话冻结为 `supervisor_v1`，其他 intent 继续使用 R1 会话层并接力 v2。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
+
+R2 候选新增 `SupervisorReplayRuntime`，相当于会话回放编排 Service：`off/assist` 在 Graph Handler 前执行 kill switch，未启用 intent 返回 delegated，`shadow` 只形成冻结 `ActionDecision`、标准命令 DTO 和统一预算报告，禁止进入 Workflow Handler、Operation 或 PowerMem record；只有 `primary` 才调用 M02/M05 图内核。视频 `WorkflowCommand` 明确携带 `user_id/turn_id/current_input/materials/reply_to_message_id/artifact_refs`，并在 Handler 边界深拷贝附件。非付费 mock E2E 使用 M11 `VideoPlanningWorkflowService` 和 M06 `OperationStartCoordinator` fake，验证刷新/进程重建后的供应商 start 增量为 0，不调用真实 Provider、LLM、content-app 或 PowerMem。此候选尚未进入 Agent，也不构成生产 `primary(video)` 授权。
 
 M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 51 条中文离线黄金集达到 action 98.04%、target 95.45%、歧义追问 95.24%、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
 

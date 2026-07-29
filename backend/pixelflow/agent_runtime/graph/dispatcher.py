@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,6 +48,12 @@ class WorkflowCommand:
     decision: ActionDecision
     workflow: WorkflowRecord | None
     namespace: GraphExecutionNamespace
+    user_id: str
+    turn_id: str
+    current_input: str
+    materials: list[dict[str, Any]]
+    reply_to_message_id: str | None
+    artifact_refs: list[str]
 
 
 class WorkflowCommandDispatcher:
@@ -105,6 +112,21 @@ class WorkflowCommandDispatcher:
         else:
             raise ValueError(f"未支持的 Workflow 业务动作：{action}")
 
+        # R2 视频 Handler 必须消费完整 Turn 与附件上下文；尚未进入 R2 的其他
+        # Workflow 继续兼容 M02 的纯路由内核调用，后续阶段接入时再提升为必填。
+        context_text = _required_text if kind is WorkflowKind.VIDEO else _text_or_empty
+        user_id = context_text(state, "user_id")
+        turn_id = context_text(state, "turn_id")
+        current_input = context_text(state, "current_input")
+        materials = _materials_snapshot(state.get("materials", []))
+        reply_to_message_id = _optional_text(
+            state.get("reply_to_message_id"),
+            "reply_to_message_id",
+        )
+        artifact_refs = _artifact_refs_snapshot(
+            state.get("artifact_refs", []),
+        )
+
         command = WorkflowCommand(
             conversation_id=conversation_id,
             workflow_id=target_workflow_id,
@@ -115,6 +137,12 @@ class WorkflowCommandDispatcher:
                 conversation_id,
                 target_workflow_id,
             ),
+            user_id=user_id,
+            turn_id=turn_id,
+            current_input=current_input,
+            materials=materials,
+            reply_to_message_id=reply_to_message_id,
+            artifact_refs=artifact_refs,
         )
         handler = self._registry.resolve(kind)
         result = await handler.dispatch(command)
@@ -150,3 +178,50 @@ def _validate_result_identity(
         raise ValueError("Workflow 处理器返回了不同的 conversation_id")
     if result.kind != command.kind:
         raise ValueError("Workflow 处理器返回了不同的 kind")
+
+
+def _required_text(state: Mapping[str, Any], field_name: str) -> str:
+    """读取 Handler 必需的 Turn 字段，拒绝缺失或空白值。"""
+
+    value = state.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Supervisor state 必须提供 {field_name}")
+    return value
+
+
+def _text_or_empty(state: Mapping[str, Any], field_name: str) -> str:
+    """兼容只测试路由内核的旧调用；存在字段时仍拒绝非法类型。"""
+
+    value = state.get(field_name)
+    if value is None:
+        return ""
+    return _required_text(state, field_name)
+
+
+def _optional_text(value: Any, field_name: str) -> str | None:
+    """复制可选文本引用，避免把非法目标交给业务 Handler。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Supervisor state 的 {field_name} 必须是非空字符串")
+    return value
+
+
+def _materials_snapshot(value: Any) -> list[dict[str, Any]]:
+    """深拷贝首轮附件，使 Handler 看到与可见消息相同的素材快照。"""
+
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError("Supervisor state 的 materials 必须是对象数组")
+    return deepcopy(value)
+
+
+def _artifact_refs_snapshot(value: Any) -> list[str]:
+    """校验并复制 Artifact 引用，禁止静默丢弃非法目标。"""
+
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip()
+        for item in value
+    ):
+        raise ValueError("Supervisor state 的 artifact_refs 必须是非空字符串数组")
+    return list(value)

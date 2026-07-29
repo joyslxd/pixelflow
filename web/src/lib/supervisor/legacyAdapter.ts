@@ -64,6 +64,24 @@ const INVALID_PENDING_OWNER = "历史对话 pending 状态归属不合法";
 const CONFLICTING_ARTIFACT = "历史对话 artifact 状态不一致";
 
 export type WorkspaceAgentRuntimeMode = "off" | "shadow" | "assist" | "primary";
+export type InitialRuntimeIntent = "image" | "video" | "ppt" | "video_analysis";
+
+/**
+ * 从首轮文本提取保守的会话归属提示。
+ *
+ * 该提示只允许命中服务端 enabled_intents，不能替代 Supervisor 的权威分类；
+ * 无法唯一判断时返回 null，让旧 v2 继续拥有业务推进权。
+ */
+export function inferInitialRuntimeIntent(content: string): InitialRuntimeIntent | null {
+  const normalized = content.trim();
+  if (!normalized) return null;
+  if (/视频分析|分析.{0,8}视频|拆解.{0,8}视频/u.test(normalized)) return "video_analysis";
+  if (/(?:PPT|ppt|演示文稿|幻灯片)/u.test(normalized)) return "ppt";
+  // “图生视频”同时包含图片和视频，必须优先归入视频工作流。
+  if (/视频|短片|影片|图生视频|文生视频/u.test(normalized)) return "video";
+  if (/图片|图像|主图|海报/u.test(normalized)) return "image";
+  return null;
+}
 
 export interface ConversationWriteSequencer {
   run<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
@@ -299,6 +317,7 @@ export function resolveWorkspaceRuntimePolicy(
     mode === "supervisor_v1"
     || agentRuntimeMode === "assist"
     || agentRuntimeMode === "shadow"
+    || agentRuntimeMode === "primary"
   );
   const legacyRunnerEnabled = mode === "frontend_v2";
   return {

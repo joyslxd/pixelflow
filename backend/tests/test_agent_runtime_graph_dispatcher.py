@@ -230,6 +230,9 @@ async def test_dispatcher_routes_multiple_workflow_kinds_to_distinct_handlers() 
     )
     state = {
         "conversation_id": "conv-1",
+        "user_id": "user-conv-1",
+        "turn_id": "turn-conv-1",
+        "current_input": "继续视频流程",
         "workflows": {
             image.workflow_id: image,
             video.workflow_id: video,
@@ -409,7 +412,13 @@ async def test_start_workflow_uses_intent_registry_without_existing_projection()
     )
 
     result = await dispatcher.dispatch(
-        {"conversation_id": "conv-1", "workflows": {}},
+        {
+            "conversation_id": "conv-1",
+            "user_id": "user-conv-1",
+            "turn_id": "turn-conv-1",
+            "current_input": "新建视频流程",
+            "workflows": {},
+        },
         _decision(
             action=AgentAction.START_WORKFLOW,
             intent=AgentIntent.VIDEO,
@@ -467,6 +476,9 @@ async def test_dispatcher_fails_closed_when_handler_is_not_registered() -> None:
         await dispatcher.dispatch(
             {
                 "conversation_id": "conv-1",
+                "user_id": "user-conv-1",
+                "turn_id": "turn-conv-1",
+                "current_input": "继续视频流程",
                 "workflows": {video.workflow_id: video},
             },
             _decision(
