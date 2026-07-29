@@ -1,10 +1,10 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`ready_for_phase_integration`
+- phase：`phase_integrated`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：`M13.2`
+- 当前切片：`M13.3`
 - base Agent SHA：`2b7bd44813dbbe63836e8fd2434c0b9be08af404`
 - 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
@@ -12,8 +12,8 @@
 - release_id：`R2`
 - checkpoint_slice：`M13.2`
 - checkpoint_commit：`d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
-- last_integrated_commit：`328fb535bb2c03790bd1bb189781b9cd64aa1567`
-- checkpoint_status：`ready`
+- last_integrated_commit：`95ef865f2a084ce57b91be5eb326e1045247d4a0`
+- checkpoint_status：`phase_integrated:R2`
 - 当前发布门禁：`released:R1 / ready_for_phase_integration:R2`；开发者人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R2` 和 `awaiting_release_approval:R2`
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
