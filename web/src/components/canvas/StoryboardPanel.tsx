@@ -25,6 +25,7 @@ interface StoryboardPanelProps {
   onAddGlobalAsset?: (assetGroup: GlobalSceneAssetGroup, replacement: SceneGlobalAssetReplacement) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
+  onSave?: () => void | Promise<void>;
   onClose?: () => void;
 }
 
@@ -129,6 +130,7 @@ export function StoryboardPanel({
   onAddGlobalAsset,
   onGenerateVideo,
   onRetrySceneAssets,
+  onSave,
   onClose,
 }: StoryboardPanelProps) {
   const videoScenePackages = msg.artifact?.videoScenePackages;
@@ -399,13 +401,25 @@ export function StoryboardPanel({
               })}
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <button type="button" onClick={onClose} className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas">
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={!onSave}
+                title={onSave ? undefined : "当前运行模式不允许保存"}
+                className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 保存
               </button>
               <button
                 type="button"
                 onClick={sceneAssetQuotaPaused ? onRetrySceneAssets : onGenerateVideo}
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                disabled={sceneAssetQuotaPaused ? !onRetrySceneAssets : !onGenerateVideo}
+                title={
+                  sceneAssetQuotaPaused
+                    ? (onRetrySceneAssets ? undefined : "当前运行模式不允许继续生成参考图")
+                    : (onGenerateVideo ? undefined : "当前运行模式不允许生成视频")
+                }
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Sparkles size={15} />
                 {sceneAssetQuotaPaused ? "继续生成参考图" : "确认并生成视频"}

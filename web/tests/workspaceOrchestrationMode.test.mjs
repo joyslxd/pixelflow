@@ -14,9 +14,11 @@ const {
   inferInitialRuntimeIntent,
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceAgentRuntimeMode,
+  resolveWorkspacePrimaryExecutionReady,
   resolveWorkspaceRuntimePolicy,
   resolveWorkspaceInteractionPolicy,
   resolveAssistHandoffAction,
+  resolveUnavailableSupervisorRecovery,
 } = await import(adapterModuleUrl);
 
 test("同一会话的 pending Turn 写入串行读取最新状态", async () => {
@@ -164,6 +166,37 @@ test("R1 assist 只从服务端保留命名空间解析且不改变业务归属"
   }), "off");
 });
 
+test("live Handler 就绪只能由服务端保留命名空间声明", () => {
+  assert.equal(resolveWorkspacePrimaryExecutionReady({
+    conversation: conversation({
+      context: {
+        __agent_runtime: {
+          mode: "primary",
+          enabled_intents: ["video"],
+          context_compaction_enabled: true,
+          context_version: 0,
+          primary_execution_ready: true,
+        },
+      },
+    }),
+    messages: [],
+  }), true);
+  assert.equal(resolveWorkspacePrimaryExecutionReady({
+    conversation: conversation({
+      context: {
+        primary_execution_ready: true,
+        __agent_runtime: {
+          mode: "primary",
+          enabled_intents: ["video"],
+          context_compaction_enabled: true,
+          context_version: 0,
+        },
+      },
+    }),
+    messages: [],
+  }), false);
+});
+
 test("运行时策略保证 Supervisor 与旧 runner、旧动作互斥", () => {
   assert.deepEqual(resolveWorkspaceRuntimePolicy("supervisor_v1", "conv-m12", "off"), {
     supervisorEnabled: true,
@@ -184,6 +217,19 @@ test("R1 assist 同时挂载统一会话基础设施与旧业务 runner", () => 
     legacyRunnerEnabled: true,
     legacyArtifactActionsEnabled: true,
   });
+});
+
+test("R1 assist 不得用空 Supervisor Workflow 覆盖 v2 任务看板", () => {
+  const effectStart = workspaceSource.indexOf("const projectedMessages = mergeSupervisorMessagesWithPending");
+  const effectEnd = workspaceSource.indexOf("void api.getJianyingDraftCapability", effectStart);
+  assert.notEqual(effectStart, -1, "Workspace 必须投影统一会话消息");
+  assert.notEqual(effectEnd, -1, "剪映能力加载必须位于统一会话投影之后");
+  const effectSource = workspaceSource.slice(effectStart, effectEnd);
+  assert.match(
+    effectSource,
+    /if \(orchestrationModeRef\.current === "supervisor_v1"\) \{[\s\S]*projectSupervisorWorkflowProgress/,
+    "只有 supervisor_v1 业务归属才能投影 Supervisor Workflow",
+  );
 });
 
 test("R2 primary 先挂载统一会话层，并只对明确视频首轮提示申请接管", () => {
@@ -238,6 +284,133 @@ test("R1 assist 只在服务端 Turn 可执行后接力旧流程", () => {
     serverInputStatus: "processing",
     pendingPlanRevision: true,
   }), "wait");
+});
+
+test("supervisor_v1 accepted Turn 不得由 assist 接力确认", () => {
+  assert.equal(resolveAssistHandoffAction({
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: true,
+    registrationStatus: "registered",
+    serverInputStatus: "accepted",
+    serverRunStatus: "running",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  }), "wait");
+});
+
+test("supervisor_v1 按权威失败或完成状态清理 pending", () => {
+  const base = {
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: true,
+    registrationStatus: "registered",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  };
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: "failed",
+    serverRunStatus: "failed",
+  }), "failed");
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: undefined,
+    serverRunStatus: "completed",
+  }), "acknowledge");
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: undefined,
+    serverRunStatus: "running",
+  }), "wait");
+  assert.match(
+    workspaceSource,
+    /handoffAction === "failed"[\s\S]*appendPersistedSupervisorNotice[\s\S]*failedSupervisorNoticeId[\s\S]*persistPendingSupervisorTurns/,
+    "终态失败提示必须先按稳定 ID 持久化，再清理 pending",
+  );
+});
+
+test("历史 supervisor_v1 缺少 live Handler 就绪证据时停止自动重试", () => {
+  assert.equal(resolveAssistHandoffAction({
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: false,
+    registrationStatus: "registered",
+    serverInputStatus: "accepted",
+    serverRunStatus: "running",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  }), "unavailable");
+  assert.match(workspaceSource, /该历史会话由未接线的 R2 候选创建，已停止自动重试/);
+});
+
+test("历史未就绪 Supervisor 按会话幂等收敛孤儿 inputQueue", () => {
+  const base = {
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: false,
+    connectionStatus: "connected",
+    markerVersion: 0,
+    noticePersisted: false,
+  };
+
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+  }), "persist_notice");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 3,
+    hasActiveInput: true,
+  }), "persist_notice");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+    noticePersisted: true,
+  }), "finalize");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+    markerVersion: 1,
+    noticePersisted: true,
+  }), "none");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: false,
+  }), "none");
+});
+
+test("未就绪 Supervisor 不得从服务端 inputQueue 反复重建本地 pending", () => {
+  const recoveryStart = workspaceSource.indexOf("刷新或压缩完成后，服务端 Turn");
+  const recoveryEnd = workspaceSource.indexOf("const handleVisibilityResume", recoveryStart);
+  const recoverySource = workspaceSource.slice(recoveryStart, recoveryEnd);
+
+  assert.match(
+    recoverySource,
+    /orchestrationModeRef\.current === "supervisor_v1"[\s\S]*!primaryExecutionReadyRef\.current[\s\S]*return/,
+  );
+  assert.match(workspaceSource, /agent-runtime-unavailable:\$\{conversationId\}:v1/);
+  assert.match(
+    workspaceSource,
+    /await appendPersistedSupervisorNotice[\s\S]*unavailableSupervisorNoticeVersionsRef\.current\.set[\s\S]*await persistPendingSupervisorTurns/,
+    "必须先幂等保存说明，再写会话级 marker 并一次清空全部 pending",
+  );
+  assert.match(
+    workspaceSource,
+    /enabled: runtimePolicy\.supervisorEnabled && !primaryExecutionUnavailable/,
+    "历史未就绪会话不得继续投影永久 running Notice",
+  );
+  assert.match(
+    workspaceSource,
+    /const primaryExecutionUnavailable = orchestrationResolved[\s\S]*orchestrationMode === "supervisor_v1"/,
+    "切换对话时必须先完成服务端归属解析，不能沿用上一会话状态执行恢复",
+  );
 });
 
 test("旧运行时的 composer 与 artifact 动作共享业务 busy 闸门", () => {
@@ -319,6 +492,10 @@ test("WorkspacePage 使用创建响应的权威归属并等待 Snapshot 后提�
   assert.match(workspaceSource, /supervisorRuntime\.getContextVersion\(\)/);
   assert.doesNotMatch(workspaceSource, /expected_context_version:\s*1[,\n]/);
   assert.match(workspaceSource, /supervisorRuntime\.startTurn/);
+  assert.match(
+    workspaceSource,
+    /resolveAssistHandoffAction\(\{[\s\S]*orchestrationMode:\s*orchestrationModeRef\.current/,
+  );
 });
 
 test("WorkspacePage 的 assist Turn 使用同一 UUID 幂等键并在注册后续跑旧流程", () => {

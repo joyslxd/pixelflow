@@ -269,6 +269,7 @@ def test_primary_assignment_only_gives_enabled_video_new_conversations_to_superv
         config=_config(),
         repository=MemoryCompactionQueueRepository(),
         task_store=MemoryPixelFlowTaskStore(),
+        primary_execution_intents=("video",),
     )
 
     video_assignments = [
@@ -296,6 +297,57 @@ def test_primary_assignment_only_gives_enabled_video_new_conversations_to_superv
     )
 
 
+def test_primary_video_without_live_handler_keeps_v2_owner_and_r1_runtime() -> None:
+    """配置获批但进程没有真实 Handler 时，业务继续由 v2 安全推进。"""
+
+    service = AgentRuntimeService(
+        config=_config(),
+        repository=MemoryCompactionQueueRepository(),
+        task_store=MemoryPixelFlowTaskStore(),
+    )
+
+    assignment = service.assignment_for_new_conversation(
+        {},
+        initial_intent="video",
+    )
+
+    assert assignment.orchestration_mode.value == "frontend_v2"
+    assert assignment.context[AGENT_RUNTIME_CONTEXT_KEY]["mode"] == "primary"
+    assert assignment.context[AGENT_RUNTIME_CONTEXT_KEY]["enabled_intents"] == [
+        "video",
+    ]
+    assert (
+        assignment.context[AGENT_RUNTIME_CONTEXT_KEY][
+            "primary_execution_ready"
+        ]
+        is False
+    )
+
+
+def test_primary_assignment_records_live_handler_readiness() -> None:
+    """Supervisor 归属必须把本会话的 live Handler 就绪事实冻结到命名空间。"""
+
+    service = AgentRuntimeService(
+        config=_config(),
+        repository=MemoryCompactionQueueRepository(),
+        task_store=MemoryPixelFlowTaskStore(),
+        primary_execution_intents=("video",),
+    )
+
+    assignment = service.assignment_for_new_conversation(
+        {},
+        initial_intent="video",
+    )
+
+    assert assignment.orchestration_mode.value == "supervisor_v1"
+    assert (
+        assignment.context[AGENT_RUNTIME_CONTEXT_KEY][
+            "primary_execution_ready"
+        ]
+        is True
+    )
+
+
 def test_conversation_router_freezes_only_video_hint_as_supervisor_owner() -> None:
     """验证真实创建路由只把获批视频提示冻结为 Supervisor 归属。"""
 
@@ -316,6 +368,7 @@ def test_conversation_router_freezes_only_video_hint_as_supervisor_owner() -> No
         config=_config(),
         repository=repository,
         task_store=task_store,
+        primary_execution_intents=("video",),
     )
     app.include_router(pixelflow_conversations.router)
 
@@ -335,6 +388,7 @@ def test_conversation_router_freezes_only_video_hint_as_supervisor_owner() -> No
     assert video.json()["context"][AGENT_RUNTIME_CONTEXT_KEY] == {
         "mode": "primary",
         "enabled_intents": ["video"],
+        "primary_execution_ready": True,
         "context_compaction_enabled": True,
         "context_version": 0,
     }

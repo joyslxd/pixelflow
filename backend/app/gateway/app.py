@@ -201,9 +201,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             context_compactor=context_compactor,
         )
         logger.info(
-            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s",
+            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s primary_execution_intents=%s",
             agent_runtime_config.mode,
             agent_runtime_config.new_conversation_rollout_percent,
+            sorted(
+                app.state.pixelflow_agent_runtime_service.primary_execution_intents,
+            ),
         )
 
         from pixelflow.tracing import configure_trace_sink

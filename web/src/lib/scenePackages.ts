@@ -528,6 +528,32 @@ export function sceneGenerationPayloadFromPackage(
   };
 }
 
+function explicitRevisionSceneIds(
+  scenes: Array<Pick<ScenePackageRecord, "scene_id" | "scene_index">>,
+  feedback: string,
+): Set<string> {
+  const ids = new Set<string>();
+  const normalizedFeedback = feedback.trim();
+  scenes.forEach((scene) => {
+    const pattern = new RegExp(
+      `(?:只|仅)?\\s*(?:修改|修复|重(?:新)?生成)\\s*第\\s*${scene.scene_index}\\s*(?:个)?\\s*(?:分镜|段)`,
+      "g",
+    );
+    for (const match of normalizedFeedback.matchAll(pattern)) {
+      const prefix = normalizedFeedback.slice(
+        Math.max(0, (match.index ?? 0) - 12),
+        match.index ?? 0,
+      );
+      if (/(?:不要|不用|无需|不需要|不|别|不可|禁止)\s*(?:再\s*)?$/u.test(prefix)) {
+        continue;
+      }
+      ids.add(scene.scene_id);
+      break;
+    }
+  });
+  return ids;
+}
+
 export function sceneIdsForRevision(
   scenes: Array<Pick<ScenePackageRecord, "scene_id" | "scene_index">>,
   feedback: string,
@@ -539,16 +565,10 @@ export function sceneIdsForRevision(
     stringArray(qualityReview?.target_scene_ids).forEach((sceneId) => ids.add(sceneId));
     if (ids.size > 0) return ids;
     stringArray(qualityReview?.affected_scene_ids).forEach((sceneId) => ids.add(sceneId));
-    return ids;
+    return ids.size > 0 ? ids : explicitRevisionSceneIds(scenes, feedback);
   }
   const normalizedFeedback = feedback.trim();
-  const explicitOnlyIds = new Set<string>();
-  scenes.forEach((scene) => {
-    const pattern = new RegExp(`(?:只|仅)\\s*(?:修复|修改)\\s*第\\s*${scene.scene_index}\\s*(?:个)?\\s*分镜`);
-    if (pattern.test(normalizedFeedback)) {
-      explicitOnlyIds.add(scene.scene_id);
-    }
-  });
+  const explicitOnlyIds = explicitRevisionSceneIds(scenes, normalizedFeedback);
   if (explicitOnlyIds.size > 0) {
     return explicitOnlyIds;
   }

@@ -46,6 +46,16 @@
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
 
+## M13.2 / R2 测试环境人工验收修复（2026-07-29）
+
+- 触发原因：测试环境视频新对话被配置冻结为 `supervisor_v1`，但 Gateway 没有安装消费 Turn 的 live Graph Handler；Turn 长期停在 `accepted`，前端 assist 恢复反复写 pending，表现为无限请求且没有结果或错误提示。
+- 归属修复：新增 `primary_execution_intents` 运行时就绪集合。只有 intent 同时位于配置 `enabled_intents` 和已装配 handler 集合时才允许 `supervisor_v1` 接管；Gateway 当前显式传入空集合，因此视频由 `frontend_v2` 业务 runner 推进，同时保留 R1 Turn、Snapshot/SSE、压缩和输入排队。
+- 前端隔离：`supervisor_v1` 的 `accepted` Turn 只等待后端执行，不再被 assist 错误确认；前端只信任服务端保留的 `primary_execution_ready`。历史误分配会话缺少就绪证据时停止 inputQueue 重建，先按会话稳定消息 ID 持久化一次中文说明，再写版本 marker 并一次清空全部 pending；孤儿 input、重复 pending 和两次写入之间的退出都按同一会话幂等收敛。真实复验从 6 秒 25 次 Conversation `PUT` 收敛为稳态 0 次。R1 统一消息投影仍可与 v2 并存，但只有真正的 `supervisor_v1` owner 才能投影 Supervisor Workflow，避免空工作流清空 v2 任务看板。
+- 权威恢复：分镜显式保存、全局素材删除和视频最终确认均先更新权威消息 Artifact，再更新本地视图和 Conversation Snapshot。存在物化场景包消息时，旧 context 不得覆盖权威素材和分镜；刷新后分镜编辑、素材删除、最终确认及“导出交付已完成”均保持。
+- QC 兜底：后端 QC 没有返回 scene ID 时默认不重生成；只有用户明确说出“修改/修复/重生成第 N 个分镜（或第 N 段）”才提取严格作用域，模糊反馈和“不要/不修改第 N 个分镜”等否定表达继续失败关闭。
+- 真实验收：使用本机测试配置和测试环境 content-app 从新对话完整执行视频表单、创意重生成与选择、Plan 编辑/Agent 修改/回退/恢复/确认、场景包素材增删改存、首次生成、下载、两种 QC 修改策略、局部重生成、合并、剪映草稿生成/下载、最终下载和人工结束；最终刷新恢复稳定。详细证据见 [M13.2 / R2 测试环境人工验收修复记录](../test-reports/M13.2-R2-live-acceptance-repair.md)。
+- 发布边界：生产继续保持 R1；本修复不把 fake replay handler 当作 live handler，也不授权发布 `primary(video)`。未来装配真实 handler 时必须显式注册对应 `primary_execution_intents` 并重新执行真实全流程验收。
+
 ## M13.2 / R2 单槽阶段集成（2026-07-29）
 
 - 冻结引用：Agent `2b7bd44813dbbe63836e8fd2434c0b9be08af404`、dev `fb7450775a227d891372c19eae1b308045c51e68`、M13 状态提交 `95ef865f2a084ce57b91be5eb326e1045247d4a0`；实现检查点固定为 `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`。

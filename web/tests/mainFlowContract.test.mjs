@@ -67,6 +67,75 @@ test("manual global asset addition persists in place without clearing generated 
   assert.doesNotMatch(handler, /videoScenePackageEditedSceneIds:\s*\[\]/);
 });
 
+test("分镜保存必须更新权威消息后再关闭画布", () => {
+  const start = workspaceSource.indexOf("const handleSaveVideoScenePackage = async");
+  const end = workspaceSource.indexOf("const handleGenerateVideoFromScenePackages = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供分镜显式保存处理器");
+  assert.notEqual(end, -1, "视频生成处理器必须位于分镜保存处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /messagesRef\.current\.find/, "保存时必须读取最新消息，不能使用画布旧闭包");
+  assert.match(handler, /await api\.updateConversationMessage/, "保存时必须先更新权威消息");
+  assert.match(handler, /persistScenePackageSnapshot/, "保存后必须同步会话快照");
+  assert.match(handler, /setCanvasOpen\(false\)/, "权威消息更新成功后才能关闭画布");
+  assert.match(storyboardPanelSource, /onSave\?: \(\) => void \| Promise<void>/, "分镜画布必须暴露独立保存动作");
+  assert.match(storyboardPanelSource, /onClick=\{onSave\}/, "保存按钮不能继续复用仅关闭画布的动作");
+  assert.match(workspaceSource, /onSave=\{legacyArtifactActionsEnabled[\s\S]*handleSaveVideoScenePackage/, "Workspace 必须把权威保存处理器接到画布");
+});
+
+test("删除分镜素材必须持久化更新后的权威消息", () => {
+  const start = workspaceSource.indexOf("const handleDeleteReferencedGlobalAsset = async");
+  const end = workspaceSource.indexOf("const showImageEditOptions = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供分镜素材删除处理器");
+  assert.notEqual(end, -1, "图片编辑参数处理器必须位于删除处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /const updatedArtifact: ChatArtifact = \{[\s\S]*videoScenePackages: updatedPackages/, "删除必须以当前消息构造完整更新 artifact");
+  assert.match(handler, /await api\.updateConversationMessage/, "删除必须更新权威消息，避免 Snapshot 用旧素材覆盖");
+  assert.ok(
+    handler.indexOf("await api.updateConversationMessage") < handler.indexOf("updateVideoScenePackageArtifactInMessage"),
+    "删除必须先持久化成功，再更新画布并提示成功",
+  );
+});
+
+test("刷新恢复不得用旧 Conversation context 覆盖权威分镜消息", () => {
+  const start = workspaceSource.indexOf("function restoreLatestVideoScenePackagesFromContext");
+  const end = workspaceSource.indexOf("function markLatestPptFileDoneFromContext", start);
+  assert.notEqual(start, -1, "Workspace 必须提供历史场景包恢复函数");
+  assert.notEqual(end, -1, "PPT 恢复函数必须位于场景包恢复函数之后");
+  const restoreSource = workspaceSource.slice(start, end);
+  assert.doesNotMatch(
+    restoreSource,
+    /global_assets:\s*\(globalAssets\s*\|\|/,
+    "已有消息时不得让 context.global_assets 抢占权威 Artifact",
+  );
+  assert.doesNotMatch(
+    restoreSource,
+    /scene_packages:\s*\(Array\.isArray\(scenePackages\)/,
+    "已有消息时不得让 context.scene_packages 抢占权威 Artifact",
+  );
+  assert.match(
+    restoreSource,
+    /if \(latestIndex < 0\)[\s\S]*restoredVideoScenePackages/,
+    "只有没有物化场景包消息时才能用 context 补建",
+  );
+});
+
+test("分镜画布缺少动作 Handler 时必须禁用按钮", () => {
+  assert.match(storyboardPanelSource, /disabled=\{!onSave\}/, "没有保存 Handler 时保存按钮必须禁用");
+  assert.match(
+    storyboardPanelSource,
+    /disabled=\{sceneAssetQuotaPaused \? !onRetrySceneAssets : !onGenerateVideo\}/,
+    "没有生成或恢复 Handler 时主动作必须禁用",
+  );
+});
+
+test("需求表单折叠按钮的读屏标签必须反映下一步动作", () => {
+  assert.match(
+    genParamsDialogSource,
+    /aria-label=\{collapsed \? "展开表单" : "折叠表单"\}/,
+    "折叠后按钮必须提示可展开，展开时按钮必须提示可折叠",
+  );
+});
+
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
   const end = workspaceSource.indexOf("async function onEvent", start);
@@ -683,6 +752,34 @@ test("restoring or creating a conversation clears stale pending dialog attachmen
   assert.match(resetSource, /setPendingFormValues\(\{\}\)/, "new conversation reset must clear pending form values");
 });
 
+test("恢复快照必须用响应中的对话 ID 绑定工作流进度", () => {
+  const applyStart = workspaceSource.indexOf("const applySnapshot = ");
+  const applyEnd = workspaceSource.indexOf("const makeSnapshot", applyStart);
+  const conversationStart = workspaceSource.indexOf("const applyConversation = async");
+  const conversationEnd = workspaceSource.indexOf("const resumeVisiblePendingJobs", conversationStart);
+  assert.notEqual(applyStart, -1, "applySnapshot 必须存在");
+  assert.notEqual(applyEnd, -1, "makeSnapshot 必须位于 applySnapshot 之后");
+  assert.notEqual(conversationStart, -1, "applyConversation 必须存在");
+  assert.notEqual(conversationEnd, -1, "待恢复任务处理器必须位于 applyConversation 之后");
+  const applySource = workspaceSource.slice(applyStart, applyEnd);
+  const conversationSource = workspaceSource.slice(conversationStart, conversationEnd);
+  assert.match(
+    applySource,
+    /const applySnapshot = \(snapshot: Partial<WorkspaceSnapshot>, targetConversationId: string\)/,
+    "快照应用必须显式接收目标对话 ID，不能依赖渲染时序中的可变 ref",
+  );
+  assert.match(
+    applySource,
+    /workflowProgressConversationIdRef\.current = targetConversationId/,
+    "恢复的任务看板必须绑定权威对话 ID",
+  );
+  assert.match(
+    conversationSource,
+    /applySnapshot\(\{[\s\S]*\}, detail\.conversation\.conversation_id\)/,
+    "恢复入口必须把服务端响应中的对话 ID 传给快照应用",
+  );
+});
+
 test("image edit intake bypasses the normal directions and plan flow", () => {
   const source = handleSendSource();
   const intakeCompletionSource = handleCompletedIntakeJobSource();
@@ -739,6 +836,25 @@ test("video results require explicit user confirmation", () => {
   assert.doesNotMatch(workspaceSource, /timeoutReviewMessage\("video"/, "video flow must not emit timeout auto-finish messages");
   assert.match(messageBubbleSource, /无意见，结束/, "video result cards must still expose manual accept");
   assert.match(messageBubbleSource, /提出修改意见/, "video result cards must still expose manual revision");
+});
+
+test("视频结束必须先持久化权威产物再保存完成快照", () => {
+  const start = workspaceSource.indexOf("async function handleAcceptVideoResult");
+  const end = workspaceSource.indexOf("function handleReviseVideoResult", start);
+  assert.notEqual(start, -1, "Workspace 必须提供视频结束处理器");
+  assert.notEqual(end, -1, "视频修改处理器必须位于结束处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /videoAccepted:\s*true/, "结束动作必须把确认标记写入视频 artifact");
+  assert.match(handler, /await api\.updateConversationMessage/, "结束动作必须更新权威视频消息");
+  assert.match(handler, /await updateConversationWithProgress/, "结束动作必须等待完成快照落库");
+  assert.ok(
+    handler.indexOf("await api.updateConversationMessage") < handler.indexOf("await updateConversationWithProgress"),
+    "必须先保存权威产物，再保存 video_accepted 快照",
+  );
+  assert.ok(
+    handler.indexOf("await updateConversationWithProgress") < handler.indexOf("已确认视频无修改意见，流程结束。"),
+    "只有权威产物和完成快照都落库后才能提示成功",
+  );
 });
 
 test("confirmed image edit options survive conversation restore", () => {
@@ -1149,8 +1265,16 @@ test("final storyboard edits persist and restore the latest scene package contex
   assert.match(workspaceSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
   assert.match(workspaceSource, /latestScenePackageSnapshotForConversation/, "snapshots must preserve latest scene package restore fields");
   assert.match(workspaceSource, /latestVideoResultArtifactForConversation/, "restoring after refresh must recover scene videos from the persisted video_result card");
-  assert.match(workspaceSource, /contextGeneratedSceneVideos \|\| latestVideoResultArtifact\?\.generatedSceneVideos/, "restore should fall back to video_result generated scene videos when context is stale");
-  assert.match(workspaceSource, /latestVideoResultArtifact\?\.videoScenePackages\?\.scene_packages/, "restore should fall back to video_result scene packages when context is stale");
+  assert.match(
+    workspaceSource,
+    /latestVideoResultArtifact\?\.generatedSceneVideos \|\|[\s\S]*message\.artifact\.generatedSceneVideos \|\|[\s\S]*contextGeneratedSceneVideos/,
+    "存在权威消息时必须优先用视频结果或原场景包消息恢复分镜视频",
+  );
+  assert.match(
+    workspaceSource,
+    /global_assets:\s*videoScenePackages\.global_assets,[\s\S]*scene_packages:\s*videoScenePackages\.scene_packages/,
+    "存在权威场景包消息时不得用旧 context 覆盖素材和分镜",
+  );
   assert.match(workspaceSource, /messagesRef\.current = snapshot\.messages/, "restored messages must update the ref used by snapshot persistence");
   assert.match(workspaceSource, /generated_scene_videos:\s*artifact\.generatedSceneVideos\?\.scene_videos/, "snapshot must include generated scene videos from the latest scene package card");
   assert.match(workspaceSource, /merged_video:\s*artifact\.mergedVideo/, "snapshot must include merged video from the latest scene package card");

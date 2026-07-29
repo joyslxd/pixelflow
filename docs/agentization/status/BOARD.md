@@ -4,7 +4,7 @@
 >
 > 原始设计基线：`02493711e8c9b74ec5f8e54cfadac3881297754c`；M00-A/M00-B 共同 Agent 基线：`8e626ae232d984f14fa9954b672b4e025894d426`。M00-I.1 不固定使用本页旧快照，必须在执行时重新 fetch 四条远端引用。
 >
-> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`，发布状态为 `awaiting_release_approval:R2`。生产继续保持 R1 `assist + enabled_intents=[] + 100% + context_compaction=true`，现有阶段工作流继续拥有业务推进权；本次集成没有发布 `primary(video)`。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。M13.3、真实付费供应商验证和生产 R2 发布均未执行。
+> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`，发布状态仍记录为 `awaiting_release_approval:R2`；测试环境人工验收随后确认 Gateway 尚未安装视频 live Graph Handler，因此运行时现在只有在 intent 同时命中配置范围和已注册 handler 就绪集合时才允许 `supervisor_v1` 接管。当前视频安全使用 `frontend_v2 + R1 Turn/Snapshot/SSE/压缩队列` 组合，不能把 fake replay 当作可发布 handler。生产继续保持 R1 `assist + enabled_intents=[] + 100% + context_compaction=true`，现有阶段工作流继续拥有业务推进权；本次修复不授权发布 `primary(video)`。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。M13.3 和生产 R2 发布均未执行；本次仅在测试环境按用户授权执行真实 content-app 视频全流程验收。
 
 ## 上线里程碑
 

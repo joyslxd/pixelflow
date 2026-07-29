@@ -318,6 +318,7 @@ def test_r1_assist_assigns_runtime_to_all_new_conversations_without_taking_busin
         "enabled_intents": [],
         "context_compaction_enabled": True,
         "context_version": 0,
+        "primary_execution_ready": False,
     }
 
 

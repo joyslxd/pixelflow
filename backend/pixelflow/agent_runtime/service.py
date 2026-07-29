@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -230,11 +230,25 @@ class AgentRuntimeService:
         repository: CompactionQueueRepository,
         task_store: PixelFlowTaskStore,
         context_compactor: AgentContextCompactor | None = None,
+        primary_execution_intents: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.config = AgentRuntimeConfig.model_validate(
             config.model_dump(mode="python"),
         )
+        normalized_execution_intents = frozenset(
+            item.strip()
+            for item in primary_execution_intents
+            if isinstance(item, str) and item.strip()
+        )
+        unsupported_execution_intents = normalized_execution_intents.difference(
+            self.config.enabled_intents,
+        )
+        if unsupported_execution_intents:
+            raise ValueError(
+                "primary_execution_intents 必须是 enabled_intents 的子集",
+            )
+        self.primary_execution_intents = normalized_execution_intents
         self.repository = repository
         self.task_store = task_store
         self._context_compactor = context_compactor
@@ -270,11 +284,13 @@ class AgentRuntimeService:
             enabled
             and self.config.mode == "primary"
             and normalized_intent in self.config.enabled_intents
+            and normalized_intent in self.primary_execution_intents
         )
         if enabled:
             context[AGENT_RUNTIME_CONTEXT_KEY] = {
                 "mode": self.config.mode,
                 "enabled_intents": list(self.config.enabled_intents),
+                "primary_execution_ready": primary_intent_enabled,
                 "context_compaction_enabled": self.config.context_compaction_enabled,
                 "context_version": 0,
             }

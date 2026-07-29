@@ -117,8 +117,10 @@ import type {
 import {
   createConversationWriteSequencer,
   resolveAssistHandoffAction,
+  resolveUnavailableSupervisorRecovery,
   resolveWorkspaceAgentRuntimeMode,
   resolveWorkspaceOrchestrationMode,
+  resolveWorkspacePrimaryExecutionReady,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
   inferInitialRuntimeIntent,
@@ -167,6 +169,15 @@ interface SendRuntimeOptions {
 
 // 统一使用 UUID 作为消息 ID 与 Runtime client_input_id，旧消息 API 会映射到同一稳定主键。
 const uid = (): string => crypto.randomUUID();
+const UNAVAILABLE_SUPERVISOR_NOTICE_VERSION = 1;
+const UNAVAILABLE_SUPERVISOR_NOTICE =
+  "该历史会话由未接线的 R2 候选创建，已停止自动重试。请新建对话继续，原消息和素材仍保留。";
+const unavailableSupervisorNoticeId = (conversationId: string): string =>
+  `agent-runtime-unavailable:${conversationId}:v1`;
+const failedSupervisorNoticeId = (
+  conversationId: string,
+  clientInputId: string,
+): string => `agent-runtime-failed:${conversationId}:${clientInputId}:v1`;
 const now = () => formatClockTime(new Date().toISOString());
 
 const parsePendingSupervisorTurn = (
@@ -370,6 +381,8 @@ interface WorkspaceSnapshot {
   pending_message_job?: PendingMessageJob | null;
   pendingAgentRuntimeTurns?: PendingSupervisorTurn[];
   pending_agent_runtime_turns?: PendingSupervisorTurn[];
+  agentRuntimeUnavailableNoticeVersion?: number;
+  agent_runtime_unavailable_notice_version?: number;
   pendingIntakeJob?: PendingIntakeJob | null;
   pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
@@ -1694,14 +1707,22 @@ function restoreLatestVideoScenePackagesFromContext(
         ...message.artifact,
         videoScenePackages: {
           ...videoScenePackages,
-          global_assets: (globalAssets || latestVideoResultArtifact?.videoScenePackages?.global_assets || videoScenePackages.global_assets) as typeof videoScenePackages.global_assets,
-          scene_packages: (Array.isArray(scenePackages)
-            ? scenePackages
-            : latestVideoResultArtifact?.videoScenePackages?.scene_packages || videoScenePackages.scene_packages) as typeof videoScenePackages.scene_packages,
+          global_assets: videoScenePackages.global_assets,
+          scene_packages: videoScenePackages.scene_packages,
         },
-        generatedSceneVideos: generatedSceneVideos || message.artifact.generatedSceneVideos,
-        mergedVideo: mergedVideo || message.artifact.mergedVideo,
-        videoScenePackageEditedSceneIds: editedSceneIds || message.artifact.videoScenePackageEditedSceneIds,
+        generatedSceneVideos:
+          latestVideoResultArtifact?.generatedSceneVideos ||
+          message.artifact.generatedSceneVideos ||
+          contextGeneratedSceneVideos,
+        mergedVideo:
+          latestVideoResultArtifact?.mergedVideo ||
+          message.artifact.mergedVideo ||
+          mergedVideo,
+        videoScenePackageEditedSceneIds:
+          message.artifact.videoScenePackageEditedSceneIds ??
+          latestVideoResultArtifact?.videoScenePackageEditedSceneIds ??
+          editedSceneIds ??
+          [],
       },
     };
   });
@@ -1860,11 +1881,18 @@ export function WorkspacePage() {
   );
   const orchestrationModeRef = useRef<OrchestrationMode | null>("frontend_v2");
   const agentRuntimeModeRef = useRef<WorkspaceAgentRuntimeMode | null>("off");
+  const primaryExecutionReadyRef = useRef(false);
   const deferredOwnershipInputsRef = useRef<DeferredOwnershipInput[]>([]);
   const supervisorTurnInFlightRef = useRef<Set<string>>(new Set());
   // 旧 v2 接力可能持续数秒；在接力完成并写回上下文前，禁止同一 Turn 被
   // Runtime effect 因状态刷新重复执行，避免重复计费或重复启动供应商任务。
   const supervisorLegacyHandoffClaimedRef = useRef<Set<string>>(new Set());
+  const unavailableSupervisorNoticeVersionsRef = useRef(
+    new Map<string, number>(),
+  );
+  const unavailableSupervisorRecoveryInFlightRef = useRef(
+    new Set<string>(),
+  );
   const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(
     orchestrationMode,
     currentConversationId,
@@ -1877,6 +1905,9 @@ export function WorkspacePage() {
       legacyRunnerEnabled: false,
       legacyArtifactActionsEnabled: false,
     };
+  const primaryExecutionUnavailable = orchestrationResolved
+    && orchestrationMode === "supervisor_v1"
+    && !primaryExecutionReadyRef.current;
   // 新旧运行时共用同一个页面入口；R1 assist 只挂载会话基础设施，业务仍由旧 runner 推进。
   // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
@@ -1889,13 +1920,15 @@ export function WorkspacePage() {
     legacyBusy,
     dialogOpen,
     pendingPlanRevision: Boolean(pendingPlanRevisionChoice),
-    supervisorConnection: supervisorRuntime.state.connection.status,
+    supervisorConnection: primaryExecutionUnavailable
+      ? "fatal"
+      : supervisorRuntime.state.connection.status,
     supervisorRun: supervisorRuntime.state.run.status,
     supervisorCompression: supervisorRuntime.state.compression.status,
     pendingSupervisorTurns: pendingSupervisorTurns.length,
   });
   const runtimeNotice = resolveSupervisorRuntimeNotice({
-    enabled: runtimePolicy.supervisorEnabled,
+    enabled: runtimePolicy.supervisorEnabled && !primaryExecutionUnavailable,
     runStatus: supervisorRuntime.state.run.status,
     compression: supervisorRuntime.state.compression,
     inputQueue: supervisorRuntime.state.inputQueue,
@@ -2002,12 +2035,15 @@ export function WorkspacePage() {
     );
     messagesRef.current = projectedMessages;
     setMessages(projectedMessages);
-    const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
-    workflowProgressConversationIdRef.current = currentConversationId;
-    workflowProgressRef.current = nextProgress;
-    setWorkflowProgress(nextProgress);
+    if (orchestrationModeRef.current === "supervisor_v1") {
+      const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
+      workflowProgressConversationIdRef.current = currentConversationId;
+      workflowProgressRef.current = nextProgress;
+      setWorkflowProgress(nextProgress);
+    }
   }, [
     currentConversationId,
+    orchestrationMode,
     pendingSupervisorTurns,
     runtimePolicy.supervisorEnabled,
     supervisorRuntime.state.connection.status,
@@ -3234,7 +3270,26 @@ export function WorkspacePage() {
       global_assets: updated.global_assets,
       scene_packages: updated.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
     };
+    const updatedArtifact: ChatArtifact = {
+      ...storyboardMessage.artifact,
+      videoScenePackages: updatedPackages,
+    };
 
+    if (targetConversationId) {
+      try {
+        await api.updateConversationMessage(targetConversationId, storyboardMessage.id, {
+          content: storyboardMessage.content,
+          payload: {
+            artifact: updatedArtifact,
+            materials: updatedArtifact.materials || [],
+            client_message_id: storyboardMessage.id,
+          } as unknown as Record<string, unknown>,
+        });
+      } catch {
+        pushAssistant("分镜素材删除保存失败，请重试。", targetConversationId);
+        return true;
+      }
+    }
     setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
     updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
     if (isVisibleConversation(targetConversationId)) {
@@ -6131,7 +6186,7 @@ export function WorkspacePage() {
     }
   }
 
-  const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
+  const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>, targetConversationId: string) => {
     if (Array.isArray(snapshot.messages)) {
       messagesRef.current = snapshot.messages;
       setMessages(snapshot.messages);
@@ -6148,14 +6203,30 @@ export function WorkspacePage() {
     const restoredRuntimeTurns = (
       Array.isArray(rawRuntimeTurns) ? rawRuntimeTurns : []
     )
-      .map((item) => parsePendingSupervisorTurn(item, conversationIdRef.current))
+      .map((item) => parsePendingSupervisorTurn(item, targetConversationId))
       .filter((item): item is PendingSupervisorTurn => item !== null);
     pendingSupervisorTurnsRef.current = restoredRuntimeTurns;
-    if (conversationIdRef.current) {
+    if (targetConversationId) {
       pendingSupervisorTurnsByConversationRef.current.set(
-        conversationIdRef.current,
+        targetConversationId,
         restoredRuntimeTurns,
       );
+      const unavailableNoticeVersion = snapshot.agentRuntimeUnavailableNoticeVersion
+        ?? snapshot.agent_runtime_unavailable_notice_version;
+      if (
+        typeof unavailableNoticeVersion === "number"
+        && Number.isFinite(unavailableNoticeVersion)
+        && unavailableNoticeVersion > 0
+      ) {
+        unavailableSupervisorNoticeVersionsRef.current.set(
+          targetConversationId,
+          unavailableNoticeVersion,
+        );
+      } else {
+        unavailableSupervisorNoticeVersionsRef.current.delete(
+          targetConversationId,
+        );
+      }
     }
     setPendingSupervisorTurns(restoredRuntimeTurns);
     pendingPlanMessagePersistenceIdsRef.current = new Set(
@@ -6185,16 +6256,16 @@ export function WorkspacePage() {
     pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     const pendingJianyingDraftJob = snapshot.pendingJianyingDraftJob || snapshot.pending_jianying_draft_job || null;
     pendingJianyingDraftJobRef.current =
-      pendingJianyingDraftJob?.conversation_id === conversationIdRef.current ? pendingJianyingDraftJob : null;
+      pendingJianyingDraftJob?.conversation_id === targetConversationId ? pendingJianyingDraftJob : null;
     setJianyingDraftRecordsForConversation(
-      conversationIdRef.current,
+      targetConversationId,
       snapshot.jianyingDraftRecords || snapshot.jianying_draft_records || {},
     );
     const restoredWorkflowProgress = snapshot.workflowProgress || snapshot.workflow_progress || null;
-    workflowProgressConversationIdRef.current = conversationIdRef.current;
+    workflowProgressConversationIdRef.current = targetConversationId;
     workflowProgressRef.current = restoredWorkflowProgress;
     setWorkflowProgress(restoredWorkflowProgress);
-    setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
+    setPptDoneForConversation(targetConversationId, snapshot.ppt_done === true);
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
@@ -6232,6 +6303,10 @@ export function WorkspacePage() {
       pending_agent_runtime_turns: pendingSupervisorTurnsRef.current.filter(
         (item) => item.conversationId === snapshotConversationId,
       ),
+      agentRuntimeUnavailableNoticeVersion:
+        unavailableSupervisorNoticeVersionsRef.current.get(snapshotConversationId),
+      agent_runtime_unavailable_notice_version:
+        unavailableSupervisorNoticeVersionsRef.current.get(snapshotConversationId),
       pendingIntakeJob:
         pendingIntakeJobRef.current?.conversation_id === snapshotConversationId ? pendingIntakeJobRef.current : null,
       pending_intake_job:
@@ -6325,7 +6400,10 @@ export function WorkspacePage() {
     setBusy(false);
     setResolvedOrchestrationMode("frontend_v2");
     setResolvedAgentRuntimeMode("off");
+    primaryExecutionReadyRef.current = false;
     pendingSupervisorTurnsRef.current = [];
+    unavailableSupervisorNoticeVersionsRef.current = new Map();
+    unavailableSupervisorRecoveryInFlightRef.current = new Set();
     setPendingSupervisorTurns([]);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
@@ -6362,6 +6440,10 @@ export function WorkspacePage() {
   };
 
   const applyConversation = async (detail: ConversationDetailResponse) => {
+    primaryExecutionReadyRef.current = resolveWorkspacePrimaryExecutionReady({
+      conversation: detail.conversation,
+      messages: detail.messages,
+    });
     const resolvedMode = resolveWorkspaceOrchestrationMode({
       conversation: detail.conversation,
       messages: detail.messages,
@@ -6461,7 +6543,7 @@ export function WorkspacePage() {
       workflowProgress: restoredWorkflowProgress,
       workflow_progress: restoredWorkflowProgress,
       messages: normalizedMessages,
-    });
+    }, detail.conversation.conversation_id);
     if (resolvedMode !== "frontend_v2") return;
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
@@ -6615,6 +6697,10 @@ export function WorkspacePage() {
   // pendingSupervisorTurns 已丢失。这里按服务端队列和已保存用户消息重建接力 DTO，
   // 类似从数据库恢复一条待执行的 Service Command，绝不重新注册或重复计费。
   useEffect(() => {
+    if (
+      orchestrationModeRef.current === "supervisor_v1"
+      && !primaryExecutionReadyRef.current
+    ) return;
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow"
@@ -6694,6 +6780,87 @@ export function WorkspacePage() {
     supervisorRuntime.state.inputQueue,
   ]);
 
+  // M13.2 早期候选可能已经把 Turn 保存为 accepted，却没有真实 Graph Handler。
+  // 这里按会话写一次稳定提示和版本 marker，再一次性清空全部本地 pending；
+  // 即使进程在两次写入之间退出，刷新也只补齐 marker，不会重复新增消息。
+  useEffect(() => {
+    if (
+      !orchestrationResolved
+      || !currentConversationId
+      || !primaryExecutionUnavailable
+    ) {
+      return;
+    }
+    const targetConversationId = currentConversationId;
+    const noticeId = unavailableSupervisorNoticeId(targetConversationId);
+    const noticePersisted = messagesRef.current.some(
+      (message) => (
+        message.id === noticeId
+        || message.content === UNAVAILABLE_SUPERVISOR_NOTICE
+      )
+        && messageConversationId(message, targetConversationId) === targetConversationId,
+    );
+    const pendingCount = pendingSupervisorTurns.filter(
+      (item) => item.conversationId === targetConversationId,
+    ).length;
+    const hasActiveInput = supervisorRuntime.state.inputQueue.some(
+      (item) => ["sending", "queued", "processing", "accepted"].includes(item.status),
+    );
+    const recoveryAction = resolveUnavailableSupervisorRecovery({
+      orchestrationMode,
+      primaryExecutionReady: primaryExecutionReadyRef.current,
+      connectionStatus: supervisorRuntime.state.connection.status,
+      pendingCount,
+      hasActiveInput,
+      markerVersion:
+        unavailableSupervisorNoticeVersionsRef.current.get(targetConversationId) ?? 0,
+      noticePersisted,
+    });
+    if (
+      recoveryAction === "none"
+      || unavailableSupervisorRecoveryInFlightRef.current.has(targetConversationId)
+    ) {
+      return;
+    }
+    unavailableSupervisorRecoveryInFlightRef.current.add(targetConversationId);
+    const convergeUnavailableSupervisor = async () => {
+      try {
+        if (recoveryAction === "persist_notice") {
+          await appendPersistedSupervisorNotice(
+            UNAVAILABLE_SUPERVISOR_NOTICE,
+            targetConversationId,
+            noticeId,
+          );
+        }
+        unavailableSupervisorNoticeVersionsRef.current.set(
+          targetConversationId,
+          UNAVAILABLE_SUPERVISOR_NOTICE_VERSION,
+        );
+        await persistPendingSupervisorTurns(
+          () => [],
+          targetConversationId,
+        );
+      } catch {
+        unavailableSupervisorNoticeVersionsRef.current.delete(
+          targetConversationId,
+        );
+      } finally {
+        unavailableSupervisorRecoveryInFlightRef.current.delete(
+          targetConversationId,
+        );
+      }
+    };
+    void convergeUnavailableSupervisor();
+  }, [
+    currentConversationId,
+    orchestrationMode,
+    orchestrationResolved,
+    pendingSupervisorTurns,
+    primaryExecutionUnavailable,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.inputQueue,
+  ]);
+
   useEffect(() => {
     const handleVisibilityResume = () => {
       pageVisibleRef.current = typeof document === "undefined" || document.visibilityState !== "hidden";
@@ -6741,6 +6908,7 @@ export function WorkspacePage() {
       setActiveConversationId(conversationId);
       orchestrationModeRef.current = null;
       agentRuntimeModeRef.current = null;
+      primaryExecutionReadyRef.current = false;
       setOrchestrationResolved(false);
       setBusy(true);
       try {
@@ -6814,6 +6982,7 @@ export function WorkspacePage() {
     });
     const createdMode = resolveWorkspaceOrchestrationMode(created);
     const createdAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode(created);
+    primaryExecutionReadyRef.current = resolveWorkspacePrimaryExecutionReady(created);
     skipRouteRestoreConversationRef.current = created.conversation_id;
     setResolvedAgentRuntimeMode(createdAgentRuntimeMode);
     setResolvedOrchestrationMode(createdMode);
@@ -6855,6 +7024,41 @@ export function WorkspacePage() {
       messagesRef.current = nextItems;
       return nextItems;
     });
+  };
+
+  const appendPersistedSupervisorNotice = async (
+    content: string,
+    targetConversationId: string,
+    messageId: string,
+  ) => {
+    if (messagesRef.current.some(
+      (message) => message.id === messageId
+        && messageConversationId(message, targetConversationId) === targetConversationId,
+    )) {
+      return;
+    }
+    const optimisticMessage = appendOptimisticMessageForConversation({
+      id: messageId,
+      conversationId: targetConversationId,
+      role: "assistant",
+      content,
+      time: "",
+    }, targetConversationId);
+    try {
+      const savedMessage = await persistChatMessage(
+        targetConversationId,
+        optimisticMessage,
+      );
+      replaceOptimisticMessage(
+        optimisticMessage.id,
+        savedMessage,
+        targetConversationId,
+      );
+    } catch (error) {
+      removeOptimisticMessage(optimisticMessage.id, targetConversationId);
+      throw error;
+    }
+    await supervisorRuntime.refreshSnapshot().catch(() => {});
   };
 
   const handleSupervisorTurn = async (
@@ -6947,8 +7151,11 @@ export function WorkspacePage() {
     if (supervisorRuntime.state.connection.status !== "connected") return;
     if (serverInput) ensurePendingSupervisorTurnVisible(pendingTurn);
     const handoffAction = resolveAssistHandoffAction({
+      orchestrationMode: orchestrationModeRef.current ?? "frontend_v2",
+      primaryExecutionReady: primaryExecutionReadyRef.current,
       registrationStatus: pendingTurn.registrationStatus,
       serverInputStatus: serverInput?.status,
+      serverRunStatus: supervisorRuntime.state.run.status,
       continueLegacy: pendingTurn.continueLegacy,
       legacyBusy,
       dialogOpen,
@@ -6956,8 +7163,29 @@ export function WorkspacePage() {
     });
     if (handoffAction !== "register") {
       if (handoffAction === "wait") return;
+      // 历史未接线会话由上面的会话级恢复 effect 统一收敛，避免每条 pending
+      // 各写一条随机提示或在清空后因孤儿 inputQueue 再次重建。
+      if (handoffAction === "unavailable") return;
       if (handoffAction === "failed") {
-        appendSupervisorNotice("会话 Agent 未能处理已保存输入，请稍后重试。", pendingTurn.conversationId);
+        supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+        void appendPersistedSupervisorNotice(
+          "会话 Agent 未能处理已保存输入，请稍后重试。",
+          pendingTurn.conversationId,
+          failedSupervisorNoticeId(
+            pendingTurn.conversationId,
+            pendingTurn.clientInputId,
+          ),
+        )
+          .then(() => persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          ))
+          .catch(() => {})
+          .finally(() => {
+            supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+          });
         return;
       }
       supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
@@ -7046,6 +7274,7 @@ export function WorkspacePage() {
     supervisorRuntime.getContextVersion,
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.inputQueue,
+    supervisorRuntime.state.run.status,
   ]);
 
   const shouldUseRecoverableIntakeEntry = (
@@ -8894,6 +9123,42 @@ export function WorkspacePage() {
     }
   };
 
+  const handleSaveVideoScenePackage = async (msg: ChatMessage) => {
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const latestMessage = messagesRef.current.find(
+      (message) =>
+        message.id === msg.id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        Boolean(message.artifact?.videoScenePackages),
+    );
+    const artifact = latestMessage?.artifact;
+    const videoScenePackages = artifact?.videoScenePackages;
+    if (!latestMessage || !artifact || !videoScenePackages) {
+      pushAssistant("当前没有找到可保存的分镜场景包，请重新打开后再试。", targetConversationId);
+      return;
+    }
+    try {
+      if (targetConversationId) {
+        await api.updateConversationMessage(targetConversationId, latestMessage.id, {
+          content: latestMessage.content,
+          payload: {
+            artifact,
+            materials: artifact.materials || [],
+            client_message_id: latestMessage.id,
+          } as unknown as Record<string, unknown>,
+        });
+      }
+      persistScenePackageSnapshot(targetConversationId, videoScenePackages, "scene_package_saved", {
+        video_scene_package_edited_scene_ids: artifact.videoScenePackageEditedSceneIds || [],
+      });
+      setCanvasOpen(false);
+      setSelectedStoryboardMessageId("");
+      setSelectedPlanEditorMessageId("");
+    } catch {
+      pushAssistant("分镜保存失败，请检查网络后重试。", targetConversationId);
+    }
+  };
+
   const handleGenerateVideoFromScenePackages = async (msg: ChatMessage) => {
     const latestMessage =
       messagesRef.current.find(
@@ -9018,15 +9283,42 @@ export function WorkspacePage() {
   async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    videoRevisionArtifactRef.current = null;
-    markVideoResultAccepted(msg.id, targetConversationId);
-    pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
-    if (targetConversationId) {
-      void updateConversationWithProgress(targetConversationId, {
+    if (!targetConversationId) return;
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    const currentMessage = messagesRef.current.find(
+      (message) =>
+        message.id === msg.id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        message.artifact?.type === "video_result",
+    ) || msg;
+    if (!currentMessage.artifact) {
+      releaseArtifactAction(processedKey);
+      return;
+    }
+    const acceptedArtifact: ChatArtifact = {
+      ...currentMessage.artifact,
+      videoAccepted: true,
+    };
+    try {
+      await api.updateConversationMessage(targetConversationId, currentMessage.id, {
+        content: currentMessage.content,
+        payload: {
+          artifact: acceptedArtifact,
+          materials: currentMessage.materials || acceptedArtifact.materials || [],
+          client_message_id: currentMessage.id,
+        } as unknown as Record<string, unknown>,
+      });
+      videoRevisionArtifactRef.current = null;
+      markVideoResultAccepted(currentMessage.id, targetConversationId);
+      await updateConversationWithProgress(targetConversationId, {
           last_phase: "video_accepted",
           context: { ...makeSnapshot(), video_accepted: true, pendingVideoRevision: null, pending_video_revision: null } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
+        });
+      pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
+    } catch {
+      releaseArtifactAction(processedKey);
+      pushAssistant("视频结束状态保存失败，请检查网络后重试。", targetConversationId);
     }
   }
 
@@ -9355,6 +9647,7 @@ export function WorkspacePage() {
             ? () => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)
             : undefined}
           onRetrySceneAssets={legacyArtifactActionsEnabled ? () => handleRetrySceneAssets(selectedStoryboardMessage) : undefined}
+          onSave={legacyArtifactActionsEnabled ? () => handleSaveVideoScenePackage(selectedStoryboardMessage) : undefined}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
