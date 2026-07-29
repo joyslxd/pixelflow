@@ -121,6 +121,7 @@ import {
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
+  inferInitialRuntimeIntent,
   type WorkspaceAgentRuntimeMode,
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
@@ -6616,7 +6617,8 @@ export function WorkspacePage() {
   useEffect(() => {
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
-      || agentRuntimeModeRef.current === "shadow";
+      || agentRuntimeModeRef.current === "shadow"
+      || agentRuntimeModeRef.current === "primary";
     if (
       !currentConversationId
       || !runtimeAttached
@@ -6808,6 +6810,7 @@ export function WorkspacePage() {
       last_phase: String(canvas.phase || "idle"),
       current_task_id: currentTaskId || null,
       context: makeSnapshot() as unknown as Record<string, unknown>,
+      initial_intent: inferInitialRuntimeIntent(title),
     });
     const createdMode = resolveWorkspaceOrchestrationMode(created);
     const createdAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode(created);
@@ -6861,7 +6864,8 @@ export function WorkspacePage() {
     const targetConversationId = pendingTurn.conversationId;
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
-      || agentRuntimeModeRef.current === "shadow";
+      || agentRuntimeModeRef.current === "shadow"
+      || agentRuntimeModeRef.current === "primary";
     if (!targetConversationId || !runtimeAttached) return null;
     try {
       // 每次写请求前重新读取 CAS 版本，避免上一轮 Turn 或事件消费后继续使用旧版本。
@@ -6927,7 +6931,8 @@ export function WorkspacePage() {
       || candidateTurns[0];
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
-      || agentRuntimeModeRef.current === "shadow";
+      || agentRuntimeModeRef.current === "shadow"
+      || agentRuntimeModeRef.current === "primary";
     if (!pendingTurn || !runtimeAttached) return;
     if (supervisorRuntime.state.connection.status === "fatal") {
       appendSupervisorNotice("会话 Agent 状态恢复失败，请刷新后重试。", pendingTurn.conversationId);
@@ -7097,7 +7102,8 @@ export function WorkspacePage() {
       activeConversation = ownership.conversationId;
       const shouldRegisterRuntime = ownership.orchestrationMode === "supervisor_v1"
         || ownership.agentRuntimeMode === "assist"
-        || ownership.agentRuntimeMode === "shadow";
+        || ownership.agentRuntimeMode === "shadow"
+        || ownership.agentRuntimeMode === "primary";
       if (shouldRegisterRuntime && !runtimeOptions.skipRuntimeRegistration) {
         const restoredInterruptId = ownership.orchestrationMode === "supervisor_v1"
           && supervisorRuntime.state.conversationId === activeConversation

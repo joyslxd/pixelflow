@@ -254,11 +254,23 @@ class AgentRuntimeService:
     def assignment_for_new_conversation(
         self,
         client_context: dict[str, Any] | None,
+        *,
+        initial_intent: str | None = None,
     ) -> AgentRuntimeConversationAssignment:
-        """只让获批的100%新对话进入 Runtime，业务 owner 在 R1 保持 v2。"""
+        """按启动快照和首轮意图提示冻结新对话的业务 owner。"""
 
         context = sanitize_client_conversation_context(client_context)
         enabled = self.config.mode != "off" and self.config.new_conversation_rollout_percent == 100
+        normalized_intent = (
+            initial_intent.strip()
+            if isinstance(initial_intent, str) and initial_intent.strip()
+            else None
+        )
+        primary_intent_enabled = (
+            enabled
+            and self.config.mode == "primary"
+            and normalized_intent in self.config.enabled_intents
+        )
         if enabled:
             context[AGENT_RUNTIME_CONTEXT_KEY] = {
                 "mode": self.config.mode,
@@ -267,7 +279,11 @@ class AgentRuntimeService:
                 "context_version": 0,
             }
         return AgentRuntimeConversationAssignment(
-            orchestration_mode=OrchestrationMode.FRONTEND_V2,
+            orchestration_mode=(
+                OrchestrationMode.SUPERVISOR_V1
+                if primary_intent_enabled
+                else OrchestrationMode.FRONTEND_V2
+            ),
             orchestration_version=1,
             context=context,
         )

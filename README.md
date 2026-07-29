@@ -14,9 +14,9 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
-| 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；所有 Agent 共用配置驱动的 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案；业务推进权仍属于现有 v2 阶段工作流，生产继续关闭 |
+| 统一会话 Runtime | R2 开发候选 / R1 已发布 | dev profile 为 `primary + video + 100%`：全部新对话继续统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队，只有明确视频首轮提示冻结为 `supervisor_v1`；其他 intent 继续由 v2 推进。所有 Agent 共用 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案。生产仍保持已批准的 R1 `assist + [] + 100%`，R2 尚未发布 |
 | 持久化 External Job Coordinator | M06 已进入 Agent | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库；M06 已通过 Final 单槽集成，生产仍保持 R1 `assist`，R2 Workflow 接线和发布继续受独立门禁约束 |
-| 视频 Workflow Adapter | M11.2 开发候选 | 已建立视频 intake/方向/Plan 权威快照，并新增严格消费已审核 Plan 的场景包与全局资产图 Application Service；当前仍未接入 Supervisor、供应商 Operation 或生产路由 |
+| 视频 Workflow Adapter | M11 已进入 Agent / R2 候选接线 | 已冻结 intake、方向、Plan、场景包、分镜生成、后处理、人工结束和剪映交付权威状态；M13.2 候选把标准 Turn/附件 DTO 接入 Supervisor replay 与 M06 非付费幂等门禁。生产仍为 R1，真实付费 Provider 和 R2 发布必须另行批准 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |

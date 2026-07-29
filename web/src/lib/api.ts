@@ -1561,7 +1561,13 @@ export const api = {
   saveSessionContext: (taskId: string, context: Record<string, unknown>) =>
     req<SessionContextResponse>(`${FLOW_BASE}/session/context`, { method: "PUT", body: JSON.stringify({ task_id: taskId, context }) }),
 
-  createConversation: (body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> } = {}) =>
+  createConversation: (body: {
+    title?: string;
+    current_task_id?: string | null;
+    last_phase?: string;
+    context?: Record<string, unknown>;
+    initial_intent?: "image" | "video" | "ppt" | "video_analysis" | null;
+  } = {}) =>
     req<ConversationSummaryResponse>("/conversations", { method: "POST", body: JSON.stringify(body) }),
 
   listConversations: ({ pageSize = 5, cursor }: { pageSize?: number; cursor?: string | null } = {}) => {

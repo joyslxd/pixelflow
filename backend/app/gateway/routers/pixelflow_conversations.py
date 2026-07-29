@@ -48,6 +48,7 @@ class ConversationCreateRequest(BaseModel):
     current_task_id: str | None = None
     last_phase: str = "idle"
     context: dict[str, Any] = Field(default_factory=dict)
+    initial_intent: Literal["image", "video", "ppt", "video_analysis"] | None = None
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -260,7 +261,10 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
         orchestration_mode = "frontend_v2"
         orchestration_version = 1
     else:
-        assignment = service.assignment_for_new_conversation(body.context)
+        assignment = service.assignment_for_new_conversation(
+            body.context,
+            initial_intent=body.initial_intent,
+        )
         context = assignment.context
         orchestration_mode = assignment.orchestration_mode.value
         orchestration_version = assignment.orchestration_version

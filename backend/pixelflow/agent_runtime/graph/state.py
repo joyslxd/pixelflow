@@ -62,6 +62,9 @@ class SupervisorState(TypedDict, total=False):
     turn_id: str
     run_id: str
     current_input: str
+    materials: list[dict[str, Any]]
+    reply_to_message_id: str | None
+    artifact_refs: list[str]
     context_version: int
     messages: Annotated[list[AnyMessage], add_messages]
     workflows: Annotated[

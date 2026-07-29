@@ -321,8 +321,8 @@ def test_r1_assist_assigns_runtime_to_all_new_conversations_without_taking_busin
     }
 
 
-def test_r1_release_enables_assist_for_all_new_conversations_in_dev_and_prod() -> None:
-    """R1 获批发布后，开发和生产 profile 都只对全部新对话启用 assist 与压缩。"""
+def test_r1_contract_remains_in_prod_while_dev_advances_to_r2_candidate() -> None:
+    """R2 只推进开发候选，生产继续保持已发布的 R1 assist 合同。"""
 
     dev_profile = yaml.safe_load(
         (BACKEND_ROOT / "config.dev.yml").read_text(encoding="utf-8"),
@@ -338,8 +338,8 @@ def test_r1_release_enables_assist_for_all_new_conversations_in_dev_and_prod() -
         "require_verified_model_profile": True,
     }
     assert dev_profile["pixelflow"]["agent_runtime"] == {
-        "mode": "assist",
-        "enabled_intents": [],
+        "mode": "primary",
+        "enabled_intents": ["video"],
         "new_conversation_rollout_percent": 100,
         "context_compaction_enabled": True,
         "context_budget": expected_budget,

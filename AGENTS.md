@@ -21,9 +21,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 能力线 | 主要入口 | Java 类比 | 当前用途 |
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
-| R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R1/R2 统一会话 Runtime | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`replay.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | dev 的 R2 候选让全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列，并仅把明确视频首轮提示冻结为 `supervisor_v1`；其他 intent 接力 v2。生产保持已发布的 R1 `assist / [] / 100%`，R2 未发布 |
 | R2 External Job Coordinator | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义，并通过 Final 单槽集成进入 Agent 长期分支；生产仍保持 R1 `assist`，后续 Workflow 接线与 R2 发布继续受独立门禁约束 |
-| R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py`、`scene_packages.py` | 视频领域 Application Service + 权威 DTO | M11.1–M11.2 已冻结 intake/方向/Plan 及严格继承 Plan 的场景包与全局资产图；尚未接 Supervisor、供应商 Operation 或生产路由 |
+| R2 视频 Workflow Adapter | `backend/pixelflow/agent_workflows/video/`、`agent_runtime/replay.py` | 视频领域 Application Service + 权威 DTO + 回放编排 Service | M11 已完成并进入 Agent；M13.2 候选用标准 Turn/附件 DTO 串起 Supervisor Graph、视频 Planning Handler 和 M06 幂等 fake，冻结 Shadow 无副作用边界。真实付费 Provider 和生产 `primary(video)` 仍须独立批准 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -85,11 +85,12 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 
 前端工作台主流程不是一次性自由聊天，而是阶段化编排：
 
-M13.1/R1 测试候选在主流程入口前增加统一会话层：测试 profile 对全部新对话冻结
-`assist / enabled_intents=[] / 100% / context_compaction=true`，先原子保存可见消息和
-Turn，再通过 Snapshot/SSE 投影压缩 Notice 与输入队列；旧 v2 只有在服务端 Turn
-进入可执行状态后才继续，并复用同一个 `client_input_id`。刷新只查询权威 Snapshot
-和原 job，不自动重发。历史对话、运行中任务及生产 profile 均不迁移或自动启用。
+M13.2/R2 开发候选在 R1 统一会话层上把 dev profile 冻结为
+`primary / enabled_intents=[video] / 100% / context_compaction=true`：全部新对话仍先原子
+保存可见消息和 Turn，并通过 Snapshot/SSE 投影压缩 Notice 与输入队列；只有明确视频
+首轮提示的新对话冻结为 `supervisor_v1`，其他 intent 继续由 v2 接力。刷新只查询权威
+Snapshot 和原 job，不自动重发。生产仍保持已发布的 R1
+`assist / enabled_intents=[] / 100% / true`；历史对话和运行中任务不迁移，R2 未获发布批准。
 
 R1 修复后的上下文预算是跨 R2–R4 的强制合同：dev/prod profile 都配置
 `context_budget.effective_context_k=896`、`output_reserve_k=32`、
