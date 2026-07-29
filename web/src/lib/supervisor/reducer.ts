@@ -3,6 +3,11 @@ import type {
   JsonObject,
   JsonValue,
 } from "./contracts.js";
+import {
+  applySupervisorWorkspaceEvent,
+  cloneSupervisorWorkspaceProjection,
+  type SupervisorWorkspaceProjection,
+} from "./workspaceProjection.js";
 
 export const SUPERVISOR_CONNECTION_STATUS_VALUES = [
   "idle",
@@ -79,7 +84,7 @@ export interface SupervisorResumePoint {
   sequence: number;
 }
 
-export interface SupervisorRuntimeProjection {
+export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjection {
   conversationId: string;
   run: SupervisorRunState;
   compression: SupervisorCompressionState;
@@ -458,6 +463,24 @@ function applyAgentEvent(
       return applyCompressionTerminal(state, event, "failed");
     case "input.state_changed":
       return applyInputEvent(state, event);
+    case "message.upserted":
+    case "workflow.progressed":
+    case "interrupt.opened":
+    case "interrupt.closed": {
+      try {
+        const workspace = applySupervisorWorkspaceEvent({
+          messages: state.messages,
+          workflows: state.workflows,
+          interrupt: state.interrupt,
+        }, event);
+        return {
+          ...withEventResumePoint(state, event),
+          ...workspace,
+        };
+      } catch {
+        return withInvalidEvent(state);
+      }
+    }
     default:
       return withEventResumePoint(state, event);
   }
@@ -555,12 +578,19 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     || !isResumePoint(projection.resume)) {
     return null;
   }
+  let workspace: SupervisorWorkspaceProjection;
+  try {
+    workspace = cloneSupervisorWorkspaceProjection(value, projection.conversationId);
+  } catch {
+    return null;
+  }
   const cloned = {
     conversationId: projection.conversationId,
     run: { ...projection.run },
     compression: { ...projection.compression },
     inputQueue: projection.inputQueue.map((item) => ({ ...item })),
     resume: { ...projection.resume },
+    ...workspace,
   };
   return isProjectionStateConsistent(cloned) ? cloned : null;
 }
@@ -586,6 +616,9 @@ export function createSupervisorRuntimeState(conversationId: string): Supervisor
       updatedAt: null,
     },
     inputQueue: [],
+    messages: [],
+    workflows: [],
+    interrupt: null,
     resume: {
       cursor: null,
       sequence: 0,

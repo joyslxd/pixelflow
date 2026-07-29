@@ -27,6 +27,7 @@ import {
   type SupervisorRuntimeProjection,
   type SupervisorRuntimeState,
 } from "../lib/supervisor/reducer.js";
+import { projectSupervisorSnapshot } from "../lib/supervisor/workspaceProjection.js";
 
 export type SupervisorSnapshotProjector = (
   snapshot: JsonValue,
@@ -69,8 +70,11 @@ export interface UseSupervisorConversationResult {
   getRunStatus(runId: string): Promise<JsonValue>;
 }
 
-function defaultProjectSnapshot(snapshot: JsonValue): SupervisorRuntimeProjection {
-  return snapshot as unknown as SupervisorRuntimeProjection;
+function defaultProjectSnapshot(
+  snapshot: JsonValue,
+  conversationId: string,
+): SupervisorRuntimeProjection {
+  return projectSupervisorSnapshot(snapshot, conversationId);
 }
 
 function readContextVersion(snapshot: JsonValue): number {

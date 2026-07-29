@@ -124,6 +124,11 @@ import {
   type WorkspaceAgentRuntimeMode,
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
+import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
+import {
+  mergeSupervisorMessagesWithPending,
+  projectSupervisorWorkflowProgress,
+} from "@/lib/supervisor/workspaceProjection";
 
 interface ConversationOwnership {
   conversationId: string;
@@ -136,6 +141,9 @@ interface PendingSupervisorTurn {
   clientInputId: string;
   content: string;
   materials: Array<Record<string, unknown>>;
+  replyToMessageId: string | null;
+  artifactRefs: string[];
+  interruptId: string | null;
   continueLegacy: boolean;
   registrationStatus: "pending" | "registered";
   runId?: string;
@@ -160,19 +168,54 @@ interface SendRuntimeOptions {
 const uid = (): string => crypto.randomUUID();
 const now = () => formatClockTime(new Date().toISOString());
 
-const isPendingSupervisorTurn = (
+const parsePendingSupervisorTurn = (
   value: unknown,
   conversationId: string,
-): value is PendingSupervisorTurn => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+): PendingSupervisorTurn | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
-  return item.conversationId === conversationId
-    && typeof item.clientInputId === "string"
-    && typeof item.content === "string"
-    && Array.isArray(item.materials)
-    && typeof item.continueLegacy === "boolean"
-    && (item.registrationStatus === "pending" || item.registrationStatus === "registered")
-    && (item.runId === undefined || typeof item.runId === "string");
+  if (
+    item.conversationId !== conversationId
+    || typeof item.clientInputId !== "string"
+    || typeof item.content !== "string"
+    || !Array.isArray(item.materials)
+    || (item.continueLegacy !== undefined && typeof item.continueLegacy !== "boolean")
+    || (
+      item.registrationStatus !== undefined
+      && item.registrationStatus !== "pending"
+      && item.registrationStatus !== "registered"
+    )
+    || (item.runId !== undefined && typeof item.runId !== "string")
+    || (
+      item.replyToMessageId !== undefined
+      && item.replyToMessageId !== null
+      && typeof item.replyToMessageId !== "string"
+    )
+    || (
+      item.interruptId !== undefined
+      && item.interruptId !== null
+      && typeof item.interruptId !== "string"
+    )
+    || (
+      item.artifactRefs !== undefined
+      && (
+        !Array.isArray(item.artifactRefs)
+        || !item.artifactRefs.every((artifactRef) => typeof artifactRef === "string")
+      )
+    )
+  ) return null;
+  return {
+    conversationId,
+    clientInputId: item.clientInputId,
+    content: item.content,
+    materials: item.materials as Array<Record<string, unknown>>,
+    replyToMessageId: typeof item.replyToMessageId === "string" ? item.replyToMessageId : null,
+    artifactRefs: Array.isArray(item.artifactRefs) ? item.artifactRefs as string[] : [],
+    interruptId: typeof item.interruptId === "string" ? item.interruptId : null,
+    continueLegacy: item.continueLegacy === true,
+    registrationStatus: item.registrationStatus === "registered" ? "registered" : "pending",
+    ...(typeof item.runId === "string" ? { runId: item.runId } : {}),
+  };
 };
 
 const parseRegisteredSupervisorTurn = (
@@ -1941,6 +1984,38 @@ export function WorkspacePage() {
   }, [currentConversationId, pendingSupervisorTurns]);
 
   useEffect(() => {
+    if (
+      !runtimePolicy.supervisorEnabled
+      || supervisorRuntime.state.connection.status !== "connected"
+      || supervisorRuntime.state.conversationId !== currentConversationId
+    ) return;
+    const projectedMessages = mergeSupervisorMessagesWithPending(
+      supervisorRuntime.state.messages,
+      pendingSupervisorTurns.map((pendingTurn) => ({
+        id: pendingTurn.clientInputId,
+        conversationId: pendingTurn.conversationId,
+        content: pendingTurn.content,
+        materials: pendingTurn.materials as JsonObject[],
+      })),
+      currentConversationId,
+    );
+    messagesRef.current = projectedMessages;
+    setMessages(projectedMessages);
+    const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
+    workflowProgressConversationIdRef.current = currentConversationId;
+    workflowProgressRef.current = nextProgress;
+    setWorkflowProgress(nextProgress);
+  }, [
+    currentConversationId,
+    pendingSupervisorTurns,
+    runtimePolicy.supervisorEnabled,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.conversationId,
+    supervisorRuntime.state.messages,
+    supervisorRuntime.state.workflows,
+  ]);
+
+  useEffect(() => {
     let disposed = false;
     void api.getJianyingDraftCapability()
       .then((capability) => {
@@ -2813,7 +2888,9 @@ export function WorkspacePage() {
   };
 
   const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
-    const material = selectedStoryboardMessageId ? { ...asset, scene_global_asset_action: "edit" as const, storyboard_message_id: selectedStoryboardMessageId } : { ...asset, scene_global_asset_action: "edit" as const };
+    const material = selectedStoryboardMessageId
+      ? { ...asset, conversation_id: currentConversationId, scene_global_asset_action: "edit" as const, storyboard_message_id: selectedStoryboardMessageId }
+      : { ...asset, conversation_id: currentConversationId, scene_global_asset_action: "edit" as const };
     setReferencedMaterials((items) => {
       const next = items.filter((item) => item.asset_id !== material.asset_id);
       return [material, ...next].slice(0, 1);
@@ -2821,7 +2898,9 @@ export function WorkspacePage() {
   };
 
   const handleDeleteGlobalAsset = (asset: SceneGlobalAssetReference) => {
-    const material = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    const material = selectedStoryboardMessageId
+      ? { ...asset, conversation_id: currentConversationId, storyboard_message_id: selectedStoryboardMessageId }
+      : { ...asset, conversation_id: currentConversationId };
     const deleteMaterial = { ...material, scene_global_asset_action: "delete" as const };
     setReferencedMaterials((items) => {
       const next = items.filter((item) => item.asset_id !== deleteMaterial.asset_id);
@@ -6067,7 +6146,9 @@ export function WorkspacePage() {
       || snapshot.pending_agent_runtime_turns;
     const restoredRuntimeTurns = (
       Array.isArray(rawRuntimeTurns) ? rawRuntimeTurns : []
-    ).filter((item) => isPendingSupervisorTurn(item, conversationIdRef.current));
+    )
+      .map((item) => parsePendingSupervisorTurn(item, conversationIdRef.current))
+      .filter((item): item is PendingSupervisorTurn => item !== null);
     pendingSupervisorTurnsRef.current = restoredRuntimeTurns;
     if (conversationIdRef.current) {
       pendingSupervisorTurnsByConversationRef.current.set(
@@ -6588,6 +6669,9 @@ export function WorkspacePage() {
       clientInputId: recoverableInput.clientInputId,
       content: sourceMessage.content,
       materials: sourceMessage.materials || [],
+      replyToMessageId: null,
+      artifactRefs: [],
+      interruptId: null,
       continueLegacy: orchestrationModeRef.current === "frontend_v2",
       registrationStatus: "registered",
       runId: recoverableInput.turnId || undefined,
@@ -6742,7 +6826,13 @@ export function WorkspacePage() {
 
   const normalizeSendInput = (input: string | AgentUserMessagePayload): AgentUserMessagePayload => {
     if (typeof input === "string") return { content: input, materials: [] };
-    return { content: input.content, materials: Array.isArray(input.materials) ? input.materials : [] };
+    return {
+      content: input.content,
+      materials: Array.isArray(input.materials) ? input.materials : [],
+      reply_to_message_id: input.reply_to_message_id ?? null,
+      artifact_refs: Array.isArray(input.artifact_refs) ? input.artifact_refs : [],
+      interrupt_id: input.interrupt_id ?? null,
+    };
   };
 
   const appendSupervisorNotice = (content: string, targetConversationId: string) => {
@@ -6777,14 +6867,32 @@ export function WorkspacePage() {
       // 每次写请求前重新读取 CAS 版本，避免上一轮 Turn 或事件消费后继续使用旧版本。
       await supervisorRuntime.refreshSnapshot();
       const expectedContextVersion = supervisorRuntime.getContextVersion() ?? contextVersion;
-      const request: TurnStartRequest = {
-        client_input_id: pendingTurn.clientInputId,
+      const submission = buildSupervisorSubmission({
+        conversationId: targetConversationId,
+        clientInputId: pendingTurn.clientInputId,
         content: pendingTurn.content,
         materials: pendingTurn.materials as JsonObject[],
-        reply_to_message_id: null,
-        artifact_refs: [],
-        expected_context_version: expectedContextVersion,
-      };
+        replyToMessageId: pendingTurn.replyToMessageId,
+        artifactRefs: pendingTurn.artifactRefs,
+        interruptId: orchestrationModeRef.current === "supervisor_v1"
+          ? pendingTurn.interruptId
+          : null,
+      }, expectedContextVersion);
+      if (submission.kind === "interrupt") {
+        if (orchestrationModeRef.current !== "supervisor_v1") return null;
+        await supervisorRuntime.respondToInterrupt(submission.interruptId, submission.request);
+        // interrupt 成功后先原子移除恢复上下文；若写回失败，保留相同
+        // client_response_id 供幂等重试，不创建额外 Turn。
+        await persistPendingSupervisorTurns(
+          (current) => current.filter(
+            (item) => item.clientInputId !== pendingTurn.clientInputId,
+          ),
+          targetConversationId,
+        );
+        await supervisorRuntime.refreshSnapshot().catch(() => {});
+        return null;
+      }
+      const request: TurnStartRequest = submission.request;
       const started = parseRegisteredSupervisorTurn(
         await supervisorRuntime.startTurn(request),
       );
@@ -6868,6 +6976,8 @@ export function WorkspacePage() {
             {
               content: pendingTurn.content,
               materials: pendingTurn.materials,
+              reply_to_message_id: pendingTurn.replyToMessageId,
+              artifact_refs: pendingTurn.artifactRefs,
             },
             {
               skipRuntimeRegistration: true,
@@ -6966,7 +7076,13 @@ export function WorkspacePage() {
       });
       return;
     }
-    const { content: text, materials = [] } = normalizeSendInput(input);
+    const {
+      content: text,
+      materials = [],
+      reply_to_message_id: replyToMessageId = null,
+      artifact_refs: artifactRefs = [],
+      interrupt_id: interruptId = null,
+    } = normalizeSendInput(input);
     let activeConversation = conversationIdRef.current;
     const message: ChatMessage = {
       id: runtimeOptions.clientInputId ?? uid(),
@@ -6983,11 +7099,20 @@ export function WorkspacePage() {
         || ownership.agentRuntimeMode === "assist"
         || ownership.agentRuntimeMode === "shadow";
       if (shouldRegisterRuntime && !runtimeOptions.skipRuntimeRegistration) {
+        const restoredInterruptId = ownership.orchestrationMode === "supervisor_v1"
+          && supervisorRuntime.state.conversationId === activeConversation
+          ? supervisorRuntime.state.interrupt?.interruptId ?? null
+          : null;
         const pendingTurn: PendingSupervisorTurn = {
           conversationId: activeConversation,
           clientInputId: message.id,
           content: text,
           materials,
+          replyToMessageId,
+          artifactRefs,
+          interruptId: ownership.orchestrationMode === "supervisor_v1"
+            ? interruptId ?? restoredInterruptId
+            : null,
           continueLegacy: ownership.orchestrationMode === "frontend_v2",
           registrationStatus: "pending",
         };
@@ -7000,6 +7125,7 @@ export function WorkspacePage() {
           activeConversation,
         );
         ensurePendingSupervisorTurnVisible(pendingTurn);
+        setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
         return;
       }
@@ -9081,7 +9207,9 @@ export function WorkspacePage() {
     progress: workflowProgress,
     messages,
   });
-  const workflowTaskBoard = runtimePolicy.legacyRunnerEnabled && derivedWorkflowTaskBoard
+  const workflowTaskBoard = (
+    runtimePolicy.legacyRunnerEnabled || runtimePolicy.supervisorEnabled
+  ) && derivedWorkflowTaskBoard
     ? { ...derivedWorkflowTaskBoard, workflowId: `${currentConversationId}:${derivedWorkflowTaskBoard.workflowId}` }
     : null;
   const legacyArtifactActionsEnabled = runtimePolicy.legacyArtifactActionsEnabled;
@@ -9207,8 +9335,12 @@ export function WorkspacePage() {
           onUpdateVideoScenePackage={legacyArtifactActionsEnabled
             ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
             : undefined}
-          onReferenceGlobalAsset={legacyArtifactActionsEnabled ? handleReferenceGlobalAsset : undefined}
-          onDeleteGlobalAsset={legacyArtifactActionsEnabled ? handleDeleteGlobalAsset : undefined}
+          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
+            ? handleReferenceGlobalAsset
+            : undefined}
+          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
+            ? handleDeleteGlobalAsset
+            : undefined}
           onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)

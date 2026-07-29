@@ -367,3 +367,26 @@ test("WorkspacePage 恢复归属未决时排队输入且 Supervisor 禁用旧动
   assert.match(workspaceSource, /artifactActionsDisabled=\{interactionPolicy\.artifact\.actionsDisabled\}/);
   assert.match(workspaceSource, /runtimeBusy=\{interactionPolicy\.runtime\.busy\}/);
 });
+
+test("Supervisor 权威投影替换历史消息并复用既有任务看板", () => {
+  assert.match(workspaceSource, /supervisorRuntime\.state\.messages/);
+  assert.match(workspaceSource, /mergeSupervisorMessagesWithPending\(/);
+  assert.match(workspaceSource, /projectSupervisorWorkflowProgress\(supervisorRuntime\.state\.workflows\)/);
+  assert.match(workspaceSource, /messagesRef\.current\s*=\s*projectedMessages/);
+  assert.match(
+    workspaceSource,
+    /supervisorRuntime\.state\.conversationId\s*!==\s*currentConversationId/,
+  );
+  assert.match(workspaceSource, /runtimePolicy\.legacyRunnerEnabled\s*\|\|\s*runtimePolicy\.supervisorEnabled/);
+});
+
+test("Supervisor 普通输入自动使用 Snapshot 恢复的当前 interrupt", () => {
+  assert.match(
+    workspaceSource,
+    /const restoredInterruptId = ownership\.orchestrationMode === "supervisor_v1"[\s\S]*supervisorRuntime\.state\.conversationId === activeConversation/,
+  );
+  assert.match(
+    workspaceSource,
+    /interruptId: ownership\.orchestrationMode === "supervisor_v1"[\s\S]*\? interruptId \?\? restoredInterruptId[\s\S]*: null/,
+  );
+});

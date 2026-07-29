@@ -32,6 +32,9 @@ export interface BrowserStorageLike {
 export interface AgentUserMessagePayload {
   content: string;
   materials?: Array<Record<string, unknown>>;
+  reply_to_message_id?: string | null;
+  artifact_refs?: string[];
+  interrupt_id?: string | null;
 }
 
 export interface AuthorizationSources {
@@ -112,6 +115,13 @@ export function setupContentAppAuthorizationListener(): () => void {
       const payload: AgentUserMessagePayload = {
         content: data.content,
         materials: Array.isArray(data.materials) ? data.materials : [],
+        ...(typeof data.reply_to_message_id === "string" || data.reply_to_message_id === null
+          ? { reply_to_message_id: data.reply_to_message_id }
+          : {}),
+        ...(Array.isArray(data.artifact_refs) ? { artifact_refs: data.artifact_refs } : {}),
+        ...(typeof data.interrupt_id === "string" || data.interrupt_id === null
+          ? { interrupt_id: data.interrupt_id }
+          : {}),
       };
       window.__CONTENT_APP_USER_MESSAGE__ = payload;
       window.dispatchEvent(new CustomEvent("contentAppUserMessage", { detail: payload }));
