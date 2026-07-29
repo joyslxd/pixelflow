@@ -1,6 +1,6 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`ready_for_integration`
+- phase：`merged`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
@@ -17,8 +17,8 @@
 - release_id：`R1`
 - checkpoint_slice：`M12.5`
 - checkpoint_commit：`5786c5ad23f69b5585d7c8cb56440a8d453f13c3`
-- last_integrated_commit：`af3f7c1ec64044c6c05307b533e4fac621d3c282`
-- checkpoint_status：`ready`
+- last_integrated_commit：`e71cd8e1f3afa640acd1b28780ad3ba5fbbb2f22`
+- checkpoint_status：`integrated`
 
 ## 切片
 
