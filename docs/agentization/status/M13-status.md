@@ -14,7 +14,7 @@
 - checkpoint_commit：`d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
 - last_integrated_commit：`95ef865f2a084ce57b91be5eb326e1045247d4a0`
 - checkpoint_status：`phase_integrated:R2`
-- 当前发布门禁：`released:R1 / phase_integrated:R2 / awaiting_release_approval:R2`；R2 代码已进入 Agent，但生产继续保持 R1，只有唯一发布负责人另行明确批准后才允许发布 `primary(video)`
+- 当前发布门禁：`released:R1 / phase_integrated:R2 / release_blocked:R2`；唯一发布负责人已于 2026-07-29 批准 R2，但本机没有受控生产部署入口，发布在修改生产配置前失败关闭，生产继续保持 R1
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
 ## 切片
@@ -38,13 +38,25 @@
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
 | R1 | `released:R1` | 已批准（2026-07-27） | `assist / [] / 100 / true` | 生产配置提交 `38a782b`；发布负责人确认上传、重启和启动日志正常；详见 [R1 生产发布记录](../test-reports/M13.1-R1-production-release.md) |
-| R2 | `awaiting_release_approval:R2` | 未批准 | 保持 R1 `assist / [] / 100 / true` | 全新单槽候选 `codex/integrate-r2-m13-20260729-050341-ecd2fc89` 已通过并进入 Agent；等待独立生产发布批准 |
+| R2 | `release_blocked:R2` | 已批准（2026-07-29） | 保持 R1 `assist / [] / 100 / true` | 代码、模型档案和非付费门禁复核通过；因缺少受控生产部署入口，在修改生产配置前停止；详见 [R2 生产发布阻塞记录](../test-reports/M13.2-R2-production-release-blocked.md) |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 
 ## 恢复提示
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
+
+## M13.2 / R2 生产发布阻塞（2026-07-29）
+
+- 发布授权：唯一发布负责人明确批准只把全部新建对话切换为 `primary / [video] / 100 / true`，并明确排除真实付费 API、M13.3、Agent→dev、`automation_active` 和其他 intent。
+- 冻结引用：最新 Agent `e645aa2040ab41b052b7e209ce12169f85dec6a0`、dev `fb7450775a227d891372c19eae1b308045c51e68`、M13 状态分支 `b274fa91d919ca45c43703fe6bfdf7a89cbee9ce`；M13.2 实现检查点 `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56` 及 M02/M05/M06/M11/M12 依赖均为冻结 Agent 祖先。
+- 门禁复核：R2 定向 `34 passed`；后端可运行全量 `5057 passed, 19 skipped`；Ruff 通过；Web Agent 合同 `9 passed`、Web 全量 `327 passed`、TypeScript 与生产构建通过。
+- 上下文合同：生产 profile 解析仍为 `896K/32K/32K`、`require_verified_model_profile=true`、30 秒压缩失败退避；`deepseek-v4-pro` 档案解析状态为 `verified`，`max_context_tokens=1000000`，验证时间为 2026-07-26，未设置过期时间。
+- 回滚准备：已从冻结 Agent 生成权限为仅当前用户可读写的 R1 回滚包 `pixelflow-backend-prod-r2-rollback-r1-e645aa2.tar.gz`，SHA-256 为 `c14313aa9a4de073f5bf6006b8cc630b3d3457d566f8062aead364fd99b0395a`；kill switch 目标固定为 `assist / [] / 100 / true`。
+- 阻塞原因：仓库没有远端 CI 或生产部署脚本，R1 记录明确依赖人工上传和重启；当前机器也没有 SSH 目标、已登录生产发布平台或其他可验证的受控部署入口。因此无法满足“配置变更后立即部署、smoke、指标观察和异常回滚”的原子发布边界。
+- 安全结果：在修改 `backend/config.prod.yml`、生成 R2 发布包或触发生产部署前停止；生产路由未认证探测仍返回 JSON 401 且 TLS 校验通过。生产继续运行 R1，没有新建 Supervisor 视频对话、没有迁移历史对话或运行中任务，也没有调用真实付费 API。
+- 恢复边界：后续必须先提供可验证的生产部署、重启、日志/指标观察和回滚入口，再由唯一发布负责人重新明确批准一次 R2 发布；不得沿用本次阻塞任务自动继续。
+- 详细证据：[M13.2 / R2 生产发布阻塞记录](../test-reports/M13.2-R2-production-release-blocked.md)。
 
 ## M13.2 / R2 单槽阶段集成（2026-07-29）
 

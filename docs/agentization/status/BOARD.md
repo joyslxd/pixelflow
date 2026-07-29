@@ -4,14 +4,14 @@
 >
 > 原始设计基线：`02493711e8c9b74ec5f8e54cfadac3881297754c`；M00-A/M00-B 共同 Agent 基线：`8e626ae232d984f14fa9954b672b4e025894d426`。M00-I.1 不固定使用本页旧快照，必须在执行时重新 fetch 四条远端引用。
 >
-> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`，发布状态为 `awaiting_release_approval:R2`。生产继续保持 R1 `assist + enabled_intents=[] + 100% + context_compaction=true`，现有阶段工作流继续拥有业务推进权；本次集成没有发布 `primary(video)`。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。M13.3、真实付费供应商验证和生产 R2 发布均未执行。
+> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`。唯一发布负责人于 2026-07-29 批准生产切换，但本机没有受控生产部署入口，任务在修改生产配置前失败关闭，发布状态为 `release_blocked:R2`。生产继续保持 R1 `assist + enabled_intents=[] + 100% + context_compaction=true`，现有阶段工作流继续拥有业务推进权。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。M13.3、真实付费供应商验证和生产 R2 发布均未执行。
 
 ## 上线里程碑
 
 | 批次 | 目标日 | 用户可见成果 | 当前状态 | 代码检查点 | 生产状态 |
 | --- | ---: | --- | --- | --- | --- |
 | R1 | D4 | 自动上下文压缩开始/完成提示、输入排队、刷新恢复、原任务继续 | `released` | M00、M01、M03、M04、M07、M12.3、M13.1 已进入 Agent；生产配置提交 `38a782b` | 已人工发布 `assist+100%`；负责人确认启动日志正常，未报告红线异常 |
-| R2 | D9 | 视频会话 Agent：继续、修改、重生、重试、新建、切换、取消、追问 | `awaiting_release_approval` | M02、M05、M06、M11、M12.5、M13.2 已进入 Agent | 未发布；保持 R1，等待独立批准 `primary(video)+100%` |
+| R2 | D9 | 视频会话 Agent：继续、修改、重生、重试、新建、切换、取消、追问 | `release_blocked` | M02、M05、M06、M11、M12.5、M13.2 已进入 Agent | 已获批准但缺少受控生产部署入口；修改配置前停止，保持 R1 |
 | R3 | D13 | 图片/编辑、PPT、视频分析接入同一会话 Agent | `planned` | 待 M08/M09/M10/M13.3 | 未发布；目标 `primary(四类intent)+100%` |
 | R4 | D16–D18 | 五流程全量门禁、回滚、新对话全面接管验收 | `planned` | 待全部模块和 M13.4–M13.5 | 未发布；保持R3范围100% |
 
@@ -30,7 +30,7 @@
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
 | M11 | 视频生成 Adapter | B | `merged` | 5/5 | 无；已进入 Agent，R2 真实联调可使用 M06 | `5ed26af` |
 | M12 | 交互 UI 与 Legacy 迁移 | B | `merged` | 5/5 | 无；已进入 Agent | `e71cd8e` |
-| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；R2 已进入 Agent 并等待独立生产批准；R3–R4 尚未执行 | `95ef865` |
+| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；R2 已进入 Agent，生产发布因缺少受控部署入口失败关闭；R3–R4 尚未执行 | `95ef865` |
 
 ## 当前文件所有权
 
@@ -38,8 +38,8 @@ M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `co
 
 ## 下一步
 
-1. M13.2 / R2 已完成唯一单槽阶段集成，不得重复执行该检查点或自动启动 M13.3；R2 生产继续保持 R1，等待唯一发布负责人另行批准 `primary(video)`。
+1. M13.2 / R2 已完成唯一单槽阶段集成，不得重复执行该检查点或自动启动 M13.3；本次 R2 生产批准因缺少受控部署入口失败关闭，生产继续保持 R1。后续必须先补齐部署、重启、日志/指标和回滚入口，再由唯一发布负责人重新明确批准。
 2. 当前自动化状态为 `automation_local_ready`。模块开工、阶段/最终集成和 dev→agent 漂移检查均人工触发仓库脚本；只有未来实际部署并验收远端 CI 后才能提升为 `automation_active`。
-3. R1 已按运行手册 9.17 完成人工发布并保持 `assist+100%`；R2 代码已进入最新 Agent，但本记录不授权 `primary(video)`、真实付费供应商测试、M13.3 或 Agent→dev 合并。
+3. R1 已按运行手册 9.17 完成人工发布并保持 `assist+100%`；R2 代码已进入最新 Agent，但本次阻塞记录不授权继续发布、真实付费供应商测试、M13.3 或 Agent→dev 合并。
 
 总看板在合法阶段检查点或最终模块通过闸门并由单槽候选合入 `feature/agent_0.8.4_boguan` 后更新；当前单槽候选由开发者人工触发。`phase_integrated` 只表示该批次增量已进入 Agent，不表示模块完成。模块分支内的逐切片实时进度写对应模块状态文件。
