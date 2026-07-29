@@ -1,24 +1,24 @@
 # M12 交互 UI、双运行时与 Legacy 迁移
 
-- phase：`in_progress`
+- phase：`ready_for_integration`
 - owner：B
 - branch：`codex/agent-0.8.4-m12-workspace-ui`
 - 依赖：M07
-- 当前切片：`M12 最终集成冲突修复`
+- 当前切片：`M12 最终集成冲突修复（完成）`
 - base Agent SHA：`7510f8fcbe0ac2b3f37aaba73126fa2cfe53a17d`
 - M12.3 模块分支基线：`12bcff09e37ea7fc61b51fa044dbf0e250933b5e`
 - M12.4 模块分支基线：`b69a13eaebfec53bdccf7e374e1824c01f14058d`
 - M12.5 模块分支基线：`c0e3d94ad308794d2fb1914bcc5b66c625f8506b`
-- 当前唯一写入者：`Codex（本次修复任务）`
-- 开始时间：`2026-07-29 08:56:52 +08:00`
+- 当前唯一写入者：`尚未领取`
+- 开始时间：`—`
 - M12.5 已释放文件：`web/src/lib/supervisor/workspaceProjection.ts`、`web/src/lib/supervisor/reducer.ts`、`web/src/hooks/useSupervisorConversation.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/workspaceOrchestrationMode.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.5.md`
 - M12.4 已释放文件：`web/src/lib/authStorage.ts`、`web/src/lib/supervisor/turnSubmission.ts`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/authStorage.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.4.md`
 - M12.3 已释放文件：`web/src/lib/supervisor/reducer.ts`、`web/src/lib/supervisor/runtimeNotice.ts`、`web/src/components/chat/ConversationRuntimeNotice.tsx`、`web/src/components/chat/ChatPanel.tsx`、`web/src/pages/WorkspacePage.tsx`、`web/scripts/run-tests.mjs`、`web/tests/supervisorReducer.test.mjs`、`web/tests/supervisorRuntimeNotice.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12.3.md`
 - release_id：`R1`
-- checkpoint_slice：`M12.3`
-- checkpoint_commit：`4d9931811f23eb306f2bf8b8dc33357aacbb46e4`
+- checkpoint_slice：`M12.5`
+- checkpoint_commit：`5786c5ad23f69b5585d7c8cb56440a8d453f13c3`
 - last_integrated_commit：`af3f7c1ec64044c6c05307b533e4fac621d3c282`
-- checkpoint_status：`repair_in_progress`
+- checkpoint_status：`ready`
 
 ## 切片
 
@@ -79,8 +79,8 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 阶段门禁：固定实现提交 `4d9931811f23eb306f2bf8b8dc33357aacbb46e4` 后，按 `Invoke-AgentModuleGate.ps1` 的 `M12 / Phase / R1 / M12.3` 权威范围执行 `git diff --check`、`corepack pnpm test`、`corepack pnpm lint`、`corepack pnpm build-prod`，全部通过；聚合测试为 `296/296`，生产构建只有既存 chunk 体积提醒。
 - 状态：`R1-assist-ui` 阶段门禁和中文规范人工等价检查均绿色，M12 已登记 `ready_for_phase_integration`、`checkpoint_status=ready`；唯一写入权和 M12.3 文件锁已释放，等待开发者人工启动单槽阶段集成。
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
-- locked files：`web/src/pages/WorkspacePage.tsx`、`web/src/lib/supervisor/workspaceProjection.ts`、`web/tests/workspaceOrchestrationMode.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12-final-integration-repair-20260729.md`
-- integration failure evidence：`docs/agentization/test-reports/M12-final-integration-blocked-20260729.md`
+- locked files：`无`
+- integration failure evidence：`无`
 
 ## M12 最终单槽集成阻塞记录
 
@@ -122,5 +122,19 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 工具链说明：本机 Corepack 初始因上游签名 keyid 轮换失败，捆绑的 `pnpm 9.9.0` 又不能解析仓库现有 pnpm 10 工作区配置；将 Corepack 运行时固定到机器已安装的 `pnpm 10.34.4` 后原样重跑权威门禁并通过，未修改 `package.json`、`pnpm-workspace.yaml` 或锁文件。
 - 状态：M12.5 是模块最后一片，完整 M12 Final 门禁绿色，M12 已写 `ready_for_integration`；唯一写入权和全部文件锁已释放，不更新 `status/BOARD.md` 或集成记录。
 - 边界：不创建切片子分支，不修改两个长期 feature 分支，不自动进入其他切片或单槽集成；当前自动化状态为 `automation_local_ready`。
-- final checkpoint commit：`4753d62a7509ea8b5725bd324a07e495f45d42f6`
+- final checkpoint commit：`5786c5ad23f69b5585d7c8cb56440a8d453f13c3`
 - final gate status：`passed`
+
+## M12 最终集成冲突修复记录
+
+- 完成时间：`2026-07-29 09:10:45 +08:00`
+- 冻结远端：Agent `6c25a7bf7eae3a7a806874f5299926898d1c039a`；dev `fb7450775a227d891372c19eae1b308045c51e68`；修复开工状态 `834b36fa6d8300c24f08dee0c2dc0e3429996985`。
+- 实现检查点：`5786c5ad23f69b5585d7c8cb56440a8d453f13c3`；该提交以普通 `--no-ff` 合并精确 Agent SHA，没有 rebase、force-push 或复用 blocked 候选。
+- 组合修复：保留 R1 `assist/shadow` 的 Turn 登记、持久化和旧 v2 单次接力，同时保留 M12 reply、Artifact、mention 与 interrupt 单路响应；普通 Turn 只调用一次 `startTurn()`，interrupt 只允许 `supervisor_v1` 调用 `respondToInterrupt()`，成功后原子清理 pending。
+- Snapshot 安全：权威消息投影会叠加尚未进入 Snapshot 的当前会话 pending 用户消息；服务端出现相同稳定 UUID 后以服务端消息为准，旧会话 pending、事件和 interrupt 不进入新会话。
+- 兼容恢复：历史两种 pending DTO 均规范化为合并后的字段集合；使用 `crypto.randomUUID()` 作为消息 ID、`client_input_id` 与 `client_response_id` 的稳定幂等键。
+- 回归验证：`corepack pnpm test` 为 `326/326`，`corepack pnpm lint`、`corepack pnpm build-prod` 和 `git diff --check` 全部通过；生产构建只有既存 chunk 体积提醒。
+- Final 门禁：以冻结 Agent 为 `ChinesePolicyBaseRef` 调用仓库 `Invoke-AgentModuleGate.ps1 -ModuleId M12 -GateType Final`，结果 `Passed=True / CommandCount=4`；中文工程规范与全部非付费权威命令全绿。
+- 证据：`docs/agentization/test-reports/M12-final-integration-repair-20260729.md`；首次阻塞历史仍保存在 `docs/agentization/test-reports/M12-final-integration-blocked-20260729.md`。
+- 状态：M12 已恢复为 `ready_for_integration`，全部写锁释放；等待开发者授权的同一任务重新创建全新唯一候选，不更新 `status/BOARD.md` 或 `integration/MERGE_LOG.md`。
+- 安全边界：未调用真实图片、视频、PPT、剪映、LLM、PowerMem 或其他付费 API；未修改生产配置，未执行其他模块或切片，自动化状态保持 `automation_local_ready`。
