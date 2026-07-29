@@ -14,7 +14,7 @@
 - checkpoint_commit：`d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
 - last_integrated_commit：`95ef865f2a084ce57b91be5eb326e1045247d4a0`
 - checkpoint_status：`phase_integrated:R2`
-- 当前发布门禁：`released:R1 / ready_for_phase_integration:R2`；开发者人工触发的单槽候选绿色进入 Agent 后才可写 `phase_integrated:R2` 和 `awaiting_release_approval:R2`
+- 当前发布门禁：`released:R1 / phase_integrated:R2 / awaiting_release_approval:R2`；R2 代码已进入 Agent，但生产继续保持 R1，只有唯一发布负责人另行明确批准后才允许发布 `primary(video)`
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
 ## 切片
@@ -38,13 +38,24 @@
 | 批次 | 候选状态 | 人工批准 | 生产值/比例 | 发布证据 |
 | --- | --- | --- | --- | --- |
 | R1 | `released:R1` | 已批准（2026-07-27） | `assist / [] / 100 / true` | 生产配置提交 `38a782b`；发布负责人确认上传、重启和启动日志正常；详见 [R1 生产发布记录](../test-reports/M13.1-R1-production-release.md) |
-| R2 | `not_eligible` | 未批准 | 保持发布前原值 | — |
+| R2 | `awaiting_release_approval:R2` | 未批准 | 保持 R1 `assist / [] / 100 / true` | 全新单槽候选 `codex/integrate-r2-m13-20260729-050341-ecd2fc89` 已通过并进入 Agent；等待独立生产发布批准 |
 | R3 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 | R4 | `not_eligible` | 未批准 | 保持发布前原值 | — |
 
 ## 恢复提示
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
+
+## M13.2 / R2 单槽阶段集成（2026-07-29）
+
+- 冻结引用：Agent `2b7bd44813dbbe63836e8fd2434c0b9be08af404`、dev `fb7450775a227d891372c19eae1b308045c51e68`、M13 状态提交 `95ef865f2a084ce57b91be5eb326e1045247d4a0`；实现检查点固定为 `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`。
+- 前置依赖：M13.1、M02、M05、M06、M11、M12.4–M12.5 均已是冻结 Agent 祖先，冻结 dev 也已进入 Agent；集成前没有其他任务占用单槽锁。
+- 唯一候选：`codex/integrate-r2-m13-20260729-050341-ecd2fc89`。本次调用 `Integrate-AgentModule.ps1` 的参数固定为 `M13 / Phase / R2 / M13.2 / codex/agent-0.8.4-m13-integration`，没有复用历史阻塞候选。
+- 权威门禁：12 项非付费命令全部绿色，覆盖中文工程规范、Python 3.12、R2 Graph 定向、后端可运行全量、Ruff、Web Agent 合同/全量/lint/build、生产配置隔离、既有 Docker 退役基线隔离和上下文常量审计。后端全量仅排除冻结 Agent 中已存在、依赖已退役 `scripts/docker.sh` 的 6 个基线用例，并额外证明 R2 没有修改该测试或恢复脚本。
+- 上下文合同：候选继续统一使用 `effective_context_k=896`、`output_reserve_k=32`、`safety_reserve_k=32`、DeepSeek V4 Pro `max_context_tokens=1000000`、`require_verified_model_profile=true` 和 `compaction_retry_backoff_seconds=30`；未增加视频节点窗口常量或 128K 业务兜底。
+- 原子结果：脚本先把远端 Agent 从 `2b7bd44813dbbe63836e8fd2434c0b9be08af404` 推进到 `4baa22193e661a570fecbecf21a5e9b3750c5162`，并把模块状态推进到 `994efd77bc2f03285d710ce7ab7ee6939ec05a96`；完整中文交接记录将以相同候选再次防漂移快进，最终值以远端复读为准。
+- 安全边界：未修改 `backend/config.prod.yml`，未调用真实图片、视频、PPT、剪映、LLM、content-app 或 PowerMem 付费接口，未执行 M13.3，未发布 `primary(video)`，自动化状态保持 `automation_local_ready`。
+- 停止点：R2 代码阶段状态为 `phase_integrated:R2`，发布状态为 `awaiting_release_approval:R2`；本任务完成远端 SHA 核对后立即停止，等待独立的 R2 生产发布批准。
 
 ## M13.2 / R2 实现检查点记录（2026-07-29）
 
