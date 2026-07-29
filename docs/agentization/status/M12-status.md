@@ -125,4 +125,3 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - final checkpoint commit：`4753d62a7509ea8b5725bd324a07e495f45d42f6`
 - final gate status：`passed`
 - locked files：`无`
-- integration failure evidence：`候选 codex/integrate-m12-20260729-004147-406e3815 已保留；Agent 未更新；错误类型 RuntimeException`
