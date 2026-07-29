@@ -341,3 +341,27 @@
 - rollback：如需撤回，基于本记录定位 M12 候选中的业务、恢复、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M12 状态、BOARD、MERGE_LOG、首次阻塞报告和最终冲突修复报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-29 13:05:09 +08:00：M13 阶段 R2 候选通过，模块提交 `95ef865f2a084ce57b91be5eb326e1045247d4a0` 已纳入最新 Agent/dev 基线。
+
+### 0013 / 2026-07-29 / M13.2 / R2 阶段集成
+
+- module / release / slice：`M13 / R2 / M13.2`
+- source branch / state SHA：`origin/codex/agent-0.8.4-m13-integration@95ef865f2a084ce57b91be5eb326e1045247d4a0`；该远端 HEAD 是中文状态提交，父提交为实现检查点 `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@2b7bd44813dbbe63836e8fd2434c0b9be08af404` 先由脚本原子推进至 `4baa22193e661a570fecbecf21a5e9b3750c5162`；完整中文交接记录随同一候选再次防漂移快进，最终值以远端复读为准
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交已是冻结 Agent 和最终候选祖先，没有额外 dev 合并，也没有执行 Agent→dev
+- dependencies：M13.1 `328fb535bb2c03790bd1bb189781b9cd64aa1567`、M02 `e77bdcd322cf76d706a7063cf5e64b428c64e109`、M05 `2c0c0bc7365beca611913318a210bb6d0987102a`、M06 `e8ed2be676304da00a7cc391eabb26a86cbf2aed`、M11 `5ed26af7efd9fdd7c02d842873461428653f85c8`、M12 `e71cd8e1f3afa640acd1b28780ad3ba5fbbb2f22` 均已是冻结 Agent 祖先；M12.4–M12.5 随 M12 Final 进入
+- candidate：`codex/integrate-r2-m13-20260729-050341-ecd2fc89`；严格从“最新 Agent + 最新 dev + M13.2 增量”创建的全新候选，没有续用或合入历史阻塞候选
+- checkpoint：`release_id=R2`、`checkpoint_slice=M13.2`、`checkpoint_commit=d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`、此前 `last_integrated_commit=328fb535bb2c03790bd1bb189781b9cd64aa1567`；本次模块状态源 HEAD 为 `95ef865f2a084ce57b91be5eb326e1045247d4a0`
+- trigger / single slot：远端状态为 `ready_for_phase_integration`、`checkpoint_status=ready`，状态提交已 push，阶段检查点命中白名单；集成前确认锁文件无人占用，脚本再以独占文件句柄取得唯一单槽，最终状态为 `phase_integrated:R2`
+- invocation：调用 `scripts/agentization/Integrate-AgentModule.ps1`，固定参数为 `ModuleId=M13`、`GateType=Phase`、`ReleaseId=R2`、`Slice=M13.2`、`ModuleBranch=codex/agent-0.8.4-m13-integration`，并使用 `-Apply`
+- tests：12 项 M13/R2 权威非付费门禁全部绿色，覆盖 `git diff --check`、Python 3.12、R2 Graph 定向、后端可运行全量、全仓 Ruff、Web Agent 合同/全量/lint/build、生产配置隔离、既有 Docker 退役基线隔离和上下文常量审计
+- baseline isolation：后端可运行全量只排除冻结 Agent 中已存在、依赖已退役 `scripts/docker.sh` 的 6 个基线用例；候选额外校验 `backend/tests/test_docker_sandbox_mode_detection.py` 与 `scripts/docker.sh` 相对冻结 Agent 无差异，没有用 R2 增量修复、隐藏或恢复该能力
+- context contract：继续统一使用 `effective_context_k=896`、`output_reserve_k=32`、`safety_reserve_k=32`、DeepSeek V4 Pro `max_context_tokens=1000000`、`require_verified_model_profile=true`、`compaction_retry_backoff_seconds=30`；差异审计未发现视频节点级窗口常量或 128K 业务兜底
+- feature flag / production：`backend/config.prod.yml` 相对冻结 Agent 无差异；生产保持 R1 `assist / [] / 100 / true`，没有发布 `primary(video)`，历史对话和运行中任务不迁移
+- release state：代码阶段为 `phase_integrated:R2`，发布阶段为 `awaiting_release_approval:R2`；没有把代码集成等同于生产批准
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- Chinese engineering policy：M13.2 实现/状态提交、候选自动合并提交、发布等待状态、BOARD、MERGE_LOG 和本交接记录均使用中文主体语义；两次候选中文规范门禁和最终差异检查均通过
+- security / smoke：所有测试使用本地 fixture、Memory/SQL Store 和 fake/mock；未调用真实 content-app、图片、视频、PPT、视频分析、剪映、LLM、PowerMem 或其他付费 API，未输出 Authorization 或供应商凭据
+- exclusions：未修改生产配置，未执行 M13.3，未发布 R2，未执行真实付费冒烟，未把 Agent 合回 dev
+- remote guard：权威门禁后脚本重新读取 Agent、dev 和 M13 三条远端引用，三者与冻结值一致后才执行第一次原子更新；完整交接快进前再次执行同样的防漂移检查
+- rollback：如需撤回，基于本记录定位 M13.2 候选与交接提交，使用带中文说明的 `git revert` 创建回滚提交；生产当前仍为 R1，无需切换生产模式。禁止 force-push 或改写共享历史
+- synchronized docs：M13 状态、BOARD、MERGE_LOG 和 M13.2 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
