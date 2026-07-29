@@ -29,17 +29,17 @@
 | M09 | PPT Adapter | B | `not_started` | 0/4 | M00；联调 M06 | — |
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
 | M11 | 视频生成 Adapter | B | `merged` | 5/5 | 无；已进入 Agent，R2 真实联调可使用 M06 | `5ed26af` |
-| M12 | 交互 UI 与 Legacy 迁移 | B | `merged` | 0/5 | M07 | `e71cd8e` |
+| M12 | 交互 UI 与 Legacy 迁移 | B | `merged` | 5/5 | 无；已进入 Agent | `e71cd8e` |
 | M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 1/5 | R1 已发布生产；R2–R4 仍按阶段依赖和独立批准执行 | `328fb53` |
 
 ## 当前文件所有权
 
-M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `codex/integrate-m00-20260724-0043` 完成，没有复用上一条 blocked 候选。门禁基线修复使用独立候选 `codex/integrate-m00-gate-repair-20260724-164428` 和全局单槽锁，推送确认后释放。M03 使用全新候选 `codex/integrate-m03-20260724-101526-afe4c4f6` 完成最终集成。M01 首轮候选因权威清单未固化而安全阻塞；修复后使用全新候选 `codex/integrate-m01-20260724-114004-b292f538` 完成最终集成，没有复用原阻塞候选。M04 使用全新候选 `codex/integrate-m04-20260725-011234-0f2661e4` 完成最终集成；集成前仅以状态提交规范 checkpoint 元数据，没有改写 M04.5 业务实现。M02 使用全新候选 `codex/integrate-m02-20260727-224341-c8add0a7` 完成最终集成。M05 首次执行在候选创建前因状态占位值不规范而停止，第二条候选 `codex/integrate-m05-20260728-053559-3206adb1` 因本地临时门禁 wrapper 的 PowerShell 5.1 解析错误安全阻塞；修复入口并在保留候选复跑 Final 后，使用全新候选 `codex/integrate-m05-20260728-054138-49267ca5` 完成最终集成，没有复用 blocked 候选。M11 首次候选 `codex/integrate-m11-20260728-102519-7a52afec` 因缺少全新 worktree 的前端本地依赖而安全阻塞；补齐依赖并在保留候选复跑 Final 绿色后，只恢复模块入口，再使用全新候选 `codex/integrate-m11-20260728-110448-578e18ae` 完成最终集成，没有复用 blocked 候选。M06 首次候选 `codex/integrate-m06-20260728-112612-f2a7b3d2` 因 M11/M06 同时修改 `AGENTS.md` 和 `README.md` 的共享能力表而安全阻塞；在原模块分支纳入最新 Agent、保留两条能力说明并重复执行 Final 绿色后，使用全新候选 `codex/integrate-m06-20260728-121304-1f633dea` 完成最终集成，没有复用 blocked 候选。M01/M02/M03/M04/M05/M06/M11 全局单槽锁和模块写锁均已释放；根工作区及原模块 worktree 中既有用户文件未被删除或纳入提交。
+M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `codex/integrate-m00-20260724-0043` 完成，没有复用上一条 blocked 候选。门禁基线修复使用独立候选 `codex/integrate-m00-gate-repair-20260724-164428` 和全局单槽锁，推送确认后释放。M03 使用全新候选 `codex/integrate-m03-20260724-101526-afe4c4f6` 完成最终集成。M01 首轮候选因权威清单未固化而安全阻塞；修复后使用全新候选 `codex/integrate-m01-20260724-114004-b292f538` 完成最终集成，没有复用原阻塞候选。M04 使用全新候选 `codex/integrate-m04-20260725-011234-0f2661e4` 完成最终集成；集成前仅以状态提交规范 checkpoint 元数据，没有改写 M04.5 业务实现。M02 使用全新候选 `codex/integrate-m02-20260727-224341-c8add0a7` 完成最终集成。M05 首次执行在候选创建前因状态占位值不规范而停止，第二条候选 `codex/integrate-m05-20260728-053559-3206adb1` 因本地临时门禁 wrapper 的 PowerShell 5.1 解析错误安全阻塞；修复入口并在保留候选复跑 Final 后，使用全新候选 `codex/integrate-m05-20260728-054138-49267ca5` 完成最终集成，没有复用 blocked 候选。M11 首次候选 `codex/integrate-m11-20260728-102519-7a52afec` 因缺少全新 worktree 的前端本地依赖而安全阻塞；补齐依赖并在保留候选复跑 Final 绿色后，只恢复模块入口，再使用全新候选 `codex/integrate-m11-20260728-110448-578e18ae` 完成最终集成，没有复用 blocked 候选。M06 首次候选 `codex/integrate-m06-20260728-112612-f2a7b3d2` 因 M11/M06 同时修改 `AGENTS.md` 和 `README.md` 的共享能力表而安全阻塞；在原模块分支纳入最新 Agent、保留两条能力说明并重复执行 Final 绿色后，使用全新候选 `codex/integrate-m06-20260728-121304-1f633dea` 完成最终集成，没有复用 blocked 候选。M12 首次候选 `codex/integrate-m12-20260729-004147-406e3815` 因 `WorkspacePage.tsx` 六处语义冲突安全阻塞；模块分支合入精确 Agent 基线、组合保留 R1 接力与 M12 Supervisor 投影并重复执行 Final 绿色后，使用全新候选 `codex/integrate-m12-20260729-011456-8d59d974` 完成最终集成，没有复用 blocked 候选。M01/M02/M03/M04/M05/M06/M11/M12 全局单槽锁和模块写锁均已释放；根工作区及原模块 worktree 中既有用户文件未被删除或纳入提交。
 
 ## 下一步
 
-1. M01、M02、M03、M04、M05、M06、M11 已完成最终集成，不得重复执行其最后切片或 9.10A。本次任务不自动启动 M12、M13.2 或任何其他模块切片。
+1. M01、M02、M03、M04、M05、M06、M11、M12 已完成最终集成，不得重复执行其最后切片或 9.10A。本次任务不自动启动 M13.2 或任何其他模块切片。
 2. 当前自动化状态为 `automation_local_ready`。模块开工、阶段/最终集成和 dev→agent 漂移检查均人工触发仓库脚本；只有未来实际部署并验收远端 CI 后才能提升为 `automation_active`。
-3. R1 已按运行手册 9.17 完成人工发布并保持 `assist+100%`；M02、M05、M06、M11 已进入最新 Agent。本记录不授权 M12.5、M13.2/R2、`primary(video)`、真实付费供应商测试或 Agent→dev 合并。
+3. R1 已按运行手册 9.17 完成人工发布并保持 `assist+100%`；M02、M05、M06、M11、M12 已进入最新 Agent。本记录不授权 M13.2/R2、`primary(video)`、真实付费供应商测试或 Agent→dev 合并。
 
 总看板在合法阶段检查点或最终模块通过闸门并由单槽候选合入 `feature/agent_0.8.4_boguan` 后更新；当前单槽候选由开发者人工触发。`phase_integrated` 只表示该批次增量已进入 Agent，不表示模块完成。模块分支内的逐切片实时进度写对应模块状态文件。

@@ -314,3 +314,29 @@
 - rollback：如需撤回，基于本记录定位 M06 候选中的业务、恢复、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
 - synchronized docs：M06 状态、BOARD、MERGE_LOG、AGENTS、README、最新流程设计和 M06.1–M06.5 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
 - 2026-07-29 09:15:22 +08:00：M12 最终模块 候选通过，模块提交 `e71cd8e1f3afa640acd1b28780ad3ba5fbbb2f22` 已纳入最新 Agent/dev 基线。
+
+### 0012 / 2026-07-29 / M12 最终模块集成
+
+- module：`M12`
+- source branch / checkpoint SHA：`origin/codex/agent-0.8.4-m12-workspace-ui@e71cd8e1f3afa640acd1b28780ad3ba5fbbb2f22`；冲突修复实现检查点为 `5786c5ad23f69b5585d7c8cb56440a8d453f13c3`
+- integration target before / after：`origin/feature/agent_0.8.4_boguan@6c25a7bf7eae3a7a806874f5299926898d1c039a` 由脚本首次原子推进至 `d1ded19fd8506d997470587cedbf447b86c4511c`；完整交接记录随同一成功候选再次防漂移快进，最终以远端复读值为准
+- module state after：`origin/codex/agent-0.8.4-m12-workspace-ui@1782734046e30f382e775b94d048a3260a74ae1c`
+- latest dev SHA：`origin/feature/dev_0.8.4_boguan@fb7450775a227d891372c19eae1b308045c51e68`；该提交是冻结 Agent 和最终候选的祖先，集成没有执行 Agent→dev
+- candidate：成功候选为 `codex/integrate-m12-20260729-011456-8d59d974`，严格按“最新 Agent + 最新 dev + M12 模块增量”创建；没有复用 blocked 候选
+- checkpoint：最终模块检查点，`release_id` 不适用；`checkpoint_slice=M12.5`，冲突修复实现检查点 `5786c5ad23f69b5585d7c8cb56440a8d453f13c3`，集成源 HEAD `e71cd8e1f3afa640acd1b28780ad3ba5fbbb2f22`，此前 `last_integrated_commit=af3f7c1ec64044c6c05307b533e4fac621d3c282`，最终写为集成源 HEAD
+- trigger / single slot：远端状态恢复为 `ready_for_integration`、全部提交已 push、分支名与冻结定义一致、唯一写入者和模块锁已释放；开发者明确授权同一任务修复后重新集成，最终状态 `merged`、`checkpoint_status=integrated`
+- blocked history：首次候选 `codex/integrate-m12-20260729-004147-406e3815` 在合入模块增量时因 `web/src/pages/WorkspacePage.tsx` 六处语义冲突安全写入 `integration_blocked`，Agent 保持不变且候选完整保留；修复任务没有在 blocked 候选续写，而是在模块分支合入精确 Agent 基线并重新开放入口
+- conflicts：修复提交组合保留 R1 `assist/shadow` Turn 登记、持久化与旧 v2 单次接力，以及 M12 reply、Artifact、mention、interrupt 单路响应和 Snapshot/SSE 投影；成功候选合入最新 M12 增量时无内容冲突
+- pending / routing safety：普通输入只启动一个 Turn；interrupt 仅由 `supervisor_v1` 幂等响应并在成功后持久化清除；Snapshot 保留尚未入库的当前会话 pending 用户消息，切换对话后旧消息、事件和 interrupt 不进入新会话
+- file ownership：候选只纳入 M12 交互 UI、双运行时兼容修复、模块状态、总看板和交接记录；没有执行 M08、M09、M10、M13.2 或其他模块/切片
+- feature flag / production：未修改生产运行模式、`enabled_intents`、rollout 比例或 Feature Flag；R1 既有 `assist + [] + 100% + context_compaction=true` 保持不变，没有发布 R2 或切换 `primary(video)`
+- automation：保持 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不记录为 `automation_active`
+- tests：模块修复 HEAD 与全新成功候选均执行 M12 Final 四项权威非付费门禁并返回 `Passed=True / CommandCount=4`；固定范围覆盖中文工程规范、`git diff --check`、Web 全量 `326/326`、TypeScript lint 和 `build-prod`，生产构建只有既存 chunk 体积提醒
+- review：M12.5 原独立 reviewer 二轮结论为 `Ready`，Critical / Important / Minor 均为 0；本次冲突修复另以目标化回归覆盖两侧交叉语义，并由全新候选重复执行同一权威 Final 门禁
+- migration/configuration：M12 模块增量无 migration、无生产配置键、无依赖声明或锁文件变化；候选仅按既有 `pnpm-lock.yaml` 安装本地前端依赖
+- Chinese engineering policy：M12 切片、阻塞证据、冲突修复、恢复提交、候选中文合并提交、模块状态、BOARD 和 MERGE_LOG 均通过本地中文规范门禁
+- smoke：只执行本地 mock/fixture 非付费权威门禁；未调用真实 content-app、图片、视频、PPT、视频分析、剪映、LLM、PowerMem 或其他付费 API
+- exclusions：未运行其他模块门禁，未自动执行下一模块或切片，未修改 dev，未发布 R2，未修改生产配置，未把自动化状态提升为 `automation_active`
+- remote guard：成功候选门禁后脚本重新读取 Agent、dev 和 M12 三条远端引用，三者与冻结值一致后才执行原子更新；完整交接快进前再次执行相同防漂移检查
+- rollback：如需撤回，基于本记录定位 M12 候选中的业务、恢复、状态和交接提交，使用带中文说明的 `git revert` 创建回滚提交；禁止 force-push 或改写共享分支历史
+- synchronized docs：M12 状态、BOARD、MERGE_LOG、首次阻塞报告和最终冲突修复报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
