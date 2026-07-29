@@ -9,6 +9,7 @@ assert.ok(reducerModuleUrl, "SUPERVISOR_REDUCER_TEST_MODULE 必须指向编译�
 assert.ok(taskBoardModuleUrl, "WORKFLOW_TASK_BOARD_TEST_MODULE 必须指向编译后的任务看板模块");
 
 const {
+  mergeSupervisorMessagesWithPending,
   projectSupervisorSnapshot,
   projectSupervisorWorkflowProgress,
 } = await import(projectionModuleUrl);
@@ -130,6 +131,46 @@ test("Snapshot 原子恢复消息、artifact、工作流和当前 interrupt", ()
   assert.equal(state.messages[1].artifact.type, "video_scene_packages");
   assert.equal(state.workflows[0].workflow_id, "wf-video-1");
   assert.equal(state.interrupt.interruptId, "interrupt-review-1");
+});
+
+test("Snapshot 投影保留尚未入库的当前会话 pending 用户消息", () => {
+  const authoritative = projectSupervisorSnapshot(snapshot(), "conv-1").messages;
+  const merged = mergeSupervisorMessagesWithPending(authoritative, [{
+    id: "client-pending-1",
+    conversationId: "conv-1",
+    content: "压缩期间继续排队的输入",
+    materials: [{ type: "image", url: "https://example.com/pending.png" }],
+  }, {
+    id: "client-other-conversation",
+    conversationId: "conv-2",
+    content: "不能串入当前会话",
+  }], "conv-1");
+
+  assert.deepEqual(merged.map((item) => item.id), [
+    "client-user-1",
+    "assistant-1",
+    "client-pending-1",
+  ]);
+  assert.equal(merged[2].role, "user");
+  assert.equal(merged[2].content, "压缩期间继续排队的输入");
+
+  const serverAcknowledged = mergeSupervisorMessagesWithPending(
+    [...authoritative, {
+      id: "client-pending-1",
+      conversationId: "conv-1",
+      role: "user",
+      content: "服务端权威内容",
+      time: "2026-07-28T10:05:00Z",
+    }],
+    [{
+      id: "client-pending-1",
+      conversationId: "conv-1",
+      content: "本地旧内容",
+    }],
+    "conv-1",
+  );
+  assert.equal(serverAcknowledged.filter((item) => item.id === "client-pending-1").length, 1);
+  assert.equal(serverAcknowledged.at(-1).content, "服务端权威内容");
 });
 
 test("message.upserted 按稳定消息 ID 原位更新并保持 artifact 同事件提交", () => {

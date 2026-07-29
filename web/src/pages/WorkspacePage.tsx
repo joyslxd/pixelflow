@@ -108,22 +108,32 @@ import {
   type WorkflowFlowKind,
   type WorkflowProgressSnapshot,
 } from "@/lib/workflowTaskBoard";
-import type { OrchestrationMode } from "@/lib/supervisor/contracts";
+import type {
+  JsonObject,
+  JsonValue,
+  OrchestrationMode,
+  TurnStartRequest,
+} from "@/lib/supervisor/contracts";
 import {
+  createConversationWriteSequencer,
+  resolveAssistHandoffAction,
+  resolveWorkspaceAgentRuntimeMode,
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
+  type WorkspaceAgentRuntimeMode,
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
 import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
-import { projectSupervisorWorkflowProgress } from "@/lib/supervisor/workspaceProjection";
-
-let seq = 0;
-const clientMessagePrefix = Math.random().toString(36).slice(2, 8);
+import {
+  mergeSupervisorMessagesWithPending,
+  projectSupervisorWorkflowProgress,
+} from "@/lib/supervisor/workspaceProjection";
 
 interface ConversationOwnership {
   conversationId: string;
   orchestrationMode: OrchestrationMode;
+  agentRuntimeMode: WorkspaceAgentRuntimeMode;
 }
 
 interface PendingSupervisorTurn {
@@ -134,14 +144,97 @@ interface PendingSupervisorTurn {
   replyToMessageId: string | null;
   artifactRefs: string[];
   interruptId: string | null;
+  continueLegacy: boolean;
+  registrationStatus: "pending" | "registered";
+  runId?: string;
+}
+
+interface RegisteredSupervisorTurn {
+  runId: string;
+  status: "accepted" | "queued";
 }
 
 interface DeferredOwnershipInput {
   routeConversationId: string;
   input: string | AgentUserMessagePayload;
 }
-const uid = () => `m${Date.now().toString(36)}-${clientMessagePrefix}-${++seq}`;
+
+interface SendRuntimeOptions {
+  skipRuntimeRegistration?: boolean;
+  clientInputId?: string;
+}
+
+// 统一使用 UUID 作为消息 ID 与 Runtime client_input_id，旧消息 API 会映射到同一稳定主键。
+const uid = (): string => crypto.randomUUID();
 const now = () => formatClockTime(new Date().toISOString());
+
+const parsePendingSupervisorTurn = (
+  value: unknown,
+  conversationId: string,
+): PendingSupervisorTurn | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (
+    item.conversationId !== conversationId
+    || typeof item.clientInputId !== "string"
+    || typeof item.content !== "string"
+    || !Array.isArray(item.materials)
+    || (item.continueLegacy !== undefined && typeof item.continueLegacy !== "boolean")
+    || (
+      item.registrationStatus !== undefined
+      && item.registrationStatus !== "pending"
+      && item.registrationStatus !== "registered"
+    )
+    || (item.runId !== undefined && typeof item.runId !== "string")
+    || (
+      item.replyToMessageId !== undefined
+      && item.replyToMessageId !== null
+      && typeof item.replyToMessageId !== "string"
+    )
+    || (
+      item.interruptId !== undefined
+      && item.interruptId !== null
+      && typeof item.interruptId !== "string"
+    )
+    || (
+      item.artifactRefs !== undefined
+      && (
+        !Array.isArray(item.artifactRefs)
+        || !item.artifactRefs.every((artifactRef) => typeof artifactRef === "string")
+      )
+    )
+  ) return null;
+  return {
+    conversationId,
+    clientInputId: item.clientInputId,
+    content: item.content,
+    materials: item.materials as Array<Record<string, unknown>>,
+    replyToMessageId: typeof item.replyToMessageId === "string" ? item.replyToMessageId : null,
+    artifactRefs: Array.isArray(item.artifactRefs) ? item.artifactRefs as string[] : [],
+    interruptId: typeof item.interruptId === "string" ? item.interruptId : null,
+    continueLegacy: item.continueLegacy === true,
+    registrationStatus: item.registrationStatus === "registered" ? "registered" : "pending",
+    ...(typeof item.runId === "string" ? { runId: item.runId } : {}),
+  };
+};
+
+const parseRegisteredSupervisorTurn = (
+  value: JsonValue,
+): RegisteredSupervisorTurn => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Agent Turn 返回格式不合法");
+  }
+  const runId = value.run_id;
+  const status = value.status;
+  if (
+    typeof runId !== "string"
+    || !runId
+    || (status !== "accepted" && status !== "queued")
+  ) {
+    throw new TypeError("Agent Turn 返回格式不合法");
+  }
+  return { runId, status };
+};
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
 const workflowIntentFromPhase = (phase: string): CreationIntent | null => {
@@ -274,6 +367,8 @@ interface WorkspaceSnapshot {
   flowDraft?: FlowDraft | null;
   pendingMessageJob?: PendingMessageJob | null;
   pending_message_job?: PendingMessageJob | null;
+  pendingAgentRuntimeTurns?: PendingSupervisorTurn[];
+  pending_agent_runtime_turns?: PendingSupervisorTurn[];
   pendingIntakeJob?: PendingIntakeJob | null;
   pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
@@ -290,6 +385,8 @@ interface WorkspaceSnapshot {
   pending_image_job?: PendingImageJob | null;
   pendingImageRevision?: PendingConversationArtifact | null;
   pending_image_revision?: PendingConversationArtifact | null;
+  pendingPptOutlineRevision?: PendingConversationArtifact | null;
+  pending_ppt_outline_revision?: PendingConversationArtifact | null;
   pendingScenePackageJob?: PendingScenePackageJob | null;
   pending_scene_package_job?: PendingScenePackageJob | null;
   pendingVideoJob?: PendingVideoJob | null;
@@ -1387,6 +1484,18 @@ function latestImageResultArtifactForConversation(messages: ChatMessage[], conve
   return undefined;
 }
 
+function latestPptRevisionRequestedForConversation(
+  messages: ChatMessage[],
+  conversationId: string,
+  content: string,
+): boolean {
+  if (!/(大纲|页|结构|封面|市场痛点|产品卖点|营销计划|总结)/u.test(content)) return false;
+  return messages.some(
+    (message) => messageConversationId(message, conversationId) === conversationId
+      && Boolean(message.artifact?.pptSummary),
+  );
+}
+
 function quotaMessage(fallback: string) {
   return `${fallback} 当前操作已暂停，充值后回到本对话可以继续执行。`;
 }
@@ -1718,6 +1827,7 @@ export function WorkspacePage() {
   const [selectedStoryboardMessageId, setSelectedStoryboardMessageId] = useState("");
   const [selectedPlanEditorMessageId, setSelectedPlanEditorMessageId] = useState("");
   const [savingPlanEdit, setSavingPlanEdit] = useState(false);
+  const [agentRevisionSourceMessageId, setAgentRevisionSourceMessageId] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
@@ -1737,12 +1847,28 @@ export function WorkspacePage() {
   const [, setJianyingDraftUiRevision] = useState(0);
   const [workflowProgress, setWorkflowProgress] = useState<WorkflowProgressSnapshot | null>(null);
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>("frontend_v2");
+  const [agentRuntimeMode, setAgentRuntimeMode] = useState<WorkspaceAgentRuntimeMode>("off");
   const [orchestrationResolved, setOrchestrationResolved] = useState(true);
   const [pendingSupervisorTurns, setPendingSupervisorTurns] = useState<PendingSupervisorTurn[]>([]);
+  const pendingSupervisorTurnsRef = useRef<PendingSupervisorTurn[]>([]);
+  const pendingSupervisorTurnsByConversationRef = useRef(
+    new Map<string, PendingSupervisorTurn[]>(),
+  );
+  const pendingSupervisorTurnWritesRef = useRef(
+    createConversationWriteSequencer(),
+  );
   const orchestrationModeRef = useRef<OrchestrationMode | null>("frontend_v2");
+  const agentRuntimeModeRef = useRef<WorkspaceAgentRuntimeMode | null>("off");
   const deferredOwnershipInputsRef = useRef<DeferredOwnershipInput[]>([]);
-  const supervisorTurnInFlightRef = useRef(false);
-  const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(orchestrationMode, currentConversationId);
+  const supervisorTurnInFlightRef = useRef<Set<string>>(new Set());
+  // 旧 v2 接力可能持续数秒；在接力完成并写回上下文前，禁止同一 Turn 被
+  // Runtime effect 因状态刷新重复执行，避免重复计费或重复启动供应商任务。
+  const supervisorLegacyHandoffClaimedRef = useRef<Set<string>>(new Set());
+  const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(
+    orchestrationMode,
+    currentConversationId,
+    agentRuntimeMode,
+  );
   const runtimePolicy = orchestrationResolved
     ? resolvedRuntimePolicy
     : {
@@ -1750,7 +1876,7 @@ export function WorkspacePage() {
       legacyRunnerEnabled: false,
       legacyArtifactActionsEnabled: false,
     };
-  // 新旧运行时共用同一个页面入口，但只有服务端明确分配 supervisor_v1 时才启动新 Hook。
+  // 新旧运行时共用同一个页面入口；R1 assist 只挂载会话基础设施，业务仍由旧 runner 推进。
   // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
@@ -1789,7 +1915,7 @@ export function WorkspacePage() {
     };
     window.addEventListener("contentAppUserMessage", handler);
     return () => window.removeEventListener("contentAppUserMessage", handler);
-  }, [orchestrationMode]);
+  }, [agentRuntimeMode, orchestrationMode]);
 
   // 运行中上下文：这些值主要给异步 SSE 回调读取，不需要每次变化都触发 React 重渲染。
   // 可以类比后端 Service 内部字段，保存当前 taskId、事件去重集合和取消订阅函数。
@@ -1848,19 +1974,40 @@ export function WorkspacePage() {
   }, [messages]);
 
   useEffect(() => {
+    pendingSupervisorTurnsRef.current = pendingSupervisorTurns;
+    if (currentConversationId) {
+      pendingSupervisorTurnsByConversationRef.current.set(
+        currentConversationId,
+        pendingSupervisorTurns,
+      );
+    }
+  }, [currentConversationId, pendingSupervisorTurns]);
+
+  useEffect(() => {
     if (
       !runtimePolicy.supervisorEnabled
       || supervisorRuntime.state.connection.status !== "connected"
       || supervisorRuntime.state.conversationId !== currentConversationId
     ) return;
-    messagesRef.current = supervisorRuntime.state.messages;
-    setMessages(supervisorRuntime.state.messages);
+    const projectedMessages = mergeSupervisorMessagesWithPending(
+      supervisorRuntime.state.messages,
+      pendingSupervisorTurns.map((pendingTurn) => ({
+        id: pendingTurn.clientInputId,
+        conversationId: pendingTurn.conversationId,
+        content: pendingTurn.content,
+        materials: pendingTurn.materials as JsonObject[],
+      })),
+      currentConversationId,
+    );
+    messagesRef.current = projectedMessages;
+    setMessages(projectedMessages);
     const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
     workflowProgressConversationIdRef.current = currentConversationId;
     workflowProgressRef.current = nextProgress;
     setWorkflowProgress(nextProgress);
   }, [
     currentConversationId,
+    pendingSupervisorTurns,
     runtimePolicy.supervisorEnabled,
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.conversationId,
@@ -1909,6 +2056,13 @@ export function WorkspacePage() {
     orchestrationModeRef.current = mode;
     setOrchestrationMode(mode);
     setOrchestrationResolved(true);
+  };
+
+  const setResolvedAgentRuntimeMode = (
+    mode: WorkspaceAgentRuntimeMode,
+  ) => {
+    agentRuntimeModeRef.current = mode;
+    setAgentRuntimeMode(mode);
   };
 
   const isCurrentConversation = (targetConversationId: string) => {
@@ -2157,6 +2311,22 @@ export function WorkspacePage() {
       return nextItems;
     });
     return optimisticMessage;
+  };
+
+  const ensurePendingSupervisorTurnVisible = (pendingTurn: PendingSupervisorTurn) => {
+    const alreadyVisible = messagesRef.current.some(
+      (item) => item.id === pendingTurn.clientInputId
+        && messageConversationId(item, pendingTurn.conversationId) === pendingTurn.conversationId,
+    );
+    if (alreadyVisible) return;
+    appendOptimisticMessageForConversation({
+      id: pendingTurn.clientInputId,
+      conversationId: pendingTurn.conversationId,
+      role: "user",
+      content: pendingTurn.content,
+      materials: pendingTurn.materials,
+      time: "",
+    }, pendingTurn.conversationId);
   };
 
   const appendMessageForConversation = async (message: ChatMessage, targetConversationId: string): Promise<ChatMessage> => {
@@ -3429,23 +3599,120 @@ export function WorkspacePage() {
       smartPptProjectId: pptProjectId(sourceArtifact) ?? numericValue(pptFile.smart_ppt_project_id),
     }, targetConversationId);
 
+  const persistPendingSupervisorTurns = async (
+    updater: (
+      current: PendingSupervisorTurn[],
+    ) => PendingSupervisorTurn[],
+    targetConversationId: string,
+  ) => {
+    await pendingSupervisorTurnWritesRef.current.run(
+      targetConversationId,
+      async () => {
+        const current = (
+          pendingSupervisorTurnsByConversationRef.current.get(
+            targetConversationId,
+          )
+          || pendingSupervisorTurnsRef.current.filter(
+            (item) => item.conversationId === targetConversationId,
+          )
+        );
+        const normalized = updater([...current]).filter(
+          (item) => item.conversationId === targetConversationId,
+        );
+        const completedLegacyTurn = current.find(
+          (item) => item.conversationId === targetConversationId
+            && item.continueLegacy
+            && item.registrationStatus === "registered"
+            && !normalized.some((next) => next.clientInputId === item.clientInputId),
+        );
+        await updateConversationWithProgress(targetConversationId, {
+          context: {
+            ...makeSnapshot(targetConversationId),
+            pendingAgentRuntimeTurns: normalized,
+            pending_agent_runtime_turns: normalized,
+            ...(completedLegacyTurn
+              ? {
+                  legacy_handoff: {
+                    source: "frontend_v2",
+                    client_input_id: completedLegacyTurn.clientInputId,
+                  },
+                }
+              : {}),
+          } as unknown as Record<string, unknown>,
+        });
+        // 只有服务端恢复上下文落库后才向注册 effect 暴露 Turn；
+        // PUT 失败时保持原 ref/state，避免出现已注册但刷新不可恢复的半状态。
+        pendingSupervisorTurnsByConversationRef.current.set(
+          targetConversationId,
+          normalized,
+        );
+        if (isCurrentConversation(targetConversationId)) {
+          pendingSupervisorTurnsRef.current = normalized;
+          setPendingSupervisorTurns(normalized);
+        }
+      },
+    );
+  };
+
+  const pendingSupervisorTurnsForConversation = (
+    targetConversationId: string,
+  ): PendingSupervisorTurn[] => (
+    pendingSupervisorTurnsByConversationRef.current.get(
+      targetConversationId,
+    )
+    || pendingSupervisorTurnsRef.current.filter(
+      (item) => item.conversationId === targetConversationId,
+    )
+  );
+
   const persistPendingMessageJob = async (
     pendingMessageJob: PendingMessageJob | null,
     targetConversationId: string,
     lastPhase: string,
     extraContext: Record<string, unknown> = {},
   ) => {
-    pendingMessageJobRef.current = pendingMessageJob;
-    if (!targetConversationId) return;
-    await updateConversationWithProgress(targetConversationId, {
-      last_phase: lastPhase,
-      context: {
-        ...makeSnapshot(targetConversationId),
-        ...extraContext,
-        pendingMessageJob,
-        pending_message_job: pendingMessageJob,
-      } as unknown as Record<string, unknown>,
-    });
+    if (!targetConversationId) {
+      pendingMessageJobRef.current = pendingMessageJob;
+      return;
+    }
+    await pendingSupervisorTurnWritesRef.current.run(
+      targetConversationId,
+      async () => {
+        const currentRuntimeTurns = pendingSupervisorTurnsForConversation(
+          targetConversationId,
+        );
+        const runtimeTurns = (
+          pendingMessageJob?.continue_after_save?.type === "handle_send"
+            ? currentRuntimeTurns.filter(
+                (item) => (
+                  item.clientInputId
+                  !== pendingMessageJob.source_message_id
+                ),
+              )
+            : currentRuntimeTurns
+        );
+        await updateConversationWithProgress(targetConversationId, {
+          last_phase: lastPhase,
+          context: {
+            ...makeSnapshot(targetConversationId),
+            ...extraContext,
+            pendingMessageJob,
+            pending_message_job: pendingMessageJob,
+            pendingAgentRuntimeTurns: runtimeTurns,
+            pending_agent_runtime_turns: runtimeTurns,
+          } as unknown as Record<string, unknown>,
+        });
+        pendingMessageJobRef.current = pendingMessageJob;
+        pendingSupervisorTurnsByConversationRef.current.set(
+          targetConversationId,
+          runtimeTurns,
+        );
+        if (isCurrentConversation(targetConversationId)) {
+          pendingSupervisorTurnsRef.current = runtimeTurns;
+          setPendingSupervisorTurns(runtimeTurns);
+        }
+      },
+    );
   };
 
   const clearPendingMessageJob = async (
@@ -4585,6 +4852,44 @@ export function WorkspacePage() {
     const quotaInsufficient = isQuotaInsufficientPayload(editResult);
     if (!editResult.ok || !nextUrl) {
       releaseArtifactAction(processedKey);
+      const failedRequest = pendingImageJob.request as ImageAssetEditJobRequest;
+      const retryMaterials = [
+        {
+          ...reference,
+          source_image_url: reference.source_image_url,
+          url: reference.source_image_url,
+          storyboard_message_id: storyboardMessage?.id || pendingImageJob.storyboard_message_id,
+        },
+        ...uploadedReferenceMaterials(failedRequest.materials || []),
+      ];
+      const retrySelection: ImageEditModelSelection = {
+        model: String(failedRequest.model || "gpt-image-2"),
+        ratio: String(failedRequest.ratio || defaultGlobalSceneAssetRatio(reference.asset_group)),
+        size: String(failedRequest.size || "4K"),
+      };
+      const retryRequest: PendingImageEditRequest = {
+        conversationId: targetConversationId,
+        prompt: String(failedRequest.prompt || ""),
+        formValues: {
+          image_goal: reference.name,
+          image_operation: "image_edit",
+          image_model: retrySelection.model,
+          image_size: retrySelection.ratio,
+          image_quality: retrySelection.size,
+        },
+        intakeContext: {
+          image_operation: "image_edit",
+          image_model: retrySelection.model,
+          image_size: retrySelection.ratio,
+          image_quality: retrySelection.size,
+          scene_global_asset_reference: reference,
+        },
+        materials: retryMaterials,
+        selection: retrySelection,
+        mode: isFusion ? "scene_global_asset_fusion" : "scene_global_asset_edit",
+        sceneGlobalAssetReference: reference,
+        storyboardMessageId: storyboardMessage?.id || pendingImageJob.storyboard_message_id,
+      };
       pushArtifact("全局素材图片编辑失败，请查看错误信息。", {
         type: "image_result",
         title: "全局素材图片编辑结果",
@@ -4602,8 +4907,10 @@ export function WorkspacePage() {
           raw: editResult.raw,
         },
         intent: "image",
-        materials: [reference],
-        imageRevisionFeedback: String((pendingImageJob.request as ImageAssetEditJobRequest).prompt || ""),
+        materials: retryMaterials,
+        imageEditRequest: retryRequest as unknown as Record<string, unknown>,
+        imageEditConfirmedSelection: retrySelection,
+        imageRevisionFeedback: retryRequest.prompt,
       }, targetConversationId);
       await clearPendingImageJob(
         targetConversationId,
@@ -5835,6 +6142,21 @@ export function WorkspacePage() {
     pendingDialogContextRef.current = null;
     flowDraftRef.current = snapshot.flowDraft || null;
     pendingMessageJobRef.current = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
+    const rawRuntimeTurns = snapshot.pendingAgentRuntimeTurns
+      || snapshot.pending_agent_runtime_turns;
+    const restoredRuntimeTurns = (
+      Array.isArray(rawRuntimeTurns) ? rawRuntimeTurns : []
+    )
+      .map((item) => parsePendingSupervisorTurn(item, conversationIdRef.current))
+      .filter((item): item is PendingSupervisorTurn => item !== null);
+    pendingSupervisorTurnsRef.current = restoredRuntimeTurns;
+    if (conversationIdRef.current) {
+      pendingSupervisorTurnsByConversationRef.current.set(
+        conversationIdRef.current,
+        restoredRuntimeTurns,
+      );
+    }
+    setPendingSupervisorTurns(restoredRuntimeTurns);
     pendingPlanMessagePersistenceIdsRef.current = new Set(
       pendingMessageJobRef.current?.continue_after_save?.type === "plan_save"
         ? [pendingMessageJobRef.current.source_message_id]
@@ -5844,11 +6166,18 @@ export function WorkspacePage() {
     pendingDirectionJobRef.current = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
     pendingPlanJobRef.current = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     planRevisionArtifactRef.current = snapshot.pendingPlanRevisionRequest || snapshot.pending_plan_revision_request || null;
-    setPendingPlanRevisionChoice(snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null);
+    const restoredPlanRevisionChoice = snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null;
+    setPendingPlanRevisionChoice(restoredPlanRevisionChoice);
+    setAgentRevisionSourceMessageId(
+      planRevisionArtifactRef.current?.sourceMessageId
+        || restoredPlanRevisionChoice?.sourceMessageId
+        || (pendingPlanJobRef.current?.kind === "plan_revision" ? pendingPlanJobRef.current.source_message_id : ""),
+    );
     pendingImageEditRequestRef.current = snapshot.pendingImageEditRequest || null;
     imageEditConfirmedSelectionsRef.current = snapshot.imageEditConfirmedSelections || {};
     pendingImageJobRef.current = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     imageRevisionArtifactRef.current = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
+    pptOutlineRevisionArtifactRef.current = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     videoRevisionArtifactRef.current = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
@@ -5896,6 +6225,12 @@ export function WorkspacePage() {
         pendingMessageJobRef.current?.conversation_id === snapshotConversationId ? pendingMessageJobRef.current : null,
       pending_message_job:
         pendingMessageJobRef.current?.conversation_id === snapshotConversationId ? pendingMessageJobRef.current : null,
+      pendingAgentRuntimeTurns: pendingSupervisorTurnsRef.current.filter(
+        (item) => item.conversationId === snapshotConversationId,
+      ),
+      pending_agent_runtime_turns: pendingSupervisorTurnsRef.current.filter(
+        (item) => item.conversationId === snapshotConversationId,
+      ),
       pendingIntakeJob:
         pendingIntakeJobRef.current?.conversation_id === snapshotConversationId ? pendingIntakeJobRef.current : null,
       pending_intake_job:
@@ -5927,6 +6262,10 @@ export function WorkspacePage() {
         imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
       pending_image_revision:
         imageRevisionArtifactRef.current?.conversationId === snapshotConversationId ? imageRevisionArtifactRef.current : null,
+      pendingPptOutlineRevision:
+        pptOutlineRevisionArtifactRef.current?.conversationId === snapshotConversationId ? pptOutlineRevisionArtifactRef.current : null,
+      pending_ppt_outline_revision:
+        pptOutlineRevisionArtifactRef.current?.conversationId === snapshotConversationId ? pptOutlineRevisionArtifactRef.current : null,
       pendingScenePackageJob:
         pendingScenePackageJobRef.current?.conversation_id === snapshotConversationId ? pendingScenePackageJobRef.current : null,
       pending_scene_package_job:
@@ -5984,6 +6323,8 @@ export function WorkspacePage() {
     setComposerPrefillRequest(null);
     setBusy(false);
     setResolvedOrchestrationMode("frontend_v2");
+    setResolvedAgentRuntimeMode("off");
+    pendingSupervisorTurnsRef.current = [];
     setPendingSupervisorTurns([]);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
@@ -6010,7 +6351,9 @@ export function WorkspacePage() {
     setWorkflowProgress(null);
     pptDoneConversationIdsRef.current = new Set();
     planRevisionArtifactRef.current = null;
+    pptOutlineRevisionArtifactRef.current = null;
     setPendingPlanRevisionChoice(null);
+    setAgentRevisionSourceMessageId("");
     imageRevisionArtifactRef.current = null;
     videoRevisionArtifactRef.current = null;
     briefReadyShownRef.current = false;
@@ -6022,6 +6365,11 @@ export function WorkspacePage() {
       conversation: detail.conversation,
       messages: detail.messages,
     });
+    const resolvedAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode({
+      conversation: detail.conversation,
+      messages: detail.messages,
+    });
+    setResolvedAgentRuntimeMode(resolvedAgentRuntimeMode);
     setResolvedOrchestrationMode(resolvedMode);
     const snapshot = (detail.conversation.context || {}) as Partial<WorkspaceSnapshot>;
     const pendingImageEditRequest =
@@ -6034,6 +6382,7 @@ export function WorkspacePage() {
     const pendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
+    const pendingPptOutlineRevision = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     const pendingVideoRevision = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     const pendingScenePackageJob = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
     const pendingPptJob = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
@@ -6095,6 +6444,8 @@ export function WorkspacePage() {
       pending_image_job: pendingImageJob,
       pendingImageRevision,
       pending_image_revision: pendingImageRevision,
+      pendingPptOutlineRevision,
+      pending_ppt_outline_revision: pendingPptOutlineRevision,
       pendingVideoRevision,
       pending_video_revision: pendingVideoRevision,
       pendingPptJob,
@@ -6259,6 +6610,88 @@ export function WorkspacePage() {
     }
   };
 
+  // 刷新或压缩完成后，服务端 Turn 可能已经进入 processing，但旧版页面内存里的
+  // pendingSupervisorTurns 已丢失。这里按服务端队列和已保存用户消息重建接力 DTO，
+  // 类似从数据库恢复一条待执行的 Service Command，绝不重新注册或重复计费。
+  useEffect(() => {
+    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+      || agentRuntimeModeRef.current === "assist"
+      || agentRuntimeModeRef.current === "shadow";
+    if (
+      !currentConversationId
+      || !runtimeAttached
+      || supervisorRuntime.state.connection.status !== "connected"
+    ) return;
+    const localIds = new Set(
+      pendingSupervisorTurns
+        .filter((item) => item.conversationId === currentConversationId)
+        .map((item) => item.clientInputId),
+    );
+    const recoverableInput = supervisorRuntime.state.inputQueue.find(
+      (item) => ["accepted", "processing", "queued"].includes(item.status)
+        && !localIds.has(item.clientInputId),
+    );
+    if (!recoverableInput) return;
+    const sourceMessage = messagesRef.current.find(
+      (message) => message.id === recoverableInput.clientInputId
+        && messageConversationId(message, currentConversationId) === currentConversationId
+        && message.role === "user",
+    );
+    if (!sourceMessage) return;
+
+    const lastPhase = workflowProgressConversationIdRef.current === currentConversationId
+      ? workflowProgressRef.current?.last_phase || ""
+      : "";
+    if (!imageRevisionArtifactRef.current) {
+      const imageArtifact = latestImageResultArtifactForConversation(messagesRef.current, currentConversationId);
+      const looksLikeRevision = /修改|重新生成|背景|轮廓光|亮明|保持不变/u.test(sourceMessage.content);
+      if (imageArtifact && (lastPhase === "image_regeneration_running" || looksLikeRevision)) {
+        imageRevisionArtifactRef.current = {
+          conversationId: currentConversationId,
+          artifact: imageArtifact,
+        };
+      }
+    }
+    if (!pptOutlineRevisionArtifactRef.current && latestPptRevisionRequestedForConversation(messagesRef.current, currentConversationId, sourceMessage.content)) {
+      const outlineMessage = [...messagesRef.current]
+        .reverse()
+        .find((message) => messageConversationId(message, currentConversationId) === currentConversationId && message.artifact?.pptSummary);
+      if (outlineMessage?.artifact) {
+        pptOutlineRevisionArtifactRef.current = {
+          conversationId: currentConversationId,
+          artifact: outlineMessage.artifact,
+        };
+      }
+    }
+
+    const recoveredTurn: PendingSupervisorTurn = {
+      conversationId: currentConversationId,
+      clientInputId: recoverableInput.clientInputId,
+      content: sourceMessage.content,
+      materials: sourceMessage.materials || [],
+      replyToMessageId: null,
+      artifactRefs: [],
+      interruptId: null,
+      continueLegacy: orchestrationModeRef.current === "frontend_v2",
+      registrationStatus: "registered",
+      runId: recoverableInput.turnId || undefined,
+    };
+    void persistPendingSupervisorTurns(
+      (current) => current.some((item) => item.clientInputId === recoveredTurn.clientInputId)
+        ? current
+        : [recoveredTurn, ...current],
+      currentConversationId,
+    ).catch(() => {});
+  }, [
+    currentConversationId,
+    agentRuntimeMode,
+    pendingSupervisorTurns,
+    orchestrationMode,
+    orchestrationResolved,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.inputQueue,
+  ]);
+
   useEffect(() => {
     const handleVisibilityResume = () => {
       pageVisibleRef.current = typeof document === "undefined" || document.visibilityState !== "hidden";
@@ -6305,6 +6738,7 @@ export function WorkspacePage() {
       lastEventIdRef.current = 0;
       setActiveConversationId(conversationId);
       orchestrationModeRef.current = null;
+      agentRuntimeModeRef.current = null;
       setOrchestrationResolved(false);
       setBusy(true);
       try {
@@ -6366,6 +6800,7 @@ export function WorkspacePage() {
       return {
         conversationId: conversationIdRef.current,
         orchestrationMode: orchestrationModeRef.current ?? "frontend_v2",
+        agentRuntimeMode: agentRuntimeModeRef.current ?? "off",
       };
     }
     const created = await api.createConversation({
@@ -6375,12 +6810,18 @@ export function WorkspacePage() {
       context: makeSnapshot() as unknown as Record<string, unknown>,
     });
     const createdMode = resolveWorkspaceOrchestrationMode(created);
+    const createdAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode(created);
     skipRouteRestoreConversationRef.current = created.conversation_id;
+    setResolvedAgentRuntimeMode(createdAgentRuntimeMode);
     setResolvedOrchestrationMode(createdMode);
     setActiveConversationId(created.conversation_id);
     window.dispatchEvent(new Event("pixelflow-conversations-updated"));
     notifyContentAppConversationsUpdated(created.conversation_id);
-    return { conversationId: created.conversation_id, orchestrationMode: createdMode };
+    return {
+      conversationId: created.conversation_id,
+      orchestrationMode: createdMode,
+      agentRuntimeMode: createdAgentRuntimeMode,
+    };
   };
 
   const normalizeSendInput = (input: string | AgentUserMessagePayload): AgentUserMessagePayload => {
@@ -6416,10 +6857,12 @@ export function WorkspacePage() {
   const handleSupervisorTurn = async (
     pendingTurn: PendingSupervisorTurn,
     contextVersion: number,
-  ): Promise<void> => {
+  ): Promise<RegisteredSupervisorTurn | null> => {
     const targetConversationId = pendingTurn.conversationId;
-    if (!targetConversationId || orchestrationModeRef.current !== "supervisor_v1") return;
-    setBusyForConversation(targetConversationId, true);
+    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+      || agentRuntimeModeRef.current === "assist"
+      || agentRuntimeModeRef.current === "shadow";
+    if (!targetConversationId || !runtimeAttached) return null;
     try {
       // 每次写请求前重新读取 CAS 版本，避免上一轮 Turn 或事件消费后继续使用旧版本。
       await supervisorRuntime.refreshSnapshot();
@@ -6428,62 +6871,176 @@ export function WorkspacePage() {
         conversationId: targetConversationId,
         clientInputId: pendingTurn.clientInputId,
         content: pendingTurn.content,
-        materials: pendingTurn.materials,
+        materials: pendingTurn.materials as JsonObject[],
         replyToMessageId: pendingTurn.replyToMessageId,
         artifactRefs: pendingTurn.artifactRefs,
-        interruptId: pendingTurn.interruptId,
+        interruptId: orchestrationModeRef.current === "supervisor_v1"
+          ? pendingTurn.interruptId
+          : null,
       }, expectedContextVersion);
       if (submission.kind === "interrupt") {
+        if (orchestrationModeRef.current !== "supervisor_v1") return null;
         await supervisorRuntime.respondToInterrupt(submission.interruptId, submission.request);
-      } else {
-        await supervisorRuntime.startTurn(submission.request);
+        // interrupt 成功后先原子移除恢复上下文；若写回失败，保留相同
+        // client_response_id 供幂等重试，不创建额外 Turn。
+        await persistPendingSupervisorTurns(
+          (current) => current.filter(
+            (item) => item.clientInputId !== pendingTurn.clientInputId,
+          ),
+          targetConversationId,
+        );
+        await supervisorRuntime.refreshSnapshot().catch(() => {});
+        return null;
       }
+      const request: TurnStartRequest = submission.request;
+      const started = parseRegisteredSupervisorTurn(
+        await supervisorRuntime.startTurn(request),
+      );
       // Turn 已接受后刷新一次，让紧随其后的排队输入看到服务端最新版本。
       try {
         await supervisorRuntime.refreshSnapshot();
       } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof DOMException && error.name === "AbortError") return null;
       }
+      return started;
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (error instanceof DOMException && error.name === "AbortError") return null;
       appendSupervisorNotice("会话 Agent 请求失败，请稍后重试。", targetConversationId);
-    } finally {
-      setBusyForConversation(targetConversationId, false);
+      return null;
     }
   };
 
   useEffect(() => {
-    const pendingTurn = pendingSupervisorTurns.find(
-      (item) => item.conversationId === currentConversationId,
-    );
-    if (!pendingTurn || orchestrationModeRef.current !== "supervisor_v1") return;
+    // 恢复时优先处理尚未提交到 Runtime 的输入；已注册 Turn 则优先选择
+    // Snapshot 中仍存在的 input，避免已失效的旧 registered Turn 一直 wait，
+    // 阻塞后续输入。
+    const candidateTurns = pendingSupervisorTurns
+      .filter(
+        (item) => item.conversationId === currentConversationId
+          && !supervisorTurnInFlightRef.current.has(item.clientInputId)
+          && !supervisorLegacyHandoffClaimedRef.current.has(item.clientInputId),
+      );
+    const pendingTurn = candidateTurns.find((item) => item.registrationStatus === "pending")
+      || candidateTurns.find((item) => supervisorRuntime.state.inputQueue.some(
+        (serverItem) => serverItem.clientInputId === item.clientInputId,
+      ))
+      || candidateTurns[0];
+    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+      || agentRuntimeModeRef.current === "assist"
+      || agentRuntimeModeRef.current === "shadow";
+    if (!pendingTurn || !runtimeAttached) return;
     if (supervisorRuntime.state.connection.status === "fatal") {
-      setPendingSupervisorTurns((items) => items.filter(
-        (item) => item.clientInputId !== pendingTurn.clientInputId,
-      ));
       appendSupervisorNotice("会话 Agent 状态恢复失败，请刷新后重试。", pendingTurn.conversationId);
       return;
     }
-    if (
-      supervisorRuntime.state.connection.status !== "connected"
-      || supervisorRuntime.contextVersion === null
-      || supervisorTurnInFlightRef.current
-    ) {
+    const serverInput = supervisorRuntime.state.inputQueue.find(
+      (item) => item.clientInputId === pendingTurn.clientInputId,
+    );
+    // Snapshot 的 contextVersion 只作为 CAS 优化值；恢复阶段它可能尚未从
+    // 外部 Store 反映到本次 render。真正注册前 handleSupervisorTurn 会再读
+    // 一次最新 Snapshot，因此不能因为这里暂时为 null 而把已落库 Turn 卡死。
+    if (supervisorRuntime.state.connection.status !== "connected") return;
+    if (serverInput) ensurePendingSupervisorTurnVisible(pendingTurn);
+    const handoffAction = resolveAssistHandoffAction({
+      registrationStatus: pendingTurn.registrationStatus,
+      serverInputStatus: serverInput?.status,
+      continueLegacy: pendingTurn.continueLegacy,
+      legacyBusy,
+      dialogOpen,
+      pendingPlanRevision: Boolean(pendingPlanRevisionChoice),
+    });
+    if (handoffAction !== "register") {
+      if (handoffAction === "wait") return;
+      if (handoffAction === "failed") {
+        appendSupervisorNotice("会话 Agent 未能处理已保存输入，请稍后重试。", pendingTurn.conversationId);
+        return;
+      }
+      supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+      if (handoffAction === "continue_legacy") {
+        supervisorLegacyHandoffClaimedRef.current.add(pendingTurn.clientInputId);
+      }
+      const continueRegisteredTurn = async () => {
+        let handoffPersisted = false;
+        if (handoffAction === "acknowledge") {
+          await persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          );
+          handoffPersisted = true;
+          return;
+        }
+        try {
+          await handleSend(
+            {
+              content: pendingTurn.content,
+              materials: pendingTurn.materials,
+              reply_to_message_id: pendingTurn.replyToMessageId,
+              artifact_refs: pendingTurn.artifactRefs,
+            },
+            {
+              skipRuntimeRegistration: true,
+              clientInputId: pendingTurn.clientInputId,
+            },
+          );
+          await persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          );
+          handoffPersisted = true;
+          await supervisorRuntime.refreshSnapshot().catch(() => {});
+        } finally {
+          if (handoffPersisted) {
+            supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
+          }
+        }
+      };
+      void continueRegisteredTurn().finally(() => {
+        supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+        if (handoffAction === "acknowledge") {
+          supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
+        }
+      });
       return;
     }
-    supervisorTurnInFlightRef.current = true;
-    void handleSupervisorTurn(pendingTurn, supervisorRuntime.contextVersion)
+    supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+    void handleSupervisorTurn(pendingTurn, supervisorRuntime.getContextVersion() ?? 0)
+      .then(async (registered) => {
+        if (!registered) return;
+        const registeredTurn: PendingSupervisorTurn = {
+          ...pendingTurn,
+          registrationStatus: "registered",
+          runId: registered.runId,
+        };
+        ensurePendingSupervisorTurnVisible(registeredTurn);
+        await persistPendingSupervisorTurns(
+          (current) => current.map(
+            (item) => item.clientInputId === pendingTurn.clientInputId
+              ? registeredTurn
+              : item,
+          ),
+          pendingTurn.conversationId,
+        );
+      })
       .finally(() => {
-        supervisorTurnInFlightRef.current = false;
-        setPendingSupervisorTurns((items) => items.filter(
-          (item) => item.clientInputId !== pendingTurn.clientInputId,
-        ));
+        supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
       });
   }, [
     currentConversationId,
+    agentRuntimeMode,
+    dialogOpen,
+    legacyBusy,
+    orchestrationMode,
+    orchestrationResolved,
+    pendingPlanRevisionChoice,
     pendingSupervisorTurns,
     supervisorRuntime.contextVersion,
+    supervisorRuntime.getContextVersion,
     supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.inputQueue,
   ]);
 
   const shouldUseRecoverableIntakeEntry = (
@@ -6508,7 +7065,10 @@ export function WorkspacePage() {
     return true;
   };
 
-  const handleSend = async (input: string | AgentUserMessagePayload) => {
+  const handleSend = async (
+    input: string | AgentUserMessagePayload,
+    runtimeOptions: SendRuntimeOptions = {},
+  ) => {
     if (restoringRef.current) {
       deferredOwnershipInputsRef.current.push({
         routeConversationId: routeConversationIdRef.current,
@@ -6524,25 +7084,47 @@ export function WorkspacePage() {
       interrupt_id: interruptId = null,
     } = normalizeSendInput(input);
     let activeConversation = conversationIdRef.current;
-    const message: ChatMessage = { id: uid(), conversationId: activeConversation || undefined, role: "user", content: text, materials, time: "" };
+    const message: ChatMessage = {
+      id: runtimeOptions.clientInputId ?? uid(),
+      conversationId: activeConversation || undefined,
+      role: "user",
+      content: text,
+      materials,
+      time: "",
+    };
     try {
       const ownership = await ensureConversation(text);
       activeConversation = ownership.conversationId;
-      if (ownership.orchestrationMode === "supervisor_v1") {
-        const restoredInterruptId = supervisorRuntime.state.conversationId === activeConversation
+      const shouldRegisterRuntime = ownership.orchestrationMode === "supervisor_v1"
+        || ownership.agentRuntimeMode === "assist"
+        || ownership.agentRuntimeMode === "shadow";
+      if (shouldRegisterRuntime && !runtimeOptions.skipRuntimeRegistration) {
+        const restoredInterruptId = ownership.orchestrationMode === "supervisor_v1"
+          && supervisorRuntime.state.conversationId === activeConversation
           ? supervisorRuntime.state.interrupt?.interruptId ?? null
           : null;
-        setPendingSupervisorTurns((items) => items.some(
-          (item) => item.clientInputId === message.id,
-        ) ? items : [...items, {
+        const pendingTurn: PendingSupervisorTurn = {
           conversationId: activeConversation,
           clientInputId: message.id,
           content: text,
           materials,
           replyToMessageId,
           artifactRefs,
-          interruptId: interruptId ?? restoredInterruptId,
-        }]);
+          interruptId: ownership.orchestrationMode === "supervisor_v1"
+            ? interruptId ?? restoredInterruptId
+            : null,
+          continueLegacy: ownership.orchestrationMode === "frontend_v2",
+          registrationStatus: "pending",
+        };
+        await persistPendingSupervisorTurns(
+          (current) => (
+            current.some((item) => item.clientInputId === message.id)
+              ? current
+              : [...current, pendingTurn]
+          ),
+          activeConversation,
+        );
+        ensurePendingSupervisorTurnVisible(pendingTurn);
         setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
         return;
@@ -6693,7 +7275,6 @@ export function WorkspacePage() {
     }
     if (pendingImageRevision?.conversationId === activeConversation && pendingImageRevisionArtifact?.imagePrepare && pendingImageRevisionArtifact.imageResult) {
       const flowMaterials = mergeMaterials(pendingImageRevisionArtifact.materials, materials);
-      imageRevisionArtifactRef.current = null;
       setBusyForConversation(activeConversation, true);
       pushAssistant("已收到图片修改意见，正在重新准备参数并生成图片…", activeConversation);
       try {
@@ -6757,7 +7338,10 @@ export function WorkspacePage() {
           intake_context: pendingImageRevisionArtifact.intakeContext,
           materials: flowMaterials,
           image_prepare: imagePrepare,
+          pendingImageRevision: null,
+          pending_image_revision: null,
         });
+        imageRevisionArtifactRef.current = null;
         await resumePendingImageJob(pendingImageJob);
       } catch (err) {
         pushAssistant(`图片重新生成失败:${err instanceof Error ? err.message : String(err)}`, activeConversation);
@@ -7217,6 +7801,17 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     pptOutlineRevisionArtifactRef.current = { conversationId: targetConversationId, artifact: msg.artifact };
     pushAssistant("请在输入框填写 PPT 大纲修改意见，我会基于当前大纲继续更新。", targetConversationId);
+    if (targetConversationId) {
+      void updateConversationWithProgress(targetConversationId, {
+          last_phase: "ppt_outline_revision_requested",
+          context: {
+            ...makeSnapshot(targetConversationId),
+            pendingPptOutlineRevision: pptOutlineRevisionArtifactRef.current,
+            pending_ppt_outline_revision: pptOutlineRevisionArtifactRef.current,
+          } as unknown as Record<string, unknown>,
+        }, { intent: "ppt" })
+        .catch(() => {});
+    }
   };
 
   const handleRegeneratePptImage = async (msg: ChatMessage, pageIndex: number) => {
@@ -7787,6 +8382,7 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
+    setAgentRevisionSourceMessageId(msg.id);
     planRevisionArtifactRef.current = msg.artifact
       ? { conversationId: targetConversationId, artifact: msg.artifact, sourceMessageId: msg.id, processedKey }
       : null;
@@ -7895,6 +8491,7 @@ export function WorkspacePage() {
     const pending = pendingPlanRevisionChoice;
     if (!pending) return;
     setPendingPlanRevisionChoice(null);
+    setAgentRevisionSourceMessageId("");
     if (pending.processedKey) releaseArtifactAction(pending.processedKey);
     pushAssistant("已取消本次 plan.md 修改方式选择，当前 Plan 保持不变。", pending.conversationId);
     void updateConversationWithProgress(pending.conversationId, {
@@ -8004,13 +8601,30 @@ export function WorkspacePage() {
   };
 
   const handleRetryImageResult = async (msg: ChatMessage) => {
-    const imagePrepare = msg.artifact?.imagePrepare;
-    if (!imagePrepare || !msg.artifact?.imageResult || canAcceptImageResult(msg.artifact.imageResult)) return;
+    const artifact = msg.artifact;
+    if (!artifact?.imageResult || canAcceptImageResult(artifact.imageResult)) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const storedImageEditRequest = (artifact.imageEditRequest || {}) as Partial<PendingImageEditRequest>;
+    const sceneGlobalAssetReference = storedImageEditRequest.sceneGlobalAssetReference
+      || sceneGlobalAssetReferenceFromMaterials(artifact.materials || []);
+    if (sceneGlobalAssetReference) {
+      const processedKey = beginArtifactAction(msg, targetConversationId);
+      if (!processedKey) return;
+      releaseArtifactAction(processedKey);
+      await pushSceneGlobalAssetEditOptions(
+        sceneGlobalAssetReference,
+        String(storedImageEditRequest.prompt || artifact.imageRevisionFeedback || "图片编辑"),
+        targetConversationId,
+        (storedImageEditRequest.materials || artifact.materials || []) as Array<Record<string, unknown>>,
+      );
+      return;
+    }
+    const imagePrepare = artifact.imagePrepare;
+    if (!imagePrepare) return;
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
-    if (imagePrepare.method === "image_edit" && msg.artifact) {
-      const imageEditRequest = imageEditRequestFromArtifact(msg.artifact, targetConversationId);
+    if (imagePrepare.method === "image_edit") {
+      const imageEditRequest = imageEditRequestFromArtifact(artifact, targetConversationId);
       pendingImageEditRequestRef.current = imageEditRequest;
       releaseArtifactAction(processedKey);
       await showImageEditOptions(imageEditRequest);
@@ -8025,7 +8639,6 @@ export function WorkspacePage() {
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
       };
-      const artifact: ChatArtifact = msg.artifact;
       const started = await api.startImageGenerationJob(request);
       const pendingImageJob: PendingImageJob = {
         job_id: started.job_id,
@@ -8399,8 +9012,6 @@ export function WorkspacePage() {
   async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    const processedKey = beginArtifactAction(msg, targetConversationId);
-    if (!processedKey) return;
     videoRevisionArtifactRef.current = null;
     markVideoResultAccepted(msg.id, targetConversationId);
     pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
@@ -8416,8 +9027,6 @@ export function WorkspacePage() {
   function handleReviseVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok || msg.artifact.videoAccepted) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    const processedKey = beginArtifactAction(msg, targetConversationId);
-    if (!processedKey) return;
     videoRevisionArtifactRef.current = {
       conversationId: targetConversationId,
       artifact: {
@@ -8659,6 +9268,7 @@ export function WorkspacePage() {
         onApprovePlan={legacyArtifactActionsEnabled ? handleApprovePlan : undefined}
         onEditPlan={legacyArtifactActionsEnabled ? handleEditPlan : undefined}
         onRevisePlan={legacyArtifactActionsEnabled ? handleRevisePlan : undefined}
+        agentRevisionSourceMessageId={agentRevisionSourceMessageId}
         onRollbackPlan={legacyArtifactActionsEnabled ? handleRollbackPlan : undefined}
         onGenerateImage={legacyArtifactActionsEnabled ? handleGenerateImage : undefined}
         onConfirmImageEditOptions={legacyArtifactActionsEnabled ? handleConfirmImageEditOptions : undefined}

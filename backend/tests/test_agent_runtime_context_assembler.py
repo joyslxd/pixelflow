@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+from pixelflow.agent_runtime.config import ContextBudgetConfig
+from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
 from pixelflow.agent_runtime.context.profiles import ModelContextProfile
 from pixelflow.agent_runtime.contracts import (
     ContextRequest,
@@ -148,6 +150,9 @@ def _assembler(
         token_estimator=estimate,
         clock=lambda: NOW,
         recent_message_limit=recent_message_limit,
+        budget_policy_provider=ContextBudgetPolicyProvider(
+            ContextBudgetConfig(require_verified_model_profile=False),
+        ),
     )
     return assembler, estimates
 

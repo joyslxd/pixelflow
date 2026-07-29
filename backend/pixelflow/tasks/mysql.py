@@ -13,7 +13,10 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
+from pixelflow.agent_runtime.persistence import (
+    AGENT_RUNTIME_SUPPORT_TABLES,
+    AGENT_RUNTIME_TABLES,
+)
 from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
@@ -25,13 +28,17 @@ from pixelflow.tasks.store import SQLPixelFlowTaskStore
 
 logger = logging.getLogger(__name__)
 
-PIXELFLOW_TASK_TABLES = [
-    PixelFlowTaskRow.__table__,
-    PixelFlowTaskEventRow.__table__,
-    PixelFlowAssetRow.__table__,
-    PixelFlowConversationRow.__table__,
-    PixelFlowConversationMessageRow.__table__,
-] + list(AGENT_RUNTIME_TABLES)
+PIXELFLOW_TASK_TABLES = (
+    [
+        PixelFlowTaskRow.__table__,
+        PixelFlowTaskEventRow.__table__,
+        PixelFlowAssetRow.__table__,
+        PixelFlowConversationRow.__table__,
+        PixelFlowConversationMessageRow.__table__,
+    ]
+    + list(AGENT_RUNTIME_TABLES)
+    + list(AGENT_RUNTIME_SUPPORT_TABLES)
+)
 
 
 _MICROSECOND_COLUMNS = {
@@ -68,22 +75,25 @@ async def _ensure_mysql_conversation_revision(conn) -> None:
 
     if conn.dialect.name not in {"mysql", "mariadb"}:
         return
-    result = await conn.execute(
-        text(
-            "SELECT COLUMN_NAME "
-            "FROM INFORMATION_SCHEMA.COLUMNS "
-            "WHERE TABLE_SCHEMA = DATABASE() "
-            "AND TABLE_NAME = 'pixelflow_conversations' "
-            "AND COLUMN_NAME = 'revision'"
-        )
-    )
+    result = await conn.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pixelflow_conversations' AND COLUMN_NAME = 'revision'"))
     if result.first() is None:
-        await conn.execute(
-            text(
-                "ALTER TABLE pixelflow_conversations "
-                "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
-            )
-        )
+        await conn.execute(text("ALTER TABLE pixelflow_conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
+
+
+async def _ensure_mysql_conversation_orchestration(conn) -> None:
+    """为 create_all 无法修改的旧对话表补齐固定编排归属。"""
+
+    if conn.dialect.name not in {"mysql", "mariadb"}:
+        return
+    result = await conn.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pixelflow_conversations' AND COLUMN_NAME IN ('orchestration_mode', 'orchestration_version')"))
+    existing = {str(row[0]) for row in result}
+    clauses: list[str] = []
+    if "orchestration_mode" not in existing:
+        clauses.append("ADD COLUMN orchestration_mode VARCHAR(24) NOT NULL DEFAULT 'frontend_v2'")
+    if "orchestration_version" not in existing:
+        clauses.append("ADD COLUMN orchestration_version INTEGER NOT NULL DEFAULT 1")
+    if clauses:
+        await conn.execute(text("ALTER TABLE pixelflow_conversations " + ", ".join(clauses)))
 
 
 async def _ensure_mysql_microsecond_timestamps(conn) -> None:
@@ -105,12 +115,7 @@ async def _ensure_mysql_microsecond_timestamps(conn) -> None:
     result = await conn.execute(text("SHOW INDEX FROM pixelflow_conversations WHERE Key_name = :name"), {"name": "ix_pixelflow_conversations_user_created"})
     if result.first() is None:
         try:
-            await conn.execute(
-                text(
-                    "CREATE INDEX ix_pixelflow_conversations_user_created "
-                    "ON pixelflow_conversations (user_id, created_at, conversation_id)"
-                )
-            )
+            await conn.execute(text("CREATE INDEX ix_pixelflow_conversations_user_created ON pixelflow_conversations (user_id, created_at, conversation_id)"))
         except Exception:
             logger.warning("Failed to create pixelflow conversation created_at index", exc_info=True)
 
@@ -133,6 +138,7 @@ async def make_mysql_task_store(url: str, *, echo: bool = False, pool_size: int 
             )
         )
         await _ensure_mysql_conversation_revision(conn)
+        await _ensure_mysql_conversation_orchestration(conn)
         await _ensure_mysql_microsecond_timestamps(conn)
     logger.info("PixelFlow MySQL task tables are ready")
     return SQLPixelFlowTaskStore(async_sessionmaker(engine, expire_on_commit=False)), engine

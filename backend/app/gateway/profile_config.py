@@ -49,6 +49,14 @@ _AGENT_RUNTIME_PROFILE_FIELDS = {
     "enabled_intents",
     "new_conversation_rollout_percent",
     "context_compaction_enabled",
+    "context_budget",
+    "compaction_retry_backoff_seconds",
+}
+_AGENT_RUNTIME_CONTEXT_BUDGET_FIELDS = {
+    "effective_context_k",
+    "output_reserve_k",
+    "safety_reserve_k",
+    "require_verified_model_profile",
 }
 
 
@@ -74,6 +82,35 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
         "agent_runtime",
         "context_compaction_enabled",
     ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "context_budget",
+        "effective_context_k",
+    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "context_budget",
+        "output_reserve_k",
+    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "context_budget",
+        "safety_reserve_k",
+    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "context_budget",
+        "require_verified_model_profile",
+    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE",
+    (
+        "pixelflow",
+        "agent_runtime",
+        "compaction_retry_backoff_seconds",
+    ): "PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS",
     ("pixelflow", "mysql_url"): "PIXELFLOW_MYSQL_URL",
     ("pixelflow", "mem0_enabled"): "PIXELFLOW_MEM0_ENABLED",
     ("pixelflow", "semantic_memory_enabled"): "PIXELFLOW_SEMANTIC_MEMORY_ENABLED",
@@ -214,11 +251,35 @@ def _validate_agent_runtime_profile(data: dict[str, Any]) -> None:
     if unknown_fields:
         unknown_text = ", ".join(sorted(str(field) for field in unknown_fields))
         raise ValueError(f"pixelflow.agent_runtime 包含不支持的配置键：{unknown_text}")
+    if "context_budget" in runtime and not isinstance(
+        runtime["context_budget"],
+        dict,
+    ):
+        raise ValueError("pixelflow.agent_runtime.context_budget 必须是 YAML 对象")
     for field_name, value in runtime.items():
         if value is None or value == "":
             raise ValueError(f"pixelflow.agent_runtime.{field_name} 不能是 null 或空字符串")
         if field_name == "enabled_intents" and not isinstance(value, list):
             raise ValueError("pixelflow.agent_runtime.enabled_intents 必须是 YAML 数组")
+    context_budget = runtime.get("context_budget")
+    if context_budget is not None:
+        unknown_budget_fields = (
+            set(context_budget) - _AGENT_RUNTIME_CONTEXT_BUDGET_FIELDS
+        )
+        if unknown_budget_fields:
+            unknown_text = ", ".join(
+                sorted(str(field) for field in unknown_budget_fields)
+            )
+            raise ValueError(
+                "pixelflow.agent_runtime.context_budget 包含不支持的配置键："
+                f"{unknown_text}"
+            )
+        for field_name, value in context_budget.items():
+            if value is None or value == "":
+                raise ValueError(
+                    "pixelflow.agent_runtime.context_budget."
+                    f"{field_name} 不能是 null 或空字符串"
+                )
 
 
 def _apply_extra_environment(data: dict[str, Any]) -> None:

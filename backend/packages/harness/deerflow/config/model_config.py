@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -12,6 +14,10 @@ class ModelConfig(BaseModel):
         description="Class path of the model provider(e.g. langchain_openai.ChatOpenAI)",
     )
     model: str = Field(..., description="Model name")
+    context_profile: dict[str, Any] | None = Field(
+        default=None,
+        description="用途：记录模型上下文能力档案；影响：仅供 PixelFlow Runtime 预算校验，不传给模型 Provider。",
+    )
     model_config = ConfigDict(extra="allow")
     use_responses_api: bool | None = Field(
         default=None,

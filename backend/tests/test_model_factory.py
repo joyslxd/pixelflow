@@ -94,6 +94,29 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
 
 
+def test_context_profile_is_not_forwarded_to_model_provider(monkeypatch):
+    """内部上下文能力档案只供 Runtime 使用，不得传给模型 Provider。"""
+
+    model = _make_model("profiled-model").model_copy(
+        update={
+            "context_profile": {
+                "max_context_tokens": 1_000_000,
+                "max_output_tokens": 32_768,
+                "tokenizer_strategy": "conservative_estimate",
+                "verified_at": "2026-07-26T00:00:00+08:00",
+                "source": "测试能力档案",
+            },
+        },
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="profiled-model")
+
+    assert "context_profile" not in FakeChatModel.captured_kwargs
+
+
 def test_raises_when_model_not_found(monkeypatch):
     cfg = _make_app_config([_make_model("only-model")])
     monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)

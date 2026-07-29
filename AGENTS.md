@@ -21,6 +21,9 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 能力线 | 主要入口 | Java 类比 | 当前用途 |
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
+| R1 统一会话 Runtime 候选 | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | 测试 profile 的全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；`assist` 下业务推进权仍属于 v2，生产默认关闭 |
+| R2 External Job Coordinator | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义，并通过 Final 单槽集成进入 Agent 长期分支；生产仍保持 R1 `assist`，后续 Workflow 接线与 R2 发布继续受独立门禁约束 |
+| R2 视频 Workflow Adapter 开发候选 | `backend/pixelflow/agent_workflows/video/planning.py`、`scene_packages.py` | 视频领域 Application Service + 权威 DTO | M11.1–M11.2 已冻结 intake/方向/Plan 及严格继承 Plan 的场景包与全局资产图；尚未接 Supervisor、供应商 Operation 或生产路由 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -53,17 +56,19 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 20. `backend/pixelflow/creative/contract.py`
 21. `backend/pixelflow/creative/duration.py`
 22. `backend/pixelflow/generate/image_prepare.py`
-23. `backend/pixelflow/generate/scene_packages.py`
-24. `backend/pixelflow/generate/seedance_prompt.py`
-25. `backend/pixelflow/skills/base.py`
-26. `backend/pixelflow/skills/borgrise/skill.py`
-27. `backend/pixelflow/skills/borgrise/run_generation.py`
-28. `web/src/pages/WorkspacePage.tsx`
-29. `web/src/lib/api.ts`
-30. `web/src/components/chat/MessageBubble.tsx`
-31. `web/src/components/composer/GenParamsDialog.tsx`
-32. `web/src/components/canvas/StoryboardPanel.tsx`
-33. `web/src/components/canvas/SceneMentionEditor.tsx`
+23. `backend/pixelflow/agent_workflows/video/planning.py`
+24. `backend/pixelflow/agent_workflows/video/scene_packages.py`
+25. `backend/pixelflow/generate/scene_packages.py`
+26. `backend/pixelflow/generate/seedance_prompt.py`
+27. `backend/pixelflow/skills/base.py`
+28. `backend/pixelflow/skills/borgrise/skill.py`
+29. `backend/pixelflow/skills/borgrise/run_generation.py`
+30. `web/src/pages/WorkspacePage.tsx`
+31. `web/src/lib/api.ts`
+32. `web/src/components/chat/MessageBubble.tsx`
+33. `web/src/components/composer/GenParamsDialog.tsx`
+34. `web/src/components/canvas/StoryboardPanel.tsx`
+35. `web/src/components/canvas/SceneMentionEditor.tsx`
 
 模板和垂类资料在：
 
@@ -79,6 +84,56 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 ## 当前主流程
 
 前端工作台主流程不是一次性自由聊天，而是阶段化编排：
+
+M13.1/R1 测试候选在主流程入口前增加统一会话层：测试 profile 对全部新对话冻结
+`assist / enabled_intents=[] / 100% / context_compaction=true`，先原子保存可见消息和
+Turn，再通过 Snapshot/SSE 投影压缩 Notice 与输入队列；旧 v2 只有在服务端 Turn
+进入可执行状态后才继续，并复用同一个 `client_input_id`。刷新只查询权威 Snapshot
+和原 job，不自动重发。历史对话、运行中任务及生产 profile 均不迁移或自动启用。
+
+R1 修复后的上下文预算是跨 R2–R4 的强制合同：dev/prod profile 都配置
+`context_budget.effective_context_k=896`、`output_reserve_k=32`、
+`safety_reserve_k=32`，其中 `K=1024 tokens`；DeepSeek V4 Pro 的已验证
+`max_context_tokens=1000000`。全部当前和未来 Agent/节点必须通过共享
+`ContextBudgetPolicyProvider` 读取同一预算，不得增加节点级窗口常量。
+`require_verified_model_profile=true` 时缺失、未验证或过期档案必须 fail-closed，
+实际流程不得走底层 128K 兼容兜底。压缩失败持久化 30 秒 `retry_not_before`，
+Snapshot/SSE/Run 在边界前不得重复调度；恢复专用 Plan 修订快照保留在 Store，
+但不得重复进入模型上下文。新增或修改流程必须验证附件完整、自动压缩、压缩期输入
+排队继续和失败受控重试。
+
+M06.1 的 operation 身份固定为 `workflow_id + stage + stage_version + attempt`，
+幂等键使用带版本的规范哈希，供应商请求仅保存规范 SHA-256。相同 start 重试或并发
+竞争只能返回同一内部 job；相同身份但请求摘要不同必须 fail-closed。M06.2 继续为
+`polling` operation 增加按用户、对话和 job 隔离的数据库 lease：仅
+`provider_job_id` 已落库且 `next_poll_at` 到期的任务可被一个 worker 领取；有效租约
+内同 worker 重领只回读，不自动延长，heartbeat 必须严格续到更晚时间。轮询后原子
+写入未来 `next_poll_at` 并释放租约；过期边界允许新 worker 接管，旧 worker 随即
+失去 heartbeat 和排期权限。M06.3 新增的 `ProviderJobAdapter` 只作为
+现有 v2 start/status Service 的防腐 Client：start 显式透传单次 Authorization 和
+operation 幂等键但不保存，status 只查询传入的原 provider job ID；现有 DTO 被统一
+映射为 `polling/succeeded/failed/paused_quota/timeout/expired`。现有 DTO 中明确的
+供应商 raw 字段在边界递归剔除；未知状态、job ID 错配、其余敏感结果、带查询串
+完整 URL 和非法 JSON 一律 fail-closed。稳定 Snapshot 深度只读，序列化前再次
+执行安全校验；业务失败与异常只返回固定安全原因，不回显供应商原始错误。M06.4
+把 `succeeded/failed/timeout` 终态和 `external_job.state_changed` 完成事件放进
+同一个 Memory 临界区或 SQL 事务，重复终态只回读同一稳定事件。完成事件按内部
+job 派生 ID 领取独立投递租约，并把该 ID 作为 Workflow checkpoint 幂等键；进程在
+Provider 成功后或 Graph checkpoint 后退出，都只能重放同一事件，不能重新调用
+供应商 start。Operation 和完成事件的返回快照连同嵌套 JSON 都深度只读，同时仍可
+稳定序列化为普通 JSON。通用 Event Outbox worker 看到队首完成事件时必须停止，
+不能过滤它并越过 sequence 领取后续事件；Graph 返回后还必须用实际完成时间确认
+租约，租约已过期时保留事件等待同 ID 接管。M06.5 的
+`OperationStartCoordinator` 再用 start lease 保证并发请求只调用一次供应商 start；
+只有单次调用边界持有 Authorization 和原请求，持久层仍只保存请求摘要与 provider
+job ID。`OperationRecoveryRuntime` 按数据库候选和租约恢复原 job，关闭时只取消
+本进程任务，不伪造终态或释放未完成租约；新进程在租约过期后继续。每个候选和每轮
+扫描都有安全异常隔离，慢 status 返回后重新读取时钟，过期 worker 不能提交结果。
+status 402 清除自动轮询计划，用户动作只恢复原 provider job；start 402 返回固定
+可重试错误。HTTP 404 固定映射 `expired` 完成事件，原 Operation 禁止重开，只能由
+上层创建新 attempt。SQL 恢复扫描先在数据库中联结并过滤有效完成事件，再稳定排序和
+限制批量，不会被无效队首饿死或无界物化。本模块最终本地门禁已绿，但增量尚未进入
+Agent 长期分支。
 
 ```text
 用户输入 + 附件
@@ -188,7 +243,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/contract.py`、`creative/duration.py` | PlanTemplateFillSkill、PlanConsistencyCheckSkill、PlanRevisionSkill、PlanRestoreSkill | 图片/视频按独立模板调用 LLM 生成 Plan，校验模型能力与精确时长，维护版本历史 |
 | 人工审核 Agent | `WorkspacePage.tsx` | 前端状态与对话存储 | plan.md、图片结果、视频结果的确认/修改循环；当前创意内修订不得重新生成方向，历史版本支持回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | ImageEndpointDecisionSkill、ImagePromptBuildSkill、ImageGenerationSkill | 选择文生图/图片编辑/参考图/多图融合，支持多图生成 |
-| 视频生成 Agent | `pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | 严格按当前 Plan 创作合同生成场景包、资产图、场景视频、合并、QAAgent QC 质检和修改循环 |
+| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`pixelflow_video.py`、`generate/scene_packages.py`、`generate/seedance_prompt.py`、`qc/video_review.py` | VideoPlanningWorkflowService、VideoScenePackageWorkflowService、ScenePackageSkill、SeedanceShotPromptSkill、SceneAssetImageSkill、SceneVideoGenerationSkill、VideoMergeSkill、VideoQualityReviewSkill | M11.1–M11.2 已以确定性 Service 固化 intake/方向/Plan 权威快照，以及严格继承 Plan 的场景包和全局资产图；后续切片接入供应商 Operation、场景视频、合并、QAAgent QC 质检和修改循环 |
 | 视频分析 Agent | `pixelflow_video.py` | MediaLinkExtractionSkill、VideoDecomposeSkill | 抽取媒体链接，按单个或多个视频调用 storyboard 拆解 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | JianyingDraftService、JianyingDraftSkill、HttpJianyingDraftSkill | 只接收当前版本全部成功的分镜视频，异步创建并轮询第三方任务，下载第三方 ZIP、校验后原样通过 content-app 上传 TOS；同时管理对话归属、版本幂等、超时和安全终态摘要 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PptFormSchemaSkill、PptIndustryProfileSkill、SmartPptSummarySkill、SmartPptImageSkill、SmartPptFileSkill | 表单收集、行业补充、大纲确认/修改、页面图片生成、PPT文件生成 |
@@ -359,6 +414,7 @@ SmartPPT接口：
 - 所有片段的整数秒时长总和必须精确等于当前 Plan 合同的 `video_duration_sec`；300 秒可以超过旧 18 分镜上限。
 - 视频 Plan 必须同时发布结构化 `asset_manifest` 和固定“全局资产清单”第四章。角色项包含最终名称、文字说明、`three_view_prompt`；场景/道具项包含最终名称、文字说明、`image_prompt`。三类名称全局唯一，并分别与所有蓝图 `asset_requirements` 的同类并集完全一致；初次生成、Agent 修订、手工编辑和历史回退都必须版本化保存。
 - 场景包必须消费当前激活 Plan 的 `scene_blueprints + asset_manifest`，不得再按总时长重新切分、重写故事内容或调用第二次 LLM 分析资产；只机械映射全局资产、`@asset_id` 和 mentions。缺少清单的旧 Plan 必须先重新生成或修订，不能继续生成场景包。
+- M11.2 的 `VideoScenePackageWorkflowService` 要求 `plan_review` 先经用户显式同意并持久化为 `plan_approved`，再进入 `generate_scene_assets` 和 `scene_package_review`；边界重新校验当前 Plan 与完整历史并冻结场景包 SHA-256 权威快照。场景 ID/顺序/时长、叙事字段、执行提示词和允许字段集合都必须等于权威蓝图或确定性机械结果；供应商追加字段、追加故事或改写提示词一律失败关闭。
 - 权威蓝图中的人物、场景和道具需求必须逐项进入全局资产，四类全局 ID（含 `visual_style.asset_id`）必须唯一；已有 `@asset_id` 不得被名称规范化再次替换。任一分镜引用超过 9 张时直接返回包含分镜编号和引用数的明确错误，不得静默截断。
 - 全局资产名称、场景包名称和前端 `shot_description.mentions[].name` 必须等于最终 Plan 名称；旧缓存名称不能覆盖全局正式名称。每个清单资产只创建一个图片任务并只绑定一个图片 URL，同一资产跨分镜复用时不得重复生图。
 - 场景资产调用 content-app 时，提示词必须合并最终 Plan 清单的正式名称、`description` 和 `three_view_prompt/image_prompt`，不能只取生图字段而丢失文字说明里的外观、材质或颜色约束。
@@ -372,8 +428,9 @@ SmartPPT接口：
 - 镜头描述由 `generate/seedance_prompt.py` 应用 vendored `skills/seedance-prompt/SKILL.md` 规则生成。该 Skill 对所有启用的 Seedance 系列模型通用，场景包 Prompt 必须显式携带用户确认的 `video_model`，并经过秒级时间码、`@asset_id` 和最多 9 张引用校验。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 保留两个输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 每个视频场景片段最多 9 张参考图，前端和后端都要限制。
+- M11.2 仅接受每个清单资产恰好一个 HTTPS 图片 URL 并按 `asset_id` 回填 mentions；真实供应商 Operation、部分失败、额度暂停、重试和单镜生成属于 M11.3，不得提前塞入本 Service。
 - 前端 `SceneMentionEditor` 是 `contentEditable`，用户输入 `@` 后弹出素材下拉，素材 chip 可预览。
-- 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后直接替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑结果卡片的“重新生成”仍由 `WorkspacePage` 保持 `scene_global_asset` 上下文，下一条输入继续调用 `edit-asset/start`，不能掉回普通采集 Agent。
+- 全局素材图片可在 `StoryboardPanel` 点击预览并“引用素材”到左侧输入框；用户发送编辑指令后，`WorkspacePage` 识别 `materials.source="scene_global_asset"`，调用 `/agent/flows/image/edit-asset/start` 走可恢复图片编辑 job。编辑成功后先展示候选图，用户确认后才替换 `global_assets` 中原图：角色替换 `three_view_images[0]`，场景/道具替换 `images[0]`，并同步同 `asset_id` 的 `shot_description.mentions[].image_url`。全局素材编辑或融合失败卡片必须保存 `imageEditRequest`、素材引用、修改意见、模型参数、场景包来源和上传参考图；点击“重新生成图片”时必须先于普通图片的 `imagePrepare` 判断恢复 `scene_global_asset` 上下文并重新打开参数确认卡，确认后调用对应 `/edit-asset/start` 或 `/fuse-asset/start`，不能静默退出或掉回普通采集 Agent。历史失败卡片缺少完整请求时，至少从 `materials.source="scene_global_asset"` 恢复引用、修改意见和编辑链路。
 - 全局素材预览里的“删除素材”只预填左侧固定删除文案并带上素材 chip；用户发送后，`WorkspacePage` 根据 `scene_global_asset_action="delete"` 在当前场景包内原地清理该素材的 `reference_asset_ids`、`shot_description.mentions`、精确 `@素材名/@asset_id` 文本和相关 `image_urls`，同时保留 `global_assets` 素材记录但清空图片 URL 作为占位符，不推送新的场景包确认卡片。
 - `StoryboardPanel` 的角色、场景、道具三行末尾必须固定显示“添加素材”，并以 `operation="add"` 复用替换素材弹层。添加结果只追加到当前场景包 `global_assets`：ID 使用 `character-manual-*`、`scene-manual-*`、`prop-manual-*` 并保持全局唯一，三类来源名称重名时自动追加序号，角色写 `three_view_images`，场景/道具写 `images`，数字人保留 `generation_reference_url=asset://thirdAssetId`。不得修改当前 Plan `asset_manifest` 或自动写入镜头；只有用户之后在镜头描述中手动 `@` 选择时，才更新 mentions/reference IDs、标记 dirty scene，并在已有视频上只重生成受影响镜头。新增资产必须原地持久化到当前消息和 conversation context，保留已有分镜视频、合并视频及 dirty scene 状态。
 - 全局素材替换弹窗保留两条本地图片入口：原“本地上传”只调用 `/api/upload` 并在二次确认后临时替换，不创建资产记录；图片素材列表第一张“上传到资产库”依次调用 `/api/projects`、`/api/upload`、`/api/asset/create`，再回查 `/api/asset/assets` 第一页，创建响应的 `data.id` 仅用于本次弹窗标记“刚刚上传”和同步重试。资产上传只校验 JPG/JPEG/PNG/WEBP 与 20MB，不校验宽高；取消替换时已创建资产继续保留。需要真实上传进度时复用 `uploadAttachment(file, { onProgress })`，其内部用 XHR 监听上传进度，默认无回调调用仍走 fetch。
@@ -451,6 +508,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 | 图片/视频生成准备逻辑 | `backend/pixelflow/generate/` |
 | PowerMem 语义记忆 Client 和现有记忆上下文整理 | `backend/pixelflow/memory/` |
 | 新 Agent Runtime 的模型预算、结构化摘要与全局上下文压缩 | `backend/pixelflow/agent_runtime/context/` |
+| 新 Agent Runtime 的 operation 幂等、状态机和后续外部任务协调 | `backend/pixelflow/agent_runtime/jobs/` |
 | 第三方 API、上传、轮询、错误归一 | `backend/pixelflow/skills/` |
 | 任务、会话、资产持久化 | `backend/pixelflow/tasks/` |
 | 用户偏好 | `backend/pixelflow/preferences/` |

@@ -86,3 +86,13 @@
 - 原因：M03.4 暴露的失败来自共享 Agent 基线中的门禁范围、旧鉴权测试和已退役 Docker/provisioner/Sandbox 合同，不属于 M03 业务实现。产品已确认不保留缺失的旧 Docker/provisioner/Sandbox 能力；继续在 M03 分支绕过或复制修复会造成门禁双轨和模块越界。
 - 审核加固：M01 在 M01.5 Event Outbox 权威测试清单冻结前保持 fail-closed；M07、M12 增加前端全量测试；M08–M11 在后端权威清单冻结前保持 fail-closed；Pester 精确锁定项目 Python 3.12 版本检查。不得猜测尚未由模块 owner 冻结的测试文件名。
 - 边界：这是开发者明确批准的 M00 维护特例，不改变 D-004/D-008 的普通模块 9.10A 触发流程，不授权发布、真实付费冒烟、生产配置变更或 Agent→dev 反向合并，也不得据此提前修改 M03 状态。修复进入 Agent 后，M03.4 仍须在原模块分支恢复并执行真实 M03 Final 门禁；绿色后才可写 `ready_for_integration`，再由开发者手动启动 M03 的 9.10A 单槽集成。
+
+## D-010：R1–R4 统一使用配置驱动的 896K 上下文预算
+
+- 日期：2026-07-26
+- 状态：已确认
+- 决策：DeepSeek V4 Pro 的模型物理上下文档案按已确认的 `1,000,000 tokens` 配置；所有当前和未来 Agent、摘要节点及新增流程统一读取 `pixelflow.agent_runtime.context_budget`：`effective_context_k=896`、`output_reserve_k=32`、`safety_reserve_k=32`，其中 `K=1024 tokens`。`require_verified_model_profile=true`，实际 PixelFlow Runtime 对缺失、未验证或过期模型档案 fail-closed。
+- 原因：按节点冻结 256K/384K/512K 会让新增流程遗漏配置，并让已具备 1M 能力的模型过早压缩；而实际故障还包括 Plan 修订恢复数据重复进入 Prompt、失败租约立即到期导致读取触发风暴，单纯放大窗口不能解决。
+- 影响：统一有效窗口为 917,504 tokens，扣除两项 32K 后可用输入为 851,968 tokens，相对模型物理窗口保留 82,496 tokens。配置修改并重启后统一影响新进程所有节点；代码不得维护节点窗口表。底层 128K 解析只保留兼容测试，不是业务兜底。
+- 恢复合同：`pendingPlanRevisionRequest` 及别名等恢复专用快照保留在权威 Store，但不得重复送入模型；压缩失败按 `compaction_retry_backoff_seconds=30` 持久化 `retry_not_before`，读取端到期前不调度，到期后只恢复一次，排队输入不丢失且无需前端重发。
+- 后续门禁：M13.2/R2、M13.3/R3、M13.4/R4 和 M13.5 必须先复核本决策，验证其新增或修改流程继承统一 Provider、附件完整、自动压缩成功、排队输入接续和失败受控重试；任何节点级预算分叉或实际 128K 回落均阻断集成。

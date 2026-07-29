@@ -33,6 +33,13 @@ export interface SupervisorChatMessage {
   artifact?: SupervisorChatArtifact;
 }
 
+export interface PendingSupervisorMessageProjection {
+  id: string;
+  conversationId: string;
+  content: string;
+  materials?: JsonObject[];
+}
+
 export interface SupervisorInterruptProjection {
   interruptId: string;
   conversationId: string;
@@ -186,6 +193,31 @@ function upsertMessage(
   const next = [...messages];
   next[index] = message;
   return next;
+}
+
+export function mergeSupervisorMessagesWithPending(
+  authoritativeMessages: readonly SupervisorChatMessage[],
+  pendingMessages: readonly PendingSupervisorMessageProjection[],
+  conversationId: string,
+): SupervisorChatMessage[] {
+  if (!isNonEmptyString(conversationId)) return fail();
+  let messages = [...authoritativeMessages];
+  for (const pendingMessage of pendingMessages) {
+    // 路由切换期间旧会话的本地 pending 可能晚一拍到达，只保留当前会话数据。
+    if (pendingMessage.conversationId !== conversationId) continue;
+    if (!isNonEmptyString(pendingMessage.id) || typeof pendingMessage.content !== "string") return fail();
+    if (messages.some((message) => message.id === pendingMessage.id)) continue;
+    const materials = (pendingMessage.materials || []).map((material) => cloneJsonObject(material));
+    messages = [...messages, {
+      id: pendingMessage.id,
+      conversationId,
+      role: "user",
+      content: pendingMessage.content,
+      time: "",
+      ...(materials.length > 0 ? { materials } : {}),
+    }];
+  }
+  return messages;
 }
 
 function projectMessages(value: unknown, conversationId: string): SupervisorChatMessage[] {

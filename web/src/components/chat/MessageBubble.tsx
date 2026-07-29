@@ -20,6 +20,7 @@ interface MessageBubbleProps {
   onApprovePlan?: (msg: ChatMessage) => void;
   onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
+  hidePlanEdit?: boolean;
   onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
@@ -221,6 +222,7 @@ export function MessageBubble({
   onApprovePlan,
   onEditPlan,
   onRevisePlan,
+  hidePlanEdit = false,
   onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
@@ -598,14 +600,16 @@ export function MessageBubble({
                 <Check size={15} />
                 同意方案
               </button>
-              <button
-                type="button"
-                onClick={() => onEditPlan?.(msg)}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-              >
-                <Pencil size={15} />
-                编辑
-              </button>
+              {!hidePlanEdit ? (
+                <button
+                  type="button"
+                  onClick={() => onEditPlan?.(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <Pencil size={15} />
+                  编辑
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => onRevisePlan?.(msg)}
@@ -999,7 +1003,7 @@ export function MessageBubble({
                     <button
                       type="button"
                       onClick={() => onRegeneratePptImage?.(msg, page.page_index)}
-                      className="absolute right-2 top-2 hidden h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink shadow-sm hover:text-accent group-hover:flex"
+                      className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-white/90 text-ink opacity-0 shadow-sm transition-opacity hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
                       aria-label="重新生成本页"
                     >
                       <RefreshCw size={15} />

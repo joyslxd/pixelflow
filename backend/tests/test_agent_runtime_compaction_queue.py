@@ -418,8 +418,18 @@ async def test_failed_compaction_keeps_queue_for_later_recovery(
                 lease_token=first_lease.lease_token,
                 now=NOW + timedelta(minutes=1),
                 claim_next=False,
+                retry_not_before=NOW + timedelta(minutes=1, seconds=30),
             )
             is None
+        )
+        retry_lease = await repository.get_compaction_lease(
+            OWNER_A,
+            CONVERSATION_A,
+        )
+        assert retry_lease is not None
+        assert retry_lease.lease_expires_at == NOW + timedelta(
+            minutes=1,
+            seconds=30,
         )
         assert [
             turn.status
@@ -554,6 +564,43 @@ async def test_compaction_lease_validation_and_owner_conflict_fail_closed(
             )
 
 
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_finish_compaction_validates_retry_boundary(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        lease = await repository.acquire_compaction_lease(
+            OWNER_A,
+            CONVERSATION_A,
+            lease_owner="worker-a",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(minutes=5),
+        )
+        assert lease is not None
+
+        with pytest.raises(ValueError, match="retry_not_before"):
+            await repository.finish_compaction(
+                OWNER_A,
+                CONVERSATION_A,
+                lease_owner=lease.lease_owner,
+                lease_token=lease.lease_token,
+                now=NOW + timedelta(seconds=1),
+                claim_next=False,
+                retry_not_before=NOW + timedelta(seconds=1),
+            )
+        with pytest.raises(ValueError, match="retry_not_before"):
+            await repository.finish_compaction(
+                OWNER_A,
+                CONVERSATION_A,
+                lease_owner=lease.lease_owner,
+                lease_token=lease.lease_token,
+                now=NOW + timedelta(seconds=1),
+                claim_next=True,
+                retry_not_before=NOW + timedelta(seconds=31),
+            )
+
+
 @pytest.mark.asyncio
 async def test_sql_concurrent_lease_acquisition_has_one_winner(
     tmp_path: Path,
@@ -685,6 +732,7 @@ async def test_sql_common_repository_cannot_bypass_active_compaction(
                 lease_token=lease.lease_token,
                 now=NOW + timedelta(minutes=1),
                 claim_next=False,
+                retry_not_before=NOW + timedelta(minutes=1, seconds=30),
             )
             is None
         )
@@ -1009,7 +1057,7 @@ async def test_runtime_failure_or_pause_preserves_inputs_without_resend(
         CONVERSATION_A,
     )
     assert recovery_marker is not None
-    assert recovery_marker.lease_expires_at <= NOW
+    assert recovery_marker.lease_expires_at == NOW + timedelta(seconds=30)
     queued_after_failure = await runtime.enqueue_turn(
         OWNER_A,
         _turn(2),

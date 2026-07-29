@@ -1493,3 +1493,26 @@ def test_manual_image_plan_edit_ignores_llm_contract_fields_not_changed_by_user(
     assert revised.creation_contract["image_style"] == "真实摄影"
     assert revised.creation_contract["image_size"] == "1:1"
     assert revised.creation_contract["image_count"] == 1
+
+
+def test_manual_image_plan_edit_keeps_readonly_count_when_model_invents_count():
+    current_contract = {
+        "intent": "image",
+        "image_goal": "蓝色保温杯电商主图",
+        "image_type": "商品广告图",
+        "image_usage": "广告投放",
+        "image_style": "简洁干净",
+        "image_size": "1:1",
+        "image_count": 1,
+    }
+    current_markdown = "# 保温杯主图\n\n## 六、视觉重点\n\n- 突出杯盖密封圈。\n\n## 制作执行合同\n\n- 生成数量：1 张"
+    edited_markdown = current_markdown.replace("突出杯盖密封圈。", "强化杯盖密封圈与包内物品干燥状态的视觉证据。")
+
+    merged = merge_revision_contract(
+        "image",
+        current_contract,
+        build_manual_plan_revision_feedback(current_markdown, edited_markdown),
+        {"image_count": 3},
+    )
+
+    assert merged["image_count"] == 1

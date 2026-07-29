@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "dataset_id": "m05-supervisor-zh-v1",
+  "description": "M05 Supervisor 中文动作、目标、歧义追问和计费安全离线回放黄金集。",
+  "cases": [
+    {
+      "case_id": "answer-model-reason",
+      "user_input": "为什么给我选这个视频模型？",
+      "expected": {"action": "answer_only", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "answer_only", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "answer-image-ratio",
+      "user_input": "这张图为什么用了竖版比例？",
+      "expected": {"action": "answer_only", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "answer_only", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "answer-ppt-layout",
+      "user_input": "这个演示文稿的页面结构是怎么安排的？",
+      "expected": {"action": "answer_only", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "answer_only", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "answer-general-capability",
+      "user_input": "你能帮我完成哪些创作任务？",
+      "expected": {"action": "answer_only", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "answer_only", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "continue-video-plan",
+      "user_input": "这个视频方案我确认了，继续下一步。",
+      "expected": {"action": "continue_workflow", "intent": "video", "target_workflow_id": "wf-video-01", "target_artifact_ref": "artifact:plan:video:v2"},
+      "observed": {"action": "continue_workflow", "intent": "video", "target_workflow_id": "wf-video-01", "target_artifact_ref": "artifact:plan:video:v2"}
+    },
+    {
+      "case_id": "continue-image-direction",
+      "user_input": "就选第二个图片创意方向，继续。",
+      "expected": {"action": "continue_workflow", "intent": "image", "target_workflow_id": "wf-image-01", "target_artifact_ref": "artifact:direction:image:2"},
+      "observed": {"action": "continue_workflow", "intent": "image", "target_workflow_id": "wf-image-01", "target_artifact_ref": "artifact:direction:image:2"}
+    },
+    {
+      "case_id": "continue-ppt-outline",
+      "user_input": "大纲没有问题，请继续生成页面。",
+      "expected": {"action": "continue_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-01", "target_artifact_ref": "artifact:ppt:outline:v1"},
+      "observed": {"action": "continue_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-01", "target_artifact_ref": "artifact:ppt:outline:v1"}
+    },
+    {
+      "case_id": "continue-analysis-result",
+      "user_input": "这个拆解结果可以，继续整理重点。",
+      "expected": {"action": "continue_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-01", "target_artifact_ref": "artifact:analysis:storyboard:v1"},
+      "observed": {"action": "continue_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-01", "target_artifact_ref": "artifact:analysis:storyboard:v1"}
+    },
+    {
+      "case_id": "modify-image-third",
+      "user_input": "把刚才第三张图的背景换成白色。",
+      "expected": {"action": "modify_workflow", "intent": "image", "target_workflow_id": "wf-image-02", "target_artifact_ref": "artifact:image:3"},
+      "observed": {"action": "modify_workflow", "intent": "image", "target_workflow_id": "wf-image-02", "target_artifact_ref": "artifact:image:3"}
+    },
+    {
+      "case_id": "modify-video-scene",
+      "user_input": "把第三个分镜的旁白改得更简洁。",
+      "expected": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-02", "target_artifact_ref": "artifact:scene:3"},
+      "observed": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-02", "target_artifact_ref": "artifact:scene:3"}
+    },
+    {
+      "case_id": "modify-ppt-page",
+      "user_input": "把演示文稿第三页改成数据图。",
+      "expected": {"action": "modify_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-02", "target_artifact_ref": "artifact:ppt:page:3"},
+      "observed": {"action": "modify_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-02", "target_artifact_ref": "artifact:ppt:page:3"}
+    },
+    {
+      "case_id": "modify-video-plan",
+      "user_input": "把这个视频方案的总时长改成三十秒。",
+      "expected": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-03", "target_artifact_ref": "artifact:plan:video:v1"},
+      "observed": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-03", "target_artifact_ref": "artifact:plan:video:v1"}
+    },
+    {
+      "case_id": "modify-analysis-source",
+      "user_input": "把当前视频拆解任务换成我刚上传的素材。",
+      "expected": {"action": "modify_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-02", "target_artifact_ref": "artifact:analysis:source:v1"},
+      "observed": {"action": "modify_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-02", "target_artifact_ref": "artifact:analysis:source:v1"}
+    },
+    {
+      "case_id": "regenerate-image-result",
+      "user_input": "按相同参数重新生成这张主图。",
+      "expected": {"action": "regenerate_stage", "intent": "image", "target_workflow_id": "wf-image-03", "target_artifact_ref": "artifact:image:hero"},
+      "observed": {"action": "regenerate_stage", "intent": "image", "target_workflow_id": "wf-image-03", "target_artifact_ref": "artifact:image:hero"}
+    },
+    {
+      "case_id": "regenerate-video-scene",
+      "user_input": "重新生成第二个分镜视频。",
+      "expected": {"action": "regenerate_stage", "intent": "video", "target_workflow_id": "wf-video-04", "target_artifact_ref": "artifact:scene:2"},
+      "observed": {"action": "regenerate_stage", "intent": "video", "target_workflow_id": "wf-video-04", "target_artifact_ref": "artifact:scene:2"}
+    },
+    {
+      "case_id": "regenerate-ppt-page",
+      "user_input": "只重新生成演示文稿第五页。",
+      "expected": {"action": "regenerate_stage", "intent": "ppt", "target_workflow_id": "wf-ppt-03", "target_artifact_ref": "artifact:ppt:page:5"},
+      "observed": {"action": "regenerate_stage", "intent": "ppt", "target_workflow_id": "wf-ppt-03", "target_artifact_ref": "artifact:ppt:page:5"}
+    },
+    {
+      "case_id": "regenerate-analysis",
+      "user_input": "重新分析这个视频，不要沿用上次结果。",
+      "expected": {"action": "regenerate_stage", "intent": "video_analysis", "target_workflow_id": "wf-analysis-03", "target_artifact_ref": "artifact:analysis:result:v1"},
+      "observed": {"action": "regenerate_stage", "intent": "video_analysis", "target_workflow_id": "wf-analysis-03", "target_artifact_ref": "artifact:analysis:result:v1"}
+    },
+    {
+      "case_id": "retry-image-failed",
+      "user_input": "重试刚才失败的第二张图片。",
+      "expected": {"action": "retry_failed", "intent": "image", "target_workflow_id": "wf-image-04", "target_artifact_ref": "artifact:image:2"},
+      "observed": {"action": "retry_failed", "intent": "image", "target_workflow_id": "wf-image-04", "target_artifact_ref": "artifact:image:2"}
+    },
+    {
+      "case_id": "retry-video-failed",
+      "user_input": "重试额度暂停后失败的第四个分镜。",
+      "expected": {"action": "retry_failed", "intent": "video", "target_workflow_id": "wf-video-05", "target_artifact_ref": "artifact:scene:4"},
+      "observed": {"action": "retry_failed", "intent": "video", "target_workflow_id": "wf-video-05", "target_artifact_ref": "artifact:scene:4"}
+    },
+    {
+      "case_id": "retry-ppt-failed",
+      "user_input": "重试生成失败的演示文稿第六页。",
+      "expected": {"action": "retry_failed", "intent": "ppt", "target_workflow_id": "wf-ppt-04", "target_artifact_ref": "artifact:ppt:page:6"},
+      "observed": {"action": "retry_failed", "intent": "ppt", "target_workflow_id": "wf-ppt-04", "target_artifact_ref": "artifact:ppt:page:6"}
+    },
+    {
+      "case_id": "start-image",
+      "user_input": "另做一套夏日清爽风格的商品主图。",
+      "expected": {"action": "start_workflow", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "start_workflow", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "start-video",
+      "user_input": "按这个品牌风格再做一个三十秒视频。",
+      "expected": {"action": "start_workflow", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "start_workflow", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "start-ppt",
+      "user_input": "新建一个季度经营汇报演示文稿。",
+      "expected": {"action": "start_workflow", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "start_workflow", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "start-analysis",
+      "user_input": "新建任务分析我刚上传的两段视频。",
+      "expected": {"action": "start_workflow", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "start_workflow", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "switch-video",
+      "user_input": "先切回刚才的商品视频任务。",
+      "expected": {"action": "switch_workflow", "intent": "video", "target_workflow_id": "wf-video-06", "target_artifact_ref": null},
+      "observed": {"action": "switch_workflow", "intent": "video", "target_workflow_id": "wf-video-06", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "switch-ppt",
+      "user_input": "切换到季度汇报演示文稿继续看。",
+      "expected": {"action": "switch_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-05", "target_artifact_ref": null},
+      "observed": {"action": "switch_workflow", "intent": "ppt", "target_workflow_id": "wf-ppt-05", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "switch-image-target-miss",
+      "user_input": "切回上一个商品主图任务。",
+      "expected": {"action": "switch_workflow", "intent": "image", "target_workflow_id": "wf-image-05", "target_artifact_ref": null},
+      "observed": {"action": "switch_workflow", "intent": "image", "target_workflow_id": "wf-image-06", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "cancel-image",
+      "user_input": "取消当前这套商品图片任务。",
+      "expected": {"action": "cancel_workflow", "intent": "image", "target_workflow_id": "wf-image-07", "target_artifact_ref": null},
+      "observed": {"action": "cancel_workflow", "intent": "image", "target_workflow_id": "wf-image-07", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "cancel-video",
+      "user_input": "终止正在等待确认的视频任务。",
+      "expected": {"action": "cancel_workflow", "intent": "video", "target_workflow_id": "wf-video-07", "target_artifact_ref": null},
+      "observed": {"action": "cancel_workflow", "intent": "video", "target_workflow_id": "wf-video-07", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "cancel-analysis",
+      "user_input": "取消这个视频分析任务。",
+      "expected": {"action": "cancel_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-04", "target_artifact_ref": null},
+      "observed": {"action": "cancel_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-04", "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-continue-two",
+      "user_input": "继续。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-regenerate-two-images",
+      "user_input": "再生成一次。",
+      "expected": {"action": "clarify", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-modify-which",
+      "user_input": "把刚才那个改得更高级。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-retry-two-failures",
+      "user_input": "重试失败的那个。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-switch-two-videos",
+      "user_input": "切回视频任务。",
+      "expected": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-cancel-two",
+      "user_input": "把这个任务取消。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-new-kind",
+      "user_input": "再做一个。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-third-item",
+      "user_input": "把第三个换掉。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-ppt-page",
+      "user_input": "重新生成那一页演示文稿。",
+      "expected": {"action": "clarify", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-scene",
+      "user_input": "视频里那段镜头需要重做。",
+      "expected": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-plan-version",
+      "user_input": "恢复之前那个方案。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-image-or-video",
+      "user_input": "按这个风格重新做一版。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-analysis-source",
+      "user_input": "换一个视频继续分析。",
+      "expected": {"action": "clarify", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-confirm-two",
+      "user_input": "这个我确认了。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-edit-reference",
+      "user_input": "把参考图换成新上传的那张。",
+      "expected": {"action": "clarify", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "image", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-download-result",
+      "user_input": "下载最终结果。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-end-video",
+      "user_input": "结束这个视频。",
+      "expected": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-reuse-style",
+      "user_input": "沿用刚才的风格继续。",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-two-failed-scenes",
+      "user_input": "把失败的分镜重试一下。",
+      "expected": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "video", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-two-ppt-files",
+      "user_input": "继续生成最终演示文稿。",
+      "expected": {"action": "clarify", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "clarify", "intent": "ppt", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "clarify-safe-miss",
+      "user_input": "这个怎么处理？",
+      "expected": {"action": "clarify", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null},
+      "observed": {"action": "answer_only", "intent": "general", "target_workflow_id": null, "target_artifact_ref": null}
+    }
+  ]
+}

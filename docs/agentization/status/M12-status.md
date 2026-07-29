@@ -79,7 +79,7 @@ R1 规则：M12.3 完成后运行 `R1-assist-ui` 阶段门禁，绿色后写 `re
 - 阶段门禁：固定实现提交 `4d9931811f23eb306f2bf8b8dc33357aacbb46e4` 后，按 `Invoke-AgentModuleGate.ps1` 的 `M12 / Phase / R1 / M12.3` 权威范围执行 `git diff --check`、`corepack pnpm test`、`corepack pnpm lint`、`corepack pnpm build-prod`，全部通过；聚合测试为 `296/296`，生产构建只有既存 chunk 体积提醒。
 - 状态：`R1-assist-ui` 阶段门禁和中文规范人工等价检查均绿色，M12 已登记 `ready_for_phase_integration`、`checkpoint_status=ready`；唯一写入权和 M12.3 文件锁已释放，等待开发者人工启动单槽阶段集成。
 - 边界：不更新 `status/BOARD.md` 或集成记录，不执行 M12.4/M12.5，不创建切片子分支，不修改两个长期 feature 分支。
-- locked files：`web/src/pages/WorkspacePage.tsx`、`web/tests/workspaceOrchestrationMode.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12-final-integration-repair-20260729.md`
+- locked files：`web/src/pages/WorkspacePage.tsx`、`web/src/lib/supervisor/workspaceProjection.ts`、`web/tests/workspaceOrchestrationMode.test.mjs`、`web/tests/supervisorTurnSubmission.test.mjs`、`web/tests/supervisorWorkspaceProjection.test.mjs`、`docs/agentization/status/M12-status.md`、`docs/agentization/test-reports/M12-final-integration-repair-20260729.md`
 - integration failure evidence：`docs/agentization/test-reports/M12-final-integration-blocked-20260729.md`
 
 ## M12 最终单槽集成阻塞记录

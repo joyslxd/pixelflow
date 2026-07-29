@@ -14,6 +14,9 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
+| 统一会话 Runtime | R1 测试候选 | 测试 profile 对全部新对话使用 `assist`：统一登记 Turn、提供 Snapshot/SSE、自动上下文压缩与输入排队；所有 Agent 共用配置驱动的 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案；业务推进权仍属于现有 v2 阶段工作流，生产继续关闭 |
+| 持久化 External Job Coordinator | M06 已进入 Agent | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库；M06 已通过 Final 单槽集成，生产仍保持 R1 `assist`，R2 Workflow 接线和发布继续受独立门禁约束 |
+| 视频 Workflow Adapter | M11.2 开发候选 | 已建立视频 intake/方向/Plan 权威快照，并新增严格消费已审核 Plan 的场景包与全局资产图 Application Service；当前仍未接入 Supervisor、供应商 Operation 或生产路由 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
@@ -35,6 +38,8 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 flowchart LR
   FE["Web 前端<br/>React + Vite"] --> GW["FastAPI Gateway<br/>/agent/*"]
   GW --> PF["PixelFlow 业务层<br/>intake / creative / generate / skills"]
+  GW --> Runtime["Agent Runtime<br/>Turn / Snapshot / SSE / Context"]
+  Runtime --> Store
   PF --> LLM["DeepSeek LLM<br/>deepseek-v4-pro"]
   PF --> Store["Task / Conversation Store"]
   PF --> PM["PowerMem HTTP sidecar<br/>semantic memory"]
@@ -55,6 +60,7 @@ pixelflow/
 │   │   ├── generate/                # 图片参数准备、视频场景包、Seedance 镜头 Prompt
 │   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
+│   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩、排队与 operation/Provider Job 协调
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
@@ -175,11 +181,18 @@ flowchart TD
 | 对话 | POST | `/agent/conversations/{conversation_id}/messages` | 保存对话消息，兼容旧同步调用 |
 | 对话 | POST | `/agent/conversations/{conversation_id}/messages/start` | 启动可恢复消息保存 job |
 | 对话 | GET | `/agent/conversations/{conversation_id}/messages/jobs/{job_id}` | 查询消息保存 job |
+| 会话 Runtime | POST | `/agent/conversations/{conversation_id}/turns/start` | 幂等登记统一输入与 Turn |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/agent-snapshot` | 恢复 run、压缩、队列、消息和 cursor |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/agent-events` | 按 cursor 断点续传 Runtime SSE |
+| 会话 Runtime | GET | `/agent/conversations/{conversation_id}/turns/jobs/{run_id}` | SSE 不可用时查询原 Turn，不重新创建 |
+| 会话 Runtime | POST | `/agent/conversations/{conversation_id}/interrupts/{interrupt_id}/responses` | R1 返回旧 v2 仍拥有人工确认权的稳定冲突合同 |
 | 对话 | PATCH | `/agent/conversations/{conversation_id}/messages/{message_id}` | 更新对话消息内容或 payload |
 | 对话 | GET | `/agent/conversations/{conversation_id}/trace` | 内部调试专用：查看该对话的 LLM/供应商调用 trace，需要 content-app `ROLE_ADMIN` |
 | 用户偏好 | GET/PUT | `/agent/users/{user_id}/preferences` | 用户偏好 |
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
+
+R1 的 `assist / [] / 100 / true` 只写入 `backend/config.dev.yml`，用于测试环境覆盖全部新对话。`backend/config.prod.yml` 未增加这些键，仍由代码默认值保持 `off / [] / 0 / false`；历史对话和运行中任务不会迁移。生产启用需要在 M13.1 候选进入 Agent 后另行取得发布负责人的明确批准。
 
 ## 剪映草稿流程
 
@@ -311,6 +324,7 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - 所有分镜整数秒时长总和必须精确等于用户确认的 `video_duration_sec`；300 秒任务允许产生超过 18 个分镜。
 - 视频 Plan 的固定第四章是“全局资产清单”，结构化 `asset_manifest` 分别保存角色、场景、道具的最终名称、文字说明和生图要求；三类清单必须与全部 `scene_blueprints[].asset_requirements` 的分类并集完全相等，不能少也不能多。修订、手工编辑和历史回退都按版本保存该清单。
 - 场景包直接消费当前 Plan 的权威 `scene_blueprints + asset_manifest`，保留蓝图标题、故事线、镜头描述、旁白、转场和时长，并机械映射全局素材及 `@asset_id`，不再调用第二次 LLM 分析资产。缺少清单的旧 Plan 会被阻止进入新场景包流程；前端展示和提交的 `mentions.name` 始终以清单正式名称为准。任一分镜超过 9 张引用会返回明确错误而不是静默截断。
+- M11.2 的 `VideoScenePackageWorkflowService` 类比只读编排 Service：`plan_review` 只能先经用户显式同意并持久化为 `plan_approved`，再进入 `generate_scene_assets -> scene_package_review`；入口重新校验当前 Plan 与完整版本历史并冻结 SHA-256 场景包快照。场景 ID、顺序、精确时长、故事线、旁白、转场、执行提示词和所有字段都必须来自权威蓝图或固定机械映射；供应商追加字段、改写提示词或在正文后追加故事都会失败关闭。
 - 全局固定资产是 `characters`、`scenes`、`props`、`visual_style`。
 - `characters` 只能是人物角色，每个角色必须是同一个人物的正面、侧面、背面三视图。
 - 产品、商品、包装、工具、书包、球、床垫等非人物主体放到 `props`。
@@ -321,7 +335,8 @@ Plan 默认按当前创意修订并生成 v2/v3；只有用户明确选择“重
 - Plan 分镜写作与场景包执行提示词都应用项目内 `skills/seedance-prompt/SKILL.md`。该 Skill 对 content-app 实时启用的全部 Seedance 系列模型通用；调用层始终显式携带用户确认的 `video_model`，Skill 不改写模型，实时能力不兼容时由调用层提示。场景包继续严格保留最终 Plan 中的 `@asset_id`、正式资产名称和 mentions 图片 URL。
 - `skills/seedance-prompt/THIRD_PARTY_NOTICE.md` 记录 Skill 的输入来源、哈希和授权边界，具有来源审计价值，不能当作无用文件删除。
 - 角色三视图、场景图和道具图严格按 `asset_manifest` 一项生成一张并只保存一个 URL，同一 `asset_id` 跨分镜只生成一次；实际生图提示词同时包含清单的正式名称、文字说明和生图要求，避免 `image_prompt` 未重复某项外观约束时丢失 Plan 说明；统一使用当前 Plan 合同中的 `image_model/scene_image_ratio/scene_image_size`。分镜视频统一使用 `video_model/video_ratio/video_size/video_sound`。
-- 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后直接替换原 `global_assets` 图片，并同步相关 `shot_description.mentions` 的 `image_url`。编辑结果卡片点击“重新生成”后，下一条用户输入继续走全局素材图片编辑，不重新进入采集 Agent。
+- M11.2 只接收每项资产恰好一个 HTTPS 图片 URL 并机械回填同 `asset_id` 的 mentions；供应商调用、部分资产失败、额度暂停、重试和单镜视频生成由 M11.3 接入持久化 Operation 后处理，本切片不调用真实付费 API。
+- 场景包确认页支持点击全局素材图片预览、引用到左侧对话输入框并发送编辑指令；前端调用 `/agent/flows/image/edit-asset/start` 启动可恢复图片编辑 job，后端复用 `/api/picture/image_edit`，成功后由用户确认候选图，再替换原 `global_assets` 图片并同步相关 `shot_description.mentions` 的 `image_url`。编辑失败卡片会保留素材引用、修改意见、模型参数、场景包来源以及融合参考图；点击“重新生成图片”先重新打开全局素材参数确认卡，确认后继续调用 `/edit-asset/start` 或 `/fuse-asset/start`，不重新进入采集 Agent，也不盲目复用失败参数。历史失败卡片没有完整请求时会从已保存的 `scene_global_asset` 素材引用恢复编辑上下文。
 - 角色、场景、道具三行末尾固定提供“添加素材”卡片，复用现有素材库/本地上传弹层。新增素材使用带类型前缀的唯一 `*-manual-*` ID，来源名称重名时自动追加序号，只追加到当前场景包 `global_assets` 并持久化到消息和 conversation context，不修改 Plan `asset_manifest`，也不自动绑定镜头；用户在镜头描述中手动 `@` 后才写入 mentions、标记该镜头已修改并参与首次生成或局部二次生成。
 - 全局素材预览也支持“删除素材”：点击后只预填左侧固定删除文案和素材 chip，用户发送后在当前场景包内原地删除该素材引用，清空 `global_assets` 中该素材图片 URL 作为占位符，不新增场景包确认卡片。
 - 新需求入口使用可恢复 job：用户消息保存走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存完成后采集意图识别走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并写入 `pendingIntakeJob` / `pending_intake_job`。用户切到历史对话、创作页、iframe 外或刷新后只轮询已有 job，不重复追加用户消息、不重复启动采集流程；旧 `/messages` 和 `/intake/analyze` 同步接口仅做兼容。

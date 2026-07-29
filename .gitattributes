@@ -1,0 +1,2 @@
+# 用途：固定 M13.1/R1 PowerShell 5.1 门禁入口为 CRLF；检出后可避免本地换行策略重新引入脚本解析风险。
+scripts/agentization/Invoke-M13R1PhaseGate.ps1 text eol=crlf

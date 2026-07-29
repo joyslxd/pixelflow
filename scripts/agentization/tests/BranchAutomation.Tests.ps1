@@ -9,6 +9,7 @@ $RequiredScripts = @(
     "Sync-DevToAgent.ps1",
     "Start-AgentModule.ps1",
     "Invoke-AgentModuleGate.ps1",
+    "Invoke-M13R1PhaseGate.ps1",
     "Integrate-AgentModule.ps1",
     "Reconcile-DevToAgent.ps1"
 )
@@ -187,6 +188,34 @@ function Get-RemoteBranchSha {
         throw "无法读取测试远端分支：$Branch"
     }
     return ($lines -split "\s+")[0]
+}
+
+function Set-FakeM13CanonicalGate {
+    param([hashtable]$Topology)
+
+    $fakeGateDirectory = Join-Path $Topology.Repository "scripts\agentization"
+    New-Item -ItemType Directory -Path $fakeGateDirectory -Force | Out-Null
+    $fakeGate = @'
+param(
+    [string]$RepositoryPath,
+    [string]$ModuleId,
+    [string]$GateType,
+    [string]$ReleaseId,
+    [string]$Slice,
+    [string]$ChinesePolicyBaseRef,
+    [switch]$PlanOnly
+)
+[pscustomobject]@{
+    RepositoryPath = $RepositoryPath
+    ModuleId = $ModuleId
+    GateType = $GateType
+    ReleaseId = $ReleaseId
+    Slice = $Slice
+    ChinesePolicyBaseRef = $ChinesePolicyBaseRef
+    PlanOnly = [bool]$PlanOnly
+}
+'@
+    Set-Content -LiteralPath (Join-Path $fakeGateDirectory "Invoke-AgentModuleGate.ps1") -Value $fakeGate -Encoding UTF8
 }
 
 function Remove-TestRoot {
@@ -493,10 +522,134 @@ Describe "Agent 分支自动化入口" {
         )
     }
 
-    It "未配置权威测试清单的后端模块必须 fail-closed" {
-        foreach ($moduleId in @("M02", "M05", "M06")) {
-            { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
-        }
+    It "M02 最终门禁固定图内核、Gateway、旧图和分支脚本回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M02" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_dispatcher.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_checkpointer.py",
+            "tests/test_checkpointer_none_fix.py",
+            "tests/test_run_manager.py",
+            "tests/test_gateway_runtime_cleanup.py",
+            "tests/test_gateway_run_recovery.py",
+            "tests/test_harness_boundary.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_pixelflow_task_store.py",
+            "tests/test_openapi_operation_ids.py",
+            "tests/test_langgraph_auth.py"
+        )
+        $expectedRuffPaths = @(
+            "app/gateway/deps.py",
+            "app/gateway/pixelflow_agent_runtime.py",
+            "pixelflow/agent_runtime/graph"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
+    }
+
+    It "M05 最终门禁固定 Supervisor、图路由、黄金集和旧流程回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M05" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_supervisor_resolver.py",
+            "tests/test_agent_runtime_supervisor_classifier.py",
+            "tests/test_agent_runtime_supervisor_validator.py",
+            "tests/test_agent_runtime_supervisor_routing.py",
+            "tests/test_agent_runtime_supervisor_evaluation.py",
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_dispatcher.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_openapi_operation_ids.py"
+        )
+        $expectedRuffPaths = @(
+            "pixelflow/agent_runtime/supervisor",
+            "pixelflow/agent_runtime/graph"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
+    }
+
+    It "M06 最终门禁固定 Operation、重启恢复、旧流程和分支脚本回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M06" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $pesterCommands = @(
+            $plan | Where-Object {
+                ($_.Arguments -join " ") -match "(^|\s|=)Invoke-Pester(\s|$)"
+            }
+        )
+        $expectedTests = @(
+            "tests/test_agent_runtime_operation_coordinator.py",
+            "tests/test_agent_runtime_operation_leases.py",
+            "tests/test_agent_runtime_provider_job_adapter.py",
+            "tests/test_agent_runtime_operation_completion.py",
+            "tests/test_agent_runtime_operation_recovery.py",
+            "tests/test_agent_runtime_event_outbox.py",
+            "tests/test_agent_runtime_contracts.py",
+            "tests/test_agent_runtime_repositories.py",
+            "tests/test_agent_runtime_migration.py",
+            "tests/test_agent_runtime_graph_state.py",
+            "tests/test_agent_runtime_graph_interrupts.py",
+            "tests/test_agent_runtime_graph_composition.py",
+            "tests/test_agent_runtime_config.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_gateway_runtime_cleanup.py",
+            "tests/test_gateway_run_recovery.py"
+        )
+        $expectedRuffPaths = @(
+            "pixelflow/agent_runtime/jobs",
+            "pixelflow/agent_runtime/persistence/repositories.py"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        $pesterCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be (
+            (
+                @("-m", "ruff", "check") +
+                $expectedRuffPaths +
+                $expectedTests
+            ) -join "`n"
+        )
     }
 
     It "M07 和 M12 前端门禁包含全量测试、lint 和生产构建" {
@@ -511,10 +664,78 @@ Describe "Agent 分支自动化入口" {
         }
     }
 
-    It "M08 到 M11 在后端权威清单完成前必须 fail-closed" {
-        foreach ($moduleId in @("M08", "M09", "M10", "M11")) {
+    It "M08 到 M10 在后端权威清单完成前必须 fail-closed" {
+        foreach ($moduleId in @("M08", "M09", "M10")) {
             { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId $moduleId -GateType "Final" -PlanOnly } | Should Throw
         }
+    }
+
+    It "M11 门禁固定视频 Workflow 后端全组与前端回归" {
+        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M11" -GateType "Final" -PlanOnly)
+        $pytestCommands = @($plan | Where-Object { $_.Arguments -contains "pytest" })
+        $ruffCommands = @($plan | Where-Object { $_.Arguments -contains "ruff" })
+        $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
+        $expectedTests = @(
+            "tests/test_agent_video_workflow_planning.py",
+            "tests/test_agent_video_workflow_scene_packages.py",
+            "tests/test_agent_video_workflow_generation.py",
+            "tests/test_agent_video_workflow_postproduction.py",
+            "tests/test_agent_video_workflow_delivery.py",
+            "tests/test_pixelflow_intake_router.py",
+            "tests/test_pixelflow_planning_router.py",
+            "tests/test_creative_plan_markdown.py",
+            "tests/test_video_creation_contract.py",
+            "tests/test_plan_asset_manifest.py",
+            "tests/test_plan_asset_manifest_integration.py",
+            "tests/test_plan_scene_blueprint.py",
+            "tests/test_scene_blueprint_quality.py",
+            "tests/test_seedance_plan_authoring.py",
+            "tests/test_seedance_prompt_skill.py",
+            "tests/test_video_scene_packages.py",
+            "tests/test_scene_assets.py",
+            "tests/test_scene_semantic_qc.py",
+            "tests/test_borgrise_authorization_passthrough.py",
+            "tests/test_borgrise_generation_create_serialization.py",
+            "tests/test_borgrise_poll.py",
+            "tests/test_borgrise_project_id.py",
+            "tests/test_borgrise_quota_detection.py",
+            "tests/test_borgrise_video_payloads.py",
+            "tests/test_pixelflow_video_router.py",
+            "tests/test_borgrise_video_qc_skill.py",
+            "tests/test_video_quality_review.py",
+            "tests/test_jianying_draft_config.py",
+            "tests/test_jianying_draft_models.py",
+            "tests/test_jianying_draft_http_skill.py",
+            "tests/test_jianying_draft_service.py",
+            "tests/test_pixelflow_jianying_draft_router.py",
+            "tests/test_pixelflow_jianying_draft_lifespan.py",
+            "tests/test_agent_runtime_legacy_invariants.py",
+            "tests/test_openapi_operation_ids.py"
+        )
+        $expectedRuffPaths = @(
+            "app/gateway/routers/pixelflow_intake.py",
+            "app/gateway/routers/pixelflow_planning.py",
+            "app/gateway/routers/pixelflow_video.py",
+            "app/gateway/routers/pixelflow_jianying_draft.py",
+            "pixelflow/agent_workflows/video",
+            "pixelflow/creative",
+            "pixelflow/generate/scene_packages.py",
+            "pixelflow/generate/seedance_prompt.py",
+            "pixelflow/jianying_draft",
+            "pixelflow/qc/scene_semantic.py",
+            "pixelflow/qc/video_review.py",
+            "pixelflow/skills/borgrise"
+        )
+
+        $pytestCommands.Count | Should Be 1
+        $ruffCommands.Count | Should Be 1
+        ($pytestCommands[0].Arguments -join "`n") | Should Be ((@("-m", "pytest") + $expectedTests + @("-q")) -join "`n")
+        ($ruffCommands[0].Arguments -join "`n") | Should Be ((@("-m", "ruff", "check") + $expectedRuffPaths + $expectedTests) -join "`n")
+        ($pytestCommands[0].FilePath -match "backend[\\/]\.venv[\\/]Scripts[\\/]python\.exe$") | Should Be $true
+        ($ruffCommands[0].FilePath -eq $pytestCommands[0].FilePath) | Should Be $true
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "test" }).Count | Should Be 1
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "lint" }).Count | Should Be 1
+        @($webCommands | Where-Object { $_.FilePath -eq "pnpm.cmd" -and ($_.Arguments -join " ") -eq "build-prod" }).Count | Should Be 1
     }
 
     It "M13 保留后端全量门禁并使用项目 Python" {
@@ -533,6 +754,94 @@ Describe "Agent 分支自动化入口" {
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm test" }).Count | Should Be 1
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm lint" }).Count | Should Be 1
         @($webCommands | Where-Object { ($_.Arguments -join " ") -eq "pnpm build-prod" }).Count | Should Be 1
+    }
+
+    It "M13 R1 固定入口绑定冻结 Agent 和唯一阶段参数" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        $expectedAgent = Get-RemoteBranchSha -Topology $topology -Branch "feature/agent_0.8.4_boguan"
+
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $expectedAgent, "Process")
+            $result = & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $result.RepositoryPath | Should Be ([System.IO.Path]::GetFullPath($topology.Repository))
+        $result.ModuleId | Should Be "M13"
+        $result.GateType | Should Be "Phase"
+        $result.ReleaseId | Should Be "R1"
+        $result.Slice | Should Be "M13.1"
+        $result.ChinesePolicyBaseRef | Should Be $expectedAgent
+        $result.PlanOnly | Should Be $true
+    }
+
+    It "M13 R1 固定入口缺少冻结 Agent 跟踪引用时 fail-closed" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        $thrown = $false
+        $message = ""
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $null, "Process")
+            try {
+                & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly | Out-Null
+            }
+            catch {
+                $thrown = $true
+                $message = $_.Exception.Message
+            }
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $thrown | Should Be $true
+        $message | Should Match "缺少集成器冻结 Agent SHA"
+    }
+
+    It "M13 R1 固定入口拒绝不是候选祖先的冻结 Agent SHA" {
+        $topology = New-AutomationTestTopology
+        Set-FakeM13CanonicalGate -Topology $topology
+        Add-DevCommit -Topology $topology
+        $devSha = Get-RemoteBranchSha -Topology $topology -Branch "feature/dev_0.8.4_boguan"
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        $thrown = $false
+        $message = ""
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $devSha, "Process")
+            try {
+                & (Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1") -RepositoryPath $topology.Repository -PlanOnly | Out-Null
+            }
+            catch {
+                $thrown = $true
+                $message = $_.Exception.Message
+            }
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $thrown | Should Be $true
+        $message | Should Match "不是当前 M13 R1 候选的祖先"
+    }
+
+    It "M13 R1 固定入口使用 Windows PowerShell 5.1 可识别的脚本编码" {
+        $scriptPath = Join-Path $AgentizationRoot "Invoke-M13R1PhaseGate.ps1"
+        $bytes = [System.IO.File]::ReadAllBytes($scriptPath)
+        $text = [System.IO.File]::ReadAllText($scriptPath, [System.Text.Encoding]::UTF8)
+        $crlfCount = [regex]::Matches($text, "`r`n").Count
+        $bareLfCount = [regex]::Matches($text, "(?<!`r)`n").Count
+        $attributeOutput = & git -C $RepositoryRoot check-attr eol -- "scripts/agentization/Invoke-M13R1PhaseGate.ps1"
+
+        $PSVersionTable.PSVersion.Major | Should Be 5
+        (($bytes[0..2] | ForEach-Object { $_.ToString("X2") }) -join " ") | Should Be "EF BB BF"
+        ($crlfCount -gt 0) | Should Be $true
+        $bareLfCount | Should Be 0
+        ($attributeOutput -join "`n") | Should Match "eol: crlf"
     }
 
     It "缺少项目虚拟环境时不得回退到 PATH Python" {
@@ -595,6 +904,31 @@ Describe "Agent 分支自动化入口" {
         $confirmedAgain.Status | Should Be "already_integrated"
         $resumed = & (Join-Path $AgentizationRoot "Start-AgentModule.ps1") -RepositoryPath $topology.Repository -ModuleId "M12" -Slice "M12.4" -Writer "下一切片测试者" -WorktreeRoot (Join-Path $topology.Root "module-worktrees") -RemoteName "origin" -SkipFetch
         $resumed.Action | Should Be "created"
+    }
+
+    It "单槽集成向门禁传递并恢复冻结 Agent SHA" {
+        $topology = New-AutomationTestTopology
+        $moduleBranch = Add-M13PhaseCheckpoint -Topology $topology -ReleaseId "R1" -Slice "M13.1"
+        $expectedAgent = Get-RemoteBranchSha -Topology $topology -Branch "feature/agent_0.8.4_boguan"
+        $gateScript = Join-Path $topology.Root "Assert-Frozen-Agent-Gate.ps1"
+        $gateContent = @"
+param([string]`$RepositoryPath)
+if (`$env:PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA -ne "$expectedAgent") {
+    throw "集成器没有向门禁传递本次冻结的 Agent SHA。"
+}
+"@
+        Set-Content -LiteralPath $gateScript -Value $gateContent -Encoding UTF8
+        $previousAgent = [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process")
+        try {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "调用前值", "Process")
+            $result = & (Join-Path $AgentizationRoot "Integrate-AgentModule.ps1") -RepositoryPath $topology.Repository -ModuleId "M13" -ModuleBranch $moduleBranch -GateType "Phase" -ReleaseId "R1" -Slice "M13.1" -RemoteName "origin" -CandidateRoot (Join-Path $topology.Root "integration") -GateScript $gateScript -SkipFetch -Apply
+            [System.Environment]::GetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", "Process") | Should Be "调用前值"
+        }
+        finally {
+            [System.Environment]::SetEnvironmentVariable("PIXELFLOW_AGENTIZATION_FROZEN_AGENT_SHA", $previousAgent, "Process")
+        }
+
+        $result.Status | Should Be "integrated"
     }
 
     It "同一模块后续检查点只集成 last_integrated_commit 之后的增量" {

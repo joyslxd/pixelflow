@@ -215,6 +215,7 @@ def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
             "product_category": "服饰鞋包",
             "target_audience": "通勤人群",
             "conversion_goal": "直接购买",
+            "video_model": "seedance-2.0",
         },
         plan_markdown="## 五、镜头列表\n严格执行权威分镜蓝图。",
         selected_direction={"title": "雨天防水实测"},
@@ -226,6 +227,7 @@ def test_prepare_video_scene_packages_consumes_authoritative_plan_blueprints():
     assert [scene["title"] for scene in result["scene_packages"]] == ["雨水钩子", "防水证明", "通勤收束"]
     assert result["scene_packages"][1]["storyline"] == "泼水和开包检查证明防水。"
     assert result["scene_packages"][1]["narration"] == "高密防泼水面料，把雨留在外面。"
+    assert "视频模型：" not in result["scene_packages"][0]["prompt"]
     assert {item["name"] for item in result["global_assets"]["characters"]} == set()
     assert {item["name"] for item in result["global_assets"]["scenes"]} == {"雨中街道", "办公区"}
     assert {item["name"] for item in result["global_assets"]["props"]} == {"防水背包", "水杯"}

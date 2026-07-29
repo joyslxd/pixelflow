@@ -1129,7 +1129,7 @@ def generate_ppt_content_json(
     """调用智能 PPT 大纲转 JSON 接口并轮询结果。"""
     endpoint = "/picture/smart-ppt/generatePptContentToJson"
     request_data = {
-        "originalOutline": original_outline,
+        "originalOutline": _prepare_ppt_content_outline(original_outline),
         "smartPptProjectId": smart_ppt_project_id,
         "pptStyle": ppt_style,
     }
@@ -1150,6 +1150,28 @@ def generate_ppt_content_json(
         "content_json": content_json,
         "raw_response": {"start": start_result, "poll": poll_result},
     }
+
+
+def _prepare_ppt_content_outline(original_outline: str) -> str:
+    """把明确页标题内部的 Markdown 子标题降级，避免被 SmartPPT 误拆成页面。"""
+    if not isinstance(original_outline, str) or not original_outline.strip():
+        return original_outline
+
+    lines = original_outline.splitlines()
+    page_started = False
+    prepared: list[str] = []
+    for line in lines:
+        page_heading = re.match(r"^##\s+P\d+(?:\b|[.：:、\s])", line.strip(), flags=re.IGNORECASE)
+        if page_heading:
+            page_started = True
+            prepared.append(line)
+            continue
+        if page_started and re.match(r"^#{3,6}\s+", line):
+            heading = re.sub(r"^#{3,6}\s+", "", line).strip()
+            prepared.append(f"**{heading}**" if heading else line)
+            continue
+        prepared.append(line)
+    return "\n".join(prepared)
 
 
 def generate_ppt_image(json_content: str, smart_ppt_project_id: int) -> dict:

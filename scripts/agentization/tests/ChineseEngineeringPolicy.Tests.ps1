@@ -216,6 +216,16 @@ Describe "中文工程规范门禁" {
         { & $PolicyScript -RepositoryPath $repository -BaseRef "HEAD~1" -HeadRef "HEAD" } | Should Throw
     }
 
+    It "允许赋值给变量的三引号普通字符串包含英文配置值" {
+        $repository = New-PolicyTestRepository
+        $content = "_CONFIG = `"`"`"`nmodel: fake-test-model`n`"`"`""
+        Add-TestCommit -RepositoryPath $repository -RelativePath "sample.py" -Content $content -Message "测试：验证普通多行字符串不按文档检查"
+
+        $result = & $PolicyScript -RepositoryPath $repository -BaseRef "HEAD~1" -HeadRef "HEAD"
+
+        $result.Passed | Should Be $true
+    }
+
     It "要求 YAML 叶子配置项紧邻中文用途和影响说明" {
         $repository = New-PolicyTestRepository
         Add-TestCommit -RepositoryPath $repository -RelativePath "config.test.yml" -Content "feature:`n  enabled: true" -Message "测试：验证配置说明拒绝"

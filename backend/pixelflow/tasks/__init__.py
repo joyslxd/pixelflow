@@ -14,6 +14,7 @@ from pixelflow.tasks.store import (
     PixelFlowTaskRecord,
     PixelFlowTaskStore,
     SQLPixelFlowTaskStore,
+    ensure_sql_conversation_schema,
     sanitize_client_conversation_context,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "PixelFlowTaskRecord",
     "PixelFlowTaskStore",
     "SQLPixelFlowTaskStore",
+    "ensure_sql_conversation_schema",
     "sanitize_client_conversation_context",
 ]

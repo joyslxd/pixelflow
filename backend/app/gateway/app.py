@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # lifespan 入口再调用一次，保证测试或特殊 ASGI 加载路径也已经完成 profile 初始化。
     load_profile_config()
+    agent_runtime_config = validate_agent_runtime_startup_config()
 
     # 启动时加载配置并检查必要环境变量。startup_config 是一次性启动快照，只用于
     # 日志级别、LangGraph runtime 引擎和 channels 等必须重启才生效的基础设施。
@@ -133,9 +134,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
-        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.engine import get_engine, get_session_factory
         from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
+
+        # SQLite/DeerFlow 复用旧库时不会自动执行 PixelFlow 业务 Alembic 迁移。
+        # 先幂等补齐对话列，再把同一 session factory 注入 Repository，避免新旧
+        # 对话接口在 ORM 查询阶段因缺列统一返回 500。
+        persistence_engine = get_engine()
+        if persistence_engine is not None:
+            from pixelflow.tasks import ensure_sql_conversation_schema
+
+            await ensure_sql_conversation_schema(persistence_engine)
 
         app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
@@ -158,6 +168,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
 
+        from pixelflow.agent_runtime.persistence import (
+            MemoryCompactionQueueRepository,
+            SQLCompactionQueueRepository,
+        )
+        from pixelflow.agent_runtime.runtime_compaction import (
+            build_agent_context_compactor,
+        )
+        from pixelflow.agent_runtime.service import AgentRuntimeService
+
+        task_store = app.state.pixelflow_task_store
+        if isinstance(task_store, SQLPixelFlowTaskStore):
+            agent_runtime_repository = SQLCompactionQueueRepository(
+                task_store.session_factory,
+            )
+        else:
+            agent_runtime_repository = MemoryCompactionQueueRepository()
+        context_compactor = (
+            build_agent_context_compactor(
+                task_store=task_store,
+                repository=agent_runtime_repository,
+                app_config=startup_config,
+                agent_runtime_config=agent_runtime_config,
+            )
+            if agent_runtime_config.context_compaction_enabled
+            else None
+        )
+        app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
+            config=agent_runtime_config,
+            repository=agent_runtime_repository,
+            task_store=task_store,
+            context_compactor=context_compactor,
+        )
+        logger.info(
+            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s",
+            agent_runtime_config.mode,
+            agent_runtime_config.new_conversation_rollout_percent,
+        )
+
         from pixelflow.tracing import configure_trace_sink
 
         conversation_trace_store = app.state.pixelflow_task_store
@@ -170,6 +218,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
+            pixelflow_agent_runtime_service = getattr(
+                app.state,
+                "pixelflow_agent_runtime_service",
+                None,
+            )
+            if pixelflow_agent_runtime_service is not None:
+                await pixelflow_agent_runtime_service.aclose()
+                logger.info("PixelFlow Agent Runtime closed")
             pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
             if pixelflow_jianying_draft_service is not None:
                 await pixelflow_jianying_draft_service.aclose()

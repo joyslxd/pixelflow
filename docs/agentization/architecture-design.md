@@ -225,21 +225,18 @@ flowchart LR
 上下文窗口由实际调用模型决定，不是 LangGraph 自己提供固定窗口：
 
 ```text
-effective_context = min(模型已验证的 max_context_tokens, 业务建议上限)
+effective_context = min(模型已验证的 max_context_tokens, context_budget.effective_context_k × 1024)
 usable_input = effective_context - max_output_tokens - safety_reserve_tokens
 utilization = estimated_input_tokens / usable_input
 ```
 
-| Agent/节点 | 建议有效窗口上限 | 输出预留 | 安全预留 | 未验证时 |
+| 适用范围 | 统一有效窗口 | 输出预留 | 安全预留 | 可用输入 |
 | --- | ---: | ---: | ---: | ---: |
-| Supervisor | 256K | 8K | 32K | 128K 档案 |
-| 图片/图片编辑 | 256K | 16K | 32K | 128K 档案 |
-| 视频 | 384K | 32K | 48K | 128K 档案 |
-| PPT | 384K | 32K | 48K | 128K 档案 |
-| 视频分析 | 512K | 48K | 64K | 128K 档案 |
-| 摘要节点 | 384K，超出分块 | 24K | 48K | 128K 分块 |
+| 全部当前 Agent/节点、摘要节点、未来新增 Agent 和流程 | 896K（917,504） | 32K（32,768） | 32K（32,768） | 832K（851,968） |
 
-256K/384K/512K 是建议上限，不代表当前 AIRouter 模型已经验证支持。能力档案缺失或过期时必须使用 128K 保守档案。
+`K` 按 `1024 tokens` 计算。唯一预算来源是 dev/prod profile 的 `pixelflow.agent_runtime.context_budget`；`ContextBudgetPolicyProvider` 对任意非空节点名返回同一策略，所以 R2、R3、R4 新增或修改流程时不得复制窗口常量。修改配置并重启即可统一改变新进程预算。
+
+当前 `deepseek-v4-pro` 的 `models[].context_profile.max_context_tokens=1000000`，统一有效窗口低于物理上限 `82,496 tokens`。实际 Runtime 保持 `require_verified_model_profile=true`，档案缺失、未验证或过期时启动失败；128K 只保留为底层兼容工具和显式非严格测试能力，不得成为 PixelFlow 业务流程兜底。
 
 ### 8.3 四级压缩策略
 
@@ -252,7 +249,7 @@ utilization = estimated_input_tokens / usable_input
 
 成功压缩目标是回落到 45% 以下。原始 SQL 消息、权威 Plan 和 artifact 不删除。
 
-压缩流程：发送 started 事件 → 取得 conversation 锁 → 生成结构化摘要 → 校验目标/否定约束/合同/ID/未决问题 → 原子保存 → 发送 completed → 按顺序处理排队输入。
+压缩流程：发送 started 事件 → 取得 conversation 锁 → 生成结构化摘要 → 校验目标/否定约束/合同/ID/未决问题 → 原子保存 → 发送 completed → 按顺序处理排队输入。失败时原子写 `retry_required + retry_not_before`，当前默认退避 30 秒；Snapshot/SSE/Run 读取在到期前不得创建恢复任务，到期后只唤醒一次。
 
 SQL 为每个进入 Turn 路径的 conversation 建立永久协调行，状态为 `idle`、`active` 或 `retry_required`；普通 Turn 与压缩专用入口都先锁该行，再用短事务租约和随机 fencing token 协调，压缩期间不占用长事务或数据库连接。成功收尾时原子切回 `idle`、清空租约字段并只把最早 Turn 从 `queued` 迁移为 `processing`；异常或 `paused` 时切为 `retry_required` 恢复标记，通用 Turn 领取仍被阻塞，新 worker 可立即用新 token 接管，陈旧 worker 不能改写新锁或消费队列。
 
@@ -451,7 +448,7 @@ GPT-5.6-sol 高思考足以完成大多数切片。以下高风险模块建议�
 - `contracts-v1.md` 的 action、事件、API、状态和幂等键无歧义。
 - 认可共享文件单一 owner 和 14 模块依赖关系。
 - 认可 M00 只保留 M00-A/M00-B 两条开发分支，各自内部串行；M00 首次集成由开发者手动启动一次临时集成切片。
-- 认可模型窗口动态验证，不能把 256K/512K 当成当前模型事实。
+- 认可模型窗口由配置和已验证档案共同决定；当前统一 896K/32K/32K 与 DeepSeek V4 Pro 1,000,000 tokens 档案是 R1–R4 事实，后续调整必须改 profile、重启并重新验证。
 - 认可业务合同永不摘要、原始消息不删除、压缩期间输入可排队。
 - 认可每个 Codex 对话只领取一个切片，完成状态写入模块文档。
 - 认可 R1–R4 分阶段上线和明确的 `release checkpoint`；阶段检查点通过单槽候选进入 Agent，生产运行模式、`enabled_intents` 与 Feature Flag 变化仍需人工批准；当前各阶段新对话比例固定100%。

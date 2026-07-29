@@ -135,19 +135,37 @@ test("多个不同消息目标会失败关闭而不是猜测最近目标", () =>
   );
 });
 
-test("Workspace 只在 Supervisor 归属内分流 interrupt，旧运行时入口保持不变", () => {
+test("Workspace 普通输入只启动一次 Turn 并完整携带目标元数据", () => {
+  const functionStart = workspaceSource.indexOf("const handleSupervisorTurn = async");
+  const functionEnd = workspaceSource.indexOf("useEffect(() => {", functionStart);
+  const functionSource = workspaceSource.slice(functionStart, functionEnd);
+
+  assert.ok(functionStart >= 0 && functionEnd > functionStart);
   assert.match(
-    workspaceSource,
-    /const submission = buildSupervisorSubmission\([\s\S]*submission\.kind === "interrupt"[\s\S]*respondToInterrupt\(submission\.interruptId, submission\.request\)[\s\S]*startTurn\(submission\.request\)/,
+    functionSource,
+    /buildSupervisorSubmission\(\{[\s\S]*replyToMessageId: pendingTurn\.replyToMessageId[\s\S]*artifactRefs: pendingTurn\.artifactRefs/,
+  );
+  assert.equal(
+    functionSource.match(/supervisorRuntime\.startTurn\(request\)/g)?.length,
+    1,
+  );
+});
+
+test("Workspace 仅由 supervisor_v1 响应 interrupt，成功后持久化清除 pending", () => {
+  const functionStart = workspaceSource.indexOf("const handleSupervisorTurn = async");
+  const functionEnd = workspaceSource.indexOf("useEffect(() => {", functionStart);
+  const functionSource = workspaceSource.slice(functionStart, functionEnd);
+
+  assert.match(
+    functionSource,
+    /submission\.kind === "interrupt"[\s\S]*orchestrationModeRef\.current !== "supervisor_v1"[\s\S]*respondToInterrupt\(submission\.interruptId, submission\.request\)[\s\S]*persistPendingSupervisorTurns\([\s\S]*clientInputId !== pendingTurn\.clientInputId/,
   );
   assert.match(
     workspaceSource,
-    /if \(ownership\.orchestrationMode === "supervisor_v1"\)[\s\S]*setPendingSupervisorTurns/,
+    /interruptId: ownership\.orchestrationMode === "supervisor_v1"[\s\S]*\? interruptId \?\? restoredInterruptId[\s\S]*: null/,
   );
-  assert.match(
-    workspaceSource,
-    /if \(shouldUseRecoverableIntakeEntry\(text, materials, activeConversation\)\)/,
-  );
+  assert.match(workspaceSource, /const shouldRegisterRuntime = ownership\.orchestrationMode === "supervisor_v1"[\s\S]*ownership\.agentRuntimeMode === "assist"[\s\S]*ownership\.agentRuntimeMode === "shadow"/);
+  assert.match(workspaceSource, /if \(shouldUseRecoverableIntakeEntry\(text, materials, activeConversation\)\)/);
 });
 
 test("Supervisor 只释放场景目标引用入口，不恢复旧供应商动作", () => {

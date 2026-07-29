@@ -33,6 +33,50 @@ from pixelflow.tasks.model import (
 )
 
 
+def _ensure_sql_conversation_schema(sync_connection) -> None:
+    """为运行中的旧业务库补齐对话新列，并创建缺失的消息表。
+
+    生产环境通常由 Alembic 管理结构；但 DeerFlow 的 SQLite 开发/测试库会被
+    直接复用，启动时不会自动执行业务迁移。这里仅做幂等的兼容修复，保证 M13.1
+    新增的编排归属和 CAS revision 不会让历史对话接口整体返回 500。
+    """
+
+    from sqlalchemy import inspect
+
+    inspector = inspect(sync_connection)
+    conversation_table = PixelFlowConversationRow.__table__
+    message_table = PixelFlowConversationMessageRow.__table__
+    if not inspector.has_table(conversation_table.name):
+        conversation_table.metadata.create_all(
+            sync_connection,
+            tables=[conversation_table, message_table],
+        )
+        return
+
+    columns = {str(column["name"]) for column in inspector.get_columns(conversation_table.name)}
+    missing_columns = {
+        "revision": "INTEGER NOT NULL DEFAULT 1",
+        "orchestration_mode": "VARCHAR(24) NOT NULL DEFAULT 'frontend_v2'",
+        "orchestration_version": "INTEGER NOT NULL DEFAULT 1",
+    }
+    for name, definition in missing_columns.items():
+        if name in columns:
+            continue
+        # 只使用固定的内部列名和定义，避免把外部输入拼接到 DDL。
+        sync_connection.execute(text(f"ALTER TABLE {conversation_table.name} ADD COLUMN {name} {definition}"))
+
+    # 消息表是独立于旧对话表创建的；不存在时补建即可。
+    if not inspector.has_table(message_table.name):
+        message_table.metadata.create_all(sync_connection, tables=[message_table])
+
+
+async def ensure_sql_conversation_schema(engine) -> None:
+    """启动期幂等修复 SQLite/DeerFlow 共享库中的对话结构。"""
+
+    async with engine.begin() as connection:
+        await connection.run_sync(_ensure_sql_conversation_schema)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -481,6 +525,8 @@ class PixelFlowAssetRecord:
 class PixelFlowConversationRecord:
     conversation_id: str
     user_id: str | None
+    orchestration_mode: str = "frontend_v2"
+    orchestration_version: int = 1
     title: str = ""
     current_task_id: str | None = None
     last_phase: str = "idle"
@@ -493,6 +539,8 @@ class PixelFlowConversationRecord:
         return {
             "conversation_id": self.conversation_id,
             "user_id": self.user_id,
+            "orchestration_mode": self.orchestration_mode,
+            "orchestration_version": self.orchestration_version,
             "title": self.title,
             "current_task_id": self.current_task_id,
             "last_phase": self.last_phase,
@@ -631,6 +679,8 @@ def _conversation_row_to_record(row: PixelFlowConversationRow) -> PixelFlowConve
     return PixelFlowConversationRecord(
         conversation_id=row.conversation_id,
         user_id=row.user_id,
+        orchestration_mode=row.orchestration_mode or "frontend_v2",
+        orchestration_version=row.orchestration_version or 1,
         title=row.title or "",
         current_task_id=row.current_task_id,
         last_phase=row.last_phase or "idle",
@@ -657,6 +707,12 @@ class SQLPixelFlowTaskStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._sf = session_factory
         self._conversation_locks = _new_conversation_locks()
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """暴露同库 Session 工厂，让 Agent Runtime Repository 复用业务事务边界。"""
+
+        return self._sf
 
     async def create(self, record: PixelFlowTaskRecord) -> PixelFlowTaskRecord:
         async with self._sf() as session:
@@ -830,6 +886,8 @@ class SQLPixelFlowTaskStore:
             row = PixelFlowConversationRow(
                 conversation_id=record.conversation_id,
                 user_id=record.user_id,
+                orchestration_mode=record.orchestration_mode,
+                orchestration_version=record.orchestration_version,
                 title=record.title,
                 current_task_id=record.current_task_id,
                 last_phase=record.last_phase,
@@ -906,6 +964,15 @@ class SQLPixelFlowTaskStore:
                             if getattr(row, attr) != value:
                                 setattr(row, attr, value)
                                 changed = True
+                    runtime_patch = fields.get("_agent_runtime_patch")
+                    if isinstance(runtime_patch, dict):
+                        patched_context = _patch_agent_runtime_context(
+                            row.context_json,
+                            runtime_patch,
+                        )
+                        if patched_context != row.context_json:
+                            row.context_json = patched_context
+                            changed = True
                     if changed:
                         row.revision = (
                             _require_conversation_revision(row.revision) + 1
@@ -1235,6 +1302,15 @@ class MemoryPixelFlowTaskStore:
                     if getattr(record, key) != value:
                         setattr(record, key, value)
                         changed = True
+            runtime_patch = fields.get("_agent_runtime_patch")
+            if isinstance(runtime_patch, dict):
+                patched_context = _patch_agent_runtime_context(
+                    record.context,
+                    runtime_patch,
+                )
+                if patched_context != record.context:
+                    record.context = patched_context
+                    changed = True
             if changed:
                 record.revision = (
                     _require_conversation_revision(record.revision) + 1

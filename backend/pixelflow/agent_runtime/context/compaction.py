@@ -26,8 +26,11 @@ from ..persistence.compaction_queue import (
     ConversationCompactionLease,
 )
 from .compaction_events import CompactionEventSink
-from .profiles import ModelContextProfile, resolve_model_context_profile
-from .token_meter import TokenMeter, get_context_budget_policy
+from .profiles import ModelContextProfile
+from .token_meter import (
+    ContextBudgetPolicyProvider,
+    TokenMeter,
+)
 from .verification import (
     SummaryVerificationBaseline,
     SummaryVerifier,
@@ -64,6 +67,7 @@ PIXELFLOW_STRUCTURED_SUMMARY_PROMPT = (
     "你是 PixelFlow 结构化上下文摘要器。输入只包含上一版结构化摘要和本版新增消息。\n"
     "请综合两者返回一份完整的新语义快照；允许移除已经解决的问题或替换已变更的决定，\n"
     "但不得编造输入中不存在的 Plan、创作合同、资产、pending action、operation 或凭据。\n"
+    "消息中的 verification_requirements 是保存前的精确验证基线，相关字符串和稳定 ID 必须原样进入对应字段，不得改写、遗漏或合并。\n"
     "不要输出思维链、Markdown、代码围栏或额外说明，只返回一个 JSON 对象。\n\n"
     "JSON 字段必须严格如下：\n"
     '{{\n  "user_goals": ["用户目标"],\n'
@@ -620,6 +624,7 @@ class ContextCompactionCoordinator:
         summary_model_name: str,
         model_profiles: Mapping[str, ModelContextProfile],
         token_meter: TokenMeter | None = None,
+        budget_policy_provider: ContextBudgetPolicyProvider | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_model_name = summary_model_name.strip()
@@ -635,6 +640,9 @@ class ContextCompactionCoordinator:
         self._summary_model_name = normalized_model_name
         self._model_profiles = MappingProxyType(frozen_profiles)
         self._token_meter = token_meter or TokenMeter()
+        self._budget_policy_provider = (
+            budget_policy_provider or ContextBudgetPolicyProvider()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def coordinate(
@@ -792,15 +800,15 @@ class ContextCompactionCoordinator:
     def _summary_chunk_limit_tokens(self) -> int:
         """从摘要模型档案和 summary 节点策略计算不可伪造的分块上限。"""
 
-        resolution = resolve_model_context_profile(
+        profile = self._budget_policy_provider.resolve_model_profile(
             self._summary_model_name,
             self._model_profiles,
             now=self._clock(),
         )
         summary_budget = self._token_meter.measure(
             estimated_input_tokens=0,
-            profile=resolution.profile,
-            policy=get_context_budget_policy("summary"),
+            profile=profile,
+            policy=self._budget_policy_provider.policy_for("summary"),
         )
         return summary_budget.usable_input_tokens
 
@@ -948,6 +956,7 @@ class ConversationCompactionRuntime:
         lease_owner: str,
         lease_ttl: timedelta,
         event_sink: CompactionEventSink,
+        retry_backoff: timedelta = timedelta(seconds=30),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_owner = lease_owner.strip()
@@ -955,6 +964,8 @@ class ConversationCompactionRuntime:
             raise ValueError("lease_owner 不能为空")
         if lease_ttl <= timedelta(0):
             raise ValueError("lease_ttl 必须大于零")
+        if retry_backoff <= timedelta(0):
+            raise ValueError("retry_backoff 必须大于零")
         if not isinstance(event_sink, CompactionEventSink):
             raise TypeError("event_sink 必须实现 CompactionEventSink")
         if not event_sink.is_bound_to(repository):
@@ -963,6 +974,7 @@ class ConversationCompactionRuntime:
         self._repository = repository
         self._lease_owner = normalized_owner
         self._lease_ttl = lease_ttl
+        self._retry_backoff = retry_backoff
         self._event_sink = event_sink
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -1043,13 +1055,15 @@ class ConversationCompactionRuntime:
             )
             result = ContextCompactionResult.model_validate(raw_result)
             if result.status == "paused":
+                failed_at = self._clock()
                 await self._repository.finish_compaction_with_event(
                     user_id,
                     lease.conversation_id,
                     lease_owner=lease.lease_owner,
                     lease_token=lease.lease_token,
-                    now=self._clock(),
+                    now=failed_at,
                     claim_next=False,
+                    retry_not_before=failed_at + self._retry_backoff,
                     run_id=normalized_run_id,
                     event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
                     payload={
@@ -1085,13 +1099,15 @@ class ConversationCompactionRuntime:
         except BaseException:
             if started_event_persisted:
                 try:
+                    failed_at = self._clock()
                     await self._repository.finish_compaction_with_event(
                         user_id,
                         lease.conversation_id,
                         lease_owner=lease.lease_owner,
                         lease_token=lease.lease_token,
-                        now=self._clock(),
+                        now=failed_at,
                         claim_next=False,
+                        retry_not_before=failed_at + self._retry_backoff,
                         run_id=normalized_run_id,
                         event_type=AgentEventType.CONTEXT_COMPRESSION_FAILED,
                         payload={
@@ -1147,13 +1163,15 @@ class ConversationCompactionRuntime:
     ) -> None:
         """异常路径只写恢复标记，绝不消费已经持久化的输入。"""
 
+        failed_at = self._clock()
         await self._repository.finish_compaction(
             user_id,
             lease.conversation_id,
             lease_owner=lease.lease_owner,
             lease_token=lease.lease_token,
-            now=self._clock(),
+            now=failed_at,
             claim_next=False,
+            retry_not_before=failed_at + self._retry_backoff,
         )
 
 

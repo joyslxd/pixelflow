@@ -18,8 +18,11 @@ from ..contracts import (
     WorkflowRecord,
 )
 from .externalizer import ContextPayloadExternalizer
-from .profiles import ModelContextProfile, resolve_model_context_profile
-from .token_meter import TokenMeter, get_context_budget_policy
+from .profiles import ModelContextProfile
+from .token_meter import (
+    ContextBudgetPolicyProvider,
+    TokenMeter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +211,7 @@ class ContextAssembler:
         memory_limit: int = 5,
         token_meter: TokenMeter | None = None,
         externalizer: ContextPayloadExternalizer | None = None,
+        budget_policy_provider: ContextBudgetPolicyProvider | None = None,
     ) -> None:
         if isinstance(recent_message_limit, bool) or not isinstance(recent_message_limit, int) or recent_message_limit <= 0:
             raise ValueError("recent_message_limit 必须是正整数")
@@ -220,7 +224,10 @@ class ContextAssembler:
         self._memory_search = memory_search
         self._model_name = model_name.strip()
         self._model_profiles = dict(model_profiles)
-        self._policy = get_context_budget_policy(budget_node)
+        self._budget_policy_provider = (
+            budget_policy_provider or ContextBudgetPolicyProvider()
+        )
+        self._policy = self._budget_policy_provider.policy_for(budget_node)
         self._token_estimator = token_estimator
         self._clock = clock
         self._recent_message_limit = recent_message_limit
@@ -276,14 +283,14 @@ class ContextAssembler:
             "unresolved_questions": unresolved_questions,
         }
         estimated_input_tokens = self._token_estimator(deepcopy(payload))
-        resolution = resolve_model_context_profile(
+        profile = self._budget_policy_provider.resolve_model_profile(
             self._model_name,
             self._model_profiles,
             now=self._clock(),
         )
         budget_report = self._token_meter.measure(
             estimated_input_tokens=estimated_input_tokens,
-            profile=resolution.profile,
+            profile=profile,
             policy=self._policy,
         )
         if self._externalizer is not None and budget_report.compaction_level >= 1:
@@ -297,7 +304,7 @@ class ContextAssembler:
                 estimated_input_tokens = self._token_estimator(deepcopy(payload))
                 budget_report = self._token_meter.measure(
                     estimated_input_tokens=estimated_input_tokens,
-                    profile=resolution.profile,
+                    profile=profile,
                     policy=self._policy,
                 )
         payload["budget_report"] = budget_report

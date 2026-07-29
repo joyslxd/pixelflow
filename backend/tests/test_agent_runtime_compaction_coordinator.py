@@ -8,11 +8,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from pixelflow.agent_runtime.config import ContextBudgetConfig
 from pixelflow.agent_runtime.context import (
     CompactionSegment,
     CompactionStageRequest,
     CompactionStageResult,
     ContextBudgetPolicy,
+    ContextBudgetPolicyProvider,
     ContextCompactionCoordinator,
     ContextCompactionRequest,
     ContextCompactionResult,
@@ -98,6 +100,9 @@ def _coordinator(
         executor=executor,
         summary_model_name=_SUMMARY_MODEL_NAME,
         model_profiles=profiles,
+        budget_policy_provider=ContextBudgetPolicyProvider(
+            ContextBudgetConfig(require_verified_model_profile=False),
+        ),
         clock=lambda: _NOW,
     )
 
@@ -271,7 +276,7 @@ async def test_coordinator_hierarchically_compacts_workflow_summaries() -> None:
         {
             "externalize_payloads": [84],
             "incremental_summary": [80],
-            "hierarchical_summary": [60, 44],
+            "hierarchical_summary": [44],
         }
     )
     workflow_segments = (
@@ -290,11 +295,18 @@ async def test_coordinator_hierarchically_compacts_workflow_summaries() -> None:
         "externalize_payloads",
         "incremental_summary",
         "hierarchical_summary",
-        "hierarchical_summary",
     ]
     hierarchical_requests = executor.requests[2:]
-    assert [request.batch.scope for request in hierarchical_requests if request.batch is not None] == ["workflow_summaries", "workflow_summaries"]
-    assert [request.batch.segments[0].segment_id for request in hierarchical_requests if request.batch is not None] == ["wf-video", "wf-ppt"]
+    assert [
+        request.batch.scope
+        for request in hierarchical_requests
+        if request.batch is not None
+    ] == ["workflow_summaries"]
+    assert [
+        [segment.segment_id for segment in request.batch.segments]
+        for request in hierarchical_requests
+        if request.batch is not None
+    ] == [["wf-video", "wf-ppt"]]
     assert result.status == "target_reached"
 
 
@@ -307,9 +319,9 @@ async def test_coordinator_rejects_single_segment_larger_than_summary_budget() -
             _request(
                 72,
                 incremental_segments=(
-                    CompactionSegment(
-                        segment_id="msg-too-large",
-                        estimated_tokens=90_849,
+                        CompactionSegment(
+                            segment_id="msg-too-large",
+                            estimated_tokens=107_233,
                     ),
                 ),
             )
@@ -415,9 +427,9 @@ async def test_summary_chunks_use_conservative_profile_when_verified_profile_is_
     request = _request(
         72,
         incremental_segments=(
-            CompactionSegment(
-                segment_id="msg-over-conservative-budget",
-                estimated_tokens=80_000,
+                CompactionSegment(
+                    segment_id="msg-over-conservative-budget",
+                    estimated_tokens=90_113,
             ),
         ),
     )
@@ -447,9 +459,9 @@ async def test_hard_gate_summary_planning_failure_uses_minimal_safe_context() ->
         _request(
             92,
             incremental_segments=(
-                CompactionSegment(
-                    segment_id="msg-too-large-at-hard-gate",
-                    estimated_tokens=90_849,
+                    CompactionSegment(
+                        segment_id="msg-too-large-at-hard-gate",
+                        estimated_tokens=107_233,
                 ),
             ),
         )

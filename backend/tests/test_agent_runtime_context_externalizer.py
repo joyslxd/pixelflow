@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from pixelflow.agent_runtime.config import ContextBudgetConfig
+from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
 from pixelflow.agent_runtime.context.assembler import (
     ContextAssembler,
     ContextAssemblySnapshot,
@@ -362,6 +364,9 @@ async def test_assembler_externalizes_level_one_payload_then_remeasures_budget()
         externalizer=ContextPayloadExternalizer(
             store=store,
             externalize_min_bytes=1_000,
+        ),
+        budget_policy_provider=ContextBudgetPolicyProvider(
+            ContextBudgetConfig(require_verified_model_profile=False),
         ),
     )
 

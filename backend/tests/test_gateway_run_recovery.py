@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
+from langgraph.checkpoint.memory import InMemorySaver
 
 import deerflow.runtime as runtime_module
 from app.gateway import deps as gateway_deps
@@ -74,16 +75,21 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(
+        checkpointer_module,
+        "make_checkpointer",
+        lambda _config: _fake_context(InMemorySaver()),
+    )
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
-        pass
+        assert app.state.pixelflow_agent_graph_runtime.graph.checkpointer is app.state.checkpointer
 
     assert len(_FakeRunManager.instances) == 1
+    assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
@@ -113,15 +119,20 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
+    monkeypatch.setattr(
+        checkpointer_module,
+        "make_checkpointer",
+        lambda _config: _fake_context(InMemorySaver()),
+    )
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
     monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
-        pass
+        assert app.state.pixelflow_agent_graph_runtime.graph.checkpointer is app.state.checkpointer
 
     assert len(_FakeRunManager.instances) == 1
+    assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == []

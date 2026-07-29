@@ -76,6 +76,7 @@ from .summaries import (
 from .token_meter import (
     ContextBudgetNode,
     ContextBudgetPolicy,
+    ContextBudgetPolicyProvider,
     TokenMeter,
     get_context_budget_policy,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "ContextAssemblySnapshot",
     "ContextBudgetNode",
     "ContextBudgetPolicy",
+    "ContextBudgetPolicyProvider",
     "ContextExternalizationResult",
     "ContextCompactionCoordinator",
     "ContextCompactionRequest",

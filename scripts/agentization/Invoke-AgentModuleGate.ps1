@@ -69,7 +69,7 @@ if ($GateType -eq "Phase") {
     }
 }
 
-$backendModuleIds = @("M00", "M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M13")
+$backendModuleIds = @("M00", "M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M11", "M13")
 $pythonExecutable = $null
 if ($backendModuleIds -contains $ModuleId) {
     $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
@@ -143,6 +143,50 @@ elseif ($ModuleId -eq "M01") {
         }
     )
 }
+elseif ($ModuleId -eq "M02") {
+    $m02Tests = @(
+        "tests/test_agent_runtime_graph_state.py",
+        "tests/test_agent_runtime_graph_dispatcher.py",
+        "tests/test_agent_runtime_graph_interrupts.py",
+        "tests/test_agent_runtime_graph_composition.py",
+        "tests/test_checkpointer.py",
+        "tests/test_checkpointer_none_fix.py",
+        "tests/test_run_manager.py",
+        "tests/test_gateway_runtime_cleanup.py",
+        "tests/test_gateway_run_recovery.py",
+        "tests/test_harness_boundary.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_pixelflow_task_store.py",
+        "tests/test_openapi_operation_ids.py",
+        "tests/test_langgraph_auth.py"
+    )
+    $m02RuffPaths = @(
+        "app/gateway/deps.py",
+        "app/gateway/pixelflow_agent_runtime.py",
+        "pixelflow/agent_runtime/graph"
+    )
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = $root
+            FilePath = "powershell"
+            Arguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "`$r=Invoke-Pester -Script 'scripts/agentization/tests/BranchAutomation.Tests.ps1' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }"
+            )
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m02Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m02RuffPaths + $m02Tests
+        }
+    )
+}
 elseif ($ModuleId -eq "M03") {
     $m03Tests = @(
         "tests/test_agent_runtime_context_externalizer.py",
@@ -205,15 +249,162 @@ elseif ($ModuleId -eq "M04") {
         }
     )
 }
-elseif ($ModuleId -match "^M0(2|5|6)$") {
-    throw "模块 $ModuleId 尚未建立权威测试清单；禁止回退到后端全量门禁，请先由模块 owner 按 test-matrix.md 配置。"
+elseif ($ModuleId -eq "M05") {
+    $m05Tests = @(
+        "tests/test_agent_runtime_supervisor_resolver.py",
+        "tests/test_agent_runtime_supervisor_classifier.py",
+        "tests/test_agent_runtime_supervisor_validator.py",
+        "tests/test_agent_runtime_supervisor_routing.py",
+        "tests/test_agent_runtime_supervisor_evaluation.py",
+        "tests/test_agent_runtime_graph_state.py",
+        "tests/test_agent_runtime_graph_dispatcher.py",
+        "tests/test_agent_runtime_graph_interrupts.py",
+        "tests/test_agent_runtime_graph_composition.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_openapi_operation_ids.py"
+    )
+    $m05RuffPaths = @(
+        "pixelflow/agent_runtime/supervisor",
+        "pixelflow/agent_runtime/graph"
+    )
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = $root
+            FilePath = "powershell"
+            Arguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "`$r=Invoke-Pester -Script 'scripts/agentization/tests/BranchAutomation.Tests.ps1' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }"
+            )
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m05Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m05RuffPaths + $m05Tests
+        }
+    )
+}
+elseif ($ModuleId -eq "M06") {
+    $m06Tests = @(
+        "tests/test_agent_runtime_operation_coordinator.py",
+        "tests/test_agent_runtime_operation_leases.py",
+        "tests/test_agent_runtime_provider_job_adapter.py",
+        "tests/test_agent_runtime_operation_completion.py",
+        "tests/test_agent_runtime_operation_recovery.py",
+        "tests/test_agent_runtime_event_outbox.py",
+        "tests/test_agent_runtime_contracts.py",
+        "tests/test_agent_runtime_repositories.py",
+        "tests/test_agent_runtime_migration.py",
+        "tests/test_agent_runtime_graph_state.py",
+        "tests/test_agent_runtime_graph_interrupts.py",
+        "tests/test_agent_runtime_graph_composition.py",
+        "tests/test_agent_runtime_config.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_gateway_runtime_cleanup.py",
+        "tests/test_gateway_run_recovery.py"
+    )
+    $m06RuffPaths = @(
+        "pixelflow/agent_runtime/jobs",
+        "pixelflow/agent_runtime/persistence/repositories.py"
+    )
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = $root
+            FilePath = "powershell"
+            Arguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "`$r=Invoke-Pester -Script 'scripts/agentization/tests/BranchAutomation.Tests.ps1' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }"
+            )
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m06Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m06RuffPaths + $m06Tests
+        }
+    )
 }
 elseif ($ModuleId -match "^M(07|12)$") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
 }
-elseif ($ModuleId -match "^M(0[8-9]|1[0-1])$") {
+elseif ($ModuleId -eq "M11") {
+    $m11Tests = @(
+        "tests/test_agent_video_workflow_planning.py",
+        "tests/test_agent_video_workflow_scene_packages.py",
+        "tests/test_agent_video_workflow_generation.py",
+        "tests/test_agent_video_workflow_postproduction.py",
+        "tests/test_agent_video_workflow_delivery.py",
+        "tests/test_pixelflow_intake_router.py",
+        "tests/test_pixelflow_planning_router.py",
+        "tests/test_creative_plan_markdown.py",
+        "tests/test_video_creation_contract.py",
+        "tests/test_plan_asset_manifest.py",
+        "tests/test_plan_asset_manifest_integration.py",
+        "tests/test_plan_scene_blueprint.py",
+        "tests/test_scene_blueprint_quality.py",
+        "tests/test_seedance_plan_authoring.py",
+        "tests/test_seedance_prompt_skill.py",
+        "tests/test_video_scene_packages.py",
+        "tests/test_scene_assets.py",
+        "tests/test_scene_semantic_qc.py",
+        "tests/test_borgrise_authorization_passthrough.py",
+        "tests/test_borgrise_generation_create_serialization.py",
+        "tests/test_borgrise_poll.py",
+        "tests/test_borgrise_project_id.py",
+        "tests/test_borgrise_quota_detection.py",
+        "tests/test_borgrise_video_payloads.py",
+        "tests/test_pixelflow_video_router.py",
+        "tests/test_borgrise_video_qc_skill.py",
+        "tests/test_video_quality_review.py",
+        "tests/test_jianying_draft_config.py",
+        "tests/test_jianying_draft_models.py",
+        "tests/test_jianying_draft_http_skill.py",
+        "tests/test_jianying_draft_service.py",
+        "tests/test_pixelflow_jianying_draft_router.py",
+        "tests/test_pixelflow_jianying_draft_lifespan.py",
+        "tests/test_agent_runtime_legacy_invariants.py",
+        "tests/test_openapi_operation_ids.py"
+    )
+    $m11RuffPaths = @(
+        "app/gateway/routers/pixelflow_intake.py",
+        "app/gateway/routers/pixelflow_planning.py",
+        "app/gateway/routers/pixelflow_video.py",
+        "app/gateway/routers/pixelflow_jianying_draft.py",
+        "pixelflow/agent_workflows/video",
+        "pixelflow/creative",
+        "pixelflow/generate/scene_packages.py",
+        "pixelflow/generate/seedance_prompt.py",
+        "pixelflow/jianying_draft",
+        "pixelflow/qc/scene_semantic.py",
+        "pixelflow/qc/video_review.py",
+        "pixelflow/skills/borgrise"
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest") + $m11Tests + @("-q") })
+    $commands.Add(
+        [pscustomobject]@{
+            WorkingDirectory = (Join-Path $root "backend")
+            FilePath = $pythonExecutable
+            Arguments = @("-m", "ruff", "check") + $m11RuffPaths + $m11Tests
+        }
+    )
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "pnpm.cmd"; Arguments = @("test") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "pnpm.cmd"; Arguments = @("lint") })
+    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "pnpm.cmd"; Arguments = @("build-prod") })
+}
+elseif ($ModuleId -match "^M(0[8-9]|10)$") {
     throw "模块 $ModuleId 尚未建立包含后端范围的权威测试清单；禁止只运行前端门禁，请先由模块 owner 按 test-matrix.md 配置。"
 }
 elseif ($ModuleId -eq "M13") {

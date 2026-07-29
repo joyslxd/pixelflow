@@ -1,5 +1,6 @@
 """Agent Runtime 行模型与 additive migration 结构合同。"""
 
+import logging
 from pathlib import Path
 
 from alembic import command
@@ -313,6 +314,56 @@ def _migration_config(database_path: Path) -> Config:
     config = Config(str(MIGRATION_ROOT / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
     return config
+
+
+def test_agent_runtime_migration_keeps_existing_application_loggers_enabled(tmp_path: Path) -> None:
+    """执行 migration 时不得禁用测试收集阶段已创建的业务 logger。"""
+
+    logger = logging.getLogger("pixelflow.m13.logging-sentinel")
+    original_disabled = logger.disabled
+    logger.disabled = False
+    try:
+        command.upgrade(_migration_config(tmp_path / "logging-sentinel.db"), "head")
+
+        assert logger.disabled is False
+    finally:
+        logger.disabled = original_disabled
+
+
+def test_conversation_orchestration_migration_preserves_legacy_rows(tmp_path: Path) -> None:
+    """旧对话升级后固定归旧 v2，回滚只移除 M13.1 自有字段。"""
+
+    database_path = tmp_path / "conversation-orchestration.db"
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE pixelflow_conversations (conversation_id VARCHAR(64) PRIMARY KEY, title VARCHAR(255) NOT NULL)"))
+        connection.execute(text("INSERT INTO pixelflow_conversations (conversation_id, title) VALUES ('legacy-1', '保留旧对话')"))
+    engine.dispose()
+
+    config = _migration_config(database_path)
+    command.upgrade(config, "head")
+
+    engine = create_engine(_sync_database_url(database_path))
+    inspector = inspect(engine)
+    assert "pixelflow_agent_context_payloads" in inspector.get_table_names()
+    columns = {column["name"] for column in inspector.get_columns("pixelflow_conversations")}
+    assert {"orchestration_mode", "orchestration_version"}.issubset(columns)
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT title, orchestration_mode, orchestration_version FROM pixelflow_conversations WHERE conversation_id='legacy-1'")).one()
+        assert tuple(row) == ("保留旧对话", "frontend_v2", 1)
+    engine.dispose()
+
+    command.downgrade(config, "20260725_03")
+
+    engine = create_engine(_sync_database_url(database_path))
+    inspector = inspect(engine)
+    assert "pixelflow_agent_context_payloads" not in inspector.get_table_names()
+    columns = {column["name"] for column in inspector.get_columns("pixelflow_conversations")}
+    assert "orchestration_mode" not in columns
+    assert "orchestration_version" not in columns
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT title FROM pixelflow_conversations WHERE conversation_id='legacy-1'")).scalar_one() == "保留旧对话"
+    engine.dispose()
 
 
 def _sync_database_url(database_path: Path) -> str:
