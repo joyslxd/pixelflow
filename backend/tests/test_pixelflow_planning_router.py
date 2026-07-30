@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from uuid import UUID
 
@@ -47,6 +48,132 @@ def _poll_plan_job(client: TestClient, path: str, job_id: str) -> dict:
         time.sleep(0.01)
     assert status is not None
     raise AssertionError(f"plan job did not finish: {status}")
+
+
+def _video_plan_start_payload() -> dict:
+    return {
+        "intent": "video",
+        "form_values": {
+            "product_info": "智能健康戒指",
+            "video_duration_sec": 30,
+            "video_ratio": "9:16",
+            "video_model": "seedance-2.0",
+            "image_model": "gpt-image-2",
+        },
+        "selected_direction": {
+            "direction_id": "direction_1",
+            "title": "全天健康陪伴",
+            "description": "从晨跑到睡眠展示产品价值。",
+        },
+    }
+
+
+def _start_generation_and_poll(client: TestClient) -> dict:
+    response = client.post(
+        "/agent/flows/planning/plan/start",
+        json=_video_plan_start_payload(),
+    )
+    assert response.status_code == 200
+    return _poll_plan_job(
+        client,
+        "/agent/flows/planning/plan/jobs",
+        response.json()["job_id"],
+    )
+
+
+def test_plan_job_status_exposes_stage_and_timestamps():
+    from app.gateway.routers import pixelflow_planning
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/start",
+            json=_video_plan_start_payload(),
+        )
+        assert response.status_code == 200
+        status = client.get(
+            f"/agent/flows/planning/plan/jobs/{response.json()['job_id']}"
+        ).json()
+
+    assert status["stage"] in {"planning", "fallback", "completed"}
+    assert status["started_at"]
+    assert status["updated_at"]
+
+
+def test_generation_job_total_timeout_returns_deterministic_plan(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+
+    async def slow_builder(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(pixelflow_planning, "_PLAN_JOB_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(pixelflow_planning, "build_plan_markdown_with_llm", slow_builder)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+    with TestClient(app) as client:
+        status = _start_generation_and_poll(client)
+
+    assert status["status"] == "completed"
+    assert status["result"]["error"] is None
+    assert status["result"]["llm_used"] is False
+
+
+def test_revision_job_total_timeout_preserves_current_version(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+
+    initial = build_plan_markdown(
+        "image",
+        {
+            "image_goal": "书包宣传图",
+            "image_type": "海报",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+        },
+        {"title": "通学收纳", "description": "突出容量和护脊"},
+    )
+
+    async def slow_revision(**_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(pixelflow_planning, "_PLAN_JOB_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", slow_revision)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/revise/start",
+            json={
+                "intent": "image",
+                "form_values": {
+                    "image_goal": "书包宣传图",
+                    "image_type": "海报",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "1:1",
+                },
+                "selected_direction": {
+                    "title": "通学收纳",
+                    "description": "突出容量和护脊",
+                },
+                "current_plan_markdown": initial.plan_markdown,
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "revision_feedback": "增加开学氛围",
+                "creation_contract": initial.creation_contract,
+            },
+        )
+        assert response.status_code == 200
+        status = _poll_plan_job(
+            client,
+            "/agent/flows/planning/plan/revise/jobs",
+            response.json()["job_id"],
+        )
+
+    assert status["status"] == "failed"
+    assert "当前版本已保留" in status["error"]
 
 
 def test_planning_router_starts_and_polls_plan_generation_job():
