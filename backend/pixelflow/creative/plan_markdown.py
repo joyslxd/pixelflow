@@ -1,4 +1,4 @@
-"""Plan template filling, LLM planning, versioning, and strict contracts."""
+"""Plan 模板填充、LLM 策划、版本管理与严格创作合同。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from pixelflow.creative.duration import scene_time_ranges
 from pixelflow.creative.plan_llm import (
     PLAN_LLM_MODEL_NAME,
     ModelFactory,
+    PlanModelTimeoutError,
     author_seedance_plan_payload,
     generate_plan_payload,
     repair_plan_asset_requirements,
@@ -455,7 +456,18 @@ async def build_plan_markdown_with_llm(
             llm_used=True,
             model_name=model_name,
         )
-    except Exception as exc:  # noqa: BLE001 - Plan generation must degrade to a valid contract
+    except PlanModelTimeoutError:
+        fallback = build_plan_markdown(intent, form_values, selected_direction, profile, materials, context)
+        return replace(
+            fallback,
+            consistency_issues=[
+                *fallback.consistency_issues,
+                "Plan 模型请求超时，已使用确定性创作合同生成可审核方案",
+            ],
+            error=None,
+            model_name=model_name,
+        )
+    except Exception as exc:  # noqa: BLE001 - Plan 生成异常时必须降级为有效合同
         fallback = build_plan_markdown(intent, form_values, selected_direction, profile, materials, context)
         return replace(fallback, error=str(exc), model_name=model_name)
 
@@ -1040,6 +1052,9 @@ async def _author_seedance_plan_blueprints(
             )
             corrections = ["Seedance 分镜已根据专用校验反馈重新生成"] if attempt else []
             return authored, corrections
+        except PlanModelTimeoutError as exc:
+            last_error = exc
+            break
         except Exception as exc:  # noqa: BLE001 - 专用写作失败时不能污染权威 Plan 合同
             last_error = exc
             validation_feedback = str(exc)
@@ -1054,6 +1069,10 @@ async def _author_seedance_plan_blueprints(
         asset_manifest=asset_manifest,
         total_duration_sec=int(creation_contract.get("video_duration_sec") or 0),
     )
+    if isinstance(last_error, PlanModelTimeoutError):
+        return bound, [
+            "Seedance 专用分镜写作请求超时，已在保留故事线、对白和资产合同的前提下重建连续秒段并按规则绑定稳定资产"
+        ]
     return bound, [
         "Seedance 专用分镜写作连续两次未通过，已在保留故事线、对白和资产合同的前提下重建连续秒段并按规则绑定稳定资产："
         f"{last_error or '未知错误'}"
