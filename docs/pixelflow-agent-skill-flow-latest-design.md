@@ -92,6 +92,8 @@ flowchart TD
 
 前端在 Composer 后方展示当前主流程的业务任务看板。看板从输入框左上圆角结束位置开始排列并限制最大宽度，输入框保持前景层级；默认折叠，只显示“当前步骤 + 状态”，折叠态由输入框覆盖看板底边和下方圆角。用户展开后才显示全部步骤和任务数量，内容向上滑出、关闭时向下收回。切换对话或重新进入页面时恢复默认折叠，折叠偏好不写入 PowerMem。
 
+响应式边界固定为：小于 `xl`（1280px）断点时隐藏 244px 历史侧栏，让对话、任务看板和 Composer 使用完整视口宽度；Plan 编辑器、分镜编辑器和通用结果画布作为全屏层展示，关闭画布后回到完整对话。`xl` 及以上恢复历史侧栏和左右画布分栏。手机、平板和桌面端都不得产生水平溢出。
+
 | intent | 看板步骤 |
 | --- | --- |
 | `video` | 需求收集 -> 创意规划 -> 创作规划 -> 执行规划 -> 素材生成 -> 视频生成 -> 导出交付 |
@@ -798,6 +800,8 @@ Plan 审核与版本规则：
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
 - Plan 卡片点击“Agent 修改”后立即隐藏当前卡片的“编辑”入口；等待修改意见、选择修改方式或执行 Agent 修订期间都保持隐藏，刷新恢复待处理上下文后仍保持一致。取消修改方式选择时恢复当前卡片的“编辑”入口，新 Plan 版本继续提供自己的“编辑”入口，已被后续产物替代的历史 Plan 不再展示该入口。
 - 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`。前端必须把 `pendingPlanJob` / `pending_plan_job` 写入 conversation context，恢复时只轮询已有 job，不得因刷新、离开或切换对话重新提交生成请求；同步 `/plan` 与 `/plan/revise` 仅保留兼容旧调用。
+- Plan 专用模型 Client 的单次请求边界固定为 600 秒并关闭传输层透明重试；生成和修订 job 的总预算固定为 1200 秒，查询快照额外返回 `stage`、`started_at` 和 `updated_at`。初始模型请求超时时发布 `error=null` 的确定性可审核合同；Seedance 专用写作超时时停止第二次慢调用，在保留故事线、对白和资产合同后确定性重建连续秒段与稳定资产绑定；修订总预算耗尽时保留当前版本并返回固定失败摘要。
+- 前端不得再用固定 10 分钟轮询时长推断 Plan 失败。`/plan/start` 或 `/plan/revise/start` 返回后，先按对话把不含 Authorization 的 `pendingPlanJob` 临时副本写入当前标签页 `sessionStorage`，再更新 conversation context；首次 context 写入失败不能释放动作锁或重新调用 `/start`，必须继续查询原 `job_id`、按最长 30 秒的有限退避重试持久化，并在刷新时优先使用服务端句柄、缺失时才使用标签页副本。句柄 PUT 在页面隐藏时暂停、恢复可见后继续，重试窗口不超过 job 启动后的 25 分钟。修订 job 恢复时必须把 `pendingPlanRevisionChoice` / `pending_plan_revision_choice` 覆盖为 `null`；即使旧弹窗发生迟到确认，处理器也必须先检查同一对话的现存 Plan job 并只恢复原任务。服务端写入成功、Plan 已物化或进入明确终态后立即清除副本。临时网络失败、请求取消、页面隐藏、刷新或切换对话都必须保留原句柄；只有后端明确完成、失败、完成但缺结果的协议终态或 404 才清理。该恢复规则只修复既有 `frontend_v2` 视频链路，不安装 live Graph Handler、不扩大 `primary_execution_intents`，R1 Turn/Snapshot/SSE/压缩/队列与 v2 业务接力边界保持不变。
 - 当前创意内修改不得返回创意方向列表；job 完成后再保存 plan artifact，消息保存失败时继续复用已有 Plan 结果和消息 job。
 - 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
 - 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。

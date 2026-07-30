@@ -21,7 +21,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 表单补全 | 可用 | 图片、视频和PPT分别有表单 schema，最多 3 轮补充；视频粗略需求必须先确认需求清洗表单，不能直接进入创意方向 |
 | 垂类 Skill | 可用 | 命中预制行业画像时使用模板，未知行业用 LLM 生成通用画像 |
 | 创意方向 | 可用 | 基于表单、行业画像和素材生成 3 个方向 |
-| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；视频先生成结构与资产分析，再用项目内 `seedance-prompt` Skill 专门写作全部分镜，最终同时发布权威分镜蓝图和角色/场景/道具 `asset_manifest`，支持版本化修订与回退 |
+| plan.md 策划 | 可用 | 图片/视频使用独立模板和 `deepseek-v4-pro` 生成 plan.md；Plan 模型单次请求最多等待 600 秒且不做透明重试，异步 job 总预算为 1200 秒；视频先生成结构与资产分析，再用项目内 `seedance-prompt` Skill 专门写作全部分镜，最终同时发布权威分镜蓝图和角色/场景/道具 `asset_manifest`，支持版本化修订与回退 |
 | 图片生成 | 可用 | 支持文生图、图片编辑、参考图生成、多图融合和多张循环生成 |
 | 视频分析 | 可用 | 支持单视频拆解和多视频批量拆解 |
 | 视频生成 | 可用 | 用户确认的创作合同贯穿 Plan、Seedance 分镜、场景资产和逐段视频；每镜 4-15 秒且总和精确等于目标时长 |
@@ -106,6 +106,7 @@ flowchart TD
 ### 前端任务看板
 
 - 图片、视频和 PPT 主流程在输入框后方、从左上圆角结束位置开始显示限制最大宽度的可折叠任务看板；默认折叠，只显示当前业务步骤和状态，展开时向上滑出完整链路，关闭时向下收回。
+- 小于 `xl`（1280px）断点时隐藏固定宽度历史侧栏，主对话占满可用宽度；右侧 Plan、分镜和结果画布改为全屏层，关闭后恢复完整消息区、任务看板与输入框。`xl` 及以上桌面端继续保留 244px 历史侧栏和左右分栏。
 - 看板状态由 conversation context 中的 `workflowProgress`、pending job 和结果消息共同恢复；`video_analysis`、未知意图和未识别意图时不展示。
 - 视频场景包 job 的 `prepare_scene_packages` 与 `generate_scene_assets` 分别对应“执行规划”和“素材生成”。失败、额度暂停、取消及人工确认都会停留在当前业务步骤。
 - “导出交付”只在用户点击最终产物下载入口后完成：图片下载任意一张最终图即可，视频只计算合并成品，PPT 只计算最终 PPT 文件。下载时间保存在结果消息 artifact 中，重新生成的新结果不会继承旧记录。
@@ -192,7 +193,7 @@ flowchart TD
 
 旧 LangGraph 任务流仍保留在 `/agent/flows`、`/agent/flows/{task_id}/events`、`/agent/flows/{task_id}/assets` 等接口中。
 
-R1 的 `assist / [] / 100 / true` 只写入 `backend/config.dev.yml`，用于测试环境覆盖全部新对话。`backend/config.prod.yml` 未增加这些键，仍由代码默认值保持 `off / [] / 0 / false`；历史对话和运行中任务不会迁移。生产启用需要在 M13.1 候选进入 Agent 后另行取得发布负责人的明确批准。
+开发环境当前声明 R2 候选 `primary / [video] / 100 / true`，但 Gateway 的 `primary_execution_intents` 仍为空，因此视频新对话保持 `frontend_v2`，同时使用已发布 R1 的 Turn、Snapshot/SSE、上下文压缩和输入队列基础设施。生产环境保持已批准的 R1 `assist / [] / 100 / true`；历史对话和运行中任务不会迁移，R2 生产发布仍需另行取得明确批准。
 
 ## 剪映草稿流程
 
@@ -296,6 +297,8 @@ SmartPPT 每一步都是异步任务，PixelFlow 通过 `/api/task/{taskId}/stat
 - 图片模型来自 `/api/modelParamConfig/listByCategory/image_generate`，默认 `gpt-image-2`。表单不展示图片比例和清晰度，只把所选模型及其能力范围提交给 Plan Agent。
 - Plan LLM 从图片模型支持范围内选择 `scene_image_ratio` 和 `scene_image_size`，并先自主规划结构、精确时间线、资产需求和 `asset_manifest`；稳定 `asset_id` 生成后，再由 `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` 对全部 `scene_blueprints` 做一次专用分镜写作。每个蓝图包含叙事职能、精确时长、故事线、镜头描述、旁白、转场和资产需求；不再预先按 10 秒机械切分。
 - Seedance Plan 写作显式接收用户确认的 `video_model`、完整创作合同、当前 Plan、全部分镜、稳定资产 ID、用户要求和附件，只允许改写标题、故事线、镜头描述、旁白与转场。每镜描述是一整段中文，内部只用连续的 `0-N秒` 整数时间码，覆盖地点、主体、动作、景别、运镜、光影、声音和收束；只引用该镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次解释用途且最多 9 张。分镜数量、顺序、时间线、模型、画幅、卖点、转化目标和资产集合均不可修改；非法响应整批拒绝并携带校验错误重试一次。
+- Plan 专用模型 Client 显式设置 600 秒有限等待并关闭传输层透明重试；初始模型请求超时时返回 `error=null` 的确定性可审核创作合同，Seedance 写作超时时不再重复执行同一慢调用，而是在保留故事线、对白和资产合同后确定性重建连续秒段与稳定资产绑定。生成或修订 job 另有 1200 秒总预算，并在查询响应中返回阶段、启动时间和更新时间。
+- 前端不再用固定 10 分钟轮询时长推断 Plan 失败。`pendingPlanJob` 作为恢复业务单号写入 conversation context；任务启动后先在当前标签页 `sessionStorage` 保存一份不含 Authorization 的临时恢复副本，首次 context 写入失败时仍继续查询同一个 `job_id` 并按有限退避重试持久化，写入成功或进入终态后立即清除副本。句柄 PUT 在页面隐藏时暂停、恢复可见后继续，且不超过 job 启动后的 25 分钟恢复窗口。修订 job 恢复时强制关闭旧修改方式弹窗，再次确认只恢复现存 job，不重复调用 `/plan/revise/start`。临时网络失败、页面隐藏、刷新或切换对话都保留原句柄，只有后端明确完成、失败、协议终态或 404 才清理，避免重复启动高成本 Plan。
 - Plan 修订（包括手工编辑重新对齐）在结构与资产清单通过校验后也执行同一个 Seedance 专用写作阶段，并携带当前版本、修订候选、用户意见、附件和上下文；最终确认版本仍是后续场景包唯一依据。
 - 历史已审核 Plan 若仍使用全局镜头时间段，场景包恢复时会确定性换算为当前分镜的局部 `0-N秒`，不会因新校验阻断旧对话；新 Plan 仍按严格局部时间轴发布。
 - 优先级固定为“用户确认值 > LLM 预填值 > 系统默认值”。Plan、场景包、场景资产和场景视频只读取当前激活 Plan 的最终 `creation_contract`。

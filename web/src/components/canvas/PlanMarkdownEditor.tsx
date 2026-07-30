@@ -55,7 +55,7 @@ export function PlanMarkdownEditor({
   };
 
   return (
-    <aside className="flex h-full w-[52vw] min-w-[680px] max-w-[980px] flex-col border-l border-line bg-[#f8fafc]">
+    <aside className="fixed inset-0 z-50 flex h-full w-full min-w-0 max-w-none flex-col border-l border-line bg-[#f8fafc] xl:static xl:z-auto xl:w-[52vw] xl:min-w-[680px] xl:max-w-[980px]">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-4">
         <button type="button" onClick={closeEditor} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas" aria-label="返回">
           <ArrowLeft size={18} />

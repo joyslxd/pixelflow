@@ -186,12 +186,18 @@ function resumePendingPlanJobSource() {
 
 function assertRecoverablePlanJobOrder(source, startCall, label) {
   const startIndex = source.indexOf(startCall);
-  const persistIndex = source.indexOf("await persistPendingPlanJob", startIndex);
-  const resumeIndex = source.indexOf("await resumePendingPlanJob", persistIndex);
+  const continuationIndex = source.indexOf("await continueStartedPlanJob", startIndex);
+  const recoveryIndex = source.indexOf("savePendingPlanJobRecovery", continuationIndex);
+  const persistIndex = source.indexOf("persistPendingPlanJob(", recoveryIndex);
+  const resumeIndex = source.indexOf("resumePending: resumePendingPlanJob", persistIndex);
   assert.notEqual(startIndex, -1, `${label} must start a recoverable Plan job`);
+  assert.notEqual(continuationIndex, -1, `${label} must enter the start-success continuation`);
+  assert.notEqual(recoveryIndex, -1, `${label} must preserve a refresh-safe recovery handle`);
   assert.notEqual(persistIndex, -1, `${label} must persist the Plan job before polling`);
   assert.notEqual(resumeIndex, -1, `${label} must enter the shared Plan resume path`);
-  assert.ok(startIndex < persistIndex, `${label} must start the Plan job before persisting its handle`);
+  assert.ok(startIndex < continuationIndex, `${label} must start the Plan job before continuing it`);
+  assert.ok(continuationIndex < recoveryIndex, `${label} must enter continuation before saving its recovery handle`);
+  assert.ok(recoveryIndex < persistIndex, `${label} must save the recovery handle before server persistence`);
   assert.ok(persistIndex < resumeIndex, `${label} must persist the Plan job before resuming it`);
 }
 
@@ -432,7 +438,7 @@ test("current-creative Plan revision persists the returned message before author
   assert.equal(revisionSource.includes("api.updateConversation"), false, "message rejection must prevent any revision context write");
   assert.match(
     revisionSource,
-    /await persistPendingPlanJob\([\s\S]*pendingPlanRevisionChoice:\s*null,[\s\S]*pending_plan_revision_choice:\s*null/,
+    /const persistenceContext = \{[\s\S]*pendingPlanRevisionChoice:\s*null,[\s\S]*pending_plan_revision_choice:\s*null,[\s\S]*persistPendingPlanJob\(/,
     "persisting the pending job must clear the completed revision-mode choice so refresh cannot reopen it",
   );
   assert.match(planResumeSource, /await persistPlanArtifactForConversation\(/, "the shared resume path must await strict Plan message persistence");
@@ -470,6 +476,8 @@ test("initial v1 Plan uses the recoverable strict message job before writing con
 
 test("Plan job 轮询不再用前端时长误判，临时失败继续恢复原任务", () => {
   const planResumeSource = resumePendingPlanJobSource();
+  const revisionSource = handleConfirmPlanRevisionModeSource();
+  const restoredConversationSource = applyConversationSource();
 
   assert.equal(apiSource.includes("PLAN_JOB_TIMEOUT_MS"), false, "Plan job 终态只能由后端权威状态决定");
   assert.match(planResumeSource, /classifyPlanJobResume/, "恢复路径必须按纯合同分类");
@@ -478,6 +486,20 @@ test("Plan job 轮询不再用前端时长误判，临时失败继续恢复原�
     planResumeSource,
     /Plan 查询暂时中断，正在使用原任务继续恢复/,
     "用户只接收一次可恢复提示，不能误报任务失败",
+  );
+  const existingJobGuardIndex = revisionSource.indexOf("const existingPlanJob = pendingPlanJobRef.current");
+  const revisionStartIndex = revisionSource.indexOf("api.startPlanRevisionJob");
+  assert.notEqual(existingJobGuardIndex, -1, "修订确认必须先检查现存 Plan job");
+  assert.ok(existingJobGuardIndex < revisionStartIndex, "现存 job 门禁必须早于修订 start");
+  assert.match(
+    revisionSource,
+    /existingPlanJob\.conversation_id === targetConversationId[\s\S]*await resumePendingPlanJob\(existingPlanJob\);[\s\S]*return;/,
+    "刷新后再次确认修订时只能恢复同一对话的原 job",
+  );
+  assert.match(
+    restoredConversationSource,
+    /pendingPlanRevisionChoice:\s*pendingPlanJob\?\.kind === "plan_revision" \? null/,
+    "恢复修订 job 时必须覆盖旧 Snapshot 的修订方式选择",
   );
 });
 

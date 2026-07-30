@@ -54,7 +54,12 @@ import {
 } from "@/lib/planMessageRecovery";
 import {
   classifyPlanJobResume,
+  clearPendingPlanJobRecovery,
+  continueStartedPlanJob,
+  loadPendingPlanJobRecovery,
   planJobResumeDelayMs,
+  savePendingPlanJobRecovery,
+  shouldRetryPlanJobPersistence,
 } from "@/lib/planJobRecovery";
 
 const PlanMarkdownEditor = lazy(() =>
@@ -253,6 +258,14 @@ const parseRegisteredSupervisorTurn = (
 };
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
+
+const browserSessionStorage = (): Storage | null => {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
 const workflowIntentFromPhase = (phase: string): CreationIntent | null => {
   if (phase.startsWith("ppt_")) return "ppt";
   if (phase.startsWith("scene_") || (phase.startsWith("video_") && !phase.startsWith("video_analysis"))) return "video";
@@ -599,6 +612,31 @@ interface PendingPlanJob {
   started_at: string;
   request: PlanGenerationJobRequest | PlanRevisionJobRequest;
   context: PendingPlanJobContext;
+}
+
+function isRecoverablePendingPlanJob(value: unknown): value is PendingPlanJob {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const pendingPlanJob = value as Partial<PendingPlanJob>;
+  const context = pendingPlanJob.context as Partial<PendingPlanJobContext> | undefined;
+  return (
+    typeof pendingPlanJob.job_id === "string"
+    && Boolean(pendingPlanJob.job_id)
+    && typeof pendingPlanJob.conversation_id === "string"
+    && Boolean(pendingPlanJob.conversation_id)
+    && typeof pendingPlanJob.source_message_id === "string"
+    && (pendingPlanJob.kind === "plan_generation" || pendingPlanJob.kind === "plan_revision")
+    && typeof pendingPlanJob.started_at === "string"
+    && Boolean(pendingPlanJob.request)
+    && typeof pendingPlanJob.request === "object"
+    && Boolean(context)
+    && isCreationIntent(context?.intent)
+    && Boolean(context?.formValues)
+    && typeof context?.formValues === "object"
+    && Boolean(context?.selectedDirection)
+    && typeof context?.selectedDirection === "object"
+    && typeof context?.coreMessage === "string"
+    && Array.isArray(context?.materials)
+  );
 }
 
 const DIRECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["type"]>([
@@ -1979,6 +2017,9 @@ export function WorkspacePage() {
   const activePlanJobPollsRef = useRef(new Set<string>());
   const planJobResumeAttemptsRef = useRef(new Map<string, number>());
   const planJobRecoveryNoticesRef = useRef(new Set<string>());
+  const planJobPersistenceAttemptsRef = useRef(new Map<string, number>());
+  const planJobPersistenceNoticesRef = useRef(new Set<string>());
+  const scheduledPlanJobPersistenceRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const pendingImageJobRef = useRef<PendingImageJob | null>(null);
@@ -4027,13 +4068,45 @@ export function WorkspacePage() {
     await persistPendingDirectionJob(null, targetConversationId, lastPhase, flowDraft, extraContext);
   };
 
+  const planJobPersistenceKey = (pendingPlanJob: PendingPlanJob) =>
+    `${pendingPlanJob.conversation_id}:${pendingPlanJob.kind}:${pendingPlanJob.job_id}`;
+
+  const clearPlanJobPersistenceState = (pendingPlanJob: PendingPlanJob) => {
+    const key = planJobPersistenceKey(pendingPlanJob);
+    planJobPersistenceAttemptsRef.current.delete(key);
+    planJobPersistenceNoticesRef.current.delete(key);
+    scheduledPlanJobPersistenceRef.current.delete(key);
+  };
+
+  const notifyPlanJobPersistenceRecovery = (pendingPlanJob: PendingPlanJob) => {
+    const key = planJobPersistenceKey(pendingPlanJob);
+    if (planJobPersistenceNoticesRef.current.has(key)) return;
+    planJobPersistenceNoticesRef.current.add(key);
+    pushAssistant(
+      "Plan 任务已经启动，但恢复句柄暂未同步到对话；正在继续查询原任务并重试同步，不会重复生成。",
+      pendingPlanJob.conversation_id,
+    );
+  };
+
   const persistPendingPlanJob = async (
     pendingPlanJob: PendingPlanJob | null,
     targetConversationId: string,
     lastPhase: string,
     extraContext: Record<string, unknown> = {},
   ) => {
+    const previousPendingPlanJob = pendingPlanJobRef.current;
     pendingPlanJobRef.current = pendingPlanJob;
+    if (
+      !pendingPlanJob
+      && previousPendingPlanJob?.conversation_id === targetConversationId
+    ) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        previousPendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(previousPendingPlanJob);
+    }
     if (!targetConversationId) return;
     await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
@@ -4044,6 +4117,56 @@ export function WorkspacePage() {
         pending_plan_job: pendingPlanJob,
       } as unknown as Record<string, unknown>,
     });
+    if (pendingPlanJob) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
+    }
+  };
+
+  const schedulePendingPlanJobPersistence = (
+    pendingPlanJob: PendingPlanJob,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ): void => {
+    if (!shouldRetryPlanJobPersistence({
+      hidden: !pageVisibleRef.current,
+      startedAt: pendingPlanJob.started_at,
+    })) {
+      return;
+    }
+    const key = planJobPersistenceKey(pendingPlanJob);
+    if (scheduledPlanJobPersistenceRef.current.has(key)) return;
+    const attempt = planJobPersistenceAttemptsRef.current.get(key) || 0;
+    planJobPersistenceAttemptsRef.current.set(key, attempt + 1);
+    scheduledPlanJobPersistenceRef.current.add(key);
+    window.setTimeout(() => {
+      scheduledPlanJobPersistenceRef.current.delete(key);
+      if (!shouldRetryPlanJobPersistence({
+        hidden: !pageVisibleRef.current,
+        startedAt: pendingPlanJob.started_at,
+      })) {
+        return;
+      }
+      const current = pendingPlanJobRef.current;
+      if (
+        current?.job_id !== pendingPlanJob.job_id
+        || current.conversation_id !== pendingPlanJob.conversation_id
+      ) {
+        return;
+      }
+      void persistPendingPlanJob(
+        pendingPlanJob,
+        pendingPlanJob.conversation_id,
+        lastPhase,
+        extraContext,
+      ).catch(() => {
+        schedulePendingPlanJobPersistence(pendingPlanJob, lastPhase, extraContext);
+      });
+    }, planJobResumeDelayMs(attempt));
   };
 
   const clearPendingPlanJob = async (
@@ -4637,6 +4760,12 @@ export function WorkspacePage() {
     const clearRecoveryState = () => {
       planJobResumeAttemptsRef.current.delete(pollKey);
       planJobRecoveryNoticesRef.current.delete(pollKey);
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
     };
     setBusyForConversation(targetConversationId, true);
     try {
@@ -6507,7 +6636,22 @@ export function WorkspacePage() {
     const pendingMessageJob = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
     const pendingIntakeJob = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
-    const pendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
+    const storedPendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
+    const recoveredPendingPlanJobCandidate = storedPendingPlanJob
+      ? null
+      : loadPendingPlanJobRecovery<PendingPlanJob>(
+          browserSessionStorage(),
+          detail.conversation.conversation_id,
+        );
+    const recoveredPendingPlanJob = isRecoverablePendingPlanJob(recoveredPendingPlanJobCandidate)
+      ? recoveredPendingPlanJobCandidate
+      : null;
+    if (storedPendingPlanJob) {
+      clearPendingPlanJobRecovery(browserSessionStorage(), detail.conversation.conversation_id);
+    } else if (recoveredPendingPlanJobCandidate && !recoveredPendingPlanJob) {
+      clearPendingPlanJobRecovery(browserSessionStorage(), detail.conversation.conversation_id);
+    }
+    const pendingPlanJob = storedPendingPlanJob || recoveredPendingPlanJob;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     const pendingPptOutlineRevision = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
@@ -6530,6 +6674,18 @@ export function WorkspacePage() {
     const normalizedMessages = normalizeRestoredMessageReferences(
       dedupeRestoredScenePackageMessages(restorePendingMessageJobMessage(videoAwareMessages, pendingMessageJob)),
     );
+    const pendingPlanJobMaterialized = Boolean(
+      pendingPlanJob
+      && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob),
+    );
+    if (pendingPlanJobMaterialized && pendingPlanJob) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        detail.conversation.conversation_id,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
+    }
     const contextIntent = isCreationIntent((detail.conversation.context || {}).intent)
       ? (detail.conversation.context || {}).intent as CreationIntent
       : null;
@@ -6563,10 +6719,12 @@ export function WorkspacePage() {
       pending_intake_job: pendingIntakeJob,
       pendingDirectionJob,
       pending_direction_job: pendingDirectionJob,
-      pendingPlanJob:
-        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
-      pending_plan_job:
-        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
+      pendingPlanJob: pendingPlanJobMaterialized ? null : pendingPlanJob,
+      pending_plan_job: pendingPlanJobMaterialized ? null : pendingPlanJob,
+      pendingPlanRevisionChoice:
+        pendingPlanJob?.kind === "plan_revision" ? null : snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null,
+      pending_plan_revision_choice:
+        pendingPlanJob?.kind === "plan_revision" ? null : snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
@@ -6589,7 +6747,25 @@ export function WorkspacePage() {
       workflow_progress: restoredWorkflowProgress,
       messages: normalizedMessages,
     }, detail.conversation.conversation_id);
+    if (!pendingPlanJobMaterialized && pendingPlanJob?.context.processedKey) {
+      processedArtifactIdsRef.current.add(pendingPlanJob.context.processedKey);
+    }
     if (resolvedMode !== "frontend_v2") return;
+    if (recoveredPendingPlanJob && !pendingPlanJobMaterialized) {
+      notifyPlanJobPersistenceRecovery(recoveredPendingPlanJob);
+      schedulePendingPlanJobPersistence(
+        recoveredPendingPlanJob,
+        recoveredPendingPlanJob.kind === "plan_revision"
+          ? "plan_revision_running"
+          : "plan_generation_running",
+        recoveredPendingPlanJob.kind === "plan_revision"
+          ? {
+              pendingPlanRevisionChoice: null,
+              pending_plan_revision_choice: null,
+            }
+          : {},
+      );
+    }
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
         void resumePendingMessageJob(pendingMessageJob);
@@ -6714,6 +6890,24 @@ export function WorkspacePage() {
     }
     const pendingPlanJob = pendingPlanJobRef.current;
     if (pendingPlanJob?.job_id && pendingPlanJob.conversation_id === activeConversationId) {
+      const recoveryHandle = loadPendingPlanJobRecovery<PendingPlanJob>(
+        browserSessionStorage(),
+        activeConversationId,
+      );
+      if (recoveryHandle?.job_id === pendingPlanJob.job_id) {
+        schedulePendingPlanJobPersistence(
+          pendingPlanJob,
+          pendingPlanJob.kind === "plan_revision"
+            ? "plan_revision_running"
+            : "plan_generation_running",
+          pendingPlanJob.kind === "plan_revision"
+            ? {
+                pendingPlanRevisionChoice: null,
+                pending_plan_revision_choice: null,
+              }
+            : {},
+        );
+      }
       void resumePendingPlanJob(pendingPlanJob);
     }
     const pendingImageJob = pendingImageJobRef.current;
@@ -8356,18 +8550,32 @@ export function WorkspacePage() {
           processedKey,
         },
       };
-      await persistPendingPlanJob(
+      const persistenceContext = {
+        selected_direction: direction,
+        form_values: msg.artifact.formValues,
+        intake_context: msg.artifact.intakeContext,
+        materials: msg.artifact.materials || [],
+      };
+      await continueStartedPlanJob({
         pendingPlanJob,
-        targetConversationId,
-        "plan_generation_running",
-        {
-          selected_direction: direction,
-          form_values: msg.artifact.formValues,
-          intake_context: msg.artifact.intakeContext,
-          materials: msg.artifact.materials || [],
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
         },
-      );
-      await resumePendingPlanJob(pendingPlanJob);
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_generation_running",
+          persistenceContext,
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_generation_running",
+          persistenceContext,
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -8690,6 +8898,26 @@ export function WorkspacePage() {
     setPendingPlanRevisionChoice(null);
     setBusyForConversation(targetConversationId, true);
     try {
+      const existingPlanJob = pendingPlanJobRef.current;
+      if (
+        existingPlanJob?.job_id
+        && existingPlanJob.conversation_id === targetConversationId
+      ) {
+        schedulePendingPlanJobPersistence(
+          existingPlanJob,
+          existingPlanJob.kind === "plan_revision"
+            ? "plan_revision_running"
+            : "plan_generation_running",
+          existingPlanJob.kind === "plan_revision"
+            ? {
+                pendingPlanRevisionChoice: null,
+                pending_plan_revision_choice: null,
+              }
+            : {},
+        );
+        await resumePendingPlanJob(existingPlanJob);
+        return;
+      }
       if (mode === "regenerate_directions") {
         pushAssistant("已选择放弃当前创意，正在重新生成 3 个创意方向…", targetConversationId);
         await startDirectionJob(
@@ -8749,16 +8977,30 @@ export function WorkspacePage() {
           processedKey: pending.processedKey,
         },
       };
-      await persistPendingPlanJob(
+      const persistenceContext = {
+        pendingPlanRevisionChoice: null,
+        pending_plan_revision_choice: null,
+      };
+      await continueStartedPlanJob({
         pendingPlanJob,
-        targetConversationId,
-        "plan_revision_running",
-        {
-          pendingPlanRevisionChoice: null,
-          pending_plan_revision_choice: null,
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
         },
-      );
-      await resumePendingPlanJob(pendingPlanJob);
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_revision_running",
+          persistenceContext,
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_revision_running",
+          persistenceContext,
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       if (pending.processedKey) releaseArtifactAction(pending.processedKey);
       pushAssistant(`plan.md 修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -9660,7 +9902,7 @@ export function WorkspacePage() {
         }}
       />
       {legacyArtifactActionsEnabled && canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (
-        <Suspense fallback={<aside className="flex h-full w-[52vw] min-w-[680px] items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft">正在加载 Markdown 编辑器…</aside>}>
+        <Suspense fallback={<aside className="fixed inset-0 z-50 flex h-full w-full min-w-0 items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft xl:static xl:z-auto xl:w-[52vw] xl:min-w-[680px]">正在加载 Markdown 编辑器…</aside>}>
           <PlanMarkdownEditor
             planVersion={selectedPlanEditorMessage.artifact.plan.plan_version || 1}
             initialMarkdown={selectedPlanEditorMessage.artifact.plan.plan_markdown}

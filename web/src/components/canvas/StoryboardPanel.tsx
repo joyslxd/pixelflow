@@ -235,7 +235,7 @@ export function StoryboardPanel({
   };
 
   return (
-    <aside className="flex h-full w-[52vw] min-w-[680px] max-w-[980px] flex-col border-l border-line bg-[#f8fafc]">
+    <aside className="fixed inset-0 z-50 flex h-full w-full min-w-0 max-w-none flex-col border-l border-line bg-[#f8fafc] xl:static xl:z-auto xl:w-[52vw] xl:min-w-[680px] xl:max-w-[980px]">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-4">
         <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas" aria-label="返回">
           <ArrowLeft size={18} />
@@ -246,7 +246,7 @@ export function StoryboardPanel({
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(280px,42%)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(280px,42%)]">
         <div className="min-h-0 overflow-y-auto px-4 py-4">
           <section className="rounded-2xl border border-line bg-white p-4">
             <div className="mb-3 text-[14px] font-semibold text-ink">全局素材</div>

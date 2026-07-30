@@ -36,7 +36,7 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside className="flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
+    <aside className="hidden xl:flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="px-3 pt-5">
         <button
           onClick={() => navigate("/")}
