@@ -468,6 +468,19 @@ test("initial v1 Plan uses the recoverable strict message job before writing con
   assert.match(planResumeSource, /flowDraft:\s*null/, "initial Plan completion must clear the direction draft");
 });
 
+test("Plan job 轮询不再用前端时长误判，临时失败继续恢复原任务", () => {
+  const planResumeSource = resumePendingPlanJobSource();
+
+  assert.equal(apiSource.includes("PLAN_JOB_TIMEOUT_MS"), false, "Plan job 终态只能由后端权威状态决定");
+  assert.match(planResumeSource, /classifyPlanJobResume/, "恢复路径必须按纯合同分类");
+  assert.match(planResumeSource, /planJobResumeDelayMs/, "临时失败必须有限退避后恢复同一 job");
+  assert.match(
+    planResumeSource,
+    /Plan 查询暂时中断，正在使用原任务继续恢复/,
+    "用户只接收一次可恢复提示，不能误报任务失败",
+  );
+});
+
 test("recoverable Plan message jobs retain unknown results and resume with server artifact authority", () => {
   const helperStart = workspaceSource.indexOf("const persistPlanArtifactForConversation = async");
   const helperEnd = workspaceSource.indexOf("const startConversationMessageJobForConversation", helperStart);

@@ -52,6 +52,10 @@ import {
   planMessageResumeDelayMs,
   resumePlanMessageJobStep,
 } from "@/lib/planMessageRecovery";
+import {
+  classifyPlanJobResume,
+  planJobResumeDelayMs,
+} from "@/lib/planJobRecovery";
 
 const PlanMarkdownEditor = lazy(() =>
   import("@/components/canvas/PlanMarkdownEditor").then((module) => ({ default: module.PlanMarkdownEditor })),
@@ -1973,6 +1977,8 @@ export function WorkspacePage() {
   const activeDirectionJobPollsRef = useRef(new Set<string>());
   const pendingPlanJobRef = useRef<PendingPlanJob | null>(null);
   const activePlanJobPollsRef = useRef(new Set<string>());
+  const planJobResumeAttemptsRef = useRef(new Map<string, number>());
+  const planJobRecoveryNoticesRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const pendingImageJobRef = useRef<PendingImageJob | null>(null);
@@ -4628,10 +4634,15 @@ export function WorkspacePage() {
     const targetConversationId = pendingPlanJob.conversation_id;
     const shouldContinuePolling = () => isVisibleConversation(targetConversationId);
     const stopIfHidden = () => !shouldContinuePolling();
+    const clearRecoveryState = () => {
+      planJobResumeAttemptsRef.current.delete(pollKey);
+      planJobRecoveryNoticesRef.current.delete(pollKey);
+    };
     setBusyForConversation(targetConversationId, true);
     try {
       if (stopIfHidden()) return;
       if (hasMaterializedPlanJob(messagesRef.current, targetConversationId, pendingPlanJob)) {
+        clearRecoveryState();
         await clearPendingPlanJob(targetConversationId, "plan_review").catch(() => {});
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         return;
@@ -4640,16 +4651,24 @@ export function WorkspacePage() {
         ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
         : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
       if (stopIfHidden()) return;
-      if (status.status === "failed") {
-        throw new Error(status.error || status.message || "Plan job failed");
+      const statusAction = classifyPlanJobResume({
+        status: status.status,
+        hasResult: Boolean(status.result),
+      });
+      if (statusAction === "clear_failed") {
+        throw new ApiError(
+          status.status === "failed" ? 409 : 422,
+          status.error || status.message || "Plan job failed",
+        );
       }
-      const plan = status.status === "completed" && status.result
-        ? status.result
+      const plan = statusAction === "complete"
+        ? status.result!
         : pendingPlanJob.kind === "plan_revision"
           ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
           : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
       if (!plan || stopIfHidden()) return;
       if (plan.error) {
+        clearRecoveryState();
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         const isRevision = pendingPlanJob.kind === "plan_revision";
         await clearPendingPlanJob(targetConversationId, isRevision ? "plan_revision_failed" : "plan_generation_failed", {
@@ -4697,12 +4716,38 @@ export function WorkspacePage() {
           },
         },
       );
+      clearRecoveryState();
     } catch (err) {
-      if (stopIfHidden()) return;
-      if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
       const message = err instanceof Error ? err.message : String(err);
+      const action = classifyPlanJobResume({
+        hidden: stopIfHidden(),
+        errorStatus: err instanceof ApiError ? err.status : undefined,
+      });
+      if (action === "retain_pending") {
+        if (!stopIfHidden()) {
+          const attempt = planJobResumeAttemptsRef.current.get(pollKey) || 0;
+          planJobResumeAttemptsRef.current.set(pollKey, attempt + 1);
+          if (!planJobRecoveryNoticesRef.current.has(pollKey)) {
+            planJobRecoveryNoticesRef.current.add(pollKey);
+            pushAssistant("Plan 查询暂时中断，正在使用原任务继续恢复…", targetConversationId);
+          }
+          window.setTimeout(() => {
+            const current = pendingPlanJobRef.current;
+            if (
+              !document.hidden &&
+              current?.job_id === pendingPlanJob.job_id &&
+              current.conversation_id === targetConversationId
+            ) {
+              void resumePendingPlanJob(pendingPlanJob);
+            }
+          }, planJobResumeDelayMs(attempt));
+        }
+        return;
+      }
+      clearRecoveryState();
+      if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
       pushAssistant(
-        message.includes("404")
+        action === "clear_not_found"
           ? "之前的 plan.md 任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新创意方向或 Plan 卡片手动重试。"
           : `继续查询 plan.md 任务失败：${message}`,
         targetConversationId,

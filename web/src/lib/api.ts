@@ -36,7 +36,6 @@ const CONVERSATION_MESSAGE_JOB_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
 const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const PLAN_JOB_POLL_INTERVAL_MS = 3000;
-const PLAN_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
@@ -359,6 +358,9 @@ export interface PlanJobStatusResponse {
   result: PlanMarkdownResponse | null;
   error: string | null;
   message: string;
+  stage?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface VideoCreationContract extends Record<string, unknown> {
@@ -1089,21 +1091,22 @@ async function pollPlanJob(
   kind: "generation" | "revision",
   shouldContinue: () => boolean = () => true,
 ): Promise<PlanMarkdownResponse | null> {
-  const deadline = Date.now() + PLAN_JOB_TIMEOUT_MS;
   const path = kind === "revision"
     ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
     : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
+  while (shouldContinue()) {
     const status = await req<PlanJobStatusResponse>(path);
     if (!shouldContinue()) return null;
-    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "completed") {
+      if (status.result) return status.result;
+      throw new ApiError(422, "Plan job completed without result");
+    }
     if (status.status === "failed") {
-      throw new ApiError(500, status.error || status.message || (kind === "revision" ? "Plan revision failed" : "Plan generation failed"));
+      throw new ApiError(409, status.error || status.message || (kind === "revision" ? "Plan revision failed" : "Plan generation failed"));
     }
     await delay(PLAN_JOB_POLL_INTERVAL_MS);
   }
-  throw new ApiError(408, kind === "revision" ? "Plan revision polling timed out" : "Plan generation polling timed out");
+  return null;
 }
 
 async function pollSceneVideoJob(
