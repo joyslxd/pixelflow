@@ -1,4 +1,4 @@
-"""DeepSeek-backed Plan generation and revision client."""
+"""基于 DeepSeek 的 Plan 生成与修订客户端。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,13 @@ from pixelflow.creative.seedance_plan import build_seedance_plan_authoring_promp
 from pixelflow.generate.seedance_prompt import load_seedance_guidance
 
 PLAN_LLM_MODEL_NAME = "deepseek-v4-pro"
+PLAN_LLM_REQUEST_TIMEOUT_SECONDS = 600.0
 CreationIntent = Literal["video", "image"]
 ModelFactory = Callable[..., Any]
+
+
+class PlanModelTimeoutError(TimeoutError):
+    """说明：Plan 模型请求超过有限等待边界。"""
 
 
 async def generate_plan_payload(
@@ -346,15 +351,33 @@ def _generation_prompt(
 def _default_model_factory(model_name: str, *, attach_tracing: bool = False) -> Any:
     from deerflow.models.factory import create_chat_model
 
-    return create_chat_model(model_name, attach_tracing=attach_tracing)
+    return create_chat_model(
+        model_name,
+        attach_tracing=attach_tracing,
+        timeout=PLAN_LLM_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+
+
+def _is_model_timeout(exc: Exception) -> bool:
+    return isinstance(exc, TimeoutError) or exc.__class__.__name__ in {
+        "APITimeoutError",
+        "ConnectTimeout",
+        "ReadTimeout",
+    }
 
 
 def _invoke_json_model(prompt: str, model_name: str, model_factory: ModelFactory) -> Any:
     try:
-        model = model_factory(model_name, attach_tracing=False)
-    except TypeError:
-        model = model_factory(model_name)
-    response = model.invoke(prompt)
+        try:
+            model = model_factory(model_name, attach_tracing=False)
+        except TypeError:
+            model = model_factory(model_name)
+        response = model.invoke(prompt)
+    except Exception as exc:
+        if _is_model_timeout(exc):
+            raise PlanModelTimeoutError("Plan 模型请求超时") from None
+        raise
     return _parse_json_payload(getattr(response, "content", response))
 
 
