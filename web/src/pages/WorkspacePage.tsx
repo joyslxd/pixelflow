@@ -1435,13 +1435,14 @@ function sceneGlobalAssetReferenceFromMaterials(materials: Array<Record<string, 
   const assetId = String(material.asset_id || "");
   const assetGroup = String(material.asset_group || "");
   const sourceImageUrl = String(material.source_image_url || material.url || "");
-  if (!assetId || !isGlobalSceneAssetGroup(assetGroup) || !sourceImageUrl) return null;
+  const action = material.scene_global_asset_action === "delete" ? "delete" : "edit";
+  if (!assetId || !isGlobalSceneAssetGroup(assetGroup) || (action !== "delete" && !sourceImageUrl)) return null;
   return {
     ...material,
     source: "scene_global_asset",
     asset_id: assetId,
     asset_group: assetGroup,
-    scene_global_asset_action: material.scene_global_asset_action === "delete" ? "delete" : "edit",
+    scene_global_asset_action: action,
     name: String(material.name || material.asset_name || assetId),
     source_image_url: sourceImageUrl,
     url: sourceImageUrl,
@@ -9704,7 +9705,27 @@ export function WorkspacePage() {
     );
     if (affectedSceneIds.size === 0) {
       releaseArtifactAction(processedKey);
+      videoRevisionArtifactRef.current = {
+        conversationId: targetConversationId,
+        artifact: {
+          ...artifact,
+          originalVideoScenePackages,
+        },
+      };
       pushAssistant("QAAgent QC 质检没有定位到具体分镜。为了避免误把整条视频重做，请在修改意见里明确写出要修改的分镜，例如“只修改第2个分镜”。", targetConversationId);
+      if (targetConversationId) {
+        void updateConversationWithProgress(targetConversationId, {
+            last_phase: "video_revision_scene_required",
+            context: {
+              ...makeSnapshot(),
+              pendingVideoRevision: videoRevisionArtifactRef.current,
+              pending_video_revision: videoRevisionArtifactRef.current,
+              video_revision_feedback: artifact.videoRevisionFeedback,
+              video_quality_review: artifact.videoQualityReview,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
       setBusyForConversation(targetConversationId, false);
       return;
     }

@@ -62,11 +62,7 @@ def _scene_packages() -> list[dict]:
                 "https://old.example.com/wine.png",
             ],
             "shot_description": {
-                "text": (
-                    "0-8秒: 地点:@总裁办公室 中，角色:@周衡-总裁造型 身穿黑色西装和白色衬衫，"
-                    "短发整齐，拿起道具:@高端红酒。中景缓慢推进，暖色轮廓光，伴随脚步声，"
-                    "最后定格在酒标。"
-                ),
+                "text": ("0-8秒: 地点:@总裁办公室 中，角色:@周衡-总裁造型 身穿黑色西装和白色衬衫，短发整齐，拿起道具:@高端红酒。中景缓慢推进，暖色轮廓光，伴随脚步声，最后定格在酒标。"),
                 "mentions": [
                     {
                         "asset_id": "character-president",
@@ -241,9 +237,7 @@ def test_delete_removes_asset_reference_and_related_description_only():
 
     assert result["ok"] is True
     assert result["affected_scene_ids"] == ["scene-1"]
-    prop = result["global_assets"]["props"][0]
-    assert prop["images"] == []
-    assert prop["image_url"] == ""
+    assert result["global_assets"]["props"] == []
     updated_scene = result["scene_packages"][0]
     assert "@高端红酒" not in updated_scene["shot_description"]["text"]
     assert "酒标" not in updated_scene["shot_description"]["text"]
@@ -256,6 +250,33 @@ def test_delete_removes_asset_reference_and_related_description_only():
         "https://old.example.com/president.png",
         "https://old.example.com/office.png",
     ]
+
+
+def test_delete_removes_unreferenced_manual_asset_without_leaving_placeholder():
+    global_assets = _global_assets()
+    global_assets["props"].append(
+        {
+            "asset_id": "manual-prop",
+            "name": "手工新增道具",
+            "images": ["https://old.example.com/manual.png"],
+        }
+    )
+
+    result = asyncio.run(
+        revise_scene_package_asset(
+            operation="delete",
+            asset_id="manual-prop",
+            asset_group="props",
+            asset_name="手工新增道具",
+            source_image_url="",
+            global_assets=global_assets,
+            scene_packages=_scene_packages(),
+            patch_provider=_delete_patch_provider,
+        )
+    )
+
+    assert [record["asset_id"] for record in result["global_assets"]["props"]] == ["prop-wine"]
+    assert result["affected_scene_ids"] == []
 
 
 async def _unsafe_patch_provider(**_kwargs):

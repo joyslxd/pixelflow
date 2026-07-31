@@ -57,17 +57,8 @@ async def revise_scene_package_asset(
     if target_asset is None:
         raise ValueError(f"全局素材不存在：{asset_id}")
 
-    canonical_name = str(
-        target_asset.get("name")
-        or target_asset.get("label")
-        or asset_name
-        or asset_id
-    ).strip()
-    affected_scenes = [
-        scene
-        for scene in next_scenes
-        if _scene_references_asset(scene, asset_id, canonical_name)
-    ]
+    canonical_name = str(target_asset.get("name") or target_asset.get("label") or asset_name or asset_id).strip()
+    affected_scenes = [scene for scene in next_scenes if _scene_references_asset(scene, asset_id, canonical_name)]
 
     image_analysis_markdown = ""
     if normalized_operation == "replace":
@@ -132,7 +123,7 @@ async def revise_scene_package_asset(
         )
         message = "新素材分析完成，相关分镜内容已完成定向更新。"
     else:
-        _clear_asset_image(target_asset)
+        _remove_asset(next_assets, asset_group=asset_group, asset_id=asset_id)
         _remove_asset_references(
             next_scenes,
             asset_id=asset_id,
@@ -147,11 +138,7 @@ async def revise_scene_package_asset(
         "asset_group": asset_group,
         "global_assets": next_assets,
         "scene_packages": next_scenes,
-        "affected_scene_ids": [
-            str(scene.get("scene_id") or "")
-            for scene in affected_scenes
-            if str(scene.get("scene_id") or "")
-        ],
+        "affected_scene_ids": [str(scene.get("scene_id") or "") for scene in affected_scenes if str(scene.get("scene_id") or "")],
         "image_analysis_markdown": image_analysis_markdown,
         "message": message,
     }
@@ -172,7 +159,7 @@ def _validate_request(
         raise ValueError("asset_id 不能为空")
     if asset_group not in _ASSET_GROUPS:
         raise ValueError("asset_group 只支持 characters、scenes 或 props")
-    if not _is_public_http_url(source_image_url):
+    if normalized_operation == "replace" and not _is_public_http_url(source_image_url):
         raise ValueError("原素材图片必须是公开 HTTP(S) 地址")
     if normalized_operation == "replace" and not _is_public_http_url(new_image_url or ""):
         raise ValueError("新素材图片必须是公开 HTTP(S) 地址")
@@ -196,17 +183,20 @@ def _find_asset(global_assets: dict[str, Any], asset_group: str, asset_id: str) 
     return None
 
 
+def _remove_asset(global_assets: dict[str, Any], *, asset_group: str, asset_id: str) -> None:
+    """从全局素材清单中真正移除目标记录，避免删除后留下待生成空壳。"""
+
+    records = global_assets.get(asset_group)
+    if not isinstance(records, list):
+        return
+    global_assets[asset_group] = [record for record in records if not isinstance(record, dict) or str(record.get("asset_id") or record.get("id") or "") != asset_id]
+
+
 def _shot_text(scene: dict[str, Any]) -> str:
     shot = scene.get("shot_description")
     if not isinstance(shot, dict):
         return str(shot or "")
-    return str(
-        shot.get("text")
-        or shot.get("description_text")
-        or shot.get("shotText")
-        or shot.get("description")
-        or ""
-    )
+    return str(shot.get("text") or shot.get("description_text") or shot.get("shotText") or shot.get("description") or "")
 
 
 def _scene_references_asset(scene: dict[str, Any], asset_id: str, asset_name: str) -> bool:
@@ -302,17 +292,8 @@ def _patch_prompt(
     global_assets: dict[str, Any],
     validation_feedback: str = "",
 ) -> str:
-    action = (
-        "把目标素材旧图片对应的外貌、外观、特征和特点，改成新图片分析结论。目标素材的 @引用文字必须保留。"
-        if operation == "replace"
-        else "删除目标素材的 @引用，并删除或最小改写只有依赖该素材才成立的外貌、外观、特征、动作和收束描述。"
-    )
-    correction = (
-        "\n上一次补丁未通过安全校验，原因如下。必须针对原因缩小替换范围，不能重复同一错误：\n"
-        f"{validation_feedback}\n"
-        if validation_feedback
-        else ""
-    )
+    action = "把目标素材旧图片对应的外貌、外观、特征和特点，改成新图片分析结论。目标素材的 @引用文字必须保留。" if operation == "replace" else "删除目标素材的 @引用，并删除或最小改写只有依赖该素材才成立的外貌、外观、特征、动作和收束描述。"
+    correction = f"\n上一次补丁未通过安全校验，原因如下。必须针对原因缩小替换范围，不能重复同一错误：\n{validation_feedback}\n" if validation_feedback else ""
     return f"""你是 PixelFlow 的分镜素材定向修订模块。你只能对目标素材相关文字给出“精确子串替换补丁”，不能重写整段分镜。
 
 操作：{operation}
@@ -500,30 +481,7 @@ def _sync_replacement_references(
                         mention[key] = value
         image_urls = scene.get("image_urls")
         if isinstance(image_urls, list):
-            scene["image_urls"] = [
-                new_image_url if str(url) == source_image_url else url
-                for url in image_urls
-            ]
-
-
-def _clear_asset_image(asset: dict[str, Any]) -> None:
-    for key in ("three_view_images", "images"):
-        if key in asset:
-            asset[key] = []
-    for key in (
-        "image_url",
-        "url",
-        "generation_reference_url",
-        "third_asset_id",
-        "replacement_asset_id",
-        "replacement_asset_type",
-        "replacement_source",
-        "image_analysis_markdown",
-    ):
-        if key in {"image_url", "url"}:
-            asset[key] = ""
-        else:
-            asset.pop(key, None)
+            scene["image_urls"] = [new_image_url if str(url) == source_image_url else url for url in image_urls]
 
 
 def _remove_asset_references(
@@ -538,16 +496,7 @@ def _remove_asset_references(
             scene["reference_asset_ids"] = [item for item in references if str(item) != asset_id]
         shot = scene.get("shot_description")
         if isinstance(shot, dict) and isinstance(shot.get("mentions"), list):
-            shot["mentions"] = [
-                mention
-                for mention in shot["mentions"]
-                if not isinstance(mention, dict)
-                or str(mention.get("asset_id") or mention.get("assetId") or mention.get("id") or "") != asset_id
-            ]
+            shot["mentions"] = [mention for mention in shot["mentions"] if not isinstance(mention, dict) or str(mention.get("asset_id") or mention.get("assetId") or mention.get("id") or "") != asset_id]
         image_urls = scene.get("image_urls")
         if isinstance(image_urls, list):
-            scene["image_urls"] = [
-                url
-                for url in image_urls
-                if str(url) != source_image_url
-            ]
+            scene["image_urls"] = [url for url in image_urls if str(url) != source_image_url]
