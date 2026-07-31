@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import re
+import secrets
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from threading import RLock
 from typing import Any, Protocol
-
-from pydantic import BaseModel
+from weakref import WeakKeyDictionary
 
 from pixelflow.agent_runtime.contracts import WorkflowStatus
 from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME
@@ -74,19 +76,24 @@ class Clock(Protocol):
     def now(self) -> datetime: ...
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
 class TransientTurnCredential:
     """只在当前 Turn 的付费 Skill 边界短暂使用的登录凭据。"""
 
     authorization: _OpaqueAuthorization = field(repr=False)
 
     def __init__(self, authorization: str) -> None:
-        object.__setattr__(self, "authorization", _OpaqueAuthorization(authorization))
+        if not isinstance(authorization, str) or not authorization.strip():
+            raise ValueError("当前 Turn 缺少临时 Authorization")
+        handle = secrets.token_urlsafe(24)
+        object.__setattr__(self, "authorization", _OpaqueAuthorization(handle))
+        with _TRANSIENT_CREDENTIAL_LOCK:
+            _TRANSIENT_CREDENTIAL_SECRETS[self] = authorization.strip()
 
-    def reveal_for_skill_boundary(self) -> str:
-        """只供单次付费 Skill/start 调用边界显式读取原始值。"""
+    def discard(self) -> None:
+        """显式清理尚未消费的临时凭据。"""
 
-        return self.authorization._reveal_for_boundary()
+        _discard_transient_credential(self)
 
     def __copy__(self) -> None:
         raise TypeError("临时凭据禁止复制")
@@ -406,7 +413,7 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             set_current_content_app_auth,
         )
 
-        authorization = credential.reveal_for_skill_boundary()
+        authorization = _consume_authorization_for_skill_boundary(credential)
         context_token = set_current_content_app_auth(authorization, username="")
         skill_failed = False
         result: dict[str, Any] | None = None
@@ -483,11 +490,15 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
         try:
             safe_metadata = dict(metadata)
             safe_metadata["recorded_at"] = self._clock.now().isoformat()
-            self._memory_record.record_background(
+            schedule_result = self._memory_record.record_background(
                 summary=summary,
                 category="experience",
                 metadata=safe_metadata,
             )
+            if schedule_result is not None:
+                if inspect.isawaitable(schedule_result):
+                    _dispose_unexpected_awaitable(schedule_result)
+                raise TypeError("PowerMem 后台记录端口必须同步返回 None")
         except Exception as error:  # noqa: BLE001 - PowerMem 记录失败不得阻断主流程
             _log_memory_failure("record_background", error)
 
@@ -502,6 +513,21 @@ def _log_memory_failure(operation: str, error: BaseException) -> None:
     )
 
 
+def _dispose_unexpected_awaitable(value: Any) -> None:
+    """关闭或取消误注入的 awaitable，且不在用户路径等待它。"""
+
+    try:
+        close = getattr(value, "close", None)
+        if callable(close):
+            close()
+            return
+        cancel = getattr(value, "cancel", None)
+        if callable(cancel):
+            cancel()
+    except Exception:  # noqa: BLE001 - 清理失败也不得回显第三方对象异常
+        return
+
+
 def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = context.get("materials")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
@@ -512,12 +538,10 @@ def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
 class _OpaqueAuthorization:
     """通用转换只能看到固定脱敏文本的不透明 Authorization。"""
 
-    __slots__ = ("_secret",)
+    __slots__ = ("_handle",)
 
-    def __init__(self, secret: str) -> None:
-        if not isinstance(secret, str) or not secret.strip():
-            raise ValueError("当前 Turn 缺少临时 Authorization")
-        object.__setattr__(self, "_secret", secret.strip())
+    def __init__(self, handle: str) -> None:
+        object.__setattr__(self, "_handle", handle)
 
     def __setattr__(self, _name: str, _value: Any) -> None:
         raise TypeError("临时凭据禁止修改")
@@ -543,26 +567,48 @@ class _OpaqueAuthorization:
     def __reduce_ex__(self, _protocol: int) -> None:
         raise TypeError("临时凭据禁止序列化")
 
-    def _reveal_for_boundary(self) -> str:
-        return self._secret
+
+_TRANSIENT_CREDENTIAL_LOCK = RLock()
+_TRANSIENT_CREDENTIAL_SECRETS: WeakKeyDictionary[TransientTurnCredential, str] = (
+    WeakKeyDictionary()
+)
+
+
+def _consume_authorization_for_skill_boundary(
+    credential: TransientTurnCredential,
+) -> str:
+    """在付费 Skill 边界原子消费一次临时 Authorization。"""
+
+    with _TRANSIENT_CREDENTIAL_LOCK:
+        authorization = _TRANSIENT_CREDENTIAL_SECRETS.pop(credential, None)
+    if authorization is None:
+        raise RuntimeError("当前 Turn 临时凭据不可用")
+    return authorization
+
+
+def _discard_transient_credential(credential: TransientTurnCredential) -> None:
+    """清理未消费的临时 Authorization，重复调用保持幂等。"""
+
+    with _TRANSIENT_CREDENTIAL_LOCK:
+        _TRANSIENT_CREDENTIAL_SECRETS.pop(credential, None)
 
 
 class _UnsafeCapabilityOutput(ValueError):
     """标记供应商结果无法安全投影；异常文本不得携带原始值。"""
 
 
-_SENSITIVE_PROTOCOL_KEYS = {
+_SENSITIVE_PROTOCOL_KEY_FRAGMENTS = {
     "authorization",
+    "authheader",
     "accesstoken",
-    "refreshtoken",
     "idtoken",
-    "clientsecret",
     "apikey",
-    "authtoken",
     "token",
     "secret",
     "cookie",
-    "setcookie",
+    "credential",
+    "password",
+    "session",
 }
 _BEARER_PATTERN = re.compile(r"(?i)(?:^|[\s\"'])bearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
@@ -578,19 +624,15 @@ def _safe_json_projection(value: Any, *, authorization: str) -> Any:
         secret_values.add(bearer_match.group(1))
 
     def project(item: Any) -> Any:
-        if isinstance(item, BaseModel):
-            return project(item.model_dump(mode="json"))
-        if is_dataclass(item) and not isinstance(item, type):
-            return project({field_info.name: getattr(item, field_info.name) for field_info in fields(item)})
         if isinstance(item, Mapping):
             projected: dict[str, Any] = {}
             for key, child in item.items():
                 if not isinstance(key, str):
                     raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
-                normalized_key = re.sub(r"[_\-/\s]+", "", key.casefold())
+                normalized_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
                 if any(
-                    normalized_key.endswith(sensitive_key)
-                    for sensitive_key in _SENSITIVE_PROTOCOL_KEYS
+                    sensitive_fragment in normalized_key
+                    for sensitive_fragment in _SENSITIVE_PROTOCOL_KEY_FRAGMENTS
                 ):
                     raise _UnsafeCapabilityOutput("场景资产结果包含敏感字段")
                 projected[key] = project(child)

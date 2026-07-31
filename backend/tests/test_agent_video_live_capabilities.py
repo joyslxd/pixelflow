@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import json
 import pickle
 import subprocess
 import sys
+import warnings
+import weakref
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 
 from pixelflow.agent_runtime.contracts import WorkflowStatus
 from pixelflow.agent_workflows.video import (
@@ -123,6 +127,14 @@ class _SlowMemoryRecord:
         await self.release.wait()
 
 
+class _AsyncMemoryRecord:
+    def __init__(self) -> None:
+        self.executed = False
+
+    async def record_background(self, *, summary, category, metadata):
+        self.executed = True
+
+
 class _SceneAssetSkill:
     async def text_to_image(self, **kwargs):
         from app.gateway.content_app_auth_context import require_current_authorization
@@ -179,6 +191,16 @@ class _BrokenRawDto(BaseModel):
 
     def model_dump(self, *args, **kwargs):
         raise RuntimeError(f"{self.detail} DTO 转换异常")
+
+
+class _SideEffectRawDto(BaseModel):
+    detail: str
+    serializer_calls: ClassVar[int] = 0
+
+    @model_serializer
+    def serialize_model(self) -> dict[str, str]:
+        type(self).serializer_calls += 1
+        return {"detail": self.detail}
 
 
 def _capabilities(
@@ -328,6 +350,27 @@ async def test_memory_record_clock_failure_is_safe_and_fail_open(caplog: pytest.
 
 
 @pytest.mark.asyncio
+async def test_async_memory_recorder_is_closed_without_runtime_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    memory_record = _AsyncMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        directions = await capabilities.generate_directions(VIDEO_FORM, {})
+        gc.collect()
+        await asyncio.sleep(0)
+
+    assert len(directions) == 3
+    assert memory_record.executed is False
+    assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background" in caplog.text
+    assert "exception_type=TypeError" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_memory_and_clock_ports_receive_safe_stage_contract() -> None:
     memory_search = _MemorySearch()
     memory_record = _MemoryRecord()
@@ -408,6 +451,8 @@ async def test_default_capabilities_generate_scene_assets_with_transient_credent
     with pytest.raises(TypeError) as json_error:
         json.dumps(credential)
     assert "turn-secret" not in str(json_error.value)
+    with pytest.raises(RuntimeError, match="当前 Turn 临时凭据不可用"):
+        await capabilities.generate_scene_assets(scene_state, credential=credential)
 
 
 def test_transient_authorization_field_is_opaque_for_common_conversions() -> None:
@@ -435,7 +480,52 @@ def test_transient_authorization_field_is_opaque_for_common_conversions() -> Non
     with pytest.raises(TypeError) as json_error:
         json.dumps(authorization)
     assert "turn-secret" not in str(json_error.value)
-    assert credential.reveal_for_skill_boundary() == "Bearer turn-secret"
+    assert not hasattr(credential, "reveal_for_skill_boundary")
+    assert not hasattr(authorization, "_reveal_for_boundary")
+    reflected_values: list[object] = []
+    for owner in (credential, authorization):
+        for owner_type in type(owner).__mro__:
+            raw_slots = getattr(owner_type, "__slots__", ())
+            slot_names = (raw_slots,) if isinstance(raw_slots, str) else raw_slots
+            for slot_name in slot_names:
+                if slot_name == "__weakref__":
+                    continue
+                reflected_values.append(getattr(owner, slot_name))
+    assert "turn-secret" not in repr(reflected_values)
+    assert "Bearer turn-secret" not in repr(reflected_values)
+
+
+@pytest.mark.asyncio
+async def test_discarded_transient_credential_cannot_enter_skill_boundary() -> None:
+    capabilities = _capabilities()
+    approved = _planning_state(approved=True)
+    scene_state = VideoScenePackageWorkflowService().prepare_from_approved_plan(
+        approved,
+        materials=MATERIALS,
+        now=approved.updated_at + timedelta(seconds=1),
+    )
+    credential = TransientTurnCredential("Bearer turn-secret")
+
+    credential.discard()
+
+    with pytest.raises(RuntimeError, match="当前 Turn 临时凭据不可用") as error_info:
+        await capabilities.generate_scene_assets(scene_state, credential=credential)
+    assert "turn-secret" not in str(error_info.value)
+
+
+def test_unconsumed_transient_credential_is_removed_after_gc() -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    initial_count = len(live_capabilities._TRANSIENT_CREDENTIAL_SECRETS)
+    credential = TransientTurnCredential("Bearer turn-secret")
+    credential_reference = weakref.ref(credential)
+    assert len(live_capabilities._TRANSIENT_CREDENTIAL_SECRETS) == initial_count + 1
+
+    del credential
+    gc.collect()
+
+    assert credential_reference() is None
+    assert len(live_capabilities._TRANSIENT_CREDENTIAL_SECRETS) <= initial_count
 
 
 @pytest.mark.asyncio
@@ -452,6 +542,10 @@ def test_transient_authorization_field_is_opaque_for_common_conversions() -> Non
         {"outer": {"providerAccessToken": "opaque-provider-token"}},
         {"outer": {"Cookie": "opaque-provider-token"}},
         {"outer": {"Set-Cookie": "opaque-provider-token"}},
+        {"outer": {"authorizationHeader": "opaque-provider-token"}},
+        {"outer": {"secretValue": "opaque-provider-token"}},
+        {"outer": {"cookieValue": "opaque-provider-token"}},
+        {"outer": {"credentialValue": "opaque-provider-token"}},
         {"note": "turn-secret"},
         {"note": "响应包含 Bearer unrelated-secret"},
         {
@@ -461,6 +555,10 @@ def test_transient_authorization_field_is_opaque_for_common_conversions() -> Non
                 "signaturevalue"
             )
         },
+        _SafeRawDto(
+            delivery_url="https://assets.example.com/image.png",
+            business_token_count=3,
+        ),
         _UnsafeRawDto(accessToken="provider-value"),
         _BrokenRawDto(detail="Bearer turn-secret"),
     ],
@@ -487,11 +585,12 @@ async def test_scene_asset_output_rejects_sensitive_payloads_fail_closed(unsafe_
 
 
 @pytest.mark.asyncio
-async def test_scene_asset_output_projects_safe_dto_and_keeps_business_values() -> None:
-    raw = _SafeRawDto(
-        delivery_url="https://assets.example.com/tokenized/image.png?version=business",
-        business_token_count=3,
-    )
+async def test_scene_asset_output_projects_safe_mapping_and_keeps_business_values() -> None:
+    raw = {
+        "delivery_url": "https://assets.example.com/tokenized/image.png?version=business",
+        "asset_count": 3,
+        "scene_metadata": [{"description": "电影写实风"}],
+    }
     capabilities = _capabilities(scene_asset_skill=_RawFailureSceneAssetSkill(raw))
     approved = _planning_state(approved=True)
     scene_state = VideoScenePackageWorkflowService().prepare_from_approved_plan(
@@ -506,11 +605,29 @@ async def test_scene_asset_output_projects_safe_dto_and_keeps_business_values() 
     )
 
     projected = result["failed_assets"][0]["raw"]
-    assert projected == {
-        "delivery_url": "https://assets.example.com/tokenized/image.png?version=business",
-        "business_token_count": 3,
-    }
+    assert projected == raw
     json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_scene_asset_projection_rejects_custom_serializer_without_executing_it() -> None:
+    _SideEffectRawDto.serializer_calls = 0
+    raw = _SideEffectRawDto(detail="安全外观但禁止执行 serializer")
+    capabilities = _capabilities(scene_asset_skill=_RawFailureSceneAssetSkill(raw))
+    approved = _planning_state(approved=True)
+    scene_state = VideoScenePackageWorkflowService().prepare_from_approved_plan(
+        approved,
+        materials=MATERIALS,
+        now=approved.updated_at + timedelta(seconds=1),
+    )
+
+    with pytest.raises(RuntimeError, match="场景资产结果未通过安全校验"):
+        await capabilities.generate_scene_assets(
+            scene_state,
+            credential=TransientTurnCredential("Bearer turn-secret"),
+        )
+
+    assert _SideEffectRawDto.serializer_calls == 0
 
 
 @pytest.mark.asyncio
