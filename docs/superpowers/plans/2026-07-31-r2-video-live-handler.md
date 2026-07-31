@@ -56,8 +56,10 @@
 - Modify: `backend/tests/fixtures/agent_runtime/contracts-v1.json`
 - Modify: `backend/tests/test_agent_runtime_contracts.py`
 - Modify: `web/src/lib/supervisor/contracts.ts`
+- Modify: `web/scripts/run-tests.mjs`
 - Modify: `web/tests/agentRuntimeContracts.type-test.ts`
 - Modify: `web/tests/agentRuntimeContracts.test.mjs`
+- Modify: `web/tests/supervisorTurnSubmission.test.mjs`
 
 **Interfaces:**
 - Produces: `ExplicitActionSignal`、`InterruptResponseRequest`、`AgentInterruptProjection`。
@@ -187,6 +189,8 @@ export type InterruptResponseRequest = Readonly<{
 
 fixture 中 `turn_start_request.explicit_action` 与 `interrupt_response_request.value.explicit_action` 和上述类型逐字段相同；`interrupt_projection` 固定包含 `interrupt_id/workflow_id/turn_id/kind/reason_code/payload/opened_at`，不得放入内部 `user_id/thread_id/checkpoint_ns`。interrupt response 不增加 `expected_context_version`，开放 interrupt 本身就是原 Turn 的恢复边界。
 
+同步 `web/scripts/run-tests.mjs` 中硬编码的 `CanonicalFixture` 顶级字段，使新增 fixture 节点接受同一 TypeScript 检查；`web/tests/supervisorTurnSubmission.test.mjs` 的 M12 builder 期望明确排除 Task 12 才接线的 `explicit_action`，继续验证 reply/Artifact 字段，不得提前修改生产 `turnSubmission.ts`。
+
 - [ ] **Step 5: 运行合同测试并确认 GREEN**
 
 Run:
@@ -203,7 +207,7 @@ Expected: PASS，Python/TypeScript 对同一 fixture 的字段、枚举和可空
 - [ ] **Step 6: 提交合同切片**
 
 ```powershell
-git add backend/pixelflow/agent_runtime/contracts backend/pixelflow/agent_runtime/identity.py backend/pixelflow/agent_runtime/service.py backend/pixelflow/agent_runtime/supervisor/resolver.py backend/tests/fixtures/agent_runtime/contracts-v1.json backend/tests/test_agent_runtime_contracts.py web/src/lib/supervisor/contracts.ts web/tests/agentRuntimeContracts.type-test.ts web/tests/agentRuntimeContracts.test.mjs
+git add backend/pixelflow/agent_runtime/contracts backend/pixelflow/agent_runtime/identity.py backend/pixelflow/agent_runtime/service.py backend/pixelflow/agent_runtime/supervisor/resolver.py backend/tests/fixtures/agent_runtime/contracts-v1.json backend/tests/test_agent_runtime_contracts.py web/scripts/run-tests.mjs web/src/lib/supervisor/contracts.ts web/tests/agentRuntimeContracts.type-test.ts web/tests/agentRuntimeContracts.test.mjs web/tests/supervisorTurnSubmission.test.mjs
 git commit -m "实现：冻结视频 live Turn 与人工确认合同" -m "统一结构化动作、interrupt response、公开投影和跨进程稳定身份，保持 Python 与 TypeScript 唯一 fixture 一致。"
 ```
 
