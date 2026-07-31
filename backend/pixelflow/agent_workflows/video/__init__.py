@@ -24,6 +24,15 @@ from .scene_packages import (
     VideoScenePackageWorkflowService,
     VideoScenePackageWorkflowState,
 )
+from .state_codec import (
+    VideoWorkflowState,
+    VideoWorkflowStateEnvelope,
+    VideoWorkflowStateKind,
+    canonical_payload_sha256,
+    decode_video_workflow_state,
+    encode_video_workflow_state,
+    project_video_workflow_state,
+)
 from .video_generation import (
     VideoSceneAtomicOperationPort,
     VideoSceneGenerationStage,
@@ -54,6 +63,9 @@ __all__ = [
     "VideoSceneVideoStage",
     "VideoSceneVideoWorkflowService",
     "VideoSceneVideoWorkflowState",
+    "VideoWorkflowState",
+    "VideoWorkflowStateEnvelope",
+    "VideoWorkflowStateKind",
     "VideoMergeSkillPort",
     "VideoOperationStartClaim",
     "VideoOperationTerminalClaim",
@@ -63,4 +75,8 @@ __all__ = [
     "VideoPostProductionWorkflowState",
     "VideoQualityReviewSkillPort",
     "VideoQualityReviewWorkflowResult",
+    "canonical_payload_sha256",
+    "decode_video_workflow_state",
+    "encode_video_workflow_state",
+    "project_video_workflow_state",
 ]
