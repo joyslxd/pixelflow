@@ -341,6 +341,7 @@ git commit -m "实现：增加视频 live Runtime 支持表" -m "新增完整视
 **Files:**
 - Create: `backend/pixelflow/agent_workflows/video/state_codec.py`
 - Modify: `backend/pixelflow/agent_workflows/video/__init__.py`
+- Modify: `backend/pixelflow/agent_runtime/__init__.py`
 - Modify: `backend/pixelflow/agent_workflows/video/planning.py`
 - Create: `backend/tests/test_agent_video_workflow_state_codec.py`
 - Modify: `backend/tests/test_agent_video_workflow_planning.py`
@@ -944,6 +945,8 @@ git commit -m "实现：生成并复核 live Turn 的 Supervisor 决策" -m "按
 - Modify: `backend/app/gateway/routers/pixelflow_video.py`
 
 集成修复补充：`video` 包入口必须保留现有公开导出，同时允许干净 Python 进程直接导入 `video.live_capabilities`，不得因 eager export 形成 `delivery → agent_runtime → persistence.video_runtime → video` 循环。使用可测试的惰性导出或等价安全顺序，并补直接导入回归。
+
+并发审查补充：循环根因中的 `agent_runtime` 包入口也必须保留现有公开 API 并改为按符号惰性导出，删除 `video` 包的无条件 Runtime 预热。必须验证多线程 fresh-process 同时首次导入 `video` 公开符号、`scene_packages` 与 `live_capabilities` 不出现 `_DeadlockError`，且单独导入 `video` 不主动加载 `agent_runtime.replay` 或触发 LangGraph warning。
 
 **Interfaces:**
 - Produces Protocol: `VideoLiveCapabilityPort`。
