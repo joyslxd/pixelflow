@@ -9,18 +9,23 @@ import pytest
 
 def _profile(
     *,
+    model_name: str = "verified-model",
     max_context_tokens: int = 1_000_000,
     max_output_tokens: int = 32 * 1024,
+    verified_at: datetime | None = datetime(2026, 7, 1, tzinfo=UTC),
+    expires_at: datetime | None = None,
+    source: str | None = "AIRouter 模型能力验证记录",
 ):
     from pixelflow.agent_runtime.context.profiles import ModelContextProfile
 
     return ModelContextProfile(
-        model_name="verified-model",
+        model_name=model_name,
         max_context_tokens=max_context_tokens,
         max_output_tokens=max_output_tokens,
         tokenizer_strategy="provider_usage",
-        verified_at=datetime(2026, 7, 1, tzinfo=UTC),
-        source="AIRouter 模型能力验证记录",
+        verified_at=verified_at,
+        expires_at=expires_at,
+        source=source,
     )
 
 
@@ -206,19 +211,78 @@ def test_blank_context_budget_node_is_rejected() -> None:
         get_context_budget_policy(" ")
 
 
-def test_strict_budget_provider_rejects_unverified_model_profile() -> None:
+def test_strict_budget_provider_accepts_verified_model_profile() -> None:
     from pixelflow.agent_runtime.config import ContextBudgetConfig
-    from pixelflow.agent_runtime.context.token_meter import (
+    from pixelflow.agent_runtime.context import (
         ContextBudgetPolicyProvider,
     )
 
     provider = ContextBudgetPolicyProvider(
         ContextBudgetConfig(require_verified_model_profile=True),
     )
+    profile = _profile()
 
-    with pytest.raises(ValueError, match="已验证"):
+    resolved = provider.resolve_model_profile(
+        "verified-model",
+        {"verified-model": profile},
+        now=datetime(2026, 7, 24, tzinfo=UTC),
+    )
+
+    assert resolved == profile
+
+
+@pytest.mark.parametrize("status", ["missing", "unverified", "expired"])
+def test_strict_budget_provider_uses_public_error_for_unavailable_profile(
+    status: str,
+) -> None:
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+    from pixelflow.agent_runtime.context import (
+        ContextBudgetPolicyProvider,
+        VerifiedModelProfileUnavailableError,
+    )
+
+    provider = ContextBudgetPolicyProvider(
+        ContextBudgetConfig(require_verified_model_profile=True),
+    )
+    model_name = f"{status}-model"
+    profiles = {}
+    if status == "unverified":
+        profiles[model_name] = _profile(
+            model_name=model_name,
+            verified_at=None,
+        )
+    elif status == "expired":
+        profiles[model_name] = _profile(
+            model_name=model_name,
+            expires_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+
+    with pytest.raises(
+        VerifiedModelProfileUnavailableError,
+        match="已验证",
+    ) as exc_info:
         provider.resolve_model_profile(
-            "missing-model",
-            {},
+            model_name,
+            profiles,
             now=datetime(2026, 7, 24, tzinfo=UTC),
         )
+
+    assert isinstance(exc_info.value, ValueError)
+
+
+def test_compatible_budget_provider_preserves_conservative_fallback() -> None:
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+    from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
+
+    provider = ContextBudgetPolicyProvider(
+        ContextBudgetConfig(require_verified_model_profile=False),
+    )
+
+    profile = provider.resolve_model_profile(
+        "missing-model",
+        {},
+        now=datetime(2026, 7, 24, tzinfo=UTC),
+    )
+
+    assert profile.model_name == "missing-model"
+    assert profile.tokenizer_strategy == "conservative_estimate"

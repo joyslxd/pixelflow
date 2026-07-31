@@ -78,6 +78,7 @@ from .token_meter import (
     ContextBudgetPolicy,
     ContextBudgetPolicyProvider,
     TokenMeter,
+    VerifiedModelProfileUnavailableError,
     get_context_budget_policy,
 )
 from .verification import (
@@ -153,6 +154,7 @@ __all__ = [
     "SummaryVerifier",
     "TokenMeter",
     "TokenEstimator",
+    "VerifiedModelProfileUnavailableError",
     "WorkflowSummaryRecord",
     "estimate_context_tokens",
     "estimate_prompt_bytes",

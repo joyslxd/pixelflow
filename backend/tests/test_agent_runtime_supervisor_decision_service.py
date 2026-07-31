@@ -455,7 +455,7 @@ async def test_forged_profile_message_from_fake_assembler_is_not_mapped() -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("control", ["\r", "\n", "\t", "\x00"])
-async def test_profile_error_with_control_character_model_name_is_not_mapped(
+async def test_real_strict_profile_error_is_mapped_by_type_for_any_model_name(
     control: str,
 ) -> None:
     class OwnedSnapshotSource:
@@ -473,7 +473,7 @@ async def test_profile_error_with_control_character_model_name_is_not_mapped(
                 workflows=(_workflow(),),
             )
 
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(SupervisorDecisionUnavailableError) as exc_info:
         await _service(
             CountingDecisionModel(),
             context_assembler=ContextAssembler(
@@ -484,7 +484,37 @@ async def test_profile_error_with_control_character_model_name_is_not_mapped(
             ),
         ).decide(_evidence())
 
-    assert not isinstance(exc_info.value, SupervisorDecisionUnavailableError)
+    assert exc_info.value.reason_code == "model_profile_invalid"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_value_error_with_real_profile_traceback_is_not_mapped() -> None:
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+    from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
+
+    provider = ContextBudgetPolicyProvider(
+        ContextBudgetConfig(require_verified_model_profile=True),
+    )
+    try:
+        provider.resolve_model_profile(
+            "missing-model",
+            {},
+            now=NOW,
+        )
+    except ValueError as source_error:
+        error = ValueError(*source_error.args).with_traceback(
+            source_error.__traceback__,
+        )
+    else:
+        raise AssertionError("严格 Provider 必须拒绝缺失档案")
+
+    with pytest.raises(ValueError) as exc_info:
+        await _service(
+            CountingDecisionModel(),
+            context_assembler=FailingContextAssembler(error),
+        ).decide(_evidence())
+
+    assert exc_info.value is error
 
 
 @pytest.mark.asyncio
@@ -532,6 +562,113 @@ async def test_explicit_patch_foreign_reserved_reference_is_rejected_before_mode
         )
 
     assert model.calls == 0
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {
+            "workflow_id": "wf-2",
+            "artifact_ref": "artifact:wf-2:plan:v2",
+        },
+        {"nested": {"artifact_ref": "artifact:wf-2:plan:v2"}},
+        {
+            "workflow_id": "wf-1",
+            "nested": {"ref": "artifact:wf-2:plan:v2"},
+        },
+        {"nested": {"message_id": "msg-2"}},
+        {"items": [{"artifact_refs": ["artifact:wf-2:plan:v2"]}]},
+    ],
+)
+def test_explicit_patch_reference_must_match_signal_workflow(
+    patch: dict[str, object],
+) -> None:
+    model = CountingDecisionModel()
+
+    with pytest.raises(ValidationError):
+        _evidence(
+            workflows=(_workflow(), _workflow("wf-2")),
+            visible_messages=(
+                {"message_id": "msg-1", "workflow_id": "wf-1"},
+                {"message_id": "msg-2", "workflow_id": "wf-2"},
+            ),
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+                patch=patch,
+            ),
+        )
+
+    assert model.calls == 0
+
+
+def test_explicit_patch_allows_references_owned_by_signal_workflow() -> None:
+    patch = {
+        "workflow_id": "wf-1",
+        "nested": {
+            "message_id": "msg-1",
+            "artifact_refs": ["artifact:wf-1:plan:v2"],
+        },
+    }
+
+    evidence = _evidence(
+        workflows=(_workflow(), _workflow("wf-2")),
+        visible_messages=(
+            {"message_id": "msg-1", "workflow_id": "wf-1"},
+            {"message_id": "msg-2", "workflow_id": "wf-2"},
+        ),
+        explicit_action=ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id="wf-1",
+            patch=patch,
+        ),
+    )
+
+    assert evidence.explicit_action is not None
+    assert evidence.explicit_action.patch == patch
+
+
+def test_explicit_patch_without_signal_target_rejects_multiple_workflow_owners() -> None:
+    with pytest.raises(ValidationError):
+        _evidence(
+            workflows=(_workflow(), _workflow("wf-2")),
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.START_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                patch={
+                    "items": [
+                        {"artifact_ref": "artifact:wf-1:plan:v2"},
+                        {"artifact_ref": "artifact:wf-2:plan:v2"},
+                    ]
+                },
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_switch_workflow_treats_signal_workflow_as_selected_target() -> None:
+    patch = {
+        "workflow_id": "wf-2",
+        "nested": {"artifact_ref": "artifact:wf-2:plan:v2"},
+    }
+
+    result = await _service(CountingDecisionModel()).decide(
+        _evidence(
+            workflows=(_workflow(), _workflow("wf-2")),
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.SWITCH_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-2",
+                patch=patch,
+            ),
+        )
+    )
+
+    assert result.decision.action is AgentAction.SWITCH_WORKFLOW
+    assert result.decision.target_workflow_id == "wf-2"
+    assert result.decision.patch == patch
 
 
 @pytest.mark.asyncio

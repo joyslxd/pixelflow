@@ -17,6 +17,15 @@ from .profiles import (
 ContextBudgetNode = str
 
 
+class VerifiedModelProfileUnavailableError(ValueError):
+    """表示严格模式缺少当前有效且已验证的模型档案。"""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__(
+            f"模型 {model_name} 缺少当前有效且已验证的 context_profile"
+        )
+
+
 class ContextBudgetPolicy(BaseModel):
     """记录业务节点对有效窗口、输出和安全空间的统一预留。"""
 
@@ -75,9 +84,7 @@ class ContextBudgetPolicyProvider:
             self.require_verified_model_profile
             and resolution.status != "verified"
         ):
-            raise ValueError(
-                f"模型 {model_name} 缺少当前有效且已验证的 context_profile"
-            )
+            raise VerifiedModelProfileUnavailableError(model_name)
         return resolution.profile
 
 
@@ -171,5 +178,6 @@ __all__ = [
     "ContextBudgetPolicy",
     "ContextBudgetPolicyProvider",
     "TokenMeter",
+    "VerifiedModelProfileUnavailableError",
     "get_context_budget_policy",
 ]
