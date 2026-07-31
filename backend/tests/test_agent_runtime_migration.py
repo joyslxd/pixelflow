@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
@@ -16,6 +17,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
+from sqlalchemy.exc import IntegrityError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_ROOT = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "persistence" / "migrations"
@@ -116,6 +118,79 @@ EXPECTED_TABLE_COLUMNS = {
     },
 }
 
+EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS = {
+    "pixelflow_agent_video_states": {
+        "workflow_id",
+        "conversation_id",
+        "user_id",
+        "schema_version",
+        "state_kind",
+        "workflow_version",
+        "context_version",
+        "payload_json",
+        "payload_sha256",
+        "last_turn_id",
+        "last_action_key",
+        "created_at",
+        "updated_at",
+    },
+    "pixelflow_agent_turn_executions": {
+        "turn_id",
+        "conversation_id",
+        "user_id",
+        "attempt",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "next_attempt_at",
+        "last_reason_code",
+        "created_at",
+        "updated_at",
+    },
+    "pixelflow_agent_projection_messages": {
+        "message_id",
+        "conversation_id",
+        "user_id",
+        "run_id",
+        "role",
+        "content",
+        "payload_json",
+        "created_at",
+        "updated_at",
+    },
+    "pixelflow_agent_interrupts": {
+        "interrupt_id",
+        "conversation_id",
+        "user_id",
+        "workflow_id",
+        "turn_id",
+        "thread_id",
+        "checkpoint_ns",
+        "kind",
+        "reason_code",
+        "status",
+        "payload_json",
+        "response_id",
+        "response_json",
+        "opened_at",
+        "closed_at",
+    },
+    "pixelflow_agent_conversation_states": {
+        "conversation_id",
+        "user_id",
+        "active_workflow_id",
+        "created_at",
+        "updated_at",
+    },
+}
+
+EXPECTED_RUNTIME_SUPPORT_TABLE_NAMES = {"pixelflow_agent_context_payloads"} | set(
+    EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS
+)
+
+EXPECTED_MIGRATION_TABLE_COLUMNS = dict(EXPECTED_TABLE_COLUMNS)
+EXPECTED_MIGRATION_TABLE_COLUMNS.update(EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS)
+
 EXPECTED_PRIMARY_KEYS = {
     "pixelflow_agent_workflows": ("workflow_id",),
     "pixelflow_agent_turns": ("inbox_sequence",),
@@ -123,6 +198,11 @@ EXPECTED_PRIMARY_KEYS = {
     "pixelflow_agent_context_summaries": ("summary_id",),
     "pixelflow_agent_events": ("outbox_id",),
     "pixelflow_agent_operations": ("job_id",),
+    "pixelflow_agent_video_states": ("workflow_id",),
+    "pixelflow_agent_turn_executions": ("turn_id",),
+    "pixelflow_agent_projection_messages": ("message_id",),
+    "pixelflow_agent_interrupts": ("interrupt_id",),
+    "pixelflow_agent_conversation_states": ("conversation_id",),
 }
 
 EXPECTED_AUTOINCREMENT_COLUMNS = {
@@ -150,6 +230,17 @@ EXPECTED_NULLABLE_COLUMNS = {
         "lease_owner",
         "lease_expires_at",
     },
+    "pixelflow_agent_video_states": {"last_turn_id", "last_action_key"},
+    "pixelflow_agent_turn_executions": {
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "next_attempt_at",
+        "last_reason_code",
+    },
+    "pixelflow_agent_projection_messages": {"run_id"},
+    "pixelflow_agent_interrupts": {"response_id", "response_json", "closed_at"},
+    "pixelflow_agent_conversation_states": {"active_workflow_id"},
 }
 
 EXPECTED_COLUMN_TYPE_FAMILIES = {
@@ -246,6 +337,69 @@ EXPECTED_COLUMN_TYPE_FAMILIES = {
         "created_at": "datetime",
         "updated_at": "datetime",
     },
+    "pixelflow_agent_video_states": {
+        "workflow_id": "string",
+        "conversation_id": "string",
+        "user_id": "string",
+        "schema_version": "integer",
+        "state_kind": "string",
+        "workflow_version": "integer",
+        "context_version": "integer",
+        "payload_json": "json",
+        "payload_sha256": "string",
+        "last_turn_id": "string",
+        "last_action_key": "string",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+    },
+    "pixelflow_agent_turn_executions": {
+        "turn_id": "string",
+        "conversation_id": "string",
+        "user_id": "string",
+        "attempt": "integer",
+        "lease_owner": "string",
+        "lease_token": "string",
+        "lease_expires_at": "datetime",
+        "next_attempt_at": "datetime",
+        "last_reason_code": "string",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+    },
+    "pixelflow_agent_projection_messages": {
+        "message_id": "string",
+        "conversation_id": "string",
+        "user_id": "string",
+        "run_id": "string",
+        "role": "string",
+        "content": "string",
+        "payload_json": "json",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+    },
+    "pixelflow_agent_interrupts": {
+        "interrupt_id": "string",
+        "conversation_id": "string",
+        "user_id": "string",
+        "workflow_id": "string",
+        "turn_id": "string",
+        "thread_id": "string",
+        "checkpoint_ns": "string",
+        "kind": "string",
+        "reason_code": "string",
+        "status": "string",
+        "payload_json": "json",
+        "response_id": "string",
+        "response_json": "json",
+        "opened_at": "datetime",
+        "closed_at": "datetime",
+    },
+    "pixelflow_agent_conversation_states": {
+        "conversation_id": "string",
+        "user_id": "string",
+        "active_workflow_id": "string",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+    },
 }
 
 EXPECTED_UNIQUE_COLUMN_SETS = {
@@ -267,6 +421,11 @@ EXPECTED_UNIQUE_COLUMN_SETS = {
         frozenset({"idempotency_key"}),
         frozenset({"workflow_id", "stage", "stage_version", "attempt"}),
     },
+    "pixelflow_agent_video_states": set(),
+    "pixelflow_agent_turn_executions": set(),
+    "pixelflow_agent_projection_messages": set(),
+    "pixelflow_agent_interrupts": set(),
+    "pixelflow_agent_conversation_states": set(),
 }
 
 EXPECTED_UNIQUE_CONSTRAINTS = {
@@ -287,6 +446,21 @@ EXPECTED_CHECK_CONSTRAINTS = {
         "ck_pf_agent_compaction_locks_lease_fields",
         "ck_pf_agent_compaction_locks_state",
     },
+    "pixelflow_agent_video_states": {
+        "ck_pf_agent_video_states_payload_sha256",
+        "ck_pf_agent_video_states_workflow_version",
+    },
+    "pixelflow_agent_turn_executions": {
+        "ck_pf_agent_turn_executions_attempt",
+        "ck_pf_agent_turn_executions_lease_fields",
+    },
+    "pixelflow_agent_projection_messages": {
+        "ck_pf_agent_projection_messages_role",
+    },
+    "pixelflow_agent_interrupts": {
+        "ck_pf_agent_interrupts_response_fields",
+        "ck_pf_agent_interrupts_status",
+    },
 }
 
 EXPECTED_INDEXES = {
@@ -306,6 +480,69 @@ EXPECTED_INDEXES = {
     "pixelflow_agent_operations": {
         "ix_pf_agent_operations_owner_workflow",
         "ix_pf_agent_operations_poll",
+    },
+    "pixelflow_agent_video_states": {
+        "ix_pf_agent_video_states_owner_conversation",
+    },
+    "pixelflow_agent_turn_executions": {
+        "ix_pf_agent_turn_executions_owner_conversation",
+        "ix_pf_agent_turn_executions_recovery",
+    },
+    "pixelflow_agent_projection_messages": {
+        "ix_pf_agent_projection_messages_owner_conversation_created",
+    },
+    "pixelflow_agent_interrupts": {
+        "ix_pf_agent_interrupts_owner_conversation_status",
+    },
+    "pixelflow_agent_conversation_states": {
+        "ix_pf_agent_conversation_states_owner",
+    },
+}
+
+EXPECTED_VIDEO_LIVE_OWNER_INDEXES = {
+    "pixelflow_agent_video_states": "ix_pf_agent_video_states_owner_conversation",
+    "pixelflow_agent_turn_executions": (
+        "ix_pf_agent_turn_executions_owner_conversation"
+    ),
+    "pixelflow_agent_projection_messages": (
+        "ix_pf_agent_projection_messages_owner_conversation_created"
+    ),
+    "pixelflow_agent_interrupts": (
+        "ix_pf_agent_interrupts_owner_conversation_status"
+    ),
+    "pixelflow_agent_conversation_states": "ix_pf_agent_conversation_states_owner",
+}
+
+EXPECTED_VIDEO_LIVE_INDEX_COLUMNS = {
+    "pixelflow_agent_video_states": {
+        "ix_pf_agent_video_states_owner_conversation": ("user_id", "conversation_id"),
+    },
+    "pixelflow_agent_turn_executions": {
+        "ix_pf_agent_turn_executions_owner_conversation": (
+            "user_id",
+            "conversation_id",
+        ),
+        "ix_pf_agent_turn_executions_recovery": (
+            "next_attempt_at",
+            "lease_expires_at",
+        ),
+    },
+    "pixelflow_agent_projection_messages": {
+        "ix_pf_agent_projection_messages_owner_conversation_created": (
+            "user_id",
+            "conversation_id",
+            "created_at",
+        ),
+    },
+    "pixelflow_agent_interrupts": {
+        "ix_pf_agent_interrupts_owner_conversation_status": (
+            "user_id",
+            "conversation_id",
+            "status",
+        ),
+    },
+    "pixelflow_agent_conversation_states": {
+        "ix_pf_agent_conversation_states_owner": ("user_id", "conversation_id"),
     },
 }
 
@@ -385,14 +622,25 @@ def _type_family(column_type) -> str:
 def test_agent_runtime_models_register_frozen_tables_and_mysql_bootstrap():
     """ORM metadata 与 PixelFlow 独立 MySQL 初始化必须使用同一组新表。"""
 
-    from pixelflow.agent_runtime.persistence.models import AGENT_RUNTIME_TABLES
+    from pixelflow.agent_runtime.persistence.models import (
+        AGENT_RUNTIME_SUPPORT_TABLES,
+        AGENT_RUNTIME_TABLES,
+    )
     from pixelflow.tasks.mysql import PIXELFLOW_TASK_TABLES
 
     runtime_tables = {table.name: table for table in AGENT_RUNTIME_TABLES}
+    support_tables = {table.name: table for table in AGENT_RUNTIME_SUPPORT_TABLES}
     assert set(runtime_tables) == set(EXPECTED_TABLE_COLUMNS)
-    assert {table.name for table in PIXELFLOW_TASK_TABLES}.issuperset(runtime_tables)
-    for table_name, expected_columns in EXPECTED_TABLE_COLUMNS.items():
-        table = runtime_tables[table_name]
+    assert set(support_tables) == EXPECTED_RUNTIME_SUPPORT_TABLE_NAMES
+    assert {table.name for table in PIXELFLOW_TASK_TABLES}.issuperset(
+        runtime_tables | support_tables
+    )
+    inspected_tables = runtime_tables | {
+        table_name: support_tables[table_name]
+        for table_name in EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS
+    }
+    for table_name, expected_columns in EXPECTED_MIGRATION_TABLE_COLUMNS.items():
+        table = inspected_tables[table_name]
         assert {column.name for column in table.columns} == expected_columns
         assert set(EXPECTED_COLUMN_TYPE_FAMILIES[table_name]) == expected_columns
         assert tuple(column.name for column in table.primary_key.columns) == EXPECTED_PRIMARY_KEYS[table_name]
@@ -407,6 +655,11 @@ def test_agent_runtime_models_register_frozen_tables_and_mysql_bootstrap():
         check_names = {constraint.name for constraint in table.constraints if isinstance(constraint, CheckConstraint)}
         assert check_names == EXPECTED_CHECK_CONSTRAINTS.get(table_name, set())
         assert {index.name for index in table.indexes} == EXPECTED_INDEXES.get(table_name, set())
+        if table_name in EXPECTED_VIDEO_LIVE_INDEX_COLUMNS:
+            assert {
+                index.name: tuple(column.name for column in index.columns)
+                for index in table.indexes
+            } == EXPECTED_VIDEO_LIVE_INDEX_COLUMNS[table_name]
 
 
 def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
@@ -425,8 +678,8 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
 
     engine = create_engine(sync_url)
     inspector = inspect(engine)
-    assert set(EXPECTED_TABLE_COLUMNS).issubset(inspector.get_table_names())
-    for table_name, expected_columns in EXPECTED_TABLE_COLUMNS.items():
+    assert set(EXPECTED_MIGRATION_TABLE_COLUMNS).issubset(inspector.get_table_names())
+    for table_name, expected_columns in EXPECTED_MIGRATION_TABLE_COLUMNS.items():
         reflected_columns = {column["name"]: column for column in inspector.get_columns(table_name)}
         assert set(reflected_columns) == expected_columns
         assert set(EXPECTED_COLUMN_TYPE_FAMILIES[table_name]) == expected_columns
@@ -442,6 +695,11 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
         assert check_names == EXPECTED_CHECK_CONSTRAINTS.get(table_name, set())
         index_names = {item["name"] for item in inspector.get_indexes(table_name)}
         assert index_names == EXPECTED_INDEXES.get(table_name, set())
+        if table_name in EXPECTED_VIDEO_LIVE_INDEX_COLUMNS:
+            assert {
+                item["name"]: tuple(item["column_names"])
+                for item in inspector.get_indexes(table_name)
+            } == EXPECTED_VIDEO_LIVE_INDEX_COLUMNS[table_name]
     with engine.begin() as connection:
         for suffix in ("a", "b"):
             connection.execute(
@@ -482,8 +740,207 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
     engine = create_engine(sync_url)
     inspector = inspect(engine)
     remaining_tables = set(inspector.get_table_names())
-    assert not remaining_tables.intersection(EXPECTED_TABLE_COLUMNS)
+    assert not remaining_tables.intersection(EXPECTED_MIGRATION_TABLE_COLUMNS)
     assert "legacy_sentinel" in remaining_tables
     with engine.connect() as connection:
         assert connection.execute(text("SELECT value FROM legacy_sentinel WHERE id = 1")).scalar_one() == "keep-me"
+    engine.dispose()
+
+
+def test_video_live_migration_downgrade_preserves_existing_runtime_rows(tmp_path: Path) -> None:
+    """只回滚本版本五表，并保留 sentinel 与既有 Runtime 数据。"""
+
+    database_path = tmp_path / "video-live-downgrade.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260725_04")
+
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE legacy_sentinel "
+                "(id INTEGER PRIMARY KEY, value VARCHAR(32) NOT NULL)"
+            )
+        )
+        connection.execute(
+            text("INSERT INTO legacy_sentinel (id, value) VALUES (1, 'keep-me')")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO pixelflow_agent_workflows ("
+                "workflow_id, conversation_id, user_id, kind, status, current_stage, "
+                "stage_version, creation_contract_snapshot_json, "
+                "latest_artifact_refs_json, context_version, created_at, updated_at"
+                ") VALUES ("
+                "'workflow-legacy', 'conversation-1', 'user-1', 'video', 'running', "
+                "'planning', 1, '{}', '[]', 1, "
+                "'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'"
+                ")"
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.downgrade(config, "20260725_04")
+
+    engine = create_engine(_sync_database_url(database_path))
+    inspector = inspect(engine)
+    remaining_tables = set(inspector.get_table_names())
+    assert not remaining_tables.intersection(EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS)
+    assert set(EXPECTED_TABLE_COLUMNS).issubset(remaining_tables)
+    assert "pixelflow_agent_context_payloads" in remaining_tables
+    assert "legacy_sentinel" in remaining_tables
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT value FROM legacy_sentinel WHERE id = 1")
+        ).scalar_one() == "keep-me"
+        assert connection.execute(
+            text(
+                "SELECT status FROM pixelflow_agent_workflows "
+                "WHERE workflow_id = 'workflow-legacy'"
+            )
+        ).scalar_one() == "running"
+    engine.dispose()
+
+
+@pytest.mark.parametrize("table_name", EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS)
+def test_video_live_migration_rejects_incomplete_same_name_table(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    """同名残表缺少完整字段或 owner 标记时必须失败关闭。"""
+
+    database_path = tmp_path / f"incomplete-{table_name}.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260725_04")
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(f"CREATE TABLE {table_name} (legacy_id VARCHAR(64) PRIMARY KEY)")
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match=table_name):
+        command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize("table_name", EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS)
+def test_video_live_migration_rejects_spoofed_owner_index(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    """owner 索引名称正确但列错误时仍须失败关闭。"""
+
+    from pixelflow.agent_runtime.persistence.models import AGENT_RUNTIME_SUPPORT_TABLES
+
+    database_path = tmp_path / f"spoofed-owner-{table_name}.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260725_04")
+    engine = create_engine(_sync_database_url(database_path))
+    support_tables = {table.name: table for table in AGENT_RUNTIME_SUPPORT_TABLES}
+    support_tables[table_name].metadata.create_all(
+        engine,
+        tables=[support_tables[table_name]],
+    )
+    owner_index = EXPECTED_VIDEO_LIVE_OWNER_INDEXES[table_name]
+    primary_key = EXPECTED_PRIMARY_KEYS[table_name][0]
+    with engine.begin() as connection:
+        connection.execute(text(f'DROP INDEX "{owner_index}"'))
+        connection.execute(
+            text(f'CREATE INDEX "{owner_index}" ON "{table_name}" ("{primary_key}")')
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match=table_name):
+        command.upgrade(config, "head")
+
+
+def test_video_live_migration_downgrade_protects_unrecognized_legacy_tables(
+    tmp_path: Path,
+) -> None:
+    """owner 索引列不匹配的同名旧表不能在回滚时被删除。"""
+
+    database_path = tmp_path / "unowned-video-live-tables.db"
+    config = _migration_config(database_path)
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        for table_name in EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS:
+            connection.execute(
+                text(f"CREATE TABLE {table_name} (legacy_id VARCHAR(64) PRIMARY KEY)")
+            )
+            connection.execute(
+                text(f"INSERT INTO {table_name} (legacy_id) VALUES ('keep-me')")
+            )
+            owner_index = EXPECTED_VIDEO_LIVE_OWNER_INDEXES[table_name]
+            connection.execute(
+                text(
+                    f'CREATE INDEX "{owner_index}" '
+                    f'ON "{table_name}" ("legacy_id")'
+                )
+            )
+    engine.dispose()
+    command.stamp(config, "20260731_05")
+
+    command.downgrade(config, "20260725_04")
+
+    engine = create_engine(_sync_database_url(database_path))
+    inspector = inspect(engine)
+    assert set(EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS).issubset(inspector.get_table_names())
+    with engine.connect() as connection:
+        for table_name in EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS:
+            assert connection.execute(
+                text(f"SELECT legacy_id FROM {table_name}")
+            ).scalar_one() == "keep-me"
+    engine.dispose()
+
+
+def test_video_live_migration_enforces_state_and_lease_constraints(tmp_path: Path) -> None:
+    """迁移必须真实拒绝非法摘要、租约、角色、状态和响应组合。"""
+
+    database_path = tmp_path / "video-live-checks.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_database_url(database_path))
+
+    invalid_statements = (
+        "INSERT INTO pixelflow_agent_video_states ("
+        "workflow_id, conversation_id, user_id, schema_version, state_kind, "
+        "workflow_version, context_version, payload_json, payload_sha256, created_at, updated_at"
+        ") VALUES ('workflow-bad-hash', 'conversation-1', 'user-1', 1, 'planning', "
+        "1, 1, '{}', 'sha256:ABC', '2026-07-31', '2026-07-31')",
+        "INSERT INTO pixelflow_agent_video_states ("
+        "workflow_id, conversation_id, user_id, schema_version, state_kind, "
+        "workflow_version, context_version, payload_json, payload_sha256, created_at, updated_at"
+        ") VALUES ('workflow-bad-version', 'conversation-1', 'user-1', 1, 'planning', "
+        "0, 1, '{}', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+        "'2026-07-31', '2026-07-31')",
+        "INSERT INTO pixelflow_agent_turn_executions ("
+        "turn_id, conversation_id, user_id, attempt, lease_owner, created_at, updated_at"
+        ") VALUES ('turn-partial-lease', 'conversation-1', 'user-1', 0, 'worker-1', "
+        "'2026-07-31', '2026-07-31')",
+        "INSERT INTO pixelflow_agent_turn_executions ("
+        "turn_id, conversation_id, user_id, attempt, created_at, updated_at"
+        ") VALUES ('turn-bad-attempt', 'conversation-1', 'user-1', -1, "
+        "'2026-07-31', '2026-07-31')",
+        "INSERT INTO pixelflow_agent_projection_messages ("
+        "message_id, conversation_id, user_id, role, content, payload_json, created_at, updated_at"
+        ") VALUES ('message-bad-role', 'conversation-1', 'user-1', 'user', 'x', '{}', "
+        "'2026-07-31', '2026-07-31')",
+        "INSERT INTO pixelflow_agent_interrupts ("
+        "interrupt_id, conversation_id, user_id, workflow_id, turn_id, thread_id, "
+        "checkpoint_ns, kind, reason_code, status, payload_json, opened_at"
+        ") VALUES ('interrupt-bad-status', 'conversation-1', 'user-1', 'workflow-1', "
+        "'turn-1', 'thread-1', 'video', 'review', 'awaiting_review', 'unknown', '{}', "
+        "'2026-07-31')",
+        "INSERT INTO pixelflow_agent_interrupts ("
+        "interrupt_id, conversation_id, user_id, workflow_id, turn_id, thread_id, "
+        "checkpoint_ns, kind, reason_code, status, payload_json, response_id, opened_at"
+        ") VALUES ('interrupt-partial-response', 'conversation-1', 'user-1', 'workflow-1', "
+        "'turn-1', 'thread-1', 'video', 'review', 'awaiting_review', 'responded', '{}', "
+        "'response-1', '2026-07-31')",
+    )
+    for statement in invalid_statements:
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(text(statement))
     engine.dispose()
