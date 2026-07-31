@@ -777,7 +777,9 @@ def _is_sensitive_protocol_key(key: str) -> bool:
     word_set = frozenset(words)
     if word_set & _CREDENTIAL_WORDS:
         return True
-    if "key" in word_set:
+    if words == ("key",):
+        return True
+    if "key" in word_set and word_set & _CREDENTIAL_KEY_QUALIFIERS:
         return True
     return any(_has_fused_credential_semantics(word) for word in words)
 

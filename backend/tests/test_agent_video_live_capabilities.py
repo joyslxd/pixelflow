@@ -941,6 +941,7 @@ def test_unconsumed_transient_credential_is_removed_after_gc() -> None:
         "sessionid",
         "accessKey",
         "accesskey",
+        "client_keys",
         "subscription-key",
         "subscriptionkey",
     ],
@@ -1142,6 +1143,29 @@ def test_safe_projection_preserves_provider_key_metadata_suffixes(
     from pixelflow.agent_workflows.video import live_capabilities
 
     raw = {"outer": [{"metadata": {metadata_key: metadata_value}}]}
+
+    assert live_capabilities._safe_json_projection(
+        raw,
+        authorization="Bearer turn-secret",
+    ) == raw
+
+
+def test_safe_projection_preserves_nested_scene_key_fields_and_urls() -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    raw = {
+        "key_frame": "https://assets.example.com/keyframe.png",
+        "scene": {
+            "keyFrame": {"url": "https://assets.example.com/frames/hero.png"},
+            "assets": [
+                {
+                    "key_image": "https://assets.example.com/images/product.png",
+                    "key_points": ["主体清晰", "构图稳定"],
+                    "keyframe_url": "https://assets.example.com/video/keyframe.jpg",
+                }
+            ],
+        },
+    }
 
     assert live_capabilities._safe_json_projection(
         raw,
