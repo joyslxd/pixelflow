@@ -102,10 +102,12 @@ def _workflow_state(
     version: int = 1,
     action_key: str = "action-1",
     turn_id: str = "turn-1",
+    workflow_id: str = WORKFLOW,
+    conversation_id: str = CONVERSATION,
 ):
     state = VideoPlanningWorkflowService().start(
-        workflow_id=WORKFLOW,
-        conversation_id=CONVERSATION,
+        workflow_id=workflow_id,
+        conversation_id=conversation_id,
         intent="video",
         intake_context={"nested": {"items": ["a", {"value": 1}]}},
         now=NOW,
@@ -124,13 +126,15 @@ def _message(
     *,
     message_id: str = "message-1",
     run_id: str = "turn-1",
+    conversation_id: str = CONVERSATION,
+    content: str = "已完成视频需求登记。",
 ) -> SupervisorProjectionMessage:
     return SupervisorProjectionMessage(
         message_id=message_id,
-        conversation_id=CONVERSATION,
+        conversation_id=conversation_id,
         run_id=run_id,
         role="assistant",
-        content="已完成视频需求登记。",
+        content=content,
         payload={"artifact": {"refs": ["artifact-1"]}},
         created_at=NOW + timedelta(seconds=10),
     )
@@ -285,6 +289,66 @@ async def claim(
     )
     assert result is not None
     return result
+
+
+def _waiting_commit(*, message_content: str = "请选择是否继续。") -> VideoTurnCommit:
+    """构造不推进视频状态、只等待人工确认的固定 Graph 结果。"""
+
+    return VideoTurnCommit(
+        decision=_decision(action=AgentAction.CLARIFY, action_key="waiting-action-1"),
+        turn_status=TurnStatus.WAITING_USER,
+        expected_workflow_version=0,
+        messages=(
+            _message(
+                message_id="message-waiting-1",
+                content=message_content,
+            ),
+        ),
+        open_interrupt=_interrupt(),
+        occurred_at=NOW + timedelta(seconds=20),
+    )
+
+
+async def _claim_operation_completion(repository: VideoRuntimeRepository):
+    """建立并领取一个指向默认会话和 Workflow 的真实 M06 完成事件。"""
+
+    operation = OperationRecord(
+        job_id="job-binding-1",
+        provider_job_id="provider-binding-1",
+        workflow_id=WORKFLOW,
+        conversation_id=CONVERSATION,
+        stage="scene_generation",
+        stage_version=1,
+        status=ExternalJobStatus.SUCCEEDED,
+        attempt=1,
+        request_hash="sha256:" + "2" * 64,
+        idempotency_key="operation-binding-1",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    await repository.create_operation(OWNER, operation)
+    completion = AgentEvent(
+        event_id="evt_binding_done_1",
+        sequence=1,
+        cursor="cursor-binding-done-1",
+        conversation_id=CONVERSATION,
+        run_id=operation.job_id,
+        occurred_at=NOW + timedelta(seconds=1),
+        type=AgentEventType.EXTERNAL_JOB_STATE_CHANGED,
+        payload={"job_id": operation.job_id, "status": "succeeded"},
+    )
+    await repository.create_event(OWNER, completion)
+    delivery = await repository.claim_operation_completion_event(
+        OWNER,
+        CONVERSATION,
+        completion.event_id,
+        operation.job_id,
+        lease_owner="worker-binding",
+        now=NOW + timedelta(seconds=2),
+        lease_expires_at=NOW + timedelta(seconds=32),
+    )
+    assert delivery is not None
+    return operation, completion, delivery
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
@@ -722,6 +786,105 @@ async def test_snapshot_is_deep_readonly_stable_and_json_serializable(
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize("snapshot_first", [True, False])
+@pytest.mark.asyncio
+async def test_snapshot_and_commit_share_one_consistent_read_boundary(
+    kind: RepositoryKind,
+    snapshot_first: bool,
+) -> None:
+    """防止 Snapshot 与原子提交交错时拼出从未存在的投影组合。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        current = await claim(repository)
+        guard = (
+            repository._compaction_write_lock  # type: ignore[attr-defined]
+            if kind == "memory"
+            else repository._sqlite_write_lock  # type: ignore[attr-defined]
+        )
+        await guard.acquire()
+        snapshot_started = asyncio.Event()
+        commit_started = asyncio.Event()
+
+        async def read_snapshot():
+            snapshot_started.set()
+            return await repository.export_safe_snapshot(OWNER, CONVERSATION)
+
+        async def write_commit():
+            commit_started.set()
+            return await repository.commit_turn(current, completed_commit())
+
+        try:
+            if snapshot_first:
+                snapshot_task = asyncio.create_task(read_snapshot())
+                await snapshot_started.wait()
+                assert not snapshot_task.done()
+                commit_task = asyncio.create_task(write_commit())
+                await commit_started.wait()
+            else:
+                commit_task = asyncio.create_task(write_commit())
+                await commit_started.wait()
+                snapshot_task = asyncio.create_task(read_snapshot())
+                await snapshot_started.wait()
+            assert not commit_task.done()
+            assert not snapshot_task.done()
+        finally:
+            guard.release()
+
+        snapshot = await snapshot_task
+        await commit_task
+        if snapshot_first:
+            assert snapshot.workflow_states == ()
+            assert snapshot.workflows == ()
+            assert snapshot.messages == ()
+            assert snapshot.active_workflow_id is None
+            assert [item.turn.status for item in snapshot.turns] == [TurnStatus.PROCESSING]
+        else:
+            assert len(snapshot.workflow_states) == 1
+            assert len(snapshot.workflows) == 1
+            assert len(snapshot.messages) == 1
+            assert snapshot.active_workflow_id == WORKFLOW
+            assert [item.turn.status for item in snapshot.turns] == [TurnStatus.COMPLETED]
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_waiting_user_commit_replay_returns_existing_turn(kind: RepositoryKind) -> None:
+    """防止首次等待确认提交成功但响应丢失后被误判为 lease 冲突。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        current = await claim(repository)
+        commit = _waiting_commit()
+        first = await repository.commit_turn(current, commit)
+        replay = await repository.commit_turn(current, commit)
+        assert first.status is TurnStatus.WAITING_USER
+        assert replay == first
+        assert len(await repository.list_turns(OWNER, CONVERSATION)) == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_waiting_user_commit_replay_rejects_changed_projection(
+    kind: RepositoryKind,
+) -> None:
+    """防止相同动作键用不同消息或 interrupt 投影冒充模糊提交重放。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        current = await claim(repository)
+        await repository.commit_turn(current, _waiting_commit())
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.commit_turn(
+                current,
+                _waiting_commit(message_content="已被替换的确认消息。"),
+            )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
 async def test_operation_completion_requires_live_delivery_lease_and_commits_atomically(
     kind: RepositoryKind,
@@ -813,6 +976,95 @@ async def test_operation_completion_requires_live_delivery_lease_and_commits_ato
             now=NOW + timedelta(seconds=20),
             lease_expires_at=NOW + timedelta(seconds=30),
         ) is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_operation_completion_rejects_cross_conversation_state(
+    kind: RepositoryKind,
+) -> None:
+    """防止会话 A 的完成事件推进同一用户的会话 B。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await _seed_conversation(store, conversation_id="conversation-2")
+        operation, completion, delivery = await _claim_operation_completion(repository)
+        envelope, workflow = _workflow_state(
+            workflow_id="workflow-2",
+            conversation_id="conversation-2",
+            action_key=completion.event_id,
+            turn_id="turn-operation-2",
+        )
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.commit_operation_completion(
+                delivery,
+                user_id=OWNER,
+                workflow_state=envelope,
+                workflow=workflow,
+                expected_workflow_version=0,
+                messages=(
+                    _message(
+                        message_id="message-operation-2",
+                        run_id="job-binding-1",
+                        conversation_id="conversation-2",
+                    ),
+                ),
+                occurred_at=NOW + timedelta(seconds=3),
+            )
+        assert await repository.get_video_state(OWNER, "workflow-2") is None
+        assert await repository.get_event(OWNER, completion.event_id) == completion
+        assert await repository.claim_operation_completion_event(
+            OWNER,
+            CONVERSATION,
+            completion.event_id,
+            operation.job_id,
+            lease_owner="worker-binding-retry",
+            now=NOW + timedelta(seconds=33),
+            lease_expires_at=NOW + timedelta(seconds=63),
+        ) is not None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_operation_completion_rejects_other_workflow_in_same_conversation(
+    kind: RepositoryKind,
+) -> None:
+    """防止完成事件在原会话内推进不属于 Operation 的其他 Workflow。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        operation, completion, delivery = await _claim_operation_completion(repository)
+        envelope, workflow = _workflow_state(
+            workflow_id="workflow-other",
+            action_key=completion.event_id,
+            turn_id="turn-operation-other",
+        )
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.commit_operation_completion(
+                delivery,
+                user_id=OWNER,
+                workflow_state=envelope,
+                workflow=workflow,
+                expected_workflow_version=0,
+                messages=(
+                    _message(
+                        message_id="message-operation-other",
+                        run_id="job-binding-1",
+                    ),
+                ),
+                occurred_at=NOW + timedelta(seconds=3),
+            )
+        assert await repository.get_video_state(OWNER, "workflow-other") is None
+        assert await repository.get_event(OWNER, completion.event_id) == completion
+        assert await repository.claim_operation_completion_event(
+            OWNER,
+            CONVERSATION,
+            completion.event_id,
+            operation.job_id,
+            lease_owner="worker-binding-retry",
+            now=NOW + timedelta(seconds=33),
+            lease_expires_at=NOW + timedelta(seconds=63),
+        ) is not None
 
 
 def test_commit_contract_rejects_inconsistent_interrupt_and_mutable_json_aliases() -> None:

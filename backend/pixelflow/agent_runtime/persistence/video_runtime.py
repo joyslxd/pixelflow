@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
-from collections.abc import Mapping
+from asyncio import Lock
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +36,7 @@ from ..contracts import (
     AgentEventType,
     AgentInterruptProjection,
     ExternalJobRef,
+    ExternalJobStatus,
     TurnRecord,
     TurnStatus,
     WorkflowRecord,
@@ -43,6 +48,7 @@ from .models import (
     PixelFlowAgentConversationStateRow,
     PixelFlowAgentEventRow,
     PixelFlowAgentInterruptRow,
+    PixelFlowAgentOperationRow,
     PixelFlowAgentProjectionMessageRow,
     PixelFlowAgentTurnExecutionRow,
     PixelFlowAgentTurnRow,
@@ -52,18 +58,27 @@ from .models import (
 from .repositories import (
     AgentRuntimeRecordConflictError,
     EventDeliveryClaim,
+    OperationRecord,
     _clone,
     _database_utc,
     _event_from_row,
     _MemoryEventDeliveryState,
     _normalize_datetime,
+    _operation_from_row,
     _repository_write_transaction,
     _require_text,
     _turn_from_row,
+    _workflow_from_row,
 )
 
 _TERMINAL_TURN_STATUSES = {TurnStatus.COMPLETED, TurnStatus.FAILED}
 _CLAIMABLE_TURN_STATUSES = {TurnStatus.ACCEPTED, TurnStatus.QUEUED, TurnStatus.PROCESSING}
+_TERMINAL_OPERATION_STATUSES = {
+    ExternalJobStatus.SUCCEEDED,
+    ExternalJobStatus.FAILED,
+    ExternalJobStatus.TIMEOUT,
+    ExternalJobStatus.EXPIRED,
+}
 _SAFE_FAILURE_REASON_CODES = frozenset(
     {
         "authorization_required",
@@ -597,6 +612,27 @@ def _lease_window(
     return owner, normalized_now, normalized_expiry
 
 
+@asynccontextmanager
+async def _repository_snapshot_transaction(
+    session: AsyncSession,
+    sqlite_write_lock: Lock | None,
+) -> AsyncIterator[None]:
+    """为 Snapshot 建立 SQLite 串行边界或 SQL REPEATABLE READ 一致读。"""
+
+    if session.get_bind().dialect.name == "sqlite":
+        async with _repository_write_transaction(session, sqlite_write_lock):
+            yield
+        return
+    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+    try:
+        yield
+    except BaseException:
+        await session.rollback()
+        raise
+    else:
+        await session.commit()
+
+
 def _clone_message(message: SupervisorProjectionMessage) -> SupervisorProjectionMessage:
     return SupervisorProjectionMessage.model_validate(message.model_dump(mode="python"))
 
@@ -670,6 +706,49 @@ def _validate_commit_contract(
         if workflow.workflow_id != state.workflow_id or workflow.context_version != state.context_version:
             raise VideoWorkflowStateConflictError("视频状态与 Workflow 身份或 context 不一致")
     return normalized_claim, normalized_commit
+
+
+def _validate_operation_completion_binding(
+    *,
+    user_id: str,
+    event: AgentEvent,
+    operation: OperationRecord | None,
+    workflow_state: VideoWorkflowStateEnvelope,
+    workflow: WorkflowRecord,
+) -> None:
+    """把完成事件、Operation 与目标视频状态绑定为同一权威身份。"""
+
+    job_id = event.payload.get("job_id")
+    event_status = event.payload.get("status")
+    if (
+        type(job_id) is not str
+        or operation is None
+        or operation.job_id != job_id
+        or operation.status not in _TERMINAL_OPERATION_STATUSES
+        or event.type is not AgentEventType.EXTERNAL_JOB_STATE_CHANGED
+        or event_status != operation.status.value
+        or event.conversation_id != operation.conversation_id
+        or workflow_state.user_id != user_id
+        or workflow_state.conversation_id != operation.conversation_id
+        or workflow.conversation_id != operation.conversation_id
+        or workflow_state.workflow_id != operation.workflow_id
+        or workflow.workflow_id != operation.workflow_id
+    ):
+        raise AgentRuntimeRecordConflictError("Operation 完成事件与目标 Workflow 身份不一致")
+
+
+def _video_turn_commit_identity(commit: VideoTurnCommit) -> str:
+    """生成只保存于 execution 元数据的完整提交身份，不进入公开投影。"""
+
+    canonical = json.dumps(
+        commit.model_dump(mode="json"),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = base64.urlsafe_b64encode(hashlib.sha256(canonical).digest()).rstrip(b"=")
+    return f"commit:{digest.decode('ascii')}"
 
 
 def _event(
@@ -959,15 +1038,80 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
         self._interrupts = state["interrupts"]  # type: ignore[assignment]
         self._active_workflows = state["active_workflows"]  # type: ignore[assignment]
 
+    def _commit_projection_matches(
+        self,
+        claim: TurnExecutionClaim,
+        commit: VideoTurnCommit,
+    ) -> bool:
+        if commit.workflow_state is not None:
+            stored_state = self._video_states.get(
+                (claim.user_id, commit.workflow_state.workflow_id)
+            )
+            if stored_state is None or stored_state != commit.workflow_state:
+                return False
+        for message in commit.messages:
+            stored = self._projection_messages.get((claim.user_id, message.message_id))
+            if stored is None or stored.model_dump(mode="json") != message.model_dump(mode="json"):
+                return False
+        if commit.open_interrupt is not None:
+            stored_interrupt = self._interrupts.get(
+                (claim.user_id, commit.open_interrupt.interrupt_id)
+            )
+            if (
+                stored_interrupt is None
+                or stored_interrupt.model_dump(mode="json")
+                != commit.open_interrupt.model_dump(mode="json")
+            ):
+                return False
+        if commit.close_interrupt_id is not None:
+            closed = self._interrupts.get((claim.user_id, commit.close_interrupt_id))
+            if closed is None or closed.status != "closed" or closed.closed_at != commit.occurred_at:
+                return False
+        if commit.workflow is not None:
+            stored_workflow = self._workflows.get((claim.user_id, commit.workflow.workflow_id))
+            if (
+                stored_workflow is None
+                or stored_workflow.model_dump(mode="json")
+                != commit.workflow.model_dump(mode="json")
+            ):
+                return False
+        if commit.update_active_workflow and self._active_workflows.get(
+            (claim.user_id, claim.turn.conversation_id)
+        ) != commit.active_workflow_id:
+            return False
+        return True
+
     def _is_idempotent_turn_replay(
         self,
         claim: TurnExecutionClaim,
         commit: VideoTurnCommit,
     ) -> TurnRecord | None:
         turn = self._turns.get((claim.user_id, claim.turn.turn_id))
+        execution = self._turn_executions.get((claim.user_id, claim.turn.turn_id))
+        if turn is None or execution is None:
+            return None
+        commit_identity = _video_turn_commit_identity(commit)
+        stored_identity = execution.last_reason_code
+        same_action_key = (
+            turn.decision is not None
+            and turn.decision.idempotency_key == commit.decision.idempotency_key
+        )
+        if stored_identity is not None and stored_identity.startswith("commit:"):
+            if stored_identity != commit_identity:
+                if same_action_key:
+                    raise AgentRuntimeRecordConflictError("相同动作键对应不同视频 Turn 提交摘要")
+                return None
+            if (
+                turn.status is not commit.turn_status
+                or turn.decision is None
+                or turn.decision.model_dump(mode="json")
+                != commit.decision.model_dump(mode="json")
+                or not self._commit_projection_matches(claim, commit)
+            ):
+                raise AgentRuntimeRecordConflictError("视频 Turn 提交摘要与持久化投影不一致")
+            return _clone(turn)
         if (
-            turn is None
-            or turn.status is not commit.turn_status
+            turn.status is not commit.turn_status
             or turn.decision is None
             or turn.decision.model_dump(mode="json") != commit.decision.model_dump(mode="json")
         ):
@@ -1193,6 +1337,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                 execution.lease_token = None
                 execution.lease_expires_at = None
                 execution.next_attempt_at = None
+                execution.last_reason_code = _video_turn_commit_identity(normalized_commit)
                 return _clone(finished)
             except Exception:
                 self._restore_live_runtime_state(before)
@@ -1338,37 +1483,57 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
     ) -> VideoRuntimeSafeSnapshot:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
-        states = [
-            state for (record_owner, _), state in self._video_states.items()
-            if record_owner == owner and state.conversation_id == conversation
-        ]
-        states.sort(key=lambda item: (item.created_at, item.workflow_id))
-        workflows = await self.list_workflows(owner, conversation)
-        turns = await self.list_turns(owner, conversation)
-        owned_turns = []
-        for turn in turns:
-            execution = self._turn_executions.get((owner, turn.turn_id))
-            owned_turns.append(
-                OwnedTurnRecord(
-                    user_id=owner,
-                    turn=_clone(turn),
-                    next_attempt_at=None if execution is None else execution.next_attempt_at,
-                )
+        async with self._compaction_write_lock:
+            states = [
+                state for (record_owner, _), state in self._video_states.items()
+                if record_owner == owner and state.conversation_id == conversation
+            ]
+            states.sort(key=lambda item: (item.created_at, item.workflow_id))
+            workflows = [
+                workflow for (record_owner, _), workflow in self._workflows.items()
+                if record_owner == owner and workflow.conversation_id == conversation
+            ]
+            workflows.sort(
+                key=lambda item: (item.updated_at, item.workflow_id),
+                reverse=True,
             )
-        interrupts = [
-            item for (record_owner, _), item in self._interrupts.items()
-            if record_owner == owner and item.conversation_id == conversation
-        ]
-        interrupts.sort(key=lambda item: (item.opened_at, item.interrupt_id))
-        return VideoRuntimeSafeSnapshot(
-            conversation_id=conversation,
-            active_workflow_id=await self.get_active_workflow_id(owner, conversation),
-            workflow_states=tuple(_clone_state(item) for item in states),
-            workflows=tuple(_clone(item) for item in workflows),
-            turns=tuple(owned_turns),
-            messages=tuple(await self.list_projection_messages(owner, conversation)),
-            interrupts=tuple(_clone_interrupt(item) for item in interrupts),
-        )
+            turn_keys = [
+                key for key, turn in self._turns.items()
+                if key[0] == owner and turn.conversation_id == conversation
+            ]
+            turn_keys.sort(key=self._turn_owner_sequences.__getitem__)
+            owned_turns = []
+            for key in turn_keys:
+                turn = self._turns[key]
+                execution = self._turn_executions.get(key)
+                owned_turns.append(
+                    OwnedTurnRecord(
+                        user_id=owner,
+                        turn=_clone(turn),
+                        next_attempt_at=(
+                            None if execution is None else execution.next_attempt_at
+                        ),
+                    )
+                )
+            messages = [
+                item for (record_owner, _), item in self._projection_messages.items()
+                if record_owner == owner and item.conversation_id == conversation
+            ]
+            messages.sort(key=lambda item: (item.created_at, item.message_id))
+            interrupts = [
+                item for (record_owner, _), item in self._interrupts.items()
+                if record_owner == owner and item.conversation_id == conversation
+            ]
+            interrupts.sort(key=lambda item: (item.opened_at, item.interrupt_id))
+            return VideoRuntimeSafeSnapshot(
+                conversation_id=conversation,
+                active_workflow_id=self._active_workflows.get((owner, conversation)),
+                workflow_states=tuple(_clone_state(item) for item in states),
+                workflows=tuple(_clone(item) for item in workflows),
+                turns=tuple(owned_turns),
+                messages=tuple(_clone_message(item) for item in messages),
+                interrupts=tuple(_clone_interrupt(item) for item in interrupts),
+            )
 
     async def commit_operation_completion(
         self,
@@ -1420,41 +1585,55 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
         )
         _, normalized_commit = _validate_commit_contract(synthetic_claim, commit)
         async with self._compaction_write_lock:
-            async with self._event_write_lock:
-                event_key = (owner, normalized_claim.event.event_id)
-                event = self._events.get(event_key)
-                delivery = self._event_delivery.get(event_key)
-                if (
-                    event is None
-                    or event != normalized_claim.event
-                    or event.type is not AgentEventType.EXTERNAL_JOB_STATE_CHANGED
-                    or delivery is None
-                    or delivery.status != "delivering"
-                    or delivery.delivery_attempts != normalized_claim.delivery_attempts
-                    or delivery.lease_owner != normalized_claim.lease_owner
-                    or delivery.lease_expires_at is None
-                    or delivery.lease_expires_at != normalized_claim.lease_expires_at
-                    or normalized_time >= delivery.lease_expires_at
-                ):
-                    raise TurnExecutionLeaseConflictError(normalized_claim.event.event_id)
-                before = self._snapshot_live_runtime_state()
-                try:
-                    self._compare_and_set_video_state(normalized_commit)
-                    self._upsert_workflow_and_active_projection(synthetic_claim, normalized_commit)
-                    self._upsert_projection_messages(owner, normalized_commit.messages)
-                    self._append_events(
-                        synthetic_claim,
-                        normalized_commit,
-                        operation_event_id=normalized_claim.event.event_id,
-                        include_turn_terminal=False,
+            async with self._operation_write_lock:
+                async with self._event_write_lock:
+                    event_key = (owner, normalized_claim.event.event_id)
+                    event = self._events.get(event_key)
+                    delivery = self._event_delivery.get(event_key)
+                    job_id = normalized_claim.event.payload.get("job_id")
+                    operation = (
+                        self._operations.get((owner, job_id))
+                        if type(job_id) is str
+                        else None
                     )
-                    delivery = self._event_delivery[event_key]
-                    delivery.status = "published"
-                    delivery.published_at = normalized_time
-                    return _clone(workflow)
-                except Exception:
-                    self._restore_live_runtime_state(before)
-                    raise
+                    if event is not None:
+                        _validate_operation_completion_binding(
+                            user_id=owner,
+                            event=event,
+                            operation=operation,
+                            workflow_state=normalized_commit.workflow_state,
+                            workflow=normalized_commit.workflow,
+                        )
+                    if (
+                        event is None
+                        or event != normalized_claim.event
+                        or delivery is None
+                        or delivery.status != "delivering"
+                        or delivery.delivery_attempts != normalized_claim.delivery_attempts
+                        or delivery.lease_owner != normalized_claim.lease_owner
+                        or delivery.lease_expires_at is None
+                        or delivery.lease_expires_at != normalized_claim.lease_expires_at
+                        or normalized_time >= delivery.lease_expires_at
+                    ):
+                        raise TurnExecutionLeaseConflictError(normalized_claim.event.event_id)
+                    before = self._snapshot_live_runtime_state()
+                    try:
+                        self._compare_and_set_video_state(normalized_commit)
+                        self._upsert_workflow_and_active_projection(synthetic_claim, normalized_commit)
+                        self._upsert_projection_messages(owner, normalized_commit.messages)
+                        self._append_events(
+                            synthetic_claim,
+                            normalized_commit,
+                            operation_event_id=normalized_claim.event.event_id,
+                            include_turn_terminal=False,
+                        )
+                        delivery = self._event_delivery[event_key]
+                        delivery.status = "published"
+                        delivery.published_at = normalized_time
+                        return _clone(workflow)
+                    except Exception:
+                        self._restore_live_runtime_state(before)
+                        raise
 
 
 def _video_state_from_row(row: PixelFlowAgentVideoStateRow) -> VideoWorkflowStateEnvelope:
@@ -2226,6 +2405,94 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                 )
             )
 
+    async def _sql_commit_projection_matches(
+        self,
+        session: AsyncSession,
+        claim: TurnExecutionClaim,
+        commit: VideoTurnCommit,
+    ) -> bool:
+        if commit.workflow_state is not None:
+            state_row = (
+                await session.scalars(
+                    select(PixelFlowAgentVideoStateRow).where(
+                        PixelFlowAgentVideoStateRow.user_id == claim.user_id,
+                        PixelFlowAgentVideoStateRow.workflow_id
+                        == commit.workflow_state.workflow_id,
+                    )
+                )
+            ).one_or_none()
+            if state_row is None or _video_state_from_row(state_row) != commit.workflow_state:
+                return False
+        for message in commit.messages:
+            row = (
+                await session.scalars(
+                    select(PixelFlowAgentProjectionMessageRow).where(
+                        PixelFlowAgentProjectionMessageRow.user_id == claim.user_id,
+                        PixelFlowAgentProjectionMessageRow.message_id == message.message_id,
+                    )
+                )
+            ).one_or_none()
+            if row is None or _message_from_row(row).model_dump(
+                mode="json"
+            ) != message.model_dump(mode="json"):
+                return False
+        if commit.open_interrupt is not None:
+            row = (
+                await session.scalars(
+                    select(PixelFlowAgentInterruptRow).where(
+                        PixelFlowAgentInterruptRow.user_id == claim.user_id,
+                        PixelFlowAgentInterruptRow.interrupt_id
+                        == commit.open_interrupt.interrupt_id,
+                    )
+                )
+            ).one_or_none()
+            if row is None or _interrupt_from_row(row).model_dump(
+                mode="json"
+            ) != commit.open_interrupt.model_dump(mode="json"):
+                return False
+        if commit.close_interrupt_id is not None:
+            closed = (
+                await session.scalars(
+                    select(PixelFlowAgentInterruptRow).where(
+                        PixelFlowAgentInterruptRow.user_id == claim.user_id,
+                        PixelFlowAgentInterruptRow.interrupt_id == commit.close_interrupt_id,
+                    )
+                )
+            ).one_or_none()
+            if (
+                closed is None
+                or closed.status != "closed"
+                or closed.closed_at is None
+                or _database_utc(closed.closed_at) != commit.occurred_at
+            ):
+                return False
+        if commit.workflow is not None:
+            workflow_row = (
+                await session.scalars(
+                    select(PixelFlowAgentWorkflowRow).where(
+                        PixelFlowAgentWorkflowRow.user_id == claim.user_id,
+                        PixelFlowAgentWorkflowRow.workflow_id == commit.workflow.workflow_id,
+                    )
+                )
+            ).one_or_none()
+            if workflow_row is None or _workflow_from_row(
+                workflow_row
+            ).model_dump(mode="json") != commit.workflow.model_dump(mode="json"):
+                return False
+        if commit.update_active_workflow:
+            active_row = (
+                await session.scalars(
+                    select(PixelFlowAgentConversationStateRow).where(
+                        PixelFlowAgentConversationStateRow.user_id == claim.user_id,
+                        PixelFlowAgentConversationStateRow.conversation_id
+                        == claim.turn.conversation_id,
+                    )
+                )
+            ).one_or_none()
+            if active_row is None or active_row.active_workflow_id != commit.active_workflow_id:
+                return False
+        return True
+
     async def _sql_idempotent_replay(
         self,
         session: AsyncSession,
@@ -2242,7 +2509,39 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                 .with_for_update()
             )
         ).one_or_none()
-        if turn is None or turn.status != commit.turn_status.value or turn.decision_json != commit.decision.model_dump(mode="json"):
+        if turn is None:
+            return None
+        execution = (
+            await session.scalars(
+                self._execution_statement(
+                    claim.user_id,
+                    claim.turn.conversation_id,
+                    claim.turn.turn_id,
+                )
+            )
+        ).one_or_none()
+        commit_identity = _video_turn_commit_identity(commit)
+        stored_identity = None if execution is None else execution.last_reason_code
+        same_action_key = (
+            isinstance(turn.decision_json, dict)
+            and turn.decision_json.get("idempotency_key") == commit.decision.idempotency_key
+        )
+        if stored_identity is not None and stored_identity.startswith("commit:"):
+            if stored_identity != commit_identity:
+                if same_action_key:
+                    raise AgentRuntimeRecordConflictError("相同动作键对应不同视频 Turn 提交摘要")
+                return None
+            if (
+                turn.status != commit.turn_status.value
+                or turn.decision_json != commit.decision.model_dump(mode="json")
+                or not await self._sql_commit_projection_matches(session, claim, commit)
+            ):
+                raise AgentRuntimeRecordConflictError("视频 Turn 提交摘要与持久化投影不一致")
+            return _turn_from_row(turn)
+        if (
+            turn.status != commit.turn_status.value
+            or turn.decision_json != commit.decision.model_dump(mode="json")
+        ):
             return None
         if commit.workflow_state is None:
             return _turn_from_row(turn) if TurnStatus(turn.status) in _TERMINAL_TURN_STATUSES else None
@@ -2280,6 +2579,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             lease_token=None,
                             lease_expires_at=None,
                             next_attempt_at=None,
+                            last_reason_code=_video_turn_commit_identity(normalized_commit),
                             updated_at=normalized_commit.occurred_at,
                         )
                     )
@@ -2540,6 +2840,36 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
             PixelFlowAgentTurnExecutionRow.user_id == owner,
             PixelFlowAgentTurnExecutionRow.conversation_id == conversation,
         )
+        workflow_statement = (
+            select(PixelFlowAgentWorkflowRow)
+            .where(
+                PixelFlowAgentWorkflowRow.user_id == owner,
+                PixelFlowAgentWorkflowRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentWorkflowRow.updated_at.desc(),
+                PixelFlowAgentWorkflowRow.workflow_id.desc(),
+            )
+        )
+        turn_statement = (
+            select(PixelFlowAgentTurnRow)
+            .where(
+                PixelFlowAgentTurnRow.user_id == owner,
+                PixelFlowAgentTurnRow.conversation_id == conversation,
+            )
+            .order_by(PixelFlowAgentTurnRow.inbox_sequence.asc())
+        )
+        message_statement = (
+            select(PixelFlowAgentProjectionMessageRow)
+            .where(
+                PixelFlowAgentProjectionMessageRow.user_id == owner,
+                PixelFlowAgentProjectionMessageRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentProjectionMessageRow.created_at.asc(),
+                PixelFlowAgentProjectionMessageRow.message_id.asc(),
+            )
+        )
         interrupt_statement = (
             select(PixelFlowAgentInterruptRow)
             .where(
@@ -2548,27 +2878,47 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
             )
             .order_by(PixelFlowAgentInterruptRow.opened_at.asc(), PixelFlowAgentInterruptRow.interrupt_id.asc())
         )
-        async with self._session_factory() as session:
-            state_rows = (await session.scalars(state_statement)).all()
-            execution_rows = (await session.scalars(execution_statement)).all()
-            interrupt_rows = (await session.scalars(interrupt_statement)).all()
-        schedules = {
-            row.turn_id: None if row.next_attempt_at is None else _database_utc(row.next_attempt_at)
-            for row in execution_rows
-        }
-        turns = await self.list_turns(owner, conversation)
-        return VideoRuntimeSafeSnapshot(
-            conversation_id=conversation,
-            active_workflow_id=await self.get_active_workflow_id(owner, conversation),
-            workflow_states=tuple(_video_state_from_row(row) for row in state_rows),
-            workflows=tuple(await self.list_workflows(owner, conversation)),
-            turns=tuple(
-                OwnedTurnRecord(user_id=owner, turn=turn, next_attempt_at=schedules.get(turn.turn_id))
-                for turn in turns
-            ),
-            messages=tuple(await self.list_projection_messages(owner, conversation)),
-            interrupts=tuple(_interrupt_from_row(row) for row in interrupt_rows),
+        active_statement = select(PixelFlowAgentConversationStateRow).where(
+            PixelFlowAgentConversationStateRow.user_id == owner,
+            PixelFlowAgentConversationStateRow.conversation_id == conversation,
         )
+        async with self._session_factory() as session:
+            async with _repository_snapshot_transaction(session, self._sqlite_write_lock):
+                state_rows = (await session.scalars(state_statement)).all()
+                execution_rows = (await session.scalars(execution_statement)).all()
+                workflow_rows = (await session.scalars(workflow_statement)).all()
+                turn_rows = (await session.scalars(turn_statement)).all()
+                message_rows = (await session.scalars(message_statement)).all()
+                interrupt_rows = (await session.scalars(interrupt_statement)).all()
+                active_row = (await session.scalars(active_statement)).one_or_none()
+                schedules = {
+                    row.turn_id: (
+                        None
+                        if row.next_attempt_at is None
+                        else _database_utc(row.next_attempt_at)
+                    )
+                    for row in execution_rows
+                }
+                return VideoRuntimeSafeSnapshot(
+                    conversation_id=conversation,
+                    active_workflow_id=(
+                        None if active_row is None else active_row.active_workflow_id
+                    ),
+                    workflow_states=tuple(
+                        _video_state_from_row(row) for row in state_rows
+                    ),
+                    workflows=tuple(_workflow_from_row(row) for row in workflow_rows),
+                    turns=tuple(
+                        OwnedTurnRecord(
+                            user_id=owner,
+                            turn=_turn_from_row(row),
+                            next_attempt_at=schedules.get(row.turn_id),
+                        )
+                        for row in turn_rows
+                    ),
+                    messages=tuple(_message_from_row(row) for row in message_rows),
+                    interrupts=tuple(_interrupt_from_row(row) for row in interrupt_rows),
+                )
 
     async def commit_operation_completion(
         self,
@@ -2622,6 +2972,19 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         try:
             async with self._session_factory() as session:
                 async with _repository_write_transaction(session, self._sqlite_write_lock):
+                    job_id = normalized_claim.event.payload.get("job_id")
+                    operation_row = None
+                    if type(job_id) is str:
+                        operation_row = (
+                            await session.scalars(
+                                select(PixelFlowAgentOperationRow)
+                                .where(
+                                    PixelFlowAgentOperationRow.user_id == owner,
+                                    PixelFlowAgentOperationRow.job_id == job_id,
+                                )
+                                .with_for_update()
+                            )
+                        ).one_or_none()
                     event_row = (
                         await session.scalars(
                             select(PixelFlowAgentEventRow)
@@ -2633,6 +2996,18 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             .with_for_update()
                         )
                     ).one_or_none()
+                    if event_row is not None:
+                        _validate_operation_completion_binding(
+                            user_id=owner,
+                            event=_event_from_row(event_row),
+                            operation=(
+                                None
+                                if operation_row is None
+                                else _operation_from_row(operation_row)
+                            ),
+                            workflow_state=normalized_commit.workflow_state,
+                            workflow=normalized_commit.workflow,
+                        )
                     expiry = None if event_row is None or event_row.lease_expires_at is None else _database_utc(event_row.lease_expires_at)
                     if (
                         event_row is None
