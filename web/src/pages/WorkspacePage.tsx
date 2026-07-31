@@ -37,6 +37,8 @@ import {
   type PrepareScenePackagesJobResult,
   type PrepareScenePackagesJobStatusResponse,
   type PrepareScenePackagesResponse,
+  type ScenePackageAssetRevisionRequest,
+  type ScenePackageAssetRevisionResponse,
   type SceneGenerationPayload,
   type SceneVideoPayload,
   type TaskEvent,
@@ -77,12 +79,8 @@ import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSumm
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
   addGlobalSceneAssetReference,
-  applyGlobalSceneAssetReplacement,
-  applyGlobalSceneAssetImageEdit,
   DEFAULT_TARGET_DURATION_MS,
   defaultGlobalSceneAssetRatio,
-  deleteGlobalSceneAssetReference,
-  globalAssetsContainAsset,
   globalSceneAssetRatioFromMetadata,
   inferGlobalSceneAssetRatioFromMetadata,
   mergeSceneAssetRetryFailures,
@@ -922,7 +920,7 @@ interface PendingImageJob {
   revision_feedback?: string;
 }
 
-type PendingScenePackageJobKind = "scene_package_generation" | "scene_asset_generation";
+type PendingScenePackageJobKind = "scene_package_generation" | "scene_asset_generation" | "scene_asset_revision";
 
 interface PrepareScenePackagesJobRequest {
   form_values: Record<string, unknown>;
@@ -952,8 +950,9 @@ interface PendingScenePackageJob {
   source_message_id: string;
   kind: PendingScenePackageJobKind;
   started_at: string;
-  request: PrepareScenePackagesJobRequest | SceneAssetsJobRequest;
+  request: PrepareScenePackagesJobRequest | SceneAssetsJobRequest | ScenePackageAssetRevisionRequest;
   artifact: ChatArtifact;
+  review_message_id?: string;
 }
 
 type PendingVideoJobKind = "scene_generation" | "scene_regeneration" | "scene_failed_retry" | "video_merge";
@@ -1578,6 +1577,14 @@ function scenePackageJobMessageId(job: Pick<PendingScenePackageJob, "kind" | "jo
 
 function hasMaterializedScenePackageJob(messages: ChatMessage[], job: PendingScenePackageJob): boolean {
   const expectedMessageId = scenePackageJobMessageId(job);
+  if (job.kind === "scene_asset_revision") {
+    return messages.some(
+      (message) =>
+        message.artifact?.type === "video_scene_packages" &&
+        Boolean(message.artifact.videoScenePackages) &&
+        (message.id === expectedMessageId || message.id.startsWith(`${expectedMessageId}-`)),
+    );
+  }
   const sourceMessageIndex = messages.findIndex((message) => message.id === job.source_message_id);
   return messages.some((message, index) => {
     if (message.artifact?.type !== "video_scene_packages" || !message.artifact.videoScenePackages) return false;
@@ -2788,59 +2795,6 @@ export function WorkspacePage() {
     return updatedPackages;
   };
 
-  const syncGlobalSceneAssetEditAcrossConversation = (
-    targetConversationId: string,
-    input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
-    preferredMessageId?: string,
-    fallbackPackages?: PrepareScenePackagesResponse,
-  ): PrepareScenePackagesResponse | undefined => {
-    let latestPackages: PrepareScenePackagesResponse | undefined;
-    setMessages((items) => {
-      const nextItems = items.map((message) => {
-        if (messageConversationId(message, targetConversationId) !== targetConversationId) return message;
-        const artifact = message.artifact;
-        const videoScenePackages = artifact?.videoScenePackages;
-        if (!artifact || !videoScenePackages) return message;
-        if (!globalAssetsContainAsset(videoScenePackages.global_assets, input.assetId)) return message;
-        const patched = applyGlobalSceneAssetImageEdit(
-          videoScenePackages.global_assets,
-          videoScenePackages.scene_packages as ScenePackageRecord[],
-          input,
-        );
-        const updatedPackages: PrepareScenePackagesResponse = {
-          ...videoScenePackages,
-          global_assets: patched.global_assets,
-          scene_packages: patched.scene_packages as typeof videoScenePackages.scene_packages,
-        };
-        if (message.id === preferredMessageId || !latestPackages) {
-          latestPackages = updatedPackages;
-        }
-        return {
-          ...message,
-          artifact: {
-            ...artifact,
-            videoScenePackages: updatedPackages,
-          },
-        };
-      });
-      messagesRef.current = nextItems;
-      return nextItems;
-    });
-    if (!latestPackages && fallbackPackages && globalAssetsContainAsset(fallbackPackages.global_assets, input.assetId)) {
-      const patched = applyGlobalSceneAssetImageEdit(
-        fallbackPackages.global_assets,
-        fallbackPackages.scene_packages as ScenePackageRecord[],
-        input,
-      );
-      latestPackages = {
-        ...fallbackPackages,
-        global_assets: patched.global_assets,
-        scene_packages: patched.scene_packages as typeof fallbackPackages.scene_packages,
-      };
-    }
-    return latestPackages;
-  };
-
   const persistScenePackageSnapshot = (
     targetConversationId: string,
     packages: PrepareScenePackagesResponse,
@@ -2993,64 +2947,80 @@ export function WorkspacePage() {
     setComposerPrefillRequest({ id: uid(), content: SCENE_GLOBAL_ASSET_DELETE_PROMPT(deleteMaterial.name) });
   };
 
-  const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
-    const targetConversationId = currentConversationId || conversationIdRef.current;
-    const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+  const startSceneGlobalAssetRevision = async (
+    reference: SceneGlobalAssetReference,
+    operation: "replace" | "delete",
+    replacement?: SceneGlobalAssetReplacement,
+    options: { processedKey?: string; reviewMessageId?: string; targetConversationId?: string } = {},
+  ): Promise<boolean> => {
+    const targetConversationId = options.targetConversationId || currentConversationId || conversationIdRef.current;
     const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
     if (!storyboardMessage?.artifact?.videoScenePackages) {
-      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再替换。", targetConversationId);
-      return;
+      if (options.processedKey) releaseArtifactAction(options.processedKey);
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后重试。", targetConversationId);
+      return false;
     }
-    const patched = applyGlobalSceneAssetReplacement(
-      storyboardMessage.artifact.videoScenePackages.global_assets,
-      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
-      {
-        assetId: reference.asset_id,
-        assetGroup: reference.asset_group,
-        replacement,
-      },
-    );
-    const updatedPackages: PrepareScenePackagesResponse = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: patched.global_assets,
-      scene_packages: patched.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+    const request: ScenePackageAssetRevisionRequest = {
+      operation,
+      asset_id: reference.asset_id,
+      asset_group: reference.asset_group,
+      asset_name: replacement?.assetName || reference.name,
+      source_image_url: reference.source_image_url,
+      new_image_url: replacement?.displayImageUrl || null,
+      generation_reference_url: replacement?.generationReferenceUrl || null,
+      replacement_metadata: replacement
+        ? {
+            replacement_source: replacement.source,
+            third_asset_id: replacement.thirdAssetId,
+            replacement_asset_type: replacement.assetType,
+            replacement_asset_id: replacement.contentAssetId,
+            replacement_asset_name: replacement.assetName,
+          }
+        : {},
+      global_assets: storyboardMessage.artifact.videoScenePackages.global_assets,
+      scene_packages: storyboardMessage.artifact.videoScenePackages.scene_packages,
     };
 
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
-    const sourceScenePackageArtifact = storyboardMessage.artifact;
-    const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
-      type: "video_scene_packages",
-      title: sourceScenePackageArtifact.title || "视频场景包",
-      description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
-      actionLabel: "确认",
-      videoScenePackages: updatedPackages,
-      originalVideoScenePackages: sourceScenePackageArtifact.originalVideoScenePackages || storyboardMessage.artifact.videoScenePackages,
-      sceneAssetFailures: sourceScenePackageArtifact.sceneAssetFailures || [],
-      intent: "video",
-      formValues: sourceScenePackageArtifact.formValues,
-      intakeContext: sourceScenePackageArtifact.intakeContext,
-      materials: sourceScenePackageArtifact.materials || [],
-      selectedDirection: sourceScenePackageArtifact.selectedDirection,
-      plan: sourceScenePackageArtifact.plan,
-      videoScenePackageEditedSceneIds: [],
-    }, targetConversationId);
-    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
-    if (isVisibleConversation(targetConversationId)) {
-      setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-      setCanvasOpen(true);
+    try {
+      setBusyForConversation(targetConversationId, true);
+      pushAssistant(
+        operation === "replace"
+          ? "正在分析新素材，并同步更新受影响的分镜内容…"
+          : "正在移除素材，并同步清理各分镜中的引用和相关描述…",
+        targetConversationId,
+      );
+      const started = await api.startScenePackageAssetRevisionJob(request);
+      const pendingScenePackageJob: PendingScenePackageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: storyboardMessage.id,
+        kind: "scene_asset_revision",
+        started_at: new Date().toISOString(),
+        request,
+        artifact: storyboardMessage.artifact,
+        review_message_id: options.reviewMessageId,
+      };
+      await persistPendingScenePackageJob(pendingScenePackageJob, targetConversationId, "scene_asset_revision_running", {
+        scene_global_asset_revision: {
+          operation,
+          asset_id: reference.asset_id,
+          asset_group: reference.asset_group,
+        },
+      });
+      await resumePendingScenePackageJob(pendingScenePackageJob, options.processedKey || "");
+      return true;
+    } catch (err) {
+      if (options.processedKey) releaseArtifactAction(options.processedKey);
+      pushAssistant(`分镜素材修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      return false;
+    } finally {
+      setBusyForConversation(targetConversationId, false);
     }
-    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_replaced", {
-      scene_global_asset_replacement: {
-        asset_id: reference.asset_id,
-        asset_group: reference.asset_group,
-        replacement_source: replacement.source,
-        display_image_url: replacement.displayImageUrl,
-        generation_reference_url: replacement.generationReferenceUrl,
-        third_asset_id: replacement.thirdAssetId,
-        replacement_asset_type: replacement.assetType,
-        replacement_asset_id: replacement.contentAssetId,
-      },
-    });
+  };
+
+  const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
+    const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    void startSceneGlobalAssetRevision(reference, "replace", replacement);
   };
 
   const handleAddGlobalAsset = (
@@ -3296,72 +3266,7 @@ export function WorkspacePage() {
     reference: SceneGlobalAssetReference,
     targetConversationId: string,
   ): Promise<boolean> => {
-    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
-    if (!storyboardMessage?.artifact?.videoScenePackages) {
-      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再删除。", targetConversationId);
-      return true;
-    }
-
-    const updated = deleteGlobalSceneAssetReference(
-      storyboardMessage.artifact.videoScenePackages.global_assets,
-      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
-      {
-        assetId: reference.asset_id,
-        assetGroup: reference.asset_group,
-        assetName: reference.name,
-        sourceImageUrl: reference.source_image_url,
-      },
-    );
-    const updatedPackages = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: updated.global_assets,
-      scene_packages: updated.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
-    };
-    const updatedArtifact: ChatArtifact = {
-      ...storyboardMessage.artifact,
-      videoScenePackages: updatedPackages,
-    };
-
-    if (targetConversationId) {
-      try {
-        await api.updateConversationMessage(targetConversationId, storyboardMessage.id, {
-          content: storyboardMessage.content,
-          payload: {
-            artifact: updatedArtifact,
-            materials: updatedArtifact.materials || [],
-            client_message_id: storyboardMessage.id,
-          } as unknown as Record<string, unknown>,
-        });
-      } catch {
-        pushAssistant("分镜素材删除保存失败，请重试。", targetConversationId);
-        return true;
-      }
-    }
-    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
-    if (isVisibleConversation(targetConversationId)) {
-      setSelectedStoryboardMessageId(storyboardMessage.id);
-      setCanvasOpen(true);
-    }
-    pushAssistant(`已在当前场景包中删除「${reference.name}」的素材引用，并保留空占位符。`, targetConversationId);
-
-    if (targetConversationId) {
-      void updateConversationWithProgress(targetConversationId, {
-          last_phase: "scene_global_asset_deleted",
-          context: {
-            ...makeSnapshot(),
-            global_assets: updatedPackages.global_assets,
-            scene_packages: updatedPackages.scene_packages,
-            scene_global_asset_deleted: {
-              asset_id: reference.asset_id,
-              asset_group: reference.asset_group,
-              name: reference.name,
-            },
-          } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
-    }
-    return true;
+    return startSceneGlobalAssetRevision(reference, "delete", undefined, { targetConversationId });
   };
 
   const showImageEditOptions = async (request: PendingImageEditRequest): Promise<void> => {
@@ -5225,6 +5130,121 @@ export function WorkspacePage() {
     return;
   };
 
+  const handleCompletedSceneAssetRevisionJob = async (
+    pendingScenePackageJob: PendingScenePackageJob,
+    result: ScenePackageAssetRevisionResponse,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingScenePackageJob.conversation_id;
+    const request = pendingScenePackageJob.request as ScenePackageAssetRevisionRequest;
+    const sourceMessage = messagesRef.current.find(
+      (message) =>
+        message.id === pendingScenePackageJob.source_message_id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        Boolean(message.artifact?.videoScenePackages),
+    );
+    const sourceArtifact = sourceMessage?.artifact?.videoScenePackages
+      ? sourceMessage.artifact
+      : pendingScenePackageJob.artifact;
+    const sourcePackages = sourceArtifact.videoScenePackages;
+    const quotaPaused = Boolean(result.quota_insufficient) || isQuotaInsufficientPayload(result);
+    if (!result.ok || quotaPaused || !sourcePackages || !result.scene_packages.length) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(
+        quotaPaused
+          ? quotaMessage(result.message || "图片分析额度不足，充值后可重新执行本次素材修改。")
+          : `分镜素材修改失败:${result.message || "任务没有返回更新后的场景包"}`,
+        targetConversationId,
+      );
+      await clearPendingScenePackageJob(
+        targetConversationId,
+        quotaPaused ? "scene_asset_revision_quota_paused" : "scene_asset_revision_failed",
+        {
+          scene_global_asset_revision_error: result.message || "任务没有返回更新后的场景包",
+          scene_global_asset_revision_request: request,
+        },
+      ).catch(() => {});
+      return;
+    }
+
+    const affectedSceneIds = Array.from(
+      new Set([...(sourceArtifact.videoScenePackageEditedSceneIds || []), ...(result.affected_scene_ids || [])]),
+    );
+    const updatedPackages: PrepareScenePackagesResponse = {
+      ...sourcePackages,
+      global_assets: result.global_assets,
+      scene_packages: result.scene_packages,
+      message: result.message || sourcePackages.message,
+    };
+    const updatedSourceArtifact: ChatArtifact = {
+      ...sourceArtifact,
+      videoScenePackages: updatedPackages,
+      videoScenePackageEditedSceneIds: affectedSceneIds,
+    };
+
+    if (sourceMessage) {
+      await api.updateConversationMessage(targetConversationId, sourceMessage.id, {
+        content: sourceMessage.content,
+        payload: {
+          artifact: updatedSourceArtifact,
+          materials: updatedSourceArtifact.materials || [],
+          client_message_id: sourceMessage.id,
+        } as unknown as Record<string, unknown>,
+      });
+      if (isVisibleConversation(targetConversationId)) {
+        setMessages((items) => {
+          const nextItems = items.map((message) =>
+            message.id === sourceMessage.id &&
+            messageConversationId(message, targetConversationId) === targetConversationId
+              ? { ...message, artifact: updatedSourceArtifact }
+              : message,
+          );
+          messagesRef.current = nextItems;
+          return nextItems;
+        });
+      }
+    }
+
+    if (pendingScenePackageJob.review_message_id) {
+      markImageResultAccepted(pendingScenePackageJob.review_message_id, targetConversationId);
+    }
+    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== request.asset_id));
+    const completedMessage = pushArtifact(
+      request.operation === "replace"
+        ? "素材分析完成，已仅更新引用该素材的分镜描述。最新场景包已生成，请打开「查看分镜」确认。"
+        : "素材已删除，相关分镜中的引用和描述已同步清理。最新场景包已生成，请打开「查看分镜」确认。",
+      {
+        ...updatedSourceArtifact,
+        type: "video_scene_packages",
+        title: sourceArtifact.title || "视频场景包",
+        description: `${updatedPackages.scene_packages.length} 个场景片段，${result.affected_scene_ids.length} 个分镜已同步更新。`,
+        actionLabel: "确认",
+        videoScenePackages: updatedPackages,
+        originalVideoScenePackages: sourceArtifact.originalVideoScenePackages || sourcePackages,
+        videoScenePackageEditedSceneIds: affectedSceneIds,
+      },
+      targetConversationId,
+      scenePackageJobMessageId(pendingScenePackageJob),
+    );
+    if (isVisibleConversation(targetConversationId)) {
+      setSelectedStoryboardMessageId(completedMessage.id);
+      setCanvasOpen(true);
+    }
+    await clearPendingScenePackageJob(targetConversationId, "scene_asset_revision_completed", {
+      global_assets: updatedPackages.global_assets,
+      scene_packages: updatedPackages.scene_packages,
+      generated_scene_videos: sourceArtifact.generatedSceneVideos?.scene_videos,
+      merged_video: sourceArtifact.mergedVideo,
+      video_scene_package_edited_scene_ids: affectedSceneIds,
+      scene_global_asset_revision: {
+        operation: request.operation,
+        asset_id: request.asset_id,
+        asset_group: request.asset_group,
+        affected_scene_ids: result.affected_scene_ids,
+      },
+    }).catch(() => {});
+  };
+
   const handleCompletedSceneAssetJob = async (
     pendingScenePackageJob: PendingScenePackageJob,
     sceneAssets: GenerateSceneAssetsResponse,
@@ -5961,7 +5981,11 @@ export function WorkspacePage() {
         : null;
       advanceWorkflowProgress(
         pendingScenePackageJob.conversation_id,
-        pendingScenePackageJob.kind === "scene_asset_generation" ? "scene_asset_generation_running" : "scene_package_generation_running",
+        pendingScenePackageJob.kind === "scene_asset_generation"
+          ? "scene_asset_generation_running"
+          : pendingScenePackageJob.kind === "scene_asset_revision"
+            ? "scene_asset_revision_running"
+            : "scene_package_generation_running",
         {
           intent: "video",
           scene_package_stage: status.stage,
@@ -5984,7 +6008,26 @@ export function WorkspacePage() {
     };
     try {
       if (stopIfHidden()) return;
-      if (pendingScenePackageJob.kind === "scene_asset_generation") {
+      if (pendingScenePackageJob.kind === "scene_asset_revision") {
+        const request = pendingScenePackageJob.request as ScenePackageAssetRevisionRequest;
+        const status = await api.getScenePackageAssetRevisionJob(pendingScenePackageJob.job_id);
+        if (stopIfHidden()) return;
+        const revision =
+          status.status === "completed" && status.result
+            ? status.result
+            : await api.pollScenePackageAssetRevisionJob(pendingScenePackageJob.job_id, shouldContinuePolling);
+        if (!revision || stopIfHidden()) return;
+        await handleCompletedSceneAssetRevisionJob(
+          pendingScenePackageJob,
+          {
+            ...revision,
+            operation: revision.asset_id ? revision.operation : request.operation,
+            asset_id: revision.asset_id || request.asset_id,
+            asset_group: revision.asset_id ? revision.asset_group : request.asset_group,
+          },
+          processedKey,
+        );
+      } else if (pendingScenePackageJob.kind === "scene_asset_generation") {
         const status = await api.getSceneAssetsJob(pendingScenePackageJob.job_id);
         if (stopIfHidden()) return;
         const sceneAssets =
@@ -6009,7 +6052,7 @@ export function WorkspacePage() {
       const message = err instanceof Error ? err.message : String(err);
       pushAssistant(
         message.includes("404")
-          ? "之前的场景包或参考图生成任务不存在或已过期。为避免重复生成，我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
+          ? "之前的场景包、参考图或素材修订任务不存在或已过期。为避免重复生成，我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
           : `继续查询场景包生成任务失败:${message}`,
         pendingScenePackageJob.conversation_id,
       );
@@ -9194,64 +9237,32 @@ export function WorkspacePage() {
     imageRevisionArtifactRef.current = null;
     const sceneAssetReview = msg.artifact.sceneGlobalAssetEditReview;
     if (sceneAssetReview) {
-      const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
-        targetConversationId,
+      await startSceneGlobalAssetRevision(
         {
-          assetId: sceneAssetReview.asset_id,
-          assetGroup: sceneAssetReview.asset_group,
-          editedImageUrl: sceneAssetReview.edited_image_url,
+          source: "scene_global_asset",
+          asset_id: sceneAssetReview.asset_id,
+          asset_group: sceneAssetReview.asset_group,
+          name: sceneAssetReview.asset_name || sceneAssetReview.asset_id,
+          source_image_url: sceneAssetReview.source_image_url,
+          url: sceneAssetReview.source_image_url,
+          type: "image",
+          filename: sceneAssetReview.asset_name || sceneAssetReview.asset_id,
+          storyboard_message_id: sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
         },
-        sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
-        sceneAssetReview.videoScenePackages,
-      );
-      if (!updatedPackages) {
-        releaseArtifactAction(processedKey);
-        pushAssistant("素材候选图已确认，但没有找到可写回的场景包。请从最新场景包重新引用素材后再试。", targetConversationId);
-        return;
-      }
-      const storyboardMessageId = sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id;
-      const sourceScenePackageArtifact = messagesRef.current.find(
-        (message) =>
-          message.id === storyboardMessageId &&
-          messageConversationId(message, targetConversationId) === targetConversationId &&
-          message.artifact?.type === "video_scene_packages" &&
-          Boolean(message.artifact.videoScenePackages),
-      )?.artifact;
-      markImageResultAccepted(msg.id, targetConversationId);
-      const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
-        type: "video_scene_packages",
-        title: sourceScenePackageArtifact?.title || "视频场景包",
-        description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
-        actionLabel: "确认",
-        videoScenePackages: updatedPackages,
-        originalVideoScenePackages:
-          sourceScenePackageArtifact?.originalVideoScenePackages ||
-          sceneAssetReview.originalVideoScenePackages ||
-          sceneAssetReview.videoScenePackages,
-        sceneAssetFailures: sourceScenePackageArtifact?.sceneAssetFailures || [],
-        intent: "video",
-        formValues: sourceScenePackageArtifact?.formValues,
-        intakeContext: sourceScenePackageArtifact?.intakeContext,
-        materials: sourceScenePackageArtifact?.materials || [],
-        selectedDirection: sourceScenePackageArtifact?.selectedDirection,
-        plan: sourceScenePackageArtifact?.plan,
-        videoScenePackageEditedSceneIds: [],
-      }, targetConversationId);
-      persistScenePackageSnapshot(
-        targetConversationId,
-        updatedPackages,
-        sceneAssetReview.is_fusion ? "scene_global_asset_fused" : "scene_global_asset_edited",
+        "replace",
         {
-          scene_global_asset_edit_review: sceneAssetReview,
-          scene_global_asset_edit: sceneAssetReview.editResult,
-          scene_global_asset_fusion: sceneAssetReview.is_fusion ? sceneAssetReview.editResult : undefined,
+          source: "image_asset",
+          displayImageUrl: sceneAssetReview.edited_image_url,
+          generationReferenceUrl: sceneAssetReview.edited_image_url,
+          assetName: sceneAssetReview.asset_name,
+          raw: sceneAssetReview.editResult as unknown as Record<string, unknown>,
+        },
+        {
+          processedKey,
+          reviewMessageId: msg.id,
+          targetConversationId,
         },
       );
-      if (isVisibleConversation(targetConversationId)) {
-        setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-        setCanvasOpen(true);
-      }
-      pushAssistant(`已确认并替换「${sceneAssetReview.asset_name || sceneAssetReview.asset_id}」，场景包里的分镜引用也已同步更新。`, targetConversationId);
       return;
     }
     markImageResultAccepted(msg.id, targetConversationId);

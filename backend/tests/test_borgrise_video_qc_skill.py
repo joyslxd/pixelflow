@@ -147,6 +147,27 @@ def test_borgrise_media_link_extraction_maps_links(monkeypatch):
     assert result.links == ["https://x/one.mp4"]
 
 
+def test_borgrise_image_analysis_maps_markdown(monkeypatch):
+    def fake_analyze_image(**kwargs):
+        assert kwargs["image_url"] == "https://x/character.png"
+        return {
+            "success": True,
+            "task_id": "image-analysis-1",
+            "endpoint": "/api/creative/analyze_image",
+            "image_analysis_markdown": "## 人物\n米白色西装。",
+        }
+
+    monkeypatch.setattr(run_generation, "analyze_image", fake_analyze_image)
+
+    result = asyncio.run(
+        BorgriseSkill().analyze_image("https://x/character.png")
+    )
+
+    assert result.ok is True
+    assert result.task_id == "image-analysis-1"
+    assert result.analysis_markdown == "## 人物\n米白色西装。"
+
+
 def test_borgrise_batch_decompose_maps_storyboards(monkeypatch):
     def fake_batch_decompose_video_to_storyboard(**kwargs):
         assert kwargs["video_urls"] == ["https://x/one.mp4", "https://x/two.mp4"]

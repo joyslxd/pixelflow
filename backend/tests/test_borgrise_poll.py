@@ -115,6 +115,43 @@ def test_decompose_video_uses_video_analysis_poll_timeout(monkeypatch):
     assert result["data"]["result"]["segments"][0]["visualContent"] == "主播展示商品"
 
 
+def test_analyze_image_uses_camel_case_body_and_analysis_timeout(monkeypatch):
+    captured_requests: list[tuple[str, object]] = []
+    captured_defaults: list[int | None] = []
+
+    monkeypatch.setattr(run_generation, "get_headers", lambda *a, **k: {})
+
+    def fake_make_request(endpoint, data=None, **_kwargs):
+        captured_requests.append((endpoint, data))
+        return {"data": {"taskId": "image-analysis-1"}}
+
+    def fake_poll_task(task_id, timeout=None, *, default_timeout=None):
+        captured_defaults.append(default_timeout)
+        return {
+            "data": {
+                "status": "completed",
+                "result": {
+                    "data": {
+                        "image_analysis_markdown": "## 人物\n米白色西装，栗色长发。"
+                    },
+                    "message": "图片分析成功",
+                },
+            }
+        }
+
+    monkeypatch.setattr(run_generation, "make_request", fake_make_request)
+    monkeypatch.setattr(run_generation, "poll_task", fake_poll_task)
+
+    result = run_generation.analyze_image("https://x/character.png")
+
+    assert captured_requests == [
+        ("/creative/analyze_image", {"imageUrl": "https://x/character.png"})
+    ]
+    assert captured_defaults == [run_generation.VIDEO_ANALYSIS_POLL_TIMEOUT]
+    assert result["endpoint"] == "/api/creative/analyze_image"
+    assert result["image_analysis_markdown"].startswith("## 人物")
+
+
 def test_extract_media_links_calls_creative_endpoint(monkeypatch):
     captured: dict[str, object] = {}
 

@@ -88,12 +88,12 @@ test("删除分镜素材必须持久化更新后的权威消息", () => {
   assert.notEqual(start, -1, "Workspace 必须提供分镜素材删除处理器");
   assert.notEqual(end, -1, "图片编辑参数处理器必须位于删除处理器之后");
   const handler = workspaceSource.slice(start, end);
-  assert.match(handler, /const updatedArtifact: ChatArtifact = \{[\s\S]*videoScenePackages: updatedPackages/, "删除必须以当前消息构造完整更新 artifact");
-  assert.match(handler, /await api\.updateConversationMessage/, "删除必须更新权威消息，避免 Snapshot 用旧素材覆盖");
-  assert.ok(
-    handler.indexOf("await api.updateConversationMessage") < handler.indexOf("updateVideoScenePackageArtifactInMessage"),
-    "删除必须先持久化成功，再更新画布并提示成功",
-  );
+  const revisionStart = startSceneGlobalAssetRevisionSource();
+  const revisionCompletion = handleCompletedSceneAssetRevisionJobSource();
+  assert.match(handler, /startSceneGlobalAssetRevision\(reference, "delete"/, "删除必须进入统一的素材语义修订任务");
+  assert.match(revisionStart, /operation:\s*"replace" \| "delete"/, "统一任务必须区分替换和删除");
+  assert.match(revisionCompletion, /const updatedSourceArtifact: ChatArtifact = \{[\s\S]*videoScenePackages: updatedPackages/, "任务完成后必须以当前消息构造完整更新 artifact");
+  assert.match(revisionCompletion, /await api\.updateConversationMessage/, "删除完成后必须更新权威消息，避免 Snapshot 用旧素材覆盖");
 });
 
 test("刷新恢复不得用旧 Conversation context 覆盖权威分镜消息", () => {
@@ -318,6 +318,22 @@ function handleAcceptImageResultSource() {
   const end = workspaceSource.indexOf("function handleReviseImageResult", start);
   assert.notEqual(start, -1, "handleAcceptImageResult must exist");
   assert.notEqual(end, -1, "handleReviseImageResult must follow image result acceptance");
+  return workspaceSource.slice(start, end);
+}
+
+function startSceneGlobalAssetRevisionSource() {
+  const start = workspaceSource.indexOf("const startSceneGlobalAssetRevision = async");
+  const end = workspaceSource.indexOf("const handleReplaceGlobalAsset", start);
+  assert.notEqual(start, -1, "startSceneGlobalAssetRevision must exist");
+  assert.notEqual(end, -1, "handleReplaceGlobalAsset must follow global asset revision start");
+  return workspaceSource.slice(start, end);
+}
+
+function handleCompletedSceneAssetRevisionJobSource() {
+  const start = workspaceSource.indexOf("const handleCompletedSceneAssetRevisionJob = async");
+  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
+  assert.notEqual(start, -1, "handleCompletedSceneAssetRevisionJob must exist");
+  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow global asset revision completion");
   return workspaceSource.slice(start, end);
 }
 
@@ -1089,6 +1105,8 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   const lookupSource = findStoryboardMessageForGlobalAssetSource();
   const completionSource = handleCompletedImageAssetEditJobSource();
   const acceptSource = handleAcceptImageResultSource();
+  const revisionStartSource = startSceneGlobalAssetRevisionSource();
+  const revisionCompletionSource = handleCompletedSceneAssetRevisionJobSource();
   const startIndex = executeSource.indexOf("api.startImageAssetEditJob(jobRequest)");
   const fusionStartIndex = executeSource.indexOf("api.startImageAssetFusionJob(jobRequest)");
   const persistIndex = executeSource.indexOf("await persistPendingImageJob(pendingImageJob");
@@ -1116,9 +1134,14 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   assert.match(completionSource, /sceneGlobalAssetEditReview/, "completion must create a review payload instead of replacing immediately");
   assert.match(completionSource, /scene_global_asset_edit_review/, "completion must persist the pending review payload");
   assert.doesNotMatch(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "completion must not replace scene package assets before user confirmation");
-  assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*syncGlobalSceneAssetEditAcrossConversation/, "accepting the review must sync edited images back into scene package cards");
-  assert.match(acceptSource, /pushArtifact\("素材已替换，已推送更新后的场景包[\s\S]*type:\s*"video_scene_packages"/, "accepting the review must push a fresh scene package card after replacement");
-  assert.match(acceptSource, /setSelectedStoryboardMessageId\(updatedScenePackageMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
+  assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*startSceneGlobalAssetRevision/, "accepting the review must start semantic scene package revision");
+  assert.match(revisionStartSource, /api\.startScenePackageAssetRevisionJob\(request\)/, "asset replacement must start the backend analysis and revision job");
+  assert.match(revisionStartSource, /await persistPendingScenePackageJob\(pendingScenePackageJob/, "asset revision job id must be persisted before polling");
+  assert.match(revisionStartSource, /await resumePendingScenePackageJob\(pendingScenePackageJob/, "asset revision must poll the persisted job");
+  assert.match(revisionCompletionSource, /await api\.updateConversationMessage/, "asset revision must update the authoritative source message");
+  assert.match(revisionCompletionSource, /type:\s*"video_scene_packages"/, "asset revision completion must push a fresh scene package card");
+  assert.match(revisionCompletionSource, /videoScenePackageEditedSceneIds:\s*affectedSceneIds/, "affected scenes must be marked dirty for selective video regeneration");
+  assert.match(revisionCompletionSource, /setSelectedStoryboardMessageId\(completedMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
   assert.match(completionSource, /baseVideoScenePackages/, "completion must be able to patch the fallback scene package snapshot");
 });
 
@@ -1174,6 +1197,9 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.match(apiSource, /startSceneAssetsJob:/, "API client must expose a start-only scene asset job call");
   assert.match(apiSource, /getSceneAssetsJob:/, "API client must expose a query-only scene asset job call");
   assert.match(apiSource, /pollSceneAssetsJob,/, "API client must expose polling for existing scene asset jobs");
+  assert.match(apiSource, /startScenePackageAssetRevisionJob:/, "API client must expose a start-only scene asset revision job call");
+  assert.match(apiSource, /getScenePackageAssetRevisionJob:/, "API client must expose a query-only scene asset revision job call");
+  assert.match(apiSource, /pollScenePackageAssetRevisionJob,/, "API client must expose polling for an existing scene asset revision job");
   assert.match(workspaceSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
   assert.match(workspaceSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
   assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending scene package job");

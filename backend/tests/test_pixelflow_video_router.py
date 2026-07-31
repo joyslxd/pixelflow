@@ -30,6 +30,8 @@ def test_pixelflow_video_router_prefix_and_paths():
     assert "/agent/flows/video/generate-scene-assets" in paths
     assert "/agent/flows/video/generate-scene-assets/start" in paths
     assert "/agent/flows/video/generate-scene-assets/jobs/{job_id}" in paths
+    assert "/agent/flows/video/update-scene-package-asset/start" in paths
+    assert "/agent/flows/video/update-scene-package-asset/jobs/{job_id}" in paths
     assert "/agent/flows/video/generate-scenes" in paths
     assert "/agent/flows/video/generate-scenes/start" in paths
     assert "/agent/flows/video/generate-scenes/jobs/{job_id}" in paths
@@ -422,6 +424,97 @@ def test_video_router_starts_prepare_scene_package_job_and_polls_result(monkeypa
     assert status["result"]["ok"] is True
     assert status["result"]["videoScenePackages"]["global_assets"]["characters"][0]["three_view_images"]
     assert status["result"]["sceneAssetFailures"] == []
+
+
+def test_video_router_starts_scene_asset_revision_job_and_polls_result(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+
+    async def fake_revise_scene_package_asset(**kwargs):
+        assert kwargs["operation"] == "replace"
+        assert kwargs["asset_id"] == "character-host"
+        assert kwargs["new_image_url"] == "https://x/new-host.png"
+        return {
+            "ok": True,
+            "operation": "replace",
+            "asset_id": "character-host",
+            "asset_group": "characters",
+            "global_assets": {
+                "characters": [
+                    {
+                        "asset_id": "character-host",
+                        "name": "讲解者",
+                        "three_view_images": ["https://x/new-host.png"],
+                    }
+                ]
+            },
+            "scene_packages": [
+                {
+                    "scene_id": "scene-1",
+                    "scene_index": 1,
+                    "duration_ms": 8_000,
+                    "prompt": "讲解者展示商品",
+                    "shot_description": {"text": "0-8秒: 角色:@讲解者 展示商品。", "mentions": []},
+                }
+            ],
+            "affected_scene_ids": ["scene-1"],
+            "image_analysis_markdown": "## 人物\n蓝色西装。",
+            "message": "新素材分析完成，相关分镜内容已完成定向更新。",
+        }
+
+    monkeypatch.setattr(pixelflow_video, "revise_scene_package_asset", fake_revise_scene_package_asset)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    with TestClient(app) as client:
+        started_response = client.post(
+            "/agent/flows/video/update-scene-package-asset/start",
+            json={
+                "operation": "replace",
+                "asset_id": "character-host",
+                "asset_group": "characters",
+                "asset_name": "讲解者",
+                "source_image_url": "https://x/old-host.png",
+                "new_image_url": "https://x/new-host.png",
+                "global_assets": {
+                    "characters": [
+                        {
+                            "asset_id": "character-host",
+                            "name": "讲解者",
+                            "three_view_images": ["https://x/old-host.png"],
+                        }
+                    ]
+                },
+                "scene_packages": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8_000,
+                        "prompt": "讲解者展示商品",
+                    }
+                ],
+            },
+        )
+        assert started_response.status_code == 200
+        job_id = started_response.json()["job_id"]
+        status = None
+        for _ in range(20):
+            status_response = client.get(
+                f"/agent/flows/video/update-scene-package-asset/jobs/{job_id}"
+            )
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["affected_scene_ids"] == ["scene-1"]
+    assert status["result"]["global_assets"]["characters"][0]["three_view_images"] == [
+        "https://x/new-host.png"
+    ]
 
 
 def test_video_router_generates_scene_asset_images(monkeypatch):

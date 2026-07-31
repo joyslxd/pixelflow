@@ -1887,6 +1887,67 @@ def extract_media_links(text: str) -> dict:
     }
 
 
+def analyze_image(
+        image_url: str,
+        generation_dialog_id: int | None = None,
+        parent_generation_dialog_id: int | None = None,
+) -> dict:
+    """调用 content-app 单张图片分析接口并轮询 Markdown 结果。"""
+    normalized_url = image_url.strip()
+    if not normalized_url.startswith(("http://", "https://")):
+        return {"error": True, "message": "image_url must be a public HTTP(S) URL"}
+
+    request_data: dict[str, Any] = {"imageUrl": normalized_url}
+    if generation_dialog_id is not None:
+        request_data["generationDialogId"] = generation_dialog_id
+    if parent_generation_dialog_id is not None:
+        request_data["parentGenerationDialogId"] = parent_generation_dialog_id
+
+    headers = get_headers(model="gemini-3-flash-preview", bill_type=1, duration=1, size="all")
+    result = make_request("/creative/analyze_image", request_data, custom_headers=headers)
+    if result.get("error"):
+        return result
+
+    task_id = extract_task_id(result)
+    poll_result = result
+    if task_id:
+        poll_result = poll_task(task_id, default_timeout=VIDEO_ANALYSIS_POLL_TIMEOUT)
+        if poll_result.get("error"):
+            return poll_result
+
+    final_data = poll_result.get("data", poll_result)
+    final_dict = final_data if isinstance(final_data, dict) else {}
+    result_data = final_dict.get("result", final_dict)
+    result_dict = result_data if isinstance(result_data, dict) else {}
+    nested_data = result_dict.get("data", result_dict)
+    nested_dict = nested_data if isinstance(nested_data, dict) else {}
+    markdown = str(
+        nested_dict.get("image_analysis_markdown")
+        or nested_dict.get("imageAnalysisMarkdown")
+        or result_dict.get("image_analysis_markdown")
+        or result_dict.get("imageAnalysisMarkdown")
+        or final_dict.get("image_analysis_markdown")
+        or final_dict.get("imageAnalysisMarkdown")
+        or ""
+    ).strip()
+    if not markdown:
+        return {
+            "error": True,
+            "task_id": task_id,
+            "message": "图片分析任务完成但未返回 image_analysis_markdown",
+            "details": poll_result,
+        }
+    return {
+        "success": bool(poll_result.get("success", result.get("success", True))),
+        "task_id": task_id,
+        "status": final_dict.get("status", poll_result.get("status", "COMPLETED")),
+        "endpoint": "/api/creative/analyze_image",
+        "image_url": normalized_url,
+        "image_analysis_markdown": markdown,
+        "raw_response": poll_result,
+    }
+
+
 def batch_decompose_video_to_storyboard(
         video_urls: list[str],
         generation_dialog_id: int | None = None,

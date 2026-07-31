@@ -13,12 +13,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.creative.contract import VideoCreationContract
+from pixelflow.generate.scene_asset_revision import revise_scene_package_asset
 from pixelflow.generate.scene_assets import generate_scene_assets as run_generate_scene_assets
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
 from pixelflow.memory import semantic_memory_text, with_semantic_memory
 from pixelflow.qc import VideoQCRequest, review_video_quality
 from pixelflow.qc import VideoQCResponse as CoreVideoQCResponse
 from pixelflow.skills import (
+    get_image_analysis_skill,
     get_image_skill,
     get_media_link_extraction_skill,
     get_video_decompose_skill,
@@ -41,6 +43,8 @@ _SCENE_PACKAGE_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_PACKAGE_JOBS = 100
 _SCENE_ASSET_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_SCENE_ASSET_JOBS = 100
+_SCENE_ASSET_REVISION_JOBS: dict[str, dict[str, Any]] = {}
+_MAX_SCENE_ASSET_REVISION_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
 _SCENE_VIDEO_MAX_CONCURRENCY = 100
 _SCENE_VIDEO_MAX_ATTEMPTS = 3
@@ -180,6 +184,54 @@ class GenerateSceneAssetsJobStatusResponse(BaseModel):
     status: str
     stage: str = "generate_scene_assets"
     result: GenerateSceneAssetsResponse | None = None
+    error: str | None = None
+    message: str = ""
+
+
+class ScenePackageAssetRevisionRequest(BaseModel):
+    operation: Literal["replace", "delete"]
+    asset_id: str = Field(min_length=1)
+    asset_group: Literal["characters", "scenes", "props"]
+    asset_name: str = ""
+    source_image_url: str = Field(min_length=1)
+    new_image_url: str | None = None
+    generation_reference_url: str | None = None
+    replacement_metadata: dict[str, Any] = Field(default_factory=dict)
+    global_assets: dict[str, Any] = Field(default_factory=dict)
+    scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_new_image_for_replacement(self) -> ScenePackageAssetRevisionRequest:
+        if self.operation == "replace" and not str(self.new_image_url or "").strip():
+            raise ValueError("替换素材时 new_image_url 不能为空")
+        return self
+
+
+class ScenePackageAssetRevisionResponse(BaseModel):
+    ok: bool
+    operation: Literal["replace", "delete"]
+    asset_id: str
+    asset_group: Literal["characters", "scenes", "props"]
+    global_assets: dict[str, Any] = Field(default_factory=dict)
+    scene_packages: list[dict[str, Any]] = Field(default_factory=list)
+    affected_scene_ids: list[str] = Field(default_factory=list)
+    image_analysis_markdown: str = ""
+    quota_insufficient: bool = False
+    message: str = ""
+
+
+class ScenePackageAssetRevisionJobStartResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    message: str = ""
+
+
+class ScenePackageAssetRevisionJobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: ScenePackageAssetRevisionResponse | None = None
     error: str | None = None
     message: str = ""
 
@@ -627,6 +679,78 @@ async def get_generate_scene_assets_job(job_id: str) -> GenerateSceneAssetsJobSt
         result=result_payload,
         error=str(error) if error else None,
         message=_scene_asset_job_message(status, result_payload, error),
+    )
+
+
+@router.post(
+    "/update-scene-package-asset/start",
+    response_model=ScenePackageAssetRevisionJobStartResponse,
+)
+async def start_update_scene_package_asset(
+    body: ScenePackageAssetRevisionRequest,
+    request: Request,
+) -> ScenePackageAssetRevisionJobStartResponse:
+    """启动全局素材变更后的图片分析和分镜定向修订任务。"""
+    if not body.scene_packages:
+        raise HTTPException(status_code=400, detail="scene_packages不能为空")
+    _trim_scene_asset_revision_jobs()
+    job_id = uuid.uuid4().hex
+    _SCENE_ASSET_REVISION_JOBS[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+    }
+    asyncio.create_task(
+        _run_scene_asset_revision_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            await current_user_id(request),
+        )
+    )
+    return ScenePackageAssetRevisionJobStartResponse(
+        ok=True,
+        job_id=job_id,
+        status="running",
+        message="正在分析素材并同步更新受影响的分镜内容。",
+    )
+
+
+@router.get(
+    "/update-scene-package-asset/jobs/{job_id}",
+    response_model=ScenePackageAssetRevisionJobStatusResponse,
+)
+async def get_update_scene_package_asset_job(
+    job_id: str,
+) -> ScenePackageAssetRevisionJobStatusResponse:
+    """查询全局素材语义修订任务。"""
+    job = _SCENE_ASSET_REVISION_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="分镜素材修订任务不存在或已过期")
+    raw_result = job.get("result")
+    if isinstance(raw_result, ScenePackageAssetRevisionResponse):
+        result = raw_result
+    elif isinstance(raw_result, dict):
+        result = ScenePackageAssetRevisionResponse(**raw_result)
+    else:
+        result = None
+    status = str(job.get("status") or "running")
+    error = str(job.get("error") or "") or None
+    if status == "completed":
+        message = result.message if result else "分镜素材修订完成。"
+    elif status == "quota_paused":
+        message = quota_resume_message(error)
+    elif status == "failed":
+        message = error or "分镜素材修订失败。"
+    else:
+        message = "正在分析素材并同步更新受影响的分镜内容。"
+    return ScenePackageAssetRevisionJobStatusResponse(
+        ok=status not in {"failed", "quota_paused"},
+        job_id=job_id,
+        status=status,
+        result=result,
+        error=error,
+        message=message,
     )
 
 
@@ -1182,6 +1306,75 @@ async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, po
         _record_video_job_failure(power_mem, user_id, job_id, "video_scene_asset_agent", "video_generate_scene_assets_job", exc)
 
 
+async def _run_scene_asset_revision_job(
+    job_id: str,
+    body: ScenePackageAssetRevisionRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> None:
+    """执行图片分析和分镜精确补丁，并把终态保留给前端轮询。"""
+    try:
+        raw_result = await revise_scene_package_asset(
+            operation=body.operation,
+            asset_id=body.asset_id,
+            asset_group=body.asset_group,
+            asset_name=body.asset_name,
+            source_image_url=body.source_image_url,
+            new_image_url=body.new_image_url,
+            generation_reference_url=body.generation_reference_url,
+            replacement_metadata=body.replacement_metadata,
+            global_assets=body.global_assets,
+            scene_packages=body.scene_packages,
+            image_analysis_skill=get_image_analysis_skill() if body.operation == "replace" else None,
+        )
+        result = ScenePackageAssetRevisionResponse(**raw_result)
+        _SCENE_ASSET_REVISION_JOBS[job_id] = {
+            "status": "completed",
+            "result": result,
+            "error": None,
+        }
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "视频场景包 Agent 完成全局素材语义修订",
+                {
+                    "stage": "update_scene_package_asset",
+                    "message": result.message,
+                    "ok": result.ok,
+                    "operation": body.operation,
+                    "affected_scene_count": len(result.affected_scene_ids),
+                },
+            ),
+            category="experience",
+            source_agent="video_scene_package_agent",
+            metadata={
+                "source": "video_update_scene_package_asset",
+                "job_id": job_id,
+                "operation": body.operation,
+                "affected_scene_count": len(result.affected_scene_ids),
+            },
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 异步任务边界必须把失败保留给轮询端
+        quota_insufficient = is_quota_insufficient(exc)
+        _SCENE_ASSET_REVISION_JOBS[job_id] = {
+            "status": "quota_paused" if quota_insufficient else "failed",
+            "result": None,
+            "error": str(exc),
+        }
+        _record_video_job_failure(
+            power_mem,
+            user_id,
+            job_id,
+            "video_scene_package_agent",
+            "video_update_scene_package_asset",
+            exc,
+        )
+
+
 def _trim_scene_video_jobs() -> None:
     if len(_SCENE_VIDEO_JOBS) < _MAX_SCENE_VIDEO_JOBS:
         return
@@ -1222,6 +1415,14 @@ def _trim_scene_asset_jobs() -> None:
         return
     for job_id in list(_SCENE_ASSET_JOBS.keys())[: len(_SCENE_ASSET_JOBS) - _MAX_SCENE_ASSET_JOBS + 1]:
         _SCENE_ASSET_JOBS.pop(job_id, None)
+
+
+def _trim_scene_asset_revision_jobs() -> None:
+    if len(_SCENE_ASSET_REVISION_JOBS) < _MAX_SCENE_ASSET_REVISION_JOBS:
+        return
+    overflow = len(_SCENE_ASSET_REVISION_JOBS) - _MAX_SCENE_ASSET_REVISION_JOBS + 1
+    for job_id in list(_SCENE_ASSET_REVISION_JOBS.keys())[:overflow]:
+        _SCENE_ASSET_REVISION_JOBS.pop(job_id, None)
 
 
 def _scene_package_job_message(

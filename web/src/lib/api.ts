@@ -612,6 +612,48 @@ export interface GenerateSceneAssetsJobStatusResponse {
   message: string;
 }
 
+export interface ScenePackageAssetRevisionRequest {
+  operation: "replace" | "delete";
+  asset_id: string;
+  asset_group: "characters" | "scenes" | "props";
+  asset_name?: string;
+  source_image_url: string;
+  new_image_url?: string | null;
+  generation_reference_url?: string | null;
+  replacement_metadata?: Record<string, unknown>;
+  global_assets: Record<string, unknown>;
+  scene_packages: PrepareScenePackagesResponse["scene_packages"];
+}
+
+export interface ScenePackageAssetRevisionResponse {
+  ok: boolean;
+  operation: "replace" | "delete";
+  asset_id: string;
+  asset_group: "characters" | "scenes" | "props";
+  global_assets: Record<string, unknown>;
+  scene_packages: PrepareScenePackagesResponse["scene_packages"];
+  affected_scene_ids: string[];
+  image_analysis_markdown: string;
+  quota_insufficient?: boolean;
+  message: string;
+}
+
+export interface ScenePackageAssetRevisionJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface ScenePackageAssetRevisionJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  result: ScenePackageAssetRevisionResponse | null;
+  error: string | null;
+  message: string;
+}
+
 export interface GenerateSceneVideosResponse {
   ok: boolean;
   endpoint: string;
@@ -1407,6 +1449,62 @@ async function pollSceneAssetsJob(
   };
 }
 
+async function pollScenePackageAssetRevisionJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ScenePackageAssetRevisionResponse | null> {
+  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<ScenePackageAssetRevisionJobStatusResponse>(
+      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "quota_paused") {
+      return status.result || {
+        ok: false,
+        operation: "replace",
+        asset_id: "",
+        asset_group: "characters",
+        global_assets: {},
+        scene_packages: [],
+        affected_scene_ids: [],
+        image_analysis_markdown: "",
+        quota_insufficient: true,
+        message: status.error || status.message || "图片分析额度不足",
+      };
+    }
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        operation: "replace",
+        asset_id: "",
+        asset_group: "characters",
+        global_assets: {},
+        scene_packages: [],
+        affected_scene_ids: [],
+        image_analysis_markdown: "",
+        quota_insufficient: false,
+        message: status.error || status.message || "分镜素材修订失败",
+      };
+    }
+    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    operation: "replace",
+    asset_id: "",
+    asset_group: "characters",
+    global_assets: {},
+    scene_packages: [],
+    affected_scene_ids: [],
+    image_analysis_markdown: "",
+    quota_insufficient: false,
+    message: "分镜素材修订轮询超时",
+  };
+}
+
 async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoResponse> {
   const deadline = Date.now() + DIRECT_VIDEO_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -1909,6 +2007,19 @@ export const api = {
     req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`),
 
   pollSceneAssetsJob,
+
+  startScenePackageAssetRevisionJob: (body: ScenePackageAssetRevisionRequest) =>
+    req<ScenePackageAssetRevisionJobStartResponse>(`${FLOW_BASE}/video/update-scene-package-asset/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getScenePackageAssetRevisionJob: (jobId: string) =>
+    req<ScenePackageAssetRevisionJobStatusResponse>(
+      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
+    ),
+
+  pollScenePackageAssetRevisionJob,
 
   startSceneVideosJob: (body: {
     scenes: SceneGenerationPayload[];
