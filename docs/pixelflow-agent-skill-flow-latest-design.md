@@ -962,11 +962,13 @@ flowchart TD
 - 创意方向生成使用 `/agent/flows/intake/directions/start` + `/agent/flows/intake/directions/jobs/{job_id}`，前端保存 `pendingDirectionJob` / `pending_direction_job`；返回历史对话或 iframe 恢复时只轮询已有 job，不重复调用 `/start`，job 404 或过期时只提示从表单手动继续。
 - 如果 context 中存在 `pendingMessageJob` / `pending_message_job`，进入历史对话后前端优先恢复并轮询已有消息保存 job；完成后按 job 中的 continuation 启动或恢复采集 job。
 - 如果 context 中存在 `pendingIntakeJob` / `pending_intake_job`，进入历史对话后前端继续查询已有采集意图识别 job，不重新调用 `/start`。
-- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐 `video_scene_packages` 卡片，额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
+- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包、参考图或全局素材语义修订 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。对话快照先恢复 Ref、再提交 React 可见状态，因此素材替换、重新引用或删除任务还必须在状态提交后执行一次幂等接力，避免首次定时器早于对话切换完成而永久停止。完成后的 `video_scene_packages` 终态卡片必须再通过可恢复消息 job 持久化；若用户恰好在终态保存期间切走或刷新，context 保留该消息 job，返回对话后继续保存同一条终态消息，不得只剩“处理中”提示。场景包 pending Ref 只有在终态 context 成功落库后才能清空，避免消息或画布自动保存用旧 `running` 阶段覆盖已经完成的任务。额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingImageJob` / `pending_image_job`，进入历史对话后前端继续查询已有图片生成或全局素材编辑 job；恢复失败或 404 只提示用户手动重试，不自动重新启动，避免重复计费。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
+- 服务端 Python `datetime` 可能返回 6 位微秒和 UTC 偏移；前端恢复历史消息时必须先把微秒收敛到浏览器稳定支持的毫秒精度，再按浏览器本地时区展示为 `YYYY-MM-DD HH:mm:ss`。不得直接显示原始 ISO，也不得把 UTC 时间当成本地时间。
+- “上下文整理完成”只在本次运行的压缩完成时间不早于本次 Run 更新时间时展示。历史压缩快照不得在素材替换、重新引用、删除或其他后续业务运行中重复显示；业务操作本身不会为了展示该提示而主动触发压缩。
 
 ## 12. 鉴权与上传
 

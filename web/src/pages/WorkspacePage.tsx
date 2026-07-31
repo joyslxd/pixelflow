@@ -100,7 +100,7 @@ import {
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
-import { formatClockTime } from "@/lib/time";
+import { formatMessageTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 import {
@@ -186,7 +186,7 @@ const failedSupervisorNoticeId = (
   conversationId: string,
   clientInputId: string,
 ): string => `agent-runtime-failed:${conversationId}:${clientInputId}:v1`;
-const now = () => formatClockTime(new Date().toISOString());
+const now = () => formatMessageTime(new Date().toISOString());
 
 const parsePendingSupervisorTurn = (
   value: unknown,
@@ -384,7 +384,7 @@ function toTimelineEntry(event: TaskEvent): FlowTimelineEntry | null {
     summary: String(data.summary || ""),
     phase: data.phase ? String(data.phase) : undefined,
     status: data.status ? String(data.status) : undefined,
-    time: formatClockTime(event.created_at, "zh-CN", undefined, now()),
+    time: formatMessageTime(event.created_at, "zh-CN", undefined, now()),
   };
 }
 
@@ -1650,7 +1650,7 @@ function messageFromResponse(message: ConversationMessageResponse, conversationI
     role: message.role,
     content: message.content,
     materials,
-    time: formatClockTime(message.created_at),
+    time: formatMessageTime(message.created_at),
     artifact,
   };
 }
@@ -2003,6 +2003,7 @@ export function WorkspacePage() {
   const runtimeNotice = resolveSupervisorRuntimeNotice({
     enabled: runtimePolicy.supervisorEnabled && !primaryExecutionUnavailable,
     runStatus: supervisorRuntime.state.run.status,
+    runUpdatedAt: supervisorRuntime.state.run.updatedAt,
     compression: supervisorRuntime.state.compression,
     inputQueue: supervisorRuntime.state.inputQueue,
   });
@@ -2060,6 +2061,7 @@ export function WorkspacePage() {
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const videoRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const pendingScenePackageJobRef = useRef<PendingScenePackageJob | null>(null);
+  const [pendingScenePackageResumeVersion, setPendingScenePackageResumeVersion] = useState(0);
   const activeScenePackageJobPollsRef = useRef(new Set<string>());
   const pendingVideoJobRef = useRef<PendingVideoJob | null>(null);
   const activeVideoJobPollsRef = useRef(new Set<string>());
@@ -2110,7 +2112,11 @@ export function WorkspacePage() {
         materials: pendingTurn.materials as JsonObject[],
       })),
       currentConversationId,
-    );
+    ).map((message) => ({
+      ...message,
+      // R1/Supervisor 会在连接建立后覆盖 REST 恢复消息，必须在这一投影边界再次转换时间。
+      time: formatMessageTime(message.time, "zh-CN", undefined, message.time),
+    }));
     messagesRef.current = projectedMessages;
     setMessages(projectedMessages);
     if (orchestrationModeRef.current === "supervisor_v1") {
@@ -2385,7 +2391,7 @@ export function WorkspacePage() {
       ...message,
       id: message.id,
       conversationId: conversation,
-      time: formatClockTime(saved.created_at),
+      time: formatMessageTime(saved.created_at),
     };
   };
 
@@ -3919,8 +3925,13 @@ export function WorkspacePage() {
     lastPhase: string,
     extraContext: Record<string, unknown> = {},
   ) => {
-    pendingScenePackageJobRef.current = pendingScenePackageJob;
-    if (!targetConversationId) return;
+    // 启动时立即暴露恢复句柄；结束时必须等权威 context 成功落库后再清空，
+    // 防止消息/画布自动保存拿着旧 running 阶段覆盖已经完成的任务。
+    if (pendingScenePackageJob) pendingScenePackageJobRef.current = pendingScenePackageJob;
+    if (!targetConversationId) {
+      if (!pendingScenePackageJob) pendingScenePackageJobRef.current = null;
+      return;
+    }
     const baseSnapshot = makeSnapshot(targetConversationId);
     await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
@@ -3931,6 +3942,12 @@ export function WorkspacePage() {
         pending_scene_package_job: pendingScenePackageJob,
       } as unknown as Record<string, unknown>,
     });
+    if (
+      !pendingScenePackageJob
+      && pendingScenePackageJobRef.current?.conversation_id === targetConversationId
+    ) {
+      pendingScenePackageJobRef.current = null;
+    }
   };
 
   const clearPendingScenePackageJob = async (
@@ -5260,11 +5277,15 @@ export function WorkspacePage() {
       markImageResultAccepted(pendingScenePackageJob.review_message_id, targetConversationId);
     }
     setReferencedMaterials((items) => items.filter((item) => item.asset_id !== request.asset_id));
-    const completedMessage = pushArtifact(
-      request.operation === "replace"
+    const completedMessage: ChatMessage = {
+      id: scenePackageJobMessageId(pendingScenePackageJob),
+      conversationId: targetConversationId,
+      role: "assistant",
+      content: request.operation === "replace"
         ? "素材分析完成，已仅更新引用该素材的分镜描述。最新场景包已生成，请打开「查看分镜」确认。"
         : "素材已删除，相关分镜中的引用和描述已同步清理。最新场景包已生成，请打开「查看分镜」确认。",
-      {
+      time: "",
+      artifact: {
         ...updatedSourceArtifact,
         type: "video_scene_packages",
         title: sourceArtifact.title || "视频场景包",
@@ -5274,9 +5295,13 @@ export function WorkspacePage() {
         originalVideoScenePackages: sourceArtifact.originalVideoScenePackages || sourcePackages,
         videoScenePackageEditedSceneIds: affectedSceneIds,
       },
+    };
+    // 终态场景包也通过可恢复消息 job 落库；刷新或切换对话时，后续恢复会继续保存同一条消息。
+    const completionMessageJob = await startConversationMessageJobForConversation(
+      completedMessage,
       targetConversationId,
-      scenePackageJobMessageId(pendingScenePackageJob),
     );
+    if (completionMessageJob) await resumePendingMessageJob(completionMessageJob);
     if (isVisibleConversation(targetConversationId)) {
       setSelectedStoryboardMessageId(completedMessage.id);
       setCanvasOpen(true);
@@ -6519,6 +6544,7 @@ export function WorkspacePage() {
     imageRevisionArtifactRef.current = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     pptOutlineRevisionArtifactRef.current = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
+    setPendingScenePackageResumeVersion((version) => version + 1);
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     videoRevisionArtifactRef.current = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
@@ -7011,6 +7037,21 @@ export function WorkspacePage() {
       void resumePendingJianyingDraftJob(pendingJianyingDraftJob);
     }
   };
+
+  // 对话恢复是“先写 Ref、再提交 React 状态”。素材修订 job 额外在提交完成后接力一次，
+  // 避免切换对话或刷新时，首个 setTimeout 早于可见对话状态而永久停止轮询。
+  useEffect(() => {
+    if (!orchestrationResolved || !currentConversationId || !pageVisibleRef.current) return;
+    const pendingScenePackageJob = pendingScenePackageJobRef.current;
+    if (
+      !pendingScenePackageJob?.job_id
+      || pendingScenePackageJob.conversation_id !== currentConversationId
+      || hasMaterializedScenePackageJob(messagesRef.current, pendingScenePackageJob)
+    ) {
+      return;
+    }
+    void resumePendingScenePackageJob(pendingScenePackageJob);
+  }, [currentConversationId, orchestrationResolved, pendingScenePackageResumeVersion]);
 
   // 刷新或压缩完成后，服务端 Turn 可能已经进入 processing，但旧版页面内存里的
   // pendingSupervisorTurns 已丢失。这里按服务端队列和已保存用户消息重建接力 DTO，

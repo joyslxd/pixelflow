@@ -1318,6 +1318,27 @@ test("restored conversations resume existing scene package jobs without starting
   assert.equal(resumeSource.includes("已恢复上次场景包生成任务"), false, "restore polling should not append duplicate progress messages");
   assert.match(resumeSource, /const shouldContinuePolling = \(\) => isVisibleConversation\(pendingScenePackageJob\.conversation_id\)/, "scene package polling must stop when the conversation is no longer visible");
   assert.match(resumeSource, /pausedForHiddenConversation[\s\S]*releaseArtifactAction\(processedKey\)/, "stopping hidden conversation polling must release the local action lock without clearing the pending job");
+  assert.match(workspaceSource, /pendingScenePackageResumeVersion/, "restored scene package jobs must trigger a post-render resume signal");
+  assert.match(workspaceSource, /hasMaterializedScenePackageJob\(messagesRef\.current, pendingScenePackageJob\)/, "post-render resume must not rematerialize a completed scene package job");
+  assert.match(
+    workspaceSource,
+    /终态场景包也通过可恢复消息 job 落库[\s\S]*?startConversationMessageJobForConversation\([\s\S]*?completedMessage[\s\S]*?targetConversationId/,
+    "素材修订终态卡片必须通过可恢复消息 job 保存，避免切换对话时只留下处理中消息",
+  );
+  assert.match(
+    workspaceSource,
+    /结束时必须等权威 context 成功落库后再清空[\s\S]*?await updateConversationWithProgress[\s\S]*?pendingScenePackageJobRef\.current = null/,
+    "场景包 pending 句柄必须在终态 context 落库后清空，防止自动保存回写旧运行态",
+  );
+});
+
+test("REST 与 Supervisor 两条消息恢复投影都转换为完整本地时间", () => {
+  assert.match(workspaceSource, /time: formatMessageTime\(message\.created_at\)/, "REST 恢复消息必须格式化服务端时间");
+  assert.match(
+    workspaceSource,
+    /mergeSupervisorMessagesWithPending\([\s\S]*?\)\.map\(\(message\) => \(\{[\s\S]*?time: formatMessageTime\(message\.time, "zh-CN", undefined, message\.time\)/,
+    "Supervisor 连接后的权威消息覆盖也必须格式化时间",
+  );
 });
 
 test("video revision regeneration also uses recoverable scene video jobs", () => {
