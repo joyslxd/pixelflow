@@ -314,7 +314,9 @@ revision: str = "20260731_05"
 down_revision: str | None = "20260725_04"
 ```
 
-`upgrade()` 逐表在线检查：表不存在才创建；发现同名表但字段/迁移专属索引不完整时抛 `RuntimeError`，不能静默接管。`downgrade()` 只有检测到本迁移专属 owner 索引才删除对应表。
+`upgrade()` 逐表在线检查：表不存在才创建；每张新表额外创建一个名称含 `20260731_05` 的 revision 私有、非唯一 marker 索引，该 marker 与 ORM/业务查询索引分离且不进入 `AGENT_RUNTIME_SUPPORT_TABLES`。发现同名表但缺私有 marker，或列类型/长度/nullability、主键、CHECK 规范化表达式、业务索引/marker 索引不完整时抛 `RuntimeError`，不能补 marker 或静默接管。CHECK 归一化只能去方言引号、字符集 introducer、无语义空白和可证明完整包住表达式的冗余最外层括号，必须保留内部布尔分组。
+
+`downgrade()` 先预检全部带私有 marker 的候选表；只有 marker 与完整 schema 指纹都匹配时才统一删除，任一表异常时不得先删除其他表。无私有 marker 的同名 legacy 表必须保留；MySQL 非事务型 DDL 部分升级重试只能复用已经带 marker 且 schema 完整的前序表。由 ORM `create_all` 生成、没有私有 marker 的同名表后续运行本 revision 时按设计 fail-closed，必须人工核验，不能自动接管。
 
 - [ ] **Step 5: 运行迁移与 MySQL bootstrap 测试**
 
