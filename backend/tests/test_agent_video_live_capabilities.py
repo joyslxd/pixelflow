@@ -958,6 +958,141 @@ def test_safe_projection_rejects_structured_credential_key_variants(
 
 
 @pytest.mark.parametrize(
+    ("credential_key", "expected_message"),
+    [
+        ("ａｕｔｈｏｒｉｚａｔｉｏｎ", "场景资产结果包含敏感字段"),
+        ("授权令牌", "场景资产结果包含非法字段"),
+        ("t\u043eken", "场景资产结果包含非法字段"),
+        ("t\u03bfken", "场景资产结果包含非法字段"),
+        ("credentials", "场景资产结果包含敏感字段"),
+        ("secrets", "场景资产结果包含敏感字段"),
+        ("tokens", "场景资产结果包含敏感字段"),
+    ],
+    ids=[
+        "fullwidth-authorization",
+        "chinese-key",
+        "cyrillic-homoglyph",
+        "greek-homoglyph",
+        "plural-credentials",
+        "plural-secrets",
+        "plural-tokens",
+    ],
+)
+def test_safe_projection_rejects_reviewer_unicode_and_plural_keys(
+    credential_key: str,
+    expected_message: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match=expected_message) as error_info:
+        live_capabilities._safe_json_projection(
+            {"outer": {credential_key: "opaque-provider-value"}},
+            authorization="Bearer turn-secret",
+        )
+
+    assert credential_key not in str(error_info.value)
+    assert "opaque-provider-value" not in str(error_info.value)
+
+
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "场景状态",
+        "scene\u200dstatus",
+        "scene\x00status",
+        "scene\tstatus",
+        "scene\nstatus",
+        "scene\x7fstatus",
+        "scene.status",
+        "scene%status",
+        "scene/status",
+        "scene:status",
+    ],
+    ids=[
+        "unicode",
+        "zero-width-control",
+        "nul-control",
+        "tab-control",
+        "newline-control",
+        "delete-control",
+        "dot-punctuation",
+        "percent-punctuation",
+        "slash-punctuation",
+        "colon-punctuation",
+    ],
+)
+def test_safe_projection_rejects_non_ascii_control_and_punctuation_keys(
+    unsafe_key: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含非法字段") as error_info:
+        live_capabilities._safe_json_projection(
+            {unsafe_key: "普通业务值"},
+            authorization="Bearer turn-secret",
+        )
+
+    assert unsafe_key not in str(error_info.value)
+    assert "普通业务值" not in str(error_info.value)
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "accessTokens",
+        "clientSecrets",
+        "providerCredentials",
+        "providerCookies",
+        "accountPasswords",
+        "userSessions",
+        "privateKeys",
+        "access_tokens",
+        "client-secrets",
+        "provider credentials",
+        "APIKeys",
+        "accesstokens",
+        "clientsecrets",
+        "providercredentials",
+        "providercookies",
+        "accountpasswords",
+        "usersessions",
+        "privatekeys",
+    ],
+)
+def test_safe_projection_rejects_plural_credential_words_and_compact_forms(
+    credential_key: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含敏感字段"):
+        live_capabilities._safe_json_projection(
+            {credential_key: "opaque-provider-value"},
+            authorization="Bearer turn-secret",
+        )
+
+
+def test_safe_projection_preserves_plural_metadata_and_unicode_business_values() -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    raw = {
+        "business_tokens_count": 2,
+        "providerCredentialsStatus": "已脱敏",
+        "client-secrets-status": "已清理",
+        "provider credentials enabled": True,
+        "APIKeysUsage": 2,
+        "privatekeysenabled": True,
+        "authorization_expires_at": "稍后刷新",
+        "tokenized_url": "https://assets.example.com/tokenized/image.png",
+        "scene status": "处理完成",
+    }
+
+    assert live_capabilities._safe_json_projection(
+        raw,
+        authorization="Bearer turn-secret",
+    ) == raw
+
+
+@pytest.mark.parametrize(
     ("metadata_key", "metadata_value"),
     [
         ("business_token_count", 2),

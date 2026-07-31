@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -630,6 +631,7 @@ class _UnsafeCapabilityOutput(ValueError):
 _PROTOCOL_KEY_WORD_PATTERN = re.compile(
     r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+",
 )
+_PROTOCOL_KEY_ALLOWED_PATTERN = re.compile(r"[A-Za-z0-9_ -]*")
 _CREDENTIAL_METADATA_SUFFIXES = (
     ("expires", "at"),
     ("expiry", "at"),
@@ -656,6 +658,15 @@ _CREDENTIAL_WORDS = frozenset(
         "session",
     }
 )
+_CREDENTIAL_WORD_PLURALS = {
+    "tokens": "token",
+    "secrets": "secret",
+    "credentials": "credential",
+    "cookies": "cookie",
+    "passwords": "password",
+    "sessions": "session",
+    "keys": "key",
+}
 _CREDENTIAL_KEY_QUALIFIERS = frozenset(
     {
         "api",
@@ -689,6 +700,21 @@ _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-
 _API_SECRET_PATTERN = re.compile(r"\b(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
 
 
+def _normalize_protocol_key(key: str) -> str:
+    """规范协议字段字符域，避免 Unicode 混淆键绕过词法检测。"""
+
+    if type(key) is not str:
+        raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
+    normalized_key = unicodedata.normalize("NFKC", key)
+    if not normalized_key.isascii() or _PROTOCOL_KEY_ALLOWED_PATTERN.fullmatch(normalized_key) is None:
+        raise _UnsafeCapabilityOutput("场景资产结果包含非法字段")
+    return normalized_key
+
+
+def _normalize_protocol_word(word: str) -> str:
+    return _CREDENTIAL_WORD_PLURALS.get(word, word)
+
+
 def _protocol_key_words(key: str) -> tuple[str, ...]:
     """按连接符和大小写边界拆分协议字段词，不依赖有限字段名枚举。"""
 
@@ -705,10 +731,18 @@ def _protocol_key_words(key: str) -> tuple[str, ...]:
             continue
         merged_words.append(words[index])
         index += 1
-    return tuple(merged_words)
+    return tuple(_normalize_protocol_word(word) for word in merged_words)
+
+
+def _normalize_fused_credential_plural(component: str) -> str:
+    for plural, singular in _CREDENTIAL_WORD_PLURALS.items():
+        if component.endswith(plural):
+            return f"{component[: -len(plural)]}{singular}"
+    return component
 
 
 def _has_fused_credential_semantics(component: str) -> bool:
+    component = _normalize_fused_credential_plural(component)
     if any(component.endswith(word) for word in _CREDENTIAL_WORDS):
         return True
     if any(component.endswith(f"{qualifier}key") for qualifier in _CREDENTIAL_KEY_QUALIFIERS):
@@ -762,7 +796,8 @@ def _safe_json_projection(value: Any, *, authorization: str) -> Any:
             for key, child in item.items():
                 if type(key) is not str:
                     raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
-                if _is_sensitive_protocol_key(key):
+                normalized_key = _normalize_protocol_key(key)
+                if _is_sensitive_protocol_key(normalized_key):
                     raise _UnsafeCapabilityOutput("场景资产结果包含敏感字段")
                 projected[key] = project(child)
             return projected
