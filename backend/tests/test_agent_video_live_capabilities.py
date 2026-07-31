@@ -9,6 +9,7 @@ import subprocess
 import sys
 import warnings
 import weakref
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -130,9 +131,57 @@ class _SlowMemoryRecord:
 class _AsyncMemoryRecord:
     def __init__(self) -> None:
         self.executed = False
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = asyncio.Event()
 
     async def record_background(self, *, summary, category, metadata):
         self.executed = True
+        self.started.set()
+        try:
+            await self.release.wait()
+        finally:
+            self.finished.set()
+
+
+class _FailingAsyncMemoryRecord:
+    def __init__(self) -> None:
+        self.finished = asyncio.Event()
+
+    async def record_background(self, *, summary, category, metadata):
+        self.finished.set()
+        raise RuntimeError("Bearer turn-secret 后台记录异常详情")
+
+
+class _FutureMemoryRecord:
+    def __init__(self) -> None:
+        self.future = asyncio.get_running_loop().create_future()
+
+    def record_background(self, *, summary, category, metadata):
+        return self.future
+
+
+class _CustomAwaitableMemoryRecord:
+    def __init__(self) -> None:
+        self.finished = asyncio.Event()
+        self.close_calls = 0
+
+    def record_background(self, *, summary, category, metadata):
+        return self
+
+    def __await__(self):
+        async def run() -> None:
+            self.finished.set()
+
+        return run().__await__()
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _InvalidMemoryRecord:
+    def record_background(self, *, summary, category, metadata):
+        return "invalid-schedule-result"
 
 
 class _SceneAssetSkill:
@@ -203,6 +252,57 @@ class _SideEffectRawDto(BaseModel):
         return {"detail": self.detail}
 
 
+class _SideEffectMapping(Mapping[str, object]):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        self.calls += 1
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        self.calls += 1
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _SideEffectDict(dict[str, object]):
+    def __init__(self) -> None:
+        super().__init__({"safe": "value"})
+        self.calls = 0
+
+    def items(self):
+        self.calls += 1
+        return super().items()
+
+
+class _SideEffectList(list[object]):
+    def __init__(self) -> None:
+        super().__init__(["safe"])
+        self.calls = 0
+
+    def __iter__(self):
+        self.calls += 1
+        return super().__iter__()
+
+
+class _SideEffectStr(str):
+    def __new__(cls):
+        instance = super().__new__(cls, "safe")
+        instance.calls = 0
+        return instance
+
+    def __contains__(self, item: object) -> bool:
+        self.calls += 1
+        return super().__contains__(item)
+
+    def casefold(self) -> str:
+        self.calls += 1
+        return super().casefold()
+
+
 def _capabilities(
     *,
     scene_asset_skill=None,
@@ -217,6 +317,12 @@ def _capabilities(
         memory_record=memory_record or _MemoryRecord(),
         clock=clock or _Clock(),
     )
+
+
+async def _event_loop_checkpoint() -> None:
+    checkpoint = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
+    await checkpoint
 
 
 def _concrete_plan():
@@ -350,7 +456,7 @@ async def test_memory_record_clock_failure_is_safe_and_fail_open(caplog: pytest.
 
 
 @pytest.mark.asyncio
-async def test_async_memory_recorder_is_closed_without_runtime_warning(
+async def test_async_memory_recorder_runs_in_background_without_runtime_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     memory_record = _AsyncMemoryRecord()
@@ -360,14 +466,125 @@ async def test_async_memory_recorder_is_closed_without_runtime_warning(
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         directions = await capabilities.generate_directions(VIDEO_FORM, {})
+        assert memory_record.executed is False
+        await asyncio.wait_for(memory_record.started.wait(), timeout=1)
+        assert memory_record.finished.is_set() is False
+        memory_record.release.set()
+        await asyncio.wait_for(memory_record.finished.wait(), timeout=1)
+        await _event_loop_checkpoint()
         gc.collect()
-        await asyncio.sleep(0)
 
     assert len(directions) == 3
-    assert memory_record.executed is False
+    assert memory_record.executed is True
     assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_awaitable_memory_recorder_result_is_safe_protocol_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    capabilities = _capabilities(memory_record=_InvalidMemoryRecord())
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    directions = await capabilities.generate_directions(VIDEO_FORM, {})
+
+    assert len(directions) == 3
     assert "operation=record_background" in caplog.text
     assert "exception_type=TypeError" in caplog.text
+    assert "invalid-schedule-result" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_async_memory_recorder_logs_safe_background_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    memory_record = _FailingAsyncMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    directions = await capabilities.generate_directions(VIDEO_FORM, {})
+    await asyncio.wait_for(memory_record.finished.wait(), timeout=1)
+    await _event_loop_checkpoint()
+
+    assert len(directions) == 3
+    assert "operation=record_background_async" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "turn-secret" not in caplog.text
+    assert "后台记录异常详情" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_future_memory_recorder_runs_in_background_without_extra_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    memory_record = _FutureMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    directions = await capabilities.generate_directions(VIDEO_FORM, {})
+    assert memory_record.future.done() is False
+    memory_record.future.set_result(None)
+    await _event_loop_checkpoint()
+
+    assert len(directions) == 3
+    assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_custom_awaitable_runs_without_calling_user_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    memory_record = _CustomAwaitableMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        directions = await capabilities.generate_directions(VIDEO_FORM, {})
+        await asyncio.wait_for(memory_record.finished.wait(), timeout=1)
+        await _event_loop_checkpoint()
+        gc.collect()
+
+    assert len(directions) == 3
+    assert memory_record.close_calls == 0
+    assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_schedule_failure_closes_only_exact_coroutine_without_warning(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    executed = False
+
+    async def record() -> None:
+        nonlocal executed
+        executed = True
+
+    coroutine = record()
+    loop_type = type(asyncio.get_running_loop())
+
+    def reject_schedule(self, coro, *, name=None, context=None):
+        raise RuntimeError("Bearer turn-secret 调度异常详情")
+
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(loop_type, "create_task", reject_schedule)
+            live_capabilities._schedule_memory_record_awaitable(coroutine)
+        gc.collect()
+        await _event_loop_checkpoint()
+
+    assert executed is False
+    assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background_schedule" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "turn-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -589,6 +806,9 @@ async def test_scene_asset_output_projects_safe_mapping_and_keeps_business_value
     raw = {
         "delivery_url": "https://assets.example.com/tokenized/image.png?version=business",
         "asset_count": 3,
+        "business_token_count": 2,
+        "scene_token_count": 4,
+        "authorization_expires_at": "2026-08-01T12:00:00Z",
         "scene_metadata": [{"description": "电影写实风"}],
     }
     capabilities = _capabilities(scene_asset_skill=_RawFailureSceneAssetSkill(raw))
@@ -607,6 +827,35 @@ async def test_scene_asset_output_projects_safe_mapping_and_keeps_business_value
     projected = result["failed_assets"][0]["raw"]
     assert projected == raw
     json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [_SideEffectMapping(), _SideEffectDict(), _SideEffectList(), _SideEffectStr()],
+)
+def test_safe_projection_rejects_container_subclasses_without_executing_them(value: object) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含不支持的对象"):
+        live_capabilities._safe_json_projection(
+            value,
+            authorization="Bearer turn-secret",
+        )
+
+    assert value.calls == 0  # type: ignore[attr-defined]
+
+
+def test_safe_projection_rejects_str_subclass_key_without_executing_it() -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    key = _SideEffectStr()
+    with pytest.raises(ValueError, match="场景资产结果包含非字符串字段"):
+        live_capabilities._safe_json_projection(
+            {key: "value"},
+            authorization="Bearer turn-secret",
+        )
+
+    assert key.calls == 0
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import math
@@ -11,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
+from types import CoroutineType
 from typing import Any, Protocol
 from weakref import WeakKeyDictionary
 
@@ -35,6 +37,7 @@ from .scene_packages import (
 )
 
 logger = logging.getLogger(__name__)
+_BACKGROUND_MEMORY_RECORD_TASKS: set[asyncio.Task[None]] = set()
 
 
 class ChatModelFactory(Protocol):
@@ -497,8 +500,9 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             )
             if schedule_result is not None:
                 if inspect.isawaitable(schedule_result):
-                    _dispose_unexpected_awaitable(schedule_result)
-                raise TypeError("PowerMem 后台记录端口必须同步返回 None")
+                    _schedule_memory_record_awaitable(schedule_result)
+                    return
+                raise TypeError("PowerMem 后台记录端口返回了非 awaitable 的非空值")
         except Exception as error:  # noqa: BLE001 - PowerMem 记录失败不得阻断主流程
             _log_memory_failure("record_background", error)
 
@@ -513,19 +517,43 @@ def _log_memory_failure(operation: str, error: BaseException) -> None:
     )
 
 
-def _dispose_unexpected_awaitable(value: Any) -> None:
-    """关闭或取消误注入的 awaitable，且不在用户路径等待它。"""
+def _schedule_memory_record_awaitable(value: Any) -> None:
+    """把误返回的 awaitable 纳入当前事件循环，用户路径不等待结果。"""
 
+    runner = _await_memory_record_result(value)
     try:
-        close = getattr(value, "close", None)
-        if callable(close):
-            close()
-            return
-        cancel = getattr(value, "cancel", None)
-        if callable(cancel):
-            cancel()
-    except Exception:  # noqa: BLE001 - 清理失败也不得回显第三方对象异常
+        task = asyncio.get_running_loop().create_task(
+            runner,
+            name="pixelflow-memory-record-adapter",
+        )
+    except Exception as error:  # noqa: BLE001 - 调度失败按安全元数据 fail-open
+        runner.close()
+        if type(value) is CoroutineType:
+            value.close()
+        _log_memory_failure("record_background_schedule", error)
         return
+    _BACKGROUND_MEMORY_RECORD_TASKS.add(task)
+    task.add_done_callback(_consume_memory_record_result)
+
+
+async def _await_memory_record_result(value: Any) -> None:
+    await value
+
+
+def _consume_memory_record_result(task: asyncio.Task[None]) -> None:
+    """消费后台结果和异常，避免 Task exception 泄漏到事件循环。"""
+
+    _BACKGROUND_MEMORY_RECORD_TASKS.discard(task)
+    try:
+        error = task.exception()
+    except asyncio.CancelledError as error:
+        _log_memory_failure("record_background_async", error)
+        return
+    except Exception as error:  # noqa: BLE001 - 回调异常只记录安全类型
+        _log_memory_failure("record_background_async", error)
+        return
+    if error is not None:
+        _log_memory_failure("record_background_async", error)
 
 
 def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -597,18 +625,62 @@ class _UnsafeCapabilityOutput(ValueError):
     """标记供应商结果无法安全投影；异常文本不得携带原始值。"""
 
 
-_SENSITIVE_PROTOCOL_KEY_FRAGMENTS = {
+_SENSITIVE_PROTOCOL_KEYS = {
     "authorization",
+    "authorizationheader",
+    "authorizationvalue",
+    "authorizationid",
     "authheader",
+    "authheadervalue",
     "accesstoken",
+    "accesstokenheader",
+    "accesstokenvalue",
+    "accesstokenid",
+    "provideraccesstoken",
+    "xaccesstoken",
+    "refreshtoken",
     "idtoken",
+    "idtokenheader",
+    "idtokenvalue",
+    "idtokenid",
+    "clientsecret",
+    "clientsecretheader",
+    "clientsecretvalue",
+    "clientsecretid",
     "apikey",
+    "apikeyheader",
+    "apikeyvalue",
+    "apikeyid",
+    "xapikey",
+    "xgoogapikey",
+    "authtoken",
     "token",
+    "tokenheader",
+    "tokenvalue",
+    "tokenid",
     "secret",
+    "secretheader",
+    "secretvalue",
+    "secretid",
     "cookie",
+    "setcookie",
+    "cookieheader",
+    "cookievalue",
+    "cookieid",
     "credential",
+    "credentialheader",
+    "credentialvalue",
+    "credentialid",
     "password",
+    "passwordheader",
+    "passwordvalue",
+    "passwordhash",
     "session",
+    "sessionheader",
+    "sessionvalue",
+    "sessionid",
+    "sessiontoken",
+    "sessioncookie",
 }
 _BEARER_PATTERN = re.compile(r"(?i)(?:^|[\s\"'])bearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
@@ -624,28 +696,26 @@ def _safe_json_projection(value: Any, *, authorization: str) -> Any:
         secret_values.add(bearer_match.group(1))
 
     def project(item: Any) -> Any:
-        if isinstance(item, Mapping):
+        item_type = type(item)
+        if item_type is dict:
             projected: dict[str, Any] = {}
             for key, child in item.items():
-                if not isinstance(key, str):
+                if type(key) is not str:
                     raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
                 normalized_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
-                if any(
-                    sensitive_fragment in normalized_key
-                    for sensitive_fragment in _SENSITIVE_PROTOCOL_KEY_FRAGMENTS
-                ):
+                if normalized_key in _SENSITIVE_PROTOCOL_KEYS:
                     raise _UnsafeCapabilityOutput("场景资产结果包含敏感字段")
                 projected[key] = project(child)
             return projected
-        if isinstance(item, (list, tuple)):
+        if item_type is list or item_type is tuple:
             return [project(child) for child in item]
-        if item is None or isinstance(item, (bool, int)):
+        if item is None or item_type is bool or item_type is int:
             return item
-        if isinstance(item, float):
+        if item_type is float:
             if not math.isfinite(item):
                 raise _UnsafeCapabilityOutput("场景资产结果包含非有限数值")
             return item
-        if isinstance(item, str):
+        if item_type is str:
             if any(secret and secret in item for secret in secret_values):
                 raise _UnsafeCapabilityOutput("场景资产结果包含当前临时凭据")
             if _BEARER_PATTERN.search(item) or _JWT_PATTERN.search(item) or _API_SECRET_PATTERN.search(item):
