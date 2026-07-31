@@ -45,8 +45,6 @@ _PUBLIC_MODULES: Final[dict[str, str]] = {
 }
 _PUBLIC_IMPORT_LOCK: Final[RLock] = RLock()
 _MISSING: Final[object] = object()
-_runtime_ready = False
-_runtime_bootstrapping = False
 
 __all__ = [
     "VideoDeliveryWorkflowService",
@@ -97,7 +95,6 @@ def __getattr__(name: str) -> Any:
         existing = globals().get(name, _MISSING)
         if existing is not _MISSING:
             return existing
-        _ensure_runtime_ready()
         module = import_module(f"{__name__}.{module_name}")
         value = getattr(module, name)
         globals()[name] = value
@@ -108,21 +105,3 @@ def __dir__() -> list[str]:
     """让交互式检查继续展示全部稳定公开符号。"""
 
     return sorted({*globals(), *__all__})
-
-
-def _ensure_runtime_ready() -> None:
-    """首次公开导入前完成 Runtime 初始化，并允许同线程的状态编解码回入。"""
-
-    global _runtime_bootstrapping, _runtime_ready
-    if _runtime_ready or _runtime_bootstrapping:
-        return
-    _runtime_bootstrapping = True
-    try:
-        import_module("pixelflow.agent_runtime.contracts")
-        _runtime_ready = True
-    finally:
-        _runtime_bootstrapping = False
-
-
-# 子模块会反向经过 Runtime 读取公开状态编解码符号，因此在任何子模块开始初始化前固定导入顺序。
-_ensure_runtime_ready()

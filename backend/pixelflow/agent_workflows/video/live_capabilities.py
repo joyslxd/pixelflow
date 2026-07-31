@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import copy
-import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+import logging
+import math
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from typing import Any, Protocol
+
+from pydantic import BaseModel
 
 from pixelflow.agent_runtime.contracts import WorkflowStatus
 from pixelflow.creative.plan_llm import PLAN_LLM_MODEL_NAME
@@ -28,6 +31,8 @@ from .scene_packages import (
     VideoScenePackageWorkflowService,
     VideoScenePackageWorkflowState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ChatModelFactory(Protocol):
@@ -54,13 +59,13 @@ class MemorySearchPort(Protocol):
 class MemoryRecordPort(Protocol):
     """记录安全阶段摘要的最小端口。"""
 
-    def record(
+    def record_background(
         self,
         *,
         summary: str,
         category: str,
         metadata: Mapping[str, Any],
-    ) -> Awaitable[None] | None: ...
+    ) -> None: ...
 
 
 class Clock(Protocol):
@@ -69,14 +74,25 @@ class Clock(Protocol):
     def now(self) -> datetime: ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class TransientTurnCredential:
     """只在当前 Turn 的付费 Skill 边界短暂使用的登录凭据。"""
 
-    authorization: str = field(repr=False)
+    authorization: _OpaqueAuthorization = field(repr=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "authorization", _NonSerializableAuthorization(self.authorization))
+    def __init__(self, authorization: str) -> None:
+        object.__setattr__(self, "authorization", _OpaqueAuthorization(authorization))
+
+    def reveal_for_skill_boundary(self) -> str:
+        """只供单次付费 Skill/start 调用边界显式读取原始值。"""
+
+        return self.authorization._reveal_for_boundary()
+
+    def __copy__(self) -> None:
+        raise TypeError("临时凭据禁止复制")
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> None:
+        raise TypeError("临时凭据禁止复制")
 
     def __getstate__(self) -> None:
         raise TypeError("临时凭据禁止序列化")
@@ -259,7 +275,7 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
         )
         if len(directions) != 3:
             raise ValueError("视频创意方向必须恰好为 3 个")
-        await self._record(
+        self._record_background(
             summary="视频 live 能力已生成 3 个创意方向",
             metadata={"stage": "direction_generation", "direction_count": len(directions)},
         )
@@ -292,7 +308,7 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             context,
             model_factory=self._model_factory,
         )
-        await self._record(
+        self._record_background(
             summary="视频 live 能力已生成初始 Plan",
             metadata={
                 "stage": "plan_generation",
@@ -335,7 +351,7 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             intake_context=context,
             model_factory=self._model_factory,
         )
-        await self._record(
+        self._record_background(
             summary="视频 live 能力已执行 Plan 修订",
             metadata={
                 "stage": "plan_revision",
@@ -366,7 +382,7 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             scene_blueprints=active.scene_blueprints,
             asset_manifest=active.asset_manifest,
         )
-        await self._record(
+        self._record_background(
             summary="视频 live 能力已恢复 Plan 历史版本",
             metadata={"stage": "plan_restore", "plan_version": result.plan_version},
         )
@@ -384,15 +400,13 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             or state.status is not WorkflowStatus.RUNNING
         ):
             raise ValueError("只有场景资产生成阶段可以调用图片 Skill")
-        authorization = credential.authorization.strip()
-        if not authorization:
-            raise ValueError("当前 Turn 缺少临时 Authorization")
         contract = state.scene_package.creation_contract
         from app.gateway.content_app_auth_context import (
             reset_current_content_app_auth,
             set_current_content_app_auth,
         )
 
+        authorization = credential.reveal_for_skill_boundary()
         context_token = set_current_content_app_auth(authorization, username="")
         skill_failed = False
         result: dict[str, Any] | None = None
@@ -417,13 +431,20 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
         finally:
             reset_current_content_app_auth(context_token)
         if skill_failed or result is None:
-            await self._record(
+            self._record_background(
                 summary="视频 live 能力执行场景资产生成失败",
                 metadata={"stage": "generate_scene_assets", "ok": False},
             )
             raise RuntimeError("场景资产生成失败") from None
-        safe_result = _without_credential(result, authorization)
-        await self._record(
+        try:
+            safe_result = _safe_json_projection(result, authorization=authorization)
+        except Exception:  # noqa: BLE001 - DTO 转换异常也不得越过安全投影边界
+            self._record_background(
+                summary="视频 live 能力拒绝了不安全的场景资产结果",
+                metadata={"stage": "generate_scene_assets", "ok": False},
+            )
+            raise RuntimeError("场景资产结果未通过安全校验") from None
+        self._record_background(
             summary="视频 live 能力已执行场景资产生成",
             metadata={
                 "stage": "generate_scene_assets",
@@ -446,7 +467,8 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
                     categories=["preference", "brand", "skill", "experience"],
                 )
             )
-        except Exception:  # noqa: BLE001 - PowerMem 按既有合同 fail-open
+        except Exception as error:  # noqa: BLE001 - PowerMem 按既有合同 fail-open
+            _log_memory_failure("search", error)
             memories = []
         raw_context = dict(intake_context)
         raw_profile = raw_context.get("product_creative_profile")
@@ -457,19 +479,27 @@ class DefaultVideoLiveCapabilities(VideoLiveCapabilityPort):
             product_creative_profile=profile,
         )
 
-    async def _record(self, *, summary: str, metadata: Mapping[str, Any]) -> None:
-        safe_metadata = dict(metadata)
-        safe_metadata["recorded_at"] = self._clock.now().isoformat()
+    def _record_background(self, *, summary: str, metadata: Mapping[str, Any]) -> None:
         try:
-            pending = self._memory_record.record(
+            safe_metadata = dict(metadata)
+            safe_metadata["recorded_at"] = self._clock.now().isoformat()
+            self._memory_record.record_background(
                 summary=summary,
                 category="experience",
                 metadata=safe_metadata,
             )
-            if inspect.isawaitable(pending):
-                await pending
-        except Exception:  # noqa: BLE001 - PowerMem 记录失败不得阻断主流程
-            return
+        except Exception as error:  # noqa: BLE001 - PowerMem 记录失败不得阻断主流程
+            _log_memory_failure("record_background", error)
+
+
+def _log_memory_failure(operation: str, error: BaseException) -> None:
+    """只记录安全诊断维度，不包含异常文本或业务内容。"""
+
+    logger.warning(
+        "PowerMem 操作失败：operation=%s exception_type=%s",
+        operation,
+        type(error).__name__,
+    )
 
 
 def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -479,31 +509,109 @@ def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(item) for item in raw if isinstance(item, Mapping)]
 
 
-class _NonSerializableAuthorization(str):
-    """保留字符串调用合同，但拒绝 dataclass 深拷贝序列化。"""
+class _OpaqueAuthorization:
+    """通用转换只能看到固定脱敏文本的不透明 Authorization。"""
+
+    __slots__ = ("_secret",)
+
+    def __init__(self, secret: str) -> None:
+        if not isinstance(secret, str) or not secret.strip():
+            raise ValueError("当前 Turn 缺少临时 Authorization")
+        object.__setattr__(self, "_secret", secret.strip())
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise TypeError("临时凭据禁止修改")
+
+    def __str__(self) -> str:
+        return "[已脱敏临时凭据]"
+
+    def __repr__(self) -> str:
+        return "[已脱敏临时凭据]"
+
+    def __format__(self, _format_spec: str) -> str:
+        return "[已脱敏临时凭据]"
+
+    def __copy__(self) -> None:
+        raise TypeError("临时凭据禁止复制")
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> None:
+        raise TypeError("临时凭据禁止复制")
+
+    def __getstate__(self) -> None:
         raise TypeError("临时凭据禁止序列化")
 
     def __reduce_ex__(self, _protocol: int) -> None:
         raise TypeError("临时凭据禁止序列化")
 
+    def _reveal_for_boundary(self) -> str:
+        return self._secret
 
-def _without_credential(value: Any, authorization: str) -> Any:
-    """深度复制输出并剔除任何凭据键或意外回显。"""
 
-    sensitive_keys = {"authorization", "token", "access_token", "api_key", "secret"}
-    if isinstance(value, Mapping):
-        return {
-            str(key): _without_credential(item, authorization)
-            for key, item in value.items()
-            if str(key).strip().lower() not in sensitive_keys
-        }
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [_without_credential(item, authorization) for item in value]
-    if isinstance(value, str):
-        return value.replace(authorization, "[已移除敏感凭据]")
-    return copy.deepcopy(value)
+class _UnsafeCapabilityOutput(ValueError):
+    """标记供应商结果无法安全投影；异常文本不得携带原始值。"""
+
+
+_SENSITIVE_PROTOCOL_KEYS = {
+    "authorization",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "clientsecret",
+    "apikey",
+    "authtoken",
+    "token",
+    "secret",
+    "cookie",
+    "setcookie",
+}
+_BEARER_PATTERN = re.compile(r"(?i)(?:^|[\s\"'])bearer\s+[A-Za-z0-9._~+/=-]{6,}")
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+_API_SECRET_PATTERN = re.compile(r"\b(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
+
+
+def _safe_json_projection(value: Any, *, authorization: str) -> Any:
+    """将结果投影为安全 JSON；无法完整验证时固定失败。"""
+
+    secret_values = {authorization}
+    bearer_match = re.fullmatch(r"(?i)bearer\s+(.+)", authorization.strip())
+    if bearer_match is not None:
+        secret_values.add(bearer_match.group(1))
+
+    def project(item: Any) -> Any:
+        if isinstance(item, BaseModel):
+            return project(item.model_dump(mode="json"))
+        if is_dataclass(item) and not isinstance(item, type):
+            return project({field_info.name: getattr(item, field_info.name) for field_info in fields(item)})
+        if isinstance(item, Mapping):
+            projected: dict[str, Any] = {}
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
+                normalized_key = re.sub(r"[_\-/\s]+", "", key.casefold())
+                if any(
+                    normalized_key.endswith(sensitive_key)
+                    for sensitive_key in _SENSITIVE_PROTOCOL_KEYS
+                ):
+                    raise _UnsafeCapabilityOutput("场景资产结果包含敏感字段")
+                projected[key] = project(child)
+            return projected
+        if isinstance(item, (list, tuple)):
+            return [project(child) for child in item]
+        if item is None or isinstance(item, (bool, int)):
+            return item
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise _UnsafeCapabilityOutput("场景资产结果包含非有限数值")
+            return item
+        if isinstance(item, str):
+            if any(secret and secret in item for secret in secret_values):
+                raise _UnsafeCapabilityOutput("场景资产结果包含当前临时凭据")
+            if _BEARER_PATTERN.search(item) or _JWT_PATTERN.search(item) or _API_SECRET_PATTERN.search(item):
+                raise _UnsafeCapabilityOutput("场景资产结果包含疑似凭据")
+            return item
+        raise _UnsafeCapabilityOutput("场景资产结果包含不支持的对象")
+
+    return project(value)
 
 
 __all__ = [
