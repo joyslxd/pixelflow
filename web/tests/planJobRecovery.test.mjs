@@ -83,6 +83,21 @@ test("Plan 恢复句柄写入当前标签页并按对话、job 精确清理", ()
   assert.equal(loadPendingPlanJobRecovery(storage, pending.conversation_id), null);
 });
 
+test("Plan 手工编辑任务使用同一套恢复句柄", () => {
+  const storage = makeStorage();
+  const pending = {
+    ...makePendingPlanJob("manual-edit-job-1"),
+    kind: "plan_manual_edit",
+    request: {
+      intent: "video",
+      current_plan_markdown: "# v1",
+      edited_plan_markdown: "# v2",
+    },
+  };
+  assert.equal(savePendingPlanJobRecovery(storage, pending), true);
+  assert.deepEqual(loadPendingPlanJobRecovery(storage, pending.conversation_id), pending);
+});
+
 test("Plan 恢复句柄拒绝跨对话和畸形缓存", () => {
   const storage = makeStorage();
   const pending = makePendingPlanJob();

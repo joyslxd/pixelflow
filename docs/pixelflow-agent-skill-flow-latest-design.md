@@ -764,6 +764,13 @@ sequenceDiagram
     FE->>FE: "保存 pendingPlanJob(kind=plan_revision)"
     FE->>PA: "轮询 /agent/flows/planning/plan/revise/jobs/{job_id}"
     PA-->>FE: "plan.md v2/v3 + 历史版本"
+  else "右侧手工编辑发布"
+    U->>FE: "编辑完整 plan.md 并点击发布"
+    FE->>PA: "POST /agent/flows/planning/plan/save-edit/start"
+    PA-->>FE: "job_id"
+    FE->>FE: "保存 pendingPlanJob(kind=plan_manual_edit)"
+    FE->>PA: "轮询 /agent/flows/planning/plan/save-edit/jobs/{job_id}"
+    PA-->>FE: "manual_edit 新版本 + 对齐后的合同与蓝图"
   else "重新生成新创意"
     FE->>IA: "POST /agent/flows/intake/directions"
     IA-->>FE: "新的 3 个创意方向"
@@ -800,11 +807,11 @@ Plan 审核与版本规则：
 
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
 - Plan 卡片点击“Agent 修改”后立即隐藏当前卡片的“编辑”入口；等待修改意见、选择修改方式或执行 Agent 修订期间都保持隐藏，刷新恢复待处理上下文后仍保持一致。取消修改方式选择时恢复当前卡片的“编辑”入口，新 Plan 版本继续提供自己的“编辑”入口，已被后续产物替代的历史 Plan 不再展示该入口。
-- 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`。前端必须把 `pendingPlanJob` / `pending_plan_job` 写入 conversation context，恢复时只轮询已有 job，不得因刷新、离开或切换对话重新提交生成请求；同步 `/plan` 与 `/plan/revise` 仅保留兼容旧调用。
+- 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`；右侧手工编辑发布使用 `/agent/flows/planning/plan/save-edit/start` + `/agent/flows/planning/plan/save-edit/jobs/{job_id}`。前端必须把三类任务都写入 `pendingPlanJob` / `pending_plan_job`，恢复时只轮询已有 job，不得因刷新、离开、切换对话或再次点击发布重新提交生成请求；同步 `/plan`、`/plan/revise` 与 `/plan/save-edit` 仅保留兼容旧调用。
 - Plan 专用模型 Client 的单次请求边界固定为 600 秒并关闭传输层透明重试；生成和修订 job 的总预算固定为 1200 秒，查询快照额外返回 `stage`、`started_at` 和 `updated_at`。初始模型请求超时时发布 `error=null` 的确定性可审核合同；Seedance 专用写作超时时停止第二次慢调用，在保留故事线、对白和资产合同后确定性重建连续秒段与稳定资产绑定；修订总预算耗尽时保留当前版本并返回固定失败摘要。
-- 前端不得再用固定 10 分钟轮询时长推断 Plan 失败。`/plan/start` 或 `/plan/revise/start` 返回后，先按对话把不含 Authorization 的 `pendingPlanJob` 临时副本写入当前标签页 `sessionStorage`，再更新 conversation context；首次 context 写入失败不能释放动作锁或重新调用 `/start`，必须继续查询原 `job_id`、按最长 30 秒的有限退避重试持久化，并在刷新时优先使用服务端句柄、缺失时才使用标签页副本。句柄 PUT 在页面隐藏时暂停、恢复可见后继续，重试窗口不超过 job 启动后的 25 分钟。修订 job 恢复时必须把 `pendingPlanRevisionChoice` / `pending_plan_revision_choice` 覆盖为 `null`；即使旧弹窗发生迟到确认，处理器也必须先检查同一对话的现存 Plan job 并只恢复原任务。服务端写入成功、Plan 已物化或进入明确终态后立即清除副本。临时网络失败、请求取消、页面隐藏、刷新或切换对话都必须保留原句柄；只有后端明确完成、失败、完成但缺结果的协议终态或 404 才清理。该恢复规则只修复既有 `frontend_v2` 视频链路，不安装 live Graph Handler、不扩大 `primary_execution_intents`，R1 Turn/Snapshot/SSE/压缩/队列与 v2 业务接力边界保持不变。
+- 前端不得再用固定 10 分钟轮询时长推断 Plan 失败。`/plan/start`、`/plan/revise/start` 或 `/plan/save-edit/start` 返回后，先按对话把不含 Authorization 的 `pendingPlanJob` 临时副本写入当前标签页 `sessionStorage`，再更新 conversation context；首次 context 写入失败不能释放动作锁或重新调用 `/start`，必须继续查询原 `job_id`、按最长 30 秒的有限退避重试持久化，并在刷新时优先使用服务端句柄、缺失时才使用标签页副本。句柄 PUT 在页面隐藏时暂停、恢复可见后继续，重试窗口不超过 job 启动后的 25 分钟。修订 job 恢复时必须把 `pendingPlanRevisionChoice` / `pending_plan_revision_choice` 覆盖为 `null`；即使旧弹窗发生迟到确认，或者手工编辑器发生再次发布，处理器也必须先检查同一对话的现存 Plan job 并只恢复原任务。服务端写入成功、Plan 已物化或进入明确终态后立即清除副本。临时网络失败、请求取消、页面隐藏、刷新或切换对话都必须保留原句柄；只有后端明确完成、失败、完成但缺结果的协议终态或 404 才清理。该恢复规则只修复既有 `frontend_v2` 视频链路，不安装 live Graph Handler、不扩大 `primary_execution_intents`，R1 Turn/Snapshot/SSE/压缩/队列与 v2 业务接力边界保持不变。
 - 当前创意内修改不得返回创意方向列表；job 完成后再保存 plan artifact，消息保存失败时继续复用已有 Plan 结果和消息 job。
-- 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
+- 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit/start`，并按返回的 `job_id` 查询 `/agent/flows/planning/plan/save-edit/jobs/{job_id}`；同步 `/plan/save-edit` 只保留兼容旧调用。后台任务不能直接保存 Markdown：它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本并重新进入人工审核，失败或总预算超时则保留当前权威版本。
 - 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。
 - 候选合同、分镜时间线或镜头描述八维完整度校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。
 - 修订值优先级固定为“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；用户未提及字段不得变化。

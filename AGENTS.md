@@ -194,6 +194,9 @@ Agent 长期分支。
 | 策划 | `POST /agent/flows/planning/plan/revise` | 同步修订 plan.md，仅保留兼容旧调用 |
 | 策划 | `POST /agent/flows/planning/plan/revise/start` | 启动可恢复 Plan 修订 job |
 | 策划 | `GET /agent/flows/planning/plan/revise/jobs/{job_id}` | 查询 Plan 修订 job |
+| 策划 | `POST /agent/flows/planning/plan/save-edit` | 同步发布手工编辑 Plan，仅保留兼容旧调用 |
+| 策划 | `POST /agent/flows/planning/plan/save-edit/start` | 启动可恢复手工编辑 Plan 发布 job |
+| 策划 | `GET /agent/flows/planning/plan/save-edit/jobs/{job_id}` | 查询手工编辑 Plan 发布 job |
 | 策划 | `POST /agent/flows/planning/plan/restore` | 直接激活所选历史 Plan，不追加重复版本 |
 | 图片 | `POST /agent/flows/image/prepare` | 判断图片接口并生成参数 |
 | 图片 | `POST /agent/flows/image/generate` | 调用图片 skill 生成，支持多张循环生成 |
@@ -404,8 +407,8 @@ SmartPPT接口：
 - Seedance Plan 写作必须传入用户已确认的 `video_model`、完整创作合同、当前 Plan、全部蓝图、稳定资产 ID、用户要求和附件，只允许合并 `title/storyline/shot_description/narration/transition`。每镜描述是一整段中文，内部使用从 0 秒连续覆盖到当前镜时长的整数秒级时间码，禁止 ms、毫秒和小数；必须覆盖地点、主体、动作、景别、运镜、光影、声音和收束，只引用本镜声明的 `@character-*`、`@scene-*`、`@prop-*`，每次说明用途且最多 9 张。分镜数量、顺序、时间线、模型、画幅、卖点、转化目标和资产集合不可修改；非法响应整批拒绝并携带错误重试一次。Plan 修订和手工编辑重新对齐同样执行该阶段，并携带当前版本、候选版本、修改意见、附件和上下文。
 - 场景包恢复历史已审核 Plan 时允许兼容旧的全局镜头时间段，并确定性转换为当前分镜的 `0-N秒` 局部时间段；新 Plan 候选仍必须通过严格局部时间轴校验。
 - PowerMem 长期记忆只允许作为 LLM 内部决策上下文，不得在面向用户的 plan.md 中输出“长期记忆约束”、PowerMem、Skill/Agent 运行日志或记忆原文；场景包阶段也不得改写已审核 Plan 来追加记忆文本。
-- Plan 初次生成和当前创意内修改分别调用 `/planning/plan/start`、`/planning/plan/revise/start`，轮询对应 `/jobs/{job_id}`；前端必须保存 `pendingPlanJob`，恢复时只查询原 job。当前创意内修改产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
-- 用户在右侧编辑器直接修改完整 plan.md 后，`/planning/plan/save-edit` 也必须调用 Plan 修订 LLM，把编辑稿重新对齐 `creation_contract` 与视频 `scene_blueprints`；合同字段白名单只能来自当前稿与编辑稿的确定性文本差异，完整稿仅供 LLM 重写内容和蓝图，禁止借机修改用户未编辑字段。三者同时校验通过才发布 `manual_edit` 新版本，失败时保留当前版本，禁止只保存 Markdown 并沿用旧合同。
+- Plan 初次生成、当前创意内修改和右侧手工编辑发布分别调用 `/planning/plan/start`、`/planning/plan/revise/start`、`/planning/plan/save-edit/start`，轮询各自 `/jobs/{job_id}`；前端必须把三类任务都保存为 `pendingPlanJob`，恢复或再次点击时只查询原 job。当前创意内修改产生 v2/v3；只有明确选择“重新生成新创意”才返回 3 个方向。
+- 用户在右侧编辑器直接修改完整 plan.md 后，手工编辑 job 必须调用 Plan 修订 LLM，把编辑稿重新对齐 `creation_contract` 与视频 `scene_blueprints`；合同字段白名单只能来自当前稿与编辑稿的确定性文本差异，完整稿仅供 LLM 重写内容和蓝图，禁止借机修改用户未编辑字段。三者同时校验通过才发布 `manual_edit` 新版本并重新进入人工审核，失败或总预算超时时保留当前版本，禁止只保存 Markdown 并沿用旧合同；同步 `/planning/plan/save-edit` 仅保留兼容旧调用。
 - 当前创意内修订必须先合并结构化合同补丁，再调用 LLM 重写 Plan。优先级是“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；未提及字段不得变化。修订 LLM 的上下文必须包含当前 Plan、表单、选中创意、垂类补充、附件、采集上下文和 PowerMem 检索结果。
 - “视频总时长延长/缩短 N 秒”按当前合同计算增量，“把片子改成 N 秒”等自然说法按新的绝对总时长处理。Plan 修订阶段没有新模型的实时能力快照，因此不能直接修改视频模型或图片模型；用户需要返回需求表单重新选择模型并确认能力。
 - 修订候选合同或分镜蓝图第一次校验失败时，只允许把原因反馈给 LLM 再修正 1 次；第二次仍失败必须保留当前 Plan、合同、蓝图和历史，前端显示失败原因，不能发布带错误合同的新版本。
@@ -486,6 +489,7 @@ PPT 主流程是：PPT需求识别 -> PPT表单 -> 垂类画像 -> SmartPPT大�
 - 新需求入口的用户消息保存必须走 `/agent/conversations/{conversation_id}/messages/start` + `/messages/jobs/{job_id}`，并把 `pendingMessageJob` / `pending_message_job` 写入 conversation context；消息保存 job 完成后再启动采集 job。切换页面、离开 iframe 或刷新恢复时只查询已有 job，不重新追加同一条用户消息。
 - 新需求入口的采集意图识别必须走 `/agent/flows/intake/analyze/start` + `/analyze/jobs/{job_id}`，并把 `pendingIntakeJob` / `pending_intake_job` 写入 conversation context；恢复时只轮询已有 job，不重新调用 `/start`，避免重复推进流程。`/agent/flows/intake/analyze` 和 `/agent/conversations/{conversation_id}/messages` 只保留兼容旧调用。
 - 最近对话默认 5 条，继续下拉按 cursor 分页；SQL store 按 `created_at desc, conversation_id desc` 排序。
+- 最近对话不得直接展示 `last_phase` 英文原值；会话阶段成功落库后必须通知列表刷新，并用中文友好状态展示运行中、待确认、失败和完成态。
 - 前端切换对话后，异步回调必须写回原来的 `conversation_id`，不能写到当前可见对话。
 - 进入历史对话时应恢复 `context`，允许从原先的表单、plan、场景包、额度不足暂停点继续。
 - 进入历史对话时如果发现 `pendingMessageJob` / `pending_message_job`，应先恢复并轮询已有消息保存 job；完成后按 job 中的 continuation 启动或恢复采集 job。
