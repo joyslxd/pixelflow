@@ -118,13 +118,6 @@ class FixedContextAssembler:
         )
 
 
-class InvalidProfileContextAssembler:
-    async def assemble(self, request: object) -> ContextEnvelope:
-        raise ValueError(
-            "模型 deepseek-v4-pro 缺少当前有效且已验证的 context_profile"
-        )
-
-
 class FailingContextAssembler:
     def __init__(self, error: Exception) -> None:
         self._error = error
@@ -402,10 +395,30 @@ async def test_answer_failure_returns_stable_clarification() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_model_profile_raises_stable_unavailable_error() -> None:
+    class OwnedSnapshotSource:
+        async def load_context_snapshot(
+            self,
+            *,
+            user_id: str,
+            conversation_id: str,
+        ) -> ContextAssemblySnapshot:
+            return ContextAssemblySnapshot(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                context_version=5,
+                active_workflow_id="wf-1",
+                workflows=(_workflow(),),
+            )
+
     with pytest.raises(SupervisorDecisionUnavailableError) as exc_info:
         await _service(
             CountingDecisionModel(),
-            context_assembler=InvalidProfileContextAssembler(),
+            context_assembler=ContextAssembler(
+                source=OwnedSnapshotSource(),
+                model_name="deepseek-v4-pro",
+                model_profiles={},
+                budget_node="supervisor",
+            ),
         ).decide(_evidence())
 
     assert exc_info.value.reason_code == "model_profile_invalid"
@@ -423,6 +436,130 @@ async def test_regular_context_value_error_is_not_mislabeled_as_profile_error() 
         ).decide(_evidence())
 
     assert exc_info.value is error
+
+
+@pytest.mark.asyncio
+async def test_forged_profile_message_from_fake_assembler_is_not_mapped() -> None:
+    error = ValueError(
+        "模型 deepseek-v4-pro 缺少当前有效且已验证的 context_profile"
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await _service(
+            CountingDecisionModel(),
+            context_assembler=FailingContextAssembler(error),
+        ).decide(_evidence())
+
+    assert exc_info.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", ["\r", "\n", "\t", "\x00"])
+async def test_profile_error_with_control_character_model_name_is_not_mapped(
+    control: str,
+) -> None:
+    class OwnedSnapshotSource:
+        async def load_context_snapshot(
+            self,
+            *,
+            user_id: str,
+            conversation_id: str,
+        ) -> ContextAssemblySnapshot:
+            return ContextAssemblySnapshot(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                context_version=5,
+                active_workflow_id="wf-1",
+                workflows=(_workflow(),),
+            )
+
+    with pytest.raises(ValueError) as exc_info:
+        await _service(
+            CountingDecisionModel(),
+            context_assembler=ContextAssembler(
+                source=OwnedSnapshotSource(),
+                model_name=f"deepseek{control}v4-pro",
+                model_profiles={},
+                budget_node="supervisor",
+            ),
+        ).decide(_evidence())
+
+    assert not isinstance(exc_info.value, SupervisorDecisionUnavailableError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"user_id": "user-foreign"},
+        {"nested": {"conversation_id": "conv-foreign"}},
+        {"items": [{"workflow_id": "wf-missing"}]},
+        {"nested": {"message_id": "msg-missing"}},
+        {"items": [{"artifact_ref": "artifact:missing"}]},
+        {
+            "nested": {
+                "artifact_refs": [
+                    "artifact:wf-1:plan:v2",
+                    "artifact:missing",
+                ]
+            }
+        },
+        {"items": [{"ref": "artifact:missing"}]},
+        {"artifact_refs": [{"ref": "artifact:wf-1:plan:v2"}]},
+    ],
+)
+async def test_explicit_patch_foreign_reserved_reference_is_rejected_before_model(
+    patch: dict[str, object],
+) -> None:
+    model = CountingDecisionModel()
+    with pytest.raises(ValidationError):
+        _evidence(
+            visible_messages=(
+                {
+                    "message_id": "msg-1",
+                    "user_id": "user-1",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                    "artifact_ref": "artifact:wf-1:plan:v2",
+                },
+            ),
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+                patch=patch,
+            ),
+        )
+
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_patch_allows_unknown_business_fields_after_scope_check() -> None:
+    patch = {
+        "approved": True,
+        "selected_direction_id": "direction-1",
+        "metadata": {
+            "note": "user_id=foreign 只是普通文本",
+            "items": ["workflow_id", "artifact:missing"],
+        },
+    }
+    model = CountingDecisionModel()
+
+    result = await _service(model).decide(
+        _evidence(
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+                patch=patch,
+            )
+        )
+    )
+
+    assert result.decision.patch == patch
+    assert result.decision.patch is not patch
+    assert model.calls == 0
 
 
 @pytest.mark.asyncio

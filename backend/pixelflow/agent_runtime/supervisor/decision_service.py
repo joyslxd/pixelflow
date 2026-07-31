@@ -8,7 +8,10 @@ from typing import Protocol, Self
 from langchain_core.messages import AIMessage
 from pydantic import Field, JsonValue, model_validator
 
-from pixelflow.agent_runtime.context import ContextAssembler
+from pixelflow.agent_runtime.context import (
+    ContextAssembler,
+    ContextBudgetPolicyProvider,
+)
 from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
@@ -147,7 +150,7 @@ class SupervisorTurnEvidence(ContractModel):
             raise ValueError("Turn 目标 Workflow 不属于当前证据")
 
         artifact_owners = _workflow_artifact_owners(self.workflows)
-        message_ids: list[str] = []
+        message_owners: dict[str, str | None] = {}
         for message in self.visible_messages:
             _validate_record_scope(
                 message,
@@ -157,9 +160,11 @@ class SupervisorTurnEvidence(ContractModel):
                 record_kind="消息",
             )
             message_id = _message_id(message)
-            if message_id is not None:
-                message_ids.append(message_id)
             workflow_id = _optional_string(message.get("workflow_id"))
+            if message_id is not None:
+                if message_id in message_owners:
+                    raise ValueError("message_id 不能重复")
+                message_owners[message_id] = workflow_id
             for artifact_ref in _message_artifact_refs(message):
                 owner = artifact_owners.get(artifact_ref)
                 if (
@@ -172,9 +177,7 @@ class SupervisorTurnEvidence(ContractModel):
                     artifact_owners[artifact_ref] = workflow_id
                 else:
                     artifact_owners.setdefault(artifact_ref, None)
-        if len(message_ids) != len(set(message_ids)):
-            raise ValueError("message_id 不能重复")
-        known_message_ids = set(message_ids)
+        known_message_ids = set(message_owners)
         if (
             self.reply_to_message_id is not None
             and self.reply_to_message_id not in known_message_ids
@@ -200,7 +203,10 @@ class SupervisorTurnEvidence(ContractModel):
             )
         _validate_explicit_action_references(
             self.explicit_action,
+            user_id=self.user_id,
+            conversation_id=self.conversation_id,
             known_workflow_ids=known_workflow_ids,
+            message_owners=message_owners,
             artifact_owners=artifact_owners,
         )
         return self
@@ -504,7 +510,7 @@ def _authoritative_evidence_snapshot(
 
 
 def _is_invalid_model_profile_error(error: ValueError) -> bool:
-    """只识别 ContextBudgetPolicyProvider 当前冻结的严格档案错误。"""
+    """只识别公开 Policy 方法真实抛出的严格档案错误。"""
 
     if len(error.args) != 1 or not isinstance(error.args[0], str):
         return False
@@ -512,12 +518,42 @@ def _is_invalid_model_profile_error(error: ValueError) -> bool:
     model_name = message.removeprefix(_MODEL_PROFILE_ERROR_PREFIX).removesuffix(
         _MODEL_PROFILE_ERROR_SUFFIX,
     )
-    return (
+    if not (
         message.startswith(_MODEL_PROFILE_ERROR_PREFIX)
         and message.endswith(_MODEL_PROFILE_ERROR_SUFFIX)
         and bool(model_name.strip())
-        and "\n" not in model_name
-    )
+        and model_name.isprintable()
+    ):
+        return False
+
+    traceback = error.__traceback__
+    expected_code = ContextBudgetPolicyProvider.resolve_model_profile.__code__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code is expected_code:
+            provider = frame.f_locals.get("self")
+            resolution = frame.f_locals.get("resolution")
+            return (
+                isinstance(provider, ContextBudgetPolicyProvider)
+                and provider.require_verified_model_profile
+                and frame.f_locals.get("model_name") == model_name
+                and getattr(resolution, "status", None)
+                in {
+                    "fallback_missing",
+                    "fallback_unverified",
+                    "fallback_expired",
+                }
+                and getattr(
+                    getattr(resolution, "profile", None),
+                    "model_name",
+                    None,
+                )
+                == model_name
+                and message
+                == f"{_MODEL_PROFILE_ERROR_PREFIX}{model_name}{_MODEL_PROFILE_ERROR_SUFFIX}"
+            )
+        traceback = traceback.tb_next
+    return False
 
 
 def _intent(workflow: WorkflowRecord) -> AgentIntent:
@@ -725,7 +761,10 @@ def _validate_material_references(
 def _validate_explicit_action_references(
     signal: ExplicitActionSignal | None,
     *,
+    user_id: str,
+    conversation_id: str,
     known_workflow_ids: set[str],
+    message_owners: dict[str, str | None],
     artifact_owners: dict[str, str | None],
 ) -> None:
     if signal is None:
@@ -740,11 +779,131 @@ def _validate_explicit_action_references(
         and signal.artifact_ref not in artifact_owners
     ):
         raise ValueError("显式动作 Artifact 引用不属于当前证据")
+    _validate_reserved_patch_references(
+        signal.patch,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        known_workflow_ids=known_workflow_ids,
+        message_owners=message_owners,
+        artifact_owners=artifact_owners,
+    )
     if signal.workflow_id is None or signal.artifact_ref is None:
         return
     owner = artifact_owners.get(signal.artifact_ref)
     if owner not in {None, signal.workflow_id}:
         raise ValueError("显式动作 Artifact 与 Workflow 归属不一致")
+
+
+def _validate_reserved_patch_references(
+    value: JsonValue,
+    *,
+    user_id: str,
+    conversation_id: str,
+    known_workflow_ids: set[str],
+    message_owners: dict[str, str | None],
+    artifact_owners: dict[str, str | None],
+) -> None:
+    if type(value) is list:
+        for item in value:
+            _validate_reserved_patch_references(
+                item,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                known_workflow_ids=known_workflow_ids,
+                message_owners=message_owners,
+                artifact_owners=artifact_owners,
+            )
+        return
+    if type(value) is not dict:
+        return
+
+    workflow_id = _validate_reserved_scalar_reference(
+        value,
+        key="workflow_id",
+        expected_values=known_workflow_ids,
+        reason="patch workflow_id 不属于当前证据",
+    )
+    message_ids = tuple(
+        message_id
+        for key in ("message_id", "reply_to_message_id")
+        if (
+            message_id := _validate_reserved_scalar_reference(
+                value,
+                key=key,
+                expected_values=set(message_owners),
+                reason="patch message_id 不属于可见消息",
+            )
+        )
+        is not None
+    )
+    artifact_refs = list(
+        artifact_ref
+        for key in ("artifact_ref", "ref")
+        if (
+            artifact_ref := _validate_reserved_scalar_reference(
+                value,
+                key=key,
+                expected_values=set(artifact_owners),
+                reason="patch Artifact 引用不属于当前证据",
+            )
+        )
+        is not None
+    )
+    if "artifact_refs" in value:
+        raw_refs = value["artifact_refs"]
+        if type(raw_refs) is not list:
+            raise ValueError("patch artifact_refs 必须是列表")
+        normalized_refs: list[str] = []
+        for item in raw_refs:
+            artifact_ref = _optional_string(item)
+            if artifact_ref is None or artifact_ref not in artifact_owners:
+                raise ValueError("patch Artifact 引用不属于当前证据")
+            normalized_refs.append(artifact_ref)
+        if len(normalized_refs) != len(set(normalized_refs)):
+            raise ValueError("patch artifact_refs 不能重复")
+        artifact_refs.extend(normalized_refs)
+    if "user_id" in value and value["user_id"] != user_id:
+        raise ValueError("patch 用户归属不一致")
+    if (
+        "conversation_id" in value
+        and value["conversation_id"] != conversation_id
+    ):
+        raise ValueError("patch 会话归属不一致")
+    if workflow_id is not None:
+        if any(
+            message_owners[message_id] not in {None, workflow_id}
+            for message_id in message_ids
+        ):
+            raise ValueError("patch 消息与 Workflow 归属不一致")
+        if any(
+            artifact_owners[artifact_ref] not in {None, workflow_id}
+            for artifact_ref in artifact_refs
+        ):
+            raise ValueError("patch Artifact 与 Workflow 归属不一致")
+    for item in value.values():
+        _validate_reserved_patch_references(
+            item,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            known_workflow_ids=known_workflow_ids,
+            message_owners=message_owners,
+            artifact_owners=artifact_owners,
+        )
+
+
+def _validate_reserved_scalar_reference(
+    mapping: dict[str, JsonValue],
+    *,
+    key: str,
+    expected_values: set[str],
+    reason: str,
+) -> str | None:
+    if key not in mapping:
+        return None
+    value = _optional_string(mapping.get(key))
+    if value is None or value not in expected_values:
+        raise ValueError(reason)
+    return value
 
 
 def _optional_string(value: JsonValue | None) -> str | None:
