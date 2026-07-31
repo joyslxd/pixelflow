@@ -463,11 +463,12 @@ export function isTurnStartRequest(value: unknown): value is TurnStartRequest {
 }
 
 export function parseTurnStartRequest(value: unknown): TurnStartRequest {
-  if (!isTurnStartRequest(value)) {
-    throw new TypeError("Turn 请求不符合 contracts-v1 合同");
-  }
   try {
-    return cloneAndFreezeJson(value) as unknown as TurnStartRequest;
+    const snapshot = cloneAndFreezeJson(value);
+    if (!isTurnStartRequest(snapshot)) {
+      throw new TypeError("Turn 请求不符合 contracts-v1 合同");
+    }
+    return snapshot;
   } catch {
     throw new TypeError("Turn 请求不符合 contracts-v1 合同");
   }
@@ -492,11 +493,12 @@ export function isInterruptResponseRequest(value: unknown): value is InterruptRe
 }
 
 export function parseInterruptResponseRequest(value: unknown): InterruptResponseRequest {
-  if (!isInterruptResponseRequest(value)) {
-    throw new TypeError("interrupt response 不符合 contracts-v1 合同");
-  }
   try {
-    return cloneAndFreezeJson(value) as unknown as InterruptResponseRequest;
+    const snapshot = cloneAndFreezeJson(value);
+    if (!isInterruptResponseRequest(snapshot)) {
+      throw new TypeError("interrupt response 不符合 contracts-v1 合同");
+    }
+    return snapshot;
   } catch {
     throw new TypeError("interrupt response 不符合 contracts-v1 合同");
   }

@@ -482,6 +482,46 @@ test("live guard 与 parser 拒绝 materials、artifact_refs 和 patch 中的稀
   }
 });
 
+test("Turn parser 对状态型 action getter 只返回合同内动作", () => {
+  const validTurn = contractFixture.turn_start_request;
+  const action = { ...validTurn.explicit_action };
+  let reads = 0;
+  Object.defineProperty(action, "action", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads <= 3 ? "continue_workflow" : "invalid_after_validation";
+    },
+  });
+
+  const parsed = parseTurnStartRequest({ ...validTurn, explicit_action: action });
+
+  assert.equal(ACTION_VALUES.includes(parsed.explicit_action.action), true);
+});
+
+test("interrupt parser 对状态型 action getter 只返回合同内动作", () => {
+  const validResponse = contractFixture.interrupt_response_request;
+  const action = { ...validResponse.value.explicit_action };
+  let reads = 0;
+  Object.defineProperty(action, "action", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads <= 4 ? "continue_workflow" : "invalid_after_validation";
+    },
+  });
+
+  const parsed = parseInterruptResponseRequest({
+    ...validResponse,
+    value: { ...validResponse.value, explicit_action: action },
+  });
+
+  assert.equal(
+    ACTION_VALUES.includes(parsed.value.explicit_action.action),
+    true,
+  );
+});
+
 test("live parser 返回与原输入隔离的递归冻结快照", () => {
   const turnInput = structuredClone(contractFixture.turn_start_request);
   const responseInput = structuredClone(contractFixture.interrupt_response_request);
