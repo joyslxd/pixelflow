@@ -5,7 +5,6 @@
 创建日期：2026-07-31
 """
 
-import re
 from collections.abc import Callable, Sequence
 
 import sqlalchemy as sa
@@ -222,13 +221,118 @@ _TABLE_CHECK_SQL = {
 }
 
 
-def _normalize_check_sql(sqltext: object) -> str:
-    """归一化 SQLite/MySQL 反射出的 CHECK 文本后再比较语义令牌。"""
+def _check_word_character(character: str) -> bool:
+    """识别需要由空格分隔的 SQL 单词字符。"""
 
-    normalized = str(sqltext).lower().replace("`", "").replace('"', "")
-    normalized = re.sub(r"_[a-z0-9]+\s*(?=')", "", normalized)
-    normalized = re.sub(r"\s+", "", normalized)
-    return normalized.replace("(", "").replace(")", "")
+    return character.isalnum() or character in {"_", "$"}
+
+
+def _strip_check_dialect_noise(sqltext: object) -> str:
+    """仅移除字符串外的方言引号、字符集引导符和无语义空白。"""
+
+    raw_sql = str(sqltext)
+    normalized: list[str] = []
+    index = 0
+    in_string = False
+    pending_space = False
+    while index < len(raw_sql):
+        character = raw_sql[index]
+        if in_string:
+            normalized.append(character)
+            if character == "\\" and index + 1 < len(raw_sql):
+                normalized.append(raw_sql[index + 1])
+                index += 2
+                continue
+            if character == "'":
+                if index + 1 < len(raw_sql) and raw_sql[index + 1] == "'":
+                    normalized.append(raw_sql[index + 1])
+                    index += 2
+                    continue
+                in_string = False
+            index += 1
+            continue
+        if character == "'":
+            if pending_space and normalized and (
+                normalized[-1] == "'" or _check_word_character(normalized[-1])
+            ):
+                normalized.append(" ")
+            normalized.append(character)
+            in_string = True
+            pending_space = False
+            index += 1
+            continue
+        if character in {'"', "`"}:
+            index += 1
+            continue
+        if character.isspace():
+            pending_space = True
+            index += 1
+            continue
+        if character == "_":
+            introducer_end = index + 1
+            while introducer_end < len(raw_sql) and raw_sql[introducer_end].isalnum():
+                introducer_end += 1
+            quote_index = introducer_end
+            while quote_index < len(raw_sql) and raw_sql[quote_index].isspace():
+                quote_index += 1
+            if introducer_end > index + 1 and (
+                quote_index < len(raw_sql) and raw_sql[quote_index] == "'"
+            ):
+                index = quote_index
+                continue
+        if (
+            pending_space
+            and normalized
+            and _check_word_character(normalized[-1])
+            and _check_word_character(character)
+        ):
+            normalized.append(" ")
+        normalized.append(character.lower())
+        pending_space = False
+        index += 1
+    return "".join(normalized)
+
+
+def _has_redundant_outer_parentheses(sqltext: str) -> bool:
+    """判断首尾括号是否平衡且完整包住整个表达式。"""
+
+    if len(sqltext) < 2 or sqltext[0] != "(" or sqltext[-1] != ")":
+        return False
+    depth = 0
+    index = 0
+    in_string = False
+    while index < len(sqltext):
+        character = sqltext[index]
+        if in_string:
+            if character == "\\" and index + 1 < len(sqltext):
+                index += 2
+                continue
+            if character == "'":
+                if index + 1 < len(sqltext) and sqltext[index + 1] == "'":
+                    index += 2
+                    continue
+                in_string = False
+            index += 1
+            continue
+        if character == "'":
+            in_string = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth < 0 or (depth == 0 and index != len(sqltext) - 1):
+                return False
+        index += 1
+    return depth == 0 and not in_string
+
+
+def _normalize_check_sql(sqltext: object) -> str:
+    """归一化明确方言噪声，同时保留 CHECK 内部布尔分组。"""
+
+    normalized = _strip_check_dialect_noise(sqltext)
+    while _has_redundant_outer_parentheses(normalized):
+        normalized = normalized[1:-1]
+    return normalized
 
 
 def _column_type_contract(column_type: object) -> tuple[str, int | None]:

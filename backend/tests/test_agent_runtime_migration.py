@@ -1,6 +1,7 @@
 """Agent Runtime 行模型与 additive migration 结构合同。"""
 
 import logging
+import runpy
 from pathlib import Path
 
 import pytest
@@ -576,6 +577,15 @@ def _migration_config(database_path: Path) -> Config:
     return config
 
 
+def _normalize_video_live_check_sql(sqltext: str) -> str:
+    """加载 migration 的 CHECK 归一化器，直接验证方言反射边界。"""
+
+    migration_path = MIGRATION_ROOT / "versions" / "20260731_05_video_live_runtime.py"
+    migration_namespace = runpy.run_path(str(migration_path))
+    normalize = migration_namespace["_normalize_check_sql"]
+    return normalize(sqltext)
+
+
 def test_agent_runtime_migration_keeps_existing_application_loggers_enabled(tmp_path: Path) -> None:
     """执行 migration 时不得禁用测试收集阶段已创建的业务 logger。"""
 
@@ -1121,6 +1131,178 @@ def test_video_live_migration_rejects_wrong_full_schema_fingerprint(
 
     with pytest.raises(RuntimeError, match=error_pattern):
         command.upgrade(config, "head")
+
+
+def test_video_live_migration_rejects_regrouped_turn_lease_check(
+    tmp_path: Path,
+) -> None:
+    """Turn 租约 CHECK 词元相同但内部分组改变时必须失败关闭。"""
+
+    table_name = "pixelflow_agent_turn_executions"
+    marker_name, _marker_columns = EXPECTED_VIDEO_LIVE_MIGRATION_MARKERS[table_name]
+    database_path = tmp_path / "regrouped-turn-lease-check.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260725_04")
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"CREATE TABLE {table_name} ("
+                "turn_id VARCHAR(64) NOT NULL PRIMARY KEY, "
+                "conversation_id VARCHAR(64) NOT NULL, "
+                "user_id VARCHAR(64) NOT NULL, "
+                "attempt INTEGER NOT NULL, "
+                "lease_owner VARCHAR(128) NULL, "
+                "lease_token VARCHAR(36) NULL, "
+                "lease_expires_at DATETIME NULL, "
+                "next_attempt_at DATETIME NULL, "
+                "last_reason_code VARCHAR(64) NULL, "
+                "created_at DATETIME NOT NULL, "
+                "updated_at DATETIME NOT NULL, "
+                "CONSTRAINT ck_pf_agent_turn_executions_attempt CHECK (attempt >= 0), "
+                "CONSTRAINT ck_pf_agent_turn_executions_lease_fields CHECK ("
+                "lease_owner IS NULL AND lease_token IS NULL AND "
+                "(lease_expires_at IS NULL OR lease_owner IS NOT NULL) AND "
+                "lease_token IS NOT NULL AND lease_expires_at IS NOT NULL"
+                "))"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_pf_agent_turn_executions_owner_conversation "
+                f"ON {table_name} (user_id, conversation_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_pf_agent_turn_executions_recovery "
+                f"ON {table_name} (next_attempt_at, lease_expires_at)"
+            )
+        )
+        connection.execute(
+            text(f'CREATE INDEX "{marker_name}" ON "{table_name}" ("turn_id")')
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="check constraint sqltext mismatch"):
+        command.upgrade(config, "head")
+
+
+def test_video_live_migration_rejects_regrouped_interrupt_response_check(
+    tmp_path: Path,
+) -> None:
+    """interrupt 响应 CHECK 词元相同但内部分组改变时必须失败关闭。"""
+
+    table_name = "pixelflow_agent_interrupts"
+    marker_name, _marker_columns = EXPECTED_VIDEO_LIVE_MIGRATION_MARKERS[table_name]
+    database_path = tmp_path / "regrouped-interrupt-response-check.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260725_04")
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"CREATE TABLE {table_name} ("
+                "interrupt_id VARCHAR(64) NOT NULL PRIMARY KEY, "
+                "conversation_id VARCHAR(64) NOT NULL, "
+                "user_id VARCHAR(64) NOT NULL, "
+                "workflow_id VARCHAR(64) NOT NULL, "
+                "turn_id VARCHAR(64) NOT NULL, "
+                "thread_id VARCHAR(128) NOT NULL, "
+                "checkpoint_ns VARCHAR(128) NOT NULL, "
+                "kind VARCHAR(64) NOT NULL, "
+                "reason_code VARCHAR(64) NOT NULL, "
+                "status VARCHAR(16) NOT NULL, "
+                "payload_json JSON NOT NULL, "
+                "response_id VARCHAR(64) NULL, "
+                "response_json JSON NULL, "
+                "opened_at DATETIME NOT NULL, "
+                "closed_at DATETIME NULL, "
+                "CONSTRAINT ck_pf_agent_interrupts_status "
+                "CHECK (status IN ('open', 'responded', 'closed')), "
+                "CONSTRAINT ck_pf_agent_interrupts_response_fields CHECK ("
+                "response_id IS NULL AND "
+                "(response_json IS NULL OR response_id IS NOT NULL) AND "
+                "response_json IS NOT NULL"
+                "))"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_pf_agent_interrupts_owner_conversation_status "
+                f"ON {table_name} (user_id, conversation_id, status)"
+            )
+        )
+        connection.execute(
+            text(
+                f'CREATE INDEX "{marker_name}" ON "{table_name}" ("interrupt_id")'
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="check constraint sqltext mismatch"):
+        command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize(
+    ("expected_sql", "reflected_sql"),
+    (
+        pytest.param(
+            "role IN ('assistant', 'system')",
+            '((("role" IN (\'assistant\', \'system\'))))',
+            id="SQLite-双引号和最外层括号",
+        ),
+        pytest.param(
+            "(lease_owner IS NULL AND lease_token IS NULL AND "
+            "lease_expires_at IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_token IS NOT NULL AND "
+            "lease_expires_at IS NOT NULL)",
+            "(((`lease_owner` IS NULL AND `lease_token` IS NULL AND "
+            "`lease_expires_at` IS NULL) OR "
+            "(`lease_owner` IS NOT NULL AND `lease_token` IS NOT NULL AND "
+            "`lease_expires_at` IS NOT NULL)))",
+            id="MySQL-反引号和最外层括号",
+        ),
+        pytest.param(
+            "role IN ('assistant', 'system')",
+            "((`role` IN (_utf8mb4'assistant', _utf8mb4'system')))",
+            id="MariaDB-字符集引导符",
+        ),
+    ),
+)
+def test_video_live_check_normalization_accepts_dialect_reflection_noise(
+    expected_sql: str,
+    reflected_sql: str,
+) -> None:
+    """合法 SQLite/MySQL/MariaDB 反射噪声不得导致 schema 误拒绝。"""
+
+    assert _normalize_video_live_check_sql(
+        reflected_sql
+    ) == _normalize_video_live_check_sql(expected_sql)
+
+
+def test_video_live_check_normalization_preserves_internal_grouping_and_literals() -> None:
+    """归一化必须保留内部分组，并忽略字符串内括号和转义引号。"""
+
+    expected_turn_sql = (
+        "(lease_owner IS NULL AND lease_token IS NULL AND "
+        "lease_expires_at IS NULL) OR "
+        "(lease_owner IS NOT NULL AND lease_token IS NOT NULL AND "
+        "lease_expires_at IS NOT NULL)"
+    )
+    regrouped_turn_sql = (
+        "lease_owner IS NULL AND lease_token IS NULL AND "
+        "(lease_expires_at IS NULL OR lease_owner IS NOT NULL) AND "
+        "lease_token IS NOT NULL AND lease_expires_at IS NOT NULL"
+    )
+    literal_sql = "label IN ('left(right)', 'it''s)ok', 'slash\\'quote(paren)')"
+
+    assert _normalize_video_live_check_sql(
+        expected_turn_sql
+    ) != _normalize_video_live_check_sql(regrouped_turn_sql)
+    assert _normalize_video_live_check_sql(
+        f"((({literal_sql})))"
+    ) == _normalize_video_live_check_sql(literal_sql)
 
 
 def test_video_live_migration_reuses_complete_marker_schema_on_upgrade_retry(
