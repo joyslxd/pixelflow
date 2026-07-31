@@ -938,9 +938,12 @@ git commit -m "实现：生成并复核 live Turn 的 Supervisor 决策" -m "按
 **Files:**
 - Create: `backend/pixelflow/agent_workflows/video/live_capabilities.py`
 - Create: `backend/tests/test_agent_video_live_capabilities.py`
+- Modify: `backend/pixelflow/agent_workflows/video/__init__.py`
 - Modify: `backend/app/gateway/routers/pixelflow_intake.py`
 - Modify: `backend/app/gateway/routers/pixelflow_planning.py`
 - Modify: `backend/app/gateway/routers/pixelflow_video.py`
+
+集成修复补充：`video` 包入口必须保留现有公开导出，同时允许干净 Python 进程直接导入 `video.live_capabilities`，不得因 eager export 形成 `delivery → agent_runtime → persistence.video_runtime → video` 循环。使用可测试的惰性导出或等价安全顺序，并补直接导入回归。
 
 **Interfaces:**
 - Produces Protocol: `VideoLiveCapabilityPort`。
