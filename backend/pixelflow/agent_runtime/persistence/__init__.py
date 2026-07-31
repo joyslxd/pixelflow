@@ -43,6 +43,19 @@ from .turn_registration import (
     TurnRegistrationUnavailableError,
     make_turn_registration_store,
 )
+from .video_runtime import (
+    MemoryVideoRuntimeRepository,
+    OwnedTurnRecord,
+    SQLVideoRuntimeRepository,
+    StoredAgentInterrupt,
+    SupervisorProjectionMessage,
+    TurnExecutionClaim,
+    TurnExecutionLeaseConflictError,
+    VideoRuntimeRepository,
+    VideoRuntimeSafeSnapshot,
+    VideoTurnCommit,
+    VideoWorkflowStateConflictError,
+)
 
 __all__ = [
     "AGENT_RUNTIME_TABLES",
@@ -56,7 +69,9 @@ __all__ = [
     "MemoryAgentRuntimeRepository",
     "MemoryCompactionQueueRepository",
     "MemoryContextPayloadStore",
+    "MemoryVideoRuntimeRepository",
     "OperationRecord",
+    "OwnedTurnRecord",
     "PixelFlowAgentCompactionLockRow",
     "PixelFlowAgentConversationStateRow",
     "PixelFlowAgentContextPayloadRow",
@@ -73,9 +88,18 @@ __all__ = [
     "SQLCompactionQueueRepository",
     "SQLContextPayloadStore",
     "SQLTurnRegistrationStore",
+    "SQLVideoRuntimeRepository",
+    "StoredAgentInterrupt",
+    "SupervisorProjectionMessage",
+    "TurnExecutionClaim",
+    "TurnExecutionLeaseConflictError",
     "MemoryTurnRegistrationStore",
     "TurnRegistrationContextConflictError",
     "TurnRegistrationResult",
     "TurnRegistrationUnavailableError",
+    "VideoRuntimeRepository",
+    "VideoRuntimeSafeSnapshot",
+    "VideoTurnCommit",
+    "VideoWorkflowStateConflictError",
     "make_turn_registration_store",
 ]
