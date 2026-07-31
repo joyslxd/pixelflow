@@ -765,6 +765,11 @@ git commit -m "实现：原子领取并提交视频 Supervisor Turn" -m "为 Mem
 - Create: `backend/pixelflow/agent_runtime/supervisor/decision_service.py`
 - Modify: `backend/pixelflow/agent_runtime/supervisor/__init__.py`
 - Create: `backend/tests/test_agent_runtime_supervisor_decision_service.py`
+- Modify: `backend/pixelflow/agent_runtime/context/token_meter.py`
+- Modify: `backend/pixelflow/agent_runtime/context/__init__.py`
+- Modify: `backend/tests/test_agent_runtime_token_meter.py`
+
+审查修复补充：`ContextBudgetPolicyProvider.resolve_model_profile()` 必须抛出并公开专用的已验证模型档案异常，决策服务只捕获该类型并转换为 `SupervisorDecisionUnavailableError("model_profile_invalid")`。不得使用错误字符串、traceback 或 frame locals 猜测异常来源；其余 `ValueError` 必须保持原异常向上。
 
 **Interfaces:**
 - Produces: `SupervisorTurnEvidence`、`SupervisorDecisionResult`、`SupervisorAnswerPort`、`SupervisorDecisionService.decide()`。
