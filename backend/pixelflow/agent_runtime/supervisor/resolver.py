@@ -8,7 +8,11 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pixelflow.agent_runtime.contracts import AgentAction, AgentIntent
+from pixelflow.agent_runtime.contracts import (
+    AgentAction,
+    AgentIntent,
+    ExplicitActionSignal,
+)
 
 _QUESTION_PATTERN = re.compile(r"^\s*(?:为什么|为何|怎么|如何|是什么|请问|能否说明|解释一下)")
 _TEXT_MENTION_PATTERN = re.compile(r"@([^\s，。！？、,;；:：]+)")
@@ -123,16 +127,6 @@ class ResolverCandidate(_ResolverModel):
     message_id: str | None = Field(default=None, min_length=1)
     artifact_ref: str | None = Field(default=None, min_length=1)
     mention_ref: str | None = Field(default=None, min_length=1)
-
-
-class ExplicitActionSignal(_ResolverModel):
-    """保存按钮或人工决策控件提交的结构化动作。"""
-
-    action: AgentAction
-    workflow_id: str | None = Field(default=None, min_length=1)
-    intent: AgentIntent | None = None
-    stage: str | None = Field(default=None, min_length=1)
-    artifact_ref: str | None = Field(default=None, min_length=1)
 
 
 class DeterministicResolutionRequest(_ResolverModel):

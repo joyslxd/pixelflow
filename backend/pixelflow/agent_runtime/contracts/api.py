@@ -7,6 +7,7 @@ from pydantic import Field, JsonValue
 
 from .base import ContractModel
 from .enums import OrchestrationMode
+from .live import ExplicitActionSignal
 
 
 class ConversationOrchestration(ContractModel):
@@ -25,6 +26,7 @@ class TurnStartRequest(ContractModel):
     reply_to_message_id: str | None = Field(default=None, min_length=1)
     artifact_refs: list[str] = Field(default_factory=list)
     expected_context_version: int = Field(ge=0)
+    explicit_action: ExplicitActionSignal | None = None
 
 
 class OperationRequest(ContractModel):

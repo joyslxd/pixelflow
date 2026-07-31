@@ -21,6 +21,8 @@ const {
   WORKFLOW_STATUS_VALUES,
   isAgentEventEnvelope,
   parseAgentEventEnvelope,
+  parseInterruptResponseRequest,
+  parseTurnStartRequest,
 } = await import(moduleUrl);
 
 const validEvent = contractFixture.event;
@@ -42,6 +44,8 @@ test("TypeScript 合同直接读取 Python 唯一规范 fixture", () => {
     "context_envelope",
     "event",
     "turn_start_request",
+    "interrupt_response_request",
+    "interrupt_projection",
     "operation_request",
     "context_request",
   ], "fixture 根字段漂移");
@@ -164,6 +168,36 @@ test("TypeScript 镜像覆盖 fixture 中全部冻结 DTO 字段", () => {
       "reply_to_message_id",
       "artifact_refs",
       "expected_context_version",
+      "explicit_action",
+    ]],
+    [contractFixture.turn_start_request.explicit_action, [
+      "action",
+      "intent",
+      "workflow_id",
+      "stage",
+      "artifact_ref",
+      "patch",
+    ]],
+    [contractFixture.interrupt_response_request, [
+      "client_response_id",
+      "value",
+    ]],
+    [contractFixture.interrupt_response_request.value, [
+      "content",
+      "materials",
+      "reply_to_message_id",
+      "artifact_refs",
+      "explicit_action",
+    ]],
+    [contractFixture.interrupt_projection, [
+      "interrupt_id",
+      "conversation_id",
+      "workflow_id",
+      "turn_id",
+      "kind",
+      "reason_code",
+      "payload",
+      "opened_at",
     ]],
     [contractFixture.operation_request, [
       "workflow_id",
@@ -273,5 +307,44 @@ test("解析非法 wire event 时返回稳定的公开错误", () => {
   assert.throws(
     () => parseAgentEventEnvelope({ ...validEvent, cursor: "" }),
     /Agent 事件信封不符合 contracts-v1 合同/,
+  );
+});
+
+test("Turn 与 interrupt response 解析器接受唯一 fixture", () => {
+  assert.deepEqual(
+    parseTurnStartRequest(contractFixture.turn_start_request),
+    contractFixture.turn_start_request,
+  );
+  assert.deepEqual(
+    parseInterruptResponseRequest(contractFixture.interrupt_response_request),
+    contractFixture.interrupt_response_request,
+  );
+});
+
+test("live 请求解析器拒绝额外键、空目标、非 JSON patch 和非 UUID 响应 ID", () => {
+  const validTurn = contractFixture.turn_start_request;
+  const validResponse = contractFixture.interrupt_response_request;
+
+  assert.throws(
+    () => parseTurnStartRequest({ ...validTurn, unexpected: true }),
+    /Turn 请求不符合 contracts-v1 合同/,
+  );
+  assert.throws(
+    () => parseTurnStartRequest({
+      ...validTurn,
+      explicit_action: { ...validTurn.explicit_action, workflow_id: "" },
+    }),
+    /Turn 请求不符合 contracts-v1 合同/,
+  );
+  assert.throws(
+    () => parseTurnStartRequest({
+      ...validTurn,
+      explicit_action: { ...validTurn.explicit_action, patch: { invalid: undefined } },
+    }),
+    /Turn 请求不符合 contracts-v1 合同/,
+  );
+  assert.throws(
+    () => parseInterruptResponseRequest({ ...validResponse, client_response_id: "not-a-uuid" }),
+    /interrupt response 不符合 contracts-v1 合同/,
   );
 });

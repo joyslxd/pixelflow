@@ -15,6 +15,8 @@ const workspaceSource = await readFile(new URL("../src/pages/WorkspacePage.tsx",
 
 test("目标定位 fixture 的 reply 与 Artifact 引用完整进入 Turn", () => {
   const canonical = fixture.turn_start_request;
+  const m12TurnRequest = { ...canonical };
+  delete m12TurnRequest.explicit_action;
   const submission = buildSupervisorSubmission({
     conversationId: "conv_001",
     clientInputId: canonical.client_input_id,
@@ -26,7 +28,7 @@ test("目标定位 fixture 的 reply 与 Artifact 引用完整进入 Turn", () =
 
   assert.deepEqual(submission, {
     kind: "turn",
-    request: canonical,
+    request: m12TurnRequest,
   });
 });
 

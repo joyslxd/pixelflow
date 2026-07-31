@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +30,7 @@ from .contracts import (
     TurnStartRequest,
     TurnStatus,
 )
+from .identity import conversation_message_id, turn_id
 from .persistence import (
     CompactionQueueRepository,
     ConversationCompactionLease,
@@ -194,18 +195,6 @@ def _runtime_enabled(context: dict[str, Any]) -> bool:
     }
 
 
-def _message_id(conversation_id: str, client_input_id: UUID) -> str:
-    key = f"pixelflow-conversation-message:{conversation_id}:{client_input_id}"
-    return uuid5(NAMESPACE_URL, key).hex
-
-
-def _turn_id(conversation_id: str, client_input_id: UUID) -> str:
-    """按同一幂等键生成跨进程稳定的 Turn ID。"""
-
-    key = f"pixelflow-agent-turn:{conversation_id}:{client_input_id}"
-    return f"turn_{uuid5(NAMESPACE_URL, key).hex}"
-
-
 def _turn_status_for_response(status: TurnStatus) -> Literal["accepted", "queued"]:
     return "queued" if status is TurnStatus.QUEUED else "accepted"
 
@@ -339,7 +328,7 @@ class AgentRuntimeService:
                 user_id=owner,
                 conversation_id=conversation_id,
                 message=PixelFlowConversationMessageRecord(
-                    message_id=_message_id(
+                    message_id=conversation_message_id(
                         conversation_id,
                         body.client_input_id,
                     ),
@@ -352,11 +341,16 @@ class AgentRuntimeService:
                         "materials": body.materials,
                         "reply_to_message_id": body.reply_to_message_id,
                         "artifact_refs": body.artifact_refs,
+                        "explicit_action": (
+                            body.explicit_action.model_dump(mode="json")
+                            if body.explicit_action is not None
+                            else None
+                        ),
                     },
                     created_at=occurred_at.isoformat(),
                 ),
                 turn=TurnRecord(
-                    turn_id=_turn_id(
+                    turn_id=turn_id(
                         conversation_id,
                         body.client_input_id,
                     ),
@@ -706,7 +700,7 @@ class AgentRuntimeService:
                 user_id=user_id,
                 conversation_id=conversation_id,
                 run_id=pending_turn.turn_id,
-                current_message_id=_message_id(
+                current_message_id=conversation_message_id(
                     conversation_id,
                     pending_turn.client_input_id,
                 ),

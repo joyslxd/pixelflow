@@ -99,12 +99,14 @@ function checkCanonicalFixtureTypes() {
   const generatedTypeTest = `
 import type {
   ActionDecision,
+  AgentInterruptProjection,
   AgentEventEnvelope,
   ContextEnvelope,
   ContextRequest,
   ContextSummary,
   ConversationOrchestration,
   ExternalJobRef,
+  InterruptResponseRequest,
   OperationRequest,
   TurnRecord,
   TurnStartRequest,
@@ -122,6 +124,8 @@ type CanonicalFixture = {
   context_envelope: ContextEnvelope;
   event: AgentEventEnvelope;
   turn_start_request: TurnStartRequest;
+  interrupt_response_request: InterruptResponseRequest;
+  interrupt_projection: AgentInterruptProjection;
   operation_request: OperationRequest;
   context_request: ContextRequest;
 };

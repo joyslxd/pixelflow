@@ -7,6 +7,9 @@ import type {
   ContextSummary,
   ConversationOrchestration,
   ExternalJobRef,
+  ExplicitActionSignal,
+  InterruptResponseRequest,
+  AgentInterruptProjection,
   OperationRequest,
   TurnRecord,
   TurnStartRequest,
@@ -128,13 +131,43 @@ const event = {
 } satisfies AgentEventEnvelope;
 
 const request = {
-  client_input_id: "client-001",
-  content: "继续",
+  client_input_id: "11111111-1111-4111-8111-111111111111",
+  content: "确认这个方案",
   materials: [],
-  reply_to_message_id: null,
-  artifact_refs: [],
-  expected_context_version: 12,
+  reply_to_message_id: "message-plan-v1",
+  artifact_refs: ["artifact:video-plan:wf-1:v1"],
+  expected_context_version: 3,
+  explicit_action: {
+    action: "continue_workflow",
+    intent: "video",
+    workflow_id: "wf-1",
+    stage: "plan_review",
+    artifact_ref: "artifact:video-plan:wf-1:v1",
+    patch: { approved: true },
+  } satisfies ExplicitActionSignal,
 } satisfies TurnStartRequest;
+
+const interruptResponse = {
+  client_response_id: "22222222-2222-4222-8222-222222222222",
+  value: {
+    content: "确认这个方案",
+    materials: [],
+    reply_to_message_id: "message-plan-v1",
+    artifact_refs: ["artifact:video-plan:wf-1:v1"],
+    explicit_action: request.explicit_action,
+  },
+} satisfies InterruptResponseRequest;
+
+const interruptProjection = {
+  interrupt_id: "interrupt-plan-review-1",
+  conversation_id: "conv_001",
+  workflow_id: "wf-1",
+  turn_id: "turn_001",
+  kind: "plan_review",
+  reason_code: "plan_review_required",
+  payload: { artifact_ref: "artifact:video-plan:wf-1:v1" },
+  opened_at: "2026-07-22T12:00:01Z",
+} satisfies AgentInterruptProjection;
 
 const operationRequest = {
   workflow_id: "wf_001",
@@ -154,4 +187,15 @@ const contextRequest = {
   expected_context_version: 12,
 } satisfies ContextRequest;
 
-void [orchestration, createdExternalJob, turn, contextEnvelope, event, request, operationRequest, contextRequest];
+void [
+  orchestration,
+  createdExternalJob,
+  turn,
+  contextEnvelope,
+  event,
+  request,
+  interruptResponse,
+  interruptProjection,
+  operationRequest,
+  contextRequest,
+];

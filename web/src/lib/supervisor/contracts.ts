@@ -33,6 +33,15 @@ export const INTENT_VALUES = ["image", "video", "ppt", "video_analysis", "genera
 
 export type AgentIntent = (typeof INTENT_VALUES)[number];
 
+export type ExplicitActionSignal = Readonly<{
+  action: AgentAction;
+  intent: "video" | null;
+  workflow_id: string | null;
+  stage: string | null;
+  artifact_ref: string | null;
+  patch: Readonly<Record<string, JsonValue>>;
+}>;
+
 export const WORKFLOW_KIND_VALUES = ["image", "video", "ppt", "video_analysis"] as const;
 
 export type WorkflowKind = (typeof WORKFLOW_KIND_VALUES)[number];
@@ -204,7 +213,30 @@ export interface TurnStartRequest {
   reply_to_message_id: string | null;
   artifact_refs: string[];
   expected_context_version: number;
+  explicit_action?: ExplicitActionSignal | null;
 }
+
+export type InterruptResponseRequest = Readonly<{
+  client_response_id: string;
+  value: Readonly<{
+    content: string;
+    materials: readonly JsonObject[];
+    reply_to_message_id: string | null;
+    artifact_refs: readonly string[];
+    explicit_action: ExplicitActionSignal | null;
+  }>;
+}>;
+
+export type AgentInterruptProjection = Readonly<{
+  interrupt_id: string;
+  conversation_id: string;
+  workflow_id: string | null;
+  turn_id: string;
+  kind: string;
+  reason_code: string;
+  payload: Readonly<Record<string, JsonValue>>;
+  opened_at: string;
+}>;
 
 export interface OperationRequest {
   workflow_id: string;
@@ -236,6 +268,32 @@ const AGENT_EVENT_KEYS = new Set([
   "type",
   "payload",
 ]);
+const TURN_START_KEYS = new Set([
+  "client_input_id",
+  "content",
+  "materials",
+  "reply_to_message_id",
+  "artifact_refs",
+  "expected_context_version",
+  "explicit_action",
+]);
+const INTERRUPT_RESPONSE_KEYS = new Set(["client_response_id", "value"]);
+const INTERRUPT_RESPONSE_VALUE_KEYS = new Set([
+  "content",
+  "materials",
+  "reply_to_message_id",
+  "artifact_refs",
+  "explicit_action",
+]);
+const EXPLICIT_ACTION_KEYS = new Set([
+  "action",
+  "intent",
+  "workflow_id",
+  "stage",
+  "artifact_ref",
+  "patch",
+]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -266,6 +324,94 @@ function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonV
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value) && isJsonValue(value, new WeakSet());
+}
+
+function hasOnlyKeys(value: JsonObject, keys: ReadonlySet<string>): boolean {
+  return Object.keys(value).length === keys.size
+    && Object.keys(value).every((key) => keys.has(key));
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function isOptionalNonEmptyString(value: unknown): value is string | null {
+  return value === null || isNonEmptyString(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isJsonObjectArray(value: unknown): value is JsonObject[] {
+  return Array.isArray(value) && value.every((item) => isJsonObject(item));
+}
+
+function isExplicitActionSignal(value: unknown): value is ExplicitActionSignal {
+  if (!isJsonObject(value) || !hasOnlyKeys(value, EXPLICIT_ACTION_KEYS)) {
+    return false;
+  }
+  return (ACTION_VALUES as readonly unknown[]).includes(value.action)
+    && (value.intent === "video" || value.intent === null)
+    && isOptionalNonEmptyString(value.workflow_id)
+    && isOptionalNonEmptyString(value.stage)
+    && isOptionalNonEmptyString(value.artifact_ref)
+    && isJsonObject(value.patch);
+}
+
+export function isTurnStartRequest(value: unknown): value is TurnStartRequest {
+  if (!isJsonObject(value)) {
+    return false;
+  }
+  const keys = value.explicit_action === undefined
+    ? new Set([...TURN_START_KEYS].filter((key) => key !== "explicit_action"))
+    : TURN_START_KEYS;
+  return hasOnlyKeys(value, keys)
+    && isUuid(value.client_input_id)
+    && isNonEmptyString(value.content)
+    && isJsonObjectArray(value.materials)
+    && isOptionalNonEmptyString(value.reply_to_message_id)
+    && isStringArray(value.artifact_refs)
+    && Number.isSafeInteger(value.expected_context_version)
+    && typeof value.expected_context_version === "number"
+    && value.expected_context_version >= 0
+    && (
+      value.explicit_action === undefined
+      || value.explicit_action === null
+      || isExplicitActionSignal(value.explicit_action)
+    );
+}
+
+export function parseTurnStartRequest(value: unknown): TurnStartRequest {
+  if (!isTurnStartRequest(value)) {
+    throw new TypeError("Turn 请求不符合 contracts-v1 合同");
+  }
+  return value;
+}
+
+export function isInterruptResponseRequest(value: unknown): value is InterruptResponseRequest {
+  if (!isJsonObject(value) || !hasOnlyKeys(value, INTERRUPT_RESPONSE_KEYS)) {
+    return false;
+  }
+  const responseValue = value.value;
+  return isUuid(value.client_response_id)
+    && isJsonObject(responseValue)
+    && hasOnlyKeys(responseValue, INTERRUPT_RESPONSE_VALUE_KEYS)
+    && isNonEmptyString(responseValue.content)
+    && isJsonObjectArray(responseValue.materials)
+    && isOptionalNonEmptyString(responseValue.reply_to_message_id)
+    && isStringArray(responseValue.artifact_refs)
+    && (
+      responseValue.explicit_action === null
+      || isExplicitActionSignal(responseValue.explicit_action)
+    );
+}
+
+export function parseInterruptResponseRequest(value: unknown): InterruptResponseRequest {
+  if (!isInterruptResponseRequest(value)) {
+    throw new TypeError("interrupt response 不符合 contracts-v1 合同");
+  }
+  return value;
 }
 
 function isAgentEventType(value: unknown): value is AgentEventType {
