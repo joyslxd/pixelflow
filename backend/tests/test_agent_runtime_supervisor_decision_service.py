@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
+from pixelflow.agent_runtime.context import (
+    ContextAssembler,
+    ContextAssemblySnapshot,
+)
 from pixelflow.agent_runtime.contracts import (
     AgentAction,
     AgentIntent,
@@ -115,7 +120,59 @@ class FixedContextAssembler:
 
 class InvalidProfileContextAssembler:
     async def assemble(self, request: object) -> ContextEnvelope:
-        raise ValueError("模型缺少当前有效且已验证的 context_profile")
+        raise ValueError(
+            "模型 deepseek-v4-pro 缺少当前有效且已验证的 context_profile"
+        )
+
+
+class FailingContextAssembler:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def assemble(self, request: object) -> ContextEnvelope:
+        raise self._error
+
+
+class MutatingContextAssembler:
+    def __init__(self, evidence: SupervisorTurnEvidence) -> None:
+        self._evidence = evidence
+        self.request: object | None = None
+
+    async def assemble(self, request: object) -> ContextEnvelope:
+        self.request = request
+        workflow = self._evidence.workflows[0]
+        workflow.status = WorkflowStatus.CANCELLED
+        workflow.current_stage = "tampered_stage"
+        workflow.latest_artifact_refs[0] = "artifact:tampered"
+        self._evidence.visible_messages[0]["artifact_ref"] = "artifact:tampered"
+        self._evidence.materials[0]["metadata"]["source"] = "tampered"
+        assert self._evidence.explicit_action is not None
+        self._evidence.explicit_action.patch["approved"] = False
+        object.__setattr__(
+            self._evidence,
+            "authoritative_context_version",
+            99,
+        )
+        return await FixedContextAssembler().assemble(request)
+
+
+class MutatingDecisionModel:
+    def __init__(self, evidence: SupervisorTurnEvidence) -> None:
+        self._evidence = evidence
+        self.calls = 0
+
+    async def ainvoke(
+        self,
+        messages: Sequence[tuple[str, str]],
+    ) -> object:
+        self.calls += 1
+        workflow = self._evidence.workflows[0]
+        workflow.status = WorkflowStatus.CANCELLED
+        workflow.current_stage = "tampered_stage"
+        workflow.latest_artifact_refs[0] = "artifact:tampered"
+        return await FixedDecisionModel(
+            action=AgentAction.CONTINUE_WORKFLOW,
+        ).ainvoke(messages)
 
 
 class FixedAnswerPort:
@@ -135,10 +192,11 @@ def _workflow(
     workflow_id: str = "wf-1",
     *,
     status: WorkflowStatus = WorkflowStatus.AWAITING_USER,
+    conversation_id: str = "conv-1",
 ) -> WorkflowRecord:
     return WorkflowRecord(
         workflow_id=workflow_id,
-        conversation_id="conv-1",
+        conversation_id=conversation_id,
         kind=WorkflowKind.VIDEO,
         status=status,
         current_stage="plan_review",
@@ -158,6 +216,10 @@ def _evidence(
     explicit_action: ExplicitActionSignal | None = None,
     expected_context_version: int = 5,
     authoritative_context_version: int = 5,
+    visible_messages: tuple[dict[str, object], ...] = (),
+    materials: tuple[dict[str, object], ...] = (),
+    reply_to_message_id: str | None = None,
+    artifact_refs: tuple[str, ...] = (),
 ) -> SupervisorTurnEvidence:
     return SupervisorTurnEvidence(
         user_id="user-1",
@@ -171,13 +233,26 @@ def _evidence(
             created_at=NOW,
         ),
         content=content,
-        visible_messages=(),
+        visible_messages=visible_messages,
         workflows=workflows or (_workflow(),),
         active_workflow_id=active_workflow_id,
+        materials=materials,
+        reply_to_message_id=reply_to_message_id,
+        artifact_refs=artifact_refs,
         explicit_action=explicit_action,
         expected_context_version=expected_context_version,
         authoritative_context_version=authoritative_context_version,
     )
+
+
+def _unchecked_evidence(**updates: object) -> SupervisorTurnEvidence:
+    valid = _evidence()
+    payload = {
+        field_name: getattr(valid, field_name)
+        for field_name in SupervisorTurnEvidence.model_fields
+    }
+    payload.update(updates)
+    return SupervisorTurnEvidence.model_construct(**payload)
 
 
 def _service(
@@ -335,3 +410,291 @@ async def test_invalid_model_profile_raises_stable_unavailable_error() -> None:
 
     assert exc_info.value.reason_code == "model_profile_invalid"
     assert str(exc_info.value) == "model_profile_invalid"
+
+
+@pytest.mark.asyncio
+async def test_regular_context_value_error_is_not_mislabeled_as_profile_error() -> None:
+    error = ValueError("token estimator contract invalid")
+
+    with pytest.raises(ValueError) as exc_info:
+        await _service(
+            CountingDecisionModel(),
+            context_assembler=FailingContextAssembler(error),
+        ).decide(_evidence())
+
+    assert exc_info.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "turn": TurnRecord(
+                turn_id="turn-foreign",
+                conversation_id="conv-foreign",
+                client_input_id=UUID(
+                    "00000000-0000-0000-0000-000000000002"
+                ),
+                status=TurnStatus.PROCESSING,
+                expected_context_version=5,
+                created_at=NOW,
+            )
+        },
+        {"workflows": (_workflow(conversation_id="conv-foreign"),)},
+        {"workflows": (_workflow(), _workflow())},
+        {"active_workflow_id": "wf-missing"},
+        {
+            "visible_messages": (
+                {
+                    "message_id": "msg-1",
+                    "user_id": "user-foreign",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                },
+            )
+        },
+        {
+            "visible_messages": (
+                {
+                    "message_id": "msg-1",
+                    "user_id": "user-1",
+                    "conversation_id": "conv-foreign",
+                    "workflow_id": "wf-1",
+                },
+            )
+        },
+        {
+            "visible_messages": (
+                {
+                    "message_id": "msg-1",
+                    "workflow_id": "wf-missing",
+                },
+            )
+        },
+        {
+            "visible_messages": (
+                {"message_id": "msg-1", "workflow_id": "wf-1"},
+                {"message_id": "msg-1", "workflow_id": "wf-1"},
+            )
+        },
+        {
+            "visible_messages": (
+                {"message_id": "msg-1", "workflow_id": "wf-1"},
+            ),
+            "reply_to_message_id": "msg-missing",
+        },
+        {"artifact_refs": ("artifact:missing",)},
+        {"artifact_refs": ("artifact:wf-1:plan:v2",) * 2},
+        {
+            "turn": TurnRecord(
+                turn_id="turn-target-missing",
+                conversation_id="conv-1",
+                client_input_id=UUID(
+                    "00000000-0000-0000-0000-000000000003"
+                ),
+                status=TurnStatus.PROCESSING,
+                target_workflow_id="wf-missing",
+                expected_context_version=5,
+                created_at=NOW,
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-foreign",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                },
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-1",
+                    "conversation_id": "conv-foreign",
+                    "workflow_id": "wf-1",
+                },
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-1",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-missing",
+                },
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-1",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                    "message_id": "msg-missing",
+                },
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-1",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                    "artifact_ref": "artifact:missing",
+                },
+            )
+        },
+        {
+            "materials": (
+                {
+                    "user_id": "user-1",
+                    "conversation_id": "conv-1",
+                    "workflow_id": "wf-1",
+                    "ref": "artifact:missing",
+                },
+            )
+        },
+        {
+            "explicit_action": ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                workflow_id="wf-missing",
+            )
+        },
+        {
+            "explicit_action": ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                workflow_id="wf-1",
+                artifact_ref="artifact:missing",
+            )
+        },
+    ],
+)
+async def test_invalid_evidence_is_rejected_before_classifier(
+    updates: dict[str, object],
+) -> None:
+    model = CountingDecisionModel()
+
+    with pytest.raises(ValidationError):
+        await _service(model).decide(_unchecked_evidence(**updates))
+
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_real_context_assembler_rejects_cross_user_owner_before_model() -> None:
+    class ForeignOwnerSource:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def load_context_snapshot(
+            self,
+            *,
+            user_id: str,
+            conversation_id: str,
+        ) -> ContextAssemblySnapshot:
+            self.calls.append((user_id, conversation_id))
+            return ContextAssemblySnapshot(
+                user_id="user-foreign",
+                conversation_id=conversation_id,
+                context_version=5,
+            )
+
+    source = ForeignOwnerSource()
+    assembler = ContextAssembler(
+        source=source,
+        model_name="deepseek-v4-pro",
+        model_profiles={},
+        budget_node="supervisor",
+    )
+    model = CountingDecisionModel()
+
+    with pytest.raises(KeyError):
+        await _service(
+            model,
+            context_assembler=assembler,
+        ).decide(_evidence())
+
+    assert source.calls == [("user-1", "conv-1")]
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_context_await_mutation_cannot_change_authoritative_snapshot() -> None:
+    evidence = _evidence(
+        visible_messages=(
+            {
+                "message_id": "msg-1",
+                "user_id": "user-1",
+                "conversation_id": "conv-1",
+                "workflow_id": "wf-1",
+                "stage": "plan_review",
+                "artifact_ref": "artifact:wf-1:plan:v2",
+            },
+        ),
+        materials=(
+            {
+                "user_id": "user-1",
+                "conversation_id": "conv-1",
+                "workflow_id": "wf-1",
+                "artifact_ref": "artifact:wf-1:plan:v2",
+                "metadata": {"source": "original"},
+            },
+        ),
+        artifact_refs=("artifact:wf-1:plan:v2",),
+        explicit_action=ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id="wf-1",
+            stage="plan_review",
+            artifact_ref="artifact:wf-1:plan:v2",
+            patch={"approved": True},
+        ),
+    )
+    assembler = MutatingContextAssembler(evidence)
+
+    result = await _service(
+        CountingDecisionModel(),
+        context_assembler=assembler,
+    ).decide(evidence)
+
+    assert evidence.workflows[0].status is WorkflowStatus.CANCELLED
+    assert evidence.explicit_action.patch == {"approved": False}
+    assert evidence.materials[0]["metadata"] == {"source": "tampered"}
+    assert result.decision.patch == {"approved": True}
+    assert result.validation_request.current_context_version == 5
+    snapshot = result.validation_request.classification_request.candidates[0]
+    current = result.validation_request.current_candidates[0]
+    assert snapshot.status is WorkflowStatus.AWAITING_USER
+    assert current.status is WorkflowStatus.AWAITING_USER
+    assert snapshot.current_stage == "plan_review"
+    assert current.current_stage == "plan_review"
+    assert snapshot.targets[0].target_artifact_ref == "artifact:wf-1:plan:v2"
+    assert current.targets[0].target_artifact_ref == "artifact:wf-1:plan:v2"
+    assert getattr(assembler.request, "user_id") == "user-1"
+    assert getattr(assembler.request, "conversation_id") == "conv-1"
+    assert getattr(assembler.request, "artifact_refs") == [
+        "artifact:wf-1:plan:v2"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_classifier_await_mutation_cannot_change_current_candidates() -> None:
+    evidence = _evidence(content="执行这一步")
+    model = MutatingDecisionModel(evidence)
+
+    result = await _service(model).decide(evidence)
+
+    assert evidence.workflows[0].status is WorkflowStatus.CANCELLED
+    classification_candidate = (
+        result.validation_request.classification_request.candidates[0]
+    )
+    current_candidate = result.validation_request.current_candidates[0]
+    assert classification_candidate is not current_candidate
+    assert classification_candidate.status is WorkflowStatus.AWAITING_USER
+    assert current_candidate.status is WorkflowStatus.AWAITING_USER
+    assert classification_candidate.current_stage == "plan_review"
+    assert current_candidate.current_stage == "plan_review"
+    assert result.decision.action is AgentAction.CONTINUE_WORKFLOW
+    assert model.calls == 1

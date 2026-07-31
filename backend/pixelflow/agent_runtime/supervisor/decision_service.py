@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, Self
 
 from langchain_core.messages import AIMessage
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from pixelflow.agent_runtime.context import ContextAssembler
 from pixelflow.agent_runtime.contracts import (
@@ -49,6 +49,8 @@ _NON_MUTATING_ACTIONS = {
     AgentAction.ANSWER_ONLY,
     AgentAction.CLARIFY,
 }
+_MODEL_PROFILE_ERROR_PREFIX = "模型 "
+_MODEL_PROFILE_ERROR_SUFFIX = " 缺少当前有效且已验证的 context_profile"
 _WORKFLOW_ACTIONS_BY_STATUS: dict[
     WorkflowStatus,
     tuple[AgentAction, ...],
@@ -115,6 +117,94 @@ class SupervisorTurnEvidence(ContractModel):
     expected_context_version: int = Field(ge=0)
     authoritative_context_version: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def require_authoritative_scope(self) -> Self:
+        """拒绝跨会话、重复或悬空的权威证据引用。"""
+
+        if self.turn.conversation_id != self.conversation_id:
+            raise ValueError("Turn 会话归属不一致")
+        if self.turn.expected_context_version != self.expected_context_version:
+            raise ValueError("Turn 上下文版本与决策证据不一致")
+
+        workflow_ids = tuple(workflow.workflow_id for workflow in self.workflows)
+        if len(workflow_ids) != len(set(workflow_ids)):
+            raise ValueError("workflow_id 不能重复")
+        known_workflow_ids = set(workflow_ids)
+        if any(
+            workflow.conversation_id != self.conversation_id
+            for workflow in self.workflows
+        ):
+            raise ValueError("Workflow 会话归属不一致")
+        if (
+            self.active_workflow_id is not None
+            and self.active_workflow_id not in known_workflow_ids
+        ):
+            raise ValueError("active_workflow_id 不属于当前证据")
+        if (
+            self.turn.target_workflow_id is not None
+            and self.turn.target_workflow_id not in known_workflow_ids
+        ):
+            raise ValueError("Turn 目标 Workflow 不属于当前证据")
+
+        artifact_owners = _workflow_artifact_owners(self.workflows)
+        message_ids: list[str] = []
+        for message in self.visible_messages:
+            _validate_record_scope(
+                message,
+                user_id=self.user_id,
+                conversation_id=self.conversation_id,
+                known_workflow_ids=known_workflow_ids,
+                record_kind="消息",
+            )
+            message_id = _message_id(message)
+            if message_id is not None:
+                message_ids.append(message_id)
+            workflow_id = _optional_string(message.get("workflow_id"))
+            for artifact_ref in _message_artifact_refs(message):
+                owner = artifact_owners.get(artifact_ref)
+                if (
+                    owner is not None
+                    and workflow_id is not None
+                    and owner != workflow_id
+                ):
+                    raise ValueError("消息 Artifact 与 Workflow 归属不一致")
+                if workflow_id is not None:
+                    artifact_owners[artifact_ref] = workflow_id
+                else:
+                    artifact_owners.setdefault(artifact_ref, None)
+        if len(message_ids) != len(set(message_ids)):
+            raise ValueError("message_id 不能重复")
+        known_message_ids = set(message_ids)
+        if (
+            self.reply_to_message_id is not None
+            and self.reply_to_message_id not in known_message_ids
+        ):
+            raise ValueError("reply_to_message_id 不属于可见消息")
+        if len(self.artifact_refs) != len(set(self.artifact_refs)):
+            raise ValueError("artifact_refs 不能重复")
+        if not set(self.artifact_refs).issubset(artifact_owners):
+            raise ValueError("artifact_refs 包含悬空引用")
+
+        for material in self.materials:
+            _validate_record_scope(
+                material,
+                user_id=self.user_id,
+                conversation_id=self.conversation_id,
+                known_workflow_ids=known_workflow_ids,
+                record_kind="素材",
+            )
+            _validate_material_references(
+                material,
+                known_message_ids=known_message_ids,
+                artifact_owners=artifact_owners,
+            )
+        _validate_explicit_action_references(
+            self.explicit_action,
+            known_workflow_ids=known_workflow_ids,
+            artifact_owners=artifact_owners,
+        )
+        return self
+
     def to_resolver_input(self) -> DeterministicResolutionRequest:
         """只从服务端权威投影构造规则解析输入。"""
 
@@ -176,6 +266,7 @@ class SupervisorDecisionService:
     ) -> SupervisorDecisionResult:
         """组装已验证上下文，并在任何派发前完成最终校验。"""
 
+        evidence = _authoritative_evidence_snapshot(evidence)
         resolution = self._resolver.resolve(evidence.to_resolver_input())
         context = await self._assemble_context(evidence, resolution)
         classification_request = ActionClassificationRequest(
@@ -256,10 +347,12 @@ class SupervisorDecisionService:
                     expected_context_version=evidence.expected_context_version,
                 )
             )
-        except ValueError:
-            raise SupervisorDecisionUnavailableError(
-                "model_profile_invalid",
-            ) from None
+        except ValueError as exc:
+            if _is_invalid_model_profile_error(exc):
+                raise SupervisorDecisionUnavailableError(
+                    "model_profile_invalid",
+                ) from None
+            raise
 
     def _decision_from_explicit(
         self,
@@ -400,6 +493,33 @@ def _idempotency_key(evidence: SupervisorTurnEvidence) -> str:
     return f"decision:{evidence.turn.turn_id}"
 
 
+def _authoritative_evidence_snapshot(
+    evidence: SupervisorTurnEvidence,
+) -> SupervisorTurnEvidence:
+    """在第一次 await 前重校验并深拷贝全部调用方可变输入。"""
+
+    return SupervisorTurnEvidence.model_validate(
+        evidence.model_dump(mode="python"),
+    ).model_copy(deep=True)
+
+
+def _is_invalid_model_profile_error(error: ValueError) -> bool:
+    """只识别 ContextBudgetPolicyProvider 当前冻结的严格档案错误。"""
+
+    if len(error.args) != 1 or not isinstance(error.args[0], str):
+        return False
+    message = error.args[0]
+    model_name = message.removeprefix(_MODEL_PROFILE_ERROR_PREFIX).removesuffix(
+        _MODEL_PROFILE_ERROR_SUFFIX,
+    )
+    return (
+        message.startswith(_MODEL_PROFILE_ERROR_PREFIX)
+        and message.endswith(_MODEL_PROFILE_ERROR_SUFFIX)
+        and bool(model_name.strip())
+        and "\n" not in model_name
+    )
+
+
 def _intent(workflow: WorkflowRecord) -> AgentIntent:
     return AgentIntent(workflow.kind.value)
 
@@ -518,6 +638,9 @@ def _message_artifact_refs(
     direct = _optional_string(message.get("artifact_ref"))
     if direct is not None:
         refs.append(direct)
+    generic_ref = _optional_string(message.get("ref"))
+    if generic_ref is not None:
+        refs.append(generic_ref)
     raw_refs = message.get("artifact_refs")
     if isinstance(raw_refs, list):
         refs.extend(
@@ -526,6 +649,102 @@ def _message_artifact_refs(
             if isinstance(item, str) and item.strip()
         )
     return tuple(dict.fromkeys(refs))
+
+
+def _workflow_artifact_owners(
+    workflows: tuple[WorkflowRecord, ...],
+) -> dict[str, str | None]:
+    owners: dict[str, str | None] = {}
+    for workflow in workflows:
+        refs = workflow.latest_artifact_refs
+        if len(refs) != len(set(refs)):
+            raise ValueError("Workflow Artifact 引用不能重复")
+        for artifact_ref in refs:
+            owner = owners.get(artifact_ref)
+            if owner is not None and owner != workflow.workflow_id:
+                raise ValueError("Artifact 不能属于多个 Workflow")
+            owners[artifact_ref] = workflow.workflow_id
+    return owners
+
+
+def _validate_record_scope(
+    record: dict[str, JsonValue],
+    *,
+    user_id: str,
+    conversation_id: str,
+    known_workflow_ids: set[str],
+    record_kind: str,
+) -> None:
+    if "user_id" in record and record.get("user_id") != user_id:
+        raise ValueError(f"{record_kind}用户归属不一致")
+    if (
+        "conversation_id" in record
+        and record.get("conversation_id") != conversation_id
+    ):
+        raise ValueError(f"{record_kind}会话归属不一致")
+    if "workflow_id" not in record:
+        return
+    workflow_id = _optional_string(record.get("workflow_id"))
+    if workflow_id is None or workflow_id not in known_workflow_ids:
+        raise ValueError(f"{record_kind} Workflow 引用不属于当前证据")
+
+
+def _message_id(message: dict[str, JsonValue]) -> str | None:
+    primary = _optional_string(message.get("message_id"))
+    alias = _optional_string(message.get("id"))
+    if "message_id" in message and primary is None:
+        raise ValueError("message_id 必须是非空字符串")
+    if "id" in message and alias is None:
+        raise ValueError("消息 id 必须是非空字符串")
+    if primary is not None and alias is not None and primary != alias:
+        raise ValueError("消息 ID 字段不一致")
+    return primary or alias
+
+
+def _validate_material_references(
+    material: dict[str, JsonValue],
+    *,
+    known_message_ids: set[str],
+    artifact_owners: dict[str, str | None],
+) -> None:
+    for key in ("message_id", "reply_to_message_id"):
+        if key not in material:
+            continue
+        message_id = _optional_string(material.get(key))
+        if message_id is None or message_id not in known_message_ids:
+            raise ValueError("素材消息引用不属于可见消息")
+    workflow_id = _optional_string(material.get("workflow_id"))
+    for artifact_ref in _message_artifact_refs(material):
+        owner = artifact_owners.get(artifact_ref)
+        if artifact_ref not in artifact_owners:
+            raise ValueError("素材 Artifact 引用不属于当前证据")
+        if workflow_id is not None and owner not in {None, workflow_id}:
+            raise ValueError("素材 Artifact 与 Workflow 归属不一致")
+
+
+def _validate_explicit_action_references(
+    signal: ExplicitActionSignal | None,
+    *,
+    known_workflow_ids: set[str],
+    artifact_owners: dict[str, str | None],
+) -> None:
+    if signal is None:
+        return
+    if (
+        signal.workflow_id is not None
+        and signal.workflow_id not in known_workflow_ids
+    ):
+        raise ValueError("显式动作 Workflow 引用不属于当前证据")
+    if (
+        signal.artifact_ref is not None
+        and signal.artifact_ref not in artifact_owners
+    ):
+        raise ValueError("显式动作 Artifact 引用不属于当前证据")
+    if signal.workflow_id is None or signal.artifact_ref is None:
+        return
+    owner = artifact_owners.get(signal.artifact_ref)
+    if owner not in {None, signal.workflow_id}:
+        raise ValueError("显式动作 Artifact 与 Workflow 归属不一致")
 
 
 def _optional_string(value: JsonValue | None) -> str | None:
