@@ -13,7 +13,10 @@ from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import ORMExecuteState, Session
 
 from deerflow.persistence.base import Base
 from pixelflow.agent_runtime.contracts import (
@@ -1065,6 +1068,66 @@ async def test_operation_completion_rejects_other_workflow_in_same_conversation(
             now=NOW + timedelta(seconds=33),
             lease_expires_at=NOW + timedelta(seconds=63),
         ) is not None
+
+
+@pytest.mark.asyncio
+async def test_sql_operation_completion_acquires_row_locks_in_global_order() -> None:
+    """防止 completion 与普通 Turn 形成 event、state 反向行锁环。"""
+
+    async with _repository("sql") as (repository, store):
+        await _seed_conversation(store)
+        _, completion, delivery = await _claim_operation_completion(repository)
+        envelope, workflow = _workflow_state(
+            action_key=completion.event_id,
+            turn_id="turn-operation-lock-order",
+        )
+        lock_trace: list[str] = []
+
+        def record_for_update(execute_state: ORMExecuteState) -> None:
+            statement = execute_state.statement
+            if getattr(statement, "_for_update_arg", None) is None:
+                return
+            sql = str(statement.compile(dialect=mysql.dialect()))
+            if "pixelflow_agent_operations" in sql:
+                lock_trace.append("operation")
+            elif "pixelflow_agent_video_states" in sql:
+                lock_trace.append("state")
+            elif "pixelflow_agent_workflows" in sql:
+                lock_trace.append("workflow")
+            elif "pixelflow_agent_projection_messages" in sql:
+                lock_trace.append("message")
+            elif "pixelflow_agent_events.event_id =" in sql:
+                lock_trace.append("completion_event")
+            elif "pixelflow_agent_events" in sql:
+                lock_trace.append("event_tail")
+
+        sqlalchemy_event.listen(Session, "do_orm_execute", record_for_update)
+        try:
+            await repository.commit_operation_completion(
+                delivery,
+                user_id=OWNER,
+                workflow_state=envelope,
+                workflow=workflow,
+                expected_workflow_version=0,
+                messages=(
+                    _message(
+                        message_id="message-operation-lock-order",
+                        run_id="job-binding-1",
+                    ),
+                ),
+                occurred_at=NOW + timedelta(seconds=3),
+            )
+        finally:
+            sqlalchemy_event.remove(Session, "do_orm_execute", record_for_update)
+
+        assert lock_trace[:6] == [
+            "operation",
+            "state",
+            "workflow",
+            "message",
+            "completion_event",
+            "event_tail",
+        ]
 
 
 def test_commit_contract_rejects_inconsistent_interrupt_and_mutable_json_aliases() -> None:

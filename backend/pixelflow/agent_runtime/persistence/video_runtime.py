@@ -2985,6 +2985,29 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                                 .with_for_update()
                             )
                         ).one_or_none()
+                    operation = (
+                        None
+                        if operation_row is None
+                        else _operation_from_row(operation_row)
+                    )
+                    _validate_operation_completion_binding(
+                        user_id=owner,
+                        event=normalized_claim.event,
+                        operation=operation,
+                        workflow_state=normalized_commit.workflow_state,
+                        workflow=normalized_commit.workflow,
+                    )
+                    await self._sql_compare_and_set_state(session, normalized_commit)
+                    await self._sql_upsert_workflow_and_active(
+                        session,
+                        synthetic_claim,
+                        normalized_commit,
+                    )
+                    await self._sql_upsert_messages(
+                        session,
+                        owner,
+                        normalized_commit.messages,
+                    )
                     event_row = (
                         await session.scalars(
                             select(PixelFlowAgentEventRow)
@@ -3000,11 +3023,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         _validate_operation_completion_binding(
                             user_id=owner,
                             event=_event_from_row(event_row),
-                            operation=(
-                                None
-                                if operation_row is None
-                                else _operation_from_row(operation_row)
-                            ),
+                            operation=operation,
                             workflow_state=normalized_commit.workflow_state,
                             workflow=normalized_commit.workflow,
                         )
@@ -3020,9 +3039,6 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         or normalized_time >= expiry
                     ):
                         raise TurnExecutionLeaseConflictError(normalized_claim.event.event_id)
-                    await self._sql_compare_and_set_state(session, normalized_commit)
-                    await self._sql_upsert_workflow_and_active(session, synthetic_claim, normalized_commit)
-                    await self._sql_upsert_messages(session, owner, normalized_commit.messages)
                     await self._sql_append_events(
                         session,
                         synthetic_claim,
