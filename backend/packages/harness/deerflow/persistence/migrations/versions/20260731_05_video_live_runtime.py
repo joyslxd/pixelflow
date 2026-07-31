@@ -5,6 +5,7 @@
 创建日期：2026-07-31
 """
 
+import re
 from collections.abc import Callable, Sequence
 
 import sqlalchemy as sa
@@ -22,69 +23,69 @@ _PROJECTION_MESSAGE_TABLE = "pixelflow_agent_projection_messages"
 _INTERRUPT_TABLE = "pixelflow_agent_interrupts"
 _CONVERSATION_STATE_TABLE = "pixelflow_agent_conversation_states"
 
-_TABLE_COLUMNS = {
+_TABLE_COLUMN_CONTRACTS = {
     _VIDEO_STATE_TABLE: {
-        "workflow_id",
-        "conversation_id",
-        "user_id",
-        "schema_version",
-        "state_kind",
-        "workflow_version",
-        "context_version",
-        "payload_json",
-        "payload_sha256",
-        "last_turn_id",
-        "last_action_key",
-        "created_at",
-        "updated_at",
+        "workflow_id": ("string", 64, False),
+        "conversation_id": ("string", 64, False),
+        "user_id": ("string", 64, False),
+        "schema_version": ("integer", None, False),
+        "state_kind": ("string", 64, False),
+        "workflow_version": ("integer", None, False),
+        "context_version": ("integer", None, False),
+        "payload_json": ("json", None, False),
+        "payload_sha256": ("string", 71, False),
+        "last_turn_id": ("string", 64, True),
+        "last_action_key": ("string", 255, True),
+        "created_at": ("datetime", None, False),
+        "updated_at": ("datetime", None, False),
     },
     _TURN_EXECUTION_TABLE: {
-        "turn_id",
-        "conversation_id",
-        "user_id",
-        "attempt",
-        "lease_owner",
-        "lease_token",
-        "lease_expires_at",
-        "next_attempt_at",
-        "last_reason_code",
-        "created_at",
-        "updated_at",
+        "turn_id": ("string", 64, False),
+        "conversation_id": ("string", 64, False),
+        "user_id": ("string", 64, False),
+        "attempt": ("integer", None, False),
+        "lease_owner": ("string", 128, True),
+        "lease_token": ("string", 36, True),
+        "lease_expires_at": ("datetime", None, True),
+        "next_attempt_at": ("datetime", None, True),
+        "last_reason_code": ("string", 64, True),
+        "created_at": ("datetime", None, False),
+        "updated_at": ("datetime", None, False),
     },
     _PROJECTION_MESSAGE_TABLE: {
-        "message_id",
-        "conversation_id",
-        "user_id",
-        "run_id",
-        "role",
-        "content",
-        "payload_json",
-        "created_at",
-        "updated_at",
+        "message_id": ("string", 64, False),
+        "conversation_id": ("string", 64, False),
+        "user_id": ("string", 64, False),
+        "run_id": ("string", 64, True),
+        "role": ("string", 16, False),
+        "content": ("text", None, False),
+        "payload_json": ("json", None, False),
+        "created_at": ("datetime", None, False),
+        "updated_at": ("datetime", None, False),
     },
     _INTERRUPT_TABLE: {
-        "interrupt_id",
-        "conversation_id",
-        "user_id",
-        "workflow_id",
-        "turn_id",
-        "thread_id",
-        "checkpoint_ns",
-        "kind",
-        "reason_code",
-        "status",
-        "payload_json",
-        "response_id",
-        "response_json",
-        "opened_at",
-        "closed_at",
+        "interrupt_id": ("string", 64, False),
+        "conversation_id": ("string", 64, False),
+        "user_id": ("string", 64, False),
+        "workflow_id": ("string", 64, False),
+        "turn_id": ("string", 64, False),
+        "thread_id": ("string", 128, False),
+        "checkpoint_ns": ("string", 128, False),
+        "kind": ("string", 64, False),
+        "reason_code": ("string", 64, False),
+        "status": ("string", 16, False),
+        "payload_json": ("json", None, False),
+        "response_id": ("string", 64, True),
+        "response_json": ("json", None, True),
+        "opened_at": ("datetime", None, False),
+        "closed_at": ("datetime", None, True),
     },
     _CONVERSATION_STATE_TABLE: {
-        "conversation_id",
-        "user_id",
-        "active_workflow_id",
-        "created_at",
-        "updated_at",
+        "conversation_id": ("string", 64, False),
+        "user_id": ("string", 64, False),
+        "active_workflow_id": ("string", 64, True),
+        "created_at": ("datetime", None, False),
+        "updated_at": ("datetime", None, False),
     },
 }
 
@@ -96,7 +97,7 @@ _TABLE_PRIMARY_KEYS = {
     _CONVERSATION_STATE_TABLE: ("conversation_id",),
 }
 
-_TABLE_CHECKS = {
+_TABLE_CHECK_NAMES = {
     _VIDEO_STATE_TABLE: {
         "ck_pf_agent_video_states_payload_sha256",
         "ck_pf_agent_video_states_workflow_version",
@@ -113,7 +114,7 @@ _TABLE_CHECKS = {
     _CONVERSATION_STATE_TABLE: set(),
 }
 
-_TABLE_INDEX_COLUMNS = {
+_BUSINESS_INDEX_COLUMNS = {
     _VIDEO_STATE_TABLE: {
         "ix_pf_agent_video_states_owner_conversation": ("user_id", "conversation_id"),
     },
@@ -146,14 +147,27 @@ _TABLE_INDEX_COLUMNS = {
     },
 }
 
-_OWNERSHIP_INDEXES = {
-    _VIDEO_STATE_TABLE: "ix_pf_agent_video_states_owner_conversation",
-    _TURN_EXECUTION_TABLE: "ix_pf_agent_turn_executions_owner_conversation",
-    _PROJECTION_MESSAGE_TABLE: (
-        "ix_pf_agent_projection_messages_owner_conversation_created"
+_MIGRATION_MARKERS = {
+    _VIDEO_STATE_TABLE: (
+        "ix_pf_agent_video_states_revision_20260731_05",
+        ("workflow_id",),
     ),
-    _INTERRUPT_TABLE: "ix_pf_agent_interrupts_owner_conversation_status",
-    _CONVERSATION_STATE_TABLE: "ix_pf_agent_conversation_states_owner",
+    _TURN_EXECUTION_TABLE: (
+        "ix_pf_agent_turn_executions_revision_20260731_05",
+        ("turn_id",),
+    ),
+    _PROJECTION_MESSAGE_TABLE: (
+        "ix_pf_agent_projection_messages_revision_20260731_05",
+        ("message_id",),
+    ),
+    _INTERRUPT_TABLE: (
+        "ix_pf_agent_interrupts_revision_20260731_05",
+        ("interrupt_id",),
+    ),
+    _CONVERSATION_STATE_TABLE: (
+        "ix_pf_agent_conversation_states_revision_20260731_05",
+        ("conversation_id",),
+    ),
 }
 
 
@@ -177,53 +191,152 @@ def _payload_sha256_check_expression(column_name: str) -> str:
     )
 
 
-def _validate_existing_table(table_name: str) -> None:
-    """同名表必须完整匹配本迁移合同，禁止接管残表。"""
+_TABLE_CHECK_SQL = {
+    _VIDEO_STATE_TABLE: {
+        "ck_pf_agent_video_states_payload_sha256": (
+            _payload_sha256_check_expression("payload_sha256")
+        ),
+        "ck_pf_agent_video_states_workflow_version": "workflow_version >= 1",
+    },
+    _TURN_EXECUTION_TABLE: {
+        "ck_pf_agent_turn_executions_attempt": "attempt >= 0",
+        "ck_pf_agent_turn_executions_lease_fields": (
+            "(lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) "
+            "OR (lease_owner IS NOT NULL AND lease_token IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL)"
+        ),
+    },
+    _PROJECTION_MESSAGE_TABLE: {
+        "ck_pf_agent_projection_messages_role": "role IN ('assistant', 'system')",
+    },
+    _INTERRUPT_TABLE: {
+        "ck_pf_agent_interrupts_status": (
+            "status IN ('open', 'responded', 'closed')"
+        ),
+        "ck_pf_agent_interrupts_response_fields": (
+            "(response_id IS NULL AND response_json IS NULL) "
+            "OR (response_id IS NOT NULL AND response_json IS NOT NULL)"
+        ),
+    },
+    _CONVERSATION_STATE_TABLE: {},
+}
+
+
+def _normalize_check_sql(sqltext: object) -> str:
+    """归一化 SQLite/MySQL 反射出的 CHECK 文本后再比较语义令牌。"""
+
+    normalized = str(sqltext).lower().replace("`", "").replace('"', "")
+    normalized = re.sub(r"_[a-z0-9]+\s*(?=')", "", normalized)
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized.replace("(", "").replace(")", "")
+
+
+def _column_type_contract(column_type: object) -> tuple[str, int | None]:
+    """把方言类型归一化为类型族和字符串长度。"""
+
+    if isinstance(column_type, sa.JSON):
+        return ("json", None)
+    if isinstance(column_type, sa.Text):
+        return ("text", None)
+    if isinstance(column_type, sa.String):
+        return ("string", column_type.length)
+    if isinstance(column_type, sa.DateTime):
+        return ("datetime", None)
+    if isinstance(column_type, sa.Integer):
+        return ("integer", None)
+    return (type(column_type).__name__.lower(), None)
+
+
+def _reflected_indexes(table_name: str) -> dict[str, tuple[tuple[str, ...], bool]]:
+    """读取索引列序和唯一属性，供 marker 与业务索引共同校验。"""
 
     inspector = sa.inspect(op.get_bind())
-    columns = {str(column["name"]) for column in inspector.get_columns(table_name)}
-    primary_key = tuple(inspector.get_pk_constraint(table_name)["constrained_columns"])
-    checks = {
-        str(constraint["name"])
-        for constraint in inspector.get_check_constraints(table_name)
-        if constraint["name"] is not None
-    }
-    indexes = {
+    return {
         str(index["name"]): (
             tuple(str(column) for column in index["column_names"]),
-            bool(index["unique"]),
+            bool(index.get("unique", False)),
         )
         for index in inspector.get_indexes(table_name)
         if index["name"] is not None
     }
-    if columns != _TABLE_COLUMNS[table_name]:
-        raise RuntimeError(f"{table_name} exists with incomplete columns")
-    if primary_key != _TABLE_PRIMARY_KEYS[table_name]:
-        raise RuntimeError(f"{table_name} exists with an incompatible primary key")
-    if checks != _TABLE_CHECKS[table_name]:
-        raise RuntimeError(f"{table_name} exists with incomplete check constraints")
-    expected_indexes = {
+
+
+def _expected_indexes(table_name: str) -> dict[str, tuple[tuple[str, ...], bool]]:
+    """合并业务索引与 revision 私有 marker 合同。"""
+
+    expected = {
         name: (columns, False)
-        for name, columns in _TABLE_INDEX_COLUMNS[table_name].items()
+        for name, columns in _BUSINESS_INDEX_COLUMNS[table_name].items()
     }
-    if indexes != expected_indexes:
-        raise RuntimeError(f"{table_name} exists with incomplete migration indexes")
+    marker_name, marker_columns = _MIGRATION_MARKERS[table_name]
+    expected[marker_name] = (marker_columns, False)
+    return expected
 
 
-def _has_ownership_index(table_name: str) -> bool:
-    """仅以本迁移专属 owner 索引识别允许回滚的表。"""
+def _marker_state(table_name: str) -> str:
+    """区分不存在、完整和伪造的 revision 私有 marker。"""
+
+    marker_name, marker_columns = _MIGRATION_MARKERS[table_name]
+    marker = _reflected_indexes(table_name).get(marker_name)
+    if marker is None:
+        return "absent"
+    if marker != (marker_columns, False):
+        return "invalid"
+    return "valid"
+
+
+def _validate_existing_table(table_name: str) -> None:
+    """校验完整方言归一化 schema 指纹，禁止接管或删除残表。"""
 
     inspector = sa.inspect(op.get_bind())
-    if not inspector.has_table(table_name):
-        return False
-    ownership_index = _OWNERSHIP_INDEXES[table_name]
-    expected_columns = _TABLE_INDEX_COLUMNS[table_name][ownership_index]
-    return any(
-        index["name"] == ownership_index
-        and tuple(index["column_names"]) == expected_columns
-        and not bool(index["unique"])
-        for index in inspector.get_indexes(table_name)
-    )
+    reflected_columns = {
+        str(column["name"]): column
+        for column in inspector.get_columns(table_name)
+    }
+    expected_columns = _TABLE_COLUMN_CONTRACTS[table_name]
+    if set(reflected_columns) != set(expected_columns):
+        raise RuntimeError(f"{table_name} schema contract column names mismatch")
+    dialect_name = op.get_bind().dialect.name
+    for column_name, (family, length, nullable) in expected_columns.items():
+        column = reflected_columns[column_name]
+        reflected_family, reflected_length = _column_type_contract(column["type"])
+        reflected_contract = (
+            reflected_family,
+            reflected_length,
+            bool(column["nullable"]),
+        )
+        if reflected_contract != (family, length, nullable):
+            raise RuntimeError(
+                f"{table_name} schema contract column contract mismatch: {column_name}"
+            )
+        if (
+            family == "datetime"
+            and dialect_name in {"mysql", "mariadb"}
+            and getattr(column["type"], "fsp", None) != 6
+        ):
+            raise RuntimeError(
+                f"{table_name} schema contract datetime precision mismatch: {column_name}"
+            )
+    primary_key = tuple(inspector.get_pk_constraint(table_name)["constrained_columns"])
+    if primary_key != _TABLE_PRIMARY_KEYS[table_name]:
+        raise RuntimeError(f"{table_name} schema contract primary key mismatch")
+    checks = {
+        str(constraint["name"]): _normalize_check_sql(constraint["sqltext"])
+        for constraint in inspector.get_check_constraints(table_name)
+        if constraint["name"] is not None
+    }
+    expected_checks = {
+        name: _normalize_check_sql(sqltext)
+        for name, sqltext in _TABLE_CHECK_SQL[table_name].items()
+    }
+    if set(checks) != _TABLE_CHECK_NAMES[table_name]:
+        raise RuntimeError(f"{table_name} schema contract check constraint names mismatch")
+    if checks != expected_checks:
+        raise RuntimeError(
+            f"{table_name} schema contract check constraint sqltext mismatch"
+        )
+    if _reflected_indexes(table_name) != _expected_indexes(table_name):
+        raise RuntimeError(f"{table_name} schema contract index contract mismatch")
 
 
 def _create_video_state_table() -> None:
@@ -400,6 +513,18 @@ _TABLE_CREATORS: tuple[tuple[str, Callable[[], None]], ...] = (
 )
 
 
+def _create_migration_marker(table_name: str) -> None:
+    """仅由本 revision 创建与业务查询无关的私有 marker 索引。"""
+
+    marker_name, marker_columns = _MIGRATION_MARKERS[table_name]
+    op.create_index(
+        marker_name,
+        table_name,
+        list(marker_columns),
+        unique=False,
+    )
+
+
 def upgrade() -> None:
     """逐表在线校验，仅创建不存在的视频 live Runtime 支撑表。"""
 
@@ -408,16 +533,39 @@ def upgrade() -> None:
     for table_name, create_table in _TABLE_CREATORS:
         inspector = sa.inspect(op.get_bind())
         if inspector.has_table(table_name):
+            marker_state = _marker_state(table_name)
+            if marker_state == "absent":
+                raise RuntimeError(
+                    f"{table_name} exists without revision 20260731_05 marker"
+                )
+            if marker_state == "invalid":
+                raise RuntimeError(
+                    f"{table_name} has an invalid revision 20260731_05 marker"
+                )
             _validate_existing_table(table_name)
             continue
         create_table()
+        _create_migration_marker(table_name)
 
 
 def downgrade() -> None:
-    """仅删除带本迁移 owner 索引的五张支撑表。"""
+    """预检完整 schema 后仅删除带 revision 私有 marker 的支撑表。"""
 
     if op.get_context().as_sql:
         raise RuntimeError("video live Runtime migration requires online schema inspection")
+    owned_tables: list[str] = []
     for table_name, _create_table in reversed(_TABLE_CREATORS):
-        if _has_ownership_index(table_name):
-            op.drop_table(table_name)
+        inspector = sa.inspect(op.get_bind())
+        if not inspector.has_table(table_name):
+            continue
+        marker_state = _marker_state(table_name)
+        if marker_state == "absent":
+            continue
+        if marker_state == "invalid":
+            raise RuntimeError(
+                f"{table_name} has an invalid revision 20260731_05 marker"
+            )
+        _validate_existing_table(table_name)
+        owned_tables.append(table_name)
+    for table_name in owned_tables:
+        op.drop_table(table_name)
