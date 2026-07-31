@@ -341,7 +341,9 @@ git commit -m "实现：增加视频 live Runtime 支持表" -m "新增完整视
 **Files:**
 - Create: `backend/pixelflow/agent_workflows/video/state_codec.py`
 - Modify: `backend/pixelflow/agent_workflows/video/__init__.py`
+- Modify: `backend/pixelflow/agent_workflows/video/planning.py`
 - Create: `backend/tests/test_agent_video_workflow_state_codec.py`
+- Modify: `backend/tests/test_agent_video_workflow_planning.py`
 
 **Interfaces:**
 - Produces: `VideoWorkflowStateKind`、`VideoWorkflowStateEnvelope`、`VideoWorkflowState` union。
@@ -444,6 +446,8 @@ class VideoWorkflowStateEnvelope(ContractModel):
 
 decoder 必须重新调用各权威快照的构造器，并通过对应 `to_workflow_record()` 触发 M11 校验；workflow/conversation/context_version 与信封不一致时拒绝。
 
+`VideoPlanningWorkflowService` 增加公开、无副作用的 `validate_state()`，由正常构造、`to_workflow_record()` 和 codec 共同校验阶段/状态组合、必需/禁止字段、Plan 权威、版本与时间，codec 不复制 planning 状态机。对 scene package → generation → postproduction → delivery 的每个父子层级，共享校验 workflow/conversation/created_at 相同、child stage/context version 不大于 parent、child updated_at 不晚于 parent。
+
 信封构造时复用 M06 的递归 freeze/thaw 模式：运行时 `payload` 的嵌套 mapping/list 均只读，`model_dump(mode="json")` 和 `model_dump_json()` 通过 field serializer 恢复普通 JSON 容器；调用方传入的原始对象后续修改不得影响信封。
 
 `STATE_FACTORIES` 在测试文件中显式复用现有 M11 测试 builder，依次产生 planning、scene package、scene generation、postproduction 和 delivery 五个有效状态；不得用 Mock 绕过状态构造器。
@@ -469,6 +473,10 @@ def canonical_payload_sha256(payload: Mapping[str, JsonValue]) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 ```
+
+`canonical_payload_sha256()` 继续作为纯 payload 规范工具；持久化字段 `payload_sha256` 在 schema v1 中实际保存完整规范信封摘要，编码时覆盖除摘要自身之外的 schema、全部身份、kind、Repository/context version、payload、Turn/动作游标和创建/更新时间，解码时必须在任何领域构造器前重算校验。该兼容语义避免回开 Task 2 数据库结构，并能拒绝格式合法但跨列漂移的元数据。
+
+正式 round-trip 除 Workflow 投影外还必须断言完整 dataclass equality 与规范 payload equality；使用真实 M11 Service/fake Port 覆盖 generation pending/failed/edited-dirty、postproduction merge error/quality feedback/finalized，以及 delivery pending/成功历史/草稿下载/最终下载等非空互斥分支。信封启用实例强制重验证，`model_copy()` 注入可变 payload 后重新验证必须生成新的深度只读、无别名实例。
 
 每个 `_decode_*` 必须逐字段调用对应 M11 构造器；上面注册表只做 kind 分派，不能跳过领域校验。
 
