@@ -21,6 +21,8 @@
 - 新增或修改的人工注释、docstring、测试说明、提交标题和正文必须使用中文主体语义；新增配置叶子必须带紧邻的中文“用途/影响”说明。
 - 每个任务严格执行 RED → 最小实现 → GREEN → 中文提交；不得跨任务攒一个大提交。
 - 执行环境从仓库根目录进入 `backend` 或 `web`；Windows 可复用主工作区已安装的 `backend/.venv` 与 `web/node_modules`，但不得把依赖目录提交到 Git。
+- 人工确认必须保持 M12 已冻结合同：客户端只提交 `{client_response_id, value}`，服务端通过 `Command(resume={interrupt_id: response})` 恢复原 `waiting_user` Turn 和原 Graph；不得创建 follow-up Turn。`explicit_action` 只能放在既有 `value` 内。
+- 本轮只执行 Task 1-13。Task 14 的 R2 真实全流程门禁属于用户定义的业务第二步，必须等待后续单独授权；Task 13 必须先同步 README、AGENTS、最新设计、M13 状态和开发验证记录，并明确“Handler 已接入，R2 真实全流程门禁待执行”。
 
 ---
 
@@ -129,14 +131,17 @@ class ExplicitActionSignal(ContractModel):
     patch: dict[str, JsonValue] = Field(default_factory=dict)
 
 
-class InterruptResponseRequest(ContractModel):
-    client_response_id: UUID
+class InterruptResponseValue(ContractModel):
     content: str = Field(min_length=1)
     materials: list[dict[str, JsonValue]] = Field(default_factory=list)
     reply_to_message_id: str | None = Field(default=None, min_length=1)
     artifact_refs: list[str] = Field(default_factory=list)
     explicit_action: ExplicitActionSignal | None = None
-    expected_context_version: int = Field(ge=0)
+
+
+class InterruptResponseRequest(ContractModel):
+    client_response_id: UUID
+    value: InterruptResponseValue
 
 
 class AgentInterruptProjection(ContractModel):
@@ -170,16 +175,17 @@ export type ExplicitActionSignal = Readonly<{
 
 export type InterruptResponseRequest = Readonly<{
   client_response_id: string;
-  content: string;
-  materials: readonly JsonObject[];
-  reply_to_message_id: string | null;
-  artifact_refs: readonly string[];
-  explicit_action: ExplicitActionSignal | null;
-  expected_context_version: number;
+  value: Readonly<{
+    content: string;
+    materials: readonly JsonObject[];
+    reply_to_message_id: string | null;
+    artifact_refs: readonly string[];
+    explicit_action: ExplicitActionSignal | null;
+  }>;
 }>;
 ```
 
-fixture 中 `turn_start_request.explicit_action`、`interrupt_response_request.explicit_action` 与上述类型逐字段相同；`interrupt_projection` 固定包含 `interrupt_id/workflow_id/turn_id/kind/reason_code/payload/opened_at`，不得放入内部 `user_id/thread_id/checkpoint_ns`。
+fixture 中 `turn_start_request.explicit_action` 与 `interrupt_response_request.value.explicit_action` 和上述类型逐字段相同；`interrupt_projection` 固定包含 `interrupt_id/workflow_id/turn_id/kind/reason_code/payload/opened_at`，不得放入内部 `user_id/thread_id/checkpoint_ns`。interrupt response 不增加 `expected_context_version`，开放 interrupt 本身就是原 Turn 的恢复边界。
 
 - [ ] **Step 5: 运行合同测试并确认 GREEN**
 
@@ -526,9 +532,22 @@ async def test_expired_worker_cannot_commit_after_takeover(repository_factory) -
     assert new is not None
     with pytest.raises(TurnExecutionLeaseConflictError):
         await repository.commit_turn(old, completed_commit())
+
+
+@pytest.mark.parametrize("repository_factory", REPOSITORIES)
+async def test_responded_interrupt_reclaims_original_waiting_turn(repository_factory) -> None:
+    repository = await repository_factory()
+    original_turn, interrupt = await seed_waiting_turn_with_responded_interrupt(repository)
+    claim = await repository.claim_interrupt_resume(
+        "user-1", "conversation-1", interrupt.interrupt_id,
+        lease_owner="worker-a", now=NOW, lease_expires_at=NOW + timedelta(seconds=30),
+    )
+    assert claim is not None
+    assert claim.turn.turn_id == original_turn.turn_id
+    assert len(await repository.list_turns("user-1", "conversation-1")) == 1
 ```
 
-原子性测试给 `VideoTurnCommit` 同时传入状态信封、Workflow 投影、助手消息、interrupt/事件和 Turn 终态，故意制造重复 event ID 或 CAS 冲突，断言所有对象保持旧值。
+原子性测试给 `VideoTurnCommit` 同时传入状态信封、Workflow 投影、助手消息、关闭的旧 interrupt、新打开的 interrupt/事件和同一 Turn 终态，故意制造重复 event ID 或 CAS 冲突，断言所有对象保持旧值。interrupt response 只能重新领取原 `waiting_user` Turn，不得插入新 Turn。
 
 另用一个已领取的 `external_job.state_changed` 完成事件测试 `commit_operation_completion()`：有效 delivery lease 同事务推进状态并确认事件；在 Handler 返回期间过期的 lease 必须保持状态和事件均未确认。
 
@@ -610,7 +629,7 @@ class VideoRuntimeSafeSnapshot(ContractModel):
 
 model validator 固定：状态信封和投影必须同时存在或同时为空；两者身份/version/context 一致；`waiting_user` 必须打开 interrupt；`completed` 不得留下 open interrupt；`failed` 只能携带固定 reason code；`active_workflow_id` 非空时必须等于本提交 Workflow 或 Repository 中同对话既有 Workflow。
 
-`VideoRuntimeSafeSnapshot` 构造时对包含的合同模型重新验证并递归冻结所有嵌套 JSON；serializer 只在输出边界 thaw 为普通容器，从而同时满足直接访问只读和稳定 JSON 序列化。
+`VideoRuntimeSafeSnapshot` 构造时对包含的合同模型重新验证并递归冻结所有嵌套 JSON；serializer 只在输出边界 thaw 为普通容器，从而同时满足直接访问只读和稳定 JSON 序列化。`responded` interrupt 保存完整公开 `value` 和 `client_response_id`，由恢复执行器消费；只有原 Turn 的 Graph 结果通过 fencing 原子提交时，Repository 才把它变为 `closed`。
 
 测试文件内定义 `seed_two_turns()`、`claim()` 和 `completed_commit()`，分别只负责建立两个有序 Turn、领取指定 owner 的 lease 和构造固定完成提交；不得在 helper 中吞掉 Repository 异常。
 
@@ -680,6 +699,11 @@ async with _repository_write_transaction(session, self._sqlite_write_lock):
 
 ```python
 async def list_due_turns(*, now: datetime, limit: int = 100) -> list[OwnedTurnRecord]: ...
+async def list_due_interrupt_responses(*, now: datetime, limit: int = 100) -> list[StoredAgentInterrupt]: ...
+async def claim_interrupt_resume(
+    user_id: str, conversation_id: str, interrupt_id: str, *,
+    lease_owner: str, now: datetime, lease_expires_at: datetime,
+) -> TurnExecutionClaim | None: ...
 async def heartbeat_turn(claim: TurnExecutionClaim, *, now: datetime, lease_expires_at: datetime) -> TurnExecutionClaim: ...
 async def reschedule_turn(claim: TurnExecutionClaim, *, now: datetime, next_attempt_at: datetime, reason_code: str) -> TurnRecord: ...
 async def get_video_state(user_id: str, workflow_id: str) -> VideoWorkflowStateEnvelope | None: ...
@@ -699,7 +723,7 @@ async def commit_operation_completion(
 ) -> WorkflowRecord: ...
 ```
 
-候选查询必须稳定排序、数据库先过滤再 `limit`，不能无界物化。恢复候选只包括 `accepted`、退避时间已到的 `queued`，以及 execution lease 已过期的 `processing`；`waiting_user` 仅由 Snapshot 恢复开放 interrupt，不重新执行。领取前必须再次确认对话冻结为 `supervisor_v1`、intent 为已注册 `video`、不存在更早未终态 Turn，且 context compaction 的 `retry_not_before` 已到。
+候选查询必须稳定排序、数据库先过滤再 `limit`，不能无界物化。普通 Turn 恢复候选只包括 `accepted`、退避时间已到的 `queued`，以及 execution lease 已过期的 `processing`；没有响应的 `waiting_user` 仅由 Snapshot 恢复开放 interrupt，不重新执行。`status=responded` 的 interrupt 是唯一例外：`list_due_interrupt_responses()` 返回它，`claim_interrupt_resume()` 只重新领取该 interrupt 绑定的原 `waiting_user` Turn，并用同一 execution lease/fencing 机制转回 `processing`。领取前必须再次确认对话冻结为 `supervisor_v1`、intent 为已注册 `video`、不存在更早未终态 Turn，且 context compaction 的 `retry_not_before` 已到。
 
 `commit_operation_completion()` 使用 M06 完成事件的 delivery lease，而不是伪造 Turn claim；它在同一临界区/事务中 CAS 写状态、Workflow、消息和 `workflow.progressed`，再按实际完成时间确认原 event lease。租约已过期时不写状态也不确认事件，留给同 event ID 接管。
 
@@ -1171,7 +1195,7 @@ interrupt(
 )
 ```
 
-因为前一节点 update 已 checkpoint，进程退出后完整状态信封和消息仍可恢复。恢复 Command 返回后清空 `workflow_dispatch_result` 并结束旧 Turn；用户的结构化 response 作为新 Turn 再执行下一业务动作。Graph 测试必须证明 Memory/SQLite checkpointer 重建后使用原 interrupt ID。
+因为前一节点 update 已 checkpoint，进程退出后完整状态信封和消息仍可恢复。`interrupt()` 恢复值是服务端根据已持久化公开 `value` 和权威证据构造的内部信封，包含 `client_response_id`、经 DecisionService 校验的 `decision` 与原公开 response。`WORKFLOW_INTERRUPT_NODE` 必须再次校验 response 对应当前 interrupt/workflow/stage，把 decision 与 command 更新进同一 Graph state，清空旧 `workflow_dispatch_result`，然后 `goto=WORKFLOW_COMMAND_NODE` 继续派发；不得结束旧 Turn后创建新 Turn。若本次动作再次需要人工确认，同一原 Turn 进入新的 `waiting_user` interrupt。Graph state 同时保存稳定 `last_interrupt_response_id`，使进程在 Graph checkpoint 后、Repository commit 前退出时可识别同一响应并只补提交。Graph 测试必须证明 Memory/SQLite checkpointer 重建后使用原 interrupt ID、原 Turn ID 且 Turn 总数不增加。
 
 - [ ] **Step 6: 实现场景包、生成、后期和交付动作映射**
 
@@ -1404,7 +1428,7 @@ git commit -m "实现：接通视频 live Operation 与恢复事件" -m "复用 
 - Create: `backend/tests/test_agent_runtime_turn_executor.py`
 
 **Interfaces:**
-- Produces: `SupervisorTurnExecutor.start()`、`notify_turn()`、`recover_due_turns()`、`metrics_snapshot()`、`aclose()`。
+- Produces: `SupervisorTurnExecutor.start()`、`notify_turn()`、`notify_interrupt()`、`recover_due_turns()`、`recover_due_interrupts()`、`metrics_snapshot()`、`aclose()`。
 - Consumes: Task 4 Repository、Task 5 DecisionService、编译 Graph、Task 7 Handler、Task 8 `TransientCredentialVault`。
 - Consumed by: Task 10 Service/router 和 Task 11 Gateway。
 
@@ -1431,6 +1455,15 @@ async def test_executor_shutdown_leaves_claim_recoverable() -> None:
     stored = await repository.get_turn("user-1", "turn-1")
     assert stored.status is TurnStatus.PROCESSING
     assert await repository.list_due_turns(now=LEASE_EXPIRY + EPSILON, limit=10)
+
+
+async def test_executor_resumes_interrupt_on_original_turn_without_followup() -> None:
+    executor, repository, opened = runtime_with_responded_interrupt()
+    await executor.recover_due_interrupts()
+    await executor.wait_idle()
+    turns = await repository.list_turns("user-1", opened.conversation_id)
+    assert [item.turn_id for item in turns] == [opened.turn_id]
+    assert turns[0].status in {TurnStatus.WAITING_USER, TurnStatus.COMPLETED}
 ```
 
 测试文件中的 `runtime_with_two_turns_same_conversation()` 和 `runtime_with_blocked_handler()` 必须装配真实 Memory Repository、编译 Graph、fake DecisionService/Handler 和可控 Clock；`scope()` 只构造 user/conversation/turn 三个稳定 ID。
@@ -1454,12 +1487,11 @@ Expected: FAIL，因为 Executor 尚不存在。
 2. 从稳定 message ID 读取当前输入、materials/reply/artifact/explicit action；
 3. 读取 Workflow、开放 interrupt 和 ContextEnvelope；
 4. 调用 DecisionService 并把 decision 写入 claim 上下文；
-5. 若消息 payload 含 `source_interrupt_id`，先用原 namespace 和 response JSON 调用 `resume_graph_from_interrupt()`；已关闭的 Graph checkpoint 作为幂等成功处理；
-6. 若 HTTP 入口传入临时凭据，先以当前 `turn_id` 放入 `TransientCredentialVault`，再使用 `supervisor_namespace(conversation_id)` 为当前新 Turn 调用 `graph.ainvoke()`，并在 `finally` 中删除该凭据；
-7. 对业务动作由 Graph Registry 派发 Handler；
-8. 从 Graph state/checkpoint 读取 answer message、clarify interrupt 或 `WorkflowDispatchResult`，转换成 `VideoTurnCommit`；
-9. 用 fencing token 原子提交；
-10. 唤醒同对话下一 Turn。
+5. 若 HTTP 入口传入临时凭据，先以当前 `turn_id` 放入 `TransientCredentialVault`，再使用 `supervisor_namespace(conversation_id)` 为当前 Turn 调用 `graph.ainvoke()`，并在 `finally` 中删除该凭据；
+6. 对业务动作由 Graph Registry 派发 Handler；
+7. 从 Graph state/checkpoint 读取 answer message、clarify interrupt 或 `WorkflowDispatchResult`，转换成 `VideoTurnCommit`；
+8. 用 fencing token 原子提交；
+9. 唤醒同对话下一 Turn。
 
 Graph 输入必须包含现有 `SupervisorState` 全字段；`active_workflow_id` 从权威状态决定，不能从客户端读取。
 
@@ -1472,8 +1504,6 @@ async def _execute_claim(
     try:
         evidence = await self._load_authoritative_evidence(claim)
         decision = await self._decision_service.decide(evidence)
-        if evidence.source_interrupt_id is not None:
-            await self._resume_source_interrupt(evidence)
         graph_state = await self._graph.ainvoke(
             self._graph_input(evidence, decision),
             config={"configurable": {"thread_id": evidence.conversation_id,
@@ -1486,7 +1516,9 @@ async def _execute_claim(
         self._credential_vault.pop(claim.turn.turn_id)
 ```
 
-`_load_authoritative_evidence()`、`_resume_source_interrupt()`、`_graph_input()` 和 `_commit_from_graph()` 分别对应上面 1-5、5、6 和 8-9 的固定职责；均在本文件实现，不得读取 FastAPI request 或前端 React 状态。
+`_load_authoritative_evidence()`、`_graph_input()` 和 `_commit_from_graph()` 分别对应上面 1-4、5-6 和 7-8 的固定职责；均在本文件实现，不得读取 FastAPI request 或前端 React 状态。普通 Turn 路径不得识别 `source_interrupt_id`，因为人工响应不会登记新 Turn。
+
+`_resume_interrupt_claim()` 是独立路径：读取 `status=responded` 的 `StoredAgentInterrupt` 与原 `waiting_user` Turn，用同一 Turn ID 获取恢复 claim；DecisionService 只根据已持久化 `response.value.explicit_action` 和权威 Workflow/Artifact 证据生成 decision；随后调用 `resume_graph_from_interrupt(graph, namespace, interrupt_id=..., response=internal_resume_envelope)`。内部恢复信封包含 `client_response_id`、公开 `value` 和已校验 decision，但不包含 Authorization。Graph 已存在相同 `last_interrupt_response_id` 时不重复 `Command(resume)`，只从 checkpoint 构造并补交 `VideoTurnCommit`。commit 在一个 fencing 临界区内关闭旧 interrupt、按结果选择完成同一 Turn或为同一 Turn打开下一 interrupt；任何路径不得插入 follow-up Turn。
 
 - [ ] **Step 4: 实现租约 heartbeat、退避和错误分类**
 
@@ -1520,7 +1552,7 @@ heartbeat 返回冲突时立即取消当前 Graph task；错误映射只接收�
 
 - [ ] **Step 5: 实现恢复扫描与关闭**
 
-`start()` 创建单个扫描任务；每轮 `list_due_turns(now, limit=100)`，每个候选独立 try/catch。`aclose()` 设置关闭标志、拒绝新 notify、取消并等待本进程任务，不改写 Turn、lease 或 Operation 状态。
+`start()` 创建单个扫描任务；每轮先稳定扫描 `list_due_interrupt_responses(now, limit=100)`，再扫描 `list_due_turns(now, limit=100)`，每个候选独立 try/catch，同一原 Turn 只能被其中一个路径取得 lease。`notify_interrupt()` 只唤醒已持久化响应对应的原 Turn。`aclose()` 设置关闭标志、拒绝新 notify、取消并等待本进程任务，不改写 Turn、interrupt、lease 或 Operation 状态。
 
 Executor 内置线程安全的 `SupervisorExecutionMetrics` 聚合器，只保存计数/耗时：Turn 等待、领取、完成、重试、租约冲突、九动作分布、interrupt 等待时间、阶段耗时、M06 六态和安全 reason code。`metrics_snapshot()` 返回深拷贝 JSON；键和值不得包含 prompt、Authorization、供应商错误或完整 URL。
 
@@ -1573,34 +1605,37 @@ git commit -m "实现：持续消费并恢复 Supervisor Turn" -m "增加按会�
 
 **Interfaces:**
 - Changes: `AgentRuntimeService` 注入可选 `turn_executor` 和 `video_repository`。
-- Produces: `AgentRuntimeService.respond_to_interrupt(*, user_id: str, conversation_id: str, interrupt_id: str, request: InterruptResponseRequest) -> AgentTurnStartResponse`。
+- Produces: `AgentRuntimeService.respond_to_interrupt(*, user_id: str, conversation_id: str, interrupt_id: str, request: InterruptResponseRequest) -> AgentTurnJobResponse`，始终返回原 Turn/run。
 - Produces: `AgentRuntimeService.notify_registered_turn(turn_id: str, credential: TransientTurnCredential | None) -> None`，仅非阻塞唤醒 Task 9 Executor。
+- Produces: `AgentRuntimeService.notify_registered_interrupt(interrupt_id: str, credential: TransientTurnCredential | None) -> None`，仅非阻塞唤醒原 Turn 的恢复路径。
 - Changes: `snapshot().interrupt` 返回 Task 1 `AgentInterruptProjection`，messages 合并 task store user messages与 live projection messages。
 - Consumes: Task 1/4/9。
 
 - [ ] **Step 1: 写入 API 失败测试**
 
 ```python
-def test_supervisor_interrupt_response_registers_one_followup_turn_idempotently(client) -> None:
+def test_supervisor_interrupt_response_resumes_original_turn_idempotently(client) -> None:
     opened = seed_open_interrupt(client)
     body = {
         "client_response_id": "22222222-2222-4222-8222-222222222222",
-        "content": "同意方案",
-        "materials": [],
-        "reply_to_message_id": "message-plan-v1",
-        "artifact_refs": ["artifact:video-plan:wf-1:v1"],
-        "explicit_action": {
-            "action": "continue_workflow", "intent": "video",
-            "workflow_id": "wf-1", "stage": "plan_review",
-            "artifact_ref": "artifact:video-plan:wf-1:v1", "patch": {"approved": True},
+        "value": {
+            "content": "同意方案",
+            "materials": [],
+            "reply_to_message_id": "message-plan-v1",
+            "artifact_refs": ["artifact:video-plan:wf-1:v1"],
+            "explicit_action": {
+                "action": "continue_workflow", "intent": "video",
+                "workflow_id": "wf-1", "stage": "plan_review",
+                "artifact_ref": "artifact:video-plan:wf-1:v1", "patch": {"approved": True},
+            },
         },
-        "expected_context_version": opened["context_version"],
     }
     first = client.post(opened["response_url"], json=body)
     second = client.post(opened["response_url"], json=body)
     assert first.status_code == second.status_code == 200
     assert first.json()["turn_id"] == second.json()["turn_id"]
-    assert first.json()["turn_id"] != opened["waiting_turn_id"]
+    assert first.json()["turn_id"] == opened["waiting_turn_id"]
+    assert live_repository.turn_count(opened["conversation_id"]) == 1
 ```
 
 再测错误 user/对话/interrupt、已关闭不同响应、刷新恢复、assistant message 与 event 投影一致。
@@ -1620,17 +1655,16 @@ Expected: FAIL，当前 interrupt endpoint 固定返回 legacy 409，Snapshot �
 
 - [ ] **Step 3: 扩展 TurnRegistrationStore 的 interrupt 原子登记**
 
-Memory 复用 `_registration_lock(user_id, conversation_id)`；SQL 锁 conversation、open interrupt 和旧 Turn，在同一事务中：
+Memory 复用 `_registration_lock(user_id, conversation_id)`；SQL 锁 conversation、open interrupt 和原 waiting Turn，在同一事务中：
 
 - 校验 interrupt 为 open 且属于当前 user/conversation；
-- 按 `client_response_id` 创建或复用可见 user message 和一个 follow-up Turn；
-- 新 Turn `target_workflow_id` 指向 interrupt.workflow；
-- 消息 payload 保存 `source_interrupt_id`、公开 response JSON 和 `explicit_action`，Executor 据此先恢复原 Graph；
-- 把 interrupt 标为 `closed` 并保存 response ID/JSON；
-- 将旧 waiting Turn 标为 completed，再登记新 Turn 并递增 context version；
-- 写 `interrupt.closed`、`message.upserted`、`input.state_changed`。
+- 按 `client_response_id` 创建或复用可见 user message，消息 payload 保存 interrupt ID、公开 `value` 和 `explicit_action`；
+- 在同一 interrupt 上保存 response ID/JSON，并把状态从 `open` 改为 `responded`；此时不能提前写 `closed`；
+- 保持原 waiting Turn 的 turn_id/run_id，不创建任何 Turn 记录；
+- 写 `interrupt.responded`、`message.upserted` 和同一 run 的 `input.state_changed/run.state_changed`；
+- 递增权威 context version，但不改变会话编排归属。
 
-同 response ID 同内容重复回读；同 ID 不同内容返回 409。若进程在 HTTP 成功后退出，新 Turn 仍由 Task 9 恢复扫描领取；它先幂等关闭原 LangGraph interrupt，再执行 response 表达的结构化动作。
+同 response ID 同内容重复回读原 Turn；同 ID 不同内容返回 409；已 `closed` 后重复同一 ID/内容仍返回原 Turn，不再次恢复。若进程在 HTTP 成功后退出，Task 9 从 `responded` interrupt 恢复扫描并重新领取原 waiting Turn；Graph 与 Repository 原子提交完成后才写 `interrupt.closed`，并按结果让同一 Turn completed 或进入下一个 waiting_user。
 
 ```python
 async def register_interrupt_response(
@@ -1641,22 +1675,23 @@ async def register_interrupt_response(
     interrupt_id: str,
     request: InterruptResponseRequest,
     occurred_at: datetime,
-) -> TurnRegistrationResult:
+) -> AgentTurnJobResponse:
     async with self._registration_lock(user_id, conversation_id):
-        interrupt = self._require_open_interrupt(user_id, conversation_id, interrupt_id)
+        interrupt = self._require_owned_interrupt(user_id, conversation_id, interrupt_id)
         existing = self._find_response_registration(interrupt, request.client_response_id)
         if existing is not None:
             return self._require_same_response(existing, request)
-        return self._atomically_close_interrupt_and_register_followup(
+        self._require_interrupt_status(interrupt, "open")
+        return self._atomically_record_response_on_original_turn(
             interrupt=interrupt, request=request, occurred_at=occurred_at
         )
 ```
 
-SQL 实现使用同一公开签名，但在 `_repository_write_transaction` 内分别通过 SQLAlchemy `select(PixelFlowAgentConversationStateRow).with_for_update()` 等语句锁定 conversation state、interrupt、旧 Turn 和 context；Memory 私有 helper 与 SQL 私有 helper 必须生成相同稳定 message/Turn/event ID。
+SQL 实现使用同一公开签名，但在 `_repository_write_transaction` 内分别通过 SQLAlchemy `select(PixelFlowAgentConversationStateRow).with_for_update()` 等语句锁定 conversation state、interrupt、原 Turn 和 context；Memory 私有 helper 与 SQL 私有 helper 必须生成相同稳定 message/event ID，且两者都不得生成 Turn ID。
 
 - [ ] **Step 4: 唤醒 Executor 并传递请求期凭据**
 
-Router 读取经过现有 auth middleware 规范化的 Authorization，只构造 `TransientTurnCredential` 传给 `notify_turn()`；`start_turn` 与 `respond_to_interrupt` 返回前 Turn 已经持久化。notify 失败不得让 HTTP 5xx 诱导前端重建 Turn，Executor 扫描会恢复。
+Router 读取经过现有 auth middleware 规范化的 Authorization，只构造 `TransientTurnCredential`；普通 `start_turn` 传给 `notify_turn()`，`respond_to_interrupt` 传给 `notify_interrupt()`。两个入口返回前登记都已持久化。notify 失败不得让 HTTP 5xx 诱导前端重建 Turn，Executor 扫描会恢复。
 
 ```python
 registration = await runtime_service.respond_to_interrupt(
@@ -1670,11 +1705,11 @@ credential = (
     if authorization is not None
     else None
 )
-runtime_service.notify_registered_turn(registration.turn_id, credential=credential)
+runtime_service.notify_registered_interrupt(interrupt_id, credential=credential)
 return registration
 ```
 
-`notify_registered_turn()` 只进行非阻塞唤醒并捕获内部唤醒异常写固定 warning；持久化登记失败仍按现有 HTTP 错误返回。
+两个 notify 方法都只进行非阻塞唤醒并捕获内部唤醒异常写固定 warning；持久化登记失败仍按现有 HTTP 错误返回。interrupt notify 必须把凭据绑定原 turn_id，不得以 interrupt ID 作为 Vault 持久身份。
 
 - [ ] **Step 5: 实现 Snapshot 合并**
 
@@ -1722,7 +1757,7 @@ Expected: PASS；assist/frontend_v2 仍得到原 legacy 所有权语义，superv
 
 ```powershell
 git add backend/pixelflow/agent_runtime/persistence/turn_registration.py backend/pixelflow/agent_runtime/service.py backend/app/gateway/routers/pixelflow_conversations.py backend/tests/test_agent_runtime_r1_integration.py backend/tests/test_agent_runtime_live_api.py
-git commit -m "实现：恢复 Supervisor 消息与人工确认" -m "让 live Turn 入口唤醒执行器，Snapshot 返回权威消息和 interrupt，并以新 Turn 幂等恢复原 Graph。"
+git commit -m "实现：恢复 Supervisor 消息与人工确认" -m "让 live Turn 入口唤醒执行器，Snapshot 返回权威消息和 interrupt，并在原 Turn 上幂等恢复同一 Graph。"
 ```
 
 ### Task 11: 在 Gateway 受控装配真实 Registry 与 readiness
@@ -1920,16 +1955,17 @@ export function buildSupervisorWorkflowAction(
 ```typescript
 {
   client_response_id: clientInputId,
-  content: input.content,
-  materials,
-  reply_to_message_id: replyToMessageId,
-  artifact_refs: artifactRefs,
-  explicit_action: input.explicitAction ?? null,
-  expected_context_version: expectedContextVersion,
+  value: {
+    content: input.content,
+    materials,
+    reply_to_message_id: replyToMessageId,
+    artifact_refs: artifactRefs,
+    explicit_action: input.explicitAction ?? null,
+  },
 }
 ```
 
-客户端网络重试复用同一个 `clientInputId`，不得为第二次请求重新生成 UUID。
+客户端网络重试复用同一个 `clientInputId`，不得为第二次请求重新生成 UUID。interrupt response 不携带 `expected_context_version`，也不经过普通 Turn builder；它只恢复 Snapshot 暴露的原 interrupt 和原 waiting Turn。
 
 - [ ] **Step 5: 将新模块加入测试编译器并运行 GREEN**
 
@@ -1963,6 +1999,11 @@ git commit -m "实现：提交结构化 Supervisor 视频动作" -m "为九动�
 - Modify: `web/tests/mainFlowContract.test.mjs`
 - Modify: `web/tests/videoSceneUiContract.test.mjs`
 - Modify: `web/tests/jianyingDraftUiContract.test.mjs`
+- Modify: `README.md`
+- Modify: `AGENTS.md`
+- Modify: `docs/pixelflow-agent-skill-flow-latest-design.md`
+- Modify: `docs/agentization/status/M13-status.md`
+- Create: `docs/agentization/test-reports/R2-video-live-handler-development.md`
 
 **Interfaces:**
 - Consumes: Task 12 action builder、现有 `useSupervisorConversation`、Snapshot interrupt/workflow projection。
@@ -2095,14 +2136,33 @@ corepack pnpm build-prod
 
 Expected: PASS；supervisor_v1 视频按钮可用，frontend_v2 和非视频 handler 保持原样。
 
-- [ ] **Step 7: 提交 UI 接线切片**
+- [ ] **Step 7: 同步业务第一步文档与开发证据**
+
+按 AGENTS.md 的流程变更同步要求，更新 README、仓库 AGENTS、最新设计和 M13 状态：说明 Gateway 已安装视频 live Graph Handler，`supervisor_v1` 视频对话由原 Turn 通过结构化 interrupt response 恢复；`frontend_v2`、历史对话、运行中任务和非视频 intent 不迁移。所有文档必须明确生产仍为 R1，R2 真实全流程门禁（Task 14）尚未执行，不能写“R2 已完成”“可生产发布”或 `ready_for_integration`。
+
+开发报告只记录 Task 1-13 已实际取得的证据：分支/提交、定向后端测试、Web 测试/类型检查/构建、fake Provider、无真实付费网络、`backend/config.prod.yml` 无差异、同一原 Turn 恢复断言和已知限制。没有执行的 Task 14 故障矩阵、从 0 全链路和全量门禁必须明确标为“待业务第二步执行”，不得用定向测试冒充。
+
+- [ ] **Step 8: 运行中文工程规范与第一步差异检查**
 
 ```powershell
-git add web/src/pages/WorkspacePage.tsx web/src/components/chat/ChatPanel.tsx web/src/components/chat/MessageBubble.tsx web/src/components/composer/GenParamsDialog.tsx web/src/components/canvas/StoryboardPanel.tsx web/src/components/canvas/VideoResultCard.tsx web/tests/workspaceOrchestrationMode.test.mjs web/tests/mainFlowContract.test.mjs web/tests/videoSceneUiContract.test.mjs web/tests/jianyingDraftUiContract.test.mjs
-git commit -m "实现：用 Supervisor 推进视频人工节点" -m "把表单、方向、Plan、场景包、视频审核和剪映操作映射为结构化 Turn 或 interrupt response，保留 v2 原行为。"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentization\Test-ChineseEngineeringPolicy.ps1 -RepositoryPath (Get-Location).Path -BaseRef origin/feature/agent_0.8.4_boguan -HeadRef HEAD
+git diff --check origin/feature/agent_0.8.4_boguan...HEAD
+git diff origin/feature/agent_0.8.4_boguan...HEAD -- backend/config.prod.yml
+rg -n "T[O]DO|T[B]D|implement[ ]later|fill[ ]in[ ]details" backend/pixelflow/agent_runtime backend/pixelflow/agent_workflows/video web/src/lib/supervisor docs/agentization/test-reports/R2-video-live-handler-development.md
+```
+
+Expected: 中文门禁 `Passed=True`，diff check 和生产配置 diff 无输出，占位符扫描无输出。失败时只修复业务第一步范围，不能提前运行 Task 14。
+
+- [ ] **Step 9: 提交 UI、文档与第一步验证切片**
+
+```powershell
+git add web/src/pages/WorkspacePage.tsx web/src/components/chat/ChatPanel.tsx web/src/components/chat/MessageBubble.tsx web/src/components/composer/GenParamsDialog.tsx web/src/components/canvas/StoryboardPanel.tsx web/src/components/canvas/VideoResultCard.tsx web/tests/workspaceOrchestrationMode.test.mjs web/tests/mainFlowContract.test.mjs web/tests/videoSceneUiContract.test.mjs web/tests/jianyingDraftUiContract.test.mjs README.md AGENTS.md docs/pixelflow-agent-skill-flow-latest-design.md docs/agentization/status/M13-status.md docs/agentization/test-reports/R2-video-live-handler-development.md
+git commit -m "实现：接通 Supervisor 视频人工节点" -m "把表单、方向、Plan、场景包、视频审核和剪映操作映射到原 Turn 的结构化恢复路径，同步第一步开发证据；R2 真实全流程门禁仍待单独执行。"
 ```
 
 ### Task 14: 完成从 0 视频链路、重启恢复和隔离验收
+
+> **本轮排除：** 本任务属于用户定义的业务第二步。完成 Task 1-13、独立代码复核和第一步报告后必须停止，等待用户再次授权，不能自动继续。
 
 **Files:**
 - Create: `backend/tests/test_agent_runtime_video_live_e2e.py`
@@ -2273,4 +2333,4 @@ git push origin codex/r2-live-video-handler
 
 ## 执行完成后的停止条件
 
-完成 Task 14 并推送后立即停止，只报告分支、提交、门禁、未发布事实和下一步所需的独立单槽集成授权。不得在本计划内执行 R2 生产发布、M13.3、真实付费测试或 Agent→dev 合并。
+本轮完成 Task 1-13、独立代码复核、第一步开发验证与文档提交后立即停止，只报告分支、提交、已运行门禁、Task 14 未执行、未发布事实和下一步需要用户单独发起的“R2 真实全流程门禁”指令。不得自动执行 Task 14、R2 生产发布、M13.3、真实付费测试或 Agent→dev 合并。后续若用户单独授权业务第二步，则完成 Task 14 并推送后再次立即停止，等待独立发布/集成授权。
