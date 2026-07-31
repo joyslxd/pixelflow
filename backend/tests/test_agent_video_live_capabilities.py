@@ -481,6 +481,39 @@ async def test_async_memory_recorder_runs_in_background_without_runtime_warning(
 
 
 @pytest.mark.asyncio
+async def test_immediately_cancelled_coroutine_is_owned_without_runtime_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    started = False
+
+    async def record() -> None:
+        nonlocal started
+        started = True
+
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    coroutine = record()
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        live_capabilities._schedule_memory_record_awaitable(coroutine)
+        assert len(live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS) == 1
+        scheduled = next(iter(live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS))
+        scheduled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scheduled
+        del coroutine
+        await _event_loop_checkpoint()
+        gc.collect()
+
+    assert started is False
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_non_awaitable_memory_recorder_result_is_safe_protocol_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -518,6 +551,8 @@ async def test_failed_async_memory_recorder_logs_safe_background_error(
 async def test_future_memory_recorder_runs_in_background_without_extra_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
     memory_record = _FutureMemoryRecord()
     capabilities = _capabilities(memory_record=memory_record)
     caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
@@ -528,6 +563,48 @@ async def test_future_memory_recorder_runs_in_background_without_extra_error(
     await _event_loop_checkpoint()
 
     assert len(directions) == 3
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_future_memory_recorder_is_consumed_with_safe_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    memory_record = _FutureMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    directions = await capabilities.generate_directions(VIDEO_FORM, {})
+    memory_record.future.set_exception(RuntimeError("Bearer turn-secret Future 异常详情"))
+    await _event_loop_checkpoint()
+
+    assert len(directions) == 3
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    assert "operation=record_background_async" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "turn-secret" not in caplog.text
+    assert "Future 异常详情" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancelled_future_memory_recorder_only_clears_tracking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    memory_record = _FutureMemoryRecord()
+    capabilities = _capabilities(memory_record=memory_record)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    directions = await capabilities.generate_directions(VIDEO_FORM, {})
+    memory_record.future.cancel()
+    await _event_loop_checkpoint()
+
+    assert len(directions) == 3
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
     assert "operation=record_background_async" not in caplog.text
 
 
@@ -535,6 +612,8 @@ async def test_future_memory_recorder_runs_in_background_without_extra_error(
 async def test_custom_awaitable_runs_without_calling_user_cleanup(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
     memory_record = _CustomAwaitableMemoryRecord()
     capabilities = _capabilities(memory_record=memory_record)
     caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
@@ -548,8 +627,61 @@ async def test_custom_awaitable_runs_without_calling_user_cleanup(
 
     assert len(directions) == 3
     assert memory_record.close_calls == 0
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
     assert not any("was never awaited" in str(item.message) for item in captured)
     assert "operation=record_background_async" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_custom_awaitable_schedule_failure_does_not_call_async_close(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    awaitable = _CustomAwaitableMemoryRecord()
+
+    def reject_schedule(_value, *, loop=None):
+        raise RuntimeError("Bearer turn-secret 自定义 awaitable 调度异常详情")
+
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        monkeypatch.setattr(asyncio, "ensure_future", reject_schedule)
+        live_capabilities._schedule_memory_record_awaitable(awaitable)
+        gc.collect()
+
+    assert awaitable.close_calls == 0
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    assert not any("was never awaited" in str(item.message) for item in captured)
+    assert "operation=record_background_schedule" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "turn-secret" not in caplog.text
+    assert "调度异常详情" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_done_callback_handles_exception_inspection_failure_without_escaping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    class InspectionFailureFuture(asyncio.Future[None]):
+        def exception(self):
+            raise RuntimeError("Bearer turn-secret 回调检查异常详情")
+
+    future = InspectionFailureFuture()
+    live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS.add(future)
+    caplog.set_level("WARNING", logger="pixelflow.agent_workflows.video.live_capabilities")
+
+    live_capabilities._consume_memory_record_result(future)
+    future.cancel()
+
+    assert not live_capabilities._BACKGROUND_MEMORY_RECORD_TASKS
+    assert "operation=record_background_async" in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "turn-secret" not in caplog.text
+    assert "回调检查异常详情" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -743,6 +875,121 @@ def test_unconsumed_transient_credential_is_removed_after_gc() -> None:
 
     assert credential_reference() is None
     assert len(live_capabilities._TRANSIENT_CREDENTIAL_SECRETS) <= initial_count
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "authorizationToken",
+        "bearerToken",
+        "oauthAccessToken",
+        "proxyAuthorization",
+        "privateKey",
+        "authorization_token",
+        "authorization-token",
+        "authorization token",
+        "authorizationtoken",
+        "AuthorizationTOKEN",
+        "authToken",
+        "Auth-Token",
+        "AUTH TOKEN",
+        "bearer_token",
+        "Bearer-Token",
+        "BEARER TOKEN",
+        "bearertoken",
+        "oauth_access_token",
+        "OAuth-Access-Token",
+        "OAUTH ACCESS TOKEN",
+        "OAuthAccessTOKEN",
+        "oauthaccesstoken",
+        "oauth_refresh_token",
+        "OAuthRefreshToken",
+        "oauthrefreshtoken",
+        "proxy_authorization",
+        "Proxy-Authorization",
+        "PROXY AUTHORIZATION",
+        "proxyauthorization",
+        "private_key",
+        "Private-Key",
+        "PRIVATE KEY",
+        "privatekey",
+        "publicKey",
+        "public_key",
+        "Public-Key",
+        "PUBLIC KEY",
+        "publickey",
+        "apiKey",
+        "API-KEY",
+        "api key",
+        "apikey",
+        "clientSecret",
+        "CLIENT_SECRET",
+        "client-secret",
+        "clientsecret",
+        "IDToken",
+        "id_token",
+        "id-token",
+        "idtoken",
+        "Cookie",
+        "sessionCookie",
+        "credential",
+        "providerCredential",
+        "password",
+        "accountPassword",
+        "sessionId",
+        "SESSION_ID",
+        "sessionid",
+        "accessKey",
+        "accesskey",
+        "subscription-key",
+        "subscriptionkey",
+    ],
+)
+def test_safe_projection_rejects_structured_credential_key_variants(
+    credential_key: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含敏感字段"):
+        live_capabilities._safe_json_projection(
+            {"outer": {credential_key: "opaque-provider-value"}},
+            authorization="Bearer turn-secret",
+        )
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "metadata_value"),
+    [
+        ("business_token_count", 2),
+        ("scene_token_count", 4),
+        ("authorization_expires_at", "2026-08-01T12:00:00Z"),
+        ("accessTokenUsage", 128),
+        ("auth-limit", 20),
+        ("bearer token ttl", 3600),
+        ("oauthAccessTokenExpires", "2026-08-01T12:00:00Z"),
+        ("oauthaccesstokenexpires", "2026-08-01T12:00:00Z"),
+        ("refresh-token-expiry", "2026-08-01T12:00:00Z"),
+        ("authorizationexpiresat", "2026-08-01T12:00:00Z"),
+        ("authorizationStatus", "active"),
+        ("api_key_enabled", True),
+        ("apikeyenabled", True),
+        ("publicKeyStatus", "active"),
+        ("sessionIdEnabled", False),
+        ("sessionidenabled", False),
+    ],
+)
+def test_safe_projection_preserves_credential_metadata_suffixes(
+    metadata_key: str,
+    metadata_value: object,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    raw = {metadata_key: metadata_value}
+
+    assert live_capabilities._safe_json_projection(
+        raw,
+        authorization="Bearer turn-secret",
+    ) == raw
 
 
 @pytest.mark.asyncio

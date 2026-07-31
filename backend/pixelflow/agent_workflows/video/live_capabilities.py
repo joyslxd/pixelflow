@@ -37,7 +37,7 @@ from .scene_packages import (
 )
 
 logger = logging.getLogger(__name__)
-_BACKGROUND_MEMORY_RECORD_TASKS: set[asyncio.Task[None]] = set()
+_BACKGROUND_MEMORY_RECORD_TASKS: set[asyncio.Future[Any]] = set()
 
 
 class ChatModelFactory(Protocol):
@@ -520,14 +520,10 @@ def _log_memory_failure(operation: str, error: BaseException) -> None:
 def _schedule_memory_record_awaitable(value: Any) -> None:
     """把误返回的 awaitable 纳入当前事件循环，用户路径不等待结果。"""
 
-    runner = _await_memory_record_result(value)
     try:
-        task = asyncio.get_running_loop().create_task(
-            runner,
-            name="pixelflow-memory-record-adapter",
-        )
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(value, loop=loop)
     except Exception as error:  # noqa: BLE001 - 调度失败按安全元数据 fail-open
-        runner.close()
         if type(value) is CoroutineType:
             value.close()
         _log_memory_failure("record_background_schedule", error)
@@ -536,24 +532,30 @@ def _schedule_memory_record_awaitable(value: Any) -> None:
     task.add_done_callback(_consume_memory_record_result)
 
 
-async def _await_memory_record_result(value: Any) -> None:
-    await value
-
-
-def _consume_memory_record_result(task: asyncio.Task[None]) -> None:
+def _consume_memory_record_result(task: asyncio.Future[Any]) -> None:
     """消费后台结果和异常，避免 Task exception 泄漏到事件循环。"""
 
     _BACKGROUND_MEMORY_RECORD_TASKS.discard(task)
     try:
+        if task.cancelled():
+            return
         error = task.exception()
-    except asyncio.CancelledError as error:
-        _log_memory_failure("record_background_async", error)
+    except asyncio.CancelledError:
         return
-    except Exception as error:  # noqa: BLE001 - 回调异常只记录安全类型
-        _log_memory_failure("record_background_async", error)
+    except BaseException as error:  # noqa: BLE001 - done callback 不得向事件循环抛错
+        _log_memory_callback_failure(error)
         return
     if error is not None:
+        _log_memory_callback_failure(error)
+
+
+def _log_memory_callback_failure(error: BaseException) -> None:
+    """保证 done callback 的安全诊断本身不会逃逸到事件循环。"""
+
+    try:
         _log_memory_failure("record_background_async", error)
+    except BaseException:  # noqa: BLE001 - 日志基础设施异常也不得破坏回调
+        return
 
 
 def _context_materials(context: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -625,66 +627,124 @@ class _UnsafeCapabilityOutput(ValueError):
     """标记供应商结果无法安全投影；异常文本不得携带原始值。"""
 
 
-_SENSITIVE_PROTOCOL_KEYS = {
-    "authorization",
-    "authorizationheader",
-    "authorizationvalue",
-    "authorizationid",
-    "authheader",
-    "authheadervalue",
-    "accesstoken",
-    "accesstokenheader",
-    "accesstokenvalue",
-    "accesstokenid",
-    "provideraccesstoken",
-    "xaccesstoken",
-    "refreshtoken",
-    "idtoken",
-    "idtokenheader",
-    "idtokenvalue",
-    "idtokenid",
-    "clientsecret",
-    "clientsecretheader",
-    "clientsecretvalue",
-    "clientsecretid",
-    "apikey",
-    "apikeyheader",
-    "apikeyvalue",
-    "apikeyid",
-    "xapikey",
-    "xgoogapikey",
-    "authtoken",
-    "token",
-    "tokenheader",
-    "tokenvalue",
-    "tokenid",
-    "secret",
-    "secretheader",
-    "secretvalue",
-    "secretid",
-    "cookie",
-    "setcookie",
-    "cookieheader",
-    "cookievalue",
-    "cookieid",
-    "credential",
-    "credentialheader",
-    "credentialvalue",
-    "credentialid",
-    "password",
-    "passwordheader",
-    "passwordvalue",
-    "passwordhash",
-    "session",
-    "sessionheader",
-    "sessionvalue",
-    "sessionid",
-    "sessiontoken",
-    "sessioncookie",
-}
+_PROTOCOL_KEY_WORD_PATTERN = re.compile(
+    r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+",
+)
+_CREDENTIAL_METADATA_SUFFIXES = (
+    ("expires", "at"),
+    ("expiry", "at"),
+    ("count",),
+    ("usage",),
+    ("limit",),
+    ("ttl",),
+    ("expires",),
+    ("expiry",),
+    ("status",),
+    ("enabled",),
+)
+_CREDENTIAL_WORDS = frozenset(
+    {
+        "authorization",
+        "auth",
+        "bearer",
+        "oauth",
+        "token",
+        "secret",
+        "cookie",
+        "credential",
+        "password",
+        "session",
+    }
+)
+_CREDENTIAL_KEY_QUALIFIERS = frozenset(
+    {
+        "api",
+        "private",
+        "public",
+        "access",
+        "client",
+        "account",
+        "subscription",
+        "service",
+        "signing",
+        "encryption",
+        "ssh",
+    }
+)
+_CREDENTIAL_DECORATION_SUFFIXES = ("header", "value", "id", "hash")
+_CREDENTIAL_COMPACT_METADATA_SUFFIXES = (
+    "expiresat",
+    "expiryat",
+    "count",
+    "usage",
+    "limit",
+    "ttl",
+    "expires",
+    "expiry",
+    "status",
+    "enabled",
+)
 _BEARER_PATTERN = re.compile(r"(?i)(?:^|[\s\"'])bearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _API_SECRET_PATTERN = re.compile(r"\b(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
+
+
+def _protocol_key_words(key: str) -> tuple[str, ...]:
+    """按连接符和大小写边界拆分协议字段词，不依赖有限字段名枚举。"""
+
+    words: list[str] = []
+    for component in re.split(r"[^A-Za-z0-9]+", key):
+        words.extend(match.group(0).casefold() for match in _PROTOCOL_KEY_WORD_PATTERN.finditer(component))
+
+    merged_words: list[str] = []
+    index = 0
+    while index < len(words):
+        if words[index : index + 2] == ["o", "auth"]:
+            merged_words.append("oauth")
+            index += 2
+            continue
+        merged_words.append(words[index])
+        index += 1
+    return tuple(merged_words)
+
+
+def _has_fused_credential_semantics(component: str) -> bool:
+    if any(component.endswith(word) for word in _CREDENTIAL_WORDS):
+        return True
+    if any(component.endswith(f"{qualifier}key") for qualifier in _CREDENTIAL_KEY_QUALIFIERS):
+        return True
+    for suffix in _CREDENTIAL_DECORATION_SUFFIXES:
+        if component.endswith(suffix) and _has_fused_credential_semantics(component[: -len(suffix)]):
+            return True
+    return False
+
+
+def _has_credential_metadata_suffix(words: tuple[str, ...]) -> bool:
+    if any(
+        len(words) >= len(suffix) and words[-len(suffix) :] == suffix
+        for suffix in _CREDENTIAL_METADATA_SUFFIXES
+    ):
+        return True
+    if not words:
+        return False
+    compact_component = words[-1]
+    return any(
+        compact_component.endswith(suffix)
+        and _has_fused_credential_semantics(compact_component[: -len(suffix)])
+        for suffix in _CREDENTIAL_COMPACT_METADATA_SUFFIXES
+    )
+
+
+def _is_sensitive_protocol_key(key: str) -> bool:
+    words = _protocol_key_words(key)
+    if not words or _has_credential_metadata_suffix(words):
+        return False
+    word_set = frozenset(words)
+    if word_set & _CREDENTIAL_WORDS:
+        return True
+    if "key" in word_set and word_set & _CREDENTIAL_KEY_QUALIFIERS:
+        return True
+    return any(_has_fused_credential_semantics(word) for word in words)
 
 
 def _safe_json_projection(value: Any, *, authorization: str) -> Any:
@@ -702,8 +762,7 @@ def _safe_json_projection(value: Any, *, authorization: str) -> Any:
             for key, child in item.items():
                 if type(key) is not str:
                     raise _UnsafeCapabilityOutput("场景资产结果包含非字符串字段")
-                normalized_key = re.sub(r"[^a-z0-9]+", "", key.casefold())
-                if normalized_key in _SENSITIVE_PROTOCOL_KEYS:
+                if _is_sensitive_protocol_key(key):
                     raise _UnsafeCapabilityOutput("场景资产结果包含敏感字段")
                 projected[key] = project(child)
             return projected
