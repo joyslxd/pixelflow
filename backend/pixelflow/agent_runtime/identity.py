@@ -1,10 +1,21 @@
 """为 live Runtime 派生跨进程稳定身份。"""
 
+import json
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 def _stable_hex(canonical_key: str) -> str:
     return uuid5(NAMESPACE_URL, canonical_key).hex
+
+
+def _component_key(identity_kind: str, *components: str | int) -> str:
+    encoded = json.dumps(
+        [identity_kind, *components],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"pixelflow-agent-runtime:{encoded}"
 
 
 def conversation_message_id(conversation_id: str, client_input_id: UUID) -> str:
@@ -31,7 +42,7 @@ def workflow_id(conversation_id: str, client_input_id: UUID) -> str:
 def interrupt_id(turn_id: str, reason_code: str) -> str:
     """按原 Turn 与原因生成重复执行一致的中断 ID。"""
 
-    key = f"pixelflow-agent-interrupt:{turn_id}:{reason_code}"
+    key = _component_key("interrupt", turn_id, reason_code)
     return f"interrupt_{_stable_hex(key)}"
 
 
@@ -43,9 +54,12 @@ def projection_message_id(
 ) -> str:
     """按工作流阶段动作生成幂等的助手投影消息 ID。"""
 
-    key = (
-        "pixelflow-agent-projection-message:"
-        f"{workflow_id}:{stage}:{stage_version}:{action_key}"
+    key = _component_key(
+        "projection_message",
+        workflow_id,
+        stage,
+        stage_version,
+        action_key,
     )
     return _stable_hex(key)
 

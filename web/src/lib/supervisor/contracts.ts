@@ -315,15 +315,59 @@ function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonV
   }
 
   ancestors.add(value);
-  const valid = Array.isArray(value)
-    ? value.every((item) => isJsonValue(item, ancestors))
-    : Object.values(value).every((item) => isJsonValue(item, ancestors));
+  let valid = false;
+  try {
+    if (Array.isArray(value)) {
+      valid = value.every((item) => isJsonValue(item, ancestors));
+    } else {
+      const prototype = Object.getPrototypeOf(value);
+      valid = (prototype === Object.prototype || prototype === null)
+        && Object.values(value).every((item) => isJsonValue(item, ancestors));
+    }
+  } catch {
+    valid = false;
+  }
   ancestors.delete(value);
   return valid;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value) && isJsonValue(value, new WeakSet());
+}
+
+function cloneAndFreezeJson(value: unknown, ancestors = new WeakSet<object>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("JSON 数字必须是有限值");
+    }
+    return value;
+  }
+  if (typeof value !== "object" || ancestors.has(value)) {
+    throw new TypeError("只允许无循环引用的 JSON 值");
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return Object.freeze(
+        value.map((item) => cloneAndFreezeJson(item, ancestors)),
+      ) as unknown as JsonValue[];
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError("JSON 对象必须使用普通对象原型");
+    }
+    const clone: JsonObject = prototype === null ? Object.create(null) : {};
+    for (const [key, item] of Object.entries(value)) {
+      clone[key] = cloneAndFreezeJson(item, ancestors);
+    }
+    return Object.freeze(clone);
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function hasOnlyKeys(value: JsonObject, keys: ReadonlySet<string>): boolean {
@@ -386,7 +430,11 @@ export function parseTurnStartRequest(value: unknown): TurnStartRequest {
   if (!isTurnStartRequest(value)) {
     throw new TypeError("Turn 请求不符合 contracts-v1 合同");
   }
-  return value;
+  try {
+    return cloneAndFreezeJson(value) as unknown as TurnStartRequest;
+  } catch {
+    throw new TypeError("Turn 请求不符合 contracts-v1 合同");
+  }
 }
 
 export function isInterruptResponseRequest(value: unknown): value is InterruptResponseRequest {
@@ -411,7 +459,11 @@ export function parseInterruptResponseRequest(value: unknown): InterruptResponse
   if (!isInterruptResponseRequest(value)) {
     throw new TypeError("interrupt response 不符合 contracts-v1 合同");
   }
-  return value;
+  try {
+    return cloneAndFreezeJson(value) as unknown as InterruptResponseRequest;
+  } catch {
+    throw new TypeError("interrupt response 不符合 contracts-v1 合同");
+  }
 }
 
 function isAgentEventType(value: unknown): value is AgentEventType {

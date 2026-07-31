@@ -3,11 +3,11 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, field_validator
 
 from .base import ContractModel
 from .enums import OrchestrationMode
-from .live import ExplicitActionSignal
+from .live import ExplicitActionSignal, validate_strict_json_array
 
 
 class ConversationOrchestration(ContractModel):
@@ -27,6 +27,10 @@ class TurnStartRequest(ContractModel):
     artifact_refs: list[str] = Field(default_factory=list)
     expected_context_version: int = Field(ge=0)
     explicit_action: ExplicitActionSignal | None = None
+
+    _validate_materials = field_validator("materials", mode="before")(
+        validate_strict_json_array
+    )
 
 
 class OperationRequest(ContractModel):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
+from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from uuid import UUID
 
 import pytest
@@ -47,6 +50,19 @@ from pixelflow.agent_runtime.service import AgentRuntimeService
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "agent_runtime" / "contracts-v1.json"
+
+
+class _NonJsonPayload:
+    """用于证明自定义类实例不能越过 JSON 合同边界。"""
+
+    def __init__(self) -> None:
+        self.value = "not-json"
+
+
+def _cyclic_json_candidate() -> dict[str, object]:
+    value: dict[str, object] = {}
+    value["self"] = value
+    return value
 
 
 @pytest.fixture(scope="module")
@@ -238,6 +254,60 @@ def test_live_action_and_interrupt_contracts_fail_closed() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        math.nan,
+        math.inf,
+        -math.inf,
+        datetime(2026, 7, 31, tzinfo=UTC),
+        MappingProxyType({"value": "map-like"}),
+        _NonJsonPayload(),
+        pytest.param(None, id="cyclic-reference"),
+    ],
+)
+def test_live_patch_rejects_every_non_json_value(invalid_value: object) -> None:
+    candidate = _cyclic_json_candidate() if invalid_value is None else invalid_value
+
+    with pytest.raises(ValidationError):
+        ExplicitActionSignal.model_validate(
+            {
+                "action": "continue_workflow",
+                "intent": "video",
+                "workflow_id": "wf-1",
+                "stage": "plan_review",
+                "artifact_ref": "artifact:video-plan:wf-1:v1",
+                "patch": {"invalid": candidate},
+            }
+        )
+
+
+def test_live_materials_and_projection_payload_reject_non_json_values() -> None:
+    with pytest.raises(ValidationError, match="materials"):
+        TurnStartRequest.model_validate(
+            {
+                "client_input_id": "11111111-1111-4111-8111-111111111111",
+                "content": "继续",
+                "materials": [{"score": math.nan}],
+                "expected_context_version": 0,
+            }
+        )
+
+    with pytest.raises(ValidationError, match="payload"):
+        AgentInterruptProjection.model_validate(
+            {
+                "interrupt_id": "interrupt-1",
+                "conversation_id": "conversation-1",
+                "workflow_id": "wf-1",
+                "turn_id": "turn-1",
+                "kind": "plan_review",
+                "reason_code": "plan_review_required",
+                "payload": {"opened": math.inf},
+                "opened_at": "2026-07-31T12:00:00Z",
+            }
+        )
+
+
 def test_live_ids_are_stable_and_scope_sensitive() -> None:
     client_id = UUID("11111111-1111-4111-8111-111111111111")
 
@@ -255,10 +325,27 @@ def test_live_ids_are_stable_and_scope_sensitive() -> None:
         client_id,
     )
     assert interrupt_id("turn-1", "plan_review_required") == (
-        "interrupt_4eb7a981ed45578997e062d9b6dc91ee"
+        "interrupt_c3e25c1142c658aabdb322aa795aeefd"
     )
     assert projection_message_id("workflow-1", "plan_review", 1, "approve") == (
-        "c91c06d7861b5abaaa18a6f0c724f1cc"
+        "001b1b0d3cb05fcead80be648a671dab"
+    )
+
+
+def test_live_ids_preserve_component_boundaries_with_colons() -> None:
+    client_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    assert interrupt_id("turn:a", "reason") != interrupt_id("turn", "a:reason")
+    assert projection_message_id("wf:a", "plan", 1, "approve") != (
+        projection_message_id("wf", "a:plan", 1, "approve")
+    )
+    assert conversation_message_id("conversation:1", client_id) != (
+        conversation_message_id("conversation", client_id)
+    )
+    assert turn_id("conversation:1", client_id) != turn_id("conversation", client_id)
+    assert workflow_id("conversation:1", client_id) != workflow_id(
+        "conversation",
+        client_id,
     )
 
 

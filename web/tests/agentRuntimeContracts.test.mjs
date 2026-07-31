@@ -348,3 +348,87 @@ test("live 请求解析器拒绝额外键、空目标、非 JSON patch 和非 UU
     /interrupt response 不符合 contracts-v1 合同/,
   );
 });
+
+test("live 请求解析器拒绝所有非 JSON patch 值", () => {
+  const validTurn = contractFixture.turn_start_request;
+  const cyclic = {};
+  cyclic.self = cyclic;
+  class NonJsonRecord {
+    constructor() {
+      this.value = "not-json";
+    }
+  }
+  const invalidValues = [
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    new Date("2026-07-31T12:00:00Z"),
+    new Map([["value", "map-like"]]),
+    new NonJsonRecord(),
+    cyclic,
+  ];
+
+  for (const invalidValue of invalidValues) {
+    assert.throws(
+      () => parseTurnStartRequest({
+        ...validTurn,
+        explicit_action: {
+          ...validTurn.explicit_action,
+          patch: { invalid: invalidValue },
+        },
+      }),
+      /Turn 请求不符合 contracts-v1 合同/,
+    );
+  }
+});
+
+test("live 请求解析器拒绝 materials 中的非法原型对象", () => {
+  const validTurn = contractFixture.turn_start_request;
+  const validResponse = contractFixture.interrupt_response_request;
+
+  for (const invalidMaterial of [new Date(), new Map(), new (class Material {})()]) {
+    assert.throws(
+      () => parseTurnStartRequest({ ...validTurn, materials: [invalidMaterial] }),
+      /Turn 请求不符合 contracts-v1 合同/,
+    );
+    assert.throws(
+      () => parseInterruptResponseRequest({
+        ...validResponse,
+        value: { ...validResponse.value, materials: [invalidMaterial] },
+      }),
+      /interrupt response 不符合 contracts-v1 合同/,
+    );
+  }
+});
+
+test("live parser 返回与原输入隔离的递归冻结快照", () => {
+  const turnInput = structuredClone(contractFixture.turn_start_request);
+  const responseInput = structuredClone(contractFixture.interrupt_response_request);
+
+  const parsedTurn = parseTurnStartRequest(turnInput);
+  const parsedResponse = parseInterruptResponseRequest(responseInput);
+
+  assert.notEqual(parsedTurn, turnInput);
+  assert.notEqual(parsedTurn.explicit_action.patch, turnInput.explicit_action.patch);
+  assert.notEqual(parsedResponse, responseInput);
+  assert.notEqual(
+    parsedResponse.value.explicit_action.patch,
+    responseInput.value.explicit_action.patch,
+  );
+  assert.equal(Object.isFrozen(parsedTurn), true);
+  assert.equal(Object.isFrozen(parsedTurn.explicit_action.patch), true);
+  assert.equal(Object.isFrozen(parsedResponse), true);
+  assert.equal(Object.isFrozen(parsedResponse.value.explicit_action.patch), true);
+
+  turnInput.explicit_action.patch.approved = false;
+  turnInput.materials.push({ changed: true });
+  responseInput.value.explicit_action.patch.approved = false;
+  responseInput.value.artifact_refs.push("artifact:changed");
+
+  assert.equal(parsedTurn.explicit_action.patch.approved, true);
+  assert.deepEqual(parsedTurn.materials, []);
+  assert.equal(parsedResponse.value.explicit_action.patch.approved, true);
+  assert.deepEqual(parsedResponse.value.artifact_refs, [
+    "artifact:video-plan:wf-1:v1",
+  ]);
+});
