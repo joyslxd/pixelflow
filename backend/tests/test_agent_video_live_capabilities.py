@@ -995,6 +995,34 @@ def test_safe_projection_rejects_reviewer_unicode_and_plural_keys(
 
 
 @pytest.mark.parametrize(
+    "credential_key",
+    [
+        "providerKeys",
+        "provider_keys",
+        "provider-keys",
+        "providerkeys",
+        "key",
+        "keys",
+        "Key",
+        "Keys",
+    ],
+)
+def test_safe_projection_rejects_provider_and_bare_key_variants_recursively(
+    credential_key: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含敏感字段") as error_info:
+        live_capabilities._safe_json_projection(
+            {"outer": [{"nested": {credential_key: "opaque-provider-value"}}]},
+            authorization="Bearer turn-secret",
+        )
+
+    assert credential_key not in str(error_info.value)
+    assert "opaque-provider-value" not in str(error_info.value)
+
+
+@pytest.mark.parametrize(
     "unsafe_key",
     [
         "场景状态",
@@ -1085,6 +1113,35 @@ def test_safe_projection_preserves_plural_metadata_and_unicode_business_values()
         "tokenized_url": "https://assets.example.com/tokenized/image.png",
         "scene status": "处理完成",
     }
+
+    assert live_capabilities._safe_json_projection(
+        raw,
+        authorization="Bearer turn-secret",
+    ) == raw
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "metadata_value"),
+    [
+        ("business_keys_count", 2),
+        ("provider_key_count", 1),
+        ("provider_keys_count", 2),
+        ("scene_key_usage", 3),
+        ("provider_keys_limit", 4),
+        ("provider_key_ttl", 3600),
+        ("provider_keys_expires", "2026-08-01T12:00:00Z"),
+        ("provider_key_expiry", "2026-08-01T12:00:00Z"),
+        ("provider_keys_status", "active"),
+        ("provider_key_enabled", True),
+    ],
+)
+def test_safe_projection_preserves_provider_key_metadata_suffixes(
+    metadata_key: str,
+    metadata_value: object,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    raw = {"outer": [{"metadata": {metadata_key: metadata_value}}]}
 
     assert live_capabilities._safe_json_projection(
         raw,
