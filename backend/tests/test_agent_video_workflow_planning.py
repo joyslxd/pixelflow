@@ -165,6 +165,26 @@ def test_video_planning_workflow_projects_each_review_boundary(service: VideoPla
     assert projection.context_version == 5
 
 
+def test_planning_state_validation_rejects_illegal_review_or_approval_authority(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+    approved = service.approve_plan(review, now=review.updated_at + timedelta(seconds=1))
+    forged_states = (
+        replace(review, status=WorkflowStatus.RUNNING),
+        replace(approved, status=WorkflowStatus.AWAITING_USER),
+        replace(review, _active_plan=None),
+        replace(approved, _active_plan=None),
+        replace(review, context_version=review.context_version + 1),
+        replace(review, stage_version=1, context_version=1),
+        replace(review, updated_at=review.created_at - timedelta(seconds=1)),
+    )
+
+    for forged in forged_states:
+        with pytest.raises(ValueError, match="规划状态|Plan"):
+            service.validate_state(forged)
+
+
 def test_intake_and_direction_contracts_fail_closed(service: VideoPlanningWorkflowService):
     now = datetime(2026, 7, 28, 2, 0, tzinfo=UTC)
     with pytest.raises(ValueError, match="video"):

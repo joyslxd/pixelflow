@@ -11,7 +11,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, cast
 
-from pydantic import ConfigDict, Field, JsonValue, field_serializer
+from pydantic import ConfigDict, Field, JsonValue, field_serializer, field_validator
 
 from pixelflow.agent_runtime.contracts import ExternalJobRef, WorkflowRecord, WorkflowStatus
 from pixelflow.agent_runtime.contracts.base import ContractModel
@@ -80,7 +80,11 @@ class VideoWorkflowStateEnvelope(ContractModel):
     """保存状态身份、乐观版本、规范载荷摘要和最近动作游标。"""
 
     # Plan Markdown 必须原样保存，信封字符串边界由 codec 显式执行更严格的无空白校验。
-    model_config = ConfigDict(frozen=True, str_strip_whitespace=False)
+    model_config = ConfigDict(
+        frozen=True,
+        revalidate_instances="always",
+        str_strip_whitespace=False,
+    )
 
     schema_version: Literal[1] = 1
     workflow_id: str = Field(min_length=1)
@@ -90,11 +94,22 @@ class VideoWorkflowStateEnvelope(ContractModel):
     workflow_version: int = Field(ge=1)
     context_version: int = Field(ge=1)
     payload: Mapping[str, JsonValue]
-    payload_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    payload_sha256: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$",
+        description="schema v1 复用历史字段名保存完整规范信封摘要，而不是只摘要 payload。",
+    )
     last_turn_id: str = Field(min_length=1)
     last_action_key: str = Field(min_length=1)
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def copy_payload_for_validation(cls, value: object) -> object:
+        """重验证现有实例时先解冻复制，避免信任原实例及其可变别名。"""
+
+        del cls
+        return _thaw_json(value)
 
     def model_post_init(self, context: object, /) -> None:
         """复制并递归冻结载荷，避免调用方别名污染持久化状态。"""
@@ -226,6 +241,16 @@ def canonical_payload_sha256(payload: Mapping[str, JsonValue]) -> str:
     """计算不受对象键顺序影响的规范 SHA-256。"""
 
     encoded = _canonical_json(payload, field_name="视频 Workflow payload")
+    return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
+
+def canonical_video_workflow_envelope_sha256(
+    envelope: VideoWorkflowStateEnvelope,
+) -> str:
+    """摘要除自身摘要字段外的完整规范信封签名体。"""
+
+    signature_body = envelope.model_dump(mode="json", exclude={"payload_sha256"})
+    encoded = _canonical_json(signature_body, field_name="视频 Workflow 规范信封签名体")
     return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
 
@@ -429,6 +454,24 @@ def _common_values(
     }
 
 
+def _validate_nested_lineage(
+    *,
+    parent: VideoWorkflowState,
+    child: VideoWorkflowState,
+    relation: str,
+) -> None:
+    """校验外层状态与完整来源状态的身份、版本及时间谱系。"""
+
+    if parent.workflow_id != child.workflow_id or parent.conversation_id != child.conversation_id:
+        raise ValueError(f"{relation} 的 Workflow 与对话谱系不一致")
+    if parent.created_at != child.created_at:
+        raise ValueError(f"{relation} 的创建时间谱系不一致")
+    if child.stage_version > parent.stage_version or child.context_version > parent.context_version:
+        raise ValueError(f"{relation} 的来源版本不能晚于外层状态谱系")
+    if child.updated_at > parent.updated_at:
+        raise ValueError(f"{relation} 的来源更新时间不能晚于外层状态谱系")
+
+
 def _decode_planning(payload: Mapping[str, JsonValue]) -> VideoPlanningWorkflowState:
     _required_keys(payload, _PLANNING_FIELDS, state_name="planning")
     active_payload = _nullable_mapping(payload["active_plan"], field_name="active_plan")
@@ -443,7 +486,9 @@ def _decode_planning(payload: Mapping[str, JsonValue]) -> VideoPlanningWorkflowS
         _selected_direction_json=_canonical_json(_mapping(payload["selected_direction"], field_name="selected_direction"), field_name="selected_direction"),
         _active_plan=active_plan,
     )
-    VideoPlanningWorkflowService().to_workflow_record(state)
+    service = VideoPlanningWorkflowService()
+    service.validate_state(state)
+    service.to_workflow_record(state)
     return state
 
 
@@ -488,6 +533,11 @@ def _decode_scene_generation(payload: Mapping[str, JsonValue]) -> VideoSceneGene
         _dirty_scene_ids_json=_canonical_json(_list(payload["dirty_scene_ids"], field_name="dirty_scene_ids"), field_name="dirty_scene_ids"),
         _pending_operations=pending,
     )
+    _validate_nested_lineage(
+        parent=state,
+        child=source_state,
+        relation="场景包到分镜生成",
+    )
     VideoSceneGenerationWorkflowService().to_workflow_record(state)
     return state
 
@@ -499,8 +549,9 @@ def _decode_postproduction(payload: Mapping[str, JsonValue]) -> VideoPostProduct
     if not isinstance(finalized, bool):
         raise ValueError("finalized_by_user 必须是布尔值")
     common = _common_values(payload, stage_type=VideoPostProductionStage)
+    generation_state = _decode_scene_generation(_mapping(payload["generation_state"], field_name="generation_state"))
     state = VideoPostProductionWorkflowState(**common,
-        _generation_state=_decode_scene_generation(_mapping(payload["generation_state"], field_name="generation_state")),
+        _generation_state=generation_state,
         _merge_request_json=_canonical_json(_mapping(payload["merge_request"], field_name="merge_request"), field_name="merge_request"),
         _merged_video_json=_canonical_json(_nullable_mapping(payload["merged_video"], field_name="merged_video"), field_name="merged_video"),
         _merge_error_json=_canonical_json(_nullable_mapping(payload["merge_error"], field_name="merge_error"), field_name="merge_error"),
@@ -512,6 +563,11 @@ def _decode_postproduction(payload: Mapping[str, JsonValue]) -> VideoPostProduct
         _operation_attempts_json=_canonical_json(_mapping(payload["operation_attempts"], field_name="operation_attempts"), field_name="operation_attempts"),
         finalized_by_user=finalized,
     )
+    _validate_nested_lineage(
+        parent=state,
+        child=generation_state,
+        relation="分镜生成到视频后处理",
+    )
     VideoPostProductionWorkflowService().to_workflow_record(state)
     return state
 
@@ -522,13 +578,19 @@ def _decode_delivery(payload: Mapping[str, JsonValue]) -> VideoDeliveryWorkflowS
     pending_jianying_operation = _nullable_mapping(payload["pending_jianying_operation"], field_name="pending_jianying_operation")
     pending_request = _nullable_mapping(payload["pending_jianying_request"], field_name="pending_jianying_request")
     common = _common_values(payload, stage_type=VideoPostProductionStage)
+    postproduction_state = _decode_postproduction(_mapping(payload["postproduction_state"], field_name="postproduction_state"))
     state = VideoDeliveryWorkflowState(**common,
-        _postproduction_state=_decode_postproduction(_mapping(payload["postproduction_state"], field_name="postproduction_state")),
+        _postproduction_state=postproduction_state,
         _jianying_draft_records_json=_canonical_json(_mapping(payload["jianying_draft_records"], field_name="jianying_draft_records"), field_name="jianying_draft_records"),
         _operation_attempts_json=_canonical_json(_mapping(payload["operation_attempts"], field_name="operation_attempts"), field_name="operation_attempts"),
         _pending_operation=(_external_job(pending_payload, field_name="pending_operation") if pending_payload is not None else None),
         _pending_jianying_operation_json=_canonical_json(pending_jianying_operation, field_name="pending_jianying_operation"),
         _final_video_delivery_json=_canonical_json(_nullable_mapping(payload["final_video_delivery"], field_name="final_video_delivery"), field_name="final_video_delivery"),
+    )
+    _validate_nested_lineage(
+        parent=state,
+        child=postproduction_state,
+        relation="视频后处理到交付",
     )
     if _canonical_json(state.pending_jianying_request, field_name="恢复后的 pending_jianying_request") != _canonical_json(
         pending_request,
@@ -576,7 +638,7 @@ def encode_video_workflow_state(
     projection = project_video_workflow_state(state)
     kind = _kind_for_state(state)
     payload = cast(dict[str, JsonValue], _json_copy(_ENCODERS[kind](state), field_name=f"{kind.value} payload"))
-    return VideoWorkflowStateEnvelope(
+    candidate = VideoWorkflowStateEnvelope(
         workflow_id=projection.workflow_id,
         conversation_id=projection.conversation_id,
         user_id=_text(user_id, field_name="user_id"),
@@ -584,18 +646,23 @@ def encode_video_workflow_state(
         workflow_version=_integer(workflow_version, field_name="workflow_version"),
         context_version=projection.context_version,
         payload=payload,
-        payload_sha256=canonical_payload_sha256(payload),
+        payload_sha256="sha256:" + "0" * 64,
         last_turn_id=_text(last_turn_id, field_name="last_turn_id"),
         last_action_key=_text(last_action_key, field_name="last_action_key"),
         created_at=projection.created_at,
         updated_at=projection.updated_at,
+    )
+    return candidate.model_copy(
+        update={
+            "payload_sha256": canonical_video_workflow_envelope_sha256(candidate),
+        }
     )
 
 
 def decode_video_workflow_state(envelope: VideoWorkflowStateEnvelope) -> VideoWorkflowState:
     """校验 schema、摘要和跨层身份后严格恢复 M11 领域状态。"""
 
-    if envelope.schema_version != 1:
+    if not isinstance(envelope.schema_version, int) or isinstance(envelope.schema_version, bool) or envelope.schema_version != 1:
         raise ValueError("schema_version 仅支持 1")
     _integer(envelope.workflow_version, field_name="workflow_version")
     _integer(envelope.context_version, field_name="context_version")
@@ -604,17 +671,25 @@ def decode_video_workflow_state(envelope: VideoWorkflowStateEnvelope) -> VideoWo
     _text(envelope.user_id, field_name="user_id")
     _text(envelope.last_turn_id, field_name="last_turn_id")
     _text(envelope.last_action_key, field_name="last_action_key")
-    if envelope.created_at.tzinfo is None or envelope.created_at.utcoffset() is None:
+    if not isinstance(envelope.created_at, datetime) or envelope.created_at.tzinfo is None or envelope.created_at.utcoffset() is None:
         raise ValueError("created_at 必须包含时区")
-    if envelope.updated_at.tzinfo is None or envelope.updated_at.utcoffset() is None or envelope.updated_at < envelope.created_at:
+    if (
+        not isinstance(envelope.updated_at, datetime)
+        or envelope.updated_at.tzinfo is None
+        or envelope.updated_at.utcoffset() is None
+        or envelope.updated_at < envelope.created_at
+    ):
         raise ValueError("信封更新时间必须包含时区且不能早于创建时间")
     try:
         kind = VideoWorkflowStateKind(envelope.state_kind)
     except ValueError as exc:
         raise ValueError("state_kind 不是受支持的视频状态类型") from exc
     payload = _mapping(envelope.payload, field_name="视频 Workflow payload")
-    if canonical_payload_sha256(payload) != envelope.payload_sha256:
-        raise ValueError("视频 Workflow payload 摘要不一致")
+    normalized = VideoWorkflowStateEnvelope.model_validate(envelope)
+    if canonical_video_workflow_envelope_sha256(normalized) != normalized.payload_sha256:
+        raise ValueError("视频 Workflow 规范信封摘要不一致")
+    envelope = normalized
+    payload = _mapping(envelope.payload, field_name="视频 Workflow payload")
     state = _DECODERS[kind](payload)
     projection = project_video_workflow_state(state)
     if projection.workflow_id != envelope.workflow_id:
@@ -633,6 +708,7 @@ __all__ = [
     "VideoWorkflowStateEnvelope",
     "VideoWorkflowStateKind",
     "canonical_payload_sha256",
+    "canonical_video_workflow_envelope_sha256",
     "decode_video_workflow_state",
     "encode_video_workflow_state",
     "project_video_workflow_state",
