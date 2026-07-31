@@ -303,6 +303,18 @@ function isIso8601(value: unknown): value is string {
   return isNonEmptyString(value) && ISO_8601_PATTERN.test(value) && Number.isFinite(Date.parse(value));
 }
 
+function isDenseArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return true;
@@ -318,7 +330,10 @@ function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonV
   let valid = false;
   try {
     if (Array.isArray(value)) {
-      valid = value.every((item) => isJsonValue(item, ancestors));
+      valid = isDenseArray(value);
+      for (let index = 0; valid && index < value.length; index += 1) {
+        valid = isJsonValue(value[index], ancestors);
+      }
     } else {
       const prototype = Object.getPrototypeOf(value);
       valid = (prototype === Object.prototype || prototype === null)
@@ -352,9 +367,14 @@ function cloneAndFreezeJson(value: unknown, ancestors = new WeakSet<object>()): 
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return Object.freeze(
-        value.map((item) => cloneAndFreezeJson(item, ancestors)),
-      ) as unknown as JsonValue[];
+      if (!isDenseArray(value)) {
+        throw new TypeError("JSON 数组不能包含空槽");
+      }
+      const clone: JsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        clone.push(cloneAndFreezeJson(value[index], ancestors));
+      }
+      return Object.freeze(clone) as unknown as JsonValue[];
     }
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
@@ -384,11 +404,27 @@ function isOptionalNonEmptyString(value: unknown): value is string | null {
 }
 
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (!isDenseArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== "string") {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isJsonObjectArray(value: unknown): value is JsonObject[] {
-  return Array.isArray(value) && value.every((item) => isJsonObject(item));
+  if (!isDenseArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isJsonObject(value[index])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isExplicitActionSignal(value: unknown): value is ExplicitActionSignal {

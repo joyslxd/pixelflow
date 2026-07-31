@@ -20,6 +20,8 @@ const {
   WORKFLOW_KIND_VALUES,
   WORKFLOW_STATUS_VALUES,
   isAgentEventEnvelope,
+  isInterruptResponseRequest,
+  isTurnStartRequest,
   parseAgentEventEnvelope,
   parseInterruptResponseRequest,
   parseTurnStartRequest,
@@ -397,6 +399,85 @@ test("live 请求解析器拒绝 materials 中的非法原型对象", () => {
         value: { ...validResponse.value, materials: [invalidMaterial] },
       }),
       /interrupt response 不符合 contracts-v1 合同/,
+    );
+  }
+});
+
+test("live guard 与 parser 拒绝 materials、artifact_refs 和 patch 中的稀疏数组", () => {
+  const validTurn = contractFixture.turn_start_request;
+  const validResponse = contractFixture.interrupt_response_request;
+  const sparseMaterials = [];
+  const sparseArtifactRefs = [];
+  const sparsePatchItems = [];
+  sparseMaterials.length = 1;
+  sparseArtifactRefs.length = 1;
+  sparsePatchItems.length = 1;
+
+  const cases = [
+    {
+      guard: isTurnStartRequest,
+      parse: parseTurnStartRequest,
+      value: { ...validTurn, materials: sparseMaterials },
+      message: "Turn 请求不符合 contracts-v1 合同",
+    },
+    {
+      guard: isInterruptResponseRequest,
+      parse: parseInterruptResponseRequest,
+      value: {
+        ...validResponse,
+        value: { ...validResponse.value, materials: sparseMaterials },
+      },
+      message: "interrupt response 不符合 contracts-v1 合同",
+    },
+    {
+      guard: isTurnStartRequest,
+      parse: parseTurnStartRequest,
+      value: { ...validTurn, artifact_refs: sparseArtifactRefs },
+      message: "Turn 请求不符合 contracts-v1 合同",
+    },
+    {
+      guard: isInterruptResponseRequest,
+      parse: parseInterruptResponseRequest,
+      value: {
+        ...validResponse,
+        value: { ...validResponse.value, artifact_refs: sparseArtifactRefs },
+      },
+      message: "interrupt response 不符合 contracts-v1 合同",
+    },
+    {
+      guard: isTurnStartRequest,
+      parse: parseTurnStartRequest,
+      value: {
+        ...validTurn,
+        explicit_action: {
+          ...validTurn.explicit_action,
+          patch: { items: sparsePatchItems },
+        },
+      },
+      message: "Turn 请求不符合 contracts-v1 合同",
+    },
+    {
+      guard: isInterruptResponseRequest,
+      parse: parseInterruptResponseRequest,
+      value: {
+        ...validResponse,
+        value: {
+          ...validResponse.value,
+          explicit_action: {
+            ...validResponse.value.explicit_action,
+            patch: { items: sparsePatchItems },
+          },
+        },
+      },
+      message: "interrupt response 不符合 contracts-v1 合同",
+    },
+  ];
+
+  for (const candidate of cases) {
+    assert.equal(candidate.guard(candidate.value), false);
+    assert.throws(
+      () => candidate.parse(candidate.value),
+      { name: "TypeError", message: candidate.message },
     );
   }
 });

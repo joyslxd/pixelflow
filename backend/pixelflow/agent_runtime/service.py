@@ -321,7 +321,12 @@ class AgentRuntimeService:
         """幂等保存可见消息、Turn、Runtime 版本和首批事件。"""
 
         owner = user_id.strip()
-        body = TurnStartRequest.model_validate(request)
+        raw_request = (
+            request.model_dump(mode="python")
+            if isinstance(request, TurnStartRequest)
+            else request
+        )
+        body = TurnStartRequest.model_validate(raw_request)
         occurred_at = self._clock()
         try:
             registration = await self._turn_registration_store.register(

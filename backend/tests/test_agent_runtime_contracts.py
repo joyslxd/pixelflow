@@ -419,6 +419,68 @@ async def test_turn_registration_copies_explicit_action_into_authoritative_messa
     assert without_action[0].payload["explicit_action"] is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("polluted_field", ["materials", "explicit_action.patch"])
+async def test_start_turn_revalidates_mutated_dto_before_registration(
+    polluted_field: str,
+) -> None:
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="assist",
+            new_conversation_rollout_percent=100,
+        ),
+        repository=repository,
+        task_store=task_store,
+    )
+    assignment = service.assignment_for_new_conversation({})
+    user_id = "user-mutated-dto"
+    conversation_id = f"conversation-mutated-{polluted_field}"
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            context=assignment.context,
+        )
+    )
+    request = TurnStartRequest.model_validate(
+        {
+            "client_input_id": "11111111-1111-4111-8111-111111111111",
+            "content": "确认这个方案",
+            "materials": [],
+            "expected_context_version": 0,
+            "explicit_action": {
+                "action": "continue_workflow",
+                "intent": "video",
+                "workflow_id": "wf-1",
+                "stage": "plan_review",
+                "artifact_ref": "artifact:video-plan:wf-1:v1",
+                "patch": {"approved": True},
+            },
+        }
+    )
+
+    if polluted_field == "materials":
+        request.materials.append({"score": math.inf})
+    else:
+        assert request.explicit_action is not None
+        request.explicit_action.patch["invalid"] = math.nan
+
+    with pytest.raises(ValidationError):
+        await service.start_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request=request,
+        )
+
+    assert await task_store.list_conversation_messages(
+        conversation_id,
+        user_id=user_id,
+    ) == []
+    assert await repository.list_turns(user_id, conversation_id) == []
+
+
 def test_non_mutating_decision_and_nested_job_fail_closed(
     contract_fixture: dict[str, object],
 ) -> None:
