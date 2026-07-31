@@ -31,8 +31,10 @@ router = APIRouter(prefix="/agent/flows/planning", tags=["pixelflow-flows"])
 
 _PLAN_GENERATION_JOBS: dict[str, dict[str, Any]] = {}
 _PLAN_REVISION_JOBS: dict[str, dict[str, Any]] = {}
+_PLAN_MANUAL_EDIT_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_PLAN_GENERATION_JOBS = 200
 _MAX_PLAN_REVISION_JOBS = 200
+_MAX_PLAN_MANUAL_EDIT_JOBS = 200
 _PLAN_JOB_TIMEOUT_SECONDS = 1200.0
 
 
@@ -84,9 +86,7 @@ class PlanMarkdownResponse(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
     llm_used: bool = False
     model_name: str = "deepseek-v4-pro"
     error: str | None = None
@@ -119,9 +119,7 @@ class PlanRevisionRequest(PlanMarkdownRequest):
     revision_feedback: str = Field(min_length=1)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
 
 class PlanRestoreRequest(BaseModel):
@@ -133,9 +131,7 @@ class PlanRestoreRequest(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -150,9 +146,7 @@ class PlanManualEditRequest(PlanMarkdownRequest):
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
@@ -628,20 +622,73 @@ async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownRespons
 
 @router.post("/plan/save-edit", response_model=PlanMarkdownResponse)
 async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -> PlanMarkdownResponse:
-    user_id, memories = await search_power_mem(
-        request,
-        source_agent="planning_agent",
-        query_values=[
-            body.form_values,
-            body.selected_direction,
-            body.product_creative_profile,
-            body.intake_context,
-            body.materials,
-            body.current_plan_markdown,
-            body.edited_plan_markdown,
-        ],
-        categories=["preference", "brand", "skill", "experience"],
+    return await _save_manual_plan_edit(body, request=request)
+
+
+@router.post("/plan/save-edit/start", response_model=PlanJobStartResponse)
+async def start_save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -> PlanJobStartResponse:
+    _trim_plan_jobs(_PLAN_MANUAL_EDIT_JOBS, _MAX_PLAN_MANUAL_EDIT_JOBS)
+    job_id = uuid.uuid4().hex
+    user_id = await current_user_id(request)
+    _update_plan_job(
+        _PLAN_MANUAL_EDIT_JOBS,
+        job_id,
+        status="running",
+        stage="planning",
+        user_id=user_id,
     )
+    asyncio.create_task(
+        _run_plan_manual_edit_job(
+            job_id,
+            body,
+            power_mem=power_mem_service(request),
+            user_id=user_id,
+        )
+    )
+    return PlanJobStartResponse(job_id=job_id, message="Plan 手工编辑发布任务已启动。")
+
+
+@router.get("/plan/save-edit/jobs/{job_id}", response_model=PlanJobStatusResponse)
+async def get_save_manual_plan_edit_job(job_id: str, request: Request) -> PlanJobStatusResponse:
+    return await _plan_job_status(
+        _PLAN_MANUAL_EDIT_JOBS,
+        job_id,
+        request,
+        not_found_detail="Plan 手工编辑发布任务不存在",
+        running_message="Plan 手工编辑稿正在对齐创作合同。",
+        completed_message="Plan 手工编辑稿发布完成。",
+        failed_message="Plan 手工编辑稿发布失败。",
+    )
+
+
+async def _save_manual_plan_edit(
+    body: PlanManualEditRequest,
+    request: Request | None = None,
+    *,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    run_id: str | None = None,
+) -> PlanMarkdownResponse:
+    query_values = [
+        body.form_values,
+        body.selected_direction,
+        body.product_creative_profile,
+        body.intake_context,
+        body.materials,
+        body.current_plan_markdown,
+        body.edited_plan_markdown,
+    ]
+    if request is not None:
+        user_id, memories = await search_power_mem(
+            request,
+            source_agent="planning_agent",
+            query_values=query_values,
+            categories=["preference", "brand", "skill", "experience"],
+        )
+        service = power_mem_service(request)
+    else:
+        service = power_mem
+        memories = await _search_planning_memories(service, user_id=user_id, query_values=query_values)
     intake_context, product_creative_profile = with_semantic_memory(
         body.intake_context,
         memories,
@@ -664,7 +711,7 @@ async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -
         change_source="manual_edit",
     )
     record_power_mem_background(
-        power_mem_service(request),
+        service,
         user_id=user_id,
         content=concise_result_summary(
             "用户手工发布 plan.md",
@@ -674,6 +721,78 @@ async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -
         source_agent="planning_agent",
         metadata={"source": "planning_plan_manual_edit", "intent": body.intent, "plan_version": result.plan_version},
         memory_type="experience",
+        run_id=run_id,
         infer=False,
     )
     return PlanMarkdownResponse(**result.to_dict())
+
+
+async def _run_plan_manual_edit_job(
+    job_id: str,
+    body: PlanManualEditRequest,
+    *,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> None:
+    try:
+        async with asyncio.timeout(_PLAN_JOB_TIMEOUT_SECONDS):
+            result = await _save_manual_plan_edit(
+                body,
+                power_mem=power_mem,
+                user_id=user_id,
+                run_id=job_id,
+            )
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="completed",
+            stage="completed",
+            result=result,
+            user_id=user_id,
+        )
+    except TimeoutError:
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error="Plan 手工编辑发布超时，当前版本已保留。",
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步发布 plan.md 手工编辑稿超时",
+                {"intent": body.intent, "ok": False},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_manual_edit_job", "job_id": job_id, "status": "failed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 后台边界必须持久化供轮询客户端读取的失败状态
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error=str(exc),
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步发布 plan.md 手工编辑稿失败",
+                {"intent": body.intent, "ok": False},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_manual_edit_job", "job_id": job_id, "status": "failed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )

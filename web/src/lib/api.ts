@@ -363,6 +363,23 @@ export interface PlanJobStatusResponse {
   updated_at?: string | null;
 }
 
+export interface PlanManualEditRequest {
+  intent: CreationIntent;
+  form_values: Record<string, unknown>;
+  selected_direction: Record<string, unknown>;
+  current_plan_markdown: string;
+  edited_plan_markdown: string;
+  current_plan_version: number;
+  plan_history: PlanMarkdownResponse["plan_history"];
+  creation_contract?: Record<string, unknown>;
+  scene_durations_sec?: number[];
+  scene_blueprints?: PlanSceneBlueprint[];
+  asset_manifest?: PlanAssetManifest;
+  product_creative_profile?: Record<string, unknown>;
+  intake_context?: Record<string, unknown>;
+  materials?: Array<Record<string, unknown>>;
+}
+
 export interface VideoCreationContract extends Record<string, unknown> {
   video_duration_sec: number;
   video_ratio: string;
@@ -1130,12 +1147,14 @@ async function pollCreativeDirectionsJob(
 
 async function pollPlanJob(
   jobId: string,
-  kind: "generation" | "revision",
+  kind: "generation" | "revision" | "manual_edit",
   shouldContinue: () => boolean = () => true,
 ): Promise<PlanMarkdownResponse | null> {
-  const path = kind === "revision"
-    ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
-    : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
+  const path = kind === "manual_edit"
+    ? `${FLOW_BASE}/planning/plan/save-edit/jobs/${encodeURIComponent(jobId)}`
+    : kind === "revision"
+      ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
+      : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
   while (shouldContinue()) {
     const status = await req<PlanJobStatusResponse>(path);
     if (!shouldContinue()) return null;
@@ -1144,7 +1163,12 @@ async function pollPlanJob(
       throw new ApiError(422, "Plan job completed without result");
     }
     if (status.status === "failed") {
-      throw new ApiError(409, status.error || status.message || (kind === "revision" ? "Plan revision failed" : "Plan generation failed"));
+      const fallbackMessage = kind === "manual_edit"
+        ? "Plan 手工编辑发布失败"
+        : kind === "revision"
+          ? "Plan revision failed"
+          : "Plan generation failed";
+      throw new ApiError(409, status.error || status.message || fallbackMessage);
     }
     await delay(PLAN_JOB_POLL_INTERVAL_MS);
   }
@@ -1826,22 +1850,17 @@ export const api = {
   pollPlanRevisionJob: (jobId: string, shouldContinue?: () => boolean) =>
     pollPlanJob(jobId, "revision", shouldContinue),
 
-  savePlanMarkdownEdit: (body: {
-    intent: CreationIntent;
-    form_values: Record<string, unknown>;
-    selected_direction: Record<string, unknown>;
-    current_plan_markdown: string;
-    edited_plan_markdown: string;
-    current_plan_version: number;
-    plan_history: PlanMarkdownResponse["plan_history"];
-    creation_contract?: Record<string, unknown>;
-    scene_durations_sec?: number[];
-    scene_blueprints?: PlanSceneBlueprint[];
-    asset_manifest?: PlanAssetManifest;
-    product_creative_profile?: Record<string, unknown>;
-    intake_context?: Record<string, unknown>;
-    materials?: Array<Record<string, unknown>>;
-  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
+  savePlanMarkdownEdit: (body: PlanManualEditRequest) =>
+    req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
+
+  startPlanManualEditJob: (body: PlanManualEditRequest) =>
+    req<PlanJobStartResponse>(`${FLOW_BASE}/planning/plan/save-edit/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getPlanManualEditJob: (jobId: string) =>
+    req<PlanJobStatusResponse>(`${FLOW_BASE}/planning/plan/save-edit/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPlanManualEditJob: (jobId: string, shouldContinue?: () => boolean) =>
+    pollPlanJob(jobId, "manual_edit", shouldContinue),
 
   restorePlanMarkdown: (body: {
     intent: CreationIntent;

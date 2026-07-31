@@ -14,7 +14,7 @@ export interface PlanJobRecoveryHandle {
   job_id: string;
   conversation_id: string;
   source_message_id: string;
-  kind: "plan_generation" | "plan_revision";
+  kind: "plan_generation" | "plan_revision" | "plan_manual_edit";
   started_at: string;
   request: object;
   context: object;
@@ -44,7 +44,11 @@ function isPlanJobRecoveryHandle(value: unknown): value is PlanJobRecoveryHandle
     && typeof value.conversation_id === "string"
     && Boolean(value.conversation_id)
     && typeof value.source_message_id === "string"
-    && (value.kind === "plan_generation" || value.kind === "plan_revision")
+    && (
+      value.kind === "plan_generation"
+      || value.kind === "plan_revision"
+      || value.kind === "plan_manual_edit"
+    )
     && typeof value.started_at === "string"
     && isRecord(value.request)
     && isRecord(value.context)

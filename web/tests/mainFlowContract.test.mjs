@@ -168,6 +168,14 @@ function handleConfirmPlanRevisionModeSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handlePublishPlanEditSource() {
+  const start = workspaceSource.indexOf("const handlePublishPlanEdit = async");
+  const end = workspaceSource.indexOf("const handleRetrySceneAssets = async", start);
+  assert.notEqual(start, -1, "Plan 手工编辑发布处理器必须存在");
+  assert.notEqual(end, -1, "场景素材重试处理器必须位于手工编辑处理器之后");
+  return workspaceSource.slice(start, end);
+}
+
 function resumePendingMessageJobSource() {
   const start = workspaceSource.indexOf("const resumePendingMessageJob = async");
   const end = workspaceSource.indexOf("const resumePendingPlanJob = async", start);
@@ -389,6 +397,29 @@ test("plan revision defaults to modifying the current creative and only regenera
   assert.match(apiSource, /planning\/plan\/restore/, "api client must expose Plan restore");
   assert.match(messageBubbleSource, /plan\.plan_version/, "Plan cards must display their version");
   assert.match(messageBubbleSource, /onRollbackPlan/, "Plan cards with history must expose rollback");
+});
+
+test("Plan 手工编辑发布使用可恢复异步任务", () => {
+  const manualEditSource = handlePublishPlanEditSource();
+  const planResumeSource = resumePendingPlanJobSource();
+
+  assertRecoverablePlanJobOrder(manualEditSource, "api.startPlanManualEditJob", "manual Plan edit");
+  assert.match(manualEditSource, /kind:\s*"plan_manual_edit"/, "恢复句柄必须区分手工编辑任务");
+  assert.equal(
+    manualEditSource.includes("api.savePlanMarkdownEdit"),
+    false,
+    "前端不得再同步等待手工编辑发布",
+  );
+  const existingJobIndex = manualEditSource.indexOf("const existingPlanJob = pendingPlanJobRef.current");
+  const startJobIndex = manualEditSource.indexOf("api.startPlanManualEditJob");
+  assert.notEqual(existingJobIndex, -1, "再次发布前必须检查原 Plan job");
+  assert.ok(existingJobIndex < startJobIndex, "原任务恢复门禁必须早于新的 start 调用");
+  assert.match(apiSource, /planning\/plan\/save-edit\/start/, "API Client 必须暴露手工编辑启动接口");
+  assert.match(apiSource, /planning\/plan\/save-edit\/jobs/, "API Client 必须暴露手工编辑查询接口");
+  assert.match(planResumeSource, /api\.getPlanManualEditJob/, "共享恢复路径必须查询原手工编辑任务");
+  assert.match(planResumeSource, /api\.pollPlanManualEditJob/, "运行中任务必须继续轮询同一 job_id");
+  assert.match(planResumeSource, /用户编辑内容已发布为 plan\.md v/, "完成后必须恢复原发布成功语义");
+  assert.match(planResumeSource, /plan_approved:\s*false/, "手工编辑产生的新版本必须重新人工审核");
 });
 
 test("plan rollback activates history directly and persists conversation context", () => {

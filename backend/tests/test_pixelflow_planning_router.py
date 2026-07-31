@@ -35,6 +35,8 @@ def test_pixelflow_planning_router_prefix_and_paths():
     assert "/agent/flows/planning/plan/revise/jobs/{job_id}" in paths
     assert "/agent/flows/planning/plan/restore" in paths
     assert "/agent/flows/planning/plan/save-edit" in paths
+    assert "/agent/flows/planning/plan/save-edit/start" in paths
+    assert "/agent/flows/planning/plan/save-edit/jobs/{job_id}" in paths
 
 
 def _poll_plan_job(client: TestClient, path: str, job_id: str) -> dict:
@@ -92,9 +94,7 @@ def test_plan_job_status_exposes_stage_and_timestamps():
             json=_video_plan_start_payload(),
         )
         assert response.status_code == 200
-        status = client.get(
-            f"/agent/flows/planning/plan/jobs/{response.json()['job_id']}"
-        ).json()
+        status = client.get(f"/agent/flows/planning/plan/jobs/{response.json()['job_id']}").json()
 
     assert status["stage"] in {"planning", "fallback", "completed"}
     assert status["started_at"]
@@ -176,6 +176,63 @@ def test_revision_job_total_timeout_preserves_current_version(monkeypatch):
     assert "当前版本已保留" in status["error"]
 
 
+def test_manual_edit_job_total_timeout_preserves_current_version(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+
+    initial = build_plan_markdown(
+        "image",
+        {
+            "image_goal": "书包宣传图",
+            "image_type": "海报",
+            "image_usage": "社媒发布",
+            "image_style": "真实摄影",
+            "image_size": "1:1",
+        },
+        {"title": "通学收纳", "description": "突出容量和护脊"},
+    )
+
+    async def slow_revision(**_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(pixelflow_planning, "_PLAN_JOB_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", slow_revision)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/save-edit/start",
+            json={
+                "intent": "image",
+                "form_values": {
+                    "image_goal": "书包宣传图",
+                    "image_type": "海报",
+                    "image_usage": "社媒发布",
+                    "image_style": "真实摄影",
+                    "image_size": "1:1",
+                },
+                "selected_direction": {
+                    "title": "通学收纳",
+                    "description": "突出容量和护脊",
+                },
+                "current_plan_markdown": initial.plan_markdown,
+                "edited_plan_markdown": f"{initial.plan_markdown}\n\n增加开学氛围",
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "creation_contract": initial.creation_contract,
+            },
+        )
+        assert response.status_code == 200
+        status = _poll_plan_job(
+            client,
+            "/agent/flows/planning/plan/save-edit/jobs",
+            response.json()["job_id"],
+        )
+
+    assert status["status"] == "failed"
+    assert "当前版本已保留" in status["error"]
+
+
 def test_planning_router_starts_and_polls_plan_generation_job():
     from app.gateway.routers import pixelflow_planning
 
@@ -243,6 +300,55 @@ def test_planning_router_starts_and_polls_plan_revision_job(monkeypatch):
 
     assert status["status"] == "completed"
     assert status["result"]["plan_version"] == 2
+
+
+def test_planning_router_starts_and_polls_manual_plan_edit_job(monkeypatch):
+    from app.gateway.routers import pixelflow_planning
+    from pixelflow.creative.plan_markdown import build_plan_markdown
+
+    captured: dict[str, object] = {}
+    initial = build_plan_markdown(
+        "image",
+        {"image_goal": "书包宣传图", "image_type": "海报", "image_usage": "社媒发布", "image_style": "真实摄影", "image_size": "1:1"},
+        {"title": "通学收纳", "description": "突出容量和护脊"},
+    )
+
+    async def fake_revision(**kwargs):
+        captured.update(kwargs)
+        return initial.next_version(
+            plan_markdown=kwargs["revision_feedback"],
+            plan_history=kwargs["plan_history"],
+            current_version=kwargs["current_plan_version"],
+            change_source=kwargs["change_source"],
+        )
+
+    monkeypatch.setattr(pixelflow_planning, "revise_plan_markdown_with_llm", fake_revision)
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_planning.router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/flows/planning/plan/save-edit/start",
+            json={
+                "intent": "image",
+                "form_values": {"image_goal": "书包宣传图", "image_type": "海报", "image_usage": "社媒发布", "image_style": "真实摄影", "image_size": "1:1"},
+                "selected_direction": {"title": "通学收纳", "description": "突出容量和护脊"},
+                "current_plan_markdown": initial.plan_markdown,
+                "edited_plan_markdown": f"{initial.plan_markdown}\n\n增加开学氛围",
+                "current_plan_version": 1,
+                "plan_history": initial.plan_history,
+                "creation_contract": initial.creation_contract,
+            },
+        )
+        assert response.status_code == 200
+        started = response.json()
+        status = _poll_plan_job(client, "/agent/flows/planning/plan/save-edit/jobs", started["job_id"])
+
+    assert status["status"] == "completed"
+    assert status["result"]["plan_version"] == 2
+    assert status["result"]["plan_history"][-1]["change_source"] == "manual_edit"
+    assert captured["change_source"] == "manual_edit"
+    assert str(captured["revision_feedback"]).startswith("【完整手工编辑稿】")
 
 
 def _stable_user() -> User:

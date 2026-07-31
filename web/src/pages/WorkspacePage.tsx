@@ -26,6 +26,7 @@ import {
   type JianyingDraftJobResponse,
   type JianyingDraftStartRequest,
   type MergeSceneVideosResponse,
+  type PlanManualEditRequest,
   type PlanMarkdownResponse,
   type PptFileResult,
   type PptImagesResult,
@@ -592,6 +593,8 @@ interface PlanRevisionJobRequest extends PlanGenerationJobRequest {
   asset_manifest?: PlanMarkdownResponse["asset_manifest"];
 }
 
+type PlanManualEditJobRequest = PlanManualEditRequest;
+
 interface PendingPlanJobContext {
   intent: CreationIntent;
   formValues: Record<string, unknown>;
@@ -606,10 +609,26 @@ interface PendingPlanJob {
   job_id: string;
   conversation_id: string;
   source_message_id: string;
-  kind: "plan_generation" | "plan_revision";
+  kind: "plan_generation" | "plan_revision" | "plan_manual_edit";
   started_at: string;
-  request: PlanGenerationJobRequest | PlanRevisionJobRequest;
+  request: PlanGenerationJobRequest | PlanRevisionJobRequest | PlanManualEditJobRequest;
   context: PendingPlanJobContext;
+}
+
+function pendingPlanJobRunningPhase(kind: PendingPlanJob["kind"]): string {
+  if (kind === "plan_revision") return "plan_revision_running";
+  if (kind === "plan_manual_edit") return "plan_manual_edit_running";
+  return "plan_generation_running";
+}
+
+function pendingPlanJobPersistenceContext(kind: PendingPlanJob["kind"]): Record<string, unknown> {
+  if (kind === "plan_revision") {
+    return {
+        pendingPlanRevisionChoice: null,
+        pending_plan_revision_choice: null,
+      };
+  }
+  return kind === "plan_manual_edit" ? { plan_approved: false } : {};
 }
 
 function isRecoverablePendingPlanJob(value: unknown): value is PendingPlanJob {
@@ -622,7 +641,11 @@ function isRecoverablePendingPlanJob(value: unknown): value is PendingPlanJob {
     && typeof pendingPlanJob.conversation_id === "string"
     && Boolean(pendingPlanJob.conversation_id)
     && typeof pendingPlanJob.source_message_id === "string"
-    && (pendingPlanJob.kind === "plan_generation" || pendingPlanJob.kind === "plan_revision")
+    && (
+      pendingPlanJob.kind === "plan_generation"
+      || pendingPlanJob.kind === "plan_revision"
+      || pendingPlanJob.kind === "plan_manual_edit"
+    )
     && typeof pendingPlanJob.started_at === "string"
     && Boolean(pendingPlanJob.request)
     && typeof pendingPlanJob.request === "object"
@@ -2192,7 +2215,7 @@ export function WorkspacePage() {
     return next;
   };
 
-  const updateConversationWithProgress = (
+  const updateConversationWithProgress = async (
     targetConversationId: string,
     body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> },
     progressPatch: Partial<Omit<WorkflowProgressSnapshot, "version" | "last_phase" | "updated_at">> = {},
@@ -2202,7 +2225,7 @@ export function WorkspacePage() {
       : workflowProgressConversationIdRef.current === targetConversationId
         ? workflowProgressRef.current
         : null;
-    return api.updateConversation(targetConversationId, {
+    const updated = await api.updateConversation(targetConversationId, {
       ...body,
       context: body.context
         ? {
@@ -2212,6 +2235,9 @@ export function WorkspacePage() {
           }
         : body.context,
     });
+    // 会话阶段写入成功后刷新左侧列表，避免异步 Job 完成后仍展示旧的运行态。
+    window.dispatchEvent(new Event("pixelflow-conversations-updated"));
+    return updated;
   };
 
   const setBusyForConversation = (targetConversationId: string, value: boolean) => {
@@ -4681,9 +4707,11 @@ export function WorkspacePage() {
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         return;
       }
-      const status = pendingPlanJob.kind === "plan_revision"
-        ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
-        : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
+      const status = pendingPlanJob.kind === "plan_manual_edit"
+        ? await api.getPlanManualEditJob(pendingPlanJob.job_id)
+        : pendingPlanJob.kind === "plan_revision"
+          ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
+          : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
       if (stopIfHidden()) return;
       const statusAction = classifyPlanJobResume({
         status: status.status,
@@ -4697,19 +4725,28 @@ export function WorkspacePage() {
       }
       const plan = statusAction === "complete"
         ? status.result!
-        : pendingPlanJob.kind === "plan_revision"
-          ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
-          : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
+        : pendingPlanJob.kind === "plan_manual_edit"
+          ? await api.pollPlanManualEditJob(pendingPlanJob.job_id, shouldContinuePolling)
+          : pendingPlanJob.kind === "plan_revision"
+            ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
+            : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
       if (!plan || stopIfHidden()) return;
       if (plan.error) {
         clearRecoveryState();
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         const isRevision = pendingPlanJob.kind === "plan_revision";
-        await clearPendingPlanJob(targetConversationId, isRevision ? "plan_revision_failed" : "plan_generation_failed", {
-          plan_job_resume_error: plan.error,
-        }).catch(() => {});
+        const isManualEdit = pendingPlanJob.kind === "plan_manual_edit";
+        await clearPendingPlanJob(
+          targetConversationId,
+          isManualEdit ? "plan_manual_edit_failed" : isRevision ? "plan_revision_failed" : "plan_generation_failed",
+          {
+            plan_job_resume_error: plan.error,
+          },
+        ).catch(() => {});
         pushAssistant(
-          isRevision
+          isManualEdit
+            ? `plan.md 编辑发布失败，已保留当前版本：${plan.error}`
+            : isRevision
             ? `plan.md 修改失败，已保留当前版本：${plan.error}`
             : `plan.md 生成失败，未展示不符合创作合同的候选方案：${plan.error}`,
           targetConversationId,
@@ -4735,6 +4772,9 @@ export function WorkspacePage() {
           type: "plan_save",
           last_phase: "plan_review",
           processed_key: pendingPlanJob.context.processedKey,
+          success_message: pendingPlanJob.kind === "plan_manual_edit"
+            ? `用户编辑内容已发布为 plan.md v${plan.plan_version}，请确认后继续。`
+            : undefined,
           context: {
             flowDraft: null,
             pendingDirectionJob: null,
@@ -4747,9 +4787,15 @@ export function WorkspacePage() {
             form_values: pendingPlanJob.context.formValues,
             intake_context: pendingPlanJob.context.intakeContext,
             materials: pendingPlanJob.context.materials,
+            ...(pendingPlanJob.kind === "plan_manual_edit" ? { plan_approved: false } : {}),
           },
         },
       );
+      if (pendingPlanJob.kind === "plan_manual_edit" && isVisibleConversation(targetConversationId)) {
+        setCanvasOpen(false);
+        setSelectedPlanEditorMessageId("");
+        setSavingPlanEdit(false);
+      }
       clearRecoveryState();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4780,17 +4826,21 @@ export function WorkspacePage() {
       }
       clearRecoveryState();
       if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
+      const isManualEdit = pendingPlanJob.kind === "plan_manual_edit";
       pushAssistant(
         action === "clear_not_found"
           ? "之前的 plan.md 任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新创意方向或 Plan 卡片手动重试。"
-          : `继续查询 plan.md 任务失败：${message}`,
+          : isManualEdit
+            ? `plan.md 编辑发布失败，已保留当前版本：${message}`
+            : `继续查询 plan.md 任务失败：${message}`,
         targetConversationId,
       );
-      await clearPendingPlanJob(targetConversationId, "plan_job_resume_failed", {
+      await clearPendingPlanJob(targetConversationId, isManualEdit ? "plan_manual_edit_failed" : "plan_job_resume_failed", {
         plan_job_resume_error: message,
       }).catch(() => {});
     } finally {
       activePlanJobPollsRef.current.delete(pollKey);
+      if (pendingPlanJob.kind === "plan_manual_edit") setSavingPlanEdit(false);
       setBusyForConversation(targetConversationId, false);
     }
   };
@@ -6798,15 +6848,8 @@ export function WorkspacePage() {
       notifyPlanJobPersistenceRecovery(recoveredPendingPlanJob);
       schedulePendingPlanJobPersistence(
         recoveredPendingPlanJob,
-        recoveredPendingPlanJob.kind === "plan_revision"
-          ? "plan_revision_running"
-          : "plan_generation_running",
-        recoveredPendingPlanJob.kind === "plan_revision"
-          ? {
-              pendingPlanRevisionChoice: null,
-              pending_plan_revision_choice: null,
-            }
-          : {},
+        pendingPlanJobRunningPhase(recoveredPendingPlanJob.kind),
+        pendingPlanJobPersistenceContext(recoveredPendingPlanJob.kind),
       );
     }
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
@@ -6940,15 +6983,8 @@ export function WorkspacePage() {
       if (recoveryHandle?.job_id === pendingPlanJob.job_id) {
         schedulePendingPlanJobPersistence(
           pendingPlanJob,
-          pendingPlanJob.kind === "plan_revision"
-            ? "plan_revision_running"
-            : "plan_generation_running",
-          pendingPlanJob.kind === "plan_revision"
-            ? {
-                pendingPlanRevisionChoice: null,
-                pending_plan_revision_choice: null,
-              }
-            : {},
+          pendingPlanJobRunningPhase(pendingPlanJob.kind),
+          pendingPlanJobPersistenceContext(pendingPlanJob.kind),
         );
       }
       void resumePendingPlanJob(pendingPlanJob);
@@ -8790,12 +8826,24 @@ export function WorkspacePage() {
     const artifact = msg.artifact;
     if (!artifact?.plan || !isCreationIntent(artifact.intent) || !artifact.formValues || !artifact.selectedDirection) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const existingPlanJob = pendingPlanJobRef.current;
+    if (existingPlanJob?.job_id && existingPlanJob.conversation_id === targetConversationId) {
+      setSavingPlanEdit(existingPlanJob.kind === "plan_manual_edit");
+      setBusyForConversation(targetConversationId, true);
+      schedulePendingPlanJobPersistence(
+        existingPlanJob,
+        pendingPlanJobRunningPhase(existingPlanJob.kind),
+        pendingPlanJobPersistenceContext(existingPlanJob.kind),
+      );
+      await resumePendingPlanJob(existingPlanJob);
+      return;
+    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setSavingPlanEdit(true);
     setBusyForConversation(targetConversationId, true);
     try {
-      const plan = await api.savePlanMarkdownEdit({
+      const request: PlanManualEditJobRequest = {
         intent: artifact.intent,
         form_values: artifact.formValues,
         selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
@@ -8810,42 +8858,45 @@ export function WorkspacePage() {
         product_creative_profile: { core_message: artifact.coreMessage || pendingCore },
         intake_context: artifact.intakeContext,
         materials: artifact.materials || [],
-      });
-      if (plan.error) {
-        releaseArtifactAction(processedKey);
-        pushAssistant(
-          `plan.md 编辑发布失败，已保留当前 v${artifact.plan.plan_version || 1}：${plan.error}`,
-          targetConversationId,
-        );
-        return;
-      }
-      await persistPlanArtifactForConversation(
-        createPlanArtifactMessage(
-          plan,
-          artifact.selectedDirection,
-          {
-            intent: artifact.intent,
-            formValues: artifact.formValues,
-            materials: artifact.materials || [],
-            coreMessage: artifact.coreMessage || pendingCore,
-            intakeContext: artifact.intakeContext,
-          },
-          targetConversationId,
-        ),
-        targetConversationId,
-        {
-          type: "plan_save",
-          last_phase: "plan_review",
-          processed_key: processedKey,
-          success_message: `用户编辑内容已发布为 plan.md v${plan.plan_version}，请确认后继续。`,
-          context: {
-            ...makeSnapshot(targetConversationId),
-            plan_approved: false,
-          } as unknown as Record<string, unknown>,
+      };
+      const started = await api.startPlanManualEditJob(request);
+      const pendingPlanJob: PendingPlanJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "plan_manual_edit",
+        started_at: new Date().toISOString(),
+        request,
+        context: {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          selectedDirection: artifact.selectedDirection,
+          materials: artifact.materials || [],
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+          processedKey,
         },
-      );
-      setCanvasOpen(false);
-      setSelectedPlanEditorMessageId("");
+      };
+      await continueStartedPlanJob({
+        pendingPlanJob,
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
+        },
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_manual_edit_running",
+          { plan_approved: false },
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_manual_edit_running",
+          { plan_approved: false },
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 编辑发布失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -8948,15 +8999,8 @@ export function WorkspacePage() {
       ) {
         schedulePendingPlanJobPersistence(
           existingPlanJob,
-          existingPlanJob.kind === "plan_revision"
-            ? "plan_revision_running"
-            : "plan_generation_running",
-          existingPlanJob.kind === "plan_revision"
-            ? {
-                pendingPlanRevisionChoice: null,
-                pending_plan_revision_choice: null,
-              }
-            : {},
+          pendingPlanJobRunningPhase(existingPlanJob.kind),
+          pendingPlanJobPersistenceContext(existingPlanJob.kind),
         );
         await resumePendingPlanJob(existingPlanJob);
         return;
