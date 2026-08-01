@@ -18,10 +18,12 @@ import { useMemo, useState } from "react";
 
 interface StoryboardPanelProps {
   msg: ChatMessage;
-  onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void;
+  onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void | Promise<void>;
+  deferSceneUpdates?: boolean;
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
+  onSupervisorReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
   onAddGlobalAsset?: (assetGroup: GlobalSceneAssetGroup, replacement: SceneGlobalAssetReplacement) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
@@ -80,6 +82,22 @@ function shotRecord(scene: ScenePackageRecord | undefined): Record<string, unkno
   return value && typeof value === "object" ? value : {};
 }
 
+function sceneWithDraft(
+  scene: ScenePackageRecord | undefined,
+  patch: ScenePackagePatch | undefined,
+): ScenePackageRecord | undefined {
+  if (!scene || !patch) return scene;
+  return {
+    ...scene,
+    ...(typeof patch.storyline === "string" ? { storyline: patch.storyline } : {}),
+    ...(typeof patch.narration === "string" ? { narration: patch.narration } : {}),
+    ...(patch.shot_description ? { shot_description: patch.shot_description } : {}),
+    ...(Array.isArray(patch.reference_asset_ids)
+      ? { reference_asset_ids: patch.reference_asset_ids }
+      : {}),
+  };
+}
+
 function textareaClass(extra = "") {
   return cn("min-h-24 w-full resize-none rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none focus:border-accent", extra);
 }
@@ -124,13 +142,15 @@ function sceneVideoForScene(
 export function StoryboardPanel({
   msg,
   onUpdateVideoScenePackage,
+  deferSceneUpdates = false,
   onReferenceGlobalAsset,
   onDeleteGlobalAsset,
   onReplaceGlobalAsset,
+  onSupervisorReplaceGlobalAsset,
   onAddGlobalAsset,
-  onGenerateVideo,
-  onRetrySceneAssets,
-  onSave,
+  onGenerateVideo: onGenerateVideoRequested,
+  onRetrySceneAssets: onRetrySceneAssetsRequested,
+  onSave: onSaveRequested,
   onClose,
 }: StoryboardPanelProps) {
   const videoScenePackages = msg.artifact?.videoScenePackages;
@@ -138,10 +158,16 @@ export function StoryboardPanel({
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
+  const [sceneDraftPatches, setSceneDraftPatches] = useState<Record<string, ScenePackagePatch>>({});
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
   const [additionTarget, setAdditionTarget] = useState<AssetGroup | null>(null);
-  const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
+  const authoritativeSelectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
+  const selectedScenePatch = authoritativeSelectedScene
+    ? sceneDraftPatches[authoritativeSelectedScene.scene_id]
+    : undefined;
+  const selectedScene = sceneWithDraft(authoritativeSelectedScene, selectedScenePatch);
+  const hasSceneDraft = Object.keys(sceneDraftPatches).length > 0;
   const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
@@ -171,8 +197,28 @@ export function StoryboardPanel({
 
   const updateScene = (patch: ScenePackagePatch) => {
     if (!selectedScene) return;
+    if (deferSceneUpdates) {
+      setSceneDraftPatches((current) => ({
+        ...current,
+        [selectedScene.scene_id]: {
+          ...current[selectedScene.scene_id],
+          ...patch,
+        },
+      }));
+      return;
+    }
     onUpdateVideoScenePackage?.(selectedScene.scene_id, patch);
   };
+
+  const saveStoryboardDraft = async () => {
+    if (deferSceneUpdates && authoritativeSelectedScene && selectedScenePatch) {
+      await onUpdateVideoScenePackage?.(authoritativeSelectedScene.scene_id, selectedScenePatch);
+    }
+    await onSaveRequested?.();
+  };
+  const onSave = deferSceneUpdates ? saveStoryboardDraft : onSaveRequested;
+  const onGenerateVideo = hasSceneDraft ? undefined : onGenerateVideoRequested;
+  const onRetrySceneAssets = hasSceneDraft ? undefined : onRetrySceneAssetsRequested;
 
   const updateShotDescription = (next: { text: string; mentions: SceneMention[] }) => {
     updateScene({
@@ -224,7 +270,7 @@ export function StoryboardPanel({
 
   const confirmReplacement = (replacement: SceneGlobalAssetReplacement) => {
     if (!replacementTarget) return;
-    onReplaceGlobalAsset?.(replacementTarget, replacement);
+    (onSupervisorReplaceGlobalAsset ?? onReplaceGlobalAsset)?.(replacementTarget, replacement);
     setReplacementTarget(null);
   };
 
@@ -316,8 +362,12 @@ export function StoryboardPanel({
                   key={scene.scene_id}
                   type="button"
                   onClick={() => setSelectedSceneId(scene.scene_id)}
+                  disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
+                  title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
+                    ? "请先保存当前分镜"
+                    : undefined}
                   className={cn(
-                    "rounded-full border px-3 py-1.5 text-[12px]",
+                    "rounded-full border px-3 py-1.5 text-[12px] disabled:cursor-not-allowed disabled:opacity-50",
                     scene.scene_id === selectedScene?.scene_id ? "border-accent bg-accent-soft text-accent" : "border-line text-ink-soft hover:bg-canvas",
                   )}
                 >
@@ -381,8 +431,12 @@ export function StoryboardPanel({
                     key={scene.scene_id}
                     type="button"
                     onClick={() => setSelectedSceneId(scene.scene_id)}
+                    disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
+                    title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
+                      ? "请先保存当前分镜"
+                      : undefined}
                     className={cn(
-                      "w-32 shrink-0 overflow-hidden rounded-xl border bg-canvas text-left",
+                      "w-32 shrink-0 overflow-hidden rounded-xl border bg-canvas text-left disabled:cursor-not-allowed disabled:opacity-50",
                       scene.scene_id === selectedScene?.scene_id ? "border-accent" : "border-line",
                     )}
                   >

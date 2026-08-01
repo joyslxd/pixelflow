@@ -400,6 +400,7 @@ async def test_start_workflow_opens_intake_interrupt(
     assert result.state.state_kind.value == "planning"
     assert result.interrupt is not None
     assert result.interrupt.kind == "video_intake_form"
+    assert result.interrupt.payload["ui_kind"] == "video_intake_form"
     assert result.turn_status is TurnStatus.WAITING_USER
 
 
@@ -485,6 +486,8 @@ async def test_video_handler_planning_action_table(
 
     assert result.workflow.current_stage == expected_stage
     assert (None if result.interrupt is None else result.interrupt.kind) == interrupt_kind
+    if result.interrupt is not None:
+        assert result.interrupt.payload["ui_kind"] == interrupt_kind
     if action is AgentAction.SWITCH_WORKFLOW:
         assert result.update_active_workflow is True
         assert result.active_workflow_id == workflow.workflow_id
@@ -497,6 +500,85 @@ async def test_video_handler_planning_action_table(
         assert cancelled.context_version == state.context_version + 1
         assert result.update_active_workflow is True
         assert result.active_workflow_id is None
+
+
+@pytest.mark.asyncio
+async def test_video_handler_intake_cancel_requires_explicit_form_cancelled_patch(
+    video_handler: VideoLiveWorkflowHandler,
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    state = _planning_state("intake")
+    _, workflow = await state_repository.seed_state(state)
+
+    result = await video_handler.dispatch(
+        command_factory(
+            action=AgentAction.CANCEL_WORKFLOW,
+            patch={"form_cancelled": True},
+            workflow=workflow,
+        )
+    )
+    cancelled = decode_video_workflow_state(result.state)
+
+    assert cancelled.current_stage.value == "form_cancelled"
+    assert cancelled.status is WorkflowStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [{}, {"form_cancelled": False}, {"form_cancelled": True, "extra": True}],
+)
+async def test_video_handler_rejects_ambiguous_intake_cancel_patch(
+    patch: dict[str, Any],
+    video_handler: VideoLiveWorkflowHandler,
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    state = _planning_state("intake")
+    _, workflow = await state_repository.seed_state(state)
+
+    with pytest.raises(VideoLiveStateConflictError, match="video_action_patch_invalid"):
+        await video_handler.dispatch(
+            command_factory(
+                action=AgentAction.CANCEL_WORKFLOW,
+                patch=patch,
+                workflow=workflow,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_video_handler_plan_review_regenerates_three_new_directions(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    state = _planning_state("plan_review")
+    _, workflow = await state_repository.seed_state(state)
+    capabilities = _FakeCapabilities()
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=capabilities,
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(state.updated_at + timedelta(seconds=1)),
+    )
+
+    result = await handler.dispatch(
+        command_factory(
+            action=AgentAction.REGENERATE_STAGE,
+            patch={},
+            workflow=workflow,
+        )
+    )
+    restarted = decode_video_workflow_state(result.state)
+
+    assert restarted.current_stage.value == "direction_review"
+    assert restarted.active_plan is None
+    assert restarted.selected_direction == {}
+    assert len(restarted.creative_directions) == 3
+    assert result.interrupt is not None
+    assert result.interrupt.kind == "video_direction_review"
+    assert result.interrupt.payload["ui_kind"] == "video_direction_review"
 
 
 @pytest.mark.asyncio
@@ -649,6 +731,7 @@ async def test_video_handler_plan_continue_without_credential_opens_auth_interru
     assert result.workflow.current_stage == "generate_scene_assets"
     assert result.interrupt is not None
     assert result.interrupt.kind == "authorization_required"
+    assert result.interrupt.payload["ui_kind"] == "authorization_required"
     assert credential_provider.turn_ids == ["turn-video-1"]
     assert capabilities.generate_scene_assets_calls == 0
 
@@ -689,6 +772,7 @@ async def test_video_handler_scene_assets_use_transient_credential_and_open_revi
     assert result.workflow.current_stage == "scene_package_review"
     assert result.interrupt is not None
     assert result.interrupt.kind == "video_scene_package_review"
+    assert result.interrupt.payload["ui_kind"] == "video_scene_package_review"
     published = decode_video_workflow_state(result.state)
     artifact = result.messages[0].model_dump(mode="json")["payload"]["artifact"]
     assert set(artifact) == {
@@ -749,6 +833,78 @@ async def test_video_handler_confirms_scene_package_and_claims_scene_operations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch_factory",
+    [
+        lambda state: {
+            "scene_id": state.scene_package.scene_packages[0]["scene_id"],
+            "scene_patch": {"narration": "新的审核旁白"},
+        },
+        lambda state: {
+            "asset_action": "replace",
+            "asset_group": "characters",
+            "asset_id": state.scene_package.global_assets["characters"][0]["asset_id"],
+            "asset_patch": {
+                "source": "image_asset",
+                "display_image_url": "https://assets.example.com/replaced-character.png",
+                "generation_reference_url": "https://assets.example.com/replaced-character-source.png",
+            },
+        },
+        lambda state: {
+            "asset_action": "delete",
+            "asset_group": "characters",
+            "asset_id": state.scene_package.global_assets["characters"][0]["asset_id"],
+        },
+        lambda state: {
+            "asset_action": "add",
+            "asset_group": "props",
+            "asset_id": "prop-manual-cup",
+            "asset_patch": {
+                "source": "local_upload",
+                "display_image_url": "https://assets.example.com/cup.png",
+                "generation_reference_url": "https://assets.example.com/cup-source.png",
+                "asset_name": "运动水杯",
+            },
+        },
+    ],
+)
+async def test_video_handler_applies_bounded_scene_package_review_modification(
+    patch_factory,
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    from test_agent_video_workflow_generation import _reviewed_scene_package_state
+
+    state = _reviewed_scene_package_state()
+    _, workflow = await state_repository.seed_state(state)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(state.updated_at + timedelta(seconds=1)),
+    )
+    patch = patch_factory(state)
+
+    result = await handler.dispatch(
+        command_factory(
+            action=AgentAction.MODIFY_WORKFLOW,
+            patch=patch,
+            workflow=workflow,
+        )
+    )
+    updated = decode_video_workflow_state(result.state)
+
+    assert updated.scene_package.to_dict() != state.scene_package.to_dict()
+    assert updated.scene_package.creation_contract == state.scene_package.creation_contract
+    assert updated.scene_package.target_duration_ms == state.scene_package.target_duration_ms
+    assert updated.stage_version == state.stage_version + 1
+    assert updated.context_version == state.context_version + 1
+    assert result.interrupt is not None
+    assert result.interrupt.kind == "video_scene_package_review"
+    assert result.interrupt.payload["ui_kind"] == "video_scene_package_review"
+
+
+@pytest.mark.asyncio
 async def test_video_handler_modifies_then_regenerates_only_dirty_scene(
     state_repository: _SeededMemoryVideoRuntimeRepository,
     command_factory,
@@ -797,6 +953,7 @@ async def test_video_handler_modifies_then_regenerates_only_dirty_scene(
     assert modified.workflow.current_stage == "scene_video_review"
     assert modified.interrupt is not None
     assert modified.interrupt.kind == "video_scene_video_review"
+    assert modified.interrupt.payload["ui_kind"] == "video_result_review"
     artifact = modified.messages[0].model_dump(mode="json")["payload"]["artifact"]
     assert set(artifact) == {
         "type",
@@ -1044,7 +1201,7 @@ async def test_video_handler_records_only_final_merged_video_download(
     result = await handler.dispatch(
         command_factory(
             action=AgentAction.CONTINUE_WORKFLOW,
-            patch={"download_url": video_url},
+            patch={"delivery_download_url": video_url},
             workflow=workflow,
         )
     )
@@ -1228,7 +1385,7 @@ async def test_real_chain_records_completed_final_video_download(
         handler=handler,
         workflow=workflow,
         action=AgentAction.CONTINUE_WORKFLOW,
-        patch={"download_url": video_url},
+        patch={"delivery_download_url": video_url},
         sequence=203,
     )
     downloaded = decode_video_workflow_state(result.state)

@@ -267,6 +267,27 @@ def test_direction_regeneration_and_form_cancellation_are_explicit(service: Vide
     assert regenerated.selected_direction == {}
 
 
+def test_plan_review_can_explicitly_restart_with_new_directions(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+
+    restarted = service.restart_directions_from_plan(
+        review,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert restarted.current_stage is VideoPlanningStage.DIRECTION_GENERATION
+    assert restarted.status is WorkflowStatus.RUNNING
+    assert restarted.form_values == review.form_values
+    assert restarted.intake_context == review.intake_context
+    assert restarted.creative_directions == []
+    assert restarted.selected_direction == {}
+    assert restarted.active_plan is None
+    assert restarted.stage_version == review.stage_version + 1
+    assert restarted.context_version == review.context_version + 1
+
+
 def test_planning_cancel_preserves_authority_and_projects_cancelled_status(
     service: VideoPlanningWorkflowService,
 ) -> None:

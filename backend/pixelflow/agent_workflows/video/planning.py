@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -353,6 +353,32 @@ class VideoPlanningWorkflowService:
             selected_direction={},
             now=now,
         )
+
+    def restart_directions_from_plan(
+        self,
+        state: VideoPlanningWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoPlanningWorkflowState:
+        """放弃当前 Plan 和已选方向，显式返回全新三方向生成阶段。"""
+
+        _require_stage(state, VideoPlanningStage.PLAN_REVIEW)
+        timestamp = _timestamp(now)
+        if timestamp < state.updated_at:
+            raise ValueError("Workflow 更新时间不能早于当前状态")
+        restarted = replace(
+            state,
+            current_stage=VideoPlanningStage.DIRECTION_GENERATION,
+            status=WorkflowStatus.RUNNING,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=timestamp,
+            _creative_directions_json="[]",
+            _selected_direction_json="{}",
+            _active_plan=None,
+        )
+        self.validate_state(restarted)
+        return restarted
 
     def publish_initial_plan(
         self,

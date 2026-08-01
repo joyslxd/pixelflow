@@ -14,7 +14,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
-| 统一会话 Runtime | R2 开发候选 / R1 已发布 | dev profile 仍声明 `primary + video + 100%`，但 Gateway 只有在对应 intent 已注册可执行 Graph Handler 时才冻结 `supervisor_v1`。当前尚未安装视频 live handler，因此视频新对话安全落为 `frontend_v2`，同时继续使用 R1 Turn、Snapshot/SSE、自动上下文压缩和输入队列；避免已接管但无人消费导致前端循环。所有 Agent 共用 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案。生产仍保持已批准的 R1 `assist + [] + 100%`，R2 尚未发布 |
+| 统一会话 Runtime | R2 live handler 开发候选 / R1 已发布 | Task 13 已在隔离开发分支补齐视频 live handler 的九动作消费、权威 Artifact/interrupt 投影和 React 结构化动作接线；Gateway 注册与 `primary_execution_intents=[video]` 仍留给独立 Task 14，因此当前可部署基线继续安全使用 `frontend_v2 + R1 Turn/Snapshot/SSE/压缩队列`，不能据此切换 R2。所有 Agent 共用 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案。生产仍保持已批准的 R1 `assist + [] + 100%`，R2 尚未发布 |
 | 持久化 External Job Coordinator | M06 已进入 Agent | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库；M06 已通过 Final 单槽集成，生产仍保持 R1 `assist`，R2 Workflow 接线和发布继续受独立门禁约束 |
 | 视频 Workflow Adapter | M11 已进入 Agent / R2 候选接线 | 已冻结 intake、方向、Plan、场景包、分镜生成、后处理、人工结束和剪映交付权威状态；M13.2 候选把标准 Turn/附件 DTO 接入 Supervisor replay 与 M06 非付费幂等门禁。生产仍为 R1，真实付费 Provider 和 R2 发布必须另行批准 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |

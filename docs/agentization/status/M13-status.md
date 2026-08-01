@@ -56,6 +56,15 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 真实验收：使用本机测试配置和测试环境 content-app 从新对话完整执行视频表单、创意重生成与选择、Plan 编辑/Agent 修改/回退/恢复/确认、场景包素材增删改存、首次生成、下载、两种 QC 修改策略、局部重生成、合并、剪映草稿生成/下载、最终下载和人工结束；最终刷新恢复稳定。详细证据见 [M13.2 / R2 测试环境人工验收修复记录](../test-reports/M13.2-R2-live-acceptance-repair.md)。
 - 发布边界：生产继续保持 R1；本修复不把 fake replay handler 当作 live handler，也不授权发布 `primary(video)`。未来装配真实 handler 时必须显式注册对应 `primary_execution_intents` 并重新执行真实全流程验收。
 
+## M13.2 / R2 视频 live handler Task 13 开发候选（2026-08-02）
+
+- 当前状态：`implementation_local_verified:Task13`；只完成隔离分支开发与非付费本地验证，尚未进入 Agent 长期分支，也未改变既有 `phase_integrated:R2 / awaiting_release_approval:R2` 发布记录。
+- 后端：live handler 已消费标准 Turn 和当前 interrupt，按权威 `workflow_id + stage + artifact_ref` 执行 intake 取消、方向重生成、Plan 返回新创意、Plan 修订/历史恢复、场景包单镜与全局素材增删改、分镜重试/重生成、后处理、剪映和下载动作；有界修改由领域 Service 重算引用与执行提示，不接受客户端整份权威快照覆盖。
+- 前端：`WorkspacePage` 从 Snapshot 的五类 `ui_kind` 纯恢复视频表单和审核卡；Supervisor 控件只提交 `ExplicitActionSignal`，每次生成一个稳定响应 UUID，pending 同时保存原 action 与目标引用，已注册恢复只查询原 run。分镜文本先形成本地草稿，显式保存后只提交一次当前分镜；`frontend_v2` 和非视频路径保持原 handler。
+- 本地证据：后端 Task 13 焦点测试 `109 passed`；Web 正确测试环境 `399 passed`；`tsc --noEmit` 与生产构建通过。扩展视频 Workflow 门禁和最终中文/差异检查以本分支报告最终记录为准。
+- 冻结边界：Task 14 的 Gateway 注册、`primary_execution_intents=[video]`、R2 真实全流程门禁、真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行。生产继续保持 R1 `assist / [] / 100 / true`；历史对话和运行中任务不迁移。
+- 详细证据：[R2 视频 live handler 开发记录](../test-reports/R2-video-live-handler-development.md)。
+
 ## M13.2 / R2 单槽阶段集成（2026-07-29）
 
 - 冻结引用：Agent `2b7bd44813dbbe63836e8fd2434c0b9be08af404`、dev `fb7450775a227d891372c19eae1b308045c51e68`、M13 状态提交 `95ef865f2a084ce57b91be5eb326e1045247d4a0`；实现检查点固定为 `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`。

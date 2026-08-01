@@ -73,6 +73,15 @@ _STAGE_HANDLERS = {
     VideoWorkflowStateKind.DELIVERY: "_dispatch_delivery",
 }
 
+_INTERRUPT_UI_KINDS = {
+    "video_intake_form": "video_intake_form",
+    "video_direction_review": "video_direction_review",
+    "video_plan_review": "video_plan_review",
+    "video_scene_package_review": "video_scene_package_review",
+    "video_scene_video_review": "video_result_review",
+    "authorization_required": "authorization_required",
+}
+
 
 class VideoLiveStateConflictError(RuntimeError):
     """用固定原因码拒绝不一致、过期或不允许的 live 动作。"""
@@ -160,9 +169,21 @@ class VideoLiveWorkflowHandler:
                 active_workflow_id=command.workflow_id,
             )
         if command.decision.action is AgentAction.CANCEL_WORKFLOW:
-            self._require_patch_keys(command, allowed=frozenset())
             if command.workflow is None:
                 raise VideoLiveStateConflictError("video_action_not_allowed_for_stage")
+            if (
+                isinstance(state, VideoPlanningWorkflowState)
+                and state.current_stage is VideoPlanningStage.INTAKE
+            ):
+                patch = self._require_patch_keys(
+                    command,
+                    allowed=frozenset({"form_cancelled"}),
+                    required=frozenset({"form_cancelled"}),
+                )
+                if patch["form_cancelled"] is not True:
+                    raise VideoLiveStateConflictError("video_action_patch_invalid")
+            else:
+                self._require_patch_keys(command, allowed=frozenset())
             try:
                 cancelled = self._cancel_state(state)
             except (TypeError, ValueError) as exc:
@@ -467,6 +488,98 @@ class VideoLiveWorkflowHandler:
     ) -> WorkflowDispatchResult:
         if not isinstance(state, VideoScenePackageWorkflowState):
             raise VideoLiveStateConflictError("video_state_kind_mismatch")
+        if command.decision.action is AgentAction.MODIFY_WORKFLOW:
+            if state.current_stage is not VideoScenePackageStage.SCENE_PACKAGE_REVIEW:
+                raise VideoLiveStateConflictError("video_action_not_allowed_for_stage")
+            patch = self._require_patch_keys(
+                command,
+                allowed=frozenset(
+                    {
+                        "scene_id",
+                        "scene_patch",
+                        "asset_action",
+                        "asset_group",
+                        "asset_id",
+                        "asset_patch",
+                    }
+                ),
+            )
+            try:
+                if set(patch) == {"scene_id", "scene_patch"}:
+                    updated = self._scene_packages.modify_review_scene(
+                        state,
+                        scene_id=self._required_text(patch["scene_id"], "scene_id"),
+                        patch=self._json_object(patch["scene_patch"], "scene_patch"),
+                        now=self._clock.now(),
+                    )
+                elif patch.get("asset_action") == "replace" and set(patch) == {
+                    "asset_action",
+                    "asset_group",
+                    "asset_id",
+                    "asset_patch",
+                }:
+                    updated = self._scene_packages.replace_review_asset(
+                        state,
+                        asset_group=self._required_text(
+                            patch["asset_group"], "asset_group"
+                        ),
+                        asset_id=self._required_text(patch["asset_id"], "asset_id"),
+                        asset_patch=self._json_object(
+                            patch["asset_patch"], "asset_patch"
+                        ),
+                        now=self._clock.now(),
+                    )
+                elif patch.get("asset_action") == "delete" and set(patch) == {
+                    "asset_action",
+                    "asset_group",
+                    "asset_id",
+                }:
+                    updated = self._scene_packages.delete_review_asset(
+                        state,
+                        asset_group=self._required_text(
+                            patch["asset_group"], "asset_group"
+                        ),
+                        asset_id=self._required_text(patch["asset_id"], "asset_id"),
+                        now=self._clock.now(),
+                    )
+                elif patch.get("asset_action") == "add" and set(patch) == {
+                    "asset_action",
+                    "asset_group",
+                    "asset_id",
+                    "asset_patch",
+                }:
+                    updated = self._scene_packages.add_review_asset(
+                        state,
+                        asset_group=self._required_text(
+                            patch["asset_group"], "asset_group"
+                        ),
+                        asset_id=self._required_text(patch["asset_id"], "asset_id"),
+                        asset_patch=self._json_object(
+                            patch["asset_patch"], "asset_patch"
+                        ),
+                        now=self._clock.now(),
+                    )
+                else:
+                    raise VideoLiveStateConflictError("video_action_patch_invalid")
+            except VideoLiveStateConflictError:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise VideoLiveStateConflictError(
+                    "video_action_patch_invalid"
+                ) from exc
+            return self._result_from_state(
+                command,
+                updated,
+                existing_envelope=existing_envelope,
+                interrupt_kind="video_scene_package_review",
+                reason_code="video_scene_package_review_required",
+                interrupt_payload={
+                    "workflow_id": command.workflow_id,
+                    "stage": updated.current_stage.value,
+                    "artifact_ref": updated.scene_package_artifact_ref,
+                },
+                artifact=self._web_artifacts.project(updated),
+            )
         if command.decision.action is not AgentAction.CONTINUE_WORKFLOW:
             raise VideoLiveStateConflictError("video_action_not_allowed_for_stage")
         self._require_patch_keys(command, allowed=frozenset())
@@ -882,6 +995,7 @@ class VideoLiveWorkflowHandler:
                     command,
                     allowed=frozenset(
                         {
+                            "delivery_download_url",
                             "download_url",
                             "jianying_action",
                             "storyboard_version_id",
@@ -901,12 +1015,12 @@ class VideoLiveWorkflowHandler:
                         operation_port=operation_port,
                         now=self._clock.now(),
                     )
-                elif set(patch) == {"download_url"}:
+                elif set(patch) == {"delivery_download_url"}:
                     updated = await self._delivery.record_final_video_download(
                         state,
                         download_url=self._required_text(
-                            patch["download_url"],
-                            "download_url",
+                            patch["delivery_download_url"],
+                            "delivery_download_url",
                         ),
                         downloaded_at=self._clock.now(),
                         operation_port=operation_port,
@@ -1047,26 +1161,16 @@ class VideoLiveWorkflowHandler:
             last_turn_id=command.turn_id,
             last_action_key=command.decision.idempotency_key,
         )
-        opened_interrupt = StoredAgentInterrupt(
-            interrupt_id=self._interrupt_occurrence_id(
-                turn_id=command.turn_id,
-                reason_code="video_intake_required",
-                workflow=workflow,
-                workflow_version=envelope.workflow_version,
-            ),
-            conversation_id=command.conversation_id,
-            workflow_id=command.workflow_id,
-            turn_id=command.turn_id,
+        opened_interrupt = self._interrupt(
+            command,
             kind="video_intake_form",
             reason_code="video_intake_required",
             payload={
                 "workflow_id": command.workflow_id,
                 "stage": workflow.current_stage,
             },
-            opened_at=now,
-            user_id=command.user_id,
-            thread_id=command.namespace.thread_id,
-            checkpoint_ns="root",
+            workflow=workflow,
+            workflow_version=envelope.workflow_version,
         )
         return WorkflowDispatchResult(
             state=envelope,
@@ -1253,6 +1357,34 @@ class VideoLiveWorkflowHandler:
         *,
         existing_envelope: VideoWorkflowStateEnvelope,
     ) -> WorkflowDispatchResult:
+        if command.decision.action is AgentAction.REGENERATE_STAGE:
+            self._require_patch_keys(command, allowed=frozenset())
+            generating = self._planning.restart_directions_from_plan(
+                state,
+                now=self._clock.now(),
+            )
+            directions = await self._capabilities.generate_directions(
+                generating.form_values,
+                generating.intake_context,
+            )
+            published = self._planning.publish_directions(
+                generating,
+                directions,
+                now=self._clock.now(),
+            )
+            return self._result_from_state(
+                command,
+                published,
+                existing_envelope=existing_envelope,
+                interrupt_kind="video_direction_review",
+                reason_code="video_direction_review_required",
+                interrupt_payload={
+                    "workflow_id": command.workflow_id,
+                    "stage": published.current_stage.value,
+                    "directions": deepcopy_json(published.creative_directions),
+                },
+                artifact=self._directions_artifact(published, command),
+            )
         if command.decision.action is AgentAction.CONTINUE_WORKFLOW:
             self._require_patch_keys(command, allowed=frozenset())
             approved = self._planning.approve_plan(
@@ -1472,6 +1604,8 @@ class VideoLiveWorkflowHandler:
         workflow: WorkflowRecord,
         workflow_version: int,
     ) -> StoredAgentInterrupt:
+        copied_payload = cast(dict[str, JsonValue], deepcopy_json(payload))
+        copied_payload["ui_kind"] = _INTERRUPT_UI_KINDS.get(kind, kind)
         return StoredAgentInterrupt(
             interrupt_id=self._interrupt_occurrence_id(
                 turn_id=command.turn_id,
@@ -1484,7 +1618,7 @@ class VideoLiveWorkflowHandler:
             turn_id=command.turn_id,
             kind=kind,
             reason_code=reason_code,
-            payload=cast(dict[str, JsonValue], deepcopy_json(payload)),
+            payload=copied_payload,
             opened_at=self._clock.now(),
             user_id=command.user_id,
             thread_id=command.namespace.thread_id,

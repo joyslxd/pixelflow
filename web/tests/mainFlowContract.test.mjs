@@ -1375,3 +1375,24 @@ test("final storyboard edits persist and restore the latest scene package contex
   assert.match(workspaceSource, /generated_scene_videos[\s\S]*merged_video/, "restored scene package context must include generated scene videos and merged video");
   assert.match(workspaceSource, /api\s*\.\s*updateConversation\(targetConversationId,[\s\S]*global_assets:[\s\S]*scene_packages:[\s\S]*video_scene_package_edited_scene_ids/, "scene package edits must update conversation context");
 });
+
+test("Supervisor 视频表单按 Snapshot interrupt 恢复并提交结构化确认或取消", () => {
+  assert.match(workspaceSource, /restoredSupervisorUi\?\.kind === "video_intake_form"/);
+  assert.match(workspaceSource, /<GenParamsDialog[\s\S]*intent="video"/);
+  assert.match(workspaceSource, /form_values:\s*form/);
+  assert.match(workspaceSource, /form_cancelled:\s*true/);
+  assert.match(workspaceSource, /action:\s*"cancel_workflow"/);
+});
+
+test("Supervisor 方向和 Plan 审核绑定当前 workflow stage artifact", () => {
+  const supervisorBranch = workspaceSource.match(
+    /function renderSupervisorVideoArtifact[\s\S]*?(?=\n\s{2}(?:const|function) \w)/,
+  );
+  assert.ok(supervisorBranch, "renderSupervisorVideoArtifact 必须存在");
+  assert.match(supervisorBranch[0], /direction_id/);
+  assert.match(supervisorBranch[0], /revision_feedback/);
+  assert.match(supervisorBranch[0], /plan_version/);
+  assert.match(supervisorBranch[0], /workflowId:\s*target\.workflow\.workflow_id/);
+  assert.match(supervisorBranch[0], /stage:\s*target\.stage/);
+  assert.match(supervisorBranch[0], /artifactRef:\s*target\.artifactRef/);
+});

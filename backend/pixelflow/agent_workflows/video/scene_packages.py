@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,31 @@ from .planning import (
     VideoPlanningStage,
     VideoPlanningWorkflowState,
 )
+
+_REVIEW_ASSET_GROUPS = ("characters", "scenes", "props")
+_REVIEW_ASSET_PATCH_FIELDS = {
+    "source",
+    "display_image_url",
+    "generation_reference_url",
+    "third_asset_id",
+    "asset_type",
+    "content_asset_id",
+    "asset_name",
+}
+_REVIEW_ASSET_MUTABLE_FIELDS = {
+    "three_view_images",
+    "images",
+    "image_url",
+    "url",
+    "generation_reference_url",
+    "replacement_source",
+    "third_asset_id",
+    "replacement_asset_type",
+    "replacement_asset_id",
+    "replacement_asset_name",
+    "manual_added",
+    "asset_origin",
+}
 
 
 class VideoScenePackageStage(StrEnum):
@@ -228,6 +254,249 @@ class VideoScenePackageWorkflowService:
             _scene_package=snapshot,
         )
 
+    def modify_review_scene(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        scene_id: str,
+        patch: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> VideoScenePackageWorkflowState:
+        """仅修改一个权威分镜的可编辑字段，并重算 mentions 与执行提示词。"""
+
+        _validate_scene_package_state_authority(state)
+        _require_stage(state, VideoScenePackageStage.SCENE_PACKAGE_REVIEW)
+        normalized_id = _required_text(scene_id, "scene_id")
+        if not isinstance(patch, Mapping) or not patch:
+            raise ValueError("分镜 patch 不能为空")
+        allowed = {"storyline", "shot_description", "narration", "reference_asset_ids"}
+        if set(patch).difference(allowed):
+            raise ValueError("分镜 patch 含有不允许的字段")
+        scenes = state.scene_package.scene_packages
+        position = next(
+            (index for index, item in enumerate(scenes) if item["scene_id"] == normalized_id),
+            None,
+        )
+        if position is None:
+            raise ValueError("目标分镜不存在")
+        scene = dict(scenes[position])
+        if "storyline" in patch:
+            scene["storyline"] = _required_text(patch["storyline"], "storyline")
+        if "narration" in patch:
+            if not isinstance(patch["narration"], str):
+                raise ValueError("narration 必须是字符串")
+            scene["narration"] = patch["narration"]
+        if "reference_asset_ids" in patch:
+            scene["reference_asset_ids"] = _validated_reference_ids(
+                patch["reference_asset_ids"]
+            )
+        if "shot_description" in patch:
+            shot = patch["shot_description"]
+            if not isinstance(shot, Mapping) or set(shot) != {"text"}:
+                raise ValueError("shot_description 只能包含 text 字段")
+            scene["shot_description"] = {
+                "text": _required_text(shot["text"], "shot_description.text"),
+                "mentions": [],
+            }
+        scenes[position] = _rebuild_review_scene(
+            scene,
+            state.scene_package.global_assets,
+            state.scene_package.creation_contract,
+        )
+        return self._publish_review_revision(
+            state,
+            global_assets=state.scene_package.global_assets,
+            scene_packages=scenes,
+            now=now,
+        )
+
+    def replace_review_asset(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        asset_group: str,
+        asset_id: str,
+        asset_patch: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> VideoScenePackageWorkflowState:
+        """替换一个已有全局资产的图片引用，保留 Plan 冻结身份与描述。"""
+
+        _validate_scene_package_state_authority(state)
+        _require_stage(state, VideoScenePackageStage.SCENE_PACKAGE_REVIEW)
+        group = _validated_asset_group(asset_group)
+        normalized_id = _required_text(asset_id, "asset_id")
+        replacement = _validated_review_asset_patch(asset_patch)
+        assets = state.scene_package.global_assets
+        items = assets[group]
+        position = next(
+            (index for index, item in enumerate(items) if item["asset_id"] == normalized_id),
+            None,
+        )
+        if position is None:
+            raise ValueError("目标全局资产不存在")
+        image_field = "three_view_images" if group == "characters" else "images"
+        updated_asset = dict(items[position])
+        updated_asset.update(
+            _asset_replacement_metadata(
+                replacement,
+                image_field=image_field,
+            )
+        )
+        items[position] = updated_asset
+        assets[group] = items
+        scenes = [
+            _rebuild_review_scene(
+                scene,
+                assets,
+                state.scene_package.creation_contract,
+            )
+            for scene in state.scene_package.scene_packages
+        ]
+        return self._publish_review_revision(
+            state,
+            global_assets=assets,
+            scene_packages=scenes,
+            now=now,
+        )
+
+    def delete_review_asset(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        asset_group: str,
+        asset_id: str,
+        now: datetime | None = None,
+    ) -> VideoScenePackageWorkflowState:
+        """清除一个资产图片，并从全部分镜结构化引用中移除该资产。"""
+
+        _validate_scene_package_state_authority(state)
+        _require_stage(state, VideoScenePackageStage.SCENE_PACKAGE_REVIEW)
+        group = _validated_asset_group(asset_group)
+        normalized_id = _required_text(asset_id, "asset_id")
+        assets = state.scene_package.global_assets
+        items = assets[group]
+        position = next(
+            (index for index, item in enumerate(items) if item["asset_id"] == normalized_id),
+            None,
+        )
+        if position is None:
+            raise ValueError("目标全局资产不存在")
+        asset = dict(items[position])
+        asset_name = _required_text(asset.get("name"), "asset.name")
+        image_field = "three_view_images" if group == "characters" else "images"
+        for key in _REVIEW_ASSET_MUTABLE_FIELDS:
+            asset.pop(key, None)
+        asset[image_field] = []
+        items[position] = asset
+        assets[group] = items
+        scenes: list[dict[str, Any]] = []
+        for current in state.scene_package.scene_packages:
+            scene = dict(current)
+            scene["reference_asset_ids"] = [
+                value
+                for value in scene["reference_asset_ids"]
+                if value != normalized_id
+            ]
+            shot = dict(scene["shot_description"])
+            shot["text"] = str(shot["text"]).replace(f"@{asset_name}", asset_name)
+            shot["mentions"] = []
+            scene["shot_description"] = shot
+            scenes.append(
+                _rebuild_review_scene(
+                    scene,
+                    assets,
+                    state.scene_package.creation_contract,
+                )
+            )
+        return self._publish_review_revision(
+            state,
+            global_assets=assets,
+            scene_packages=scenes,
+            now=now,
+        )
+
+    def add_review_asset(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        asset_group: str,
+        asset_id: str,
+        asset_patch: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> VideoScenePackageWorkflowState:
+        """新增一个有稳定 ID 的人工资产，但不隐式绑定到任何分镜。"""
+
+        _validate_scene_package_state_authority(state)
+        _require_stage(state, VideoScenePackageStage.SCENE_PACKAGE_REVIEW)
+        group = _validated_asset_group(asset_group)
+        normalized_id = _required_text(asset_id, "asset_id")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", normalized_id):
+            raise ValueError("新增资产 asset_id 格式不合法")
+        replacement = _validated_review_asset_patch(asset_patch)
+        assets = state.scene_package.global_assets
+        if normalized_id in _asset_lookup(assets):
+            raise ValueError("新增资产 asset_id 必须唯一")
+        name = replacement.get("asset_name") or "新增全局资产"
+        image_field = "three_view_images" if group == "characters" else "images"
+        added = {
+            "asset_id": normalized_id,
+            "name": name,
+            "description": name,
+            "manual_added": True,
+            "asset_origin": "manual_addition",
+        }
+        added.update(
+            _asset_replacement_metadata(
+                replacement,
+                image_field=image_field,
+            )
+        )
+        assets[group] = [*assets[group], added]
+        return self._publish_review_revision(
+            state,
+            global_assets=assets,
+            scene_packages=state.scene_package.scene_packages,
+            now=now,
+        )
+
+    def _publish_review_revision(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        global_assets: Mapping[str, Any],
+        scene_packages: Sequence[Mapping[str, Any]],
+        now: datetime | None,
+    ) -> VideoScenePackageWorkflowState:
+        """发布一次有界人工修改后的新权威快照。"""
+
+        timestamp = _timestamp(now)
+        if timestamp < state.updated_at:
+            raise ValueError("Workflow 更新时间不能早于当前状态")
+        payload = state.scene_package.to_dict()
+        revision = payload.get("review_revision", 0)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("场景包 review_revision 不合法")
+        payload.update(
+            {
+                "global_assets": json.loads(
+                    _canonical_json(global_assets, field_name="人工修改全局资产")
+                ),
+                "scene_packages": json.loads(
+                    _canonical_json(scene_packages, field_name="人工修改场景包")
+                ),
+                "review_revision": revision + 1,
+            }
+        )
+        result = replace(
+            state,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=timestamp,
+            _scene_package=VideoScenePackageAuthoritySnapshot(payload),
+        )
+        _validate_scene_package_state_authority(result)
+        return result
+
     def cancel(
         self,
         state: VideoScenePackageWorkflowState,
@@ -374,6 +643,9 @@ def _validate_scene_package_state_authority(
 
     _validate_source_plan(state.source_plan)
     payload = state.scene_package.to_dict()
+    if "review_revision" in payload:
+        _validate_revised_review_payload(state, payload)
+        return
     if payload.get("asset_images_generated") is not True:
         raise ValueError("场景包审核阶段必须已经完成全局资产图片绑定")
     generated_assets = payload.get("global_assets")
@@ -444,6 +716,194 @@ def _validate_scene_package_state_authority(
         field_name="审核态场景包权威快照",
     ):
         raise ValueError("审核态场景包权威快照与来源 Plan 不一致")
+
+
+def _validate_revised_review_payload(
+    state: VideoScenePackageWorkflowState,
+    payload: Mapping[str, Any],
+) -> None:
+    """重验人工授权后的场景包，不放宽来源 Plan 和执行合同。"""
+
+    expected_keys = {
+        "source_plan_checksum",
+        "source_plan_version",
+        "material_image_urls",
+        "target_duration_ms",
+        "creation_contract",
+        "global_assets",
+        "scene_packages",
+        "asset_images_generated",
+        "review_revision",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("人工修改场景包字段必须完整且不得包含额外字段")
+    revision = payload.get("review_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ValueError("场景包 review_revision 必须是正整数")
+    if payload.get("source_plan_checksum") != state.source_plan.checksum:
+        raise ValueError("人工修改场景包来源 Plan 校验和不一致")
+    if payload.get("source_plan_version") != state.source_plan.plan_version:
+        raise ValueError("人工修改场景包来源 Plan 版本不一致")
+    if payload.get("creation_contract") != state.source_plan.creation_contract:
+        raise ValueError("人工修改不得漂移来源 Plan 创作合同")
+    expected_duration = int(state.source_plan.creation_contract["video_duration_sec"]) * 1000
+    if payload.get("target_duration_ms") != expected_duration:
+        raise ValueError("人工修改不得漂移场景包总时长")
+    _validated_material_image_urls(payload.get("material_image_urls"))
+    if payload.get("asset_images_generated") is not True:
+        raise ValueError("人工修改只能发生在资产图片已生成的审核阶段")
+
+    assets = payload.get("global_assets")
+    if not isinstance(assets, Mapping) or set(assets) != {
+        "characters",
+        "scenes",
+        "props",
+        "visual_style",
+    }:
+        raise ValueError("人工修改全局资产字段不合法")
+    visual_style = assets.get("visual_style")
+    if not isinstance(visual_style, dict) or set(visual_style) != {
+        "asset_id",
+        "name",
+        "description",
+        "prompt",
+    }:
+        raise ValueError("人工修改视觉风格字段不合法")
+    _required_text(visual_style.get("asset_id"), "visual_style.asset_id")
+    expected_style = _required_text(
+        state.source_plan.creation_contract.get("visual_style"),
+        "creation_contract.visual_style",
+    )
+    if any(
+        visual_style.get(field_name) != expected_style
+        for field_name in ("name", "description", "prompt")
+    ):
+        raise ValueError("人工修改不得漂移 Plan 视觉风格")
+    plan_assets = {
+        item["asset_id"]: item
+        for collection in _REVIEW_ASSET_GROUPS
+        for item in state.source_plan.asset_manifest[collection]
+    }
+    seen_ids: set[str] = set()
+    for group in _REVIEW_ASSET_GROUPS:
+        items = assets.get(group)
+        if not isinstance(items, list):
+            raise ValueError(f"global_assets.{group} 必须是数组")
+        image_field = "three_view_images" if group == "characters" else "images"
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError(f"global_assets.{group} 只能包含对象")
+            asset_id = _required_text(item.get("asset_id"), f"{group}.asset_id")
+            if asset_id in seen_ids:
+                raise ValueError("全局资产 asset_id 必须唯一")
+            seen_ids.add(asset_id)
+            urls = item.get(image_field)
+            if not isinstance(urls, list) or len(urls) > 1:
+                raise ValueError("人工修改资产图片必须为空或恰好一张")
+            if urls:
+                _required_https_url(urls[0], f"{group}.{image_field}")
+            for key in ("image_url", "url"):
+                value = item.get(key)
+                if value not in (None, ""):
+                    _required_https_url(value, f"{group}.{key}")
+            generation_reference = item.get("generation_reference_url")
+            if generation_reference not in (None, ""):
+                _validated_generation_reference(
+                    source=item.get("replacement_source"),
+                    value=generation_reference,
+                    third_asset_id=item.get("third_asset_id"),
+                    field_name=f"{group}.generation_reference_url",
+                )
+            immutable = {
+                key: value
+                for key, value in item.items()
+                if key not in _REVIEW_ASSET_MUTABLE_FIELDS
+            }
+            original = plan_assets.get(asset_id)
+            if original is not None:
+                if immutable != original:
+                    raise ValueError("人工替换资产不得改写 Plan 身份或描述")
+            else:
+                if immutable != {
+                    "asset_id": asset_id,
+                    "name": item.get("name"),
+                    "description": item.get("description"),
+                } or item.get("manual_added") is not True or item.get("asset_origin") != "manual_addition":
+                    raise ValueError("人工新增资产字段不合法")
+                _required_text(item.get("name"), "人工新增资产 name")
+                if item.get("description") != item.get("name"):
+                    raise ValueError("人工新增资产 description 必须使用规范名称")
+
+    scenes = payload.get("scene_packages")
+    blueprints = state.source_plan.scene_blueprints
+    if not isinstance(scenes, list) or len(scenes) != len(blueprints):
+        raise ValueError("人工修改不得改变场景包数量")
+    asset_lookup = _asset_lookup(assets)
+    contract = state.source_plan.creation_contract
+    for position, (scene, blueprint) in enumerate(
+        zip(scenes, blueprints, strict=True),
+        start=1,
+    ):
+        if not isinstance(scene, dict) or set(scene) != {
+            "scene_id",
+            "scene_index",
+            "title",
+            "duration_ms",
+            "storyline",
+            "shot_description",
+            "reference_asset_ids",
+            "prompt",
+            "narration",
+            "transition",
+            "image_urls",
+            "video_urls",
+            "audio_urls",
+        }:
+            raise ValueError(f"人工修改场景包第 {position} 项字段不合法")
+        immutable = {
+            "scene_id": blueprint["scene_id"],
+            "scene_index": blueprint["scene_index"],
+            "title": blueprint["title"],
+            "duration_ms": int(blueprint["duration_sec"]) * 1000,
+            "transition": blueprint["transition"],
+            "image_urls": list(payload["material_image_urls"]),
+            "video_urls": [],
+            "audio_urls": [],
+        }
+        if any(scene.get(key) != value for key, value in immutable.items()):
+            raise ValueError("人工修改不得改变场景身份、时长或输入素材")
+        _required_text(scene.get("storyline"), f"场景包第 {position} 项 storyline")
+        if not isinstance(scene.get("narration"), str):
+            raise ValueError(f"场景包第 {position} 项 narration 必须是字符串")
+        references = _validated_reference_ids(scene.get("reference_asset_ids"))
+        for asset_id in references:
+            asset = asset_lookup.get(asset_id)
+            if asset is None or "image_url" not in asset:
+                raise ValueError("分镜只能引用当前存在且有图片的全局资产")
+        shot = scene.get("shot_description")
+        if not isinstance(shot, dict) or set(shot) != {"text", "mentions"}:
+            raise ValueError("人工修改 shot_description 字段不合法")
+        _required_text(shot.get("text"), "shot_description.text")
+        expected_mentions = [
+            {
+                "asset_id": asset_id,
+                "type": asset_lookup[asset_id]["type"],
+                "name": asset_lookup[asset_id]["name"],
+                "image_url": asset_lookup[asset_id]["image_url"],
+            }
+            for asset_id in references
+        ]
+        if shot.get("mentions") != expected_mentions:
+            raise ValueError("人工修改 mentions 必须由当前全局资产重算")
+        expected_prompt = build_authoritative_scene_prompt(
+            scene["storyline"],
+            shot,
+            scene["narration"],
+            assets["visual_style"],
+            video_model=_required_text(contract.get("video_model"), "video_model"),
+        )
+        if scene.get("prompt") != expected_prompt:
+            raise ValueError("人工修改场景执行提示词必须由服务端重算")
 
 
 def _validated_material_image_urls(value: Any) -> list[str]:
@@ -645,6 +1105,129 @@ def _validated_generated_assets(expected: Mapping[str, Any], value: Mapping[str,
     return assets
 
 
+def _validated_reference_ids(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > 9:
+        raise ValueError("分镜 reference_asset_ids 必须是最多 9 项的数组")
+    normalized = [
+        _required_text(item, "reference_asset_ids")
+        for item in value
+    ]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("分镜 reference_asset_ids 不得重复")
+    return normalized
+
+
+def _validated_asset_group(value: Any) -> str:
+    group = _required_text(value, "asset_group")
+    if group not in _REVIEW_ASSET_GROUPS:
+        raise ValueError("asset_group 不受支持")
+    return group
+
+
+def _validated_review_asset_patch(value: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("资产 patch 不能为空")
+    if set(value).difference(_REVIEW_ASSET_PATCH_FIELDS):
+        raise ValueError("资产 patch 含有不允许的字段")
+    source = _required_text(value.get("source"), "asset_patch.source")
+    if source not in {"digital_human", "image_asset", "local_upload"}:
+        raise ValueError("资产 patch source 不受支持")
+    normalized = {
+        "source": source,
+        "display_image_url": _required_https_url(
+            value.get("display_image_url"),
+            "asset_patch.display_image_url",
+        ),
+    }
+    for key in (
+        "third_asset_id",
+        "asset_type",
+        "content_asset_id",
+        "asset_name",
+    ):
+        if key in value:
+            normalized[key] = _required_text(value[key], f"asset_patch.{key}")
+    normalized["generation_reference_url"] = _validated_generation_reference(
+        source=source,
+        value=value.get("generation_reference_url"),
+        third_asset_id=normalized.get("third_asset_id"),
+        field_name="asset_patch.generation_reference_url",
+    )
+    return normalized
+
+
+def _asset_replacement_metadata(
+    replacement: Mapping[str, str],
+    *,
+    image_field: str,
+) -> dict[str, Any]:
+    display_url = replacement["display_image_url"]
+    result: dict[str, Any] = {
+        image_field: [display_url],
+        "image_url": display_url,
+        "url": display_url,
+        "generation_reference_url": replacement["generation_reference_url"],
+        "replacement_source": replacement["source"],
+    }
+    mappings = {
+        "third_asset_id": "third_asset_id",
+        "asset_type": "replacement_asset_type",
+        "content_asset_id": "replacement_asset_id",
+        "asset_name": "replacement_asset_name",
+    }
+    for source_key, target_key in mappings.items():
+        if source_key in replacement:
+            result[target_key] = replacement[source_key]
+    return result
+
+
+def _rebuild_review_scene(
+    value: Mapping[str, Any],
+    global_assets: Mapping[str, Any],
+    creation_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    scene = json.loads(_canonical_json(value, field_name="待重算分镜"))
+    references = _validated_reference_ids(scene.get("reference_asset_ids"))
+    lookup = _asset_lookup(global_assets)
+    for asset_id in references:
+        asset = lookup.get(asset_id)
+        if asset is None or "image_url" not in asset:
+            raise ValueError("分镜只能引用当前存在且有图片的全局资产")
+    shot = scene.get("shot_description")
+    if not isinstance(shot, Mapping):
+        raise ValueError("shot_description 必须是对象")
+    text = _required_text(shot.get("text"), "shot_description.text")
+    normalized_shot = {
+        "text": text,
+        "mentions": [
+            {
+                "asset_id": asset_id,
+                "type": lookup[asset_id]["type"],
+                "name": lookup[asset_id]["name"],
+                "image_url": lookup[asset_id]["image_url"],
+            }
+            for asset_id in references
+        ],
+    }
+    storyline = _required_text(scene.get("storyline"), "storyline")
+    narration = scene.get("narration")
+    if not isinstance(narration, str):
+        raise ValueError("narration 必须是字符串")
+    scene["reference_asset_ids"] = references
+    scene["shot_description"] = normalized_shot
+    scene["prompt"] = build_authoritative_scene_prompt(
+        storyline,
+        normalized_shot,
+        narration,
+        global_assets["visual_style"],
+        video_model=_required_text(
+            creation_contract.get("video_model"),
+            "video_model",
+        ),
+    )
+    return scene
+
+
 def _bind_asset_images_to_mentions(
     scene_packages: Sequence[Mapping[str, Any]],
     global_assets: Mapping[str, Any],
@@ -767,6 +1350,25 @@ def _required_https_url(value: Any, field_name: str) -> str:
     if parsed.scheme.lower() != "https" or not parsed.netloc:
         raise ValueError(f"{field_name} 必须是 HTTPS URL")
     return url
+
+
+def _validated_generation_reference(
+    *,
+    source: Any,
+    value: Any,
+    third_asset_id: Any,
+    field_name: str,
+) -> str:
+    reference = _required_text(value, field_name)
+    if source != "digital_human":
+        return _required_https_url(reference, field_name)
+    normalized_id = _required_text(third_asset_id, "数字人 third_asset_id")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", normalized_id):
+        raise ValueError("数字人 third_asset_id 格式不合法")
+    expected = f"asset://{normalized_id}"
+    if reference != expected:
+        raise ValueError("数字人生成引用必须与 third_asset_id 精确匹配")
+    return reference
 
 
 def _canonical_json(value: Any, *, field_name: str) -> str:
