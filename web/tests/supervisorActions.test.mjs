@@ -338,6 +338,43 @@ test("patch 递归深拷贝且修改原输入不改变动作输出", () => {
   });
 });
 
+test("patch 深拷贝保留根层与嵌套 __proto__ 数据键且不污染原型", () => {
+  const patch = JSON.parse(
+    '{"__proto__":{"polluted":"root"},"nested":{"__proto__":{"polluted":"nested"}}}',
+  );
+  const result = buildSupervisorWorkflowAction({
+    action: "continue_workflow",
+    workflowId: "wf-1",
+    patch,
+  });
+
+  assert.notEqual(result.patch, patch);
+  assert.notEqual(result.patch.__proto__, patch.__proto__);
+  assert.notEqual(result.patch.nested, patch.nested);
+  assert.notEqual(result.patch.nested.__proto__, patch.nested.__proto__);
+  assert.equal(Object.getPrototypeOf(result.patch), Object.prototype);
+  assert.equal(Object.getPrototypeOf(result.patch.nested), Object.prototype);
+  assert.equal(Object.hasOwn(result.patch, "__proto__"), true);
+  assert.equal(Object.hasOwn(result.patch.nested, "__proto__"), true);
+  assert.equal(
+    JSON.stringify(result.patch),
+    '{"__proto__":{"polluted":"root"},"nested":{"__proto__":{"polluted":"nested"}}}',
+  );
+  assert.equal({}.polluted, undefined);
+});
+
+test("answer_only 与 clarify 拒绝只含 __proto__ 数据键的非空 patch", () => {
+  for (const action of ["answer_only", "clarify"]) {
+    assertReasonCode(
+      {
+        action,
+        patch: JSON.parse('{"__proto__":{"polluted":"blocked"}}'),
+      },
+      "read_only_action_patch_forbidden",
+    );
+  }
+});
+
 test("非法 action 只暴露固定 reason code 而不回显输入", () => {
   const privateAction = "provider_token_from_user";
 

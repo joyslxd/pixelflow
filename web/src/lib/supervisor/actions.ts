@@ -78,7 +78,12 @@ function cloneJsonValue(value: unknown, ancestors: WeakSet<object>): JsonValue {
           && Object.hasOwn(descriptor, "value"),
         "patch_invalid_json",
       );
-      clone[key] = cloneJsonValue(descriptor.value, ancestors);
+      Object.defineProperty(clone, key, {
+        value: cloneJsonValue(descriptor.value, ancestors),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return clone;
   } finally {
