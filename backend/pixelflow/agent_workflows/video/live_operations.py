@@ -1061,12 +1061,24 @@ class VideoOperationCompletionHandler:
         )
         messages = ()
         artifact = None
-        if isinstance(updated, VideoSceneGenerationWorkflowState):
+        if (
+            isinstance(updated, VideoSceneGenerationWorkflowState)
+            and not updated.pending_operations
+        ):
             from pixelflow.agent_workflows.video.delivery import (
                 VideoWebArtifactAdapter,
             )
 
             artifact = VideoWebArtifactAdapter(VideoDeliveryWorkflowService(scoped)).project(updated)
+            if updated.failed_scenes:
+                artifact.update(
+                    {
+                        "type": "video_result",
+                        "title": "场景视频生成未完成",
+                        "description": "部分场景视频生成失败，请查看原因后重试。",
+                        "actionLabel": "重新生成场景视频",
+                    }
+                )
         elif isinstance(updated, VideoPostProductionWorkflowState) and stage == VideoPostProductionStage.MERGE_VIDEO.value:
             from pixelflow.agent_workflows.video.delivery import VideoWebArtifactAdapter
 
@@ -1119,7 +1131,7 @@ class VideoOperationCompletionHandler:
             delivery_service = VideoDeliveryWorkflowService(scoped)
             adapter = VideoWebArtifactAdapter(delivery_service)
             scene_artifact = adapter.project(updated.generation_state)
-            quality_review = updated.quality_review or {}
+            quality_review = _quality_review_projection(updated.quality_review or {})
             merged = updated.merged_video
             if not isinstance(merged, Mapping):
                 raise OperationConflictError("质检完成事件缺少权威合并视频")
@@ -1127,7 +1139,13 @@ class VideoOperationCompletionHandler:
                 "type": "video_quality_review",
                 "title": "QAAgent QC 质检",
                 "description": ("视频质检已通过，请确认最终成片。" if quality_review.get("passed") is True else "视频质检未完成，请按提示重试或修改。" if status != "succeeded" else "视频质检已定位需修改分镜，请选择修改范围。"),
-                "actionLabel": ("重新质检" if status != "succeeded" and quality_review.get("retryable") is True else "选择"),
+                "actionLabel": (
+                    "重新质检"
+                    if status != "succeeded" and quality_review.get("retryable") is True
+                    else "查看失败原因"
+                    if status != "succeeded"
+                    else "选择"
+                ),
                 "videoQualityReview": quality_review,
                 "videoRevisionFeedback": updated.quality_feedback or "",
                 "videoScenePackages": scene_artifact["videoScenePackages"],
@@ -1298,12 +1316,21 @@ def _hash_operation_request(provider_request: object) -> str:
 
 
 _CREDENTIAL_KEY_PARTS = frozenset({"authorization", "secret", "password", "credential"})
+_DIRECT_CREDENTIAL_KEY_PARTS = frozenset({"auth", "bearer", "jwt"})
+_DIRECT_CREDENTIAL_QUALIFIERS = frozenset({"header", "value", "credential", "token", "key"})
 _TOKEN_CREDENTIAL_PREFIXES = frozenset({"access", "refresh", "auth", "bearer", "client", "session", "id", "api", "provider"})
 _TOKEN_METADATA_SUFFIXES = frozenset({"count", "counts", "budget", "limit", "length", "usage", "estimate", "hint"})
 _CREDENTIAL_VALUE_PATTERN = re.compile(
     r"(?:\b(?:authorization|(?:access|refresh|auth|bearer|client|session|id|api|provider)"
     r"[\s_-]*token|token|api[\s_-]*key|secret|password|credential)\b\s*[:=]\s*"
     r"(?:bearer\s+)?\S+|\bbearer\s+[a-z0-9._~+/=-]{6,})",
+    re.IGNORECASE,
+)
+_JWT_CREDENTIAL_VALUE_PATTERN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+_API_CREDENTIAL_VALUE_PATTERN = re.compile(
+    r"\b(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{12,}\b",
     re.IGNORECASE,
 )
 
@@ -1323,7 +1350,11 @@ def _ensure_provider_request_has_no_credentials(value: object) -> None:
         return
     if isinstance(value, str):
         normalized = unicodedata.normalize("NFKC", value)
-        if _CREDENTIAL_VALUE_PATTERN.search(normalized):
+        if (
+            _CREDENTIAL_VALUE_PATTERN.search(normalized)
+            or _JWT_CREDENTIAL_VALUE_PATTERN.search(normalized)
+            or _API_CREDENTIAL_VALUE_PATTERN.search(normalized)
+        ):
             raise ValueError("Provider 请求包含敏感凭据")
 
 
@@ -1332,6 +1363,11 @@ def _is_sensitive_provider_request_key(value: str) -> bool:
     camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
     parts = re.findall(r"[a-z0-9]+", camel_split.casefold())
     if any(part in _CREDENTIAL_KEY_PARTS for part in parts):
+        return True
+    direct_parts = set(parts) & _DIRECT_CREDENTIAL_KEY_PARTS
+    if direct_parts and (
+        len(parts) == 1 or set(parts) & _DIRECT_CREDENTIAL_QUALIFIERS
+    ):
         return True
     if "apikey" in parts or any(first == "api" and second == "key" for first, second in zip(parts, parts[1:], strict=False)):
         return True
@@ -1345,6 +1381,13 @@ def _is_sensitive_provider_request_key(value: str) -> bool:
         if following not in _TOKEN_METADATA_SUFFIXES:
             return True
     collapsed = "".join(parts)
+    direct = r"(?:auth|bearer|jwt)"
+    qualifier = r"(?:header|value|credential|token|key)"
+    if re.fullmatch(
+        rf"(?:{direct}|{direct}{qualifier}|{qualifier}{direct})",
+        collapsed,
+    ):
+        return True
     return bool(
         re.fullmatch(
             r"(?:authorization|api(?:key)|secret|password|credential|"
@@ -1435,10 +1478,76 @@ def _completion_projection_message(
         conversation_id=normalized_workflow.conversation_id,
         run_id=normalized_workflow.workflow_id,
         role="assistant",
-        content=artifact_summary(normalized_artifact),
+        content=_completion_artifact_summary(
+            normalized_artifact,
+            success_summary=artifact_summary,
+        ),
         payload={"artifact": normalized_artifact},
         created_at=normalized_event.occurred_at,
     )
+
+
+def _quality_review_projection(value: Mapping[str, object]) -> dict[str, object]:
+    """
+    补齐 Web 质检 DTO，同时保留领域层安全失败字段。
+    """
+
+    ok = value.get("ok") is True
+    message = value.get("message")
+    if not isinstance(message, str) or not message:
+        message = "视频质检完成。" if ok else "视频质检未完成，请重试。"
+    score = value.get("score")
+    projected = dict(value)
+    projected.update({
+        "ok": ok,
+        "endpoint": (
+            value.get("endpoint")
+            if isinstance(value.get("endpoint"), str) and value.get("endpoint")
+            else "/api/creative/video_quality_review"
+        ),
+        "task_id": value.get("task_id") if isinstance(value.get("task_id"), str) else None,
+        "passed": value.get("passed") is True,
+        "score": score if type(score) in {int, float} else 0,
+        "summary_markdown": value.get("summary_markdown") if isinstance(value.get("summary_markdown"), str) else "",
+        "quality_report_markdown": value.get("quality_report_markdown") if isinstance(value.get("quality_report_markdown"), str) else "",
+        "issues": list(value.get("issues")) if isinstance(value.get("issues"), list) else [],
+        "affected_scene_ids": list(value.get("affected_scene_ids")) if isinstance(value.get("affected_scene_ids"), list) else [],
+        "revision_prompt": value.get("revision_prompt") if isinstance(value.get("revision_prompt"), str) else "",
+        "check_results": list(value.get("check_results")) if isinstance(value.get("check_results"), list) else [],
+        "error": value.get("error") if isinstance(value.get("error"), str) else None,
+        "message": message,
+        "quota_insufficient": value.get("quota_insufficient") is True,
+        "raw": {},
+    })
+    return projected
+
+
+def _completion_artifact_summary(
+    artifact: Mapping[str, object],
+    *,
+    success_summary: Callable[[Mapping[str, JsonValue]], str],
+) -> str:
+    """
+    按 Artifact 的真实终态生成摘要，失败消息不得复用成功文案。
+    """
+
+    artifact_type = artifact.get("type")
+    if artifact_type == "video_result":
+        generated = artifact.get("generatedSceneVideos")
+        if isinstance(generated, Mapping) and generated.get("ok") is False:
+            return "场景视频生成未完成，请查看失败原因后重试。"
+        merged = artifact.get("mergedVideo")
+        if isinstance(merged, Mapping) and merged.get("ok") is False:
+            return "视频合并未完成，请按提示重试。"
+    elif artifact_type == "video_quality_review":
+        quality = artifact.get("videoQualityReview")
+        if isinstance(quality, Mapping) and quality.get("ok") is False:
+            return "视频质检未完成，请按提示重试或修改。"
+    elif artifact_type == "jianying_draft":
+        draft = artifact.get("jianyingDraft")
+        if isinstance(draft, Mapping) and draft.get("status") != "succeeded":
+            return "剪映草稿生成未完成，请按提示重试。"
+    return success_summary(artifact)  # type: ignore[arg-type]
 
 
 def _clear_raw_provider_payloads(value: object) -> object:

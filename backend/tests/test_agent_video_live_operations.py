@@ -903,6 +903,19 @@ def handler_without_credential(
         ({"note": "Bearer task8-explicit-bearer"}, "task8-explicit-bearer"),
         ({"note": "Authorization: Bearer task8-explicit-authorization"}, "task8-explicit-authorization"),
         ({"note": "token=task8-explicit-token"}, "task8-explicit-token"),
+        ({"nested": {"auth_header": "task8-raw-auth-header"}}, "task8-raw-auth-header"),
+        ({"nested": [{"auth": "task8-raw-auth"}]}, "task8-raw-auth"),
+        ({"nested": {"Auth-KEY": "task8-raw-auth-key"}}, "task8-raw-auth-key"),
+        ({"nested": {"bearerValue": "task8-raw-bearer"}}, "task8-raw-bearer"),
+        ({"nested": [{"ＢＥＡＲＥＲ": "task8-nfkc-bearer"}]}, "task8-nfkc-bearer"),
+        ({"nested": {"jwt": "task8-raw-jwt-direct"}}, "task8-raw-jwt-direct"),
+        ({"nested": {"jwtToken": "task8-raw-jwt-token"}}, "task8-raw-jwt-token"),
+        ({"nested": {"ＪＷＴ－ＣＲＥＤＥＮＴＩＡＬ": "task8-raw-jwt"}}, "task8-raw-jwt"),
+        (
+            {"note": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0YXNrOCJ9.c2lnbmF0dXJlLXRhc2s4"},
+            "eyJhbGciOiJIUzI1NiJ9",
+        ),
+        ({"note": "sk-task8rawapitoken123456789"}, "sk-task8rawapitoken123456789"),
     ],
 )
 def test_video_operation_start_request_rejects_nested_credentials_without_echo(
@@ -938,7 +951,14 @@ def test_video_operation_start_request_hides_provider_request_from_repr() -> Non
 def test_video_operation_start_request_keeps_normal_business_fields_and_hash_check() -> None:
     provider_request: dict[str, JsonValue] = {
         "prompt": "展示保险箱的隐藏收纳空间",
+        "auth_mode": "signed_request",
+        "token_budget": 8192,
+        "token_count": 128,
         "token_count_hint": 128,
+        "token_hint": "估算值",
+        "key_frame": "https://assets.example.com/keyframe.png",
+        "keyImage": "https://assets.example.com/key-image.png",
+        "key_points": ["主体清晰", "构图稳定"],
         "secretary_name": "林女士",
         "passwordless_mode": True,
     }
@@ -1407,6 +1427,27 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
                 "status": "running",
                 "result": {"progress": 30},
             },
+            {
+                "job_id": "provider-scripted-2",
+                "status": "succeeded",
+                "result": {
+                    "video_url": "https://videos.example.com/scene-2.mp4",
+                    "raw": {},
+                },
+            },
+            {
+                "job_id": "provider-scripted-3",
+                "status": "running",
+                "result": {"progress": 60},
+            },
+            {
+                "job_id": "provider-scripted-3",
+                "status": "succeeded",
+                "result": {
+                    "video_url": "https://videos.example.com/scene-3.mp4",
+                    "raw": {},
+                },
+            },
         ]
     )
     async with _video_repository(
@@ -1446,6 +1487,35 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
             )
             == []
         )
+        assert await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        ) == []
+
+        clock.advance(seconds=3)
+        await runtime.run_once()
+        second_envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert second_envelope is not None
+        second = decode_video_workflow_state(second_envelope)
+        assert [item["scene_id"] for item in second.scene_videos] == [
+            "scene-1",
+            "scene-2",
+        ]
+        assert await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        ) == []
+
+        clock.advance(seconds=3)
+        await runtime.run_once()
+        final_envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert final_envelope is not None
+        final = decode_video_workflow_state(final_envelope)
+        assert [item["scene_id"] for item in final.scene_videos] == [
+            "scene-1",
+            "scene-2",
+            "scene-3",
+        ]
         message = await _assert_new_completion_projection(
             repository,
             before_message_ids=set(),
@@ -1461,6 +1531,77 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
         )
         await runtime.run_once()
         replayed = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
+        assert [item.message_id for item in replayed] == [message.message_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_same_timestamp_scene_completions_publish_only_final_actionable_batch(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """
+    同时间戳的中间分镜完成不得抢占最终整批卡片。
+    """
+
+    clock = _MutableClock()
+    provider = ScriptedProvider(
+        status_results=[
+            {
+                "job_id": f"provider-scripted-{index}",
+                "status": "succeeded",
+                "result": {
+                    "video_url": f"https://videos.example.com/scene-{index}.mp4",
+                    "raw": {},
+                },
+            }
+            for index in range(1, 4)
+        ]
+    )
+    async with _video_repository(
+        kind,
+        tmp_path / f"task8-scene-same-time-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        completion = VideoOperationCompletionHandler(
+            repository=repository,
+            operations=operations,
+            clock=clock,
+        )
+        runtime = operations.build_recovery_runtime(
+            resumer=completion,
+            worker_id=f"task8-scene-same-time-{kind}",
+        )
+
+        clock.advance(seconds=3)
+        await runtime.run_once()
+
+        messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert len(messages) == 1
+        message = messages[0]
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        assert artifact["type"] == "video_scene_packages"
+        assert artifact["generatedSceneVideos"]["ok"] is True
+        assert artifact["generatedSceneVideos"]["failed_scenes"] == []
+        assert len(artifact["generatedSceneVideos"]["scene_videos"]) == 3
+        assert artifact["actionLabel"] == "确认分镜视频"
+        assert message.content == "视频分镜与场景素材已准备，请审核确认。"
+
+        await runtime.run_once()
+        replayed = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         assert [item.message_id for item in replayed] == [message.message_id]
 
 
@@ -1735,11 +1876,11 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             )
             == []
         )
-        await _assert_completion_projection_replay_stable(
+        message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
-            expected_type="video_scene_packages",
+            expected_type="video_result",
             required_fields={
                 "title",
                 "description",
@@ -1748,8 +1889,16 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
                 "generatedSceneVideos",
                 "videoScenePackageEditedSceneIds",
             },
-            expected_count=3,
         )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        assert artifact["generatedSceneVideos"]["ok"] is False
+        assert len(artifact["generatedSceneVideos"]["scene_videos"]) == 2
+        assert len(artifact["generatedSceneVideos"]["failed_scenes"]) == 1
+        assert artifact["actionLabel"] == "重新生成场景视频"
+        assert "已生成" not in message.content
+        assert "可下载" not in message.content
+        assert "请确认" not in message.content
+        assert "未完成" in message.content
         if expected_retryable:
             workflow = await repository.get_workflow(USER_ID, WORKFLOW_ID)
             assert workflow is not None
@@ -2190,7 +2339,7 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert failed.merge_error["retryable"] is expected_retryable
         assert "原始" not in json.dumps(failed.merge_error, ensure_ascii=False)
-        await _assert_completion_projection_replay_stable(
+        message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
@@ -2205,6 +2354,14 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
                 "videoAccepted",
             },
         )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        assert artifact["mergedVideo"]["ok"] is False
+        assert artifact["mergedVideo"]["merged_video_url"] is None
+        assert artifact["mergedVideo"]["raw"] == {}
+        assert "已生成" not in message.content
+        assert "可下载" not in message.content
+        assert "请确认" not in message.content
+        assert "未完成" in message.content
         if not expected_retryable:
             return
 
@@ -2435,7 +2592,7 @@ async def test_quality_completion_updates_m11_review_and_acks_once(
         assert updated.current_stage.value == "video_review"
         assert updated.quality_review["passed"] is True
         assert provider.status_job_ids.count("provider-scripted-5") == 1
-        await _assert_completion_projection_replay_stable(
+        message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
@@ -2451,6 +2608,17 @@ async def test_quality_completion_updates_m11_review_and_acks_once(
                 "mergedVideo",
             },
         )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        review = artifact["videoQualityReview"]
+        assert review["ok"] is True
+        assert review["passed"] is True
+        assert review["endpoint"] == "/api/creative/video_quality_review"
+        assert review["task_id"] == "provider-scripted-5"
+        assert review["score"] == 0
+        assert review["check_results"] == []
+        assert review["issues"] == []
+        assert review["affected_scene_ids"] == []
+        assert review["raw"] == {}
 
 
 @pytest.mark.asyncio
@@ -2579,7 +2747,7 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert failed.quality_review["retryable"] is expected_retryable
         assert "原始" not in json.dumps(failed.quality_review, ensure_ascii=False)
-        await _assert_completion_projection_replay_stable(
+        message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
@@ -2595,6 +2763,41 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
                 "mergedVideo",
             },
         )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        review = artifact["videoQualityReview"]
+        assert artifact["actionLabel"] == (
+            "重新质检" if expected_retryable else "查看失败原因"
+        )
+        assert {
+            "issues",
+            "affected_scene_ids",
+            "passed",
+            "summary_markdown",
+            "quality_report_markdown",
+            "revision_prompt",
+            "endpoint",
+            "task_id",
+            "score",
+            "check_results",
+            "error",
+            "message",
+            "raw",
+        }.issubset(review)
+        assert review["issues"] == []
+        assert review["affected_scene_ids"] == []
+        assert review["passed"] is False
+        assert review["summary_markdown"] == ""
+        assert review["quality_report_markdown"] == ""
+        assert review["revision_prompt"] == ""
+        assert review["endpoint"] == "/api/creative/video_quality_review"
+        assert review["task_id"] is None
+        assert review["score"] == 0
+        assert review["check_results"] == []
+        assert review["raw"] == {}
+        assert "已生成" not in message.content
+        assert "可下载" not in message.content
+        assert "请确认" not in message.content
+        assert "失败" in message.content or "未完成" in message.content
         if not expected_retryable:
             return
 
@@ -2981,7 +3184,7 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert record["status"] == expected_record_status
         assert "原始" not in json.dumps(record, ensure_ascii=False)
-        await _assert_completion_projection_replay_stable(
+        message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
@@ -2995,6 +3198,14 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
                 "jianyingDraftSceneCount",
             },
         )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        assert artifact["actionLabel"] == "重新生成"
+        assert artifact["jianyingDraft"]["status"] == expected_record_status
+        assert artifact["jianyingDraft"]["download_url"] is None
+        assert "已生成" not in message.content
+        assert "可下载" not in message.content
+        assert "请确认" not in message.content
+        assert "未完成" in message.content
 
         retry_command = explicit_stage_command(
             failed_workflow,
