@@ -20,6 +20,7 @@ from pixelflow.agent_runtime.contracts import (
     ContextRequest,
     ExplicitActionSignal,
     TurnRecord,
+    WorkflowKind,
     WorkflowRecord,
     WorkflowStatus,
 )
@@ -581,11 +582,33 @@ def _classification_candidates(
             current_stage=workflow.current_stage,
             stage_version=workflow.stage_version,
             context_version=workflow.context_version,
-            allowed_actions=_WORKFLOW_ACTIONS_BY_STATUS[workflow.status],
+            allowed_actions=_allowed_workflow_actions(workflow),
             targets=_classification_targets(evidence, workflow),
         )
         for workflow in evidence.workflows
     )
+
+
+def _allowed_workflow_actions(
+    workflow: WorkflowRecord,
+) -> tuple[AgentAction, ...]:
+    """只为已完成的视频交付态开放下载继续与剪映失败重试。"""
+
+    actions = _WORKFLOW_ACTIONS_BY_STATUS[workflow.status]
+    if (
+        workflow.kind is WorkflowKind.VIDEO
+        and workflow.status is WorkflowStatus.COMPLETED
+        and workflow.current_stage == "completed"
+    ):
+        return (
+            AgentAction.ANSWER_ONLY,
+            AgentAction.CONTINUE_WORKFLOW,
+            AgentAction.MODIFY_WORKFLOW,
+            AgentAction.REGENERATE_STAGE,
+            AgentAction.RETRY_FAILED,
+            AgentAction.SWITCH_WORKFLOW,
+        )
+    return actions
 
 
 def _classification_targets(

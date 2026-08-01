@@ -21,6 +21,10 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    ContextBudgetReport,
+    ContextEnvelope,
+    ExplicitActionSignal,
+    TurnRecord,
     TurnStatus,
     WorkflowKind,
     WorkflowRecord,
@@ -35,21 +39,30 @@ from pixelflow.agent_runtime.graph import (
     supervisor_namespace,
 )
 from pixelflow.agent_runtime.identity import interrupt_id
-from pixelflow.agent_runtime.persistence import StoredAgentInterrupt
+from pixelflow.agent_runtime.persistence import (
+    MemoryVideoRuntimeRepository,
+    StoredAgentInterrupt,
+)
 from pixelflow.agent_runtime.supervisor import (
     ActionClassificationCandidate,
     ActionClassificationRequest,
     ActionClassificationTarget,
     DecisionValidationRequest,
+    DecisionValidator,
     DeterministicResolution,
     DeterministicResolutionStatus,
+    DeterministicTargetResolver,
+    SupervisorDecisionService,
+    SupervisorTurnEvidence,
 )
 from pixelflow.agent_workflows.video import (
+    VideoLiveWorkflowHandler,
     VideoPlanningWorkflowService,
     encode_video_workflow_state,
 )
 from pixelflow.agent_workflows.video.live_handler import WorkflowDispatchResult
 from pixelflow.intake.forms import draft_creative_directions, validate_form
+from pixelflow.tasks.store import MemoryPixelFlowTaskStore
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 7, 28, tzinfo=UTC)
@@ -286,6 +299,38 @@ class _LiveInterruptingHandler:
         )
 
 
+class _FixedStartContextAssembler:
+    """为真实 DecisionService 提供无外部依赖的已验证上下文。"""
+
+    async def assemble(self, request: object) -> ContextEnvelope:
+        return ContextEnvelope(
+            current_input=str(getattr(request, "current_input")),
+            budget_report=ContextBudgetReport(
+                estimated_input_tokens=1,
+                effective_context_tokens=100,
+                usable_input_tokens=80,
+                max_output_tokens=10,
+                safety_reserve_tokens=10,
+                utilization=1 / 80,
+            ),
+        )
+
+
+class _NoCredentialProvider:
+    """首轮不会读取凭据；若越界读取则返回明确缺失。"""
+
+    def get(self, turn_id: str):
+        del turn_id
+        return None
+
+
+class _FixedClock:
+    """让真实 Handler 的首轮状态和 interrupt 可稳定断言。"""
+
+    def now(self) -> datetime:
+        return NOW
+
+
 def _registry(handler: object) -> FakeWorkflowRegistry:
     """把单个测试处理器注册到图片 Workflow。"""
 
@@ -342,6 +387,55 @@ def _live_start_state(conversation_id: str) -> dict:
             expected_context_version=1,
             current_context_version=1,
         ),
+    }
+
+
+async def _decision_service_live_start_state(conversation_id: str) -> dict:
+    """经真实 DecisionService 生成首轮决策与 Validator 快照。"""
+
+    turn = TurnRecord(
+        turn_id=f"turn-{conversation_id}",
+        conversation_id=conversation_id,
+        client_input_id=UUID("20000000-0000-4000-8000-000000000007"),
+        status=TurnStatus.PROCESSING,
+        expected_context_version=0,
+        created_at=NOW,
+    )
+    content = "生成一条智能戒指广告"
+    decision_result = await SupervisorDecisionService(
+        resolver=DeterministicTargetResolver(),
+        classifier=None,
+        validator=DecisionValidator(),
+        context_assembler=_FixedStartContextAssembler(),
+    ).decide(
+        SupervisorTurnEvidence(
+            user_id="user-live-real",
+            conversation_id=conversation_id,
+            turn=turn,
+            content=content,
+            visible_messages=(),
+            workflows=(),
+            active_workflow_id=None,
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.START_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+            ),
+            expected_context_version=0,
+            authoritative_context_version=0,
+        )
+    )
+    return {
+        "conversation_id": conversation_id,
+        "user_id": "user-live-real",
+        "turn_id": turn.turn_id,
+        "run_id": f"run-{conversation_id}",
+        "current_input": content,
+        "materials": [],
+        "artifact_refs": [],
+        "context_version": 0,
+        "workflows": {},
+        "decision": decision_result.decision,
+        "decision_validation_request": decision_result.validation_request,
     }
 
 
@@ -431,6 +525,46 @@ async def test_live_graph_resumes_original_memory_interrupt_after_rebuild() -> N
     assert result["last_interrupt_response_id"] == (
         "10000000-0000-4000-8000-000000000007"
     )
+
+
+@pytest.mark.asyncio
+async def test_real_decision_router_dispatcher_and_video_handler_start_workflow() -> None:
+    """真实首轮合同由 Router 预分配 ID，并进入真实视频 Handler。"""
+
+    conversation_id = "conv-live-real-start"
+    repository = MemoryVideoRuntimeRepository(
+        task_store=MemoryPixelFlowTaskStore()
+    )
+    handler = VideoLiveWorkflowHandler(
+        repository=repository,
+        capabilities=object(),
+        credential_provider=_NoCredentialProvider(),
+        clock=_FixedClock(),
+    )
+    graph = make_agent_runtime_graph(
+        registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+        checkpointer=InMemorySaver(),
+    )
+    namespace = supervisor_namespace(conversation_id)
+
+    await graph.ainvoke(
+        await _decision_service_live_start_state(conversation_id),
+        namespace.as_runnable_config(),
+    )
+    interrupted = await graph.aget_state(namespace.as_runnable_config())
+    stored = StoredAgentInterrupt.model_validate(
+        interrupted.values["workflow_dispatch_result"]["interrupt"]
+    )
+    routed_decision = ActionDecision.model_validate(
+        interrupted.values["decision"]
+    )
+
+    assert routed_decision.target_workflow_id is None
+    assert stored.workflow_id.startswith("wf_")
+    assert interrupted.values["workflows"][stored.workflow_id].current_stage == (
+        "intake"
+    )
+    assert stored.kind == "video_intake_form"
 
 
 @pytest.mark.asyncio

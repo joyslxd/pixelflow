@@ -23,7 +23,11 @@ from pixelflow.agent_runtime.persistence import (
 )
 from pixelflow.agent_runtime.ports import OperationPort
 
-from .delivery import VideoDeliveryWorkflowService, VideoDeliveryWorkflowState
+from .delivery import (
+    VideoDeliveryWorkflowService,
+    VideoDeliveryWorkflowState,
+    VideoWebArtifactAdapter,
+)
 from .live_capabilities import Clock, TurnCredentialProvider, VideoLiveCapabilityPort
 from .planning import (
     VideoPlanningStage,
@@ -125,6 +129,7 @@ class VideoLiveWorkflowHandler:
         self._delivery = delivery_service or VideoDeliveryWorkflowService(
             operation_port
         )
+        self._web_artifacts = VideoWebArtifactAdapter(self._delivery)
 
     async def dispatch(self, command: WorkflowCommand) -> WorkflowDispatchResult:
         """读取权威状态并执行一条隔离且可幂等提交的视频命令。"""
@@ -259,12 +264,19 @@ class VideoLiveWorkflowHandler:
                         command,
                         delivery,
                         existing_envelope=existing_envelope,
-                        artifact=self._video_result_artifact(delivery),
+                        artifact=self._web_artifacts.project(delivery),
                     )
                 if action is AgentAction.MODIFY_WORKFLOW:
                     patch = self._require_patch_keys(
                         command,
-                        allowed=frozenset({"scene_patches", "user_feedback"}),
+                        allowed=frozenset(
+                            {
+                                "scene_patches",
+                                "user_feedback",
+                                "jianying_action",
+                                "project_name",
+                            }
+                        ),
                     )
                     if set(patch) == {"user_feedback"}:
                         updated = await self._postproduction.start_quality_review(
@@ -285,6 +297,36 @@ class VideoLiveWorkflowHandler:
                             generation_service=self._generation,
                             operation_port=self._operation_port,
                             now=self._clock.now(),
+                        )
+                    elif set(patch) in (
+                        {"jianying_action"},
+                        {"jianying_action", "project_name"},
+                    ) and patch["jianying_action"] == "start":
+                        delivery = await self._delivery.initialize(
+                            state,
+                            operation_port=self._operation_port,
+                            now=self._clock.now(),
+                        )
+                        project_name = (
+                            None
+                            if "project_name" not in patch
+                            else self._required_text(
+                                patch["project_name"],
+                                "project_name",
+                            )
+                        )
+                        updated = await self._delivery.start_jianying_draft(
+                            delivery,
+                            retry_failed=False,
+                            project_name=project_name,
+                            operation_port=self._operation_port,
+                            now=self._clock.now(),
+                        )
+                        return self._result_from_state(
+                            command,
+                            updated,
+                            existing_envelope=existing_envelope,
+                            artifact=self._web_artifacts.project(updated),
                         )
                     else:
                         raise VideoLiveStateConflictError(
@@ -437,7 +479,7 @@ class VideoLiveWorkflowHandler:
                 "stage": state.current_stage.value,
                 "artifact_ref": state.scene_videos_artifact_ref,
             },
-            artifact=self._scene_video_artifact(state),
+            artifact=self._web_artifacts.project(state),
         )
 
     async def _dispatch_delivery(
@@ -462,7 +504,19 @@ class VideoLiveWorkflowHandler:
                         }
                     ),
                 )
-                if set(patch) == {"download_url"}:
+                if not patch:
+                    finished = await self._postproduction.finish(
+                        state.postproduction_state,
+                        operation_port=self._operation_port,
+                        now=self._clock.now(),
+                    )
+                    updated = await self._delivery.synchronize_postproduction(
+                        state,
+                        finished,
+                        operation_port=self._operation_port,
+                        now=self._clock.now(),
+                    )
+                elif set(patch) == {"download_url"}:
                     updated = await self._delivery.record_final_video_download(
                         state,
                         download_url=self._required_text(
@@ -535,7 +589,7 @@ class VideoLiveWorkflowHandler:
             existing_envelope=existing_envelope,
             artifact=cast(
                 Mapping[str, JsonValue],
-                deepcopy_json(self._delivery.to_artifact_projection(updated)),
+                self._web_artifacts.project(updated),
             ),
         )
 
@@ -572,7 +626,12 @@ class VideoLiveWorkflowHandler:
             last_action_key=command.decision.idempotency_key,
         )
         opened_interrupt = StoredAgentInterrupt(
-            interrupt_id=interrupt_id(command.turn_id, "video_intake_required"),
+            interrupt_id=self._interrupt_occurrence_id(
+                turn_id=command.turn_id,
+                reason_code="video_intake_required",
+                workflow=workflow,
+                workflow_version=envelope.workflow_version,
+            ),
             conversation_id=command.conversation_id,
             workflow_id=command.workflow_id,
             turn_id=command.turn_id,
@@ -885,7 +944,7 @@ class VideoLiveWorkflowHandler:
                 "stage": published.current_stage.value,
                 "artifact_ref": published.scene_package_artifact_ref,
             },
-            artifact=self._scene_package_artifact(published),
+            artifact=self._web_artifacts.project(published),
         )
 
     def _wait_for_plan_review(
@@ -939,6 +998,8 @@ class VideoLiveWorkflowHandler:
                 kind=interrupt_kind,
                 reason_code=reason_code,
                 payload=interrupt_payload or {},
+                workflow=workflow,
+                workflow_version=envelope.workflow_version,
             )
         messages = ()
         if artifact is not None:
@@ -971,9 +1032,16 @@ class VideoLiveWorkflowHandler:
         kind: str,
         reason_code: str,
         payload: Mapping[str, JsonValue],
+        workflow: WorkflowRecord,
+        workflow_version: int,
     ) -> StoredAgentInterrupt:
         return StoredAgentInterrupt(
-            interrupt_id=interrupt_id(command.turn_id, reason_code),
+            interrupt_id=self._interrupt_occurrence_id(
+                turn_id=command.turn_id,
+                reason_code=reason_code,
+                workflow=workflow,
+                workflow_version=workflow_version,
+            ),
             conversation_id=command.conversation_id,
             workflow_id=command.workflow_id,
             turn_id=command.turn_id,
@@ -985,6 +1053,29 @@ class VideoLiveWorkflowHandler:
             thread_id=command.namespace.thread_id,
             checkpoint_ns="root",
         )
+
+    @staticmethod
+    def _interrupt_occurrence_id(
+        *,
+        turn_id: str,
+        reason_code: str,
+        workflow: WorkflowRecord,
+        workflow_version: int,
+    ) -> str:
+        """用权威状态版本区分同一原 Turn 内相继发生的同类中断。"""
+
+        occurrence_key = json.dumps(
+            [
+                reason_code,
+                workflow.workflow_id,
+                workflow.current_stage,
+                workflow.stage_version,
+                workflow_version,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return interrupt_id(turn_id, occurrence_key)
 
     @staticmethod
     def _require_patch_keys(
@@ -1103,80 +1194,17 @@ class VideoLiveWorkflowHandler:
         return cast(list[dict[str, Any]], materials)
 
     @staticmethod
-    def _scene_package_artifact(
-        state: VideoScenePackageWorkflowState,
-    ) -> dict[str, JsonValue]:
-        return cast(
-            dict[str, JsonValue],
-            deepcopy_json(
-                {
-                    "type": "video_scene_packages",
-                    "title": "视频分镜与场景素材",
-                    "description": "请审核分镜与场景素材，确认后生成分镜视频。",
-                    "actionLabel": "确认分镜",
-                    "scenePackages": state.scene_package.scene_packages,
-                    "globalAssets": state.scene_package.global_assets,
-                    "creationContract": state.scene_package.creation_contract,
-                    "artifactRef": state.scene_package_artifact_ref,
-                }
-            ),
-        )
-
-    @staticmethod
-    def _scene_video_artifact(
-        state: VideoSceneGenerationWorkflowState,
-    ) -> dict[str, JsonValue]:
-        return cast(
-            dict[str, JsonValue],
-            deepcopy_json(
-                {
-                    "type": "video_scene_packages",
-                    "title": "视频分镜生成结果",
-                    "description": "请确认分镜视频，或修改后仅重生成受影响镜头。",
-                    "actionLabel": "确认分镜视频",
-                    "scenePackages": state.scene_packages,
-                    "generatedSceneVideos": {
-                        "scene_videos": state.scene_videos,
-                        "failed_scenes": state.failed_scenes,
-                    },
-                    "editedSceneIds": state.edited_scene_ids,
-                    "dirtySceneIds": state.dirty_scene_ids,
-                    "artifactRef": state.scene_videos_artifact_ref,
-                }
-            ),
-        )
-
-    @staticmethod
-    def _video_result_artifact(
-        state: VideoDeliveryWorkflowState,
-    ) -> dict[str, JsonValue]:
-        postproduction = state.postproduction_state
-        return cast(
-            dict[str, JsonValue],
-            deepcopy_json(
-                {
-                    "type": "video_result",
-                    "title": "视频成片",
-                    "description": "视频已由用户确认，可下载最终成片或生成剪映草稿。",
-                    "actionLabel": "下载视频",
-                    "mergedVideo": postproduction.merged_video,
-                    "generatedSceneVideos": {
-                        "scene_videos": postproduction.generation_state.scene_videos,
-                        "failed_scenes": postproduction.generation_state.failed_scenes,
-                    },
-                    "qualityReview": postproduction.quality_review,
-                    "artifactRef": postproduction.video_artifact_ref,
-                }
-            ),
-        )
-
-    @staticmethod
     def _validate_command_identity(command: WorkflowCommand) -> None:
         if command.kind is not WorkflowKind.VIDEO:
             raise VideoLiveStateConflictError("video_workflow_kind_required")
         if command.decision.intent.value != "video":
             raise VideoLiveStateConflictError("video_intent_required")
-        if command.decision.target_workflow_id != command.workflow_id:
+        if command.decision.action is AgentAction.START_WORKFLOW:
+            if command.decision.target_workflow_id is not None:
+                raise VideoLiveStateConflictError(
+                    "video_start_workflow_target_must_be_new"
+                )
+        elif command.decision.target_workflow_id != command.workflow_id:
             raise VideoLiveStateConflictError("video_target_workflow_mismatch")
         if command.conversation_id == "" or command.user_id == "" or command.turn_id == "":
             raise VideoLiveStateConflictError("video_command_identity_required")

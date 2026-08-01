@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -10,12 +12,27 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    ContextBudgetReport,
+    ContextEnvelope,
+    ExplicitActionSignal,
+    TurnRecord,
     TurnStatus,
     WorkflowKind,
     WorkflowStatus,
 )
-from pixelflow.agent_runtime.graph import WorkflowCommand, workflow_namespace
+from pixelflow.agent_runtime.graph import (
+    FakeWorkflowRegistry,
+    WorkflowCommand,
+    WorkflowCommandDispatcher,
+    workflow_namespace,
+)
 from pixelflow.agent_runtime.persistence import MemoryVideoRuntimeRepository
+from pixelflow.agent_runtime.supervisor import (
+    DecisionValidator,
+    DeterministicTargetResolver,
+    SupervisorDecisionService,
+    SupervisorTurnEvidence,
+)
 from pixelflow.agent_workflows.video import (
     VideoLiveStateConflictError,
     VideoLiveWorkflowHandler,
@@ -188,6 +205,12 @@ class _SeededMemoryVideoRuntimeRepository(MemoryVideoRuntimeRepository):
         self._workflows[("user-1", workflow.workflow_id)] = workflow
         return envelope, workflow
 
+    async def seed_result(self, result: WorkflowDispatchResult) -> None:
+        """模拟原子提交后的权威信封，供同一原 Turn 的下一轮恢复使用。"""
+
+        self._video_states[("user-1", result.workflow.workflow_id)] = result.state
+        self._workflows[("user-1", result.workflow.workflow_id)] = result.workflow
+
 
 class _FakeCredentialProvider:
     def __init__(
@@ -200,6 +223,87 @@ class _FakeCredentialProvider:
     def get(self, turn_id: str) -> TransientTurnCredential | None:
         self.turn_ids.append(turn_id)
         return self._credential
+
+
+class _FixedSupervisorContextAssembler:
+    """为动作可达性测试提供无模型、无外部 I/O 的已验证上下文。"""
+
+    async def assemble(self, request: object) -> ContextEnvelope:
+        return ContextEnvelope(
+            current_input=str(getattr(request, "current_input")),
+            budget_report=ContextBudgetReport(
+                estimated_input_tokens=1,
+                effective_context_tokens=100,
+                usable_input_tokens=80,
+                max_output_tokens=10,
+                safety_reserve_tokens=10,
+                utilization=1 / 80,
+            ),
+        )
+
+
+async def _dispatch_through_real_supervisor(
+    *,
+    handler: VideoLiveWorkflowHandler,
+    workflow,
+    action: AgentAction,
+    patch: dict[str, Any],
+    sequence: int,
+) -> WorkflowDispatchResult:
+    """经真实 DecisionService、Validator 与 Dispatcher 调用真实 Handler。"""
+
+    turn = TurnRecord(
+        turn_id=f"turn-delivery-{sequence}",
+        conversation_id=workflow.conversation_id,
+        client_input_id=UUID(int=sequence),
+        status=TurnStatus.PROCESSING,
+        target_workflow_id=workflow.workflow_id,
+        expected_context_version=workflow.context_version,
+        created_at=workflow.updated_at,
+    )
+    artifact_ref = workflow.latest_artifact_refs[-1]
+    decision = await SupervisorDecisionService(
+        resolver=DeterministicTargetResolver(),
+        classifier=None,
+        validator=DecisionValidator(),
+        context_assembler=_FixedSupervisorContextAssembler(),
+    ).decide(
+        SupervisorTurnEvidence(
+            user_id="user-1",
+            conversation_id=workflow.conversation_id,
+            turn=turn,
+            content="执行视频交付动作",
+            visible_messages=(),
+            workflows=(workflow,),
+            active_workflow_id=workflow.workflow_id,
+            explicit_action=ExplicitActionSignal(
+                action=action,
+                intent=AgentIntent.VIDEO,
+                workflow_id=workflow.workflow_id,
+                stage=workflow.current_stage,
+                artifact_ref=artifact_ref,
+                patch=patch,
+            ),
+            expected_context_version=workflow.context_version,
+            authoritative_context_version=workflow.context_version,
+        )
+    )
+    dispatched = await WorkflowCommandDispatcher(
+        FakeWorkflowRegistry({WorkflowKind.VIDEO: handler})
+    ).dispatch_result(
+        {
+            "conversation_id": workflow.conversation_id,
+            "user_id": "user-1",
+            "turn_id": turn.turn_id,
+            "current_input": "执行视频交付动作",
+            "materials": [],
+            "artifact_refs": [],
+            "workflows": {workflow.workflow_id: workflow},
+        },
+        decision.decision,
+    )
+    assert isinstance(dispatched, WorkflowDispatchResult)
+    return dispatched
 
 
 @pytest.fixture
@@ -241,7 +345,11 @@ def command_factory():
         decision = ActionDecision(
             action=action,
             intent=AgentIntent.VIDEO,
-            target_workflow_id=workflow_id,
+            target_workflow_id=(
+                None
+                if action is AgentAction.START_WORKFLOW
+                else workflow_id
+            ),
             target_stage=(
                 target_stage
                 if target_stage is not None
@@ -278,6 +386,8 @@ async def test_start_workflow_opens_intake_interrupt(
     video_handler: VideoLiveWorkflowHandler,
     command_factory,
 ) -> None:
+    """首轮决策不带目标，Handler 信任 Router 预分配的 Workflow ID。"""
+
     result = await video_handler.dispatch(
         command_factory(action=AgentAction.START_WORKFLOW)
     )
@@ -288,6 +398,28 @@ async def test_start_workflow_opens_intake_interrupt(
     assert result.interrupt is not None
     assert result.interrupt.kind == "video_intake_form"
     assert result.turn_status is TurnStatus.WAITING_USER
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_rejects_decision_with_preexisting_target(
+    video_handler: VideoLiveWorkflowHandler,
+    command_factory,
+) -> None:
+    """首轮 target 只能由 Router 预分配，Decision 不得伪装成既有目标。"""
+
+    command = command_factory(action=AgentAction.START_WORKFLOW)
+    invalid = replace(
+        command,
+        decision=command.decision.model_copy(
+            update={"target_workflow_id": command.workflow_id}
+        ),
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_start_workflow_target_must_be_new",
+    ):
+        await video_handler.dispatch(invalid)
 
 
 @pytest.mark.asyncio
@@ -554,9 +686,26 @@ async def test_video_handler_scene_assets_use_transient_credential_and_open_revi
     assert result.workflow.current_stage == "scene_package_review"
     assert result.interrupt is not None
     assert result.interrupt.kind == "video_scene_package_review"
-    assert result.messages[0].payload["artifact"]["type"] == (
-        "video_scene_packages"
-    )
+    published = decode_video_workflow_state(result.state)
+    artifact = result.messages[0].model_dump(mode="json")["payload"]["artifact"]
+    assert set(artifact) == {
+        "type",
+        "title",
+        "description",
+        "actionLabel",
+        "videoScenePackages",
+    }
+    assert artifact["type"] == "video_scene_packages"
+    assert artifact["videoScenePackages"] == {
+        "ok": True,
+        "message": "视频分镜与场景素材已准备完成。",
+        "requires_confirmation": True,
+        "review_timeout_sec": None,
+        "target_duration_ms": published.scene_package.target_duration_ms,
+        "global_assets": published.scene_package.global_assets,
+        "scene_packages": published.scene_package.scene_packages,
+        "creation_contract": published.scene_package.creation_contract,
+    }
     assert "live-secret" not in result.model_dump_json()
     assert credential_provider.turn_ids == ["turn-video-1"]
 
@@ -645,6 +794,28 @@ async def test_video_handler_modifies_then_regenerates_only_dirty_scene(
     assert modified.workflow.current_stage == "scene_video_review"
     assert modified.interrupt is not None
     assert modified.interrupt.kind == "video_scene_video_review"
+    artifact = modified.messages[0].model_dump(mode="json")["payload"]["artifact"]
+    assert set(artifact) == {
+        "type",
+        "title",
+        "description",
+        "actionLabel",
+        "videoScenePackages",
+        "generatedSceneVideos",
+        "videoScenePackageEditedSceneIds",
+    }
+    assert artifact["videoScenePackages"]["ok"] is True
+    assert artifact["videoScenePackages"]["scene_packages"] == (
+        modified_state.scene_packages
+    )
+    assert artifact["generatedSceneVideos"] == {
+        "ok": True,
+        "endpoint": "/api/video/text-to-video",
+        "scene_videos": modified_state.scene_videos,
+        "failed_scenes": modified_state.failed_scenes,
+        "message": "场景视频生成完成。",
+        "quota_insufficient": False,
+    }
     assert regenerated.workflow.current_stage == "generate_scene_videos"
     assert [
         item["scene_id"] for item in regenerated_state.generation_requests
@@ -809,6 +980,27 @@ async def test_video_handler_final_confirmation_initializes_delivery_state(
     assert result.workflow.current_stage == "completed"
     assert result.workflow.status is WorkflowStatus.COMPLETED
     assert delivery.postproduction_state.finalized_by_user is True
+    artifact = result.messages[0].model_dump(mode="json")["payload"]["artifact"]
+    merged = delivery.postproduction_state.merged_video
+    assert merged is not None
+    assert artifact["type"] == "video_result"
+    assert artifact["title"] == "视频成片"
+    assert artifact["description"]
+    assert artifact["actionLabel"] == "下载视频"
+    assert artifact["videoAccepted"] is True
+    assert artifact["videoScenePackages"]["ok"] is True
+    assert artifact["generatedSceneVideos"]["ok"] is True
+    assert artifact["mergedVideo"] == {
+        "ok": True,
+        "endpoint": merged["endpoint"],
+        "merged_video_url": merged["video_url"],
+        "task_id": merged["task_id"],
+        "scene_videos": merged["scene_videos"],
+        "error": None,
+        "message": "视频合并完成。",
+        "quota_insufficient": False,
+        "raw": merged["raw"],
+    }
 
 
 @pytest.mark.asyncio
@@ -854,9 +1046,13 @@ async def test_video_handler_records_only_final_merged_video_download(
         )
     )
     updated = decode_video_workflow_state(result.state)
+    artifact = result.messages[0].model_dump(mode="json")["payload"]["artifact"]
 
     assert updated.final_video_delivery["deliveryDownloadedUrl"] == video_url
     assert updated.delivery_artifact_ref in result.workflow.latest_artifact_refs
+    assert artifact["title"] == "视频成片"
+    assert artifact["actionLabel"] == "下载视频"
+    assert artifact["mergedVideo"]["merged_video_url"] == video_url
 
 
 @pytest.mark.asyncio
@@ -909,6 +1105,259 @@ async def test_video_handler_starts_jianying_from_delivery_service(
         "智能戒指新品广告"
     )
     assert result.workflow.pending_external_job is not None
+
+
+@pytest.mark.asyncio
+async def test_real_chain_starts_jianying_before_video_acceptance(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+) -> None:
+    """未结束成片时可先生成剪映草稿，且不得隐式接受视频。"""
+
+    from test_agent_video_workflow_delivery import _video_review_state
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+
+    review, operation_port, _, _ = await _video_review_state()
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    _, workflow = await state_repository.seed_state(review)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(review.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.MODIFY_WORKFLOW,
+        patch={
+            "jianying_action": "start",
+            "project_name": "智能戒指新品广告",
+        },
+        sequence=201,
+    )
+    delivery = decode_video_workflow_state(result.state)
+
+    assert result.state.state_kind.value == "delivery"
+    assert result.workflow.status is WorkflowStatus.AWAITING_USER
+    assert result.workflow.current_stage == "video_review"
+    assert result.workflow.pending_external_job is not None
+    assert delivery.postproduction_state.finalized_by_user is False
+    assert result.messages[0].payload["artifact"]["videoAccepted"] is False
+
+
+@pytest.mark.asyncio
+async def test_real_chain_final_confirmation_does_not_require_jianying(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+) -> None:
+    """已初始化的未接受 Delivery 无草稿记录也能独立完成最终确认。"""
+
+    from test_agent_video_workflow_delivery import _video_review_state
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+
+    review, operation_port, _, postproduction_service = (
+        await _video_review_state()
+    )
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(review)
+    _, workflow = await state_repository.seed_state(delivery)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(delivery.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        postproduction_service=postproduction_service,
+        delivery_service=delivery_service,
+    )
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.CONTINUE_WORKFLOW,
+        patch={},
+        sequence=202,
+    )
+    completed = decode_video_workflow_state(result.state)
+
+    assert completed.postproduction_state.finalized_by_user is True
+    assert completed.jianying_draft_records == {}
+    assert result.workflow.status is WorkflowStatus.COMPLETED
+    assert result.messages[0].payload["artifact"]["videoAccepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_chain_records_completed_final_video_download(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+) -> None:
+    """完成态视频下载经 Supervisor 白名单抵达真实交付 Handler。"""
+
+    from test_agent_video_workflow_delivery import _video_review_state
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+
+    review, operation_port, _, postproduction_service = (
+        await _video_review_state()
+    )
+    finished = await postproduction_service.finish(
+        review,
+        operation_port=operation_port,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(finished)
+    _, workflow = await state_repository.seed_state(delivery)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(delivery.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+    video_url = finished.merged_video["video_url"]
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.CONTINUE_WORKFLOW,
+        patch={"download_url": video_url},
+        sequence=203,
+    )
+    downloaded = decode_video_workflow_state(result.state)
+
+    assert downloaded.final_video_delivery["deliveryDownloadedUrl"] == video_url
+
+
+@pytest.mark.asyncio
+async def test_real_chain_retries_failed_draft_after_video_completion(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+) -> None:
+    """完成态草稿失败可经 RETRY_FAILED 创建同版本的新 attempt。"""
+
+    from test_agent_video_workflow_delivery import (
+        _FakeJianyingDraftSkill,
+        _video_review_state,
+    )
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+    from pixelflow.jianying_draft.models import (
+        JianyingDraftResult,
+        JianyingDraftStatus,
+    )
+
+    review, operation_port, _, postproduction_service = (
+        await _video_review_state()
+    )
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(review)
+    failed = await delivery_service.generate_jianying_with_skill(
+        delivery,
+        skill=_FakeJianyingDraftSkill(
+            [
+                JianyingDraftResult(
+                    status=JianyingDraftStatus.FAILED,
+                    message="第三方剪映草稿任务处理失败：素材校验失败",
+                )
+            ]
+        ),
+    )
+    finished = await postproduction_service.finish(
+        review,
+        operation_port=operation_port,
+        now=failed.updated_at + timedelta(seconds=1),
+    )
+    completed = await delivery_service.synchronize_postproduction(
+        failed,
+        finished,
+        now=finished.updated_at,
+    )
+    _, workflow = await state_repository.seed_state(completed)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(completed.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.RETRY_FAILED,
+        patch={"jianying_action": "start"},
+        sequence=204,
+    )
+    retried = decode_video_workflow_state(result.state)
+
+    assert retried.pending_operation is not None
+    assert retried.operation_attempts[retried.current_storyboard_version_id] == 2
+
+
+@pytest.mark.asyncio
+async def test_real_chain_records_completed_jianying_download(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+) -> None:
+    """完成态剪映下载经 CONTINUE 到达真实交付 Handler 并留下证据。"""
+
+    from test_agent_video_workflow_delivery import (
+        _FakeJianyingDraftSkill,
+        _succeeded_result,
+        _video_review_state,
+    )
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+
+    review, operation_port, _, postproduction_service = (
+        await _video_review_state()
+    )
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(review)
+    succeeded = await delivery_service.generate_jianying_with_skill(
+        delivery,
+        skill=_FakeJianyingDraftSkill([_succeeded_result()]),
+    )
+    finished = await postproduction_service.finish(
+        review,
+        operation_port=operation_port,
+        now=succeeded.updated_at + timedelta(seconds=1),
+    )
+    completed = await delivery_service.synchronize_postproduction(
+        succeeded,
+        finished,
+        now=finished.updated_at,
+    )
+    _, workflow = await state_repository.seed_state(completed)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(completed.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+    version_id = completed.current_storyboard_version_id
+    download_url = completed.jianying_draft_records[version_id]["download_url"]
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.CONTINUE_WORKFLOW,
+        patch={
+            "download_url": download_url,
+            "jianying_action": "download",
+            "storyboard_version_id": version_id,
+        },
+        sequence=205,
+    )
+    downloaded = decode_video_workflow_state(result.state)
+
+    assert downloaded.jianying_draft_records[version_id]["draftDownloadedAt"]
 
 
 @pytest.mark.asyncio
@@ -1014,6 +1463,74 @@ async def test_video_handler_replays_same_action_key_with_stable_result(
     assert duplicate.workflow == first.workflow
     assert duplicate.messages == first.messages
     assert duplicate.interrupt == first.interrupt
+
+
+@pytest.mark.asyncio
+async def test_video_handler_same_turn_opens_new_plan_review_occurrence(
+    video_handler: VideoLiveWorkflowHandler,
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    """同一原 Turn 完成一轮修订后，再次同原因审核必须使用新 ID。"""
+
+    _, workflow = await state_repository.seed_state(_planning_state("plan_review"))
+    first = await video_handler.dispatch(
+        command_factory(
+            action=AgentAction.MODIFY_WORKFLOW,
+            patch={"revision_feedback": "第一轮加快节奏"},
+            workflow=workflow,
+            idempotency_key="decision:review-response-1",
+        )
+    )
+    await state_repository.seed_result(first)
+    second = await video_handler.dispatch(
+        command_factory(
+            action=AgentAction.MODIFY_WORKFLOW,
+            patch={"revision_feedback": "第二轮强化卖点"},
+            workflow=first.workflow,
+            idempotency_key="decision:review-response-2",
+        )
+    )
+
+    assert first.interrupt is not None
+    assert second.interrupt is not None
+    assert second.interrupt.reason_code == first.interrupt.reason_code
+    assert second.interrupt.turn_id == first.interrupt.turn_id
+    assert second.interrupt.interrupt_id != first.interrupt.interrupt_id
+
+
+@pytest.mark.asyncio
+async def test_video_handler_same_turn_opens_new_authorization_occurrence(
+    video_handler: VideoLiveWorkflowHandler,
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    """授权仍缺失且领域阶段版本未前进时，下一次提示也必须使用新 ID。"""
+
+    _, workflow = await state_repository.seed_state(_planning_state("plan_review"))
+    first = await video_handler.dispatch(
+        command_factory(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            workflow=workflow,
+            idempotency_key="decision:authorization-response-1",
+        )
+    )
+    await state_repository.seed_result(first)
+    second = await video_handler.dispatch(
+        command_factory(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            workflow=first.workflow,
+            idempotency_key="decision:authorization-response-2",
+        )
+    )
+
+    assert first.interrupt is not None
+    assert second.interrupt is not None
+    assert first.interrupt.reason_code == "authorization_required"
+    assert second.interrupt.reason_code == first.interrupt.reason_code
+    assert second.workflow.stage_version == first.workflow.stage_version
+    assert second.state.workflow_version == first.state.workflow_version + 1
+    assert second.interrupt.interrupt_id != first.interrupt.interrupt_id
 
 
 @pytest.mark.asyncio

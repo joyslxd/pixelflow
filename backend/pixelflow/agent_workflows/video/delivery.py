@@ -39,7 +39,14 @@ from .postproduction import (
     VideoPostProductionWorkflowService,
     VideoPostProductionWorkflowState,
 )
-from .video_generation import VideoSceneOperationTerminalClaim
+from .scene_packages import (
+    VideoScenePackageAuthoritySnapshot,
+    VideoScenePackageWorkflowState,
+)
+from .video_generation import (
+    VideoSceneGenerationWorkflowState,
+    VideoSceneOperationTerminalClaim,
+)
 
 _URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", flags=re.IGNORECASE)
 _SENSITIVE_PATTERN = re.compile(
@@ -650,22 +657,28 @@ class VideoDeliveryWorkflowService:
 
         _validate_delivery_state(state, allow_cancelled=True)
         merged = state.postproduction_state.merged_video or {}
+        generation = state.postproduction_state.generation_state
         records = {version_id: _public_history_record(record) for version_id, record in state.jianying_draft_records.items()}
         projection: dict[str, Any] = {
             "type": "video_result",
             "videoArtifactRef": state.postproduction_state.video_artifact_ref,
             "storyboardVersionId": state.current_storyboard_version_id,
+            "videoScenePackages": _video_scene_packages_projection(
+                generation.source_scene_package,
+                scene_packages=generation.scene_packages,
+            ),
             "mergedVideo": {
                 "ok": True,
+                "endpoint": merged["endpoint"],
                 "merged_video_url": merged["video_url"],
                 "task_id": merged["task_id"],
                 "scene_videos": copy_json(merged.get("scene_videos") or []),
+                "error": None,
+                "message": "视频合并完成。",
+                "quota_insufficient": False,
+                "raw": copy_json(merged.get("raw") or {}),
             },
-            "generatedSceneVideos": {
-                "ok": True,
-                "scene_videos": copy_json(state.postproduction_state.generation_state.scene_videos),
-                "failed_scenes": [],
-            },
+            "generatedSceneVideos": _generated_scene_videos_projection(generation),
             "videoAccepted": bool(state.postproduction_state.finalized_by_user),
             "jianyingDraftRecords": records,
         }
@@ -791,6 +804,126 @@ class VideoDeliveryWorkflowService:
             _validate_pending_operation_identity(state, trusted_pending)
             return trusted_pending
         return None
+
+
+class VideoWebArtifactAdapter:
+    """把三类视频权威状态适配为 Web 已冻结的 ChatArtifact DTO。"""
+
+    def __init__(self, delivery_service: VideoDeliveryWorkflowService) -> None:
+        self._delivery_service = delivery_service
+
+    def project(
+        self,
+        state: (
+            VideoScenePackageWorkflowState
+            | VideoSceneGenerationWorkflowState
+            | VideoDeliveryWorkflowState
+        ),
+    ) -> dict[str, Any]:
+        """由单一入口生成 Web 可直接消费的场景或成片卡片。"""
+
+        if isinstance(state, VideoScenePackageWorkflowState):
+            projection = {
+                "type": "video_scene_packages",
+                "title": "视频分镜与场景素材",
+                "description": "请审核分镜与场景素材，确认后生成分镜视频。",
+                "actionLabel": "确认分镜",
+                "videoScenePackages": _video_scene_packages_projection(
+                    state.scene_package
+                ),
+            }
+        elif isinstance(state, VideoSceneGenerationWorkflowState):
+            projection = {
+                "type": "video_scene_packages",
+                "title": "视频分镜生成结果",
+                "description": "请确认分镜视频，或修改后仅重生成受影响镜头。",
+                "actionLabel": "确认分镜视频",
+                "videoScenePackages": _video_scene_packages_projection(
+                    state.source_scene_package,
+                    scene_packages=state.scene_packages,
+                ),
+                "generatedSceneVideos": _generated_scene_videos_projection(state),
+                "videoScenePackageEditedSceneIds": copy_json(
+                    state.edited_scene_ids
+                ),
+            }
+        elif isinstance(state, VideoDeliveryWorkflowState):
+            projection = self._delivery_service.to_artifact_projection(state)
+            projection.update(
+                {
+                    "title": "视频成片",
+                    "description": (
+                        "视频已由用户确认，可下载最终成片或生成剪映草稿。"
+                        if state.postproduction_state.finalized_by_user
+                        else "请确认最终成片，也可先生成剪映草稿或提出修改意见。"
+                    ),
+                    "actionLabel": "下载视频",
+                }
+            )
+        else:
+            raise TypeError("Web 视频 Artifact 不支持当前权威状态")
+        return copy_json(projection)
+
+
+def _video_scene_packages_projection(
+    source: VideoScenePackageAuthoritySnapshot,
+    *,
+    scene_packages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """生成与 PrepareScenePackagesResponse 一一对应的稳定字段。"""
+
+    return {
+        "ok": True,
+        "message": "视频分镜与场景素材已准备完成。",
+        "requires_confirmation": True,
+        "review_timeout_sec": None,
+        "target_duration_ms": source.target_duration_ms,
+        "global_assets": copy_json(source.global_assets),
+        "scene_packages": copy_json(
+            source.scene_packages if scene_packages is None else scene_packages
+        ),
+        "creation_contract": copy_json(source.creation_contract),
+    }
+
+
+def _generated_scene_videos_projection(
+    state: VideoSceneGenerationWorkflowState,
+) -> dict[str, Any]:
+    """生成与 GenerateSceneVideosResponse 一一对应的稳定字段。"""
+
+    scene_videos = state.scene_videos
+    failed_scenes = state.failed_scenes
+    endpoints = sorted(
+        {
+            endpoint
+            for item in scene_videos
+            if isinstance((endpoint := item.get("endpoint")), str) and endpoint
+        }
+    )
+    endpoint = (
+        endpoints[0]
+        if len(endpoints) == 1
+        else "/api/video/mixed"
+        if endpoints
+        else "/api/video/reference-mode-video"
+    )
+    quota_insufficient = any(
+        item.get("quota_insufficient") is True for item in failed_scenes
+    )
+    if quota_insufficient:
+        message = "场景视频生成额度不足，请恢复额度后重试。"
+    elif failed_scenes:
+        message = "部分场景视频生成失败，请查看 failed_scenes。"
+    else:
+        message = "场景视频生成完成。"
+    return {
+        "ok": not failed_scenes,
+        "endpoint": endpoint,
+        "scene_videos": copy_json(scene_videos),
+        "failed_scenes": copy_json(failed_scenes),
+        "message": message,
+        "quota_insufficient": quota_insufficient,
+    }
 
 
 def _validate_ready_postproduction(

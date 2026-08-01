@@ -30,6 +30,7 @@ from pixelflow.agent_runtime.contracts import (
     TurnStatus,
     WorkflowStatus,
 )
+from pixelflow.agent_runtime.graph import WorkflowCommand, workflow_namespace
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
@@ -47,6 +48,7 @@ from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
 from pixelflow.agent_workflows.video import (
+    VideoLiveWorkflowHandler,
     VideoPlanningWorkflowService,
     encode_video_workflow_state,
     project_video_workflow_state,
@@ -644,6 +646,210 @@ async def test_responded_interrupt_reclaims_original_waiting_turn(
         responded = await repository.get_interrupt(OWNER, "interrupt-1")
         assert responded is not None
         assert responded.status == "responded"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_same_original_turn_atomically_closes_and_reopens_same_reason_review(
+    kind: RepositoryKind,
+) -> None:
+    """真实 Handler 的下一轮同原因审核可在原 Turn 内原子替换 interrupt。"""
+
+    from test_agent_video_live_handler import (
+        _FakeCapabilities,
+        _FakeClock,
+        _FakeCredentialProvider,
+        _planning_state,
+    )
+
+    async with _repository(kind) as (repository, store):
+        initial_state = _planning_state("plan_review")
+        initial_workflow = project_video_workflow_state(initial_state)
+        test_conversation = initial_workflow.conversation_id
+        test_workflow = initial_workflow.workflow_id
+        await _seed_conversation(
+            store,
+            conversation_id=test_conversation,
+        )
+        initial_envelope = encode_video_workflow_state(
+            user_id=OWNER,
+            state=initial_state,
+            workflow_version=1,
+            last_turn_id="turn-1",
+            last_action_key="decision:seed-plan-review",
+        )
+        setup_turn = _turn(1, conversation_id=test_conversation)
+        await repository.enqueue_turn_for_execution(OWNER, setup_turn, now=NOW)
+        setup_claim = await repository.claim_turn(
+            OWNER,
+            test_conversation,
+            setup_turn.turn_id,
+            lease_owner="worker-setup",
+            now=NOW + timedelta(seconds=1),
+            lease_expires_at=NOW + timedelta(seconds=31),
+        )
+        assert setup_claim is not None
+        setup_decision = ActionDecision(
+            action=AgentAction.MODIFY_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            target_workflow_id=test_workflow,
+            target_stage="plan_review",
+            confidence=1,
+            patch={"revision_feedback": "建立测试快照"},
+            reason_code="test_setup",
+            idempotency_key="decision:seed-plan-review",
+        )
+        await repository.commit_turn(
+            setup_claim,
+            VideoTurnCommit(
+                decision=setup_decision,
+                turn_status=TurnStatus.COMPLETED,
+                workflow_state=initial_envelope,
+                workflow=initial_workflow,
+                expected_workflow_version=0,
+                update_active_workflow=True,
+                active_workflow_id=test_workflow,
+                occurred_at=NOW + timedelta(seconds=4),
+            ),
+        )
+
+        original_turn = _turn(2, conversation_id=test_conversation)
+        await repository.enqueue_turn_for_execution(
+            OWNER,
+            original_turn,
+            now=NOW + timedelta(seconds=5),
+        )
+        first_claim = await repository.claim_turn(
+            OWNER,
+            test_conversation,
+            original_turn.turn_id,
+            lease_owner="worker-review",
+            now=NOW + timedelta(seconds=6),
+            lease_expires_at=NOW + timedelta(seconds=36),
+        )
+        assert first_claim is not None
+        handler = VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=_FakeCapabilities(),
+            credential_provider=_FakeCredentialProvider(),
+            clock=_FakeClock(NOW + timedelta(seconds=7)),
+        )
+
+        def review_command(
+            workflow,
+            *,
+            action_key: str,
+            feedback: str,
+        ) -> WorkflowCommand:
+            decision = ActionDecision(
+                action=AgentAction.MODIFY_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                target_workflow_id=test_workflow,
+                target_stage="plan_review",
+                confidence=1,
+                patch={"revision_feedback": feedback},
+                reason_code="explicit_interrupt_response",
+                idempotency_key=action_key,
+            )
+            return WorkflowCommand(
+                conversation_id=test_conversation,
+                workflow_id=test_workflow,
+                kind=initial_workflow.kind,
+                decision=decision,
+                workflow=workflow,
+                namespace=workflow_namespace(
+                    test_conversation,
+                    test_workflow,
+                ),
+                user_id=OWNER,
+                turn_id=original_turn.turn_id,
+                current_input=feedback,
+                materials=[],
+                reply_to_message_id=None,
+                artifact_refs=[],
+            )
+
+        first_command = review_command(
+            initial_workflow,
+            action_key="decision:review-1",
+            feedback="第一轮加快节奏",
+        )
+        first = await handler.dispatch(first_command)
+        assert first.interrupt is not None
+        await repository.commit_turn(
+            first_claim,
+            VideoTurnCommit(
+                decision=first_command.decision,
+                turn_status=first.turn_status,
+                workflow_state=first.state,
+                workflow=first.workflow,
+                expected_workflow_version=1,
+                messages=first.messages,
+                open_interrupt=first.interrupt,
+                occurred_at=NOW + timedelta(seconds=8),
+            ),
+        )
+        await repository.store_interrupt_response(
+            OWNER,
+            test_conversation,
+            first.interrupt.interrupt_id,
+            client_response_id=UUID(
+                "30000000-0000-4000-8000-000000000001"
+            ),
+            response_value={
+                "content": "继续修改",
+                "materials": [],
+                "artifact_refs": [],
+            },
+            responded_at=NOW + timedelta(seconds=9),
+        )
+        resumed_claim = await repository.claim_interrupt_resume(
+            OWNER,
+            test_conversation,
+            first.interrupt.interrupt_id,
+            lease_owner="worker-review",
+            now=NOW + timedelta(seconds=10),
+            lease_expires_at=NOW + timedelta(seconds=40),
+        )
+        assert resumed_claim is not None
+        second_command = review_command(
+            first.workflow,
+            action_key="decision:review-2",
+            feedback="第二轮强化卖点",
+        )
+        second = await handler.dispatch(second_command)
+        assert second.interrupt is not None
+
+        await repository.commit_turn(
+            resumed_claim,
+            VideoTurnCommit(
+                decision=second_command.decision,
+                turn_status=second.turn_status,
+                workflow_state=second.state,
+                workflow=second.workflow,
+                expected_workflow_version=2,
+                messages=second.messages,
+                open_interrupt=second.interrupt,
+                close_interrupt_id=first.interrupt.interrupt_id,
+                occurred_at=NOW + timedelta(seconds=11),
+            ),
+        )
+
+        closed = await repository.get_interrupt(
+            OWNER,
+            first.interrupt.interrupt_id,
+        )
+        opened = await repository.get_interrupt(
+            OWNER,
+            second.interrupt.interrupt_id,
+        )
+        assert closed is not None and closed.status == "closed"
+        assert opened is not None and opened.status == "open"
+        assert opened.reason_code == closed.reason_code
+        assert opened.turn_id == closed.turn_id == original_turn.turn_id
+        assert len(
+            await repository.list_turns(OWNER, test_conversation)
+        ) == 2
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

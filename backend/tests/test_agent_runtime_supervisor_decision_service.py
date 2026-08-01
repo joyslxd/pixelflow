@@ -186,13 +186,15 @@ def _workflow(
     *,
     status: WorkflowStatus = WorkflowStatus.AWAITING_USER,
     conversation_id: str = "conv-1",
+    kind: WorkflowKind = WorkflowKind.VIDEO,
+    current_stage: str = "plan_review",
 ) -> WorkflowRecord:
     return WorkflowRecord(
         workflow_id=workflow_id,
         conversation_id=conversation_id,
-        kind=WorkflowKind.VIDEO,
+        kind=kind,
         status=status,
-        current_stage="plan_review",
+        current_stage=current_stage,
         stage_version=2,
         latest_artifact_refs=[f"artifact:{workflow_id}:plan:v2"],
         context_version=5,
@@ -284,6 +286,70 @@ async def test_explicit_action_bypasses_model_but_still_uses_validator() -> None
     assert result.decision.idempotency_key == "decision:turn-1"
     assert result.validation_request.current_context_version == 5
     assert model.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [AgentAction.CONTINUE_WORKFLOW, AgentAction.RETRY_FAILED],
+)
+async def test_completed_video_delivery_allows_explicit_delivery_actions(
+    action: AgentAction,
+) -> None:
+    """仅视频 completed 交付态允许下载继续和失败草稿重试。"""
+
+    result = await _service(None).decide(
+        _evidence(
+            workflows=(
+                _workflow(
+                    status=WorkflowStatus.COMPLETED,
+                    current_stage="completed",
+                ),
+            ),
+            explicit_action=ExplicitActionSignal(
+                action=action,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+                stage="completed",
+            ),
+        )
+    )
+
+    assert result.decision.action is action
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        _workflow(
+            status=WorkflowStatus.COMPLETED,
+            kind=WorkflowKind.IMAGE,
+            current_stage="completed",
+        ),
+        _workflow(
+            status=WorkflowStatus.COMPLETED,
+            current_stage="video_review",
+        ),
+    ],
+)
+async def test_delivery_action_exception_does_not_expand_other_completed_states(
+    workflow: WorkflowRecord,
+) -> None:
+    """完成态例外不能扩大到其他 intent 或伪造的视频阶段。"""
+
+    with pytest.raises(DecisionValidationError, match="action_not_allowed"):
+        await _service(None).decide(
+            _evidence(
+                workflows=(workflow,),
+                explicit_action=ExplicitActionSignal(
+                    action=AgentAction.CONTINUE_WORKFLOW,
+                    intent=AgentIntent(workflow.kind.value),
+                    workflow_id="wf-1",
+                    stage=workflow.current_stage,
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio
