@@ -4,7 +4,7 @@
 - 任务：`Task 13`
 - 分支：`codex/r2-live-video-handler`
 - 基线：`0960f7d9c298293e0332386047762145d8504faf`
-- 状态：`implementation_local_verified:Task13`
+- 状态：`review_fix_local_verified:Task13 / awaiting_independent_review`
 
 ## 1. 结论
 
@@ -53,7 +53,40 @@ Task 13 已在隔离开发分支补齐视频 live handler 与 Web Supervisor 控
 
 扩展运行全部 `test_agent_video_*.py` 得到 `573 passed, 1 failed, 1 warning`。唯一失败为未修改文件 `tests/test_agent_video_live_capabilities.py` 对 `pixelflow.agent_runtime.__all__` 仍要求只有四个 replay 导出，而当前基线实际还包含六个 `SupervisorTurnExecutor` 相关公共导出；该测试单独复现仍失败，Task 13 未修改 `agent_runtime/__init__.py` 或该测试，因此记录为基线漂移，不据此扩大修改范围或伪报全绿。
 
-## 5. 安全与停止边界
+## 5. Task 13 独立审核整改候选
+
+### 5.1 审核意见闭环
+
+- C1：M06 Operation 最终完成不再只更新业务 Repository。Gateway 把同一个真实 Supervisor Graph 注入完成桥；完成桥先在原会话 checkpoint 上幂等写入更新后的 `WorkflowDispatchResult`，再经专用 marker 进入统一 `workflow_interrupt` 节点。只有真实 Graph pause 已建立，Memory/SQL Repository 才在同一临界区或事务中原子写权威 state/workflow/messages、原 Turn `waiting_user`、唯一 open interrupt、`interrupt.opened` 和完成事件确认。checkpoint 后进程退出时重放复用同一 pause，不新建 Turn，也不重新调用 Provider start。
+- I1：intake interrupt 从权威状态投影 `form_values`、当前输入、附件和轮次；缺少凭据时保存可恢复的原结构化 action 与原 Artifact 引用，但不保存 Authorization、token、header 或 credential。
+- I2：助手 Artifact 消息同时携带 `run_id`、`workflow_id` 和 `artifact_ref`。Web 只按当前 interrupt 的 Workflow、Artifact 与允许类型选择精确消息；双 Workflow 或身份错配时失败关闭，不按最后一条卡片猜测。
+- I3：真实 Memory/SQLite 链路覆盖“无凭据打开授权中断 → Executor 重启 → 响应携带瞬时凭据 → 恢复原 action”。整改中发现原子响应登记会合法写入 `pre_input_context_version`，而普通 workflow 恢复入口此前把它当成 DTO 额外字段拒绝；现与 clarification 使用同一严格字段集和版本校验，剥离内部字段后再构造公开 DTO，不放宽公开合同。
+- I4：人工新增全局素材继续复用统一 ID/名称生成器；后端要求所属分组前缀，并拒绝跨 characters/scenes/props/visual_style 的 ID、名称和 content asset 冲突。未知 patch 字段仍先失败关闭。
+
+### 5.2 RED / GREEN 证据
+
+- C1 首次真实 Graph 集成用例在 `VideoOperationCompletionHandler(..., graph=graph)` 处得到预期 RED，证明原完成桥没有 Graph checkpoint 接口；完成实现后 Memory 与 SQLite 均恢复同一原 Turn。随后在 Graph pause 成功、Repository 事务提交前模拟进程退出，首次重放得到 open interrupt 为空的 RED；整改后领域投影和 interrupt 都复用稳定的 `completion_event.occurred_at`，Repository 租约确认仍读取当前时钟，并复用 checkpoint 中首个 `opened_at`，31 秒租约后重放可提交同一中断且不重复 Provider start。
+- I3 重启用例首次在普通 workflow resume 得到 `pre_input_context_version` 额外字段校验失败，Provider start 保持 0；按严格内部信封修复后双 Repository 均通过，三个分镜各 start 一次且恢复与后续完成阶段都没有重复 start。
+- Web 类型检查首次发现精确 Artifact 选择可能返回空消息；无权威消息时显式不渲染 Supervisor 卡片后，`tsc --noEmit` 与生产构建转绿。
+
+| 门禁 | 命令/范围 | 结果 |
+| --- | --- | --- |
+| C1/I3 真实 Graph + completion 矩阵 | `pytest tests/test_agent_video_live_operations.py -q -k "operation_completion_opens_real_graph_interrupt or operation_completion_interrupt_matrix"` | `6 passed` |
+| Executor 相邻回归 | `pytest tests/test_agent_runtime_turn_executor.py -q` | `26 passed` |
+| Runtime Repository 相邻回归 | `pytest tests/test_agent_runtime_video_repository.py -q` | `82 passed` |
+| 视频 Operation 全量 | `pytest tests/test_agent_video_live_operations.py -q` | `146 passed` |
+| 视频 Handler | `pytest tests/test_agent_video_live_handler.py -q` | `53 passed` |
+| 场景包领域 Service | `pytest tests/test_agent_video_workflow_scene_packages.py -q` | `41 passed` |
+| Gateway readiness | `pytest tests/test_agent_runtime_gateway_readiness.py -q` | `9 passed` |
+| Web 全量 | `npm.cmd test` | `404 passed` |
+| Web 类型检查 | `npm.cmd run lint` | 通过 |
+| Web 生产构建 | `npm.cmd run build-prod` | 通过；仅有既存大 chunk 警告 |
+| Python 静态检查 | `.venv\Scripts\python.exe -m ruff check`（本次 10 个 Python 文件） | 通过 |
+| 差异格式 | `git diff --check` | 通过 |
+
+当前整改状态为 `review_fix_local_verified:Task13 / awaiting_independent_review`。该状态不是 Task 14、R2 真实门禁或发布批准。
+
+## 6. 安全与停止边界
 
 - 未修改 dev/prod 运行模式、intent、比例、上下文预算、严格模型档案或 30 秒退避。
 - 未调用真实 LLM、content-app、PowerMem、图片、视频、PPT、剪映或其他付费接口。

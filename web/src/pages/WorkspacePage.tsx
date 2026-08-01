@@ -143,6 +143,7 @@ import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
 import {
   mergeSupervisorMessagesWithPending,
   projectSupervisorWorkflowProgress,
+  selectSupervisorArtifactMessage,
 } from "@/lib/supervisor/workspaceProjection";
 
 interface ConversationOwnership {
@@ -170,7 +171,8 @@ type SupervisorVideoUiKind =
   | "video_direction_review"
   | "video_plan_review"
   | "video_scene_package_review"
-  | "video_result_review";
+  | "video_result_review"
+  | "authorization_required";
 
 interface RestoredSupervisorVideoUi {
   kind: SupervisorVideoUiKind;
@@ -181,6 +183,7 @@ interface RestoredSupervisorVideoUi {
   coreMessage: string;
   materials: JsonObject[];
   intakeRounds: number;
+  authorizationAction: ExplicitActionSignal | null;
 }
 
 interface SupervisorVideoTarget {
@@ -265,6 +268,7 @@ function restoreSupervisorVideoUi(
     && Number(payload.intake_rounds) >= 0
     ? Number(payload.intake_rounds)
     : 0;
+  const authorizationAction = parseExplicitAction(payload.authorization_action);
   switch (payload.ui_kind) {
     case "video_intake_form":
     case "video_direction_review":
@@ -280,6 +284,25 @@ function restoreSupervisorVideoUi(
         coreMessage,
         materials,
         intakeRounds,
+        authorizationAction: null,
+      };
+    case "authorization_required":
+      if (
+        !authorizationAction
+        || authorizationAction.workflow_id !== workflowId
+        || authorizationAction.stage !== stage
+        || authorizationAction.artifact_ref !== artifactRef
+      ) return null;
+      return {
+        kind: payload.ui_kind,
+        workflowId,
+        stage,
+        artifactRef,
+        formValues,
+        coreMessage,
+        materials,
+        intakeRounds,
+        authorizationAction,
       };
     default:
       return null;
@@ -2134,13 +2157,25 @@ export function WorkspacePage() {
           : activeSupervisorVideoTarget.ui.kind === "video_result_review"
             ? new Set(["video_scene_packages", "video_quality_review", "video_result", "jianying_draft"])
             : new Set<string>();
-    return [...messages]
-      .reverse()
-      .find(
-        (message) => messageConversationId(message, currentConversationId) === currentConversationId
-          && Boolean(message.artifact && allowedTypes.has(message.artifact.type)),
-      ) ?? null;
-  }, [activeSupervisorVideoTarget, currentConversationId, messages]);
+    const projected = selectSupervisorArtifactMessage(
+      supervisorRuntime.state.messages,
+      {
+        workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+        artifactRef: activeSupervisorVideoTarget.artifactRef,
+        allowedTypes: [...allowedTypes],
+      },
+    );
+    if (!projected) return null;
+    return messages.find(
+      (message) => message.id === projected.id
+        && messageConversationId(message, currentConversationId) === currentConversationId,
+    ) ?? null;
+  }, [
+    activeSupervisorVideoTarget,
+    currentConversationId,
+    messages,
+    supervisorRuntime.state.messages,
+  ]);
   const interactionPolicy = resolveWorkspaceInteractionPolicy({
     mode: orchestrationMode,
     conversationId: currentConversationId,
@@ -10162,9 +10197,9 @@ export function WorkspacePage() {
 
   function renderSupervisorVideoArtifact(target: SupervisorVideoTarget) {
     const currentMessage = activeSupervisorVideoMessage;
+    if (!currentMessage) return null;
     const acceptsMessage = (msg: ChatMessage): boolean => Boolean(
-      currentMessage
-      && msg.id === currentMessage.id
+      msg.id === currentMessage.id
       && messageConversationId(msg, currentConversationId) === currentConversationId,
     );
     const submit = (
@@ -10421,15 +10456,23 @@ export function WorkspacePage() {
         replacement: SceneGlobalAssetReplacement,
       ) => {
         if (target.ui.kind !== "video_scene_package_review") return;
-        const rawId = replacement.contentAssetId || replacement.thirdAssetId || uid();
-        const assetId = `manual-${rawId}`.replace(/[^A-Za-z0-9_-]/gu, "-").slice(0, 128);
+        const videoScenePackages = currentMessage.artifact?.videoScenePackages;
+        if (!videoScenePackages) return;
+        const added = addGlobalSceneAssetReference(videoScenePackages.global_assets, {
+          assetGroup,
+          manualId: replacement.contentAssetId || replacement.thirdAssetId || uid(),
+          replacement,
+        });
         submit("新增视频全局素材", {
           action: "modify_workflow",
           patch: {
             asset_action: "add",
             asset_group: assetGroup,
-            asset_id: assetId,
-            asset_patch: replacementPatch(replacement),
+            asset_id: added.added_asset.asset_id,
+            asset_patch: {
+              ...replacementPatch(replacement),
+              asset_name: added.added_asset.name,
+            },
           },
         });
       },
@@ -10657,6 +10700,35 @@ export function WorkspacePage() {
           }}
         />
       ) : null}
+      {restoredSupervisorUi?.kind === "authorization_required"
+        && activeSupervisorVideoTarget
+        && restoredSupervisorUi.authorizationAction ? (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 px-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl">
+              <h2 className="text-base font-semibold text-slate-900">需要重新授权</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                当前操作尚未调用供应商。请确认登录状态后继续原操作。
+              </p>
+              <button
+                type="button"
+                className="mt-4 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+                onClick={() => {
+                  void submitSupervisorAction(
+                    "授权后继续原视频操作",
+                    restoredSupervisorUi.authorizationAction as ExplicitActionSignal,
+                    {
+                      artifactRefs: activeSupervisorVideoTarget.artifactRef
+                        ? [activeSupervisorVideoTarget.artifactRef]
+                        : [],
+                    },
+                  );
+                }}
+              >
+                重新授权并继续
+              </button>
+            </div>
+          </div>
+        ) : null}
       <PlanRevisionDialog
         open={Boolean(legacyArtifactActionsEnabled && pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
         feedback={pendingPlanRevisionChoice?.feedback || ""}

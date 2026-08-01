@@ -30,6 +30,7 @@ from .state import SupervisorState
 AGENT_RUNTIME_GRAPH_ID = "pixelflow_agent_runtime"
 DISPATCH_WORKFLOW_NODE = WORKFLOW_COMMAND_NODE
 WORKFLOW_INTERRUPT_NODE = "workflow_interrupt"
+OPERATION_COMPLETION_INTERRUPT_NODE = "operation_completion_interrupt"
 
 
 @dataclass(slots=True)
@@ -145,6 +146,14 @@ def build_agent_runtime_graph(
             response=response,
         )
 
+    def stage_operation_completion_interrupt(
+        state: SupervisorState,
+    ) -> dict[str, Any]:
+        """承接已写入 checkpoint 的 Operation 完成结果并进入统一人工中断节点。"""
+
+        del state
+        return {}
+
     graph = StateGraph(SupervisorState)
     graph.add_node(
         ROUTE_ACTION_NODE,
@@ -167,9 +176,17 @@ def build_agent_runtime_graph(
         resume_workflow_interrupt,
         destinations=(DISPATCH_WORKFLOW_NODE,),
     )
+    graph.add_node(
+        OPERATION_COMPLETION_INTERRUPT_NODE,
+        stage_operation_completion_interrupt,
+    )
     graph.add_edge(START, ROUTE_ACTION_NODE)
     graph.add_edge(ANSWER_ONLY_NODE, END)
     graph.add_edge(CLARIFICATION_NODE, END)
+    graph.add_edge(
+        OPERATION_COMPLETION_INTERRUPT_NODE,
+        WORKFLOW_INTERRUPT_NODE,
+    )
     return graph
 
 

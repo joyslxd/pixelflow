@@ -845,6 +845,22 @@ class ExternalJobStateObserver(Protocol):
         """记录一个有限六态观察值。"""
 
 
+class OperationCompletionCheckpointGraph(Protocol):
+    """约束 Operation 完成桥写入并校验 Supervisor checkpoint 的最小接口。"""
+
+    async def aget_state(self, config: dict[str, Any]) -> Any: ...
+
+    async def aupdate_state(
+        self,
+        config: dict[str, Any],
+        values: dict[str, Any],
+        *,
+        as_node: str,
+    ) -> Any: ...
+
+    async def ainvoke(self, input: Any, config: dict[str, Any]) -> Any: ...
+
+
 class VideoOperationCompletionHandler:
     """把 M06 完成 Outbox 事件原子回灌到 M11 权威状态。"""
 
@@ -854,11 +870,13 @@ class VideoOperationCompletionHandler:
         repository: VideoRuntimeRepository,
         operations: VideoLiveOperationBridge,
         clock: Any,
+        graph: OperationCompletionCheckpointGraph | None = None,
         external_job_observer: ExternalJobStateObserver | None = None,
     ) -> None:
         self._repository = repository
         self._operations = operations
         self._clock = clock
+        self._graph = graph
         self._external_job_observer = external_job_observer
 
     async def resume_external_job(
@@ -900,6 +918,7 @@ class VideoOperationCompletionHandler:
             idempotency_key=idempotency_key,
         )
         payload = completion_event.payload
+        completion_time = completion_event.occurred_at
         workflow_id = payload.get("workflow_id")
         if not isinstance(workflow_id, str) or namespace != workflow_namespace(
             completion.conversation_id,
@@ -950,7 +969,7 @@ class VideoOperationCompletionHandler:
                     provider_job_id=_optional_text(payload.get("provider_job_id")),
                     raw=raw,
                     operation_port=scoped,
-                    now=self._now(),
+                    now=completion_time,
                 )
             else:
                 message = _completion_message(payload)
@@ -963,7 +982,7 @@ class VideoOperationCompletionHandler:
                     retryable=retryable,
                     raw={},
                     operation_port=scoped,
-                    now=self._now(),
+                    now=completion_time,
                 )
         elif isinstance(state, VideoPostProductionWorkflowState):
             post_service = VideoPostProductionWorkflowService(scoped)
@@ -982,7 +1001,7 @@ class VideoOperationCompletionHandler:
                         provider_job_id=_optional_text(payload.get("provider_job_id")),
                         raw=raw,
                         operation_port=scoped,
-                        now=self._now(),
+                        now=completion_time,
                     )
                 else:
                     updated = await post_service.record_merge_failure(
@@ -992,7 +1011,7 @@ class VideoOperationCompletionHandler:
                         retryable=status in {"timeout", "expired"},
                         raw={},
                         operation_port=scoped,
-                        now=self._now(),
+                        now=completion_time,
                     )
             elif state.current_stage is VideoPostProductionStage.QUALITY_REVIEW and stage == VideoPostProductionStage.QUALITY_REVIEW.value:
                 if status == "succeeded":
@@ -1016,7 +1035,7 @@ class VideoOperationCompletionHandler:
                             raw=dict(raw),
                         ),
                         operation_port=scoped,
-                        now=self._now(),
+                        now=completion_time,
                     )
                 else:
                     updated = await post_service.record_quality_failure(
@@ -1026,7 +1045,7 @@ class VideoOperationCompletionHandler:
                         retryable=status in {"timeout", "expired"},
                         raw={},
                         operation_port=scoped,
-                        now=self._now(),
+                        now=completion_time,
                     )
             else:
                 raise OperationConflictError("后处理完成事件与当前阶段不一致")
@@ -1064,7 +1083,7 @@ class VideoOperationCompletionHandler:
                 state,
                 normalized,
                 operation_port=scoped,
-                now=self._now(),
+                now=completion_time,
             )
         else:
             raise OperationConflictError("完成事件与当前视频阶段不一致")
@@ -1219,6 +1238,25 @@ class VideoOperationCompletionHandler:
                     artifact=artifact,
                 ),
             )
+        opened_interrupt = None
+        if artifact is not None and self._graph is not None:
+            opened_interrupt = _operation_completion_interrupt(
+                user_id=completion.user_id,
+                turn_id=updated_envelope.last_turn_id,
+                workflow=workflow,
+                workflow_version=updated_envelope.workflow_version,
+                scene_generation=isinstance(
+                    updated,
+                    VideoSceneGenerationWorkflowState,
+                ),
+                opened_at=completion_time,
+            )
+            opened_interrupt = await self._checkpoint_completion_interrupt(
+                updated_envelope=updated_envelope,
+                workflow=workflow,
+                messages=messages,
+                interrupt=opened_interrupt,
+            )
         await self._repository.commit_operation_completion(
             completion.claim,
             user_id=completion.user_id,
@@ -1226,12 +1264,116 @@ class VideoOperationCompletionHandler:
             workflow=workflow,
             expected_workflow_version=envelope.workflow_version,
             messages=messages,
+            open_interrupt=opened_interrupt,
             occurred_at=self._now(),
         )
         from pixelflow.agent_runtime.jobs.providers import ProviderJobOutcome
 
         self._observe_external_job_state(ProviderJobOutcome(status))
         self._operations._release_published_completion(completion)
+
+    async def _checkpoint_completion_interrupt(
+        self,
+        *,
+        updated_envelope: Any,
+        workflow: Any,
+        messages: tuple[Any, ...],
+        interrupt: Any,
+    ) -> Any:
+        """先幂等建立真实 Graph pause，成功后才允许公开 Repository 投影。"""
+
+        from pixelflow.agent_runtime.contracts import TurnStatus, WorkflowRecord
+        from pixelflow.agent_runtime.graph import supervisor_namespace
+        from pixelflow.agent_runtime.graph.composition import (
+            OPERATION_COMPLETION_INTERRUPT_NODE,
+            WORKFLOW_INTERRUPT_NODE,
+        )
+        from pixelflow.agent_workflows.video.live_handler import (
+            WorkflowDispatchResult,
+        )
+
+        graph = self._graph
+        if graph is None:
+            raise OperationConflictError("Operation 完成中断缺少 Graph checkpoint")
+        normalized_workflow = WorkflowRecord.model_validate(workflow)
+        desired = WorkflowDispatchResult(
+            state=updated_envelope,
+            workflow=normalized_workflow,
+            messages=messages,
+            interrupt=interrupt,
+            turn_status=TurnStatus.WAITING_USER,
+        )
+        namespace = supervisor_namespace(normalized_workflow.conversation_id)
+        config = namespace.as_runnable_config()
+        snapshot = await graph.aget_state(config)
+        values = dict(getattr(snapshot, "values", {}) or {})
+        if (
+            values.get("conversation_id") != normalized_workflow.conversation_id
+            or values.get("turn_id") != interrupt.turn_id
+        ):
+            raise OperationConflictError("Operation 完成中断与 Supervisor checkpoint 不一致")
+
+        existing_dispatch = values.get("workflow_dispatch_result")
+        stored_dispatch = None
+        if existing_dispatch is not None:
+            try:
+                stored_dispatch = WorkflowDispatchResult.model_validate(
+                    existing_dispatch
+                )
+            except Exception:
+                stored_dispatch = None
+        if (
+            stored_dispatch is not None
+            and stored_dispatch.interrupt is not None
+            and _same_completion_interrupt_occurrence(
+                stored_dispatch.interrupt,
+                interrupt,
+            )
+        ):
+            interrupt = stored_dispatch.interrupt
+            desired = desired.model_copy(
+                update={"interrupt": interrupt},
+            )
+
+        expected_value = {
+            "type": interrupt.kind,
+            "interrupt_id": interrupt.interrupt_id,
+            "reason_code": interrupt.reason_code,
+            "payload": interrupt.model_dump(mode="json")["payload"],
+        }
+        if _checkpoint_has_completion_interrupt(snapshot, expected_value):
+            _require_checkpoint_dispatch(values, desired)
+            return interrupt
+        if tuple(getattr(snapshot, "interrupts", ()) or ()):
+            raise OperationConflictError("Supervisor checkpoint 已存在其他开放中断")
+
+        matches_desired = stored_dispatch == desired
+        next_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        if matches_desired:
+            if next_nodes != (WORKFLOW_INTERRUPT_NODE,):
+                raise OperationConflictError("Operation 完成 checkpoint 暂存状态不一致")
+        else:
+            if next_nodes:
+                raise OperationConflictError("Supervisor checkpoint 仍有未完成节点")
+            await graph.aupdate_state(
+                config,
+                {
+                    "workflows": {
+                        normalized_workflow.workflow_id: normalized_workflow,
+                    },
+                    "workflow_dispatch_result": desired.model_dump(mode="json"),
+                },
+                as_node=OPERATION_COMPLETION_INTERRUPT_NODE,
+            )
+        await graph.ainvoke(None, config)
+        paused = await graph.aget_state(config)
+        if not _checkpoint_has_completion_interrupt(paused, expected_value):
+            raise OperationConflictError("Operation 完成未建立唯一 Graph 中断")
+        _require_checkpoint_dispatch(
+            dict(getattr(paused, "values", {}) or {}),
+            desired,
+        )
+        return interrupt
 
     def _observe_external_job_state(self, state: ProviderJobOutcome) -> None:
         """记录本进程已确认交付的终态；不承诺跨崩溃的精确一次语义。"""
@@ -1567,9 +1709,122 @@ def _completion_projection_message(
             normalized_artifact,
             success_summary=artifact_summary,
         ),
-        payload={"artifact": normalized_artifact},
+        payload={
+            "workflow_id": normalized_workflow.workflow_id,
+            "artifact_ref": (
+                normalized_workflow.latest_artifact_refs[-1]
+                if normalized_workflow.latest_artifact_refs
+                else None
+            ),
+            "artifact": normalized_artifact,
+        },
         created_at=normalized_event.occurred_at,
     )
+
+
+def _operation_completion_interrupt(
+    *,
+    user_id: str,
+    turn_id: str,
+    workflow: object,
+    workflow_version: int,
+    scene_generation: bool,
+    opened_at: datetime,
+):
+    """把最终可操作完成 Artifact 映射到原 Turn 的稳定人工中断。"""
+
+    from pixelflow.agent_runtime.contracts import WorkflowRecord
+    from pixelflow.agent_runtime.graph import supervisor_namespace
+    from pixelflow.agent_runtime.persistence import StoredAgentInterrupt
+    from pixelflow.agent_workflows.video.live_handler import (
+        video_interrupt_occurrence_id,
+    )
+
+    normalized = WorkflowRecord.model_validate(workflow)
+    if not normalized.latest_artifact_refs:
+        raise OperationConflictError("Operation 完成中断缺少权威 Artifact 引用")
+    artifact_ref = normalized.latest_artifact_refs[-1]
+    kind = "video_scene_video_review" if scene_generation else "video_result_review"
+    reason_code = (
+        "video_scene_video_review_required"
+        if scene_generation
+        else "video_result_review_required"
+    )
+    namespace = supervisor_namespace(normalized.conversation_id)
+    return StoredAgentInterrupt(
+        interrupt_id=video_interrupt_occurrence_id(
+            turn_id=turn_id,
+            reason_code=reason_code,
+            workflow=normalized,
+            workflow_version=workflow_version,
+        ),
+        conversation_id=normalized.conversation_id,
+        workflow_id=normalized.workflow_id,
+        turn_id=turn_id,
+        kind=kind,
+        reason_code=reason_code,
+        payload={
+            "workflow_id": normalized.workflow_id,
+            "stage": normalized.current_stage,
+            "artifact_ref": artifact_ref,
+            "ui_kind": "video_result_review",
+        },
+        opened_at=opened_at,
+        user_id=user_id,
+        thread_id=namespace.thread_id,
+        checkpoint_ns="root",
+    )
+
+
+def _checkpoint_has_completion_interrupt(
+    snapshot: object,
+    expected_value: Mapping[str, object],
+) -> bool:
+    """只接受与业务中断公开值完全一致的唯一 LangGraph pause。"""
+
+    matches = [
+        item
+        for item in tuple(getattr(snapshot, "interrupts", ()) or ())
+        if getattr(item, "value", None) == expected_value
+    ]
+    return len(matches) == 1
+
+
+def _same_completion_interrupt_occurrence(
+    stored: object,
+    expected: object,
+) -> bool:
+    """重放时只复用同一业务中断，首次 checkpoint 的打开时间保持不变。"""
+
+    from pixelflow.agent_runtime.persistence import StoredAgentInterrupt
+
+    try:
+        stored_document = StoredAgentInterrupt.model_validate(stored).model_dump(
+            mode="json"
+        )
+        expected_document = StoredAgentInterrupt.model_validate(expected).model_dump(
+            mode="json"
+        )
+    except Exception:
+        return False
+    stored_document.pop("opened_at", None)
+    expected_document.pop("opened_at", None)
+    return stored_document == expected_document
+
+
+def _require_checkpoint_dispatch(values: Mapping[str, object], desired: object) -> None:
+    """拒绝 Graph pause 与待提交业务状态不一致的半恢复 checkpoint。"""
+
+    from pixelflow.agent_workflows.video.live_handler import WorkflowDispatchResult
+
+    try:
+        stored = WorkflowDispatchResult.model_validate(
+            values.get("workflow_dispatch_result")
+        )
+    except Exception as exc:
+        raise OperationConflictError("Operation 完成 checkpoint 缺少权威派发结果") from exc
+    if stored != desired:
+        raise OperationConflictError("Operation 完成 checkpoint 派发结果不一致")
 
 
 def _quality_review_projection(value: Mapping[str, object]) -> dict[str, object]:

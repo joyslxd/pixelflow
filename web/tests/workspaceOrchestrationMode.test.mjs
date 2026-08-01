@@ -701,3 +701,28 @@ test("Supervisor 视频界面只按权威 interrupt 纯恢复", () => {
   assert.match(workspaceSource, /workflow\.workflow_id === restoredSupervisorUi\.workflowId/);
   assert.match(workspaceSource, /workflow\.current_stage === restoredSupervisorUi\.stage/);
 });
+
+test("Supervisor 授权中断恢复原结构化动作且不保存凭据", () => {
+  const restoreSource = extractFunctionBody(workspaceSource, "restoreSupervisorVideoUi");
+  assert.match(restoreSource, /authorization_required/);
+  assert.match(restoreSource, /parseExplicitAction\(payload\.authorization_action\)/);
+  assert.match(
+    workspaceSource,
+    /restoredSupervisorUi\?\.kind === "authorization_required"[\s\S]*submitSupervisorAction[\s\S]*authorizationAction/,
+  );
+  assert.doesNotMatch(restoreSource, /token|authorization_header|credential/iu);
+});
+
+test("Supervisor 当前卡片按 Workflow 与 artifact 权威身份选择", () => {
+  assert.match(workspaceSource, /selectSupervisorArtifactMessage/);
+  assert.match(workspaceSource, /workflowId:\s*activeSupervisorVideoTarget\.workflow\.workflow_id/);
+  assert.match(workspaceSource, /artifactRef:\s*activeSupervisorVideoTarget\.artifactRef/);
+});
+
+test("Supervisor 新增全局素材复用统一分组 ID 与名称唯一化", () => {
+  const supervisorBranch = extractFunctionBody(workspaceSource, "renderSupervisorVideoArtifact");
+  assert.match(supervisorBranch, /addGlobalSceneAssetReference/);
+  assert.match(supervisorBranch, /added\.added_asset\.asset_id/);
+  assert.match(supervisorBranch, /added\.added_asset\.name/);
+  assert.doesNotMatch(supervisorBranch, /`manual-\$\{rawId\}`/);
+});

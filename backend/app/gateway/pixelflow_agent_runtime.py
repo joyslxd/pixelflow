@@ -311,6 +311,7 @@ async def _assemble_ready_runtime(
             repository=runtime.repository,
             operations=operation_bridge,
             clock=clock,
+            graph=graph_runtime.graph,
             external_job_observer=executor,
         )
         recovery = operation_bridge.build_recovery_runtime(

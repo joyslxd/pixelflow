@@ -58,10 +58,11 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 
 ## M13.2 / R2 视频 live handler Task 13 开发候选（2026-08-02）
 
-- 当前状态：`implementation_local_verified:Task13`；只完成隔离分支开发与非付费本地验证，尚未进入 Agent 长期分支，也未改变既有 `phase_integrated:R2 / awaiting_release_approval:R2` 发布记录。
+- 当前状态：`review_fix_local_verified:Task13 / awaiting_independent_review`；只完成隔离分支开发、独立审核意见整改与非付费本地验证，尚未进入 Agent 长期分支，也未改变既有 `phase_integrated:R2 / awaiting_release_approval:R2` 发布记录。
 - 后端：live handler 已消费标准 Turn 和当前 interrupt，按权威 `workflow_id + stage + artifact_ref` 执行 intake 取消、方向重生成、Plan 返回新创意、Plan 修订/历史恢复、场景包单镜与全局素材增删改、分镜重试/重生成、后处理、剪映和下载动作；有界修改由领域 Service 重算引用与执行提示，不接受客户端整份权威快照覆盖。
 - 前端：`WorkspacePage` 从 Snapshot 的五类 `ui_kind` 纯恢复视频表单和审核卡；Supervisor 控件只提交 `ExplicitActionSignal`，每次生成一个稳定响应 UUID，pending 同时保存原 action 与目标引用，已注册恢复只查询原 run。分镜文本先形成本地草稿，显式保存后只提交一次当前分镜；`frontend_v2` 和非视频路径保持原 handler。
-- 本地证据：后端 Task 13 焦点测试 `109 passed`；Web 正确测试环境 `399 passed`；`tsc --noEmit` 与生产构建通过。扩展视频 Workflow 门禁和最终中文/差异检查以本分支报告最终记录为准。
+- 审核整改：Operation 最终完成先在真实 Supervisor checkpoint 建立同一原 Turn 的 Graph pause，再由 Memory/SQL 原子写 state/workflow/messages、原 Turn `waiting_user`、open interrupt、`interrupt.opened` 和完成事件确认；Graph pause 后、Repository 事务前退出时，以完成事件时间重建确定性投影并复用首个 checkpoint 中断，租约重放不新建 Turn、不重复 Provider start。授权中断可跨 Executor 重启恢复原结构化 action，瞬时凭据不落库且 Provider start 不重复。前端卡片按 `run_id + workflow_id + artifact_ref + type` 精确选择；人工全局素材 ID、名称和 content asset 跨分组唯一。
+- 本地证据：Executor `26 passed`、Runtime Repository `82 passed`、视频 Operation `146 passed`、视频 Handler `53 passed`、场景包 `41 passed`、Gateway readiness `9 passed`；Web 正确测试环境 `404 passed`，`tsc --noEmit` 与生产构建通过。最终中文、静态和差异检查以本分支报告收尾记录为准。
 - 冻结边界：Task 14 的 Gateway 注册、`primary_execution_intents=[video]`、R2 真实全流程门禁、真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行。生产继续保持 R1 `assist / [] / 100 / true`；历史对话和运行中任务不迁移。
 - 详细证据：[R2 视频 live handler 开发记录](../test-reports/R2-video-live-handler-development.md)。
 

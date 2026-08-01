@@ -651,8 +651,27 @@ class SupervisorTurnExecutor:
                 interrupt,
                 task_key,
             )
+        response_document = self._thaw_json(interrupt.response)
+        if not isinstance(response_document, dict) or set(response_document) not in (
+            {"client_response_id", "value"},
+            {"client_response_id", "pre_input_context_version", "value"},
+        ):
+            raise ValueError("workflow interrupt 响应文档结构非法")
+        stored_snapshot_version = response_document.get(
+            "pre_input_context_version",
+            claim.turn.expected_context_version,
+        )
+        if (
+            type(stored_snapshot_version) is not int
+            or stored_snapshot_version < 0
+            or stored_snapshot_version != claim.turn.expected_context_version
+        ):
+            raise ValueError("workflow interrupt 响应快照身份冲突")
         request = InterruptResponseRequest.model_validate(
-            self._thaw_json(interrupt.response)
+            {
+                "client_response_id": response_document["client_response_id"],
+                "value": response_document["value"],
+            }
         )
         evidence = await self._load_authoritative_evidence(
             claim,

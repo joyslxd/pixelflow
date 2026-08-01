@@ -434,9 +434,33 @@ class VideoScenePackageWorkflowService:
             raise ValueError("新增资产 asset_id 格式不合法")
         replacement = _validated_review_asset_patch(asset_patch)
         assets = state.scene_package.global_assets
-        if normalized_id in _asset_lookup(assets):
+        existing_assets = _asset_lookup(assets)
+        visual_style = assets.get("visual_style")
+        visual_style_id = (
+            visual_style.get("asset_id")
+            if isinstance(visual_style, Mapping)
+            else None
+        )
+        if normalized_id in existing_assets or normalized_id == visual_style_id:
             raise ValueError("新增资产 asset_id 必须唯一")
+        expected_prefix = {
+            "characters": "character-manual-",
+            "scenes": "scene-manual-",
+            "props": "prop-manual-",
+        }[group]
+        if not normalized_id.startswith(expected_prefix):
+            raise ValueError("新增资产 asset_id 必须使用所属分组前缀")
         name = replacement.get("asset_name") or "新增全局资产"
+        if any(item.get("name") == name for item in existing_assets.values()):
+            raise ValueError("新增资产名称必须在三类全局资产中唯一")
+        content_asset_id = replacement.get("content_asset_id")
+        if content_asset_id is not None and any(
+            isinstance(item, Mapping)
+            and item.get("replacement_asset_id") == content_asset_id
+            for collection in ("characters", "scenes", "props")
+            for item in assets.get(collection, [])
+        ):
+            raise ValueError("同一 content asset 不能跨分组重复新增")
         image_field = "three_view_images" if group == "characters" else "images"
         added = {
             "asset_id": normalized_id,

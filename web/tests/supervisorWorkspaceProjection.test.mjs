@@ -12,6 +12,7 @@ const {
   mergeSupervisorMessagesWithPending,
   projectSupervisorSnapshot,
   projectSupervisorWorkflowProgress,
+  selectSupervisorArtifactMessage,
 } = await import(projectionModuleUrl);
 const {
   createSupervisorRuntimeState,
@@ -73,8 +74,11 @@ function snapshot(overrides = {}) {
       conversation_id: "conv-1",
       user_id: "user-1",
       role: "assistant",
+      run_id: "wf-video-1",
       content: "场景素材已生成",
       payload: {
+        workflow_id: "wf-video-1",
+        artifact_ref: "artifact:scene-assets-1",
         artifact: {
           type: "video_scene_packages",
           title: "视频场景包",
@@ -131,6 +135,94 @@ test("Snapshot 原子恢复消息、artifact、工作流和当前 interrupt", ()
   assert.equal(state.messages[1].artifact.type, "video_scene_packages");
   assert.equal(state.workflows[0].workflow_id, "wf-video-1");
   assert.equal(state.interrupt.interruptId, "interrupt-review-1");
+});
+
+test("双视频 Workflow 按权威 run 和 artifact 身份选择当前卡片", () => {
+  const first = message({
+    message_id: "assistant-wf-1",
+    role: "assistant",
+    run_id: "wf-video-1",
+    payload: {
+      workflow_id: "wf-video-1",
+      artifact_ref: "artifact:video-plan:wf-video-1:v1",
+      artifact: {
+        type: "plan",
+        title: "Workflow 1 方案",
+        description: "旧时间但属于当前目标",
+        actionLabel: "审核",
+      },
+    },
+    created_at: "2026-07-28T10:03:00Z",
+  });
+  const second = message({
+    message_id: "assistant-wf-2",
+    role: "assistant",
+    run_id: "wf-video-2",
+    payload: {
+      workflow_id: "wf-video-2",
+      artifact_ref: "artifact:video-plan:wf-video-2:v2",
+      artifact: {
+        type: "plan",
+        title: "Workflow 2 方案",
+        description: "更新时间更新但不能串卡",
+        actionLabel: "审核",
+      },
+    },
+    created_at: "2026-07-28T10:05:00Z",
+  });
+  const projected = projectSupervisorSnapshot(snapshot({
+    messages: [first, second],
+    workflows: [
+      workflow({
+        workflow_id: "wf-video-1",
+        current_stage: "plan_review",
+        latest_artifact_refs: ["artifact:video-plan:wf-video-1:v1"],
+      }),
+      workflow({
+        workflow_id: "wf-video-2",
+        current_stage: "plan_review",
+        latest_artifact_refs: ["artifact:video-plan:wf-video-2:v2"],
+      }),
+    ],
+  }), "conv-1");
+
+  assert.equal(selectSupervisorArtifactMessage(projected.messages, {
+    workflowId: "wf-video-1",
+    artifactRef: "artifact:video-plan:wf-video-1:v1",
+    allowedTypes: ["plan"],
+  })?.id, "assistant-wf-1");
+  assert.equal(selectSupervisorArtifactMessage(projected.messages, {
+    workflowId: "wf-video-2",
+    artifactRef: "artifact:video-plan:wf-video-2:v2",
+    allowedTypes: ["plan"],
+  })?.id, "assistant-wf-2");
+  assert.equal(selectSupervisorArtifactMessage(projected.messages, {
+    workflowId: "wf-video-1",
+    artifactRef: "artifact:video-plan:wf-video-2:v2",
+    allowedTypes: ["plan"],
+  }), null);
+});
+
+test("助手卡片拒绝 run、workflow 与 artifact 身份不一致", () => {
+  assert.throws(
+    () => projectSupervisorSnapshot(snapshot({
+      messages: [message({
+        role: "assistant",
+        run_id: "wf-video-1",
+        payload: {
+          workflow_id: "wf-video-2",
+          artifact_ref: "artifact:video-plan:wf-video-2:v1",
+          artifact: {
+            type: "plan",
+            title: "非法串卡",
+            description: "非法串卡",
+            actionLabel: "审核",
+          },
+        },
+      })],
+    }), "conv-1"),
+    /Supervisor 工作区投影状态不合法/,
+  );
 });
 
 test("Snapshot 投影保留尚未入库的当前会话 pending 用户消息", () => {

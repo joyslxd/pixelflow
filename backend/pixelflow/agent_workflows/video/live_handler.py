@@ -1148,6 +1148,7 @@ class VideoLiveWorkflowHandler:
             intake_context={
                 "source_prompt": command.current_input,
                 "materials": deepcopy_json(command.materials),
+                "intake_rounds": 0,
                 "reply_to_message_id": command.reply_to_message_id,
                 "artifact_refs": list(command.artifact_refs),
             },
@@ -1168,6 +1169,15 @@ class VideoLiveWorkflowHandler:
             payload={
                 "workflow_id": command.workflow_id,
                 "stage": workflow.current_stage,
+                "form_values": deepcopy_json(state.form_values),
+                "core_message": self._required_text(
+                    state.intake_context.get("source_prompt"),
+                    "source_prompt",
+                ),
+                "materials": deepcopy_json(
+                    state.intake_context.get("materials", [])
+                ),
+                "intake_rounds": state.intake_context.get("intake_rounds", 0),
             },
             workflow=workflow,
             workflow_version=envelope.workflow_version,
@@ -1513,6 +1523,15 @@ class VideoLiveWorkflowHandler:
             interrupt_payload={
                 "workflow_id": command.workflow_id,
                 "stage": state.current_stage.value,
+                "artifact_ref": command.decision.target_artifact_ref,
+                "authorization_action": {
+                    "action": command.decision.action.value,
+                    "intent": "video",
+                    "workflow_id": command.workflow_id,
+                    "stage": command.decision.target_stage,
+                    "artifact_ref": command.decision.target_artifact_ref,
+                    "patch": deepcopy_json(command.decision.patch),
+                },
             },
         )
 
@@ -1635,18 +1654,12 @@ class VideoLiveWorkflowHandler:
     ) -> str:
         """用权威状态版本区分同一原 Turn 内相继发生的同类中断。"""
 
-        occurrence_key = json.dumps(
-            [
-                reason_code,
-                workflow.workflow_id,
-                workflow.current_stage,
-                workflow.stage_version,
-                workflow_version,
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
+        return video_interrupt_occurrence_id(
+            turn_id=turn_id,
+            reason_code=reason_code,
+            workflow=workflow,
+            workflow_version=workflow_version,
         )
-        return interrupt_id(turn_id, occurrence_key)
 
     @staticmethod
     def _require_patch_keys(
@@ -1781,6 +1794,29 @@ class VideoLiveWorkflowHandler:
             raise VideoLiveStateConflictError("video_command_identity_required")
 
 
+def video_interrupt_occurrence_id(
+    *,
+    turn_id: str,
+    reason_code: str,
+    workflow: WorkflowRecord,
+    workflow_version: int,
+) -> str:
+    """为 Handler 与异步完成桥生成同一规则下的稳定视频中断身份。"""
+
+    occurrence_key = json.dumps(
+        [
+            reason_code,
+            workflow.workflow_id,
+            workflow.current_stage,
+            workflow.stage_version,
+            workflow_version,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return interrupt_id(turn_id, occurrence_key)
+
+
 def deepcopy_json(value: Any) -> JsonValue:
     """校验普通 JSON 并返回无可变别名的深拷贝。"""
 
@@ -1840,7 +1876,15 @@ def _projection_message(
         run_id=workflow.workflow_id,
         role="assistant",
         content=artifact_summary(normalized_artifact),
-        payload={"artifact": normalized_artifact},
+        payload={
+            "workflow_id": workflow.workflow_id,
+            "artifact_ref": (
+                workflow.latest_artifact_refs[-1]
+                if workflow.latest_artifact_refs
+                else None
+            ),
+            "artifact": normalized_artifact,
+        },
         created_at=now,
     )
 
@@ -1851,4 +1895,5 @@ __all__ = [
     "WorkflowDispatchResult",
     "artifact_summary",
     "deepcopy_json",
+    "video_interrupt_occurrence_id",
 ]

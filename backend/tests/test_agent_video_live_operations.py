@@ -11,25 +11,39 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
+from pixelflow.agent_runtime import SupervisorTurnExecutor, SupervisorTurnScope
 from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentEvent,
     AgentIntent,
+    ExplicitActionSignal,
     ExternalJobStatus,
+    InterruptResponseRequest,
     TurnRecord,
     TurnStatus,
     WorkflowKind,
+    WorkflowRecord,
+    WorkflowStatus,
 )
-from pixelflow.agent_runtime.graph import WorkflowCommand, workflow_namespace
+from pixelflow.agent_runtime.graph import (
+    FakeWorkflowRegistry,
+    WorkflowCommand,
+    make_agent_runtime_graph,
+    supervisor_namespace,
+    workflow_namespace,
+)
+from pixelflow.agent_runtime.identity import conversation_message_id
 from pixelflow.agent_runtime.jobs import (
     OperationManualRecoveryAction,
     OperationStartQuotaPausedError,
@@ -48,12 +62,21 @@ from pixelflow.agent_runtime.persistence import (
 )
 from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
 from pixelflow.agent_runtime.ports import OperationConflictError
+from pixelflow.agent_runtime.supervisor import (
+    ActionClassificationCandidate,
+    ActionClassificationRequest,
+    ActionClassificationTarget,
+    DecisionValidationRequest,
+    DeterministicResolution,
+    DeterministicResolutionStatus,
+)
 from pixelflow.agent_workflows.video import (
     VideoLiveWorkflowHandler,
     VideoPlanningWorkflowService,
     VideoPostProductionWorkflowService,
     VideoSceneGenerationWorkflowService,
     VideoScenePackageWorkflowService,
+    WorkflowDispatchResult,
     decode_video_workflow_state,
     encode_video_workflow_state,
     project_video_workflow_state,
@@ -65,16 +88,21 @@ from pixelflow.agent_workflows.video.live_operations import (
     VideoOperationAdapterResolver,
     VideoOperationCompletionHandler,
     VideoOperationStartRequest,
+    _operation_completion_interrupt,
 )
 from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.creative.plan_markdown import build_plan_markdown
 from pixelflow.intake.forms import draft_creative_directions, validate_form
 from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
+    PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
     SQLPixelFlowTaskStore,
 )
-from pixelflow.tasks.model import PixelFlowConversationRow
+from pixelflow.tasks.model import (
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
+)
 
 NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 USER_ID = "user-live-operation"
@@ -247,6 +275,79 @@ class _RecordingExternalJobObserver:
         self.states.append(state)
 
 
+class _ExplicitVideoDecisionService:
+    """让真实 Executor 只消费权威消息中已经登记的结构化视频动作。"""
+
+    async def decide(self, evidence):
+        explicit = evidence.explicit_action
+        if explicit is None:
+            raise AssertionError("集成测试必须提供结构化视频动作")
+        candidates = tuple(
+            ActionClassificationCandidate(
+                workflow_id=item.workflow_id,
+                intent=AgentIntent.VIDEO,
+                status=item.status,
+                current_stage=item.current_stage,
+                stage_version=item.stage_version,
+                context_version=item.context_version,
+                allowed_actions=tuple(AgentAction),
+                targets=(
+                    ActionClassificationTarget(
+                        target_stage=item.current_stage,
+                        target_artifact_ref=explicit.artifact_ref,
+                    ),
+                ),
+            )
+            for item in evidence.workflows
+        )
+        resolution = DeterministicResolution(
+            status=DeterministicResolutionStatus.RESOLVED,
+            action=explicit.action,
+            intent=explicit.intent or AgentIntent.VIDEO,
+            target_workflow_id=explicit.workflow_id,
+            target_stage=explicit.stage,
+            target_artifact_ref=explicit.artifact_ref,
+            reason_code="task13_explicit_action",
+            candidate_workflow_ids=(explicit.workflow_id,),
+        )
+        classification = ActionClassificationRequest(
+            turn_id=evidence.turn.turn_id,
+            content=evidence.content,
+            deterministic_resolution=resolution,
+            candidates=candidates,
+            context_summary="Task 13 完成恢复集成测试",
+        )
+        decision = ActionDecision(
+            action=explicit.action,
+            intent=explicit.intent or AgentIntent.VIDEO,
+            target_workflow_id=explicit.workflow_id,
+            target_stage=explicit.stage,
+            target_artifact_ref=explicit.artifact_ref,
+            confidence=1,
+            requires_confirmation=False,
+            patch=dict(explicit.patch),
+            reason_code="task13_explicit_action",
+            idempotency_key=classification.idempotency_key,
+        )
+        return SimpleNamespace(
+            decision=decision,
+            validation_request=DecisionValidationRequest(
+                decision=decision,
+                classification_request=classification,
+                current_candidates=candidates,
+                allowed_global_actions=(
+                    AgentAction.ANSWER_ONLY,
+                    AgentAction.CLARIFY,
+                    AgentAction.START_WORKFLOW,
+                ),
+                expected_context_version=evidence.expected_context_version,
+                current_context_version=evidence.authoritative_context_version,
+            ),
+            context=object(),
+            answer_message=None,
+        )
+
+
 class _FailingExternalJobObserver(_RecordingExternalJobObserver):
     """证明指标失败不能反向破坏已提交的 M06 完成投递。"""
 
@@ -369,7 +470,14 @@ async def _video_repository(
         await connection.run_sync(
             lambda sync_connection: Base.metadata.create_all(
                 sync_connection,
-                tables=(tuple(AGENT_RUNTIME_TABLES) + tuple(AGENT_RUNTIME_SUPPORT_TABLES) + (PixelFlowConversationRow.__table__,)),
+                tables=(
+                    tuple(AGENT_RUNTIME_TABLES)
+                    + tuple(AGENT_RUNTIME_SUPPORT_TABLES)
+                    + (
+                        PixelFlowConversationRow.__table__,
+                        PixelFlowConversationMessageRow.__table__,
+                    )
+                ),
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -2155,6 +2263,423 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
         await runtime.run_once()
         replayed = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
         assert [item.message_id for item in replayed] == [message.message_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_operation_completion_opens_real_graph_interrupt_and_resumes_original_turn(
+    kind: RepositoryKind,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """完成事务、Graph checkpoint 和公开响应必须共同闭合同一原 Turn。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider(
+        status_results=[
+            {
+                "job_id": f"provider-scripted-{index}",
+                "status": "succeeded",
+                "result": {
+                    "video_url": f"https://videos.example.com/scene-{index}.mp4",
+                    "raw": {},
+                },
+            }
+            for index in range(1, 4)
+        ]
+    )
+    async with _video_repository(
+        kind,
+        tmp_path / f"task13-completion-graph-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        reviewed = _reviewed_scene_package_state()
+        await _commit_seed_state(repository, store, reviewed)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        vault = TransientCredentialVault()
+        handler = VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=_UnusedCapabilities(),
+            credential_provider=vault,
+            operation_port=operations,
+            clock=clock,
+        )
+        checkpointer = InMemorySaver()
+        graph = make_agent_runtime_graph(
+            registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+            checkpointer=checkpointer,
+        )
+        executor = SupervisorTurnExecutor(
+            repository=repository,
+            task_store=store,
+            decision_service=_ExplicitVideoDecisionService(),
+            graph=graph,
+            credential_vault=vault,
+            clock=clock.now,
+            worker_id=f"task13-graph-{kind}",
+            heartbeat_interval_seconds=0.01,
+            scan_interval_seconds=0.01,
+        )
+        original_turn_id = "turn-task13-operation-action"
+        client_input_id = UUID("00000000-0000-4000-8000-000000001301")
+        artifact_ref = reviewed.scene_package_artifact_ref
+        explicit = ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id=WORKFLOW_ID,
+            stage=reviewed.current_stage.value,
+            artifact_ref=artifact_ref,
+            patch={},
+        )
+        turn = TurnRecord(
+            turn_id=original_turn_id,
+            conversation_id=CONVERSATION_ID,
+            client_input_id=client_input_id,
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=clock.now(),
+        )
+        await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id=conversation_message_id(CONVERSATION_ID, client_input_id),
+                conversation_id=CONVERSATION_ID,
+                user_id=USER_ID,
+                role="user",
+                content="开始生成场景视频",
+                payload={
+                    "client_message_id": str(client_input_id),
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [artifact_ref],
+                    "explicit_action": explicit.model_dump(mode="json"),
+                },
+                created_at=clock.now().isoformat(),
+            )
+        )
+        await repository.enqueue_turn_for_execution(USER_ID, turn, now=clock.now())
+        try:
+            await executor.notify_turn(
+                SupervisorTurnScope(
+                    user_id=USER_ID,
+                    conversation_id=CONVERSATION_ID,
+                    turn_id=original_turn_id,
+                ),
+                credential=None,
+            )
+            await executor.wait_idle()
+            assert provider.start_calls == 0
+
+            authorization = await repository.get_open_interrupt(
+                USER_ID,
+                CONVERSATION_ID,
+            )
+            assert authorization is not None
+            assert authorization.kind == "authorization_required"
+            assert authorization.turn_id == original_turn_id
+            authorization_document = authorization.model_dump(mode="json")
+            authorization_action = ExplicitActionSignal.model_validate(
+                authorization_document["payload"]["authorization_action"]
+            )
+            assert authorization_action == explicit
+            assert not any(
+                marker in json.dumps(
+                    authorization_document,
+                    ensure_ascii=False,
+                ).lower()
+                for marker in ("bearer ", "authorization", "token", "credential")
+                if marker != "authorization"
+            )
+
+            await executor.aclose()
+            executor = SupervisorTurnExecutor(
+                repository=repository,
+                task_store=store,
+                decision_service=_ExplicitVideoDecisionService(),
+                graph=graph,
+                credential_vault=vault,
+                clock=clock.now,
+                worker_id=f"task13-graph-restarted-{kind}",
+                heartbeat_interval_seconds=0.01,
+                scan_interval_seconds=0.01,
+            )
+            authorization_response_id = UUID(
+                "00000000-0000-4000-8000-000000001300"
+            )
+            authorization_request = InterruptResponseRequest(
+                client_response_id=authorization_response_id,
+                value={
+                    "content": "继续生成场景视频",
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [artifact_ref],
+                    "explicit_action": authorization_action,
+                },
+            )
+            authorization_response = await repository.register_interrupt_response(
+                USER_ID,
+                CONVERSATION_ID,
+                authorization.interrupt_id,
+                request=authorization_request,
+                message=PixelFlowConversationMessageRecord(
+                    message_id=conversation_message_id(
+                        CONVERSATION_ID,
+                        authorization_response_id,
+                    ),
+                    conversation_id=CONVERSATION_ID,
+                    user_id=USER_ID,
+                    role="user",
+                    content=authorization_request.value.content,
+                    payload={
+                        "client_message_id": str(authorization_response_id),
+                        "interrupt_id": authorization.interrupt_id,
+                        "value": authorization_request.value.model_dump(mode="json"),
+                        "explicit_action": authorization_action.model_dump(
+                            mode="json"
+                        ),
+                    },
+                    created_at=clock.now().isoformat(),
+                ),
+                responded_at=clock.now(),
+            )
+            await executor.notify_interrupt(
+                authorization_response.interrupt,
+                credential=TransientTurnCredential(FAKE_AUTHORIZATION),
+            )
+            await executor.wait_idle()
+            assert provider.start_calls == 3
+
+            original_completion_commit = repository.commit_operation_completion
+            failed_after_checkpoint = False
+
+            async def fail_first_actionable_completion(*args, **kwargs):
+                nonlocal failed_after_checkpoint
+                if (
+                    kwargs.get("open_interrupt") is not None
+                    and not failed_after_checkpoint
+                ):
+                    failed_after_checkpoint = True
+                    raise RuntimeError("模拟 Graph pause 后、Repository 事务前退出")
+                return await original_completion_commit(*args, **kwargs)
+
+            monkeypatch.setattr(
+                repository,
+                "commit_operation_completion",
+                fail_first_actionable_completion,
+            )
+            completion = VideoOperationCompletionHandler(
+                repository=repository,
+                operations=operations,
+                clock=clock,
+                graph=graph,
+            )
+            runtime = operations.build_recovery_runtime(
+                resumer=completion,
+                worker_id=f"task13-completion-graph-{kind}",
+            )
+            for _ in range(3):
+                clock.advance(seconds=3)
+                await runtime.run_once()
+
+            assert failed_after_checkpoint is True
+            assert (
+                await repository.get_open_interrupt(USER_ID, CONVERSATION_ID)
+                is None
+            )
+            checkpoint_before_retry = await graph.aget_state(
+                supervisor_namespace(CONVERSATION_ID).as_runnable_config()
+            )
+            paused_dispatch = WorkflowDispatchResult.model_validate(
+                checkpoint_before_retry.values["workflow_dispatch_result"]
+            )
+            assert paused_dispatch.interrupt is not None
+
+            clock.advance(seconds=31)
+            await runtime.run_once()
+
+            opened = await repository.get_open_interrupt(USER_ID, CONVERSATION_ID)
+            assert opened is not None
+            assert opened.opened_at == paused_dispatch.interrupt.opened_at
+            assert opened.turn_id == original_turn_id
+            assert opened.workflow_id == WORKFLOW_ID
+            assert opened.kind == "video_scene_video_review"
+            assert opened.payload["stage"] == "scene_video_review"
+            completed_envelope = await repository.get_video_state(
+                USER_ID,
+                WORKFLOW_ID,
+            )
+            assert completed_envelope is not None
+            completed_state = decode_video_workflow_state(completed_envelope)
+            assert (
+                opened.payload["artifact_ref"]
+                == completed_state.scene_videos_artifact_ref
+            )
+            events = await repository.list_events(USER_ID, CONVERSATION_ID)
+            opened_events = [
+                item
+                for item in events
+                if item.type.value == "interrupt.opened"
+                and item.payload["interrupt"]["interrupt_id"] == opened.interrupt_id
+            ]
+            assert len(opened_events) == 1
+            graph_snapshot = await graph.aget_state(
+                supervisor_namespace(CONVERSATION_ID).as_runnable_config()
+            )
+            assert any(
+                item.value.get("interrupt_id") == opened.interrupt_id
+                for item in graph_snapshot.interrupts
+            )
+
+            turns_before = await repository.list_turns(USER_ID, CONVERSATION_ID)
+            response_id = UUID("00000000-0000-4000-8000-000000001302")
+            response_action = ExplicitActionSignal(
+                action=AgentAction.MODIFY_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id=WORKFLOW_ID,
+                stage="scene_video_review",
+                artifact_ref=opened.payload["artifact_ref"],
+                patch={
+                    "scene_id": "scene-1",
+                    "scene_patch": {"storyline": "补充产品近景"},
+                },
+            )
+            request = InterruptResponseRequest(
+                client_response_id=response_id,
+                value={
+                    "content": "修改第一条分镜",
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [opened.payload["artifact_ref"]],
+                    "explicit_action": response_action,
+                },
+            )
+            response = await repository.register_interrupt_response(
+                USER_ID,
+                CONVERSATION_ID,
+                opened.interrupt_id,
+                request=request,
+                message=PixelFlowConversationMessageRecord(
+                    message_id=conversation_message_id(CONVERSATION_ID, response_id),
+                    conversation_id=CONVERSATION_ID,
+                    user_id=USER_ID,
+                    role="user",
+                    content=request.value.content,
+                    payload={
+                        "client_message_id": str(response_id),
+                        "interrupt_id": opened.interrupt_id,
+                        "value": request.value.model_dump(mode="json"),
+                        "explicit_action": response_action.model_dump(mode="json"),
+                    },
+                    created_at=clock.now().isoformat(),
+                ),
+                responded_at=clock.now(),
+            )
+            await executor.notify_interrupt(response.interrupt)
+            await executor.wait_idle()
+
+            turns_after = await repository.list_turns(USER_ID, CONVERSATION_ID)
+            assert [item.turn_id for item in turns_after] == [
+                item.turn_id for item in turns_before
+            ]
+            assert provider.start_calls == 3
+            restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+            assert restored is not None
+            assert restored.last_turn_id == original_turn_id
+        finally:
+            await executor.aclose()
+
+
+@pytest.mark.parametrize(
+    (
+        "completion_stage",
+        "scene_generation",
+        "expected_kind",
+        "expected_reason_code",
+    ),
+    [
+        (
+            "scene_video_review",
+            True,
+            "video_scene_video_review",
+            "video_scene_video_review_required",
+        ),
+        (
+            "quality_review",
+            False,
+            "video_result_review",
+            "video_result_review_required",
+        ),
+        (
+            "video_review",
+            False,
+            "video_result_review",
+            "video_result_review_required",
+        ),
+        (
+            "delivery",
+            False,
+            "video_result_review",
+            "video_result_review_required",
+        ),
+    ],
+)
+def test_operation_completion_interrupt_matrix_is_stable(
+    completion_stage: str,
+    scene_generation: bool,
+    expected_kind: str,
+    expected_reason_code: str,
+) -> None:
+    """分镜、合并、质检和剪映完成都必须映射到可恢复的有限人工中断。"""
+
+    artifact_ref = f"artifact:task13:{completion_stage}"
+    workflow = WorkflowRecord(
+        workflow_id=WORKFLOW_ID,
+        conversation_id=CONVERSATION_ID,
+        kind=WorkflowKind.VIDEO,
+        status=WorkflowStatus.AWAITING_USER,
+        current_stage=completion_stage,
+        stage_version=7,
+        latest_artifact_refs=[artifact_ref],
+        context_version=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    first = _operation_completion_interrupt(
+        user_id=USER_ID,
+        turn_id="turn-task13-completion-matrix",
+        workflow=workflow,
+        workflow_version=11,
+        scene_generation=scene_generation,
+        opened_at=NOW,
+    )
+    replay = _operation_completion_interrupt(
+        user_id=USER_ID,
+        turn_id="turn-task13-completion-matrix",
+        workflow=workflow,
+        workflow_version=11,
+        scene_generation=scene_generation,
+        opened_at=NOW,
+    )
+
+    assert first == replay
+    assert first.kind == expected_kind
+    assert first.reason_code == expected_reason_code
+    assert first.payload == {
+        "workflow_id": WORKFLOW_ID,
+        "stage": completion_stage,
+        "artifact_ref": artifact_ref,
+        "ui_kind": "video_result_review",
+    }
+    assert first.turn_id == "turn-task13-completion-matrix"
+    assert first.thread_id == supervisor_namespace(
+        CONVERSATION_ID
+    ).thread_id
 
 
 @pytest.mark.asyncio

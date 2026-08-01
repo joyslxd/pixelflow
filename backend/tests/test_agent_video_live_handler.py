@@ -391,8 +391,23 @@ async def test_start_workflow_opens_intake_interrupt(
 ) -> None:
     """首轮决策不带目标，Handler 信任 Router 预分配的 Workflow ID。"""
 
+    materials = [
+        {
+            "type": "image",
+            "url": "https://assets.example.com/ring-front.png",
+        },
+        {
+            "type": "image",
+            "url": "https://assets.example.com/ring-side.png",
+        },
+    ]
+    command = replace(
+        command_factory(action=AgentAction.START_WORKFLOW),
+        current_input="用这两张参考图生成智能戒指广告",
+        materials=materials,
+    )
     result = await video_handler.dispatch(
-        command_factory(action=AgentAction.START_WORKFLOW)
+        command
     )
 
     assert isinstance(result, WorkflowDispatchResult)
@@ -400,7 +415,15 @@ async def test_start_workflow_opens_intake_interrupt(
     assert result.state.state_kind.value == "planning"
     assert result.interrupt is not None
     assert result.interrupt.kind == "video_intake_form"
-    assert result.interrupt.payload["ui_kind"] == "video_intake_form"
+    assert result.interrupt.payload == {
+        "workflow_id": command.workflow_id,
+        "stage": "intake",
+        "ui_kind": "video_intake_form",
+        "form_values": {},
+        "core_message": "用这两张参考图生成智能戒指广告",
+        "materials": materials,
+        "intake_rounds": 0,
+    }
     assert result.turn_status is TurnStatus.WAITING_USER
 
 
@@ -725,13 +748,31 @@ async def test_video_handler_plan_continue_without_credential_opens_auth_interru
         command_factory(
             action=AgentAction.CONTINUE_WORKFLOW,
             workflow=workflow,
+            target_artifact_ref=workflow.latest_artifact_refs[0],
         )
     )
 
     assert result.workflow.current_stage == "generate_scene_assets"
     assert result.interrupt is not None
     assert result.interrupt.kind == "authorization_required"
-    assert result.interrupt.payload["ui_kind"] == "authorization_required"
+    assert result.interrupt.payload == {
+        "workflow_id": workflow.workflow_id,
+        "stage": "generate_scene_assets",
+        "artifact_ref": workflow.latest_artifact_refs[0],
+        "ui_kind": "authorization_required",
+        "authorization_action": {
+            "action": "continue_workflow",
+            "intent": "video",
+            "workflow_id": workflow.workflow_id,
+            "stage": workflow.current_stage,
+            "artifact_ref": workflow.latest_artifact_refs[0],
+            "patch": {},
+        },
+    }
+    assert "token" not in str(result.interrupt.payload).lower()
+    assert "authorization" not in str(
+        result.interrupt.payload["authorization_action"]
+    ).lower()
     assert credential_provider.turn_ids == ["turn-video-1"]
     assert capabilities.generate_scene_assets_calls == 0
 

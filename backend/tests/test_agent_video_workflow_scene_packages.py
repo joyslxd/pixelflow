@@ -592,6 +592,126 @@ def test_review_asset_accepts_matching_digital_human_generation_reference() -> N
     assert replaced_character["third_asset_id"] == "digital-human-7"
 
 
+@pytest.mark.parametrize(
+    ("asset_group", "asset_id"),
+    [
+        ("characters", "character-manual-host"),
+        ("scenes", "scene-manual-studio"),
+        ("props", "prop-manual-bottle"),
+    ],
+)
+def test_review_asset_requires_group_prefix_and_accepts_three_legal_prefixes(
+    asset_group: str,
+    asset_id: str,
+) -> None:
+    service, review = _scene_package_review_state()
+
+    added = service.add_review_asset(
+        review,
+        asset_group=asset_group,
+        asset_id=asset_id,
+        asset_patch={
+            "source": "image_asset",
+            "display_image_url": f"https://assets.example.com/{asset_id}.png",
+            "generation_reference_url": f"https://assets.example.com/{asset_id}-source.png",
+            "asset_name": f"新增{asset_group}",
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert any(
+        item["asset_id"] == asset_id
+        for item in added.scene_package.global_assets[asset_group]
+    )
+
+
+@pytest.mark.parametrize(
+    ("asset_group", "asset_id"),
+    [
+        ("characters", "manual-without-group-prefix"),
+        ("characters", "scene-manual-wrong-group"),
+        ("scenes", "prop-manual-wrong-group"),
+        ("props", "character-manual-wrong-group"),
+    ],
+)
+def test_review_asset_rejects_missing_or_cross_group_prefix(
+    asset_group: str,
+    asset_id: str,
+) -> None:
+    service, review = _scene_package_review_state()
+
+    with pytest.raises(ValueError, match="前缀"):
+        service.add_review_asset(
+            review,
+            asset_group=asset_group,
+            asset_id=asset_id,
+            asset_patch={
+                "source": "image_asset",
+                "display_image_url": "https://assets.example.com/new.png",
+                "generation_reference_url": "https://assets.example.com/new-source.png",
+                "asset_name": "新增素材",
+            },
+            now=review.updated_at + timedelta(seconds=1),
+        )
+
+
+def test_review_asset_rejects_global_id_and_name_conflicts() -> None:
+    service, review = _scene_package_review_state()
+    global_assets = review.scene_package.global_assets
+    existing_character = global_assets["characters"][0]
+    visual_style_id = global_assets["visual_style"]["asset_id"]
+
+    for asset_group, asset_id, asset_name, expected in (
+        ("characters", visual_style_id, "唯一角色", "唯一"),
+        ("props", "prop-manual-duplicate-name", existing_character["name"], "名称"),
+    ):
+        with pytest.raises(ValueError, match=expected):
+            service.add_review_asset(
+                review,
+                asset_group=asset_group,
+                asset_id=asset_id,
+                asset_patch={
+                    "source": "image_asset",
+                    "display_image_url": "https://assets.example.com/new.png",
+                    "generation_reference_url": "https://assets.example.com/new-source.png",
+                    "asset_name": asset_name,
+                },
+                now=review.updated_at + timedelta(seconds=1),
+            )
+
+
+def test_review_asset_rejects_reusing_content_asset_across_groups() -> None:
+    service, review = _scene_package_review_state()
+    first = service.add_review_asset(
+        review,
+        asset_group="props",
+        asset_id="prop-manual-content-42",
+        asset_patch={
+            "source": "image_asset",
+            "display_image_url": "https://assets.example.com/content-42.png",
+            "generation_reference_url": "https://assets.example.com/content-42.png",
+            "content_asset_id": "content-42",
+            "asset_name": "素材库水杯",
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    with pytest.raises(ValueError, match="content asset"):
+        service.add_review_asset(
+            first,
+            asset_group="scenes",
+            asset_id="scene-manual-content-42",
+            asset_patch={
+                "source": "image_asset",
+                "display_image_url": "https://assets.example.com/content-42.png",
+                "generation_reference_url": "https://assets.example.com/content-42.png",
+                "content_asset_id": "content-42",
+                "asset_name": "素材库展台",
+            },
+            now=first.updated_at + timedelta(seconds=1),
+        )
+
+
 def test_review_asset_rejects_mismatched_digital_human_generation_reference() -> None:
     service, review = _scene_package_review_state()
     character = review.scene_package.global_assets["characters"][0]

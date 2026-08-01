@@ -786,6 +786,7 @@ class VideoRuntimeRepository(Protocol):
         workflow: WorkflowRecord,
         expected_workflow_version: int,
         messages: tuple[SupervisorProjectionMessage, ...],
+        open_interrupt: StoredAgentInterrupt | None,
         occurred_at: datetime,
     ) -> WorkflowRecord: ...
 
@@ -2222,6 +2223,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
         workflow: WorkflowRecord,
         expected_workflow_version: int,
         messages: tuple[SupervisorProjectionMessage, ...],
+        open_interrupt: StoredAgentInterrupt | None = None,
         occurred_at: datetime,
     ) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -2254,11 +2256,16 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                 reason_code="operation_completion",
                 idempotency_key=normalized_claim.event.event_id,
             ),
-            turn_status=TurnStatus.COMPLETED,
+            turn_status=(
+                TurnStatus.WAITING_USER
+                if open_interrupt is not None
+                else TurnStatus.COMPLETED
+            ),
             workflow_state=workflow_state,
             workflow=workflow,
             expected_workflow_version=expected_workflow_version,
             messages=messages,
+            open_interrupt=open_interrupt,
             occurred_at=normalized_time,
         )
         _, normalized_commit = _validate_commit_contract(synthetic_claim, commit)
@@ -2299,11 +2306,38 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         self._compare_and_set_video_state(normalized_commit)
                         self._upsert_workflow_and_active_projection(synthetic_claim, normalized_commit)
                         self._upsert_projection_messages(owner, normalized_commit.messages)
+                        self._apply_interrupt_transition(
+                            synthetic_claim,
+                            normalized_commit,
+                        )
+                        if normalized_commit.open_interrupt is not None:
+                            turn_key = (owner, workflow_state.last_turn_id)
+                            current_turn = self._turns.get(turn_key)
+                            if (
+                                current_turn is None
+                                or current_turn.conversation_id
+                                != workflow_state.conversation_id
+                                or current_turn.status
+                                not in {
+                                    TurnStatus.COMPLETED,
+                                    TurnStatus.WAITING_USER,
+                                }
+                            ):
+                                raise AgentRuntimeRecordConflictError(
+                                    "Operation 完成中断的原 Turn 状态不允许恢复",
+                                )
+                            self._turns[turn_key] = _clone(
+                                current_turn.model_copy(
+                                    update={"status": TurnStatus.WAITING_USER},
+                                )
+                            )
                         self._append_events(
                             synthetic_claim,
                             normalized_commit,
                             operation_event_id=normalized_claim.event.event_id,
-                            include_turn_terminal=False,
+                            include_turn_terminal=(
+                                normalized_commit.open_interrupt is not None
+                            ),
                         )
                         delivery = self._event_delivery[event_key]
                         delivery.status = "published"
@@ -4090,6 +4124,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         workflow: WorkflowRecord,
         expected_workflow_version: int,
         messages: tuple[SupervisorProjectionMessage, ...],
+        open_interrupt: StoredAgentInterrupt | None = None,
         occurred_at: datetime,
     ) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -4122,11 +4157,16 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                 reason_code="operation_completion",
                 idempotency_key=normalized_claim.event.event_id,
             ),
-            turn_status=TurnStatus.COMPLETED,
+            turn_status=(
+                TurnStatus.WAITING_USER
+                if open_interrupt is not None
+                else TurnStatus.COMPLETED
+            ),
             workflow_state=workflow_state,
             workflow=workflow,
             expected_workflow_version=expected_workflow_version,
             messages=messages,
+            open_interrupt=open_interrupt,
             occurred_at=normalized_time,
         )
         _, normalized_commit = _validate_commit_contract(synthetic_claim, commit)
@@ -4151,6 +4191,32 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         if operation_row is None
                         else _operation_from_row(operation_row)
                     )
+                    turn_row = None
+                    if normalized_commit.open_interrupt is not None:
+                        turn_row = (
+                            await session.scalars(
+                                select(PixelFlowAgentTurnRow)
+                                .where(
+                                    PixelFlowAgentTurnRow.user_id == owner,
+                                    PixelFlowAgentTurnRow.conversation_id
+                                    == workflow_state.conversation_id,
+                                    PixelFlowAgentTurnRow.turn_id
+                                    == workflow_state.last_turn_id,
+                                )
+                                .with_for_update()
+                            )
+                        ).one_or_none()
+                        if (
+                            turn_row is None
+                            or turn_row.status
+                            not in {
+                                TurnStatus.COMPLETED.value,
+                                TurnStatus.WAITING_USER.value,
+                            }
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "Operation 完成中断的原 Turn 状态不允许恢复",
+                            )
                     _validate_operation_completion_binding(
                         user_id=owner,
                         event=normalized_claim.event,
@@ -4168,6 +4234,11 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         session,
                         owner,
                         normalized_commit.messages,
+                    )
+                    await self._sql_apply_interrupt_transition(
+                        session,
+                        synthetic_claim,
+                        normalized_commit,
                     )
                     event_row = (
                         await session.scalars(
@@ -4205,8 +4276,13 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         synthetic_claim,
                         normalized_commit,
                         action_key=normalized_claim.event.event_id,
-                        include_turn_terminal=False,
+                        include_turn_terminal=(
+                            normalized_commit.open_interrupt is not None
+                        ),
                     )
+                    if turn_row is not None:
+                        turn_row.status = TurnStatus.WAITING_USER.value
+                        turn_row.updated_at = normalized_time
                     event_row.delivery_status = "published"
                     event_row.published_at = normalized_time
                     await session.flush()

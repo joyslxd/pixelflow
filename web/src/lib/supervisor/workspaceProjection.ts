@@ -26,6 +26,9 @@ export interface SupervisorChatArtifact {
 export interface SupervisorChatMessage {
   id: string;
   conversationId: string;
+  runId?: string;
+  workflowId?: string;
+  artifactRef?: string;
   role: "user" | "assistant";
   content: string;
   time: string;
@@ -173,15 +176,55 @@ function projectMessage(value: unknown, conversationId: string): SupervisorChatM
   }
   const materials = readMaterials(value, payload);
   const artifact = readArtifact(value, payload);
+  const runId = value.run_id ?? value.runId;
+  const workflowId = payload.workflow_id ?? value.workflowId;
+  const artifactRef = payload.artifact_ref ?? value.artifactRef;
+  if (artifact && value.role === "assistant" && (
+    !isNonEmptyString(runId)
+    || !isNonEmptyString(workflowId)
+    || runId !== workflowId
+    || !isNonEmptyString(artifactRef)
+    || !/^artifact:\S+$/u.test(artifactRef)
+  )) return fail();
+  if (!artifact && (
+    (runId !== undefined && !isNonEmptyString(runId))
+    || (workflowId !== undefined && !isNonEmptyString(workflowId))
+    || (artifactRef !== undefined && !isNonEmptyString(artifactRef))
+  )) return fail();
   return {
     id: messageId,
     conversationId,
+    ...(isNonEmptyString(runId) ? { runId } : {}),
+    ...(isNonEmptyString(workflowId) ? { workflowId } : {}),
+    ...(isNonEmptyString(artifactRef) ? { artifactRef } : {}),
     role: value.role,
     content: value.content,
     time,
     ...(materials.length > 0 ? { materials } : {}),
     ...(artifact ? { artifact } : {}),
   };
+}
+
+export function selectSupervisorArtifactMessage(
+  messages: readonly SupervisorChatMessage[],
+  target: {
+    workflowId: string;
+    artifactRef: string | null;
+    allowedTypes: readonly string[];
+  },
+): SupervisorChatMessage | null {
+  if (
+    !isNonEmptyString(target.workflowId)
+    || !isNonEmptyString(target.artifactRef)
+    || !target.allowedTypes.every((item) => includesValue(ARTIFACT_TYPE_VALUES, item))
+  ) return null;
+  const allowed = new Set(target.allowedTypes);
+  return [...messages].reverse().find((message) => (
+    message.runId === target.workflowId
+    && message.workflowId === target.workflowId
+    && message.artifactRef === target.artifactRef
+    && Boolean(message.artifact && allowed.has(message.artifact.type))
+  )) ?? null;
 }
 
 function upsertMessage(
