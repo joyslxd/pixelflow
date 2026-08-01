@@ -319,6 +319,62 @@ async def test_completed_video_delivery_allows_explicit_delivery_actions(
 
 
 @pytest.mark.asyncio
+async def test_unaccepted_video_review_allows_explicit_failed_draft_retry() -> None:
+    """未确认视频审核态只为显式失败草稿重试开放 RETRY_FAILED。"""
+
+    result = await _service(None).decide(
+        _evidence(
+            workflows=(
+                _workflow(
+                    status=WorkflowStatus.AWAITING_USER,
+                    current_stage="video_review",
+                ),
+            ),
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.RETRY_FAILED,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+                stage="video_review",
+                patch={"jianying_action": "start"},
+            ),
+        )
+    )
+
+    assert result.decision.action is AgentAction.RETRY_FAILED
+    assert result.decision.patch == {"jianying_action": "start"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        _workflow(current_stage="plan_review"),
+        _workflow(kind=WorkflowKind.IMAGE, current_stage="video_review"),
+        _workflow(kind=WorkflowKind.PPT, current_stage="video_review"),
+        _workflow(kind=WorkflowKind.VIDEO_ANALYSIS, current_stage="video_review"),
+    ],
+)
+async def test_unaccepted_video_retry_exception_rejects_other_intents_and_stages(
+    workflow: WorkflowRecord,
+) -> None:
+    """未确认剪映重试例外不能扩散到其他阶段或其他 intent。"""
+
+    with pytest.raises(DecisionValidationError, match="action_not_allowed"):
+        await _service(None).decide(
+            _evidence(
+                workflows=(workflow,),
+                explicit_action=ExplicitActionSignal(
+                    action=AgentAction.RETRY_FAILED,
+                    intent=AgentIntent(workflow.kind.value),
+                    workflow_id="wf-1",
+                    stage=workflow.current_stage,
+                    patch={"jianying_action": "start"},
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "workflow",
     [

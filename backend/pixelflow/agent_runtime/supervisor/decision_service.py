@@ -592,9 +592,23 @@ def _classification_candidates(
 def _allowed_workflow_actions(
     workflow: WorkflowRecord,
 ) -> tuple[AgentAction, ...]:
-    """只为已完成的视频交付态开放下载继续与剪映失败重试。"""
+    """只为精确的视频交付阶段开放对应的继续与失败重试动作。"""
 
     actions = _WORKFLOW_ACTIONS_BY_STATUS[workflow.status]
+    if (
+        workflow.kind is WorkflowKind.VIDEO
+        and workflow.status is WorkflowStatus.AWAITING_USER
+        and workflow.current_stage == "video_review"
+    ):
+        return (
+            AgentAction.ANSWER_ONLY,
+            AgentAction.CONTINUE_WORKFLOW,
+            AgentAction.MODIFY_WORKFLOW,
+            AgentAction.REGENERATE_STAGE,
+            AgentAction.RETRY_FAILED,
+            AgentAction.SWITCH_WORKFLOW,
+            AgentAction.CANCEL_WORKFLOW,
+        )
     if (
         workflow.kind is WorkflowKind.VIDEO
         and workflow.status is WorkflowStatus.COMPLETED

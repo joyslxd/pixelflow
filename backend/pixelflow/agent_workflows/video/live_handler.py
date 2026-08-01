@@ -561,6 +561,17 @@ class VideoLiveWorkflowHandler:
                     raise VideoLiveStateConflictError(
                         "video_action_patch_invalid"
                     )
+                if action is AgentAction.RETRY_FAILED:
+                    version_id = state.current_storyboard_version_id
+                    current_record = state.jianying_draft_records.get(version_id)
+                    if (
+                        state.pending_operation is not None
+                        or current_record is None
+                        or current_record.get("status") not in {"failed", "timeout"}
+                    ):
+                        raise VideoLiveStateConflictError(
+                            "video_jianying_retry_requires_failed_or_timeout"
+                        )
                 project_name = (
                     None
                     if "project_name" not in patch

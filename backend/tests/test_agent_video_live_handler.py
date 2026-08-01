@@ -1300,6 +1300,124 @@ async def test_real_chain_retries_failed_draft_after_video_completion(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["failed", "timeout"],
+)
+async def test_real_chain_retries_failed_draft_before_video_acceptance(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    terminal_status: str,
+) -> None:
+    """未确认视频的失败或超时草稿可显式重试，且不得提前接受视频。"""
+
+    from test_agent_video_workflow_delivery import (
+        _FakeJianyingDraftSkill,
+        _video_review_state,
+    )
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+    from pixelflow.jianying_draft.models import (
+        JianyingDraftResult,
+        JianyingDraftStatus,
+    )
+
+    review, operation_port, _, _ = await _video_review_state()
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(review)
+    terminal = await delivery_service.generate_jianying_with_skill(
+        delivery,
+        skill=_FakeJianyingDraftSkill(
+            [
+                JianyingDraftResult(
+                    status=JianyingDraftStatus(terminal_status),
+                    message="剪映草稿未生成，请重试。",
+                )
+            ]
+        ),
+    )
+    _, workflow = await state_repository.seed_state(terminal)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(terminal.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+
+    result = await _dispatch_through_real_supervisor(
+        handler=handler,
+        workflow=workflow,
+        action=AgentAction.RETRY_FAILED,
+        patch={"jianying_action": "start"},
+        sequence=206 if terminal_status == "failed" else 207,
+    )
+    retried = decode_video_workflow_state(result.state)
+    version_id = retried.current_storyboard_version_id
+
+    assert result.workflow.status is WorkflowStatus.AWAITING_USER
+    assert result.workflow.current_stage == "video_review"
+    assert retried.pending_operation is not None
+    assert retried.operation_attempts[version_id] == 2
+    assert retried.postproduction_state.finalized_by_user is False
+    assert result.messages[0].payload["artifact"]["videoAccepted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "draft_state",
+    ["missing", "running", "succeeded"],
+)
+async def test_real_chain_rejects_unaccepted_draft_retry_without_failed_terminal(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    draft_state: str,
+) -> None:
+    """未确认视频只有当前版本草稿为失败或超时时才能显式重试。"""
+
+    from test_agent_video_workflow_delivery import (
+        _FakeJianyingDraftSkill,
+        _succeeded_result,
+        _video_review_state,
+    )
+
+    from pixelflow.agent_workflows.video import VideoDeliveryWorkflowService
+
+    review, operation_port, _, _ = await _video_review_state()
+    delivery_service = VideoDeliveryWorkflowService(operation_port)
+    delivery = await delivery_service.initialize(review)
+    if draft_state == "running":
+        delivery = await delivery_service.start_jianying_draft(delivery)
+    elif draft_state == "succeeded":
+        delivery = await delivery_service.generate_jianying_with_skill(
+            delivery,
+            skill=_FakeJianyingDraftSkill([_succeeded_result()]),
+        )
+    _, workflow = await state_repository.seed_state(delivery)
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(delivery.updated_at + timedelta(seconds=1)),
+        operation_port=operation_port,
+        delivery_service=delivery_service,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_jianying_retry_requires_failed_or_timeout",
+    ):
+        await _dispatch_through_real_supervisor(
+            handler=handler,
+            workflow=workflow,
+            action=AgentAction.RETRY_FAILED,
+            patch={"jianying_action": "start"},
+            sequence={"missing": 208, "running": 209, "succeeded": 210}[
+                draft_state
+            ],
+        )
+
+
+@pytest.mark.asyncio
 async def test_real_chain_records_completed_jianying_download(
     state_repository: _SeededMemoryVideoRuntimeRepository,
 ) -> None:
