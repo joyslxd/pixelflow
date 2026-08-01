@@ -244,6 +244,18 @@ def _clarification_resume_command(
         raise SupervisorRoutingError(
             reason_code="clarification_resume_identity_conflict",
         )
+    raw_validation_request = response["decision_validation_request"]
+    if not isinstance(raw_validation_request, Mapping) or any(
+        type(raw_validation_request.get(field_name)) is not int
+        or raw_validation_request[field_name] < 0
+        for field_name in (
+            "expected_context_version",
+            "current_context_version",
+        )
+    ):
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_validation_context",
+        )
     try:
         request = InterruptResponseRequest.model_validate(
             {
@@ -253,7 +265,7 @@ def _clarification_resume_command(
         )
         decision = ActionDecision.model_validate(response["decision"])
         validation_request = DecisionValidationRequest.model_validate(
-            response["decision_validation_request"]
+            raw_validation_request
         )
     except ValidationError:
         raise SupervisorRoutingError(

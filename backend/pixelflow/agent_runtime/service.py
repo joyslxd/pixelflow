@@ -467,15 +467,14 @@ class AgentRuntimeService:
             context_version=registration.context_version,
         )
 
-    async def respond_to_interrupt(
+    async def preflight_interrupt_response(
         self,
         *,
         user_id: str,
         conversation_id: str,
-        interrupt_id: str,
-        request: InterruptResponseRequest | dict[str, Any],
-    ) -> AgentTurnJobResponse:
-        """幂等登记人工响应，并始终返回原 waiting Turn/run。"""
+        request: Any,
+    ) -> InterruptResponseRequest:
+        """只读校验人工响应的所有权和公开 DTO，不登记任何状态。"""
 
         owner = user_id.strip()
         conversation = await self.require_conversation(
@@ -503,6 +502,24 @@ class AgentRuntimeService:
             raise AgentRuntimeInterruptRequestValidationError(
                 "live interrupt 响应对象非法",
             ) from None
+        return body
+
+    async def respond_to_interrupt(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        request: InterruptResponseRequest | dict[str, Any],
+    ) -> AgentTurnJobResponse:
+        """幂等登记人工响应，并始终返回原 waiting Turn/run。"""
+
+        owner = user_id.strip()
+        body = await self.preflight_interrupt_response(
+            user_id=owner,
+            conversation_id=conversation_id,
+            request=request,
+        )
         try:
             registration = (
                 await self._turn_registration_store.register_interrupt_response(

@@ -115,6 +115,37 @@ def test_snapshot_interrupt_uses_frozen_projection_schema() -> None:
     assert projection_schema["additionalProperties"] is False
 
 
+def test_interrupt_response_request_uses_frozen_openapi_schema() -> None:
+    """人工响应入口必须继续公开精确 DTO，不能退化为通用 object。"""
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_conversations.router)
+    schema = app.openapi()
+    operation = schema["paths"][
+        "/agent/conversations/{conversation_id}/interrupts/"
+        "{interrupt_id}/responses"
+    ]["post"]
+    request_schema = operation["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert request_schema == {
+        "$ref": "#/components/schemas/InterruptResponseRequest",
+    }
+    request_component = schema["components"]["schemas"][
+        "InterruptResponseRequest"
+    ]
+    assert set(request_component["properties"]) == {
+        "client_response_id",
+        "value",
+    }
+    assert set(request_component["required"]) == {
+        "client_response_id",
+        "value",
+    }
+    assert request_component["additionalProperties"] is False
+
+
 class _FakeDecisionService:
     """只生成可由现有 Validator 复验的视频启动决策。"""
 

@@ -12,13 +12,14 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
 from pixelflow.agent_runtime.contracts import (
+    InterruptResponseRequest,
     TurnStartRequest,
 )
 from pixelflow.agent_runtime.service import (
@@ -242,6 +243,48 @@ def _runtime_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="Agent Runtime request failed")
 
 
+async def _preflight_agent_interrupt_response(
+    conversation_id: str,
+    interrupt_id: str,
+    request: Request,
+) -> None:
+    """在 FastAPI DTO 校验前只读确认所有权并生成固定安全错误。"""
+
+    try:
+        raw_body = await request.json()
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
+        ) from None
+    service = _agent_runtime_service(request)
+    try:
+        await service.preflight_interrupt_response(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            request=raw_body,
+        )
+    except AgentRuntimeLegacyInterruptOwnershipError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+                "interrupt_id": interrupt_id,
+            },
+        ) from exc
+    except AgentRuntimeInterruptRequestValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
+        ) from exc
+    except (
+        AgentRuntimeInterruptStateError,
+        AgentRuntimeUnavailableError,
+        LookupError,
+    ) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
 def _transient_turn_credential(request: Request) -> TransientTurnCredential | None:
     """只把当前 HTTP Authorization 封装为不可序列化的一次性凭据。"""
 
@@ -458,11 +501,12 @@ async def get_agent_turn_job(
 @router.post(
     "/{conversation_id}/interrupts/{interrupt_id}/responses",
     response_model=AgentTurnJobResponse,
+    dependencies=[Depends(_preflight_agent_interrupt_response)],
 )
 async def respond_to_agent_interrupt(
     conversation_id: str,
     interrupt_id: str,
-    body: dict[str, Any],
+    body: InterruptResponseRequest,
     request: Request,
 ) -> AgentTurnJobResponse:
     """live 对话在原 Turn 上登记响应；旧 v2 继续保持原所有权。"""

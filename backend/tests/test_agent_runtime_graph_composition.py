@@ -666,6 +666,89 @@ def test_global_clarification_resume_rejects_invalid_snapshot_identity(
     )
 
 
+def test_global_clarification_resume_rejects_non_mapping_validation_request() -> None:
+    """内部恢复信封的 Validator 请求必须保留原始映射边界。"""
+
+    state = _global_clarification_state("conv-invalid-validation-mapping")
+    response = _global_clarification_resume_value(state)
+    response["decision_validation_request"] = []
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == (
+        "invalid_clarification_resume_validation_context"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_version"),
+    [
+        ("expected_context_version", True),
+        ("current_context_version", False),
+        ("expected_context_version", -1),
+        ("current_context_version", -1),
+        ("expected_context_version", "1"),
+        ("current_context_version", "1"),
+        ("expected_context_version", None),
+        ("current_context_version", None),
+    ],
+)
+def test_global_clarification_resume_rejects_raw_validation_context_version(
+    field: str,
+    invalid_version: object,
+) -> None:
+    """Validator 双版本在 Pydantic 归一化前必须分别拒绝非法原值。"""
+
+    state = _global_clarification_state("conv-invalid-validation-version")
+    response = _global_clarification_resume_value(state)
+    validation = dict(response["decision_validation_request"])
+    validation[field] = invalid_version
+    response["decision_validation_request"] = validation
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == (
+        "invalid_clarification_resume_validation_context"
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["expected_context_version", "current_context_version"],
+)
+def test_global_clarification_resume_requires_raw_validation_context_version(
+    missing_field: str,
+) -> None:
+    """Validator 双版本任一缺失时都必须在模型解析前 fail-closed。"""
+
+    state = _global_clarification_state("conv-missing-validation-version")
+    response = _global_clarification_resume_value(state)
+    validation = dict(response["decision_validation_request"])
+    validation.pop(missing_field)
+    response["decision_validation_request"] = validation
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == (
+        "invalid_clarification_resume_validation_context"
+    )
+
+
 def test_global_clarification_resume_rejects_context_version_rollback() -> None:
     """恢复快照不得回退已经进入 Graph checkpoint 的版本。"""
 
