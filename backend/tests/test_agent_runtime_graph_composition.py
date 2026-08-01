@@ -14,6 +14,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import interrupt
 
 from app.gateway.pixelflow_agent_runtime import (
+    GatewayWorkflowRegistry,
     make_pixelflow_agent_graph_runtime,
 )
 from pixelflow import make_pixelflow_graph
@@ -1034,6 +1035,9 @@ async def test_gateway_graph_runtime_reuses_shared_checkpointer_and_cleans_state
     async with make_pixelflow_agent_graph_runtime(
         app,
         checkpointer=checkpointer,
+        registry=GatewayWorkflowRegistry(
+            {WorkflowKind.IMAGE: _ImmediateHandler()},
+        ),
     ) as runtime:
         assert app.state.pixelflow_agent_graph_runtime is runtime
         assert runtime.graph_id == AGENT_RUNTIME_GRAPH_ID
