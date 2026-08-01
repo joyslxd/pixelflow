@@ -1356,11 +1356,15 @@ _JIANYING_DRAFT_PROVIDER_FIELDS = frozenset({"request", "retry_failed"})
 _SAFE_PROVIDER_METADATA_KEYS = frozenset(
     {"authmode", "tokenbudget", "tokencount", "tokencounthint", "tokenhint"}
 )
+_ESCAPED_ASSIGNMENT_QUOTE_PATTERN = re.compile(
+    r"\\(?:u(?:0022|0027|0060)|[\"'`])",
+    re.IGNORECASE,
+)
 _CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"(?:(?P<assignment_quote>[\"'`])?\b(?:authorization|"
+    r"(?:[\"'`]?\b(?:authorization|"
     r"(?:access|refresh|auth|bearer|client|session|id|api|provider)"
     r"[\s_-]*token|token|(?:api[\s_-]*)?key|secret|password|credential)\b"
-    r"(?(assignment_quote)(?P=assignment_quote))\s*[:=]\s*"
+    r"[\"'`]?\s*\]?\s*[:=]\s*"
     r"(?:bearer\s+)?\S+|\bbearer\s+[a-z0-9._~+/=-]{6,})",
     re.IGNORECASE,
 )
@@ -1429,12 +1433,26 @@ def _ensure_provider_request_has_no_credentials(value: object) -> None:
             _ensure_provider_request_has_no_credentials(child)
         return
     if isinstance(value, str):
-        normalized = unicodedata.normalize("NFKC", value)
+        normalized = _normalize_credential_assignment_syntax(value)
         if (
             _CREDENTIAL_VALUE_PATTERN.search(normalized)
             or _JWT_CREDENTIAL_VALUE_PATTERN.search(normalized)
         ):
             raise ValueError("Provider 请求包含敏感凭据")
+
+
+def _normalize_credential_assignment_syntax(value: str) -> str:
+    """只为安全识别展开常见引号转义，不改写原业务值。"""
+
+    normalized = unicodedata.normalize("NFKC", value)
+
+    def replace_quote(match: re.Match[str]) -> str:
+        escaped = match.group(0)
+        if escaped[1].casefold() == "u":
+            return chr(int(escaped[-4:], 16))
+        return escaped[-1]
+
+    return _ESCAPED_ASSIGNMENT_QUOTE_PATTERN.sub(replace_quote, normalized)
 
 
 def _external_job_ref(operation: OperationRecord) -> ExternalJobRef:

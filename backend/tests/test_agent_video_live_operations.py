@@ -1168,6 +1168,235 @@ def test_video_operation_start_request_allows_quoted_business_json_and_unassigne
 
 
 @pytest.mark.parametrize(
+    ("stage", "provider_request", "credential_key", "secret_marker"),
+    [
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "prompt": r'{\"Authorization\":\"task8-probe-secret-value\"}',
+            },
+            "Authorization",
+            "task8-probe-secret-value",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "storyline": r"{\u0022api_key\u0022:\u0022task8-probe-secret-value\u0022}",
+            },
+            "api_key",
+            "task8-probe-secret-value",
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "user_feedback": 'headers["Authorization"] = "task8-probe-secret-value"',
+            },
+            "Authorization",
+            "task8-probe-secret-value",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "shot_description": {
+                    "text": "headers [ 'api_key' ] = 'task8-probe-secret-value'"
+                },
+            },
+            "api_key",
+            "task8-probe-secret-value",
+        ),
+        (
+            "merge_video",
+            {
+                "scene_videos": [
+                    {
+                        "scene_id": "scene-1",
+                        "note": 'Authorization": "task8-probe-secret-value"',
+                    }
+                ]
+            },
+            "Authorization",
+            "task8-probe-secret-value",
+        ),
+        (
+            "jianying_draft",
+            {
+                "request": {
+                    "payload": '"Authorization\': "task8-probe-secret-value"'
+                }
+            },
+            "Authorization",
+            "task8-probe-secret-value",
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "scene_packages": [
+                    {
+                        "notes": "ｈｅａｄｅｒｓ［＂ＡＵＴＨＯＲＩＺＡＴＩＯＮ＂］＝＂task8-probe-secret-value＂"
+                    }
+                ],
+            },
+            "ＡＵＴＨＯＲＩＺＡＴＩＯＮ",
+            "task8-probe-secret-value",
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "user_feedback": r"headers[\u0027api_key\u0027]=\u0027task8-probe-secret-value\u0027",
+            },
+            "api_key",
+            "task8-probe-secret-value",
+        ),
+        (
+            "merge_video",
+            {
+                "scene_videos": {
+                    "scene-1": {
+                        "note": r"headers[\u0060client_token\u0060]=\u0060task8-probe-secret-value\u0060"
+                    }
+                }
+            },
+            "client_token",
+            "task8-probe-secret-value",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "prompt": 'HeAdErS [ "aUtHoRiZaTiOn" ] = "task8-probe-secret-value"',
+            },
+            "aUtHoRiZaTiOn",
+            "task8-probe-secret-value",
+        ),
+        (
+            "jianying_draft",
+            {
+                "request": {
+                    "payload": r"{\'API_KEY\':\'task8-probe-secret-value\'}"
+                }
+            },
+            "API_KEY",
+            "task8-probe-secret-value",
+        ),
+    ],
+)
+def test_video_operation_start_request_rejects_extra_i1b_assignment_syntax_without_echo(
+    stage: str,
+    provider_request: dict[str, JsonValue],
+    credential_key: str,
+    secret_marker: str,
+) -> None:
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    with pytest.raises(ValueError) as raised:
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        ).model_dump(mode="json")
+
+    error_text = str(raised.value)
+    assert "Provider 请求包含敏感凭据" in error_text
+    assert error_text.count("Provider 请求包含敏感凭据") == 1
+    assert credential_key not in error_text
+    assert secret_marker not in error_text
+
+
+@pytest.mark.parametrize(
+    ("stage", "provider_request"),
+    [
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "prompt": r'{\"product_sku\":\"SK-ABCDEF12345678901234567890\"}',
+            },
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "storyline": r"{\u0022model_id\u0022:\u0022pk-product-model-2026-edition\u0022}",
+            },
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "user_feedback": "仅讨论 Authorization、api_key、client_token 字段名，不填写赋值",
+            },
+        ),
+        (
+            "merge_video",
+            {
+                "scene_videos": [
+                    {
+                        "scene_id": "scene-1",
+                        "note": "Authorization/api_key/client_token 是接口说明字段",
+                    }
+                ]
+            },
+        ),
+        (
+            "jianying_draft",
+            {
+                "request": {
+                    "payload": "headers [ 'product_api_keychain' ] = 'catalog-value'"
+                }
+            },
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "prompt": "SK-ABCDEF12345678901234567890",
+            },
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "user_feedback": 'headers["product_sku"] = "SK-ABCDEF12345678901234567890"',
+            },
+        ),
+    ],
+)
+def test_video_operation_start_request_allows_extra_i1b_business_text_unchanged(
+    stage: str,
+    provider_request: dict[str, JsonValue],
+) -> None:
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    live_request = VideoOperationStartRequest(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        operation_request=operation_request,
+        provider_request=provider_request,
+    )
+
+    assert live_request.model_dump(mode="json")["provider_request"] == provider_request
+
+
+@pytest.mark.parametrize(
     "credential_key",
     [
         "provider_keys",
