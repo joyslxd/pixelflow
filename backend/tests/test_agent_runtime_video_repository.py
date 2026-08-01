@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -74,6 +74,43 @@ NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 OWNER = "user-1"
 CONVERSATION = "conversation-1"
 WORKFLOW = "workflow-1"
+
+
+def _base_dict_setitem(value: object) -> None:
+    dict.__setitem__(value, "base-setitem", 1)  # type: ignore[arg-type]
+
+
+def _base_dict_update(value: object) -> None:
+    dict.update(value, {"base-update": 2})  # type: ignore[arg-type]
+
+
+def _base_dict_init(value: object) -> None:
+    dict.__init__(value, {"base-init": 3})  # type: ignore[arg-type]
+
+
+def _base_list_append(value: object) -> None:
+    list.append(value, "base-append")  # type: ignore[arg-type]
+
+
+def _base_list_setitem(value: object) -> None:
+    list.__setitem__(value, slice(None), ["base-setitem"])  # type: ignore[arg-type]
+
+
+def _base_list_init(value: object) -> None:
+    list.__init__(value, ["base-init"])  # type: ignore[arg-type]
+
+
+_NATIVE_BASE_MUTATIONS: tuple[
+    tuple[str, Literal["mapping", "sequence"], Callable[[object], None]],
+    ...,
+] = (
+    ("dict.__setitem__", "mapping", _base_dict_setitem),
+    ("dict.update", "mapping", _base_dict_update),
+    ("dict.__init__", "mapping", _base_dict_init),
+    ("list.append", "sequence", _base_list_append),
+    ("list.__setitem__", "sequence", _base_list_setitem),
+    ("list.__init__", "sequence", _base_list_init),
+)
 
 
 def _decision(
@@ -437,6 +474,9 @@ async def test_versioned_context_snapshot_is_deeply_read_only_and_json_serializa
         assert snapshot.task_messages[0].payload == {
             "artifact": {"refs": ["artifact:input"]}
         }
+        assert snapshot.task_messages[0].payload["artifact"]["refs"] == (
+            "artifact:input",
+        )
         assert snapshot.summaries[0].user_goals == ["生成商品视频"]
         assert snapshot.summaries[0].workflow_states == {
             WORKFLOW: "running:intake:v1"
@@ -454,6 +494,86 @@ async def test_versioned_context_snapshot_is_deeply_read_only_and_json_serializa
         )
 
     assert json.loads(encoded) == document
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize(
+    "_mutation_name,target_kind,mutate",
+    _NATIVE_BASE_MUTATIONS,
+    ids=[item[0] for item in _NATIVE_BASE_MUTATIONS],
+)
+@pytest.mark.asyncio
+async def test_versioned_context_snapshot_rejects_native_base_mutators(
+    kind: RepositoryKind,
+    _mutation_name: str,
+    target_kind: Literal["mapping", "sequence"],
+    mutate: Callable[[object], None],
+) -> None:
+    """防止原生基类 descriptor 绕过 Context DTO 的深只读边界。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id="message-context-native-mutator",
+                conversation_id=CONVERSATION,
+                user_id=OWNER,
+                role="user",
+                content="请生成商品视频",
+                payload={"artifact": {"refs": ["artifact:input"]}},
+                created_at=NOW.isoformat(),
+            )
+        )
+        snapshot = await repository.read_versioned_context_snapshot(
+            OWNER,
+            CONVERSATION,
+            expected_context_version=0,
+        )
+        before = snapshot.model_dump(mode="json")
+        target = (
+            snapshot.task_messages[0].payload
+            if target_kind == "mapping"
+            else snapshot.task_messages[0].payload["artifact"]["refs"]
+        )
+
+        with pytest.raises(TypeError):
+            mutate(target)
+        assert snapshot.model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize(
+    "_mutation_name,target_kind,mutate",
+    _NATIVE_BASE_MUTATIONS,
+    ids=[item[0] for item in _NATIVE_BASE_MUTATIONS],
+)
+def test_projection_message_rejects_native_base_mutators(
+    _mutation_name: str,
+    target_kind: Literal["mapping", "sequence"],
+    mutate: Callable[[object], None],
+) -> None:
+    """防止原生基类 descriptor 绕过既有投影 DTO 的深只读边界。"""
+
+    message = _message(message_id="message-native-mutator")
+    before = message.model_dump(mode="json")
+    target = (
+        message.payload
+        if target_kind == "mapping"
+        else message.payload["artifact"]["refs"]
+    )
+
+    with pytest.raises(TypeError):
+        mutate(target)
+    assert message.model_dump(mode="json") == before
+
+
+def test_projection_message_frozen_array_keeps_list_and_tuple_equality() -> None:
+    """冻结数组必须同时保持 JSON 列表与只读 tuple 的稳定比较语义。"""
+
+    refs = _message(message_id="message-frozen-array-equality").payload[
+        "artifact"
+    ]["refs"]
+    assert refs == ["artifact-1"]
+    assert refs == ("artifact-1",)
 
 
 async def seed_two_turns(repository: VideoRuntimeRepository) -> None:

@@ -112,40 +112,13 @@ class VideoWorkflowStateConflictError(RuntimeError):
     """视频状态 CAS 版本或动作幂等摘要发生冲突。"""
 
 
-def _reject_frozen_json_mutation(*_args: object, **_kwargs: object) -> None:
-    """统一拒绝只读 JSON 容器的所有原地修改入口。"""
+class _FrozenJsonList(tuple[object, ...]):
+    """保留 JSON 数组比较语义，同时拒绝原地修改。"""
 
-    raise TypeError("冻结的 JSON 值不能修改")
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, (list, tuple)) and tuple(self) == tuple(other)
 
-
-class _FrozenJsonDict(dict[str, object]):
-    """保持原生 JSON 对象兼容性的只读字典。"""
-
-    __setitem__ = _reject_frozen_json_mutation
-    __delitem__ = _reject_frozen_json_mutation
-    clear = _reject_frozen_json_mutation
-    pop = _reject_frozen_json_mutation
-    popitem = _reject_frozen_json_mutation
-    setdefault = _reject_frozen_json_mutation
-    update = _reject_frozen_json_mutation
-    __ior__ = _reject_frozen_json_mutation
-
-
-class _FrozenJsonList(list[object]):
-    """保持原生 JSON 数组兼容性的只读列表。"""
-
-    __setitem__ = _reject_frozen_json_mutation
-    __delitem__ = _reject_frozen_json_mutation
-    append = _reject_frozen_json_mutation
-    clear = _reject_frozen_json_mutation
-    extend = _reject_frozen_json_mutation
-    insert = _reject_frozen_json_mutation
-    pop = _reject_frozen_json_mutation
-    remove = _reject_frozen_json_mutation
-    reverse = _reject_frozen_json_mutation
-    sort = _reject_frozen_json_mutation
-    __iadd__ = _reject_frozen_json_mutation
-    __imul__ = _reject_frozen_json_mutation
+    __hash__ = None
 
 
 def _validate_json(value: object, ancestors: set[int]) -> None:
@@ -156,7 +129,7 @@ def _validate_json(value: object, ancestors: set[int]) -> None:
             raise ValueError("JSON 数字必须是有限值")
         return
     if type(value) not in {dict, list} and not isinstance(
-        value, (MappingProxyType, _FrozenJsonDict, _FrozenJsonList)
+        value, (MappingProxyType, _FrozenJsonList)
     ):
         raise ValueError("只允许 JSON 原生值")
     identity = id(value)
@@ -205,7 +178,7 @@ def _json_copy(value: object, *, field_name: str) -> dict[str, JsonValue]:
 
 def _freeze_json(value: object) -> object:
     if isinstance(value, Mapping):
-        return _FrozenJsonDict(
+        return MappingProxyType(
             {key: _freeze_json(child) for key, child in value.items()}
         )
     if isinstance(value, (list, tuple)):
@@ -591,7 +564,7 @@ class _FrozenContextSummary(ContextSummary):
         object.__setattr__(
             self,
             "workflow_states",
-            _FrozenJsonDict(dict(self.workflow_states)),
+            MappingProxyType(dict(self.workflow_states)),
         )
 
     @field_serializer(

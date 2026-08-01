@@ -248,7 +248,7 @@ def _context_messages(
             "message_id": message_id,
             "role": "user",
             "content": str(getattr(message, "content", "")),
-            "payload": getattr(message, "payload", {}),
+            "payload": _serialized_message_payload(message),
         }
         _insert_message_candidate(
             candidates,
@@ -262,7 +262,7 @@ def _context_messages(
             "message_id": message_id,
             "role": str(getattr(message, "role", "assistant")),
             "content": str(getattr(message, "content", "")),
-            "payload": getattr(message, "payload", {}),
+            "payload": _serialized_message_payload(message),
         }
         created_at = getattr(message, "created_at", None)
         _insert_message_candidate(
@@ -290,6 +290,21 @@ def _context_messages(
             start=1,
         )
     )
+
+
+def _serialized_message_payload(message: object) -> dict[str, JsonValue]:
+    """只在单条冻结消息的消费边界导出普通 JSON payload。"""
+
+    serializer = getattr(message, "model_dump", None)
+    if not callable(serializer):
+        raise ValueError("权威消息缺少稳定 JSON serializer")
+    document = serializer(mode="json")
+    if not isinstance(document, dict):
+        raise ValueError("权威消息序列化结果必须是 JSON 对象")
+    payload = document.get("payload", {})
+    if not isinstance(payload, dict):
+        raise ValueError("权威消息 payload 必须是 JSON 对象")
+    return payload
 
 
 def _insert_message_candidate(
