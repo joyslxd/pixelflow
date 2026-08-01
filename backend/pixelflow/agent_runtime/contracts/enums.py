@@ -89,6 +89,7 @@ class AgentEventType(StrEnum):
     MESSAGE_UPSERTED = "message.upserted"
     WORKFLOW_PROGRESSED = "workflow.progressed"
     INTERRUPT_OPENED = "interrupt.opened"
+    INTERRUPT_RESPONDED = "interrupt.responded"
     INTERRUPT_CLOSED = "interrupt.closed"
     EXTERNAL_JOB_STATE_CHANGED = "external_job.state_changed"
     ERROR_RAISED = "error.raised"

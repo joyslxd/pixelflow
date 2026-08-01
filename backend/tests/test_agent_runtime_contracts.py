@@ -146,6 +146,7 @@ def test_contract_enums_match_the_frozen_wire_values() -> None:
         "message.upserted",
         "workflow.progressed",
         "interrupt.opened",
+        "interrupt.responded",
         "interrupt.closed",
         "external_job.state_changed",
         "error.raised",

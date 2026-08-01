@@ -27,8 +27,16 @@ from pixelflow.agent_workflows.video import (
     decode_video_workflow_state,
     project_video_workflow_state,
 )
-from pixelflow.tasks import AGENT_RUNTIME_CONTEXT_KEY, PixelFlowTaskStore
-from pixelflow.tasks.model import PixelFlowConversationRow
+from pixelflow.tasks import (
+    AGENT_RUNTIME_CONTEXT_KEY,
+    MemoryPixelFlowTaskStore,
+    PixelFlowConversationMessageRecord,
+    PixelFlowTaskStore,
+)
+from pixelflow.tasks.model import (
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
+)
 
 from ..contracts import (
     ActionDecision,
@@ -37,11 +45,13 @@ from ..contracts import (
     AgentInterruptProjection,
     ExternalJobRef,
     ExternalJobStatus,
+    InterruptResponseRequest,
     TurnRecord,
     TurnStatus,
     WorkflowRecord,
 )
 from ..contracts.base import ContractModel
+from ..identity import conversation_message_id
 from .compaction_queue import MemoryCompactionQueueRepository, SQLCompactionQueueRepository
 from .models import (
     PixelFlowAgentCompactionLockRow,
@@ -388,6 +398,17 @@ class StoredAgentInterrupt(AgentInterruptProjection):
         return _thaw_json(value)
 
 
+@dataclass(frozen=True, slots=True)
+class InterruptResponseRegistration:
+    """原 Turn 上一次人工响应登记或幂等回读的权威结果。"""
+
+    interrupt: StoredAgentInterrupt
+    turn: TurnRecord
+    message: PixelFlowConversationMessageRecord
+    context_version: int
+    created: bool
+
+
 class OwnedTurnRecord(_FrozenContractModel):
     """恢复扫描使用的所有者与排期快照。"""
 
@@ -567,6 +588,17 @@ class VideoRuntimeRepository(Protocol):
         responded_at: datetime,
     ) -> StoredAgentInterrupt: ...
 
+    async def register_interrupt_response(
+        self,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        *,
+        request: InterruptResponseRequest,
+        message: PixelFlowConversationMessageRecord,
+        responded_at: datetime,
+    ) -> InterruptResponseRegistration: ...
+
     async def get_active_workflow_id(
         self, user_id: str, conversation_id: str
     ) -> str | None: ...
@@ -658,6 +690,170 @@ def _stable_event_identity(*parts: str) -> tuple[str, str]:
     key = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
     identity = uuid5(NAMESPACE_URL, f"pixelflow-video-runtime-event:{key}").hex
     return f"evt_{identity}", f"cursor_{identity}"
+
+
+def _normalize_interrupt_response(
+    request: InterruptResponseRequest,
+) -> InterruptResponseRequest:
+    """重新校验可能被调用方绕过 frozen 约束污染的响应 DTO。"""
+
+    return InterruptResponseRequest.model_validate(
+        request.model_dump(mode="python"),
+    )
+
+
+def _response_document(
+    request: InterruptResponseRequest,
+    *,
+    pre_input_context_version: int | None = None,
+) -> dict[str, JsonValue]:
+    document: dict[str, JsonValue] = {
+        "client_response_id": str(request.client_response_id),
+        "value": request.value.model_dump(mode="json"),
+    }
+    if pre_input_context_version is not None:
+        document["pre_input_context_version"] = pre_input_context_version
+    return document
+
+
+def _interrupt_matches_response(
+    interrupt: StoredAgentInterrupt,
+    request: InterruptResponseRequest,
+) -> bool:
+    response = interrupt.response
+    return (
+        interrupt.response_id == request.client_response_id
+        and response is not None
+        and response.get("client_response_id") == str(request.client_response_id)
+        and response.get("value") == request.value.model_dump(mode="json")
+    )
+
+
+def _response_context_version(interrupt: StoredAgentInterrupt) -> int:
+    response = interrupt.response
+    pre_input = None if response is None else response.get("pre_input_context_version")
+    if isinstance(pre_input, bool) or not isinstance(pre_input, int) or pre_input < 0:
+        raise AgentRuntimeRecordConflictError("interrupt 响应缺少合法快照身份")
+    return pre_input + 1
+
+
+def _validate_response_message(
+    *,
+    user_id: str,
+    conversation_id: str,
+    interrupt_id: str,
+    request: InterruptResponseRequest,
+    message: PixelFlowConversationMessageRecord,
+) -> PixelFlowConversationMessageRecord:
+    """只允许登记由响应合同确定性派生的公开用户消息。"""
+
+    normalized = deepcopy(message)
+    value = request.value.model_dump(mode="json")
+    expected_payload = {
+        "client_message_id": str(request.client_response_id),
+        "interrupt_id": interrupt_id,
+        "value": value,
+        "explicit_action": value.get("explicit_action"),
+    }
+    if (
+        normalized.message_id
+        != conversation_message_id(conversation_id, request.client_response_id)
+        or normalized.conversation_id != conversation_id
+        or normalized.user_id != user_id
+        or normalized.role != "user"
+        or normalized.content != request.value.content
+        or normalized.payload != expected_payload
+    ):
+        raise AgentRuntimeRecordConflictError("interrupt 响应消息身份或内容不一致")
+    return normalized
+
+
+def _response_message_matches(
+    stored: PixelFlowConversationMessageRecord,
+    expected: PixelFlowConversationMessageRecord,
+) -> bool:
+    """幂等回读忽略重试请求产生的新时间戳，只比较公开响应语义。"""
+
+    return all(
+        getattr(stored, field) == getattr(expected, field)
+        for field in (
+            "message_id",
+            "conversation_id",
+            "user_id",
+            "role",
+            "content",
+            "payload",
+        )
+    )
+
+
+def _response_event_specs(
+    *,
+    interrupt: StoredAgentInterrupt,
+    turn: TurnRecord,
+    message: PixelFlowConversationMessageRecord,
+    client_response_id: UUID,
+) -> tuple[tuple[AgentEventType, dict[str, JsonValue], str], ...]:
+    """生成 Memory/SQL 共用的四类响应登记事件。"""
+
+    response_id = str(client_response_id)
+    return (
+        (
+            AgentEventType.INTERRUPT_RESPONDED,
+            {
+                "interrupt_id": interrupt.interrupt_id,
+                "response_id": response_id,
+            },
+            interrupt.interrupt_id,
+        ),
+        (
+            AgentEventType.MESSAGE_UPSERTED,
+            {"message": message.to_dict()},
+            message.message_id,
+        ),
+        (
+            AgentEventType.INPUT_STATE_CHANGED,
+            {
+                "turn_id": turn.turn_id,
+                "status": TurnStatus.WAITING_USER.value,
+                "response_id": response_id,
+            },
+            turn.turn_id,
+        ),
+        (
+            AgentEventType.RUN_STATE_CHANGED,
+            {
+                "run_id": turn.turn_id,
+                "status": TurnStatus.WAITING_USER.value,
+            },
+            turn.turn_id,
+        ),
+    )
+
+
+def _conversation_message_from_row(
+    row: PixelFlowConversationMessageRow,
+) -> PixelFlowConversationMessageRecord:
+    return PixelFlowConversationMessageRecord(
+        message_id=row.message_id,
+        conversation_id=row.conversation_id,
+        user_id=row.user_id,
+        role=row.role,
+        content=row.content,
+        payload=deepcopy(row.payload_json or {}),
+        created_at=_database_utc(row.created_at).isoformat(),
+    )
+
+
+def _sql_runtime_context_version(row: PixelFlowConversationRow) -> int:
+    context = row.context_json or {}
+    runtime = context.get(AGENT_RUNTIME_CONTEXT_KEY)
+    value = None if not isinstance(runtime, dict) else runtime.get("context_version")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AgentRuntimeRecordConflictError(
+            "Agent Runtime 响应缺少合法上下文版本",
+        )
+    return value
 
 
 def _conversation_is_video_live(record: object | None) -> bool:
@@ -782,7 +978,7 @@ def _event(
 class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
     """复用压缩锁，在一个可回滚临界区内提交全部 live 投影。"""
 
-    def __init__(self, *, task_store: PixelFlowTaskStore) -> None:
+    def __init__(self, *, task_store: MemoryPixelFlowTaskStore) -> None:
         super().__init__()
         self._task_store = task_store
         self._video_states: dict[tuple[str, str], VideoWorkflowStateEnvelope] = {}
@@ -1385,6 +1581,201 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
             del occurred_at
             return _clone_interrupt(responded)
 
+    async def register_interrupt_response(
+        self,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        *,
+        request: InterruptResponseRequest,
+        message: PixelFlowConversationMessageRecord,
+        responded_at: datetime,
+    ) -> InterruptResponseRegistration:
+        """在共享临界区内登记响应，并由 Memory 对话写单元协同回滚。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        identity = _require_text("interrupt_id", interrupt_id, 64)
+        occurred_at = _normalize_datetime("responded_at", responded_at)
+        normalized_request = _normalize_interrupt_response(request)
+        normalized_message = _validate_response_message(
+            user_id=owner,
+            conversation_id=conversation,
+            interrupt_id=identity,
+            request=normalized_request,
+            message=message,
+        )
+        async with self._compaction_write_lock:
+            key = (owner, identity)
+            existing = self._interrupts.get(key)
+            if existing is None or existing.conversation_id != conversation:
+                raise AgentRuntimeRecordConflictError(
+                    "interrupt 不存在或不属于当前会话",
+                )
+            turn_key = (owner, existing.turn_id)
+            current_turn = self._turns.get(turn_key)
+            if current_turn is None or current_turn.conversation_id != conversation:
+                raise AgentRuntimeRecordConflictError("interrupt 原 Turn 不存在")
+
+            if existing.status in {"responded", "closed"}:
+                if not _interrupt_matches_response(existing, normalized_request):
+                    raise AgentRuntimeRecordConflictError("interrupt 已保存不同响应")
+                stored_messages = await self._task_store.list_conversation_messages(
+                    conversation,
+                    user_id=owner,
+                )
+                stored_message = next(
+                    (
+                        item
+                        for item in stored_messages
+                        if item.message_id == normalized_message.message_id
+                    ),
+                    None,
+                )
+                if stored_message is None or not _response_message_matches(
+                    stored_message,
+                    normalized_message,
+                ):
+                    raise AgentRuntimeRecordConflictError(
+                        "interrupt 响应缺少对应权威消息",
+                    )
+                return InterruptResponseRegistration(
+                    interrupt=_clone_interrupt(existing),
+                    turn=_clone(current_turn),
+                    message=deepcopy(stored_message),
+                    context_version=_response_context_version(existing),
+                    created=False,
+                )
+            if existing.status != "open":
+                raise AgentRuntimeRecordConflictError("interrupt 状态非法")
+            open_interrupts = [
+                item
+                for (record_owner, _), item in self._interrupts.items()
+                if record_owner == owner
+                and item.conversation_id == conversation
+                and item.status == "open"
+            ]
+            if len(open_interrupts) != 1 or open_interrupts[0].interrupt_id != identity:
+                raise AgentRuntimeRecordConflictError(
+                    "当前会话 open interrupt 状态非法",
+                )
+            if current_turn.status is not TurnStatus.WAITING_USER:
+                raise AgentRuntimeRecordConflictError(
+                    "interrupt 原 Turn 不在 waiting_user",
+                )
+
+            before = self._snapshot_live_runtime_state()
+            try:
+                async with self._task_store.agent_runtime_interrupt_response_write(
+                    conversation_id=conversation,
+                    user_id=owner,
+                    message=normalized_message,
+                    occurred_at=occurred_at,
+                ) as write:
+                    response = _response_document(
+                        normalized_request,
+                        pre_input_context_version=write.pre_input_context_version,
+                    )
+                    responded = StoredAgentInterrupt.model_validate(
+                        existing.model_dump(mode="python")
+                        | {
+                            "status": "responded",
+                            "response_id": normalized_request.client_response_id,
+                            "response": response,
+                        }
+                    )
+                    updated_turn = current_turn.model_copy(
+                        update={
+                            "expected_context_version": write.pre_input_context_version,
+                        }
+                    )
+                    stored_message = deepcopy(write.message)
+                    self._interrupts[key] = _clone_interrupt(responded)
+                    self._turns[turn_key] = _clone(updated_turn)
+                    self._append_interrupt_response_events(
+                        user_id=owner,
+                        interrupt=responded,
+                        turn=updated_turn,
+                        message=stored_message,
+                        request=normalized_request,
+                        occurred_at=occurred_at,
+                    )
+                return InterruptResponseRegistration(
+                    interrupt=_clone_interrupt(responded),
+                    turn=_clone(updated_turn),
+                    message=deepcopy(stored_message),
+                    context_version=write.context_version,
+                    created=True,
+                )
+            except ValueError as exc:
+                self._restore_live_runtime_state(before)
+                raise AgentRuntimeRecordConflictError(
+                    "Agent Runtime 响应对话写入冲突",
+                ) from exc
+            except BaseException:
+                self._restore_live_runtime_state(before)
+                raise
+
+    def _append_interrupt_response_events(
+        self,
+        *,
+        user_id: str,
+        interrupt: StoredAgentInterrupt,
+        turn: TurnRecord,
+        message: PixelFlowConversationMessageRecord,
+        request: InterruptResponseRequest,
+        occurred_at: datetime,
+    ) -> None:
+        """无 await 地追加响应事件，确保退出 Memory 写单元前没有半写可见。"""
+
+        conversation_events = [
+            (record_owner, event)
+            for (record_owner, _), event in self._events.items()
+            if event.conversation_id == turn.conversation_id
+        ]
+        if any(record_owner != user_id for record_owner, _ in conversation_events):
+            raise AgentRuntimeRecordConflictError(
+                "AgentEvent conversation 已被其他所有者占用",
+            )
+        next_sequence = (
+            1
+            if not conversation_events
+            else max(event.sequence for _, event in conversation_events) + 1
+        )
+        action_key = f"interrupt-response:{request.client_response_id}"
+        specs = _response_event_specs(
+            interrupt=interrupt,
+            turn=turn,
+            message=message,
+            client_response_id=request.client_response_id,
+        )
+        for offset, (event_type, payload, subject) in enumerate(specs):
+            event = _event(
+                sequence=next_sequence + offset,
+                conversation_id=turn.conversation_id,
+                run_id=turn.turn_id,
+                occurred_at=occurred_at,
+                event_type=event_type,
+                payload=payload,
+                identity_parts=(turn.turn_id, action_key, event_type.value, subject),
+            )
+            owner_key = (user_id, event.event_id)
+            sequence_key = (event.conversation_id, event.sequence)
+            cursor_key = (event.conversation_id, event.cursor)
+            if (
+                event.event_id in self._event_ids
+                or sequence_key in self._event_sequence_keys
+                or cursor_key in self._event_cursor_keys
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "interrupt 响应事件身份冲突",
+                )
+            self._event_ids.add(event.event_id)
+            self._event_sequence_keys.add(sequence_key)
+            self._event_cursor_keys.add(cursor_key)
+            self._events[owner_key] = _clone(event)
+            self._event_delivery[owner_key] = _MemoryEventDeliveryState()
+
     async def get_interrupt(self, user_id: str, interrupt_id: str) -> StoredAgentInterrupt | None:
         item = self._interrupts.get(
             (_require_text("user_id", user_id, 64), _require_text("interrupt_id", interrupt_id, 64))
@@ -1476,6 +1867,10 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
             if record_owner == owner and item.conversation_id == conversation and item.status == "open"
         ]
         items.sort(key=lambda item: (item.opened_at, item.interrupt_id))
+        if len(items) > 1:
+            raise AgentRuntimeRecordConflictError(
+                "当前会话存在多个 open interrupt",
+            )
         return None if not items else _clone_interrupt(items[0])
 
     async def get_active_workflow_id(self, user_id: str, conversation_id: str) -> str | None:
@@ -2668,6 +3063,290 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                 await session.flush()
                 return _interrupt_from_row(row)
 
+    async def register_interrupt_response(
+        self,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        *,
+        request: InterruptResponseRequest,
+        message: PixelFlowConversationMessageRecord,
+        responded_at: datetime,
+    ) -> InterruptResponseRegistration:
+        """在同一 SQL 事务中登记响应、原 Turn 快照身份、消息和事件。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        identity = _require_text("interrupt_id", interrupt_id, 64)
+        occurred_at = _normalize_datetime("responded_at", responded_at)
+        normalized_request = _normalize_interrupt_response(request)
+        normalized_message = _validate_response_message(
+            user_id=owner,
+            conversation_id=conversation,
+            interrupt_id=identity,
+            request=normalized_request,
+            message=message,
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    conversation_row = (
+                        await session.scalars(
+                            self._conversation_statement(owner, conversation),
+                        )
+                    ).one_or_none()
+                    if not _sql_conversation_is_video_live(conversation_row):
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 所属对话不可执行 live 视频",
+                        )
+                    interrupt_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentInterruptRow)
+                            .where(
+                                PixelFlowAgentInterruptRow.user_id == owner,
+                                PixelFlowAgentInterruptRow.conversation_id
+                                == conversation,
+                                PixelFlowAgentInterruptRow.interrupt_id == identity,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if interrupt_row is None:
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 不存在或不属于当前会话",
+                        )
+                    turn_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentTurnRow)
+                            .where(
+                                PixelFlowAgentTurnRow.user_id == owner,
+                                PixelFlowAgentTurnRow.conversation_id == conversation,
+                                PixelFlowAgentTurnRow.turn_id
+                                == interrupt_row.turn_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if turn_row is None:
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 原 Turn 不存在",
+                        )
+                    stored_interrupt = _interrupt_from_row(interrupt_row)
+                    if interrupt_row.status in {"responded", "closed"}:
+                        if not _interrupt_matches_response(
+                            stored_interrupt,
+                            normalized_request,
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "interrupt 已保存不同响应",
+                            )
+                        message_row = (
+                            await session.scalars(
+                                select(PixelFlowConversationMessageRow)
+                                .where(
+                                    PixelFlowConversationMessageRow.message_id
+                                    == normalized_message.message_id,
+                                    PixelFlowConversationMessageRow.conversation_id
+                                    == conversation,
+                                    PixelFlowConversationMessageRow.user_id == owner,
+                                )
+                                .with_for_update()
+                            )
+                        ).one_or_none()
+                        if message_row is None:
+                            raise AgentRuntimeRecordConflictError(
+                                "interrupt 响应缺少对应权威消息",
+                            )
+                        stored_message = _conversation_message_from_row(message_row)
+                        if not _response_message_matches(
+                            stored_message,
+                            normalized_message,
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "interrupt 响应消息内容冲突",
+                            )
+                        return InterruptResponseRegistration(
+                            interrupt=stored_interrupt,
+                            turn=_turn_from_row(turn_row),
+                            message=stored_message,
+                            context_version=_response_context_version(
+                                stored_interrupt,
+                            ),
+                            created=False,
+                        )
+                    if interrupt_row.status != "open":
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 状态非法",
+                        )
+                    open_rows = (
+                        await session.scalars(
+                            select(PixelFlowAgentInterruptRow)
+                            .where(
+                                PixelFlowAgentInterruptRow.user_id == owner,
+                                PixelFlowAgentInterruptRow.conversation_id
+                                == conversation,
+                                PixelFlowAgentInterruptRow.status == "open",
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                    if len(open_rows) != 1 or open_rows[0].interrupt_id != identity:
+                        raise AgentRuntimeRecordConflictError(
+                            "当前会话 open interrupt 状态非法",
+                        )
+                    if turn_row.status != TurnStatus.WAITING_USER.value:
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 原 Turn 不在 waiting_user",
+                        )
+                    existing_message = await session.get(
+                        PixelFlowConversationMessageRow,
+                        normalized_message.message_id,
+                        with_for_update=True,
+                    )
+                    if existing_message is not None:
+                        raise AgentRuntimeRecordConflictError(
+                            "Agent Runtime 响应消息 ID 已存在",
+                        )
+
+                    pre_input_context_version = _sql_runtime_context_version(
+                        conversation_row,
+                    )
+                    next_context_version = pre_input_context_version + 1
+                    response = _response_document(
+                        normalized_request,
+                        pre_input_context_version=pre_input_context_version,
+                    )
+                    interrupt_row.status = "responded"
+                    interrupt_row.response_id = str(
+                        normalized_request.client_response_id,
+                    )
+                    interrupt_row.response_json = response
+                    turn_row.expected_context_version = pre_input_context_version
+                    turn_row.updated_at = occurred_at
+                    context = deepcopy(conversation_row.context_json or {})
+                    runtime = deepcopy(context[AGENT_RUNTIME_CONTEXT_KEY])
+                    runtime["context_version"] = next_context_version
+                    context[AGENT_RUNTIME_CONTEXT_KEY] = runtime
+                    conversation_row.context_json = context
+                    conversation_row.revision += 1
+                    conversation_row.updated_at = occurred_at
+                    message_row = PixelFlowConversationMessageRow(
+                        message_id=normalized_message.message_id,
+                        conversation_id=conversation,
+                        user_id=owner,
+                        role=normalized_message.role,
+                        content=normalized_message.content,
+                        payload_json=deepcopy(normalized_message.payload),
+                        created_at=occurred_at,
+                    )
+                    session.add(message_row)
+                    responded = _interrupt_from_row(interrupt_row)
+                    updated_turn = _turn_from_row(turn_row)
+                    stored_message = _conversation_message_from_row(message_row)
+                    await self._sql_append_interrupt_response_events(
+                        session=session,
+                        user_id=owner,
+                        interrupt=responded,
+                        turn=updated_turn,
+                        message=stored_message,
+                        request=normalized_request,
+                        occurred_at=occurred_at,
+                    )
+                    await session.flush()
+                    return InterruptResponseRegistration(
+                        interrupt=_interrupt_from_row(interrupt_row),
+                        turn=_turn_from_row(turn_row),
+                        message=_conversation_message_from_row(message_row),
+                        context_version=next_context_version,
+                        created=True,
+                    )
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError(
+                "interrupt 响应原子登记唯一键冲突",
+            ) from None
+
+    async def _sql_append_interrupt_response_events(
+        self,
+        *,
+        session: AsyncSession,
+        user_id: str,
+        interrupt: StoredAgentInterrupt,
+        turn: TurnRecord,
+        message: PixelFlowConversationMessageRecord,
+        request: InterruptResponseRequest,
+        occurred_at: datetime,
+    ) -> None:
+        """锁定事件尾部并追加跨实现稳定的四类响应事件。"""
+
+        last = (
+            await session.scalars(
+                select(PixelFlowAgentEventRow)
+                .where(
+                    PixelFlowAgentEventRow.conversation_id
+                    == turn.conversation_id,
+                )
+                .order_by(PixelFlowAgentEventRow.sequence.desc())
+                .limit(1)
+                .with_for_update()
+            )
+        ).first()
+        if last is not None and last.user_id != user_id:
+            raise AgentRuntimeRecordConflictError(
+                "AgentEvent conversation 已属于其他用户",
+            )
+        next_sequence = 1 if last is None else last.sequence + 1
+        action_key = f"interrupt-response:{request.client_response_id}"
+        rows: list[PixelFlowAgentEventRow] = []
+        for offset, (event_type, payload, subject) in enumerate(
+            _response_event_specs(
+                interrupt=interrupt,
+                turn=turn,
+                message=message,
+                client_response_id=request.client_response_id,
+            )
+        ):
+            event = _event(
+                sequence=next_sequence + offset,
+                conversation_id=turn.conversation_id,
+                run_id=turn.turn_id,
+                occurred_at=occurred_at,
+                event_type=event_type,
+                payload=payload,
+                identity_parts=(turn.turn_id, action_key, event_type.value, subject),
+            )
+            existing = await session.get(
+                PixelFlowAgentEventRow,
+                event.event_id,
+                with_for_update=True,
+            )
+            if existing is not None:
+                raise AgentRuntimeRecordConflictError(
+                    "interrupt 响应事件身份冲突",
+                )
+            rows.append(
+                PixelFlowAgentEventRow(
+                    schema_version=1,
+                    event_id=event.event_id,
+                    sequence=event.sequence,
+                    cursor=event.cursor,
+                    conversation_id=event.conversation_id,
+                    user_id=user_id,
+                    run_id=event.run_id,
+                    occurred_at=event.occurred_at,
+                    event_type=event.type.value,
+                    payload_json=event.model_dump(mode="json")["payload"],
+                    delivery_status="pending",
+                    delivery_attempts=0,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    published_at=None,
+                )
+            )
+        session.add_all(rows)
+
     async def get_interrupt(self, user_id: str, interrupt_id: str) -> StoredAgentInterrupt | None:
         statement = select(PixelFlowAgentInterruptRow).where(
             PixelFlowAgentInterruptRow.user_id == _require_text("user_id", user_id, 64),
@@ -2813,11 +3492,14 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                 PixelFlowAgentInterruptRow.status == "open",
             )
             .order_by(PixelFlowAgentInterruptRow.opened_at.asc(), PixelFlowAgentInterruptRow.interrupt_id.asc())
-            .limit(1)
         )
         async with self._session_factory() as session:
-            row = (await session.scalars(statement)).first()
-        return None if row is None else _interrupt_from_row(row)
+            rows = (await session.scalars(statement)).all()
+        if len(rows) > 1:
+            raise AgentRuntimeRecordConflictError(
+                "当前会话存在多个 open interrupt",
+            )
+        return None if not rows else _interrupt_from_row(rows[0])
 
     async def get_active_workflow_id(self, user_id: str, conversation_id: str) -> str | None:
         statement = select(PixelFlowAgentConversationStateRow).where(

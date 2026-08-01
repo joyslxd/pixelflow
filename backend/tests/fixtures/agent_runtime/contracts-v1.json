@@ -120,6 +120,7 @@
   },
   "context_envelope": {
     "current_input": "把刚才第三张图背景换成白色",
+    "validated_context_version": 12,
     "active_or_target_workflow": {
       "workflow_id": "wf_image_001",
       "conversation_id": "conv_001",

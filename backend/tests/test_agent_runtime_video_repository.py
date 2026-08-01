@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy import null
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import ORMExecuteState, Session
@@ -26,16 +27,19 @@ from pixelflow.agent_runtime.contracts import (
     AgentEventType,
     AgentIntent,
     ExternalJobStatus,
+    InterruptResponseRequest,
     TurnRecord,
     TurnStatus,
     WorkflowStatus,
 )
 from pixelflow.agent_runtime.graph import WorkflowCommand, workflow_namespace
+from pixelflow.agent_runtime.identity import conversation_message_id
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
     MemoryVideoRuntimeRepository,
     OperationRecord,
+    PixelFlowAgentInterruptRow,
     SQLVideoRuntimeRepository,
     StoredAgentInterrupt,
     SupervisorProjectionMessage,
@@ -55,10 +59,14 @@ from pixelflow.agent_workflows.video import (
 )
 from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
+    PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
     SQLPixelFlowTaskStore,
 )
-from pixelflow.tasks.model import PixelFlowConversationRow
+from pixelflow.tasks.model import (
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
+)
 
 RepositoryKind = Literal["memory", "sql"]
 NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
@@ -149,6 +157,7 @@ def _message(
 def _interrupt(
     *,
     turn_id: str = "turn-1",
+    interrupt_id: str = "interrupt-1",
     status: Literal["open", "responded", "closed"] = "open",
 ) -> StoredAgentInterrupt:
     response_id = (
@@ -169,7 +178,7 @@ def _interrupt(
         else None
     )
     return StoredAgentInterrupt(
-        interrupt_id="interrupt-1",
+        interrupt_id=interrupt_id,
         conversation_id=CONVERSATION,
         workflow_id=WORKFLOW,
         turn_id=turn_id,
@@ -289,6 +298,7 @@ async def _repository(
                     *AGENT_RUNTIME_TABLES,  # 创建 Runtime 权威业务表。
                     *AGENT_RUNTIME_SUPPORT_TABLES,  # 创建 Runtime 辅助协调表。
                     PixelFlowConversationRow.__table__,
+                    PixelFlowConversationMessageRow.__table__,
                 ),
             )
         )
@@ -371,6 +381,63 @@ def _waiting_commit(*, message_content: str = "请选择是否继续。") -> Vid
         ),
         open_interrupt=_interrupt(),
         occurred_at=NOW + timedelta(seconds=20),
+    )
+
+
+def _interrupt_response_request(
+    *,
+    client_response_id: UUID = UUID(
+        "10000000-0000-4000-8000-000000000001",
+    ),
+    content: str = "同意方案",
+) -> InterruptResponseRequest:
+    """构造包含显式人工动作的固定响应合同。"""
+
+    return InterruptResponseRequest.model_validate(
+        {
+            "client_response_id": str(client_response_id),
+            "value": {
+                "content": content,
+                "materials": [],
+                "reply_to_message_id": "message-plan-v1",
+                "artifact_refs": ["artifact:video-plan:wf-1:v1"],
+                "explicit_action": {
+                    "action": "continue_workflow",
+                    "intent": "video",
+                    "workflow_id": WORKFLOW,
+                    "stage": "plan_review",
+                    "artifact_ref": "artifact:video-plan:wf-1:v1",
+                    "patch": {"approved": True},
+                },
+            },
+        }
+    )
+
+
+def _interrupt_response_message(
+    request: InterruptResponseRequest,
+    *,
+    interrupt_id: str = "interrupt-1",
+) -> PixelFlowConversationMessageRecord:
+    """按公开响应 ID 构造跨实现稳定的可见用户消息。"""
+
+    value = request.value.model_dump(mode="json")
+    return PixelFlowConversationMessageRecord(
+        message_id=conversation_message_id(
+            CONVERSATION,
+            request.client_response_id,
+        ),
+        conversation_id=CONVERSATION,
+        user_id=OWNER,
+        role="user",
+        content=request.value.content,
+        payload={
+            "client_message_id": str(request.client_response_id),
+            "interrupt_id": interrupt_id,
+            "value": value,
+            "explicit_action": value["explicit_action"],
+        },
+        created_at=(NOW + timedelta(seconds=30)).isoformat(),
     )
 
 
@@ -705,6 +772,565 @@ async def test_responded_interrupt_reclaims_original_waiting_turn(
         responded = await repository.get_interrupt(OWNER, "interrupt-1")
         assert responded is not None
         assert responded.status == "responded"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_interrupt_response_registration_is_atomic_and_stable(
+    kind: RepositoryKind,
+) -> None:
+    """响应必须在原 Turn 上冻结响应前版本，并同批写入消息和四类事件。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        conversation = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        assert conversation is not None
+        await store.patch_agent_runtime_conversation_context(
+            CONVERSATION,
+            user_id=OWNER,
+            expected_revision=conversation.revision,
+            runtime_patch={"context_version": 7},
+        )
+        request = _interrupt_response_request()
+        message = _interrupt_response_message(request)
+        events_before = await repository.list_events(OWNER, CONVERSATION)
+
+        first = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=request,
+            message=message,
+            responded_at=NOW + timedelta(seconds=30),
+        )
+        first_events = await repository.list_events(OWNER, CONVERSATION)
+        replay = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=request,
+            message=message,
+            responded_at=NOW + timedelta(seconds=31),
+        )
+
+        assert first.created is True
+        assert replay.created is False
+        assert first.turn.turn_id == replay.turn.turn_id == "turn-1"
+        assert first.turn.status is TurnStatus.WAITING_USER
+        assert first.turn.expected_context_version == 7
+        assert replay.turn == first.turn
+        assert first.message == replay.message == message
+        assert first.context_version == replay.context_version == 8
+        assert len(await repository.list_turns(OWNER, CONVERSATION)) == 1
+        stored_messages = await store.list_conversation_messages(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        assert stored_messages == [message]
+        updated_conversation = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        assert updated_conversation is not None
+        assert updated_conversation.context["__agent_runtime"]["context_version"] == 8
+        assert updated_conversation.revision == conversation.revision + 2
+
+        appended = first_events[len(events_before) :]
+        assert [event.type for event in appended] == [
+            AgentEventType.INTERRUPT_RESPONDED,
+            AgentEventType.MESSAGE_UPSERTED,
+            AgentEventType.INPUT_STATE_CHANGED,
+            AgentEventType.RUN_STATE_CHANGED,
+        ]
+        assert [event.sequence for event in appended] == list(
+            range(events_before[-1].sequence + 1, events_before[-1].sequence + 5)
+        )
+        assert {event.run_id for event in appended} == {"turn-1"}
+        assert await repository.list_events(OWNER, CONVERSATION) == first_events
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_closed_interrupt_replays_same_response_without_rewake(
+    kind: RepositoryKind,
+) -> None:
+    """已关闭中断只稳定回读同一响应，不推进版本或再次追加事件。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        request = _interrupt_response_request()
+        message = _interrupt_response_message(request)
+        created = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=request,
+            message=message,
+            responded_at=NOW + timedelta(seconds=30),
+        )
+        resumed = await repository.claim_interrupt_resume(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            lease_owner="worker-response",
+            now=NOW + timedelta(seconds=31),
+            lease_expires_at=NOW + timedelta(seconds=61),
+        )
+        assert resumed is not None
+        await repository.commit_turn(
+            resumed,
+            VideoTurnCommit(
+                decision=_decision(
+                    action=AgentAction.ANSWER_ONLY,
+                    action_key="response-finished",
+                ),
+                turn_status=TurnStatus.COMPLETED,
+                expected_workflow_version=0,
+                close_interrupt_id="interrupt-1",
+                occurred_at=NOW + timedelta(seconds=40),
+            ),
+        )
+        events_before = await repository.list_events(OWNER, CONVERSATION)
+        conversation_before = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+
+        replay = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=request,
+            message=message,
+            responded_at=NOW + timedelta(seconds=50),
+        )
+
+        assert replay.created is False
+        assert replay.turn.turn_id == created.turn.turn_id == "turn-1"
+        assert replay.context_version == created.context_version
+        assert await repository.list_events(OWNER, CONVERSATION) == events_before
+        assert await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == conversation_before
+        assert await repository.list_due_interrupt_responses(
+            now=NOW + timedelta(seconds=51),
+        ) == []
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.register_interrupt_response(
+                OWNER,
+                CONVERSATION,
+                "interrupt-1",
+                request=_interrupt_response_request(content="拒绝方案"),
+                message=_interrupt_response_message(
+                    _interrupt_response_request(content="拒绝方案"),
+                ),
+                responded_at=NOW + timedelta(seconds=51),
+            )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_consecutive_interrupt_responses_advance_original_turn_snapshot_identity(
+    kind: RepositoryKind,
+) -> None:
+    """同一原 Turn 的连续确认必须逐次冻结各自响应前版本。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        first_request = _interrupt_response_request()
+        first = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=first_request,
+            message=_interrupt_response_message(first_request),
+            responded_at=NOW + timedelta(seconds=30),
+        )
+        resumed = await repository.claim_interrupt_resume(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            lease_owner="worker-second-review",
+            now=NOW + timedelta(seconds=31),
+            lease_expires_at=NOW + timedelta(seconds=61),
+        )
+        assert resumed is not None
+        second_interrupt = _interrupt(interrupt_id="interrupt-2")
+        await repository.commit_turn(
+            resumed,
+            VideoTurnCommit(
+                decision=_decision(
+                    action=AgentAction.CLARIFY,
+                    action_key="waiting-action-2",
+                ),
+                turn_status=TurnStatus.WAITING_USER,
+                expected_workflow_version=0,
+                open_interrupt=second_interrupt,
+                close_interrupt_id="interrupt-1",
+                occurred_at=NOW + timedelta(seconds=40),
+            ),
+        )
+        second_request = _interrupt_response_request(
+            client_response_id=UUID(
+                "20000000-0000-4000-8000-000000000002",
+            ),
+            content="确认第二轮方案",
+        )
+        second = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-2",
+            request=second_request,
+            message=_interrupt_response_message(
+                second_request,
+                interrupt_id="interrupt-2",
+            ),
+            responded_at=NOW + timedelta(seconds=50),
+        )
+        events_before_first_replay = await repository.list_events(
+            OWNER,
+            CONVERSATION,
+        )
+        first_replay = await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=first_request,
+            message=_interrupt_response_message(first_request),
+            responded_at=NOW + timedelta(seconds=60),
+        )
+
+        assert first.context_version == first_replay.context_version == 1
+        assert second.context_version == 2
+        assert second.turn.turn_id == first.turn.turn_id == "turn-1"
+        assert second.turn.expected_context_version == 1
+        assert len(await repository.list_turns(OWNER, CONVERSATION)) == 1
+        assert await repository.list_events(
+            OWNER,
+            CONVERSATION,
+        ) == events_before_first_replay
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize(
+    ("user_id", "conversation_id", "interrupt_id"),
+    [
+        ("user-other", CONVERSATION, "interrupt-1"),
+        (OWNER, "conversation-other", "interrupt-1"),
+        (OWNER, CONVERSATION, "interrupt-other"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_interrupt_response_registration_rejects_wrong_scope(
+    kind: RepositoryKind,
+    user_id: str,
+    conversation_id: str,
+    interrupt_id: str,
+) -> None:
+    """错误用户、对话或 interrupt 身份必须 fail-closed 且不留下半写入。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        before = (
+            await repository.export_safe_snapshot(OWNER, CONVERSATION)
+        ).model_dump(mode="json")
+        request = _interrupt_response_request()
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.register_interrupt_response(
+                user_id,
+                conversation_id,
+                interrupt_id,
+                request=request,
+                message=_interrupt_response_message(request),
+                responded_at=NOW + timedelta(seconds=30),
+            )
+
+        assert (
+            await repository.export_safe_snapshot(OWNER, CONVERSATION)
+        ).model_dump(mode="json") == before
+        assert await store.list_conversation_messages(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == []
+
+
+@pytest.mark.asyncio
+async def test_memory_interrupt_response_rolls_back_when_task_store_exit_fails() -> None:
+    """Memory 对话写单元退出失败时，Repository 与 TaskStore 必须整批回滚。"""
+
+    class FailingMemoryTaskStore(MemoryPixelFlowTaskStore):
+        @asynccontextmanager
+        async def agent_runtime_interrupt_response_write(
+            self,
+            *,
+            conversation_id: str,
+            user_id: str,
+            message: PixelFlowConversationMessageRecord,
+            occurred_at: datetime | str,
+        ) -> AsyncIterator[object]:
+            async with super().agent_runtime_interrupt_response_write(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                message=message,
+                occurred_at=occurred_at,
+            ) as write:
+                yield write
+                raise RuntimeError("注入响应写入失败")
+
+    store = FailingMemoryTaskStore()
+    repository = MemoryVideoRuntimeRepository(task_store=store)
+    await _seed_conversation(store)
+    await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+    initial = await claim(repository)
+    await repository.commit_turn(initial, _waiting_commit())
+    runtime_before = (
+        await repository.export_safe_snapshot(OWNER, CONVERSATION)
+    ).model_dump(mode="json")
+    conversation_before = await store.get_conversation(
+        CONVERSATION,
+        user_id=OWNER,
+    )
+    request = _interrupt_response_request()
+
+    with pytest.raises(RuntimeError, match="注入响应写入失败"):
+        await repository.register_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            "interrupt-1",
+            request=request,
+            message=_interrupt_response_message(request),
+            responded_at=NOW + timedelta(seconds=30),
+        )
+
+    assert (
+        await repository.export_safe_snapshot(OWNER, CONVERSATION)
+    ).model_dump(mode="json") == runtime_before
+    assert await store.get_conversation(
+        CONVERSATION,
+        user_id=OWNER,
+    ) == conversation_before
+    assert await store.list_conversation_messages(
+        CONVERSATION,
+        user_id=OWNER,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_sql_interrupt_response_rolls_back_when_flush_fails() -> None:
+    """SQL flush 注入失败时，interrupt、Turn、消息、版本与事件必须同事务回滚。"""
+
+    async with _repository("sql") as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        runtime_before = (
+            await repository.export_safe_snapshot(OWNER, CONVERSATION)
+        ).model_dump(mode="json")
+        conversation_before = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        request = _interrupt_response_request()
+
+        def fail_response_flush(session, _flush_context, _instances) -> None:
+            if any(
+                isinstance(item, PixelFlowConversationMessageRow)
+                and item.message_id
+                == conversation_message_id(
+                    CONVERSATION,
+                    request.client_response_id,
+                )
+                for item in session.new
+            ):
+                raise RuntimeError("注入 SQL 响应写入失败")
+
+        sqlalchemy_event.listen(Session, "before_flush", fail_response_flush)
+        try:
+            with pytest.raises(RuntimeError, match="注入 SQL 响应写入失败"):
+                await repository.register_interrupt_response(
+                    OWNER,
+                    CONVERSATION,
+                    "interrupt-1",
+                    request=request,
+                    message=_interrupt_response_message(request),
+                    responded_at=NOW + timedelta(seconds=30),
+                )
+        finally:
+            sqlalchemy_event.remove(Session, "before_flush", fail_response_flush)
+
+        assert (
+            await repository.export_safe_snapshot(OWNER, CONVERSATION)
+        ).model_dump(mode="json") == runtime_before
+        assert await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == conversation_before
+        assert await store.list_conversation_messages(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == []
+
+
+@pytest.mark.asyncio
+async def test_interrupt_response_event_ids_match_between_memory_and_sql() -> None:
+    """同一响应在 Memory/SQLite 必须生成完全相同的稳定事件身份。"""
+
+    event_id_sets: list[list[str]] = []
+    for kind in ("memory", "sql"):
+        async with _repository(kind) as (repository, store):
+            await _seed_conversation(store)
+            await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+            initial = await claim(repository)
+            await repository.commit_turn(initial, _waiting_commit())
+            request = _interrupt_response_request()
+            await repository.register_interrupt_response(
+                OWNER,
+                CONVERSATION,
+                "interrupt-1",
+                request=request,
+                message=_interrupt_response_message(request),
+                responded_at=NOW + timedelta(seconds=30),
+            )
+            events = await repository.list_events(OWNER, CONVERSATION)
+            event_id_sets.append([event.event_id for event in events[-4:]])
+
+    assert event_id_sets[0] == event_id_sets[1]
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_concurrent_same_interrupt_response_commits_once(
+    kind: RepositoryKind,
+) -> None:
+    """同一响应并发重试只能递增一次版本并追加一组稳定事件。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        events_before = await repository.list_events(OWNER, CONVERSATION)
+        request = _interrupt_response_request()
+        message = _interrupt_response_message(request)
+
+        first, second = await asyncio.gather(
+            repository.register_interrupt_response(
+                OWNER,
+                CONVERSATION,
+                "interrupt-1",
+                request=request,
+                message=message,
+                responded_at=NOW + timedelta(seconds=30),
+            ),
+            repository.register_interrupt_response(
+                OWNER,
+                CONVERSATION,
+                "interrupt-1",
+                request=request,
+                message=message,
+                responded_at=NOW + timedelta(seconds=31),
+            ),
+        )
+
+        assert sorted((first.created, second.created)) == [False, True]
+        assert first.turn == second.turn
+        assert first.context_version == second.context_version == 1
+        assert len(
+            (await repository.list_events(OWNER, CONVERSATION))[
+                len(events_before) :
+            ]
+        ) == 4
+        conversation = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        assert conversation is not None
+        assert conversation.context["__agent_runtime"]["context_version"] == 1
+        assert len(
+            await store.list_conversation_messages(
+                CONVERSATION,
+                user_id=OWNER,
+            )
+        ) == 1
+
+
+@pytest.mark.asyncio
+async def test_sql_multiple_open_interrupts_fail_closed_without_partial_write() -> None:
+    """数据库损坏形成多个 open interrupt 时，读取和响应都不能任选一个。"""
+
+    async with _repository("sql") as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        await repository.commit_turn(initial, _waiting_commit())
+        async with store.session_factory() as session:
+            session.add(
+                PixelFlowAgentInterruptRow(
+                    interrupt_id="interrupt-corrupted-second-open",
+                    conversation_id=CONVERSATION,
+                    user_id=OWNER,
+                    workflow_id=WORKFLOW,
+                    turn_id="turn-1",
+                    thread_id=CONVERSATION,
+                    checkpoint_ns=f"pixelflow-supervisor:{CONVERSATION}",
+                    kind="confirmation",
+                    reason_code="plan_review_required",
+                    status="open",
+                    payload_json={"corrupted": True},
+                    response_id=None,
+                    response_json=null(),
+                    opened_at=NOW + timedelta(seconds=9),
+                    closed_at=None,
+                )
+            )
+            await session.commit()
+        conversation_before = await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        )
+        events_before = await repository.list_events(OWNER, CONVERSATION)
+        request = _interrupt_response_request()
+
+        with pytest.raises(AgentRuntimeRecordConflictError, match="多个 open"):
+            await repository.get_open_interrupt(OWNER, CONVERSATION)
+        with pytest.raises(AgentRuntimeRecordConflictError, match="状态非法"):
+            await repository.register_interrupt_response(
+                OWNER,
+                CONVERSATION,
+                "interrupt-1",
+                request=request,
+                message=_interrupt_response_message(request),
+                responded_at=NOW + timedelta(seconds=30),
+            )
+
+        assert await store.get_conversation(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == conversation_before
+        assert await store.list_conversation_messages(
+            CONVERSATION,
+            user_id=OWNER,
+        ) == []
+        assert await repository.list_events(OWNER, CONVERSATION) == events_before
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

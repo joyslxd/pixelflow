@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from pixelflow.agent_workflows.video.live_capabilities import (
+    TransientTurnCredential,
+)
 from pixelflow.tasks import (
     AGENT_RUNTIME_CONTEXT_KEY,
     ConversationRevisionConflictError,
@@ -25,19 +29,24 @@ from .context import RepositoryCompactionEventOutbox
 from .contracts import (
     AgentEvent,
     AgentEventType,
+    AgentInterruptProjection,
+    InterruptResponseRequest,
     OrchestrationMode,
     TurnRecord,
     TurnStartRequest,
     TurnStatus,
 )
+from .executor import SupervisorTurnExecutor, SupervisorTurnScope
 from .identity import conversation_message_id, turn_id
 from .persistence import (
+    AgentRuntimeRecordConflictError,
     CompactionQueueRepository,
     ConversationCompactionLease,
     TurnRegistrationContextConflictError,
     TurnRegistrationUnavailableError,
     make_turn_registration_store,
 )
+from .persistence.video_runtime import StoredAgentInterrupt, VideoRuntimeRepository
 from .runtime_compaction import AgentContextCompactor
 
 logger = logging.getLogger(__name__)
@@ -71,6 +80,18 @@ class AgentRuntimeContextConflictError(RuntimeError):
         self.expected_context_version = expected_context_version
         self.current_context_version = current_context_version
         super().__init__("Agent Runtime context version conflict")
+
+
+class AgentRuntimeInterruptConflictError(RuntimeError):
+    """人工响应身份、内容或当前状态与权威记录冲突。"""
+
+
+class AgentRuntimeInterruptStateError(RuntimeError):
+    """Snapshot 或响应发现损坏、歧义的 live interrupt 状态。"""
+
+
+class AgentRuntimeLegacyInterruptOwnershipError(RuntimeError):
+    """当前对话的人工确认仍归旧 v2 Controller 所有。"""
 
 
 @dataclass(frozen=True)
@@ -209,6 +230,24 @@ def _input_status(status: TurnStatus) -> RuntimeInputStatus:
     return "accepted"
 
 
+def _live_video_execution_ready(conversation: object) -> bool:
+    """只允许创建时已冻结给 live 视频 Handler 的 supervisor_v1 对话。"""
+
+    if getattr(conversation, "orchestration_mode", None) != "supervisor_v1":
+        return False
+    if getattr(conversation, "orchestration_version", None) != 1:
+        return False
+    context = getattr(conversation, "context", None)
+    runtime = _runtime_context(context) if isinstance(context, dict) else None
+    return (
+        isinstance(runtime, dict)
+        and runtime.get("mode") == "primary"
+        and runtime.get("primary_execution_ready") is True
+        and isinstance(runtime.get("enabled_intents"), list)
+        and "video" in runtime["enabled_intents"]
+    )
+
+
 class AgentRuntimeService:
     """组合旧消息 Store、Turn Inbox、压缩租约和 Event Outbox。"""
 
@@ -219,6 +258,8 @@ class AgentRuntimeService:
         repository: CompactionQueueRepository,
         task_store: PixelFlowTaskStore,
         context_compactor: AgentContextCompactor | None = None,
+        turn_executor: SupervisorTurnExecutor | None = None,
+        video_repository: VideoRuntimeRepository | None = None,
         primary_execution_intents: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -240,11 +281,14 @@ class AgentRuntimeService:
         self.primary_execution_intents = normalized_execution_intents
         self.repository = repository
         self.task_store = task_store
+        self._turn_executor = turn_executor
+        self._video_repository = video_repository
         self._context_compactor = context_compactor
         self._clock = clock or (lambda: datetime.now(UTC))
         self._turn_registration_store = make_turn_registration_store(
             repository=repository,
             task_store=task_store,
+            video_repository=video_repository,
         )
         self._event_outbox = RepositoryCompactionEventOutbox(
             repository=repository,
@@ -253,6 +297,9 @@ class AgentRuntimeService:
             tuple[str, str],
             asyncio.Task[None],
         ] = {}
+        self._executor_notification_tasks: set[asyncio.Task[None]] = set()
+        self._pending_registered_turns: dict[str, SupervisorTurnScope] = {}
+        self._pending_registered_interrupts: dict[str, StoredAgentInterrupt] = {}
 
     def assignment_for_new_conversation(
         self,
@@ -380,6 +427,14 @@ class AgentRuntimeService:
                 raise LookupError("Conversation not found") from exc
             raise AgentRuntimeUnavailableError(str(exc)) from exc
         response_turn = registration.turn
+        if registration.created and self._turn_executor is not None:
+            self._pending_registered_turns[registration.turn.turn_id] = (
+                SupervisorTurnScope(
+                    user_id=owner,
+                    conversation_id=conversation_id,
+                    turn_id=registration.turn.turn_id,
+                )
+            )
         if registration.created and self.config.context_compaction_enabled and self._context_compactor is not None:
             try:
                 await self._context_compactor.maybe_compact(
@@ -408,6 +463,141 @@ class AgentRuntimeService:
             context_version=registration.context_version,
         )
 
+    async def respond_to_interrupt(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        request: InterruptResponseRequest | dict[str, Any],
+    ) -> AgentTurnJobResponse:
+        """幂等登记人工响应，并始终返回原 waiting Turn/run。"""
+
+        owner = user_id.strip()
+        conversation = await self.require_conversation(
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        if not _live_video_execution_ready(conversation):
+            raise AgentRuntimeLegacyInterruptOwnershipError(
+                "interrupt 仍由旧 v2 处理",
+            )
+        if self._video_repository is None:
+            raise AgentRuntimeInterruptStateError(
+                "live 视频 Repository 未安装",
+            )
+        raw_request = (
+            request.model_dump(mode="python")
+            if isinstance(request, InterruptResponseRequest)
+            else request
+        )
+        body = InterruptResponseRequest.model_validate(raw_request)
+        try:
+            registration = (
+                await self._turn_registration_store.register_interrupt_response(
+                    user_id=owner,
+                    conversation_id=conversation_id,
+                    interrupt_id=interrupt_id,
+                    request=body,
+                    occurred_at=self._clock(),
+                )
+            )
+        except AgentRuntimeRecordConflictError as exc:
+            raise AgentRuntimeInterruptConflictError(
+                "interrupt 响应与权威状态冲突",
+            ) from exc
+        except TurnRegistrationUnavailableError as exc:
+            raise AgentRuntimeInterruptStateError(
+                "interrupt 响应登记不可用",
+            ) from exc
+        if registration.created and self._turn_executor is not None:
+            self._pending_registered_interrupts[interrupt_id] = (
+                registration.interrupt
+            )
+        return AgentTurnJobResponse(
+            turn_id=registration.turn.turn_id,
+            run_id=registration.turn.turn_id,
+            status=registration.turn.status.value,
+            context_version=registration.context_version,
+        )
+
+    def notify_registered_turn(
+        self,
+        turn_id: str,
+        credential: TransientTurnCredential | None,
+    ) -> None:
+        """非阻塞唤醒一次新登记 Turn；失败时保留扫描恢复语义。"""
+
+        scope = self._pending_registered_turns.pop(turn_id, None)
+        if scope is None or self._turn_executor is None:
+            if credential is not None:
+                credential.discard()
+            return
+        self._schedule_executor_notification(
+            self._turn_executor.notify_turn(scope, credential),
+            credential=credential,
+            kind="Turn",
+        )
+
+    def notify_registered_interrupt(
+        self,
+        interrupt_id: str,
+        credential: TransientTurnCredential | None,
+    ) -> None:
+        """非阻塞且至多一次唤醒新登记响应对应的原 Turn。"""
+
+        interrupt = self._pending_registered_interrupts.pop(
+            interrupt_id,
+            None,
+        )
+        if interrupt is None or self._turn_executor is None:
+            if credential is not None:
+                credential.discard()
+            return
+        self._schedule_executor_notification(
+            self._turn_executor.notify_interrupt(
+                interrupt,
+                credential=credential,
+            ),
+            credential=credential,
+            kind="interrupt",
+        )
+
+    def _schedule_executor_notification(
+        self,
+        notification,
+        *,
+        credential: TransientTurnCredential | None,
+        kind: str,
+    ) -> None:
+        """追踪唤醒协程并吞掉安全边界内异常，避免 HTTP 被诱导重试。"""
+
+        task = asyncio.create_task(
+            notification,
+            name=f"pixelflow-supervisor-notify-{kind.lower()}",
+        )
+        self._executor_notification_tasks.add(task)
+
+        def _finish(completed: asyncio.Task[None]) -> None:
+            self._executor_notification_tasks.discard(completed)
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError:
+                error = asyncio.CancelledError()
+            if error is None:
+                return
+            if credential is not None:
+                credential.discard()
+            logger.warning(
+                "Agent Runtime %s 唤醒失败并等待持久化扫描恢复：异常类型=%s",
+                kind,
+                type(error).__name__,
+            )
+
+        task.add_done_callback(_finish)
+
     async def snapshot(
         self,
         *,
@@ -429,13 +619,90 @@ class AgentRuntimeService:
             raise LookupError("Conversation not found")
         turns = await self.repository.list_turns(owner, conversation_id)
         events = await self.repository.list_events(owner, conversation_id)
-        messages = await self.task_store.list_conversation_messages(
+        stored_messages = await self.task_store.list_conversation_messages(
             conversation_id,
             user_id=owner,
         )
         workflows = await self.repository.list_workflows(
             owner,
             conversation_id,
+        )
+        messages_by_id = {
+            message.message_id: deepcopy(message.to_dict())
+            for message in stored_messages
+        }
+        public_interrupt: dict[str, Any] | None = None
+        if _live_video_execution_ready(conversation):
+            if self._video_repository is None:
+                raise AgentRuntimeInterruptStateError(
+                    "live 视频 Snapshot Repository 未安装",
+                )
+            try:
+                live_messages = (
+                    await self._video_repository.list_projection_messages(
+                        owner,
+                        conversation_id,
+                    )
+                )
+                open_interrupt = await self._video_repository.get_open_interrupt(
+                    owner,
+                    conversation_id,
+                )
+            except (
+                AgentRuntimeRecordConflictError,
+                TypeError,
+                ValidationError,
+                ValueError,
+            ) as exc:
+                raise AgentRuntimeInterruptStateError(
+                    "live interrupt 投影状态非法",
+                ) from exc
+            try:
+                for message in live_messages:
+                    if message.conversation_id != conversation_id:
+                        raise ValueError("live 消息投影不属于当前会话")
+                    messages_by_id[message.message_id] = deepcopy(
+                        message.model_dump(mode="json"),
+                    )
+                if open_interrupt is not None:
+                    workflow_ids = {workflow.workflow_id for workflow in workflows}
+                    turn_ids = {turn.turn_id for turn in turns}
+                    if (
+                        open_interrupt.conversation_id != conversation_id
+                        or open_interrupt.user_id != owner
+                        or open_interrupt.turn_id not in turn_ids
+                        or (
+                            open_interrupt.workflow_id is not None
+                            and open_interrupt.workflow_id not in workflow_ids
+                        )
+                    ):
+                        raise ValueError("live interrupt 引用身份非法")
+                    public_interrupt = AgentInterruptProjection(
+                        interrupt_id=open_interrupt.interrupt_id,
+                        conversation_id=open_interrupt.conversation_id,
+                        workflow_id=open_interrupt.workflow_id,
+                        turn_id=open_interrupt.turn_id,
+                        kind=open_interrupt.kind,
+                        reason_code=open_interrupt.reason_code,
+                        payload=open_interrupt.model_dump(mode="json")["payload"],
+                        opened_at=open_interrupt.opened_at,
+                    ).model_dump(mode="json")
+            except (
+                AttributeError,
+                KeyError,
+                TypeError,
+                ValidationError,
+                ValueError,
+            ) as exc:
+                raise AgentRuntimeInterruptStateError(
+                    "live Snapshot 投影内容非法",
+                ) from exc
+        messages = sorted(
+            messages_by_id.values(),
+            key=lambda item: (
+                str(item.get("created_at", "")),
+                str(item.get("message_id", "")),
+            ),
         )
         lease = await self.repository.get_compaction_lease(
             owner,
@@ -521,9 +788,9 @@ class AgentRuntimeService:
                 updated_at=(None if latest_compression_event is None else latest_compression_event.occurred_at),
             ),
             input_queue=input_queue,
-            messages=[message.to_dict() for message in messages],
+            messages=messages,
             workflows=[workflow.model_dump(mode="json") for workflow in workflows],
-            interrupt=None,
+            interrupt=public_interrupt,
             resume=RuntimeResumeProjection(
                 cursor=None if latest_event is None else latest_event.cursor,
                 sequence=0 if latest_event is None else latest_event.sequence,
@@ -728,6 +995,14 @@ class AgentRuntimeService:
     async def aclose(self) -> None:
         """停止进程内恢复任务；持久化队列由下一进程继续接管。"""
 
+        notification_tasks = tuple(self._executor_notification_tasks)
+        self._executor_notification_tasks.clear()
+        for task in notification_tasks:
+            task.cancel()
+        if notification_tasks:
+            await asyncio.gather(*notification_tasks, return_exceptions=True)
+        self._pending_registered_turns.clear()
+        self._pending_registered_interrupts.clear()
         tasks = tuple(self._compaction_recovery_tasks.values())
         self._compaction_recovery_tasks.clear()
         for task in tasks:
@@ -877,6 +1152,9 @@ class AgentRuntimeService:
 __all__ = [
     "AgentRuntimeContextConflictError",
     "AgentRuntimeConversationAssignment",
+    "AgentRuntimeInterruptConflictError",
+    "AgentRuntimeInterruptStateError",
+    "AgentRuntimeLegacyInterruptOwnershipError",
     "AgentRuntimeService",
     "AgentRuntimeSnapshotResponse",
     "AgentRuntimeUnavailableError",

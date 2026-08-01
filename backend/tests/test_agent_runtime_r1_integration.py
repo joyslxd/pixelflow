@@ -2554,6 +2554,36 @@ def test_flag_off_keeps_legacy_conversation_and_rejects_runtime_endpoints() -> N
     assert snapshot.status_code == 409
 
 
+def test_r1_assist_interrupt_response_keeps_legacy_v2_ownership() -> None:
+    """assist/frontend_v2 即使提交合法 M12 外壳也不能进入 live 响应路径。"""
+
+    app, _, _ = _r1_app()
+    with TestClient(app) as client:
+        conversation_id = client.post(
+            "/agent/conversations",
+            json={"title": "R1 人工确认仍归旧流程"},
+        ).json()["conversation_id"]
+        response = client.post(
+            f"/agent/conversations/{conversation_id}/interrupts/legacy-int/responses",
+            json={
+                "client_response_id": "22222222-2222-4222-8222-222222222222",
+                "value": {
+                    "content": "同意方案",
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [],
+                    "explicit_action": None,
+                },
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+        "interrupt_id": "legacy-int",
+    }
+
+
 def test_r1_runtime_endpoints_keep_owner_isolation_and_context_conflict_contract() -> None:
     """新入口沿用对话 owner 隔离，版本冲突只返回安全的结构化元数据。"""
 
