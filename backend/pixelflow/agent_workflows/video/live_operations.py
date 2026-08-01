@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,7 +44,14 @@ class VideoOperationStartRequest(ContractModel):
     user_id: str = Field(min_length=1, max_length=64)
     conversation_id: str = Field(min_length=1, max_length=64)
     operation_request: OperationRequest
-    provider_request: dict[str, JsonValue]
+    provider_request: dict[str, JsonValue] = Field(repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_provider_request_credentials(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            _ensure_provider_request_has_no_credentials(value.get("provider_request"))
+        return value
 
     @model_validator(mode="after")
     def validate_request_digest(self):
@@ -99,7 +107,7 @@ class TransientCredentialVault:
 
 
 class VideoOperationAdapterResolver:
-    """只把明确注册的视频 stage 解析为 Provider Adapter。"""
+    """把动态分镜 stage 路由到明确注册的有限 Provider 能力。"""
 
     def __init__(self, adapters: Mapping[str, ProviderJobAdapter]) -> None:
         from pixelflow.agent_runtime.jobs import MappingProviderJobAdapterResolver
@@ -107,7 +115,13 @@ class VideoOperationAdapterResolver:
         self._resolver = MappingProviderJobAdapterResolver(adapters)
 
     def resolve(self, stage: str) -> ProviderJobAdapter:
-        return self._resolver.resolve(stage)
+        lookup_stage = stage
+        if isinstance(stage, str) and stage.startswith("generate_scene_video:"):
+            scene_id = stage.removeprefix("generate_scene_video:")
+            if not scene_id or scene_id != scene_id.strip():
+                raise OperationConflictError("Operation stage 未配置 Provider Job Adapter")
+            lookup_stage = "generate_scene_video"
+        return self._resolver.resolve(lookup_stage)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,9 +155,7 @@ class _CompletionClaimRegistry:
             EventDeliveryClaim,
         )
 
-        normalized = EventDeliveryClaim.model_validate(
-            claim.model_dump(mode="python")
-        )
+        normalized = EventDeliveryClaim.model_validate(claim.model_dump(mode="python"))
         entry = _OwnedCompletionClaim(
             user_id=_require_text("user_id", user_id, maximum=64),
             conversation_id=_require_text(
@@ -203,11 +215,7 @@ class _CompletionClaimRegistry:
             self._claims.pop(identity, None)
 
     def _purge_expired(self, now: datetime) -> None:
-        expired = [
-            event_id
-            for event_id, entry in self._claims.items()
-            if entry.claim.lease_expires_at <= now
-        ]
+        expired = [event_id for event_id, entry in self._claims.items() if entry.claim.lease_expires_at <= now]
         for event_id in expired:
             self._claims.pop(event_id, None)
 
@@ -359,9 +367,7 @@ class VideoLiveOperationBridge:
     ) -> OperationRecord:
         """只在 M06 start 调用栈中持有原始 Authorization。"""
 
-        normalized = VideoOperationStartRequest.model_validate(
-            request.model_dump(mode="python")
-        )
+        normalized = VideoOperationStartRequest.model_validate(request.model_dump(mode="python"))
         adapter = self._resolver.resolve(normalized.stage)
         authorization = _borrow_authorization_for_operation_boundary(credential)
         from pixelflow.agent_runtime.jobs.recovery import OperationStartCoordinator
@@ -472,9 +478,7 @@ class VideoLiveOperationBridge:
                     stage_version,
                     int,
                 ):
-                    raise OperationConflictError(
-                        "剪映草稿持久终态格式不受支持"
-                    )
+                    raise OperationConflictError("剪映草稿持久终态格式不受支持")
                 return VideoOperationTerminalClaim(
                     job=job,
                     result_hash=_require_text(
@@ -723,26 +727,14 @@ class _ScopedVideoOperationPort:
         if current is None or completion is None:
             raise OperationConflictError("视频终态缺少当前完成事件 claim")
         payload = completion.claim.event.payload
-        if (
-            completion.user_id != self._user_id
-            or completion.conversation_id != self._conversation_id
-            or completion.job_id != current.job_id
-            or payload.get("job_id") != current.job_id
-            or payload.get("status") != current.status.value
-        ):
+        if completion.user_id != self._user_id or completion.conversation_id != self._conversation_id or completion.job_id != current.job_id or payload.get("job_id") != current.job_id or payload.get("status") != current.status.value:
             raise OperationConflictError("视频终态与完成事件身份不一致")
         domain_job = current
-        if (
-            target_status is ExternalJobStatus.FAILED
-            and current.status
-            in {
-                ExternalJobStatus.TIMEOUT,
-                ExternalJobStatus.EXPIRED,
-            }
-        ):
-            domain_job = current.model_copy(
-                update={"status": ExternalJobStatus.FAILED}
-            )
+        if target_status is ExternalJobStatus.FAILED and current.status in {
+            ExternalJobStatus.TIMEOUT,
+            ExternalJobStatus.EXPIRED,
+        }:
+            domain_job = current.model_copy(update={"status": ExternalJobStatus.FAILED})
         elif current.status is not target_status:
             raise OperationConflictError("视频领域终态与 M06 Operation 终态不一致")
         if provider_job_id is not None and current.provider_job_id != provider_job_id:
@@ -945,7 +937,7 @@ class VideoOperationCompletionHandler:
                 )
             else:
                 message = _completion_message(payload)
-                retryable = status == "timeout"
+                retryable = status in {"timeout", "expired"}
                 updated = await service.record_scene_failure(
                     state,
                     scene_id=scene_id,
@@ -958,10 +950,7 @@ class VideoOperationCompletionHandler:
                 )
         elif isinstance(state, VideoPostProductionWorkflowState):
             post_service = VideoPostProductionWorkflowService(scoped)
-            if (
-                state.current_stage is VideoPostProductionStage.MERGE_VIDEO
-                and stage == VideoPostProductionStage.MERGE_VIDEO.value
-            ):
+            if state.current_stage is VideoPostProductionStage.MERGE_VIDEO and stage == VideoPostProductionStage.MERGE_VIDEO.value:
                 if status == "succeeded":
                     result = payload.get("result")
                     if not isinstance(result, Mapping):
@@ -983,15 +972,12 @@ class VideoOperationCompletionHandler:
                         state,
                         error=_completion_message(payload),
                         attempts=1,
-                        retryable=status == "timeout",
+                        retryable=status in {"timeout", "expired"},
                         raw={},
                         operation_port=scoped,
                         now=self._now(),
                     )
-            elif (
-                state.current_stage is VideoPostProductionStage.QUALITY_REVIEW
-                and stage == VideoPostProductionStage.QUALITY_REVIEW.value
-            ):
+            elif state.current_stage is VideoPostProductionStage.QUALITY_REVIEW and stage == VideoPostProductionStage.QUALITY_REVIEW.value:
                 if status == "succeeded":
                     result = payload.get("result")
                     if not isinstance(result, Mapping):
@@ -1004,22 +990,12 @@ class VideoOperationCompletionHandler:
                         result=VideoQualityReviewWorkflowResult(
                             ok=True,
                             passed=bool(result.get("passed")),
-                            summary_markdown=str(
-                                result.get("summary_markdown") or ""
-                            ),
-                            quality_report_markdown=str(
-                                result.get("quality_report_markdown") or ""
-                            ),
+                            summary_markdown=str(result.get("summary_markdown") or ""),
+                            quality_report_markdown=str(result.get("quality_report_markdown") or ""),
                             issues=list(result.get("issues") or []),
-                            affected_scene_ids=list(
-                                result.get("affected_scene_ids") or []
-                            ),
-                            revision_prompt=str(
-                                result.get("revision_prompt") or ""
-                            ),
-                            task_id=_optional_text(
-                                payload.get("provider_job_id")
-                            ),
+                            affected_scene_ids=list(result.get("affected_scene_ids") or []),
+                            revision_prompt=str(result.get("revision_prompt") or ""),
+                            task_id=_optional_text(payload.get("provider_job_id")),
                             raw=dict(raw),
                         ),
                         operation_port=scoped,
@@ -1030,17 +1006,14 @@ class VideoOperationCompletionHandler:
                         state,
                         error=_completion_message(payload),
                         attempts=1,
-                        retryable=status == "timeout",
+                        retryable=status in {"timeout", "expired"},
                         raw={},
                         operation_port=scoped,
                         now=self._now(),
                     )
             else:
                 raise OperationConflictError("后处理完成事件与当前阶段不一致")
-        elif (
-            isinstance(state, VideoDeliveryWorkflowState)
-            and stage == "jianying_draft"
-        ):
+        elif isinstance(state, VideoDeliveryWorkflowState) and stage == "jianying_draft":
             request = state.pending_jianying_request
             if request is None:
                 raise OperationConflictError("剪映完成事件缺少权威请求")
@@ -1063,17 +1036,11 @@ class VideoOperationCompletionHandler:
                     "job_id": payload.get("job_id"),
                     "provider_task_id": payload.get("provider_job_id"),
                     "conversation_id": completion.conversation_id,
-                    "storyboard_version_id": request.get(
-                        "storyboard_version_id"
-                    ),
+                    "storyboard_version_id": request.get("storyboard_version_id"),
                     "download_url": result_data.get("download_url"),
                     "file_name": result_data.get("file_name"),
                     "expire_at": result_data.get("expire_at"),
-                    "message": (
-                        result_data.get("message")
-                        if status == "succeeded"
-                        else _completion_message(payload)
-                    ),
+                    "message": (result_data.get("message") if status == "succeeded" else _completion_message(payload)),
                 }
             )
             updated = await VideoDeliveryWorkflowService(scoped).record_jianying_result(
@@ -1092,13 +1059,142 @@ class VideoOperationCompletionHandler:
             last_turn_id=envelope.last_turn_id,
             last_action_key=completion_event.event_id,
         )
+        messages = ()
+        artifact = None
+        if isinstance(updated, VideoSceneGenerationWorkflowState):
+            from pixelflow.agent_workflows.video.delivery import (
+                VideoWebArtifactAdapter,
+            )
+
+            artifact = VideoWebArtifactAdapter(VideoDeliveryWorkflowService(scoped)).project(updated)
+        elif isinstance(updated, VideoPostProductionWorkflowState) and stage == VideoPostProductionStage.MERGE_VIDEO.value:
+            from pixelflow.agent_workflows.video.delivery import VideoWebArtifactAdapter
+
+            delivery_service = VideoDeliveryWorkflowService(scoped)
+            adapter = VideoWebArtifactAdapter(delivery_service)
+            scene_artifact = adapter.project(updated.generation_state)
+            if status == "succeeded":
+                projection_state = VideoDeliveryWorkflowState(
+                    workflow_id=updated.workflow_id,
+                    conversation_id=updated.conversation_id,
+                    current_stage=updated.current_stage,
+                    status=updated.status,
+                    stage_version=updated.stage_version,
+                    context_version=updated.context_version,
+                    created_at=updated.created_at,
+                    updated_at=updated.updated_at,
+                    _postproduction_state=updated,
+                    _jianying_draft_records_json="{}",
+                    _operation_attempts_json="{}",
+                    _pending_operation=None,
+                    _pending_jianying_operation_json="null",
+                    _final_video_delivery_json="null",
+                )
+                artifact = adapter.project(projection_state)
+            else:
+                failure = updated.merge_error or {}
+                artifact = {
+                    "type": "video_result",
+                    "title": "视频合并未完成",
+                    "description": str(failure.get("message") or "视频合并未完成，请重试。"),
+                    "actionLabel": ("重新生成" if failure.get("retryable") is True else "查看结果"),
+                    "videoScenePackages": scene_artifact["videoScenePackages"],
+                    "generatedSceneVideos": scene_artifact["generatedSceneVideos"],
+                    "mergedVideo": {
+                        "ok": False,
+                        "endpoint": "/api/video/merge",
+                        "merged_video_url": None,
+                        "task_id": None,
+                        "scene_videos": updated.generation_state.scene_videos,
+                        "error": failure.get("error"),
+                        "message": failure.get("message"),
+                        "quota_insufficient": failure.get("quota_insufficient") is True,
+                        "raw": {},
+                    },
+                    "videoAccepted": False,
+                }
+        elif isinstance(updated, VideoPostProductionWorkflowState) and stage == VideoPostProductionStage.QUALITY_REVIEW.value:
+            from pixelflow.agent_workflows.video.delivery import VideoWebArtifactAdapter
+
+            delivery_service = VideoDeliveryWorkflowService(scoped)
+            adapter = VideoWebArtifactAdapter(delivery_service)
+            scene_artifact = adapter.project(updated.generation_state)
+            quality_review = updated.quality_review or {}
+            merged = updated.merged_video
+            if not isinstance(merged, Mapping):
+                raise OperationConflictError("质检完成事件缺少权威合并视频")
+            artifact = {
+                "type": "video_quality_review",
+                "title": "QAAgent QC 质检",
+                "description": ("视频质检已通过，请确认最终成片。" if quality_review.get("passed") is True else "视频质检未完成，请按提示重试或修改。" if status != "succeeded" else "视频质检已定位需修改分镜，请选择修改范围。"),
+                "actionLabel": ("重新质检" if status != "succeeded" and quality_review.get("retryable") is True else "选择"),
+                "videoQualityReview": quality_review,
+                "videoRevisionFeedback": updated.quality_feedback or "",
+                "videoScenePackages": scene_artifact["videoScenePackages"],
+                "generatedSceneVideos": scene_artifact["generatedSceneVideos"],
+                "mergedVideo": {
+                    "ok": True,
+                    "endpoint": merged["endpoint"],
+                    "merged_video_url": merged["video_url"],
+                    "task_id": merged["task_id"],
+                    "scene_videos": merged.get("scene_videos") or [],
+                    "error": None,
+                    "message": "视频合并完成。",
+                    "quota_insufficient": False,
+                    "raw": {},
+                },
+            }
+        elif isinstance(updated, VideoDeliveryWorkflowState):
+            from pixelflow.agent_runtime.identity import projection_message_id
+            from pixelflow.agent_workflows.video.delivery import (
+                VideoWebArtifactAdapter,
+            )
+
+            delivery_artifact = VideoWebArtifactAdapter(VideoDeliveryWorkflowService(scoped)).project(updated)
+            draft = delivery_artifact.get("jianyingDraft")
+            if not isinstance(draft, Mapping):
+                raise OperationConflictError("剪映完成事件缺少 Web 结果记录")
+            scenes = request.get("scenes")
+            if not isinstance(scenes, list):
+                raise OperationConflictError("剪映完成事件缺少权威分镜请求")
+            message_id = projection_message_id(
+                workflow.workflow_id,
+                workflow.current_stage,
+                workflow.stage_version,
+                completion_event.event_id,
+            )
+            succeeded = status == "succeeded"
+            artifact = {
+                "type": "jianying_draft",
+                "title": "剪映草稿已生成" if succeeded else "剪映草稿生成失败",
+                "description": str(draft.get("message") or "剪映草稿处理完成。"),
+                "actionLabel": "下载" if succeeded else "重新生成",
+                "jianyingDraft": dict(draft),
+                "pendingJianyingDraftJob": {
+                    "job_id": payload.get("job_id"),
+                    "conversation_id": completion.conversation_id,
+                    "source_message_id": message_id,
+                    "storyboard_version_id": updated.current_storyboard_version_id,
+                    "started_at": state.updated_at.isoformat(),
+                    "request": dict(request),
+                },
+                "jianyingDraftSceneCount": len(scenes),
+            }
+        if artifact is not None:
+            messages = (
+                _completion_projection_message(
+                    workflow=workflow,
+                    completion_event=completion_event,
+                    artifact=artifact,
+                ),
+            )
         await self._repository.commit_operation_completion(
             completion.claim,
             user_id=completion.user_id,
             workflow_state=updated_envelope,
             workflow=workflow,
             expected_workflow_version=envelope.workflow_version,
-            messages=(),
+            messages=messages,
             occurred_at=self._now(),
         )
         self._operations._release_published_completion(completion)
@@ -1180,20 +1276,13 @@ def _m11_idempotency_key(
 
     if stage.startswith("generate_scene_video:"):
         scene_id = stage.partition(":")[2]
-        identity = "\0".join(
-            (workflow_id, str(stage_version), scene_id, str(attempt))
-        )
+        identity = "\0".join((workflow_id, str(stage_version), scene_id, str(attempt)))
         return f"pf:video-scene:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
     if stage in {"merge_video", "quality_review"}:
-        identity = "|".join(
-            (workflow_id, stage, str(stage_version), str(attempt), request_hash)
-        )
+        identity = "|".join((workflow_id, stage, str(stage_version), str(attempt), request_hash))
         return f"pf:video-post:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
     if stage == "jianying_draft":
-        return (
-            f"video:{workflow_id}:jianying_draft:v{stage_version}:"
-            f"a{attempt}:{request_hash}"
-        )
+        return f"video:{workflow_id}:jianying_draft:v{stage_version}:a{attempt}:{request_hash}"
     return build_operation_idempotency_key(
         workflow_id,
         stage,
@@ -1206,6 +1295,63 @@ def _hash_operation_request(provider_request: object) -> str:
     from pixelflow.agent_runtime.jobs.identity import hash_operation_request
 
     return hash_operation_request(provider_request)
+
+
+_CREDENTIAL_KEY_PARTS = frozenset({"authorization", "secret", "password", "credential"})
+_TOKEN_CREDENTIAL_PREFIXES = frozenset({"access", "refresh", "auth", "bearer", "client", "session", "id", "api", "provider"})
+_TOKEN_METADATA_SUFFIXES = frozenset({"count", "counts", "budget", "limit", "length", "usage", "estimate", "hint"})
+_CREDENTIAL_VALUE_PATTERN = re.compile(
+    r"(?:\b(?:authorization|(?:access|refresh|auth|bearer|client|session|id|api|provider)"
+    r"[\s_-]*token|token|api[\s_-]*key|secret|password|credential)\b\s*[:=]\s*"
+    r"(?:bearer\s+)?\S+|\bbearer\s+[a-z0-9._~+/=-]{6,})",
+    re.IGNORECASE,
+)
+
+
+def _ensure_provider_request_has_no_credentials(value: object) -> None:
+    """递归拒绝供应商规范请求中的凭据键和值，错误只返回固定摘要。"""
+
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if isinstance(key, str) and _is_sensitive_provider_request_key(key):
+                raise ValueError("Provider 请求包含敏感凭据")
+            _ensure_provider_request_has_no_credentials(child)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            _ensure_provider_request_has_no_credentials(child)
+        return
+    if isinstance(value, str):
+        normalized = unicodedata.normalize("NFKC", value)
+        if _CREDENTIAL_VALUE_PATTERN.search(normalized):
+            raise ValueError("Provider 请求包含敏感凭据")
+
+
+def _is_sensitive_provider_request_key(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value)
+    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
+    parts = re.findall(r"[a-z0-9]+", camel_split.casefold())
+    if any(part in _CREDENTIAL_KEY_PARTS for part in parts):
+        return True
+    if "apikey" in parts or any(first == "api" and second == "key" for first, second in zip(parts, parts[1:], strict=False)):
+        return True
+    for index, part in enumerate(parts):
+        if part != "token":
+            continue
+        previous = parts[index - 1] if index > 0 else None
+        following = parts[index + 1] if index + 1 < len(parts) else None
+        if previous in _TOKEN_CREDENTIAL_PREFIXES:
+            return True
+        if following not in _TOKEN_METADATA_SUFFIXES:
+            return True
+    collapsed = "".join(parts)
+    return bool(
+        re.fullmatch(
+            r"(?:authorization|api(?:key)|secret|password|credential|"
+            r"(?:access|refresh|auth|bearer|client|session|id|api|provider)token(?:value)?)",
+            collapsed,
+        )
+    )
 
 
 def _external_job_ref(operation: OperationRecord) -> ExternalJobRef:
@@ -1256,6 +1402,53 @@ def _completion_message(payload: Mapping[str, object]) -> str:
     if not isinstance(message, str) or not message:
         raise OperationConflictError("视频失败事件缺少安全原因")
     return message
+
+
+def _completion_projection_message(
+    *,
+    workflow: object,
+    completion_event: object,
+    artifact: Mapping[str, object],
+):
+    """用完成事件和更新后 Workflow 派生稳定 Web 消息。"""
+
+    from pixelflow.agent_runtime.contracts import AgentEvent, WorkflowRecord
+    from pixelflow.agent_runtime.identity import projection_message_id
+    from pixelflow.agent_runtime.persistence import SupervisorProjectionMessage
+    from pixelflow.agent_workflows.video.live_handler import (
+        artifact_summary,
+        deepcopy_json,
+    )
+
+    normalized_workflow = WorkflowRecord.model_validate(workflow)
+    normalized_event = AgentEvent.model_validate(completion_event)
+    normalized_artifact = deepcopy_json(_clear_raw_provider_payloads(dict(artifact)))
+    if not isinstance(normalized_artifact, dict):
+        raise TypeError("完成事件 Artifact 必须是对象")
+    return SupervisorProjectionMessage(
+        message_id=projection_message_id(
+            normalized_workflow.workflow_id,
+            normalized_workflow.current_stage,
+            normalized_workflow.stage_version,
+            normalized_event.event_id,
+        ),
+        conversation_id=normalized_workflow.conversation_id,
+        run_id=normalized_workflow.workflow_id,
+        role="assistant",
+        content=artifact_summary(normalized_artifact),
+        payload={"artifact": normalized_artifact},
+        created_at=normalized_event.occurred_at,
+    )
+
+
+def _clear_raw_provider_payloads(value: object) -> object:
+    """保留 Web DTO 的 raw 占位字段，但绝不投影供应商原始内容。"""
+
+    if isinstance(value, Mapping):
+        return {str(key): ({} if str(key) == "raw" else _clear_raw_provider_payloads(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clear_raw_provider_payloads(item) for item in value]
+    return value
 
 
 __all__ = [

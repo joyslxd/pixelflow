@@ -41,6 +41,7 @@ from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_TABLES,
     MemoryVideoRuntimeRepository,
     SQLVideoRuntimeRepository,
+    SupervisorProjectionMessage,
     VideoRuntimeRepository,
     VideoTurnCommit,
 )
@@ -287,9 +288,7 @@ def build_live_operations(
         resolver=VideoOperationAdapterResolver(
             {
                 STAGE: ProviderJobAdapter(provider),
-                "generate_scene_video:scene-1": ProviderJobAdapter(provider),
-                "generate_scene_video:scene-2": ProviderJobAdapter(provider),
-                "generate_scene_video:scene-3": ProviderJobAdapter(provider),
+                "generate_scene_video": ProviderJobAdapter(provider),
                 "merge_video": ProviderJobAdapter(provider),
                 "quality_review": ProviderJobAdapter(provider),
                 "jianying_draft": ProviderJobAdapter(provider),
@@ -352,20 +351,19 @@ async def _video_repository(
         await connection.run_sync(
             lambda sync_connection: Base.metadata.create_all(
                 sync_connection,
-                tables=(
-                    tuple(AGENT_RUNTIME_TABLES)
-                    + tuple(AGENT_RUNTIME_SUPPORT_TABLES)
-                    + (PixelFlowConversationRow.__table__,)
-                ),
+                tables=(tuple(AGENT_RUNTIME_TABLES) + tuple(AGENT_RUNTIME_SUPPORT_TABLES) + (PixelFlowConversationRow.__table__,)),
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     store = SQLPixelFlowTaskStore(session_factory)
     try:
-        yield SQLVideoRuntimeRepository(
-            session_factory,
-            task_store=store,
-        ), store
+        yield (
+            SQLVideoRuntimeRepository(
+                session_factory,
+                task_store=store,
+            ),
+            store,
+        )
     finally:
         await engine.dispose()
 
@@ -555,6 +553,58 @@ async def _commit_next_state(
     )
 
 
+async def _assert_new_completion_projection(
+    repository: VideoRuntimeRepository,
+    *,
+    before_message_ids: set[str],
+    expected_type: str,
+    required_fields: set[str],
+    expected_count: int = 1,
+) -> SupervisorProjectionMessage:
+    messages = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
+    created = [item for item in messages if item.message_id not in before_message_ids]
+    assert len(created) == expected_count
+    events = await repository.list_events(USER_ID, CONVERSATION_ID)
+    for message in created:
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        assert artifact["type"] == expected_type
+        assert required_fields.issubset(artifact)
+        assert "原始" not in json.dumps(artifact, ensure_ascii=False)
+        upserted = [event for event in events if event.type.value == "message.upserted" and event.payload["message"]["message_id"] == message.message_id]
+        assert len(upserted) == 1
+    return created[0]
+
+
+async def _assert_completion_projection_replay_stable(
+    repository: VideoRuntimeRepository,
+    runtime: object,
+    *,
+    before_message_ids: set[str],
+    expected_type: str,
+    required_fields: set[str],
+    expected_count: int = 1,
+) -> SupervisorProjectionMessage:
+    """确认完成投影在 dispatcher 重放后仍只有同一条消息和事件。"""
+
+    message = await _assert_new_completion_projection(
+        repository,
+        before_message_ids=before_message_ids,
+        expected_type=expected_type,
+        required_fields=required_fields,
+        expected_count=expected_count,
+    )
+    await runtime.run_once()
+    replayed = await _assert_new_completion_projection(
+        repository,
+        before_message_ids=before_message_ids,
+        expected_type=expected_type,
+        required_fields=required_fields,
+        expected_count=expected_count,
+    )
+    assert replayed.message_id == message.message_id
+    return message
+
+
 async def _complete_scenes_and_merge(
     repository: VideoRuntimeRepository,
     store: object,
@@ -653,14 +703,10 @@ def _reviewed_scene_package_state():
     )
     assets = prepared.scene_package.global_assets
     for item in assets["characters"]:
-        item["three_view_images"] = [
-            f"https://assets.example.com/{item['asset_id']}.png"
-        ]
+        item["three_view_images"] = [f"https://assets.example.com/{item['asset_id']}.png"]
     for collection in ("scenes", "props"):
         for item in assets[collection]:
-            item["images"] = [
-                f"https://assets.example.com/{item['asset_id']}.png"
-            ]
+            item["images"] = [f"https://assets.example.com/{item['asset_id']}.png"]
     return scene_service.publish_generated_asset_images(prepared, assets, now=NOW)
 
 
@@ -674,10 +720,7 @@ def _concrete_plan(direction: dict[str, object]):
     }
     for blueprint in blueprints:
         for collection in ("characters", "scenes", "props"):
-            blueprint["asset_requirements"][collection] = [
-                replacements.get(name, name)
-                for name in blueprint["asset_requirements"][collection]
-            ]
+            blueprint["asset_requirements"][collection] = [replacements.get(name, name) for name in blueprint["asset_requirements"][collection]]
         for old_name, new_name in replacements.items():
             for field_name in ("shot_description", "storyline", "narration"):
                 blueprint[field_name] = blueprint[field_name].replace(old_name, new_name)
@@ -842,6 +885,88 @@ def handler_without_credential(
     )
 
 
+@pytest.mark.parametrize(
+    ("provider_request", "secret_marker"),
+    [
+        ({"nested": {"Authorization": "task8-sensitive-authorization"}}, "task8-sensitive-authorization"),
+        ({"nested": [{"access_token": "task8-sensitive-snake-token"}]}, "task8-sensitive-snake-token"),
+        ({"nested": {"refresh-token": "task8-sensitive-kebab-token"}}, "task8-sensitive-kebab-token"),
+        ({"nested": {"clientToken": "task8-sensitive-camel-token"}}, "task8-sensitive-camel-token"),
+        ({"nested": {"API KEY": "task8-sensitive-space-api-key"}}, "task8-sensitive-space-api-key"),
+        ({"nested": {"api_key": "task8-sensitive-snake-api-key"}}, "task8-sensitive-snake-api-key"),
+        ({"nested": {"api-key": "task8-sensitive-kebab-api-key"}}, "task8-sensitive-kebab-api-key"),
+        ({"nested": {"apiKey": "task8-sensitive-camel-api-key"}}, "task8-sensitive-camel-api-key"),
+        ({"nested": {"secret": "task8-sensitive-secret"}}, "task8-sensitive-secret"),
+        ({"nested": {"passWord": "task8-sensitive-password"}}, "task8-sensitive-password"),
+        ({"nested": [{"credential": "task8-sensitive-credential"}]}, "task8-sensitive-credential"),
+        ({"nested": {"ＡＰＩ　ＫＥＹ": "task8-sensitive-nfkc"}}, "task8-sensitive-nfkc"),
+        ({"note": "Bearer task8-explicit-bearer"}, "task8-explicit-bearer"),
+        ({"note": "Authorization: Bearer task8-explicit-authorization"}, "task8-explicit-authorization"),
+        ({"note": "token=task8-explicit-token"}, "task8-explicit-token"),
+    ],
+)
+def test_video_operation_start_request_rejects_nested_credentials_without_echo(
+    provider_request: dict[str, JsonValue],
+    secret_marker: str,
+) -> None:
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=STAGE,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    with pytest.raises(ValueError) as raised:
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        )
+
+    assert secret_marker not in str(raised.value)
+
+
+def test_video_operation_start_request_hides_provider_request_from_repr() -> None:
+    live_request = request()
+
+    assert PROVIDER_REQUEST["prompt"] not in repr(live_request)
+    assert "provider_request" not in repr(live_request)
+
+
+def test_video_operation_start_request_keeps_normal_business_fields_and_hash_check() -> None:
+    provider_request: dict[str, JsonValue] = {
+        "prompt": "展示保险箱的隐藏收纳空间",
+        "token_count_hint": 128,
+        "secretary_name": "林女士",
+        "passwordless_mode": True,
+    }
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=STAGE,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    live_request = VideoOperationStartRequest(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        operation_request=operation_request,
+        provider_request=provider_request,
+    )
+
+    assert live_request.provider_request == provider_request
+    with pytest.raises(ValueError, match="request_hash"):
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request={**provider_request, "prompt": "已被篡改"},
+        )
+
+
 @pytest.mark.asyncio
 async def test_concurrent_live_start_calls_provider_once_and_never_persists_auth() -> None:
     provider = CountingProvider()
@@ -890,6 +1015,94 @@ def test_video_operation_adapter_resolver_rejects_unknown_stage() -> None:
     assert resolver.resolve(STAGE) is adapter
     with pytest.raises(OperationConflictError, match="stage"):
         resolver.resolve("unknown-paid-stage")
+
+
+def test_video_operation_adapter_resolver_routes_dynamic_scene_stages_to_base_capability() -> None:
+    adapter = ProviderJobAdapter(CountingProvider())
+    resolver = VideoOperationAdapterResolver({"generate_scene_video": adapter})
+
+    assert resolver.resolve("generate_scene_video") is adapter
+    for scene_id in ("scene-1", "scene-4", "hero-shot-04", "custom_17"):
+        assert resolver.resolve(f"generate_scene_video:{scene_id}") is adapter
+
+    for invalid_stage in (
+        "generate_scene_video:",
+        "generate_scene_video:   ",
+        "generate_scene_videos:scene-4",
+        "prefix_generate_scene_video:scene-4",
+    ):
+        with pytest.raises(OperationConflictError, match="stage"):
+            resolver.resolve(invalid_stage)
+
+    unavailable = VideoOperationAdapterResolver({"merge_video": adapter})
+    with pytest.raises(OperationConflictError, match="stage"):
+        unavailable.resolve("generate_scene_video")
+    with pytest.raises(OperationConflictError, match="stage"):
+        unavailable.resolve("generate_scene_video:scene-4")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scene_stage_preserves_operation_identity_during_recovery() -> None:
+    dynamic_stage = "generate_scene_video:hero-shot-04"
+    provider_request: dict[str, JsonValue] = {
+        "scene_id": "hero-shot-04",
+        "prompt": "生成非默认分镜",
+    }
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=dynamic_stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+    clock = _MutableClock()
+    provider = ScriptedProvider(
+        status_results=[
+            {
+                "job_id": "provider-scripted-1",
+                "status": "completed",
+                "result": {"video_url": "https://provider.example/hero-shot-04.mp4"},
+            }
+        ]
+    )
+    operations = VideoLiveOperationBridge(
+        repository=MemoryAgentRuntimeRepository(),
+        resolver=VideoOperationAdapterResolver({"generate_scene_video": ProviderJobAdapter(provider)}),
+        lease_owner="task8-dynamic-scene-start",
+        clock=clock,
+        job_id_factory=lambda: "operation-dynamic-scene",
+    )
+
+    started = await operations.start(
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        ),
+        credential=TransientTurnCredential(FAKE_AUTHORIZATION),
+    )
+    resumer = _RecordingResumer()
+    runtime = operations.build_recovery_runtime(
+        resumer=resumer,
+        worker_id="task8-dynamic-scene-recovery",
+    )
+    clock.advance(seconds=3)
+    await runtime.run_once()
+
+    completed = await operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=started.job_id,
+    )
+    assert completed is not None
+    assert completed.stage == dynamic_stage
+    assert completed.idempotency_key == operation_request.idempotency_key
+    assert provider.status_job_ids == ["provider-scripted-1"]
+    assert len(resumer.calls) == 1
+    completion_event = resumer.calls[0][1]
+    assert completion_event.payload["stage"] == dynamic_stage
+    assert resumer.calls[0][2] == completion_event.event_id
 
 
 @pytest.mark.asyncio
@@ -1226,10 +1439,29 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
         updated = decode_video_workflow_state(restored)
         assert [item["scene_id"] for item in updated.scene_videos] == ["scene-1"]
         assert restored.workflow_version == 2
-        assert await repository.list_pending_operation_completions(
-            now=clock.now(),
-            limit=100,
-        ) == []
+        assert (
+            await repository.list_pending_operation_completions(
+                now=clock.now(),
+                limit=100,
+            )
+            == []
+        )
+        message = await _assert_new_completion_projection(
+            repository,
+            before_message_ids=set(),
+            expected_type="video_scene_packages",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "videoScenePackageEditedSceneIds",
+            },
+        )
+        await runtime.run_once()
+        replayed = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
+        assert [item.message_id for item in replayed] == [message.message_id]
 
 
 @pytest.mark.asyncio
@@ -1399,6 +1631,7 @@ async def test_checkpoint_commit_survives_exit_before_dispatcher_ack(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.parametrize(
     ("terminal_result", "expected_operation_status"),
     [
@@ -1421,8 +1654,10 @@ async def test_checkpoint_commit_survives_exit_before_dispatcher_ack(
     ],
 )
 async def test_scene_non_success_completion_becomes_safe_m11_failure(
+    kind: RepositoryKind,
     terminal_result: object,
     expected_operation_status: ExternalJobStatus,
+    tmp_path: Path,
 ) -> None:
     clock = _MutableClock()
     provider = ScriptedProvider(
@@ -1447,8 +1682,8 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-scene-failure.db"),
+        kind,
+        tmp_path / f"task8-scene-failure-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -1469,6 +1704,10 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             worker_id="task8-scene-failure",
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
 
@@ -1481,14 +1720,37 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
         assert restored is not None
         assert operation is not None
         updated = decode_video_workflow_state(restored)
+        expected_retryable = expected_operation_status in {
+            ExternalJobStatus.TIMEOUT,
+            ExternalJobStatus.EXPIRED,
+        }
         assert operation.status is expected_operation_status
         assert [item["scene_id"] for item in updated.failed_scenes] == ["scene-1"]
+        assert updated.failed_scenes[0]["retryable"] is expected_retryable
         assert "原始" not in json.dumps(updated.failed_scenes, ensure_ascii=False)
-        assert await repository.list_pending_operation_completions(
-            now=clock.now(),
-            limit=100,
-        ) == []
-        if expected_operation_status is ExternalJobStatus.TIMEOUT:
+        assert (
+            await repository.list_pending_operation_completions(
+                now=clock.now(),
+                limit=100,
+            )
+            == []
+        )
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="video_scene_packages",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "videoScenePackageEditedSceneIds",
+            },
+            expected_count=3,
+        )
+        if expected_retryable:
             workflow = await repository.get_workflow(USER_ID, WORKFLOW_ID)
             assert workflow is not None
             retry_command = explicit_stage_command(
@@ -1520,7 +1782,33 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             ).dispatch(retry_command)
             retry_state = decode_video_workflow_state(retried.state)
             assert retry_state.pending_operations[0].attempt == 2
+            retry_job_id = retry_state.pending_operations[0].job_id
             assert provider.start_calls == 4
+
+            duplicate_vault = TransientCredentialVault()
+            duplicate_vault.put(
+                retry_command.turn_id,
+                TransientTurnCredential(FAKE_AUTHORIZATION),
+            )
+            duplicate = await VideoLiveWorkflowHandler(
+                repository=repository,
+                capabilities=_UnusedCapabilities(),
+                credential_provider=duplicate_vault,
+                operation_port=operations,
+                clock=clock,
+            ).dispatch(retry_command)
+            duplicate_state = decode_video_workflow_state(duplicate.state)
+            assert duplicate_state.pending_operations[0].job_id == retry_job_id
+            assert duplicate_state.pending_operations[0].attempt == 2
+            assert provider.start_calls == 4
+            unchanged = await operations.get_operation(
+                user_id=USER_ID,
+                conversation_id=CONVERSATION_ID,
+                job_id=first_job_id,
+            )
+            assert unchanged is not None
+            assert unchanged.status is expected_operation_status
+            assert provider.status_job_ids.count("provider-scripted-1") == 1
 
 
 @pytest.mark.asyncio
@@ -1592,14 +1880,16 @@ async def test_merge_paid_stage_requires_credential_and_starts_m06_once() -> Non
             user_id=USER_ID,
             conversation_id=CONVERSATION_ID,
         )
-        merge = next(
-            item for item in snapshot["operations"] if item["stage"] == "merge_video"
-        )
+        merge = next(item for item in snapshot["operations"] if item["stage"] == "merge_video")
         assert merge["status"] == "polling"
 
 
 @pytest.mark.asyncio
-async def test_merge_completion_updates_postproduction_and_acks_once() -> None:
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_merge_completion_updates_postproduction_and_acks_once(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
     clock = _MutableClock()
     provider = ScriptedProvider(
         status_results=[
@@ -1625,8 +1915,8 @@ async def test_merge_completion_updates_postproduction_and_acks_once() -> None:
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-merge-completion.db"),
+        kind,
+        tmp_path / f"task8-merge-completion-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -1685,6 +1975,10 @@ async def test_merge_completion_updates_postproduction_and_acks_once() -> None:
             index=2,
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
 
@@ -1695,6 +1989,21 @@ async def test_merge_completion_updates_postproduction_and_acks_once() -> None:
         assert updated.current_stage.value == "video_review"
         assert restored.workflow_version == generation_envelope.workflow_version + 2
         assert provider.status_job_ids.count("provider-scripted-4") == 1
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="video_result",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "mergedVideo",
+                "videoAccepted",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -1709,9 +2018,7 @@ async def test_non_paid_video_finish_uses_scoped_live_operation_port() -> None:
                     "job_id": f"provider-scripted-{index}",
                     "status": "succeeded",
                     "result": {
-                        "video_url": (
-                            f"https://videos.example.com/scene-{index}.mp4"
-                        ),
+                        "video_url": (f"https://videos.example.com/scene-{index}.mp4"),
                         "raw": {},
                     },
                 }
@@ -1779,15 +2086,18 @@ async def test_non_paid_video_finish_uses_scoped_live_operation_port() -> None:
             ExternalJobStatus.TIMEOUT,
             True,
         ),
-        (_HttpStatusError(404), ExternalJobStatus.EXPIRED, False),
+        (_HttpStatusError(404), ExternalJobStatus.EXPIRED, True),
     ],
 )
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
+    kind: RepositoryKind,
     terminal_result: object,
     expected_status: ExternalJobStatus,
     expected_retryable: bool,
+    tmp_path: Path,
 ) -> None:
-    """合并非成功终态均安全，只有可重试超时会启动第二次付费调用。"""
+    """合并失败可按合同显式重试，404 必须创建新 attempt。"""
 
     clock = _MutableClock()
     provider = ScriptedProvider(
@@ -1797,9 +2107,7 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
                     "job_id": f"provider-scripted-{index}",
                     "status": "succeeded",
                     "result": {
-                        "video_url": (
-                            f"https://videos.example.com/scene-{index}.mp4"
-                        ),
+                        "video_url": (f"https://videos.example.com/scene-{index}.mp4"),
                         "raw": {},
                     },
                 }
@@ -1809,8 +2117,8 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-merge-timeout.db"),
+        kind,
+        tmp_path / f"task8-merge-non-success-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -1862,6 +2170,10 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
             index=21,
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
         failed_envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
@@ -1878,6 +2190,21 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert failed.merge_error["retryable"] is expected_retryable
         assert "原始" not in json.dumps(failed.merge_error, ensure_ascii=False)
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="video_result",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "mergedVideo",
+                "videoAccepted",
+            },
+        )
         if not expected_retryable:
             return
 
@@ -1911,7 +2238,33 @@ async def test_merge_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         retry_state = decode_video_workflow_state(retried.state)
         assert retry_state.pending_operation.attempt == 2
         assert retry_state.pending_operation.job_id != first_merge_job_id
+        retry_job_id = retry_state.pending_operation.job_id
         assert provider.start_calls == 5
+
+        duplicate_vault = TransientCredentialVault()
+        duplicate_vault.put(
+            retry_command.turn_id,
+            TransientTurnCredential(FAKE_AUTHORIZATION),
+        )
+        duplicate = await VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=_UnusedCapabilities(),
+            credential_provider=duplicate_vault,
+            operation_port=operations,
+            clock=clock,
+        ).dispatch(retry_command)
+        duplicate_state = decode_video_workflow_state(duplicate.state)
+        assert duplicate_state.pending_operation.job_id == retry_job_id
+        assert duplicate_state.pending_operation.attempt == 2
+        assert provider.start_calls == 5
+        unchanged = await operations.get_operation(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            job_id=first_merge_job_id,
+        )
+        assert unchanged is not None
+        assert unchanged.status is expected_status
+        assert provider.status_job_ids.count("provider-scripted-4") == 1
 
 
 @pytest.mark.asyncio
@@ -1983,7 +2336,11 @@ async def test_quality_paid_stage_requires_credential_and_starts_m06_once() -> N
 
 
 @pytest.mark.asyncio
-async def test_quality_completion_updates_m11_review_and_acks_once() -> None:
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quality_completion_updates_m11_review_and_acks_once(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
     clock = _MutableClock()
     provider = ScriptedProvider(
         status_results=[
@@ -2022,8 +2379,8 @@ async def test_quality_completion_updates_m11_review_and_acks_once() -> None:
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-quality-completion.db"),
+        kind,
+        tmp_path / f"task8-quality-completion-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -2065,6 +2422,10 @@ async def test_quality_completion_updates_m11_review_and_acks_once() -> None:
             worker_id="task8-quality-completion",
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
 
@@ -2074,6 +2435,22 @@ async def test_quality_completion_updates_m11_review_and_acks_once() -> None:
         assert updated.current_stage.value == "video_review"
         assert updated.quality_review["passed"] is True
         assert provider.status_job_ids.count("provider-scripted-5") == 1
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="video_quality_review",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoQualityReview",
+                "videoRevisionFeedback",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "mergedVideo",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -2094,15 +2471,18 @@ async def test_quality_completion_updates_m11_review_and_acks_once() -> None:
             ExternalJobStatus.TIMEOUT,
             True,
         ),
-        (_HttpStatusError(404), ExternalJobStatus.EXPIRED, False),
+        (_HttpStatusError(404), ExternalJobStatus.EXPIRED, True),
     ],
 )
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
+    kind: RepositoryKind,
     terminal_result: object,
     expected_status: ExternalJobStatus,
     expected_retryable: bool,
+    tmp_path: Path,
 ) -> None:
-    """质检非成功终态均安全，只有可重试超时保留反馈并新建 attempt。"""
+    """质检失败可按合同显式重试，404 必须保留反馈并新建 attempt。"""
 
     clock = _MutableClock()
     provider = ScriptedProvider(
@@ -2112,9 +2492,7 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
                     "job_id": f"provider-scripted-{index}",
                     "status": "succeeded",
                     "result": {
-                        "video_url": (
-                            f"https://videos.example.com/scene-{index}.mp4"
-                        ),
+                        "video_url": (f"https://videos.example.com/scene-{index}.mp4"),
                         "raw": {},
                     },
                 }
@@ -2132,8 +2510,8 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-quality-timeout.db"),
+        kind,
+        tmp_path / f"task8-quality-non-success-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -2181,6 +2559,10 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
             worker_id="task8-quality-timeout",
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
         failed_envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
@@ -2197,6 +2579,22 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert failed.quality_review["retryable"] is expected_retryable
         assert "原始" not in json.dumps(failed.quality_review, ensure_ascii=False)
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="video_quality_review",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoQualityReview",
+                "videoRevisionFeedback",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "mergedVideo",
+            },
+        )
         if not expected_retryable:
             return
 
@@ -2231,8 +2629,36 @@ async def test_quality_non_success_is_safe_and_timeout_retry_starts_attempt_two(
         assert retry_state.pending_operation is not None
         assert retry_state.pending_operation.attempt == 2
         assert retry_state.pending_operation.job_id != first_quality_job_id
+        retry_job_id = retry_state.pending_operation.job_id
         assert retry_state.quality_feedback == first_feedback
         assert provider.start_calls == 6
+
+        duplicate_vault = TransientCredentialVault()
+        duplicate_vault.put(
+            retry_command.turn_id,
+            TransientTurnCredential(FAKE_AUTHORIZATION),
+        )
+        duplicate = await VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=_UnusedCapabilities(),
+            credential_provider=duplicate_vault,
+            operation_port=operations,
+            clock=clock,
+        ).dispatch(retry_command)
+        duplicate_state = decode_video_workflow_state(duplicate.state)
+        assert duplicate_state.pending_operation is not None
+        assert duplicate_state.pending_operation.job_id == retry_job_id
+        assert duplicate_state.pending_operation.attempt == 2
+        assert duplicate_state.quality_feedback == first_feedback
+        assert provider.start_calls == 6
+        unchanged = await operations.get_operation(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            job_id=first_quality_job_id,
+        )
+        assert unchanged is not None
+        assert unchanged.status is expected_status
+        assert provider.status_job_ids.count("provider-scripted-5") == 1
 
 
 @pytest.mark.asyncio
@@ -2307,7 +2733,11 @@ async def test_jianying_paid_stage_requires_credential_and_starts_m06_once() -> 
 
 
 @pytest.mark.asyncio
-async def test_jianying_completion_updates_delivery_record_and_acks_once() -> None:
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_jianying_completion_updates_delivery_record_and_acks_once(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
     clock = _MutableClock()
     provider = ScriptedProvider(
         status_results=[
@@ -2342,8 +2772,8 @@ async def test_jianying_completion_updates_delivery_record_and_acks_once() -> No
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-jianying-completion.db"),
+        kind,
+        tmp_path / f"task8-jianying-completion-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -2387,6 +2817,10 @@ async def test_jianying_completion_updates_delivery_record_and_acks_once() -> No
             worker_id="task8-jianying-completion",
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
 
@@ -2404,6 +2838,20 @@ async def test_jianying_completion_updates_delivery_record_and_acks_once() -> No
         ).get_video_operation_terminal_claim(job_id=jianying_job_id)
         assert trusted is not None
         assert trusted.result_type == "jianying_succeeded"
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="jianying_draft",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "jianyingDraft",
+                "pendingJianyingDraftJob",
+                "jianyingDraftSceneCount",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -2427,10 +2875,13 @@ async def test_jianying_completion_updates_delivery_record_and_acks_once() -> No
         (_HttpStatusError(404), ExternalJobStatus.EXPIRED, "failed"),
     ],
 )
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
+    kind: RepositoryKind,
     terminal_result: object,
     expected_status: ExternalJobStatus,
     expected_record_status: str,
+    tmp_path: Path,
 ) -> None:
     """剪映非成功终态保存安全历史，显式重试复用版本并创建新 attempt。"""
 
@@ -2442,9 +2893,7 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
                     "job_id": f"provider-scripted-{index}",
                     "status": "succeeded",
                     "result": {
-                        "video_url": (
-                            f"https://videos.example.com/scene-{index}.mp4"
-                        ),
+                        "video_url": (f"https://videos.example.com/scene-{index}.mp4"),
                         "raw": {},
                     },
                 }
@@ -2462,8 +2911,8 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
         ]
     )
     async with _video_repository(
-        "memory",
-        Path("unused-memory-jianying-timeout.db"),
+        kind,
+        tmp_path / f"task8-jianying-non-success-{kind}.db",
     ) as (repository, store):
         await _seed_conversation(store)
         operations = build_live_operations(
@@ -2511,6 +2960,10 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
             worker_id="task8-jianying-timeout",
         )
 
+        before_messages = await repository.list_projection_messages(
+            USER_ID,
+            CONVERSATION_ID,
+        )
         clock.advance(seconds=3)
         await runtime.run_once()
         failed_envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
@@ -2528,6 +2981,20 @@ async def test_jianying_non_success_is_safe_and_retry_starts_attempt_two(
         assert first_operation.status is expected_status
         assert record["status"] == expected_record_status
         assert "原始" not in json.dumps(record, ensure_ascii=False)
+        await _assert_completion_projection_replay_stable(
+            repository,
+            runtime,
+            before_message_ids={item.message_id for item in before_messages},
+            expected_type="jianying_draft",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "jianyingDraft",
+                "pendingJianyingDraftJob",
+                "jianyingDraftSceneCount",
+            },
+        )
 
         retry_command = explicit_stage_command(
             failed_workflow,
