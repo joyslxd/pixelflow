@@ -24,6 +24,8 @@ from pixelflow.agent_runtime.ports import OperationConflictError
 from .live_capabilities import (
     TransientTurnCredential,
     _borrow_authorization_for_operation_boundary,
+    _is_sensitive_protocol_key,
+    _normalize_protocol_key,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +52,10 @@ class VideoOperationStartRequest(ContractModel):
     @classmethod
     def validate_provider_request_credentials(cls, value: object) -> object:
         if isinstance(value, Mapping):
-            _ensure_provider_request_has_no_credentials(value.get("provider_request"))
+            _validate_provider_request_boundary(
+                operation_request=value.get("operation_request"),
+                provider_request=value.get("provider_request"),
+            )
         return value
 
     @model_validator(mode="after")
@@ -1071,7 +1076,10 @@ class VideoOperationCompletionHandler:
 
             artifact = VideoWebArtifactAdapter(VideoDeliveryWorkflowService(scoped)).project(updated)
             if updated.failed_scenes:
-                artifact.update(_scene_failure_projection(updated.failed_scenes))
+                failure_projection = _scene_failure_projection(updated.failed_scenes)
+                artifact.update(failure_projection)
+                if failure_projection["nonRetryableSceneIds"]:
+                    artifact.pop("videoScenePackages", None)
         elif isinstance(updated, VideoPostProductionWorkflowState) and stage == VideoPostProductionStage.MERGE_VIDEO.value:
             from pixelflow.agent_workflows.video.delivery import VideoWebArtifactAdapter
 
@@ -1308,39 +1316,109 @@ def _hash_operation_request(provider_request: object) -> str:
     return hash_operation_request(provider_request)
 
 
-_CREDENTIAL_KEY_PARTS = frozenset({"authorization", "secret", "password", "credential"})
-_DIRECT_CREDENTIAL_KEY_PARTS = frozenset({"auth", "bearer", "jwt"})
-_DIRECT_CREDENTIAL_QUALIFIERS = frozenset({"header", "value", "credential", "token", "key"})
-_CREDENTIAL_PART_SINGULARS = {
-    "headers": "header",
-    "values": "value",
-    "credentials": "credential",
-    "tokens": "token",
-    "keys": "key",
-}
-_TOKEN_CREDENTIAL_PREFIXES = frozenset({"access", "refresh", "auth", "bearer", "client", "session", "id", "api", "provider"})
-_TOKEN_METADATA_SUFFIXES = frozenset({"count", "counts", "budget", "limit", "length", "usage", "estimate", "hint"})
+_SCENE_VIDEO_PROVIDER_FIELDS = frozenset(
+    {
+        "scene_id",
+        "scene_index",
+        "duration",
+        "duration_ms",
+        "prompt",
+        "storyline",
+        "shot_description",
+        "narration",
+        "transition",
+        "generation_mode",
+        "image_urls",
+        "video_urls",
+        "audio_urls",
+        "model",
+        "ratio",
+        "size",
+        "sound",
+    }
+)
+_MERGE_VIDEO_PROVIDER_FIELDS = frozenset(
+    {"video_urls", "scene_videos", "duration", "size", "model"}
+)
+_QUALITY_REVIEW_PROVIDER_FIELDS = frozenset(
+    {
+        "merged_video_url",
+        "scene_videos",
+        "scene_packages",
+        "brief",
+        "materials",
+        "user_feedback",
+        "ratio",
+        "size",
+    }
+)
+_JIANYING_DRAFT_PROVIDER_FIELDS = frozenset({"request", "retry_failed"})
+_SAFE_PROVIDER_METADATA_KEYS = frozenset(
+    {"authmode", "tokenbudget", "tokencount", "tokencounthint", "tokenhint"}
+)
 _CREDENTIAL_VALUE_PATTERN = re.compile(
     r"(?:\b(?:authorization|(?:access|refresh|auth|bearer|client|session|id|api|provider)"
-    r"[\s_-]*token|token|api[\s_-]*key|secret|password|credential)\b\s*[:=]\s*"
+    r"[\s_-]*token|token|(?:api[\s_-]*)?key|secret|password|credential)\b\s*[:=]\s*"
     r"(?:bearer\s+)?\S+|\bbearer\s+[a-z0-9._~+/=-]{6,})",
     re.IGNORECASE,
 )
 _JWT_CREDENTIAL_VALUE_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
 )
-_API_CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{20,}",
-    re.IGNORECASE,
-)
+
+
+def _validate_provider_request_boundary(
+    *,
+    operation_request: object,
+    provider_request: object,
+) -> None:
+    """按真实 M11 stage 限定顶层字段，再递归执行统一凭据键检查。"""
+
+    if isinstance(operation_request, OperationRequest):
+        stage = operation_request.stage
+    elif isinstance(operation_request, Mapping):
+        stage = operation_request.get("stage")
+    else:
+        stage = None
+    allowed_fields = _provider_fields_for_stage(stage)
+    if not isinstance(provider_request, Mapping):
+        raise ValueError("Provider 请求必须是对象")
+    for key in provider_request:
+        if type(key) is not str or key not in allowed_fields:
+            raise ValueError("Provider 请求包含 stage 未声明字段")
+    _ensure_provider_request_has_no_credentials(provider_request)
+
+
+def _provider_fields_for_stage(stage: object) -> frozenset[str]:
+    if isinstance(stage, str) and stage.startswith("generate_scene_video:"):
+        scene_id = stage.removeprefix("generate_scene_video:")
+        if scene_id and scene_id == scene_id.strip():
+            return _SCENE_VIDEO_PROVIDER_FIELDS
+    elif stage == "merge_video":
+        return _MERGE_VIDEO_PROVIDER_FIELDS
+    elif stage == "quality_review":
+        return _QUALITY_REVIEW_PROVIDER_FIELDS
+    elif stage == "jianying_draft":
+        return _JIANYING_DRAFT_PROVIDER_FIELDS
+    raise ValueError("Provider 请求 stage 不受支持")
 
 
 def _ensure_provider_request_has_no_credentials(value: object) -> None:
-    """递归拒绝供应商规范请求中的凭据键和值，错误只返回固定摘要。"""
+    """递归拒绝统一协议分类器命中的凭据键与明确凭据值。"""
 
     if isinstance(value, Mapping):
         for key, child in value.items():
-            if isinstance(key, str) and _is_sensitive_provider_request_key(key):
+            if type(key) is not str:
+                raise ValueError("Provider 请求包含非法字段")
+            try:
+                normalized_key = _normalize_protocol_key(key)
+            except ValueError:
+                raise ValueError("Provider 请求包含非法字段") from None
+            compact_key = re.sub(r"[ _-]+", "", normalized_key).casefold()
+            if (
+                compact_key not in _SAFE_PROVIDER_METADATA_KEYS
+                and _is_sensitive_protocol_key(normalized_key)
+            ):
                 raise ValueError("Provider 请求包含敏感凭据")
             _ensure_provider_request_has_no_credentials(child)
         return
@@ -1353,49 +1431,8 @@ def _ensure_provider_request_has_no_credentials(value: object) -> None:
         if (
             _CREDENTIAL_VALUE_PATTERN.search(normalized)
             or _JWT_CREDENTIAL_VALUE_PATTERN.search(normalized)
-            or _API_CREDENTIAL_VALUE_PATTERN.fullmatch(normalized.strip())
         ):
             raise ValueError("Provider 请求包含敏感凭据")
-
-
-def _is_sensitive_provider_request_key(value: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", value)
-    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
-    parts = re.findall(r"[a-z0-9]+", camel_split.casefold())
-    parts = [_CREDENTIAL_PART_SINGULARS.get(part, part) for part in parts]
-    if any(part in _CREDENTIAL_KEY_PARTS for part in parts):
-        return True
-    direct_parts = set(parts) & _DIRECT_CREDENTIAL_KEY_PARTS
-    if direct_parts and (
-        len(parts) == 1 or set(parts) & _DIRECT_CREDENTIAL_QUALIFIERS
-    ):
-        return True
-    if "apikey" in parts or any(first == "api" and second == "key" for first, second in zip(parts, parts[1:], strict=False)):
-        return True
-    for index, part in enumerate(parts):
-        if part != "token":
-            continue
-        previous = parts[index - 1] if index > 0 else None
-        following = parts[index + 1] if index + 1 < len(parts) else None
-        if previous in _TOKEN_CREDENTIAL_PREFIXES:
-            return True
-        if following not in _TOKEN_METADATA_SUFFIXES:
-            return True
-    collapsed = "".join(parts)
-    direct = r"(?:auth|bearer|jwt)"
-    qualifier = r"(?:header|value|credential|token|key)"
-    if re.fullmatch(
-        rf"(?:{direct}|{direct}{qualifier}|{qualifier}{direct})",
-        collapsed,
-    ):
-        return True
-    return bool(
-        re.fullmatch(
-            r"(?:authorization|api(?:key)|secret|password|credential|"
-            r"(?:access|refresh|auth|bearer|client|session|id|api|provider)token(?:value)?)",
-            collapsed,
-        )
-    )
 
 
 def _external_job_ref(operation: OperationRecord) -> ExternalJobRef:

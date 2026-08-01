@@ -79,7 +79,7 @@ NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 USER_ID = "user-live-operation"
 CONVERSATION_ID = "conversation-live-operation"
 WORKFLOW_ID = "workflow-live-operation"
-STAGE = "generate_scene_videos"
+STAGE = "generate_scene_video:scene-1"
 RepositoryKind = Literal["memory", "sql"]
 PROVIDER_REQUEST: dict[str, JsonValue] = {
     "scene_id": "scene-1",
@@ -287,7 +287,6 @@ def build_live_operations(
         repository=repository or MemoryAgentRuntimeRepository(),
         resolver=VideoOperationAdapterResolver(
             {
-                STAGE: ProviderJobAdapter(provider),
                 "generate_scene_video": ProviderJobAdapter(provider),
                 "merge_video": ProviderJobAdapter(provider),
                 "quality_review": ProviderJobAdapter(provider),
@@ -885,6 +884,17 @@ def handler_without_credential(
     )
 
 
+def _web_exposes_scene_retry_action(artifact: Mapping[str, object]) -> bool:
+    """复刻 MessageBubble 与 ChatPanel 当前共享的场景重试条件。"""
+
+    generated = artifact.get("generatedSceneVideos")
+    return bool(
+        isinstance(generated, Mapping)
+        and generated.get("ok") is False
+        and artifact.get("videoScenePackages")
+    )
+
+
 @pytest.mark.parametrize(
     ("provider_request", "secret_marker"),
     [
@@ -903,6 +913,21 @@ def handler_without_credential(
         ({"note": "Bearer task8-explicit-bearer"}, "task8-explicit-bearer"),
         ({"note": "Authorization: Bearer task8-explicit-authorization"}, "task8-explicit-authorization"),
         ({"note": "token=task8-explicit-token"}, "task8-explicit-token"),
+        (
+            {"scene_id": "scene-1", "prompt": "Bearer task8-typed-bearer"},
+            "task8-typed-bearer",
+        ),
+        (
+            {"scene_id": "scene-1", "prompt": "token=task8-typed-token"},
+            "task8-typed-token",
+        ),
+        (
+            {
+                "scene_id": "scene-1",
+                "prompt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0YXNrOCJ9.c2lnbmF0dXJlLXRhc2s4",
+            },
+            "eyJhbGciOiJIUzI1NiJ9",
+        ),
         ({"nested": {"auth_header": "task8-raw-auth-header"}}, "task8-raw-auth-header"),
         ({"nested": [{"auth": "task8-raw-auth"}]}, "task8-raw-auth"),
         ({"nested": {"Auth-KEY": "task8-raw-auth-key"}}, "task8-raw-auth-key"),
@@ -960,17 +985,23 @@ def test_video_operation_start_request_hides_provider_request_from_repr() -> Non
 
 def test_video_operation_start_request_keeps_normal_business_fields_and_hash_check() -> None:
     provider_request: dict[str, JsonValue] = {
+        "scene_id": "scene-1",
         "prompt": "展示保险箱的隐藏收纳空间",
-        "auth_mode": "signed_request",
-        "token_budget": 8192,
-        "token_count": 128,
-        "token_count_hint": 128,
-        "token_hint": "估算值",
-        "key_frame": "https://assets.example.com/keyframe.png",
-        "keyImage": "https://assets.example.com/key-image.png",
-        "key_points": ["主体清晰", "构图稳定"],
-        "secretary_name": "林女士",
-        "passwordless_mode": True,
+        "shot_description": {
+            "auth_mode": "signed_request",
+            "token_budget": 8192,
+            "token_count": 128,
+            "token_count_hint": 128,
+            "token_hint": "估算值",
+            "provider_keys_count": 2,
+            "provider_keys_limit": 4,
+            "provider_keys_status": "已脱敏",
+            "key_frame": "https://assets.example.com/keyframe.png",
+            "keyImage": "https://assets.example.com/key-image.png",
+            "key_points": ["主体清晰", "构图稳定"],
+            "secretary_name": "林女士",
+            "passwordless_mode": True,
+        },
     }
     operation_request = build_operation_request(
         workflow_id=WORKFLOW_ID,
@@ -999,8 +1030,10 @@ def test_video_operation_start_request_keeps_normal_business_fields_and_hash_che
 
 def test_video_operation_start_request_allows_product_codes_and_scene_key_urls() -> None:
     provider_request: dict[str, JsonValue] = {
-        "prompt": "商品型号 SK-ABCDEF123456 的展示视频",
-        "key_frame": "https://cdn.example.com/assets/pk-product-model-2026.png",
+        "scene_id": "scene-1",
+        "prompt": "SK-ABCDEF12345678901234567890",
+        "model": "pk-product-model-2026-edition",
+        "image_urls": ["https://cdn.example.com/assets/pk-product-model-2026.png"],
     }
     operation_request = build_operation_request(
         workflow_id=WORKFLOW_ID,
@@ -1018,6 +1051,198 @@ def test_video_operation_start_request_allows_product_codes_and_scene_key_urls()
     )
 
     assert live_request.model_dump(mode="json")["provider_request"] == provider_request
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "provider_keys",
+        "providerKeys",
+        "providerkeys",
+        "ｐｒｏｖｉｄｅｒ＿ｋｅｙｓ",
+        "key",
+        "keys",
+        "clientKeys",
+        "key_value",
+        "keyHeader",
+        "keymaterial",
+        "privateKeys",
+        "providerCredentials",
+    ],
+)
+def test_video_operation_start_request_reuses_task6_sensitive_key_contract(
+    credential_key: str,
+) -> None:
+    provider_request: dict[str, JsonValue] = {
+        "scene_id": "scene-1",
+        "prompt": "固定测试视频提示词",
+        "shot_description": {
+            "text": "普通镜头描述",
+            "nested": {credential_key: "opaque-provider-value"},
+        },
+    }
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=STAGE,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    with pytest.raises(ValueError) as raised:
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        ).model_dump(mode="json")
+
+    assert credential_key not in str(raised.value)
+    assert "opaque-provider-value" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("stage", "provider_request"),
+    [
+        (
+            "generate_scene_video:scene-1",
+            {
+                "scene_id": "scene-1",
+                "scene_index": 1,
+                "duration": 10,
+                "duration_ms": 10_000,
+                "prompt": "SK-ABCDEF12345678901234567890",
+                "storyline": "商品亮相",
+                "shot_description": {"text": "0-10秒展示商品"},
+                "narration": "新品登场",
+                "transition": "淡出",
+                "generation_mode": "image_to_video",
+                "image_urls": ["https://cdn.example.com/pk-product-model-2026.png"],
+                "video_urls": [],
+                "audio_urls": [],
+                "model": "pk-product-model-2026-edition",
+                "ratio": "9:16",
+                "size": "1080p",
+                "sound": "on",
+            },
+        ),
+        (
+            "merge_video",
+            {
+                "video_urls": ["https://videos.example.com/scene-1.mp4"],
+                "scene_videos": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "video_url": "https://videos.example.com/scene-1.mp4",
+                    }
+                ],
+                "duration": 10,
+                "size": "1080p",
+                "model": "pk-product-model-2026-edition",
+            },
+        ),
+        (
+            "quality_review",
+            {
+                "merged_video_url": "https://videos.example.com/merged.mp4",
+                "scene_videos": [],
+                "scene_packages": [],
+                "brief": {"expected_duration_sec": 10},
+                "materials": [],
+                "user_feedback": "重点检查商品型号 SK-ABCDEF12345678901234567890",
+                "ratio": "9:16",
+                "size": "1080p",
+            },
+        ),
+        (
+            "jianying_draft",
+            {
+                "request": {
+                    "conversation_id": CONVERSATION_ID,
+                    "storyboard_version_id": "storyboard-v1",
+                    "scenes": [],
+                },
+                "retry_failed": False,
+            },
+        ),
+    ],
+)
+def test_video_operation_start_request_accepts_real_m11_stage_fields(
+    stage: str,
+    provider_request: dict[str, JsonValue],
+) -> None:
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    live_request = VideoOperationStartRequest(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        operation_request=operation_request,
+        provider_request=provider_request,
+    )
+
+    assert live_request.model_dump(mode="json")["provider_request"] == provider_request
+
+
+@pytest.mark.parametrize(
+    ("stage", "provider_request", "secret_marker"),
+    [
+        (
+            "generate_scene_videos",
+            {"scene_id": "scene-1", "prompt": "固定测试视频提示词"},
+            None,
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {"scene_id": "scene-1", "prompt": "固定测试视频提示词", "note": "普通备注"},
+            None,
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {"scene_id": "scene-1", "prompt": "固定测试视频提示词", "auth_headers": "sk-task8rawapitoken123456789"},
+            "sk-task8rawapitoken123456789",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {"scene_id": "scene-1", "prompt": "固定测试视频提示词", "provider_keys": "sk-task8rawapitoken123456789"},
+            "sk-task8rawapitoken123456789",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            {"scene_id": "scene-1", "prompt": "固定测试视频提示词", "note": "sk-task8rawapitoken123456789"},
+            "sk-task8rawapitoken123456789",
+        ),
+    ],
+)
+def test_video_operation_start_request_rejects_unknown_stage_or_top_level_field_before_dump(
+    stage: str,
+    provider_request: dict[str, JsonValue],
+    secret_marker: str | None,
+) -> None:
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    with pytest.raises(ValueError) as raised:
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        ).model_dump(mode="json")
+
+    if secret_marker is not None:
+        assert secret_marker not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1288,7 @@ def test_transient_credential_vault_lifecycle_and_empty_credential_rejection() -
 def test_video_operation_adapter_resolver_rejects_unknown_stage() -> None:
     provider = CountingProvider()
     adapter = ProviderJobAdapter(provider)
-    resolver = VideoOperationAdapterResolver({STAGE: adapter})
+    resolver = VideoOperationAdapterResolver({"generate_scene_video": adapter})
 
     assert resolver.resolve(STAGE) is adapter
     with pytest.raises(OperationConflictError, match="stage"):
@@ -1927,19 +2152,22 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             )
             == []
         )
+        expected_web_retry = not expected_non_retryable_scene_ids
+        required_fields = {
+            "title",
+            "description",
+            "actionLabel",
+            "generatedSceneVideos",
+            "videoScenePackageEditedSceneIds",
+        }
+        if expected_web_retry:
+            required_fields.add("videoScenePackages")
         message = await _assert_completion_projection_replay_stable(
             repository,
             runtime,
             before_message_ids={item.message_id for item in before_messages},
             expected_type="video_result",
-            required_fields={
-                "title",
-                "description",
-                "actionLabel",
-                "videoScenePackages",
-                "generatedSceneVideos",
-                "videoScenePackageEditedSceneIds",
-            },
+            required_fields=required_fields,
         )
         artifact = message.model_dump(mode="json")["payload"]["artifact"]
         assert artifact["generatedSceneVideos"]["ok"] is False
@@ -1949,6 +2177,9 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
         assert artifact["retryableSceneIds"] == expected_retryable_scene_ids
         assert artifact["nonRetryableSceneIds"] == expected_non_retryable_scene_ids
         assert artifact["generatedSceneVideos"]["failed_scenes"][0]["retryable"] is expected_retryable
+        assert _web_exposes_scene_retry_action(artifact) is expected_web_retry
+        if not expected_web_retry:
+            assert "videoScenePackages" not in artifact
         assert "已生成" not in message.content
         assert "可下载" not in message.content
         assert "请确认" not in message.content
@@ -2088,7 +2319,6 @@ async def test_mixed_scene_failures_publish_view_only_action_and_retryable_ids(
                 "title",
                 "description",
                 "actionLabel",
-                "videoScenePackages",
                 "generatedSceneVideos",
                 "videoScenePackageEditedSceneIds",
                 "retryableSceneIds",
@@ -2104,6 +2334,8 @@ async def test_mixed_scene_failures_publish_view_only_action_and_retryable_ids(
         assert artifact["retryableSceneIds"] == ["scene-2"]
         assert artifact["nonRetryableSceneIds"] == ["scene-1"]
         assert artifact["actionLabel"] == "查看失败原因"
+        assert "videoScenePackages" not in artifact
+        assert _web_exposes_scene_retry_action(artifact) is False
         assert "scene-1" in artifact["description"]
         assert "scene-2" in artifact["description"]
         assert "scene-1" in message.content
