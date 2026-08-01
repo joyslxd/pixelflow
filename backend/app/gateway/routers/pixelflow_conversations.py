@@ -19,12 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
 from pixelflow.agent_runtime.contracts import (
-    InterruptResponseRequest,
     TurnStartRequest,
 )
 from pixelflow.agent_runtime.service import (
     AgentRuntimeContextConflictError,
     AgentRuntimeInterruptConflictError,
+    AgentRuntimeInterruptRequestValidationError,
     AgentRuntimeInterruptStateError,
     AgentRuntimeLegacyInterruptOwnershipError,
     AgentRuntimeService,
@@ -462,7 +462,7 @@ async def get_agent_turn_job(
 async def respond_to_agent_interrupt(
     conversation_id: str,
     interrupt_id: str,
-    body: InterruptResponseRequest,
+    body: dict[str, Any],
     request: Request,
 ) -> AgentTurnJobResponse:
     """live 对话在原 Turn 上登记响应；旧 v2 继续保持原所有权。"""
@@ -483,6 +483,11 @@ async def respond_to_agent_interrupt(
                 "code": "agent_runtime_interrupt_owned_by_legacy_v2",
                 "interrupt_id": interrupt_id,
             },
+        ) from exc
+    except AgentRuntimeInterruptRequestValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
         ) from exc
     except (
         AgentRuntimeInterruptConflictError,

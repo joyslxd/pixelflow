@@ -6,6 +6,8 @@ import asyncio
 import json
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +16,9 @@ from uuid import UUID
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from deerflow.persistence.base import Base
 from pixelflow.agent_runtime import (
     SupervisorExecutorClosedError,
     SupervisorTurnExecutor,
@@ -34,6 +38,7 @@ from pixelflow.agent_runtime.contracts import (
     ExplicitActionSignal,
     ExternalJobRef,
     ExternalJobStatus,
+    InterruptResponseRequest,
     TurnRecord,
     TurnStatus,
     WorkflowKind,
@@ -46,8 +51,12 @@ from pixelflow.agent_runtime.graph import (
 from pixelflow.agent_runtime.identity import conversation_message_id
 from pixelflow.agent_runtime.jobs.providers import ProviderJobOutcome
 from pixelflow.agent_runtime.persistence import (
+    AGENT_RUNTIME_SUPPORT_TABLES,
+    AGENT_RUNTIME_TABLES,
     MemoryTurnRegistrationStore,
     MemoryVideoRuntimeRepository,
+    SQLTurnRegistrationStore,
+    SQLVideoRuntimeRepository,
     StoredAgentInterrupt,
 )
 from pixelflow.agent_runtime.supervisor import (
@@ -78,6 +87,11 @@ from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
     PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
+    SQLPixelFlowTaskStore,
+)
+from pixelflow.tasks.model import (
+    PixelFlowConversationMessageRow,
+    PixelFlowConversationRow,
 )
 
 NOW = datetime(2026, 7, 31, 12, tzinfo=UTC)
@@ -106,10 +120,14 @@ class FakeDecisionService:
         self,
         *,
         clarify_first: bool = False,
+        clarification_count: int = 0,
         vault: TransientCredentialVault | None = None,
     ) -> None:
         self.evidence = []
-        self.clarify_first = clarify_first
+        self.clarification_count = max(
+            clarification_count,
+            1 if clarify_first else 0,
+        )
         self.vault = vault
         self.credential_seen: list[bool] = []
 
@@ -120,7 +138,7 @@ class FakeDecisionService:
                 self.vault.get(evidence.turn.turn_id) is not None
             )
         explicit = evidence.explicit_action
-        if self.clarify_first and not self.evidence[:-1]:
+        if len(self.evidence) <= self.clarification_count:
             action = AgentAction.CLARIFY
             intent = AgentIntent.GENERAL
             workflow_id = None
@@ -496,6 +514,7 @@ async def _runtime(
     external_job_status: ExternalJobStatus | None = None,
     workflow_status: WorkflowStatus | None = None,
     clarify_first: bool = False,
+    clarification_count: int = 0,
     worker_id: str = "worker-1",
     heartbeat_interval_seconds: float = 0.01,
 ) -> RuntimeHarness:
@@ -524,6 +543,7 @@ async def _runtime(
     )
     decision_service = FakeDecisionService(
         clarify_first=clarify_first,
+        clarification_count=clarification_count,
         vault=vault,
     )
     executor = SupervisorTurnExecutor(
@@ -549,6 +569,145 @@ async def _runtime(
         vault=vault,
         recorder=recorder,
         decision_service=decision_service,
+    )
+
+
+@asynccontextmanager
+async def _sql_clarification_runtime(
+    database_path: Path,
+    *,
+    clarification_count: int = 1,
+) -> AsyncIterator[tuple[RuntimeHarness, SQLTurnRegistrationStore]]:
+    """使用同一 SQLite Session 工厂装配真实登记、Repository 与 Executor。"""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(
+                sync_connection,
+                tables=(
+                    *AGENT_RUNTIME_TABLES,  # 创建 Runtime 权威业务表。
+                    *AGENT_RUNTIME_SUPPORT_TABLES,  # 创建 Runtime 辅助协调表。
+                    PixelFlowConversationRow.__table__,
+                    PixelFlowConversationMessageRow.__table__,
+                ),
+            )
+        )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    task_store = SQLPixelFlowTaskStore(session_factory)
+    repository = SQLVideoRuntimeRepository(
+        session_factory,
+        task_store=task_store,
+    )
+    clock = FakeClock()
+    vault = TransientCredentialVault()
+    handler = FakeVideoHandler(repository, vault=vault)
+    graph = make_agent_runtime_graph(
+        registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+        checkpointer=InMemorySaver(),
+    )
+    recorder = FakePostCommitRecorder(vault=vault)
+    decision_service = FakeDecisionService(
+        clarification_count=clarification_count,
+        vault=vault,
+    )
+    executor = SupervisorTurnExecutor(
+        repository=repository,
+        task_store=task_store,
+        decision_service=decision_service,
+        graph=graph,
+        credential_vault=vault,
+        clock=clock,
+        worker_id="sqlite-worker",
+        lease_duration=timedelta(seconds=30),
+        heartbeat_step=timedelta(seconds=10),
+        heartbeat_interval_seconds=0.01,
+        scan_interval_seconds=0.01,
+        post_commit_recorder=recorder,
+    )
+    runtime = RuntimeHarness(
+        executor=executor,
+        repository=repository,
+        task_store=task_store,
+        handler=handler,
+        clock=clock,
+        vault=vault,
+        recorder=recorder,
+        decision_service=decision_service,
+    )
+    registration_store = SQLTurnRegistrationStore(
+        repository=repository,
+        task_store=task_store,
+        video_repository=repository,
+    )
+    try:
+        yield runtime, registration_store
+    finally:
+        await executor.aclose()
+        await engine.dispose()
+
+
+async def _register_clarification_turn(
+    registration_store: MemoryTurnRegistrationStore | SQLTurnRegistrationStore,
+    *,
+    turn_id: str,
+    client_input_id: UUID,
+    expected_context_version: int,
+    occurred_at: datetime,
+    content: str = "帮我做一个",
+):
+    """通过真实 Turn registration 保存会推进全局版本的首轮输入。"""
+
+    return await registration_store.register(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        message=PixelFlowConversationMessageRecord(
+            message_id=conversation_message_id("conversation-1", client_input_id),
+            conversation_id="conversation-1",
+            user_id="user-1",
+            role="user",
+            content=content,
+            payload={
+                "client_message_id": str(client_input_id),
+                "materials": [],
+                "reply_to_message_id": None,
+                "artifact_refs": [],
+                "explicit_action": None,
+            },
+            created_at=occurred_at.isoformat(),
+        ),
+        turn=TurnRecord(
+            turn_id=turn_id,
+            conversation_id="conversation-1",
+            client_input_id=client_input_id,
+            status=TurnStatus.ACCEPTED,
+            expected_context_version=expected_context_version,
+            created_at=occurred_at,
+        ),
+        expected_context_version=expected_context_version,
+        occurred_at=occurred_at,
+    )
+
+
+async def _register_clarification_response(
+    registration_store: MemoryTurnRegistrationStore | SQLTurnRegistrationStore,
+    *,
+    interrupt_id: str,
+    response_id: UUID,
+    content: str,
+    occurred_at: datetime,
+):
+    """通过 Task 10 原子端口保存人工响应及其响应前快照。"""
+
+    return await registration_store.register_interrupt_response(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        interrupt_id=interrupt_id,
+        request=InterruptResponseRequest(
+            client_response_id=response_id,
+            value={"content": content},
+        ),
+        occurred_at=occurred_at,
     )
 
 
@@ -1007,6 +1166,246 @@ async def test_executor_global_clarification_without_active_workflow_resumes_ori
     assert runtime.handler.turn_ids == ["turn-1"]
     closed = await runtime.repository.get_interrupt("user-1", opened.interrupt_id)
     assert closed is not None and closed.status == "closed"
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_atomic_response_registration_resumes_global_clarification_snapshot() -> None:
+    """响应前版本必须恢复 Graph 快照并完成真实登记的同一个 Turn。"""
+
+    runtime = await _runtime(clarify_first=True)
+    await _seed_conversation(runtime.task_store, context_version=0)
+    registration_store = MemoryTurnRegistrationStore(
+        repository=runtime.repository,
+        task_store=runtime.task_store,
+        video_repository=runtime.repository,
+    )
+    client_input_id = UUID("41000000-0000-4000-8000-000000000001")
+    initial = await _register_clarification_turn(
+        registration_store,
+        turn_id="turn-registered-clarification",
+        client_input_id=client_input_id,
+        expected_context_version=0,
+        occurred_at=NOW,
+    )
+    assert initial.context_version == 1
+
+    await runtime.executor.notify_turn(
+        scope(initial.turn.turn_id),
+        credential=None,
+    )
+    await runtime.executor.wait_idle()
+    opened = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert opened is not None and opened.kind == "clarification"
+
+    response = await _register_clarification_response(
+        registration_store,
+        interrupt_id=opened.interrupt_id,
+        response_id=UUID("41000000-0000-4000-8000-000000000002"),
+        content="创建一条商品介绍视频",
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+    assert response.context_version == 2
+    assert response.turn.turn_id == initial.turn.turn_id
+    assert response.turn.expected_context_version == 1
+
+    await runtime.executor.notify_interrupt(response.interrupt)
+    await runtime.executor.wait_idle()
+
+    stored = await runtime.repository.get_turn("user-1", initial.turn.turn_id)
+    assert stored is not None and stored.status is TurnStatus.COMPLETED, json.dumps(
+        runtime.executor.metrics_snapshot(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert runtime.handler.turn_ids == [initial.turn.turn_id]
+    assert runtime.executor.metrics_snapshot()["reason_codes"].get(
+        "contract_validation_failed",
+        0,
+    ) == 0
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_atomic_response_resumes_global_clarification_snapshot(
+    tmp_path: Path,
+) -> None:
+    """SQLite 原子登记也必须按响应前版本恢复同一个 Turn。"""
+
+    async with _sql_clarification_runtime(
+        tmp_path / "clarification-resume.db",
+    ) as (runtime, registration_store):
+        await _seed_conversation(runtime.task_store, context_version=0)
+        initial = await _register_clarification_turn(
+            registration_store,
+            turn_id="turn-sqlite-clarification",
+            client_input_id=UUID("42000000-0000-4000-8000-000000000001"),
+            expected_context_version=0,
+            occurred_at=NOW,
+        )
+        assert initial.context_version == 1
+        await runtime.executor.notify_turn(
+            scope(initial.turn.turn_id),
+            credential=None,
+        )
+        await runtime.executor.wait_idle()
+        opened = await runtime.repository.get_open_interrupt(
+            "user-1",
+            "conversation-1",
+        )
+        assert opened is not None and opened.kind == "clarification"
+
+        response = await _register_clarification_response(
+            registration_store,
+            interrupt_id=opened.interrupt_id,
+            response_id=UUID("42000000-0000-4000-8000-000000000002"),
+            content="创建一条商品介绍视频",
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+        assert response.context_version == 2
+        assert response.turn.expected_context_version == 1
+        await runtime.executor.notify_interrupt(response.interrupt)
+        await runtime.executor.wait_idle()
+
+        stored = await runtime.repository.get_turn("user-1", initial.turn.turn_id)
+        assert stored is not None and stored.status is TurnStatus.COMPLETED
+        assert runtime.handler.turn_ids == [initial.turn.turn_id]
+
+
+@pytest.mark.asyncio
+async def test_consecutive_global_clarifications_advance_resume_snapshot() -> None:
+    """连续追问必须按每次响应前版本推进，不得退回首轮快照。"""
+
+    runtime = await _runtime(clarification_count=2)
+    await _seed_conversation(runtime.task_store, context_version=0)
+    registration_store = MemoryTurnRegistrationStore(
+        repository=runtime.repository,
+        task_store=runtime.task_store,
+        video_repository=runtime.repository,
+    )
+    initial = await _register_clarification_turn(
+        registration_store,
+        turn_id="turn-consecutive-clarification",
+        client_input_id=UUID("43000000-0000-4000-8000-000000000001"),
+        expected_context_version=0,
+        occurred_at=NOW,
+    )
+    await runtime.executor.notify_turn(scope(initial.turn.turn_id), credential=None)
+    await runtime.executor.wait_idle()
+    first = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert first is not None
+
+    first_response = await _register_clarification_response(
+        registration_store,
+        interrupt_id=first.interrupt_id,
+        response_id=UUID("43000000-0000-4000-8000-000000000002"),
+        content="想做商品内容",
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+    assert first_response.context_version == 2
+    assert first_response.turn.expected_context_version == 1
+    await runtime.executor.notify_interrupt(first_response.interrupt)
+    await runtime.executor.wait_idle()
+    second = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert second is not None and second.interrupt_id != first.interrupt_id
+    waiting = await runtime.repository.get_turn("user-1", initial.turn.turn_id)
+    assert waiting is not None and waiting.status is TurnStatus.WAITING_USER
+
+    second_response = await _register_clarification_response(
+        registration_store,
+        interrupt_id=second.interrupt_id,
+        response_id=UUID("43000000-0000-4000-8000-000000000003"),
+        content="创建一条商品介绍视频",
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+    assert second_response.context_version == 3
+    assert second_response.turn.expected_context_version == 2
+    await runtime.executor.notify_interrupt(second_response.interrupt)
+    await runtime.executor.wait_idle()
+
+    stored = await runtime.repository.get_turn("user-1", initial.turn.turn_id)
+    assert stored is not None and stored.status is TurnStatus.COMPLETED
+    assert [item.expected_context_version for item in runtime.decision_service.evidence] == [
+        0,
+        1,
+        2,
+    ]
+    assert runtime.handler.turn_ids == [initial.turn.turn_id]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_global_clarification_resume_preserves_legally_queued_input() -> None:
+    """追问期间的新输入保持排队，并在原 Turn 恢复后按自己的快照执行。"""
+
+    runtime = await _runtime(clarify_first=True)
+    await _seed_conversation(runtime.task_store, context_version=0)
+    registration_store = MemoryTurnRegistrationStore(
+        repository=runtime.repository,
+        task_store=runtime.task_store,
+        video_repository=runtime.repository,
+    )
+    initial = await _register_clarification_turn(
+        registration_store,
+        turn_id="turn-clarification-owner",
+        client_input_id=UUID("44000000-0000-4000-8000-000000000001"),
+        expected_context_version=0,
+        occurred_at=NOW,
+    )
+    await runtime.executor.notify_turn(scope(initial.turn.turn_id), credential=None)
+    await runtime.executor.wait_idle()
+    opened = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert opened is not None
+
+    queued = await _register_clarification_turn(
+        registration_store,
+        turn_id="turn-queued-during-clarification",
+        client_input_id=UUID("44000000-0000-4000-8000-000000000002"),
+        expected_context_version=1,
+        occurred_at=NOW + timedelta(seconds=1),
+        content="再准备一条品牌视频",
+    )
+    assert queued.context_version == 2
+    assert queued.turn.status is TurnStatus.ACCEPTED
+    assert await runtime.repository.list_due_turns(
+        now=NOW + timedelta(seconds=1),
+        limit=10,
+    ) == []
+    response = await _register_clarification_response(
+        registration_store,
+        interrupt_id=opened.interrupt_id,
+        response_id=UUID("44000000-0000-4000-8000-000000000003"),
+        content="创建一条商品介绍视频",
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+    assert response.context_version == 3
+    assert response.turn.expected_context_version == 2
+
+    await runtime.executor.notify_interrupt(response.interrupt)
+    await runtime.executor.wait_idle()
+
+    turns = await runtime.repository.list_turns("user-1", "conversation-1")
+    assert [item.turn_id for item in turns] == [
+        initial.turn.turn_id,
+        queued.turn.turn_id,
+    ]
+    assert [item.status for item in turns] == [
+        TurnStatus.COMPLETED,
+        TurnStatus.COMPLETED,
+    ]
+    assert runtime.handler.turn_ids == [initial.turn.turn_id, queued.turn.turn_id]
     await runtime.executor.aclose()
 
 

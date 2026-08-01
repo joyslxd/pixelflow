@@ -86,6 +86,10 @@ class AgentRuntimeInterruptConflictError(RuntimeError):
     """人工响应身份、内容或当前状态与权威记录冲突。"""
 
 
+class AgentRuntimeInterruptRequestValidationError(ValueError):
+    """live 人工响应对象不符合冻结的公开 DTO。"""
+
+
 class AgentRuntimeInterruptStateError(RuntimeError):
     """Snapshot 或响应发现损坏、歧义的 live interrupt 状态。"""
 
@@ -189,7 +193,7 @@ class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
     )
     messages: list[dict[str, Any]] = Field(default_factory=list)
     workflows: list[dict[str, Any]] = Field(default_factory=list)
-    interrupt: dict[str, Any] | None = None
+    interrupt: AgentInterruptProjection | None = None
     resume: RuntimeResumeProjection
     context_version: int = Field(ge=0)
 
@@ -493,7 +497,12 @@ class AgentRuntimeService:
             if isinstance(request, InterruptResponseRequest)
             else request
         )
-        body = InterruptResponseRequest.model_validate(raw_request)
+        try:
+            body = InterruptResponseRequest.model_validate(raw_request)
+        except ValidationError:
+            raise AgentRuntimeInterruptRequestValidationError(
+                "live interrupt 响应对象非法",
+            ) from None
         try:
             registration = (
                 await self._turn_registration_store.register_interrupt_response(
@@ -627,12 +636,14 @@ class AgentRuntimeService:
             owner,
             conversation_id,
         )
+        live_video_execution_ready = _live_video_execution_ready(conversation)
         messages_by_id = {
             message.message_id: deepcopy(message.to_dict())
             for message in stored_messages
+            if not live_video_execution_ready or message.role == "user"
         }
-        public_interrupt: dict[str, Any] | None = None
-        if _live_video_execution_ready(conversation):
+        public_interrupt: AgentInterruptProjection | None = None
+        if live_video_execution_ready:
             if self._video_repository is None:
                 raise AgentRuntimeInterruptStateError(
                     "live 视频 Snapshot Repository 未安装",
@@ -686,7 +697,7 @@ class AgentRuntimeService:
                         reason_code=open_interrupt.reason_code,
                         payload=open_interrupt.model_dump(mode="json")["payload"],
                         opened_at=open_interrupt.opened_at,
-                    ).model_dump(mode="json")
+                    )
             except (
                 AttributeError,
                 KeyError,
@@ -1153,6 +1164,7 @@ __all__ = [
     "AgentRuntimeContextConflictError",
     "AgentRuntimeConversationAssignment",
     "AgentRuntimeInterruptConflictError",
+    "AgentRuntimeInterruptRequestValidationError",
     "AgentRuntimeInterruptStateError",
     "AgentRuntimeLegacyInterruptOwnershipError",
     "AgentRuntimeService",

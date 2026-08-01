@@ -191,12 +191,30 @@ def _clarification_resume_command(
         "decision",
         "decision_validation_request",
         "interrupt_id",
+        "resume_context_version",
         "source_decision_idempotency_key",
         "value",
     }
     if type(response) is not dict or set(response) != expected_keys:
         raise SupervisorRoutingError(
             reason_code="invalid_clarification_resume_envelope",
+        )
+    resume_context_version = response["resume_context_version"]
+    if type(resume_context_version) is not int or resume_context_version < 0:
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_context_version",
+        )
+    checkpoint_context_version = state.get("context_version")
+    if (
+        type(checkpoint_context_version) is not int
+        or checkpoint_context_version < 0
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_context_state_corrupted",
+        )
+    if resume_context_version < checkpoint_context_version:
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_context_rollback",
         )
     turn_id = state.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
@@ -250,6 +268,15 @@ def _clarification_resume_command(
         raise SupervisorRoutingError(
             reason_code="clarification_resume_evidence_conflict",
         )
+    if (
+        validation_request.expected_context_version
+        != resume_context_version
+        or validation_request.current_context_version
+        != resume_context_version
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_context_conflict",
+        )
     answer_message = response["answer_message"]
     if decision.action is AgentAction.ANSWER_ONLY:
         if not isinstance(answer_message, AIMessage):
@@ -266,6 +293,7 @@ def _clarification_resume_command(
             "materials": [dict(item) for item in request.value.materials],
             "reply_to_message_id": request.value.reply_to_message_id,
             "artifact_refs": list(request.value.artifact_refs),
+            "context_version": resume_context_version,
             "decision": decision.model_copy(deep=True),
             "decision_validation_request": validation_request.model_copy(deep=True),
             "answer_message": deepcopy(answer_message),

@@ -708,8 +708,27 @@ class SupervisorTurnExecutor:
     ) -> _CommittedTurnResult:
         """用严格内部信封恢复全局追问，并让新决策重新经过 Graph Validator。"""
 
+        response_document = self._thaw_json(interrupt.response)
+        if not isinstance(response_document, dict) or set(response_document) not in (
+            {"client_response_id", "value"},
+            {"client_response_id", "pre_input_context_version", "value"},
+        ):
+            raise ValueError("全局 clarification 响应文档结构非法")
+        stored_snapshot_version = response_document.get(
+            "pre_input_context_version",
+            claim.turn.expected_context_version,
+        )
+        if (
+            type(stored_snapshot_version) is not int
+            or stored_snapshot_version < 0
+            or stored_snapshot_version != claim.turn.expected_context_version
+        ):
+            raise ValueError("全局 clarification 响应快照身份冲突")
         request = InterruptResponseRequest.model_validate(
-            self._thaw_json(interrupt.response)
+            {
+                "client_response_id": response_document["client_response_id"],
+                "value": response_document["value"],
+            }
         )
         evidence = await self._load_authoritative_evidence(
             claim,
@@ -732,6 +751,7 @@ class SupervisorTurnExecutor:
             internal_resume_envelope = {
                 "client_response_id": response_id,
                 "interrupt_id": interrupt.interrupt_id,
+                "resume_context_version": claim.turn.expected_context_version,
                 "source_decision_idempotency_key": (
                     source_decision.idempotency_key
                 ),

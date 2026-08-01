@@ -55,6 +55,10 @@ from pixelflow.agent_runtime.supervisor import (
     SupervisorDecisionService,
     SupervisorTurnEvidence,
 )
+from pixelflow.agent_runtime.supervisor.routing import (
+    SupervisorRoutingError,
+    _clarification_resume_command,
+)
 from pixelflow.agent_workflows.video import (
     VideoLiveWorkflowHandler,
     VideoPlanningWorkflowService,
@@ -540,7 +544,7 @@ def _global_clarification_state(conversation_id: str) -> dict:
         "current_input": content,
         "materials": [],
         "artifact_refs": [],
-        "context_version": 1,
+        "context_version": 0,
         "workflows": {},
         "active_workflow_id": None,
         "decision": decision,
@@ -549,8 +553,8 @@ def _global_clarification_state(conversation_id: str) -> dict:
             classification_request=classification,
             current_candidates=(),
             allowed_global_actions=(AgentAction.CLARIFY, AgentAction.START_WORKFLOW),
-            expected_context_version=1,
-            current_context_version=1,
+            expected_context_version=0,
+            current_context_version=0,
         ),
     }
 
@@ -583,6 +587,7 @@ def _global_clarification_resume_value(state: dict) -> dict:
     return {
         "client_response_id": response_id,
         "interrupt_id": interrupt_id(turn_id, "ambiguous_target"),
+        "resume_context_version": 1,
         "source_decision_idempotency_key": f"decision:{turn_id}",
         "decision": decision.model_dump(mode="json"),
         "decision_validation_request": DecisionValidationRequest(
@@ -635,7 +640,67 @@ async def test_global_clarification_resume_revalidates_and_keeps_original_turn()
     assert result["decision"].idempotency_key == (
         "decision:40000000-0000-4000-8000-000000000001"
     )
+    assert result["context_version"] == 1
     assert handler.turn_ids == [state["turn_id"]]
+
+
+@pytest.mark.parametrize("invalid_version", [True, -1])
+def test_global_clarification_resume_rejects_invalid_snapshot_identity(
+    invalid_version: object,
+) -> None:
+    """内部恢复证据不得把 bool 或负数伪装成上下文版本。"""
+
+    state = _global_clarification_state("conv-invalid-resume-version")
+    response = _global_clarification_resume_value(state)
+    response["resume_context_version"] = invalid_version
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == (
+        "invalid_clarification_resume_context_version"
+    )
+
+
+def test_global_clarification_resume_rejects_context_version_rollback() -> None:
+    """恢复快照不得回退已经进入 Graph checkpoint 的版本。"""
+
+    state = _global_clarification_state("conv-resume-version-rollback")
+    state["context_version"] = 2
+    response = _global_clarification_resume_value(state)
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == "clarification_resume_context_rollback"
+
+
+def test_global_clarification_resume_binds_validation_context_versions() -> None:
+    """新 DecisionValidationRequest 的双版本必须绑定响应前快照。"""
+
+    state = _global_clarification_state("conv-resume-version-conflict")
+    response = _global_clarification_resume_value(state)
+    validation = dict(response["decision_validation_request"])
+    validation["expected_context_version"] = 2
+    validation["current_context_version"] = 2
+    response["decision_validation_request"] = validation
+
+    with pytest.raises(SupervisorRoutingError) as captured:
+        _clarification_resume_command(
+            state,
+            source_decision=state["decision"],
+            response=response,
+        )
+
+    assert captured.value.reason_code == "clarification_resume_context_conflict"
 
 
 @pytest.mark.asyncio

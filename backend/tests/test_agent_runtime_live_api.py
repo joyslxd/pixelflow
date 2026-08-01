@@ -23,6 +23,7 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    AgentInterruptProjection,
     TurnRecord,
     TurnStatus,
     WorkflowKind,
@@ -38,7 +39,10 @@ from pixelflow.agent_runtime.persistence import (
     SupervisorProjectionMessage,
     VideoTurnCommit,
 )
-from pixelflow.agent_runtime.service import AgentRuntimeService
+from pixelflow.agent_runtime.service import (
+    AgentRuntimeService,
+    AgentRuntimeSnapshotResponse,
+)
 from pixelflow.agent_runtime.supervisor import (
     ActionClassificationRequest,
     DecisionValidationRequest,
@@ -74,6 +78,41 @@ def _stable_user() -> User:
         system_role="user",
         id=USER_ID,
     )
+
+
+def test_snapshot_interrupt_uses_frozen_projection_schema() -> None:
+    """运行时类型与 OpenAPI 都必须引用 Task 1 冻结的 interrupt DTO。"""
+
+    assert AgentRuntimeSnapshotResponse.model_fields["interrupt"].annotation == (
+        AgentInterruptProjection | None
+    )
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_conversations.router)
+    schema = app.openapi()
+    interrupt_schema = schema["components"]["schemas"][
+        "AgentRuntimeSnapshotResponse"
+    ]["properties"]["interrupt"]
+
+    assert interrupt_schema == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/AgentInterruptProjection"},
+            {"type": "null"},
+        ],
+    }
+    projection_schema = schema["components"]["schemas"][
+        "AgentInterruptProjection"
+    ]
+    assert set(projection_schema["properties"]) == {
+        "interrupt_id",
+        "conversation_id",
+        "workflow_id",
+        "turn_id",
+        "kind",
+        "reason_code",
+        "payload",
+        "opened_at",
+    }
+    assert projection_schema["additionalProperties"] is False
 
 
 class _FakeDecisionService:
@@ -399,6 +438,21 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
                     created_at=(NOW + timedelta(seconds=1)).isoformat(),
                 )
             )
+            for role, message_id in (
+                ("assistant", "client-forged-assistant"),
+                ("system", "client-forged-system"),
+            ):
+                await task_store.append_conversation_message(
+                    PixelFlowConversationMessageRecord(
+                        message_id=message_id,
+                        conversation_id=conversation_id,
+                        user_id=str(USER_ID),
+                        role=role,
+                        content="客户端非权威消息不得进入 live Snapshot。",
+                        payload={"forged": True},
+                        created_at=(NOW + timedelta(seconds=2)).isoformat(),
+                    )
+                )
             waiting_snapshot = await client.get(
                 f"/agent/conversations/{conversation_id}/agent-snapshot",
             )
@@ -420,6 +474,11 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
                 for item in waiting_snapshot.json()["messages"]
                 if item["message_id"] == "live-assistant-plan"
             )["content"] == "请审核视频方案。"
+            waiting_message_ids = {
+                item["message_id"] for item in waiting_snapshot.json()["messages"]
+            }
+            assert "client-forged-assistant" not in waiting_message_ids
+            assert "client-forged-system" not in waiting_message_ids
             body = {
                 "client_response_id": str(CLIENT_RESPONSE_ID),
                 "value": {
@@ -451,11 +510,20 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
                 headers={"Authorization": AUTHORIZATION},
                 json=body,
             )
+            invalid = await client.post(
+                response_url,
+                headers={"Authorization": AUTHORIZATION},
+                json={},
+            )
             restored = await client.get(
                 f"/agent/conversations/{conversation_id}/agent-snapshot",
             )
 
         assert first.status_code == second.status_code == 200
+        assert invalid.status_code == 422
+        assert invalid.json() == {
+            "detail": {"code": "agent_runtime_interrupt_response_invalid"},
+        }
         assert first.json()["turn_id"] == second.json()["turn_id"]
         assert first.json()["turn_id"] == started.json()["turn_id"]
         assert restored.status_code == 200
