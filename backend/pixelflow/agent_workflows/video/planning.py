@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -271,6 +271,27 @@ class VideoPlanningWorkflowService:
             now=now,
         )
 
+    def cancel(
+        self,
+        state: VideoPlanningWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoPlanningWorkflowState:
+        """取消非终态规划，同时完整保留当前阶段的权威快照。"""
+
+        self.validate_state(state)
+        if state.status in {WorkflowStatus.CANCELLED, WorkflowStatus.COMPLETED}:
+            raise ValueError("已取消或已完成的规划 Workflow 属于终态，不能再次取消")
+        timestamp = _cancellation_timestamp(state.updated_at, now)
+        if state.current_stage is VideoPlanningStage.INTAKE:
+            return self.cancel_intake(state, now=timestamp)
+        return self._advance(
+            state,
+            stage=state.current_stage,
+            status=WorkflowStatus.CANCELLED,
+            now=timestamp,
+        )
+
     def publish_directions(
         self,
         state: VideoPlanningWorkflowState,
@@ -509,7 +530,11 @@ class VideoPlanningWorkflowService:
         }[state.current_stage]
         if state.stage_version < minimum_version:
             raise ValueError("规划状态版本早于当前阶段的最小合法版本")
-        if state.current_stage is VideoPlanningStage.INTAKE and state.stage_version != 1:
+        if (
+            state.current_stage is VideoPlanningStage.INTAKE
+            and state.status is not WorkflowStatus.CANCELLED
+            and state.stage_version != 1
+        ):
             raise ValueError("采集初始规划状态版本必须为 1")
         if state.current_stage is VideoPlanningStage.FORM_CANCELLED and state.stage_version != 2:
             raise ValueError("表单取消规划状态版本必须为 2")
@@ -527,7 +552,11 @@ class VideoPlanningWorkflowService:
             VideoPlanningStage.PLAN_REVIEW: WorkflowStatus.AWAITING_USER,
             VideoPlanningStage.PLAN_APPROVED: WorkflowStatus.RUNNING,
         }[state.current_stage]
-        if state.status is not expected_status:
+        cancelled_in_place = (
+            state.status is WorkflowStatus.CANCELLED
+            and state.current_stage is not VideoPlanningStage.INTAKE
+        )
+        if state.status is not expected_status and not cancelled_in_place:
             raise ValueError("规划状态的阶段与 WorkflowStatus 不一致")
 
         form_values = state.form_values
@@ -845,6 +874,8 @@ def _required_active_plan(state: VideoPlanningWorkflowState) -> VideoPlanAuthori
 
 
 def _require_stage(state: VideoPlanningWorkflowState, expected: VideoPlanningStage) -> None:
+    if state.status is WorkflowStatus.CANCELLED:
+        raise ValueError("已取消的规划 Workflow 处于终态阶段，不能继续推进")
     if state.current_stage is not expected:
         raise ValueError(
             f"Workflow 当前阶段为 {state.current_stage.value}，不能执行仅属于 {expected.value} 的动作"
@@ -859,6 +890,20 @@ def _timestamp(value: datetime | None) -> datetime:
     timestamp = value or datetime.now(UTC)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("Workflow 时间必须包含时区")
+    return timestamp
+
+
+def _cancellation_timestamp(
+    updated_at: datetime,
+    value: datetime | None,
+) -> datetime:
+    """生成严格前进的取消时间，避免同一时钟刻度产生停滞版本。"""
+
+    timestamp = _timestamp(value)
+    if timestamp < updated_at:
+        raise ValueError("Workflow 取消时间不能早于当前状态")
+    if timestamp == updated_at:
+        return timestamp + timedelta(microseconds=1)
     return timestamp
 
 

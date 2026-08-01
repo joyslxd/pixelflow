@@ -365,6 +365,39 @@ async def test_start_claims_each_scene_once_and_keeps_contract_parameters():
 
 
 @pytest.mark.asyncio
+async def test_generation_cancel_preserves_pending_operations_without_port_calls():
+    package_state = _reviewed_scene_package_state()
+    operation_port = _AtomicFakeOperationPort()
+    service = VideoSceneGenerationWorkflowService(operation_port)
+    state = await service.start_from_reviewed_scene_package(package_state)
+    jobs_before = copy.deepcopy(operation_port._jobs_by_id)
+    requests_before = copy.deepcopy(operation_port._requests_by_idempotency_key)
+
+    cancelled = service.cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is state.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == state.stage_version + 1
+    assert cancelled.context_version == state.context_version + 1
+    assert cancelled.updated_at > state.updated_at
+    assert cancelled.scene_packages == state.scene_packages
+    assert cancelled.scene_videos == state.scene_videos
+    assert cancelled.failed_scenes == state.failed_scenes
+    assert cancelled.generation_requests == state.generation_requests
+    assert cancelled.pending_operations == state.pending_operations
+    assert operation_port._jobs_by_id == jobs_before
+    assert operation_port._requests_by_idempotency_key == requests_before
+    assert service.to_workflow_record(cancelled).pending_external_job == state.pending_operations[0]
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
+
+
+@pytest.mark.asyncio
 async def test_resume_queries_original_operations_without_new_claims():
     package_state = _reviewed_scene_package_state()
     operation_port = _AtomicFakeOperationPort()

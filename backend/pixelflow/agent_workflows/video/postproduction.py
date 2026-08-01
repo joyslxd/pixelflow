@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -306,6 +306,8 @@ class VideoPostProductionWorkflowService:
         """刷新只查询原 Operation，不重新领取或启动供应商任务。"""
 
         _validate_postproduction_state(state)
+        if state.status is WorkflowStatus.CANCELLED:
+            raise ValueError("已取消的视频后处理 Workflow 属于终态，不能恢复 Operation")
         if state.pending_operation is None:
             return state
         port = self._port(operation_port)
@@ -324,6 +326,27 @@ class VideoPostProductionWorkflowService:
         if timestamp < state.updated_at:
             raise ValueError("Workflow 更新时间不能早于当前状态")
         return replace(state, updated_at=timestamp, _pending_operation=existing)
+
+    def cancel(
+        self,
+        state: VideoPostProductionWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoPostProductionWorkflowState:
+        """取消后处理，同时保留合并、质检及 pending Operation 权威事实。"""
+
+        _validate_postproduction_state(state)
+        if state.status in {WorkflowStatus.CANCELLED, WorkflowStatus.COMPLETED}:
+            raise ValueError("已取消或已完成的视频后处理 Workflow 属于终态，不能再次取消")
+        result = replace(
+            state,
+            status=WorkflowStatus.CANCELLED,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=_cancellation_timestamp(state.updated_at, now),
+        )
+        _validate_postproduction_state(result)
+        return result
 
     async def record_merge_success(
         self,
@@ -1093,6 +1116,12 @@ def _validate_generation_ready(state: VideoSceneGenerationWorkflowState) -> None
 
 def _validate_postproduction_state(state: VideoPostProductionWorkflowState) -> None:
     VideoSceneGenerationWorkflowService().to_workflow_record(state.generation_state)
+    if (
+        state.generation_state.current_stage
+        is not VideoSceneGenerationStage.SCENE_VIDEO_REVIEW
+        or state.generation_state.status is not WorkflowStatus.AWAITING_USER
+    ):
+        raise ValueError("视频后处理来源必须是未取消且等待人工确认的完整分镜结果")
     if state.workflow_id != state.generation_state.workflow_id or state.conversation_id != state.generation_state.conversation_id:
         raise ValueError("视频后处理状态必须属于同一 Workflow 和对话")
     if state.stage_version <= state.generation_state.stage_version or state.context_version <= state.generation_state.context_version:
@@ -1107,10 +1136,15 @@ def _validate_postproduction_state(state: VideoPostProductionWorkflowState) -> N
         expected_attempt = state.operation_attempts.get("merge" if state.current_stage is VideoPostProductionStage.MERGE_VIDEO else "quality")
         if expected_attempt != state.pending_operation.attempt:
             raise ValueError("pending Operation attempt 必须匹配当前阶段尝试次数")
+        operation_stage_version = (
+            state.stage_version - 1
+            if state.status is WorkflowStatus.CANCELLED
+            else state.stage_version
+        )
         expected_key = _operation_key(
             state.workflow_id,
             state.current_stage,
-            state.stage_version,
+            operation_stage_version,
             state.pending_operation.attempt,
             state.merge_request if state.current_stage is VideoPostProductionStage.MERGE_VIDEO else _build_quality_request(state),
         )
@@ -1119,7 +1153,10 @@ def _validate_postproduction_state(state: VideoPostProductionWorkflowState) -> N
     if state.current_stage in {VideoPostProductionStage.MERGE_VIDEO, VideoPostProductionStage.QUALITY_REVIEW}:
         if state.status is WorkflowStatus.RUNNING and state.pending_operation is None:
             raise ValueError("运行中的视频阶段必须保留 pending Operation")
-        if state.status is not WorkflowStatus.RUNNING and state.pending_operation is not None:
+        if state.status not in {
+            WorkflowStatus.RUNNING,
+            WorkflowStatus.CANCELLED,
+        } and state.pending_operation is not None:
             raise ValueError("非运行视频阶段不得保留 pending Operation")
     elif state.pending_operation is not None:
         raise ValueError("人工审核或完成阶段不得保留 pending Operation")
@@ -1127,15 +1164,26 @@ def _validate_postproduction_state(state: VideoPostProductionWorkflowState) -> N
         WorkflowStatus.RUNNING,
         WorkflowStatus.PAUSED_QUOTA,
         WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
     }:
         raise ValueError("合并阶段状态不合法")
     if state.current_stage is VideoPostProductionStage.QUALITY_REVIEW:
         if state.merged_video is None:
             raise ValueError("质检阶段必须保留合并视频")
-        if state.status not in {WorkflowStatus.RUNNING, WorkflowStatus.PAUSED_QUOTA, WorkflowStatus.FAILED}:
+        if state.status not in {
+            WorkflowStatus.RUNNING,
+            WorkflowStatus.PAUSED_QUOTA,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.CANCELLED,
+        }:
             raise ValueError("质检阶段状态不合法")
     if state.current_stage is VideoPostProductionStage.VIDEO_REVIEW:
-        if state.status not in {WorkflowStatus.AWAITING_USER, WorkflowStatus.PAUSED_QUOTA, WorkflowStatus.FAILED}:
+        if state.status not in {
+            WorkflowStatus.AWAITING_USER,
+            WorkflowStatus.PAUSED_QUOTA,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.CANCELLED,
+        }:
             raise ValueError("视频人工审核阶段状态不合法")
         if state.merged_video is None:
             raise ValueError("视频人工审核阶段必须保留合并结果")
@@ -1241,7 +1289,12 @@ def _validate_terminal_claims(state: VideoPostProductionWorkflowState) -> None:
         if actual_attempt != expected_attempt:
             raise ValueError("视频 Operation 尝试次数与权威终态历史不一致")
     if normalized and state.pending_operation is None:
-        terminal_offset = 2 if state.current_stage is VideoPostProductionStage.COMPLETED else 1
+        terminal_offset = (
+            2
+            if state.current_stage is VideoPostProductionStage.COMPLETED
+            or state.status is WorkflowStatus.CANCELLED
+            else 1
+        )
         if state.stage_version != previous_stage_version + terminal_offset:
             raise ValueError("视频状态版本与最新权威终态阶段不一致")
     if state._terminal_result_hash != (normalized[-1][2] if normalized else None):
@@ -1457,4 +1510,18 @@ def _next_timestamp(state: VideoPostProductionWorkflowState, value: datetime | N
     timestamp = _timestamp(value)
     if timestamp < state.updated_at:
         raise ValueError("Workflow 更新时间不能早于当前状态")
+    return timestamp
+
+
+def _cancellation_timestamp(
+    updated_at: datetime,
+    value: datetime | None,
+) -> datetime:
+    """生成严格前进的取消时间，并拒绝调用方提供倒退时间。"""
+
+    timestamp = _timestamp(value)
+    if timestamp < updated_at:
+        raise ValueError("Workflow 取消时间不能早于当前状态")
+    if timestamp == updated_at:
+        return timestamp + timedelta(microseconds=1)
     return timestamp

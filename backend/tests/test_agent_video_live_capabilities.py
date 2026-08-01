@@ -1490,6 +1490,8 @@ def test_clean_process_imports_scene_package_module_without_partial_cycle() -> N
 
 def test_video_package_keeps_all_public_exports_in_clean_process() -> None:
     module_by_name = {
+        "VideoLiveStateConflictError": "live_handler",
+        "VideoLiveWorkflowHandler": "live_handler",
         "VideoDeliveryWorkflowService": "delivery",
         "VideoDeliveryWorkflowState": "delivery",
         "VideoPlanAuthoritySnapshot": "planning",
@@ -1511,6 +1513,7 @@ def test_video_package_keeps_all_public_exports_in_clean_process() -> None:
         "VideoWorkflowState": "state_codec",
         "VideoWorkflowStateEnvelope": "state_codec",
         "VideoWorkflowStateKind": "state_codec",
+        "WorkflowDispatchResult": "live_handler",
         "VideoMergeSkillPort": "postproduction",
         "VideoOperationStartClaim": "postproduction",
         "VideoOperationTerminalClaim": "postproduction",

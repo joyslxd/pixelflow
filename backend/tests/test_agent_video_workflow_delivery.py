@@ -112,6 +112,64 @@ async def test_jianying_uses_only_ordered_successful_scenes_and_never_merged_vid
 
 
 @pytest.mark.asyncio
+async def test_delivery_cancel_composes_postproduction_cancel_and_preserves_pending_operation():
+    review, port, _, postproduction_service = await _video_review_state()
+    service = VideoDeliveryWorkflowService(port)
+    delivery = await service.initialize(review)
+    pending = await service.start_jianying_draft(
+        delivery,
+        project_name="智能戒指新品广告",
+    )
+    jobs_before = copy.deepcopy(port._jobs_by_id)
+    requests_before = copy.deepcopy(port._requests_by_idempotency_key)
+
+    cancelled = service.cancel(
+        pending,
+        postproduction_service=postproduction_service,
+        now=pending.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is pending.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.postproduction_state.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == pending.stage_version + 1
+    assert cancelled.context_version == pending.context_version + 1
+    assert cancelled.postproduction_state.stage_version == review.stage_version + 1
+    assert cancelled.postproduction_state.context_version == review.context_version + 1
+    assert cancelled.updated_at > pending.updated_at
+    assert cancelled.jianying_draft_records == pending.jianying_draft_records
+    assert cancelled.pending_jianying_operation == pending.pending_jianying_operation
+    assert cancelled.pending_operation == pending.pending_operation
+    assert port._jobs_by_id == jobs_before
+    assert port._requests_by_idempotency_key == requests_before
+    assert service.to_workflow_record(cancelled).pending_external_job == pending.pending_operation
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(
+            cancelled,
+            postproduction_service=postproduction_service,
+            now=cancelled.updated_at + timedelta(seconds=1),
+        )
+
+    completed_postproduction = await postproduction_service.finish(
+        review,
+        operation_port=port,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+    completed_delivery = await service.initialize(
+        completed_postproduction,
+        operation_port=port,
+    )
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(
+            completed_delivery,
+            postproduction_service=postproduction_service,
+            now=completed_delivery.updated_at + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.asyncio
 async def test_same_storyboard_claim_and_skill_call_are_idempotent():
     review, port, _, _ = await _video_review_state()
     service = VideoDeliveryWorkflowService(port)

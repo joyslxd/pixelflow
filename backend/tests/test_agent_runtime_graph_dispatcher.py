@@ -6,6 +6,7 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    TurnStatus,
     WorkflowKind,
     WorkflowRecord,
     WorkflowStatus,
@@ -15,6 +16,11 @@ from pixelflow.agent_runtime.graph import (
     WorkflowCommand,
     WorkflowCommandDispatcher,
 )
+from pixelflow.agent_workflows.video import (
+    VideoPlanningWorkflowService,
+    encode_video_workflow_state,
+)
+from pixelflow.agent_workflows.video.live_handler import WorkflowDispatchResult
 
 NOW = datetime(2026, 7, 27, tzinfo=UTC)
 NON_WORKFLOW_ACTIONS = {
@@ -89,6 +95,18 @@ class _RecordingHandler:
         return self.result
 
 
+class _LiveRecordingHandler:
+    """返回完整 live 结果，验证 dispatcher 不会丢失业务状态。"""
+
+    def __init__(self, result: WorkflowDispatchResult) -> None:
+        self.result = result
+        self.commands: list[WorkflowCommand] = []
+
+    async def dispatch(self, command: WorkflowCommand) -> WorkflowDispatchResult:
+        self.commands.append(command)
+        return self.result
+
+
 class _MutatingHandler(_RecordingHandler):
     """主动修改命令副本，用于验证原始输入不会被反向污染。"""
 
@@ -157,6 +175,80 @@ async def test_dispatcher_targets_only_requested_workflow_and_uses_isolated_name
     assert command.namespace.checkpoint_ns == ""
     assert state["workflows"][first.workflow_id] is first
     assert state["workflows"][second.workflow_id] is second
+
+
+@pytest.mark.asyncio
+async def test_dispatch_result_wraps_legacy_handler_without_changing_dispatch_contract() -> None:
+    """旧 Handler 继续只返回 Workflow，新增入口提供无中断兼容外壳。"""
+
+    workflow = _workflow("wf-image")
+    dispatcher = WorkflowCommandDispatcher(
+        FakeWorkflowRegistry({WorkflowKind.IMAGE: _RecordingHandler(workflow)})
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "workflows": {workflow.workflow_id: workflow},
+    }
+
+    wrapped = await dispatcher.dispatch_result(state, _decision())
+    direct = await dispatcher.dispatch(state, _decision())
+
+    assert wrapped.workflow == workflow
+    assert wrapped.state is None
+    assert wrapped.interrupt is None
+    assert wrapped.turn_status is TurnStatus.COMPLETED
+    assert direct == workflow
+
+
+@pytest.mark.asyncio
+async def test_dispatch_result_preserves_live_handler_state_and_interrupt_contract() -> None:
+    """live Handler 结果经过 dispatcher 后仍保留 codec 状态。"""
+
+    planning = VideoPlanningWorkflowService()
+    state = planning.start(
+        workflow_id="wf-new-video",
+        conversation_id="conv-1",
+        intent="video",
+        intake_context={"source_prompt": "生成视频"},
+        now=NOW,
+    )
+    workflow = planning.to_workflow_record(state)
+    live_result = WorkflowDispatchResult(
+        state=encode_video_workflow_state(
+            user_id="user-conv-1",
+            state=state,
+            workflow_version=1,
+            last_turn_id="turn-conv-1",
+            last_action_key="turn-1:dispatch",
+        ),
+        workflow=workflow,
+        turn_status=TurnStatus.COMPLETED,
+        update_active_workflow=True,
+        active_workflow_id=workflow.workflow_id,
+    )
+    dispatcher = WorkflowCommandDispatcher(
+        FakeWorkflowRegistry(
+            {WorkflowKind.VIDEO: _LiveRecordingHandler(live_result)}
+        )
+    )
+
+    result = await dispatcher.dispatch_result(
+        {
+            "conversation_id": "conv-1",
+            "user_id": "user-conv-1",
+            "turn_id": "turn-conv-1",
+            "current_input": "生成视频",
+            "workflows": {},
+        },
+        _decision(
+            action=AgentAction.START_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            target_workflow_id="wf-new-video",
+        ),
+    )
+
+    assert result == live_result
+    assert result.state.payload_sha256 == live_result.state.payload_sha256
 
 
 @pytest.mark.asyncio

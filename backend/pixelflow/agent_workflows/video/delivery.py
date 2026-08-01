@@ -9,7 +9,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -236,6 +236,34 @@ class VideoDeliveryWorkflowService:
         )
         _validate_delivery_state(synchronized)
         return synchronized
+
+    def cancel(
+        self,
+        state: VideoDeliveryWorkflowState,
+        *,
+        postproduction_service: VideoPostProductionWorkflowService,
+        now: datetime | None = None,
+    ) -> VideoDeliveryWorkflowState:
+        """通过后处理 Service 同步取消交付层，并保留原外部任务事实。"""
+
+        _validate_delivery_state(state, allow_cancelled=True)
+        if state.status in {WorkflowStatus.CANCELLED, WorkflowStatus.COMPLETED}:
+            raise ValueError("已取消或已完成的视频交付 Workflow 属于终态，不能再次取消")
+        timestamp = _cancellation_timestamp(state.updated_at, now)
+        cancelled_postproduction = postproduction_service.cancel(
+            state.postproduction_state,
+            now=timestamp,
+        )
+        result = replace(
+            state,
+            status=WorkflowStatus.CANCELLED,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=timestamp,
+            _postproduction_state=cancelled_postproduction,
+        )
+        _validate_delivery_state(result, allow_cancelled=True)
+        return result
 
     def current_jianying_scenes(
         self,
@@ -596,7 +624,7 @@ class VideoDeliveryWorkflowService:
     def to_workflow_record(self, state: VideoDeliveryWorkflowState) -> WorkflowRecord:
         """投影视频、剪映历史、最终下载与 pending Operation。"""
 
-        _validate_delivery_state(state)
+        _validate_delivery_state(state, allow_cancelled=True)
         base = VideoPostProductionWorkflowService().to_workflow_record(state.postproduction_state)
         refs = list(base.latest_artifact_refs)
         refs.extend(state.jianying_artifact_refs)
@@ -620,7 +648,7 @@ class VideoDeliveryWorkflowService:
     def to_artifact_projection(self, state: VideoDeliveryWorkflowState) -> dict[str, Any]:
         """生成与 Web 视频结果卡兼容的稳定 Artifact DTO。"""
 
-        _validate_delivery_state(state)
+        _validate_delivery_state(state, allow_cancelled=True)
         merged = state.postproduction_state.merged_video or {}
         records = {version_id: _public_history_record(record) for version_id, record in state.jianying_draft_records.items()}
         projection: dict[str, Any] = {
@@ -765,13 +793,22 @@ class VideoDeliveryWorkflowService:
         return None
 
 
-def _validate_ready_postproduction(state: VideoPostProductionWorkflowState) -> None:
+def _validate_ready_postproduction(
+    state: VideoPostProductionWorkflowState,
+    *,
+    allow_cancelled: bool = False,
+) -> None:
     postproduction_module._validate_postproduction_state(state)
     allowed = {
         VideoPostProductionStage.VIDEO_REVIEW: WorkflowStatus.AWAITING_USER,
         VideoPostProductionStage.COMPLETED: WorkflowStatus.COMPLETED,
     }
-    if allowed.get(state.current_stage) is not state.status:
+    cancelled_review = (
+        allow_cancelled
+        and state.current_stage is VideoPostProductionStage.VIDEO_REVIEW
+        and state.status is WorkflowStatus.CANCELLED
+    )
+    if allowed.get(state.current_stage) is not state.status and not cancelled_review:
         raise ValueError("剪映草稿只允许使用等待人工审核或已人工结束的合并视频")
     if state.pending_operation is not None or state.merged_video is None:
         raise ValueError("视频后处理仍有 pending Operation 或缺少合并结果")
@@ -806,8 +843,17 @@ async def _validate_trusted_postproduction(
             raise OperationConflictError("视频后处理 checkpoint 与可信 Repository 不一致")
 
 
-def _validate_delivery_state(state: VideoDeliveryWorkflowState) -> None:
-    _validate_ready_postproduction(state.postproduction_state)
+def _validate_delivery_state(
+    state: VideoDeliveryWorkflowState,
+    *,
+    allow_cancelled: bool = False,
+) -> None:
+    _validate_ready_postproduction(
+        state.postproduction_state,
+        allow_cancelled=allow_cancelled,
+    )
+    if state.status is WorkflowStatus.CANCELLED and not allow_cancelled:
+        raise ValueError("已取消的视频交付 Workflow 属于终态，不能继续推进")
     if state.workflow_id != state.postproduction_state.workflow_id:
         raise ValueError("交付状态 workflow_id 与视频后处理不一致")
     if state.conversation_id != state.postproduction_state.conversation_id:
@@ -899,9 +945,14 @@ def _validate_delivery_state(state: VideoDeliveryWorkflowState) -> None:
         retry_failed = operation_request.get("retry_failed")
         if not isinstance(retry_failed, bool):
             raise ValueError("剪映草稿 pending 请求缺少显式重试标志")
+        operation_stage_version = (
+            state.stage_version - 1
+            if state.status is WorkflowStatus.CANCELLED
+            else state.stage_version
+        )
         expected_key = _operation_key(
             state.workflow_id,
-            state.stage_version,
+            operation_stage_version,
             pending.attempt,
             operation_request,
         )
@@ -933,7 +984,7 @@ def _validate_delivery_state(state: VideoDeliveryWorkflowState) -> None:
 def _current_jianying_scenes(
     state: VideoPostProductionWorkflowState,
 ) -> list[JianyingDraftScene]:
-    _validate_ready_postproduction(state)
+    _validate_ready_postproduction(state, allow_cancelled=True)
     return [
         JianyingDraftScene(
             scene_id=item["scene_id"],
@@ -1250,4 +1301,18 @@ def _next_timestamp(
     timestamp = _timestamp(value)
     if timestamp < state.updated_at:
         raise ValueError("Workflow 更新时间不能倒退")
+    return timestamp
+
+
+def _cancellation_timestamp(
+    updated_at: datetime,
+    value: datetime | None,
+) -> datetime:
+    """生成严格前进的取消时间，并拒绝调用方提供倒退时间。"""
+
+    timestamp = _timestamp(value)
+    if timestamp < updated_at:
+        raise ValueError("Workflow 取消时间不能早于当前状态")
+    if timestamp == updated_at:
+        return timestamp + timedelta(microseconds=1)
     return timestamp

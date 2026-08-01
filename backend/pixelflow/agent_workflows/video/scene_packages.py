@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -228,6 +228,27 @@ class VideoScenePackageWorkflowService:
             _scene_package=snapshot,
         )
 
+    def cancel(
+        self,
+        state: VideoScenePackageWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoScenePackageWorkflowState:
+        """取消场景包阶段，但不删除 Plan、场景包或已生成资产。"""
+
+        _validate_scene_package_state_authority(state)
+        if state.status in {WorkflowStatus.CANCELLED, WorkflowStatus.COMPLETED}:
+            raise ValueError("已取消或已完成的场景包 Workflow 属于终态，不能再次取消")
+        result = replace(
+            state,
+            status=WorkflowStatus.CANCELLED,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=_cancellation_timestamp(state.updated_at, now),
+        )
+        _validate_scene_package_state_authority(result)
+        return result
+
     def to_workflow_record(self, state: VideoScenePackageWorkflowState) -> WorkflowRecord:
         """投影 Runtime DTO，保留 Plan 与场景包两个稳定 Artifact 引用。"""
 
@@ -304,10 +325,14 @@ def _validated_prepared_payload(
 
 def _validate_generating_state_authority(
     state: VideoScenePackageWorkflowState,
+    *,
+    allow_cancelled: bool = False,
 ) -> None:
     """恢复生图阶段时重新建立 Plan 与场景包快照的校验链。"""
 
-    if state.status is not WorkflowStatus.RUNNING:
+    if state.status is not WorkflowStatus.RUNNING and not (
+        allow_cancelled and state.status is WorkflowStatus.CANCELLED
+    ):
         raise ValueError("全局资产生图阶段必须处于运行状态")
     _validate_source_plan(state.source_plan)
     payload = state.scene_package.to_dict()
@@ -337,11 +362,14 @@ def _validate_scene_package_state_authority(
     state: VideoScenePackageWorkflowState,
 ) -> None:
     if state.current_stage is VideoScenePackageStage.GENERATE_SCENE_ASSETS:
-        _validate_generating_state_authority(state)
+        _validate_generating_state_authority(state, allow_cancelled=True)
         return
     if state.current_stage is not VideoScenePackageStage.SCENE_PACKAGE_REVIEW:
         raise ValueError("场景包 Workflow 阶段不受支持")
-    if state.status is not WorkflowStatus.AWAITING_USER:
+    if state.status not in {
+        WorkflowStatus.AWAITING_USER,
+        WorkflowStatus.CANCELLED,
+    }:
         raise ValueError("场景包审核阶段必须等待用户确认")
 
     _validate_source_plan(state.source_plan)
@@ -693,6 +721,8 @@ def _require_stage(
     state: VideoScenePackageWorkflowState,
     expected: VideoScenePackageStage,
 ) -> None:
+    if state.status is WorkflowStatus.CANCELLED:
+        raise ValueError("已取消的场景包 Workflow 属于终态，不能继续推进")
     if state.current_stage is not expected:
         raise ValueError(f"Workflow 当前阶段为 {state.current_stage.value}，不能执行仅属于 {expected.value} 的动作")
 
@@ -701,6 +731,20 @@ def _timestamp(value: datetime | None) -> datetime:
     timestamp = value or datetime.now(UTC)
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("Workflow 时间必须包含时区")
+    return timestamp
+
+
+def _cancellation_timestamp(
+    updated_at: datetime,
+    value: datetime | None,
+) -> datetime:
+    """生成严格前进的取消时间，并拒绝调用方提供倒退时间。"""
+
+    timestamp = _timestamp(value)
+    if timestamp < updated_at:
+        raise ValueError("Workflow 取消时间不能早于当前状态")
+    if timestamp == updated_at:
+        return timestamp + timedelta(microseconds=1)
     return timestamp
 
 

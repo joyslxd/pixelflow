@@ -7,6 +7,8 @@ from threading import RLock
 from typing import Any, Final
 
 _PUBLIC_MODULES: Final[dict[str, str]] = {
+    "VideoLiveStateConflictError": "live_handler",
+    "VideoLiveWorkflowHandler": "live_handler",
     "VideoDeliveryWorkflowService": "delivery",
     "VideoDeliveryWorkflowState": "delivery",
     "VideoPlanAuthoritySnapshot": "planning",
@@ -28,6 +30,7 @@ _PUBLIC_MODULES: Final[dict[str, str]] = {
     "VideoWorkflowState": "state_codec",
     "VideoWorkflowStateEnvelope": "state_codec",
     "VideoWorkflowStateKind": "state_codec",
+    "WorkflowDispatchResult": "live_handler",
     "VideoMergeSkillPort": "postproduction",
     "VideoOperationStartClaim": "postproduction",
     "VideoOperationTerminalClaim": "postproduction",
@@ -47,6 +50,8 @@ _PUBLIC_IMPORT_LOCK: Final[RLock] = RLock()
 _MISSING: Final[object] = object()
 
 __all__ = [
+    "VideoLiveStateConflictError",
+    "VideoLiveWorkflowHandler",
     "VideoDeliveryWorkflowService",
     "VideoDeliveryWorkflowState",
     "VideoPlanAuthoritySnapshot",
@@ -68,6 +73,7 @@ __all__ = [
     "VideoWorkflowState",
     "VideoWorkflowStateEnvelope",
     "VideoWorkflowStateKind",
+    "WorkflowDispatchResult",
     "VideoMergeSkillPort",
     "VideoOperationStartClaim",
     "VideoOperationTerminalClaim",

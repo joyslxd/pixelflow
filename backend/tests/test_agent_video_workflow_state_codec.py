@@ -12,11 +12,13 @@ import test_agent_video_workflow_generation as generation_tests
 import test_agent_video_workflow_planning as planning_tests
 import test_agent_video_workflow_postproduction as postproduction_tests
 
+from pixelflow.agent_runtime.contracts import WorkflowStatus
 from pixelflow.agent_workflows.video import (
     VideoDeliveryWorkflowService,
     VideoPlanningWorkflowService,
     VideoPostProductionWorkflowService,
     VideoSceneGenerationWorkflowService,
+    VideoScenePackageWorkflowService,
     VideoWorkflowState,
     VideoWorkflowStateEnvelope,
     canonical_payload_sha256,
@@ -150,6 +152,47 @@ async def _delivery_completed_downloads_state() -> VideoWorkflowState:
     )
 
 
+async def _cancelled_planning_state() -> VideoWorkflowState:
+    state = await _planning_state()
+    return VideoPlanningWorkflowService().cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+
+async def _cancelled_scene_package_state() -> VideoWorkflowState:
+    state = await _scene_package_state()
+    return VideoScenePackageWorkflowService().cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+
+async def _cancelled_generation_state() -> VideoWorkflowState:
+    state = await _generation_pending_state()
+    return VideoSceneGenerationWorkflowService().cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+
+async def _cancelled_postproduction_state() -> VideoWorkflowState:
+    state = await _postproduction_quality_feedback_state()
+    return VideoPostProductionWorkflowService().cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+
+async def _cancelled_delivery_state() -> VideoWorkflowState:
+    state = await _delivery_pending_state()
+    return VideoDeliveryWorkflowService().cancel(
+        state,
+        postproduction_service=VideoPostProductionWorkflowService(),
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+
 STATE_FACTORIES: tuple[StateFactory, ...] = (
     _planning_state,
     _scene_package_state,
@@ -167,6 +210,14 @@ BRANCH_STATE_FACTORIES: tuple[tuple[str, StateFactory], ...] = (
     ("postproduction_finalized", _postproduction_finalized_state),
     ("delivery_pending", _delivery_pending_state),
     ("delivery_completed_downloads", _delivery_completed_downloads_state),
+)
+
+CANCELLED_STATE_FACTORIES: tuple[StateFactory, ...] = (
+    _cancelled_planning_state,
+    _cancelled_scene_package_state,
+    _cancelled_generation_state,
+    _cancelled_postproduction_state,
+    _cancelled_delivery_state,
 )
 
 
@@ -245,6 +296,32 @@ async def test_video_state_codec_round_trips_without_mutable_alias(
         _first_frozen_list(envelope.payload).append("tampered")
     json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False, allow_nan=False)
     json.loads(envelope.model_dump_json())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state_factory", CANCELLED_STATE_FACTORIES)
+async def test_cancelled_video_state_codec_round_trips_with_matching_projection(
+    state_factory: StateFactory,
+) -> None:
+    state = await state_factory()
+    envelope = encode_video_workflow_state(
+        user_id="user-1",
+        state=state,
+        workflow_version=8,
+        last_turn_id="turn-cancel-8",
+        last_action_key="decision:cancel-8",
+    )
+
+    restored = decode_video_workflow_state(
+        VideoWorkflowStateEnvelope.model_validate_json(envelope.model_dump_json())
+    )
+    projection = project_video_workflow_state(restored)
+
+    assert restored == state
+    assert projection.status is WorkflowStatus.CANCELLED
+    assert projection.current_stage == state.current_stage.value
+    assert projection.stage_version == state.stage_version
+    assert projection.context_version == state.context_version
 
 
 @pytest.mark.asyncio

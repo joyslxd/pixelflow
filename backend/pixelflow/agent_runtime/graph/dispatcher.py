@@ -5,18 +5,22 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    TurnStatus,
     WorkflowKind,
     WorkflowRecord,
 )
 
 from .namespaces import GraphExecutionNamespace, workflow_namespace
 from .registry import WorkflowRegistry
+
+if TYPE_CHECKING:
+    from pixelflow.agent_workflows.video.live_handler import WorkflowDispatchResult
 
 _NON_WORKFLOW_ACTIONS = {
     AgentAction.ANSWER_ONLY,
@@ -56,6 +60,19 @@ class WorkflowCommand:
     artifact_refs: list[str]
 
 
+@dataclass(frozen=True, slots=True)
+class _LegacyWorkflowDispatchResult:
+    """给旧 Handler 提供与 live 结果同形的只读兼容外壳。"""
+
+    state: None
+    workflow: WorkflowRecord
+    messages: tuple[()] = ()
+    interrupt: None = None
+    turn_status: TurnStatus = TurnStatus.COMPLETED
+    update_active_workflow: bool = False
+    active_workflow_id: str | None = None
+
+
 class WorkflowCommandDispatcher:
     """显式定位工作流、隔离对话并校验处理器返回身份。"""
 
@@ -69,7 +86,23 @@ class WorkflowCommandDispatcher:
         *,
         preallocated_workflow_id: str | None = None,
     ) -> WorkflowRecord:
-        """派发一条业务命令，不负责更新 Supervisor 投影。"""
+        """保持旧入口只返回 Workflow 投影。"""
+
+        result = await self.dispatch_result(
+            state,
+            decision,
+            preallocated_workflow_id=preallocated_workflow_id,
+        )
+        return result.workflow.model_copy(deep=True)
+
+    async def dispatch_result(
+        self,
+        state: Mapping[str, Any],
+        decision: ActionDecision,
+        *,
+        preallocated_workflow_id: str | None = None,
+    ) -> WorkflowDispatchResult | _LegacyWorkflowDispatchResult:
+        """派发业务命令，并保留 live Handler 的完整结果。"""
 
         normalized_decision = decision.model_copy(deep=True)
         if normalized_decision.action in _NON_WORKFLOW_ACTIONS:
@@ -145,10 +178,25 @@ class WorkflowCommandDispatcher:
             artifact_refs=artifact_refs,
         )
         handler = self._registry.resolve(kind)
-        result = await handler.dispatch(command)
-        normalized_result = WorkflowRecord.model_validate(result).model_copy(deep=True)
-        _validate_result_identity(command, normalized_result)
-        return normalized_result
+        raw_result = await handler.dispatch(command)
+        from pixelflow.agent_workflows.video.live_handler import (
+            WorkflowDispatchResult,
+        )
+
+        if isinstance(raw_result, WorkflowDispatchResult):
+            normalized_live_result = WorkflowDispatchResult.model_validate(
+                raw_result.model_dump(mode="python")
+            )
+            _validate_result_identity(command, normalized_live_result.workflow)
+            return normalized_live_result
+        normalized_workflow = WorkflowRecord.model_validate(raw_result).model_copy(
+            deep=True
+        )
+        _validate_result_identity(command, normalized_workflow)
+        return _LegacyWorkflowDispatchResult(
+            state=None,
+            workflow=normalized_workflow,
+        )
 
 
 def _copy_target_workflow(

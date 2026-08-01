@@ -453,6 +453,40 @@ def test_generated_global_asset_images_are_bound_once_and_projected_for_review()
         assert [item["image_url"] for item in scene["shot_description"]["mentions"]] == [url_by_id[asset_id] for asset_id in scene["reference_asset_ids"]]
 
 
+@pytest.mark.parametrize("at_review", [False, True])
+def test_scene_package_cancel_preserves_authoritative_snapshots(at_review: bool) -> None:
+    planning_state = _approved_plan_state()
+    service = VideoScenePackageWorkflowService()
+    state = service.prepare_from_approved_plan(
+        planning_state,
+        now=planning_state.updated_at + timedelta(seconds=1),
+    )
+    if at_review:
+        state = service.publish_generated_asset_images(
+            state,
+            _generated_global_assets(state.scene_package.global_assets),
+            now=state.updated_at + timedelta(seconds=1),
+        )
+
+    cancelled = service.cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is state.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == state.stage_version + 1
+    assert cancelled.context_version == state.context_version + 1
+    assert cancelled.updated_at > state.updated_at
+    assert cancelled.source_plan == state.source_plan
+    assert cancelled.source_plan_artifact_ref == state.source_plan_artifact_ref
+    assert cancelled.scene_package == state.scene_package
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
+
+
 def test_generated_asset_publication_revalidates_restored_scene_package_authority():
     planning_state = _approved_plan_state()
     service = VideoScenePackageWorkflowService()

@@ -91,6 +91,53 @@ async def test_merge_claims_once_orders_scenes_and_single_scene_passthrough():
 
 
 @pytest.mark.asyncio
+async def test_postproduction_cancel_preserves_pending_operation_without_port_calls():
+    generation, port, _ = await _complete_generation()
+    service = VideoPostProductionWorkflowService(port)
+    state = await service.start_merge(
+        generation,
+        now=generation.updated_at + timedelta(seconds=1),
+    )
+    jobs_before = copy.deepcopy(port._jobs_by_id)
+    requests_before = copy.deepcopy(port._requests_by_idempotency_key)
+
+    cancelled = service.cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is state.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == state.stage_version + 1
+    assert cancelled.context_version == state.context_version + 1
+    assert cancelled.updated_at > state.updated_at
+    assert cancelled.generation_state == state.generation_state
+    assert cancelled.merge_request == state.merge_request
+    assert cancelled.pending_operation == state.pending_operation
+    assert port._jobs_by_id == jobs_before
+    assert port._requests_by_idempotency_key == requests_before
+    assert service.to_workflow_record(cancelled).pending_external_job == state.pending_operation
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
+
+    running = await _claim_started(state, port)
+    review = await service.record_merge_success(
+        running,
+        merged_video_url="https://videos.example.com/cancel-contract.mp4",
+        provider_job_id="merge-cancel-contract",
+        now=running.updated_at + timedelta(seconds=1),
+    )
+    completed = await service.finish(
+        review,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(completed, now=completed.updated_at + timedelta(seconds=1))
+
+
+@pytest.mark.asyncio
 async def test_merge_success_then_quality_review_preserves_qc_result_and_manual_finish():
     generation, port, _ = await _complete_generation()
     service = VideoPostProductionWorkflowService(port)

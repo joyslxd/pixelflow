@@ -267,6 +267,31 @@ def test_direction_regeneration_and_form_cancellation_are_explicit(service: Vide
     assert regenerated.selected_direction == {}
 
 
+def test_planning_cancel_preserves_authority_and_projects_cancelled_status(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+    cancelled = service.cancel(
+        review,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is review.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == review.stage_version + 1
+    assert cancelled.context_version == review.context_version + 1
+    assert cancelled.updated_at > review.updated_at
+    assert cancelled.intake_context == review.intake_context
+    assert cancelled.form_values == review.form_values
+    assert cancelled.creative_directions == review.creative_directions
+    assert cancelled.selected_direction == review.selected_direction
+    assert cancelled.active_plan == review.active_plan
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
+
+
 def test_initial_plan_inherits_confirmed_intake_contract_and_model_capabilities(
     service: VideoPlanningWorkflowService,
 ):

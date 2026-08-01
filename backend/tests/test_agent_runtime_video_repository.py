@@ -28,6 +28,7 @@ from pixelflow.agent_runtime.contracts import (
     ExternalJobStatus,
     TurnRecord,
     TurnStatus,
+    WorkflowStatus,
 )
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
@@ -695,6 +696,69 @@ async def test_commit_is_atomic_on_cas_conflict_and_replay_is_idempotent(
             await repository.export_safe_snapshot(OWNER, CONVERSATION)
         ).model_dump(mode="json") == snapshot_before_conflict
         assert (await repository.get_turn(OWNER, "turn-2")).status is TurnStatus.PROCESSING
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_commit_requires_domain_state_and_workflow_projection_to_match(
+    kind: RepositoryKind,
+) -> None:
+    """取消不能只改 Workflow 投影，必须同步推进可恢复的领域状态。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await seed_two_turns(repository)
+        first = await claim(repository)
+        await repository.commit_turn(first, completed_commit())
+        second = await repository.claim_turn(
+            OWNER,
+            CONVERSATION,
+            "turn-2",
+            lease_owner="worker-b",
+            now=NOW + timedelta(seconds=21),
+            lease_expires_at=NOW + timedelta(seconds=51),
+        )
+        assert second is not None
+        planning = VideoPlanningWorkflowService()
+        state = planning.start(
+            workflow_id=WORKFLOW,
+            conversation_id=CONVERSATION,
+            intent="video",
+            intake_context={"nested": {"items": ["a", {"value": 1}]}},
+            now=NOW,
+        )
+        cancelled = planning.cancel(
+            state,
+            now=NOW + timedelta(seconds=22),
+        )
+        envelope = encode_video_workflow_state(
+            user_id=OWNER,
+            state=cancelled,
+            workflow_version=2,
+            last_turn_id="turn-2",
+            last_action_key="cancel-action-2",
+        )
+        cancelled_projection = project_video_workflow_state(cancelled)
+        committed = await repository.commit_turn(
+            second,
+            VideoTurnCommit(
+                decision=_decision(
+                    action=AgentAction.CANCEL_WORKFLOW,
+                    action_key="cancel-action-2",
+                ),
+                turn_status=TurnStatus.COMPLETED,
+                workflow_state=envelope,
+                workflow=cancelled_projection,
+                expected_workflow_version=1,
+                update_active_workflow=True,
+                active_workflow_id=None,
+                occurred_at=NOW + timedelta(seconds=22),
+            ),
+        )
+
+        assert committed.status is TurnStatus.COMPLETED
+        snapshot = await repository.export_safe_snapshot(OWNER, CONVERSATION)
+        assert snapshot.workflows[0].status is WorkflowStatus.CANCELLED
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
