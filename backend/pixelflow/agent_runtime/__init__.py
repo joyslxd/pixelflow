@@ -7,6 +7,12 @@ from threading import RLock
 from typing import Any, Final
 
 _PUBLIC_MODULES: Final[dict[str, str]] = {
+    "SupervisorExecutionMetrics": "executor",
+    "SupervisorExecutorClosedError": "executor",
+    "SupervisorPostCommitRecorder": "executor",
+    "SupervisorTransientExecutionError": "executor",
+    "SupervisorTurnExecutor": "executor",
+    "SupervisorTurnScope": "executor",
     "SupervisorReplayDisposition": "replay",
     "SupervisorReplayResult": "replay",
     "SupervisorReplayRuntime": "replay",
@@ -16,6 +22,12 @@ _PUBLIC_IMPORT_LOCK: Final[RLock] = RLock()
 _MISSING: Final[object] = object()
 
 __all__ = [
+    "SupervisorExecutionMetrics",
+    "SupervisorExecutorClosedError",
+    "SupervisorPostCommitRecorder",
+    "SupervisorTransientExecutionError",
+    "SupervisorTurnExecutor",
+    "SupervisorTurnScope",
     "SupervisorReplayDisposition",
     "SupervisorReplayResult",
     "SupervisorReplayRuntime",

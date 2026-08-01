@@ -284,7 +284,7 @@ async def test_answer_only_rejects_message_id_from_another_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_clarify_opens_resumable_interrupt_without_dispatching_workflow() -> None:
-    """clarify 打开公开追问中断，恢复后仍不修改 Workflow。"""
+    """clarify 打开追问，旧任意恢复形状必须失败关闭且不修改 Workflow。"""
 
     handler = _RecordingHandler()
     checkpointer = InMemorySaver()
@@ -308,15 +308,18 @@ async def test_clarify_opens_resumable_interrupt_without_dispatching_workflow() 
     }
     assert interrupted.values["workflows"]["wf-video"].model_dump(mode="python") == before
 
-    result = await resume_graph_from_interrupt(
-        graph,
-        namespace,
-        interrupt_id=interrupted.interrupts[0].id,
-        response={"answer": "继续视频任务"},
-    )
+    with pytest.raises(ValueError) as exc_info:
+        await resume_graph_from_interrupt(
+            graph,
+            namespace,
+            interrupt_id=interrupted.interrupts[0].id,
+            response={"answer": "继续视频任务"},
+        )
 
     assert handler.commands == []
-    assert result["workflows"]["wf-video"].model_dump(mode="python") == before
+    assert getattr(exc_info.value, "reason_code", None) == (
+        "invalid_clarification_resume_envelope"
+    )
 
 
 @pytest.mark.asyncio

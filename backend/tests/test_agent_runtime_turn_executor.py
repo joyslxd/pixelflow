@@ -1,0 +1,763 @@
+"""Supervisor Turn Executor 的顺序、恢复、fencing 与关闭合同测试。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from uuid import UUID
+
+import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+
+from pixelflow.agent_runtime import (
+    SupervisorExecutorClosedError,
+    SupervisorTurnExecutor,
+    SupervisorTurnScope,
+)
+from pixelflow.agent_runtime.contracts import (
+    ActionDecision,
+    AgentAction,
+    AgentIntent,
+    ExplicitActionSignal,
+    TurnRecord,
+    TurnStatus,
+    WorkflowKind,
+)
+from pixelflow.agent_runtime.graph import (
+    FakeWorkflowRegistry,
+    make_agent_runtime_graph,
+)
+from pixelflow.agent_runtime.identity import conversation_message_id
+from pixelflow.agent_runtime.persistence import (
+    MemoryVideoRuntimeRepository,
+    StoredAgentInterrupt,
+)
+from pixelflow.agent_runtime.supervisor import (
+    ActionClassificationCandidate,
+    ActionClassificationRequest,
+    ActionClassificationTarget,
+    DecisionValidationRequest,
+    DeterministicResolution,
+    DeterministicResolutionStatus,
+)
+from pixelflow.agent_workflows.video import (
+    VideoPlanningWorkflowService,
+    WorkflowDispatchResult,
+    decode_video_workflow_state,
+    encode_video_workflow_state,
+    project_video_workflow_state,
+)
+from pixelflow.agent_workflows.video.live_capabilities import (
+    TransientTurnCredential,
+)
+from pixelflow.agent_workflows.video.live_operations import (
+    TransientCredentialVault,
+)
+from pixelflow.tasks import (
+    MemoryPixelFlowTaskStore,
+    PixelFlowConversationMessageRecord,
+    PixelFlowConversationRecord,
+)
+
+NOW = datetime(2026, 7, 31, 12, tzinfo=UTC)
+LEASE_EXPIRY = NOW + timedelta(seconds=30)
+EPSILON = timedelta(microseconds=1)
+ALL_ACTIONS = tuple(AgentAction)
+
+
+class FakeClock:
+    """为租约与退避测试提供可控 UTC 时间。"""
+
+    def __init__(self, now: datetime = NOW) -> None:
+        self.current = now
+
+    def __call__(self) -> datetime:
+        return self.current
+
+    def advance(self, delta: timedelta) -> None:
+        self.current += delta
+
+
+class FakeDecisionService:
+    """只根据权威 evidence 生成 Graph 可复验的确定性决策。"""
+
+    def __init__(self, *, clarify_first: bool = False) -> None:
+        self.evidence = []
+        self.clarify_first = clarify_first
+
+    async def decide(self, evidence):
+        self.evidence.append(evidence)
+        explicit = evidence.explicit_action
+        if self.clarify_first and not self.evidence[:-1]:
+            action = AgentAction.CLARIFY
+            intent = AgentIntent.GENERAL
+            workflow_id = None
+            stage = None
+            patch = {}
+        elif explicit is None:
+            action = AgentAction.START_WORKFLOW
+            intent = AgentIntent.VIDEO
+            workflow_id = None
+            stage = None
+            patch = {}
+        else:
+            action = explicit.action
+            intent = explicit.intent or AgentIntent.VIDEO
+            workflow_id = explicit.workflow_id
+            stage = explicit.stage
+            patch = dict(explicit.patch)
+
+        candidates = tuple(_candidate(item) for item in evidence.workflows)
+        resolution = DeterministicResolution(
+            status=DeterministicResolutionStatus.RESOLVED,
+            action=action,
+            intent=intent,
+            target_workflow_id=workflow_id,
+            target_stage=stage,
+            target_artifact_ref=(None if explicit is None else explicit.artifact_ref),
+            reason_code="fake_authoritative_decision",
+            candidate_workflow_ids=(() if workflow_id is None else (workflow_id,)),
+        )
+        classification = ActionClassificationRequest(
+            turn_id=evidence.turn.turn_id,
+            content=evidence.content,
+            deterministic_resolution=resolution,
+            candidates=candidates,
+            context_summary="测试上下文摘要",
+        )
+        decision = ActionDecision(
+            action=action,
+            intent=intent,
+            target_workflow_id=workflow_id,
+            target_stage=stage,
+            target_artifact_ref=(None if explicit is None else explicit.artifact_ref),
+            confidence=1,
+            requires_confirmation=action is AgentAction.CLARIFY,
+            clarification_question=(
+                "请明确要创建什么视频。" if action is AgentAction.CLARIFY else None
+            ),
+            patch=patch,
+            reason_code="fake_authoritative_decision",
+            idempotency_key=classification.idempotency_key,
+        )
+        validation = DecisionValidationRequest(
+            decision=decision,
+            classification_request=classification,
+            current_candidates=candidates,
+            allowed_global_actions=(
+                AgentAction.ANSWER_ONLY,
+                AgentAction.CLARIFY,
+                AgentAction.START_WORKFLOW,
+            ),
+            expected_context_version=evidence.expected_context_version,
+            current_context_version=evidence.authoritative_context_version,
+        )
+        return SimpleNamespace(
+            decision=decision,
+            validation_request=validation,
+            context=object(),
+            answer_message=None,
+        )
+
+
+def _candidate(workflow):
+    targets = (
+        ActionClassificationTarget(target_stage=workflow.current_stage),
+    )
+    return ActionClassificationCandidate(
+        workflow_id=workflow.workflow_id,
+        intent=AgentIntent(workflow.kind.value),
+        status=workflow.status,
+        current_stage=workflow.current_stage,
+        stage_version=workflow.stage_version,
+        context_version=workflow.context_version,
+        allowed_actions=ALL_ACTIONS,
+        targets=targets,
+    )
+
+
+class FakeVideoHandler:
+    """用真实视频状态 DTO 返回可提交结果，不调用模型或 Provider。"""
+
+    def __init__(
+        self,
+        repository: MemoryVideoRuntimeRepository,
+        *,
+        open_first_interrupt: bool = False,
+        block: bool = False,
+        parallel_target: int = 0,
+        fail_first: bool = False,
+        vault: TransientCredentialVault | None = None,
+    ) -> None:
+        self.repository = repository
+        self.open_first_interrupt = open_first_interrupt
+        self.block = block
+        self.parallel_target = parallel_target
+        self.failures_remaining = 1 if fail_first else 0
+        self.vault = vault
+        self.turn_ids: list[str] = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self._parallel_count = 0
+        self.credential_seen = False
+
+    async def dispatch(self, command):
+        self.turn_ids.append(command.turn_id)
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise ValueError("测试 Handler 合同失败")
+        if self.vault is not None:
+            self.credential_seen = self.vault.get(command.turn_id) is not None
+        self._parallel_count += 1
+        if self.parallel_target and self._parallel_count >= self.parallel_target:
+            self.entered.set()
+        elif self.block:
+            self.entered.set()
+        if self.block or self.parallel_target:
+            await self.release.wait()
+
+        existing = await self.repository.get_video_state(
+            command.user_id,
+            command.workflow_id,
+        )
+        if existing is None:
+            state = VideoPlanningWorkflowService().start(
+                workflow_id=command.workflow_id,
+                conversation_id=command.conversation_id,
+                intent="video",
+                intake_context={"source": "executor-test"},
+                now=NOW,
+            )
+            version = 1
+        else:
+            state = decode_video_workflow_state(existing)
+            version = existing.workflow_version + 1
+        workflow = project_video_workflow_state(state)
+        envelope = encode_video_workflow_state(
+            user_id=command.user_id,
+            state=state,
+            workflow_version=version,
+            last_turn_id=command.turn_id,
+            last_action_key=command.decision.idempotency_key,
+        )
+        if existing is None and self.open_first_interrupt:
+            opened = StoredAgentInterrupt(
+                interrupt_id=f"interrupt-{command.turn_id}",
+                conversation_id=command.conversation_id,
+                workflow_id=command.workflow_id,
+                turn_id=command.turn_id,
+                kind="video_intake_form",
+                reason_code="video_intake_required",
+                payload={"workflow_id": command.workflow_id, "stage": workflow.current_stage},
+                opened_at=NOW,
+                user_id=command.user_id,
+                thread_id=command.namespace.thread_id,
+                checkpoint_ns="root",
+            )
+            return WorkflowDispatchResult(
+                state=envelope,
+                workflow=workflow,
+                interrupt=opened,
+                turn_status=TurnStatus.WAITING_USER,
+                update_active_workflow=True,
+                active_workflow_id=command.workflow_id,
+            )
+        return WorkflowDispatchResult(
+            state=envelope,
+            workflow=workflow,
+            turn_status=TurnStatus.COMPLETED,
+        )
+
+
+class FailFirstCommitRepository(MemoryVideoRuntimeRepository):
+    """仅在首次提交前模拟数据库连接瞬断。"""
+
+    def __init__(self, *, task_store: MemoryPixelFlowTaskStore) -> None:
+        super().__init__(task_store=task_store)
+        self.failures_remaining = 1
+
+    async def commit_turn(self, claim, commit):
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise ConnectionError("测试连接已断开")
+        return await super().commit_turn(claim, commit)
+
+
+class FakePostCommitRecorder:
+    """记录 Executor 提交成功后发出的固定安全摘要。"""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.records = []
+
+    async def record_after_commit(self, record) -> None:
+        self.records.append(record)
+        if self.fail:
+            raise RuntimeError("测试 PowerMem 不可用")
+
+
+@dataclass
+class RuntimeHarness:
+    executor: SupervisorTurnExecutor
+    repository: MemoryVideoRuntimeRepository
+    task_store: MemoryPixelFlowTaskStore
+    handler: FakeVideoHandler
+    clock: FakeClock
+    vault: TransientCredentialVault
+    recorder: FakePostCommitRecorder
+
+
+def scope(
+    turn_id: str,
+    *,
+    conversation_id: str = "conversation-1",
+    user_id: str = "user-1",
+) -> SupervisorTurnScope:
+    """只构造 Executor 领取所需的三个稳定 ID。"""
+
+    return SupervisorTurnScope(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+
+
+async def _seed_conversation(
+    task_store: MemoryPixelFlowTaskStore,
+    *,
+    conversation_id: str = "conversation-1",
+    user_id: str = "user-1",
+    context_version: int = 0,
+) -> None:
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            orchestration_mode="supervisor_v1",
+            orchestration_version=1,
+            context={
+                "__agent_runtime": {
+                    "mode": "primary",
+                    "enabled_intents": ["video"],
+                    "primary_execution_ready": True,
+                    "context_compaction_enabled": True,
+                    "context_version": context_version,
+                }
+            },
+            created_at=NOW.isoformat(),
+            updated_at=NOW.isoformat(),
+        )
+    )
+
+
+async def _seed_turn(
+    repository: MemoryVideoRuntimeRepository,
+    task_store: MemoryPixelFlowTaskStore,
+    *,
+    index: int,
+    conversation_id: str = "conversation-1",
+    user_id: str = "user-1",
+    content: str | None = None,
+) -> TurnRecord:
+    client_input_id = UUID(f"00000000-0000-4000-8000-{index:012d}")
+    turn = TurnRecord(
+        turn_id=f"turn-{index}",
+        conversation_id=conversation_id,
+        client_input_id=client_input_id,
+        status=TurnStatus.ACCEPTED,
+        expected_context_version=index - 1,
+        created_at=NOW + timedelta(seconds=index),
+    )
+    await task_store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id=conversation_message_id(conversation_id, client_input_id),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role="user",
+            content=content or f"生成第 {index} 个视频",
+            payload={
+                "client_message_id": str(client_input_id),
+                "materials": [],
+                "reply_to_message_id": None,
+                "artifact_refs": [],
+                "explicit_action": None,
+            },
+            created_at=turn.created_at.isoformat(),
+        )
+    )
+    return await repository.enqueue_turn_for_execution(user_id, turn, now=NOW)
+
+
+async def _runtime(
+    *,
+    repository_type=MemoryVideoRuntimeRepository,
+    open_first_interrupt: bool = False,
+    block: bool = False,
+    parallel_target: int = 0,
+    recorder_fail: bool = False,
+    fail_first_handler: bool = False,
+    clarify_first: bool = False,
+    worker_id: str = "worker-1",
+    heartbeat_interval_seconds: float = 0.01,
+) -> RuntimeHarness:
+    task_store = MemoryPixelFlowTaskStore()
+    repository = repository_type(task_store=task_store)
+    clock = FakeClock()
+    vault = TransientCredentialVault()
+    handler = FakeVideoHandler(
+        repository,
+        open_first_interrupt=open_first_interrupt,
+        block=block,
+        parallel_target=parallel_target,
+        fail_first=fail_first_handler,
+        vault=vault,
+    )
+    graph = make_agent_runtime_graph(
+        registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+        checkpointer=InMemorySaver(),
+    )
+    recorder = FakePostCommitRecorder(fail=recorder_fail)
+    executor = SupervisorTurnExecutor(
+        repository=repository,
+        task_store=task_store,
+        decision_service=FakeDecisionService(clarify_first=clarify_first),
+        graph=graph,
+        credential_vault=vault,
+        clock=clock,
+        worker_id=worker_id,
+        lease_duration=timedelta(seconds=30),
+        heartbeat_step=timedelta(seconds=10),
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        scan_interval_seconds=0.01,
+        post_commit_recorder=recorder,
+    )
+    return RuntimeHarness(
+        executor=executor,
+        repository=repository,
+        task_store=task_store,
+        handler=handler,
+        clock=clock,
+        vault=vault,
+        recorder=recorder,
+    )
+
+
+async def runtime_with_two_turns_same_conversation() -> RuntimeHarness:
+    runtime = await _runtime()
+    await _seed_conversation(runtime.task_store, context_version=2)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=2)
+    return runtime
+
+
+async def runtime_with_blocked_handler() -> RuntimeHarness:
+    # 这两个用例需要显式跨过原始租约边界，避免静态测试时钟被后台续租提前推进。
+    runtime = await _runtime(block=True, heartbeat_interval_seconds=3600)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    return runtime
+
+
+async def runtime_with_responded_interrupt() -> tuple[RuntimeHarness, StoredAgentInterrupt]:
+    runtime = await _runtime(open_first_interrupt=True)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+    opened = await runtime.repository.get_open_interrupt("user-1", "conversation-1")
+    assert opened is not None
+    response_id = UUID("10000000-0000-4000-8000-000000000009")
+    responded = await runtime.repository.store_interrupt_response(
+        "user-1",
+        "conversation-1",
+        opened.interrupt_id,
+        client_response_id=response_id,
+        response_value={
+            "content": "确认并继续",
+            "materials": [],
+            "reply_to_message_id": None,
+            "artifact_refs": [],
+            "explicit_action": ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id=opened.workflow_id,
+                stage=str(opened.payload["stage"]),
+                patch={},
+            ).model_dump(mode="json"),
+        },
+        responded_at=NOW + timedelta(seconds=2),
+    )
+    return runtime, responded
+
+
+@pytest.mark.asyncio
+async def test_executor_processes_one_conversation_in_order() -> None:
+    runtime = await runtime_with_two_turns_same_conversation()
+
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+
+    turns = await runtime.repository.list_turns("user-1", "conversation-1")
+    assert [item.status for item in turns] == [
+        TurnStatus.COMPLETED,
+        TurnStatus.COMPLETED,
+    ]
+    assert runtime.handler.turn_ids == ["turn-1", "turn-2"]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_processes_different_conversations_in_parallel() -> None:
+    runtime = await _runtime(parallel_target=2)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_conversation(
+        runtime.task_store,
+        conversation_id="conversation-2",
+        context_version=1,
+    )
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    await _seed_turn(
+        runtime.repository,
+        runtime.task_store,
+        index=2,
+        conversation_id="conversation-2",
+    )
+
+    await runtime.executor.recover_due_turns()
+    await asyncio.wait_for(runtime.handler.entered.wait(), timeout=1)
+    runtime.handler.release.set()
+    await asyncio.wait_for(runtime.executor.wait_idle(), timeout=1)
+
+    assert set(runtime.handler.turn_ids) == {"turn-1", "turn-2"}
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_reuses_completed_checkpoint_after_transient_commit_failure() -> None:
+    runtime = await _runtime(repository_type=FailFirstCommitRepository)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+    queued = await runtime.repository.get_turn("user-1", "turn-1")
+    assert queued is not None and queued.status is TurnStatus.QUEUED
+    runtime.clock.advance(timedelta(seconds=2))
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+
+    stored = await runtime.repository.get_turn("user-1", "turn-1")
+    assert stored is not None and stored.status is TurnStatus.COMPLETED
+    assert runtime.handler.turn_ids == ["turn-1"]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_terminal_failure_wakes_next_turn_in_same_conversation() -> None:
+    """前一 Turn 固定失败后仍应让同会话队首继续，避免队列永久饿死。"""
+
+    runtime = await _runtime(fail_first_handler=True)
+    await _seed_conversation(runtime.task_store, context_version=2)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=2)
+
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+
+    turns = await runtime.repository.list_turns("user-1", "conversation-1")
+    assert [item.status for item in turns] == [
+        TurnStatus.FAILED,
+        TurnStatus.COMPLETED,
+    ]
+    assert runtime.handler.turn_ids == ["turn-1", "turn-2"]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_shutdown_leaves_claim_recoverable() -> None:
+    runtime = await runtime_with_blocked_handler()
+
+    await runtime.executor.notify_turn(scope("turn-1"), credential=None)
+    await asyncio.wait_for(runtime.handler.entered.wait(), timeout=1)
+    await runtime.executor.aclose()
+
+    stored = await runtime.repository.get_turn("user-1", "turn-1")
+    assert stored is not None and stored.status is TurnStatus.PROCESSING
+    assert await runtime.repository.list_due_turns(
+        now=LEASE_EXPIRY + EPSILON,
+        limit=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_close_is_terminal_for_start_and_notify() -> None:
+    """关闭后的同一实例不能被误重启并重新领取持久化任务。"""
+
+    runtime = await _runtime()
+    await runtime.executor.aclose()
+
+    with pytest.raises(SupervisorExecutorClosedError):
+        await runtime.executor.start()
+    with pytest.raises(SupervisorExecutorClosedError):
+        await runtime.executor.notify_turn(scope("turn-1"), credential=None)
+
+
+@pytest.mark.asyncio
+async def test_executor_stale_lease_cannot_commit_after_takeover() -> None:
+    runtime = await runtime_with_blocked_handler()
+    await runtime.executor.notify_turn(scope("turn-1"), credential=None)
+    await asyncio.wait_for(runtime.handler.entered.wait(), timeout=1)
+    runtime.clock.advance(timedelta(seconds=31))
+    takeover = await runtime.repository.claim_turn(
+        "user-1",
+        "conversation-1",
+        "turn-1",
+        lease_owner="worker-2",
+        now=runtime.clock(),
+        lease_expires_at=runtime.clock() + timedelta(seconds=30),
+    )
+    assert takeover is not None
+
+    runtime.handler.release.set()
+    await runtime.executor.wait_idle()
+
+    stored = await runtime.repository.get_turn("user-1", "turn-1")
+    assert stored is not None and stored.status is TurnStatus.PROCESSING
+    assert runtime.executor.metrics_snapshot()["lease_conflicts"] >= 1
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_resumes_interrupt_on_original_turn_without_followup() -> None:
+    runtime, opened = await runtime_with_responded_interrupt()
+
+    await runtime.executor.recover_due_interrupts()
+    await runtime.executor.wait_idle()
+
+    turns = await runtime.repository.list_turns("user-1", opened.conversation_id)
+    assert [item.turn_id for item in turns] == [opened.turn_id]
+    assert turns[0].status in {TurnStatus.WAITING_USER, TurnStatus.COMPLETED}
+    assert runtime.handler.turn_ids == [opened.turn_id, opened.turn_id]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_global_clarification_without_active_workflow_resumes_original_turn() -> None:
+    """全局追问不伪造 Workflow，并用持久响应继续同一个原 Turn。"""
+
+    runtime = await _runtime(clarify_first=True)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+    opened = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert opened is not None
+    assert opened.kind == "clarification"
+    assert opened.workflow_id is None
+    waiting = await runtime.repository.get_turn("user-1", "turn-1")
+    assert waiting is not None and waiting.status is TurnStatus.WAITING_USER
+    assert runtime.handler.turn_ids == []
+
+    await runtime.repository.store_interrupt_response(
+        "user-1",
+        "conversation-1",
+        opened.interrupt_id,
+        client_response_id=UUID("30000000-0000-4000-8000-000000000001"),
+        response_value={
+            "content": "创建一条商品介绍视频",
+            "materials": [],
+            "artifact_refs": [],
+        },
+        responded_at=NOW + timedelta(seconds=2),
+    )
+    await runtime.executor.recover_due_interrupts()
+    await runtime.executor.wait_idle()
+
+    turns = await runtime.repository.list_turns("user-1", "conversation-1")
+    assert len(turns) == 1
+    assert turns[0].status is TurnStatus.COMPLETED
+    assert runtime.handler.turn_ids == ["turn-1"]
+    closed = await runtime.repository.get_interrupt("user-1", opened.interrupt_id)
+    assert closed is not None and closed.status == "closed"
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_executor_credential_exists_only_during_graph_and_is_cleared() -> None:
+    runtime = await _runtime()
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    credential = TransientTurnCredential("Bearer executor-secret-token")
+
+    await runtime.executor.notify_turn(scope("turn-1"), credential=credential)
+    await runtime.executor.wait_idle()
+
+    assert runtime.handler.credential_seen is True
+    assert runtime.vault.get("turn-1") is None
+    assert "executor-secret-token" not in json.dumps(
+        runtime.executor.metrics_snapshot(),
+        ensure_ascii=False,
+    )
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_commit_recorder_is_fail_open_and_runs_only_after_commit() -> None:
+    runtime = await _runtime(recorder_fail=True)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+
+    stored = await runtime.repository.get_turn("user-1", "turn-1")
+    assert stored is not None and stored.status is TurnStatus.COMPLETED
+    assert len(runtime.recorder.records) == 1
+    record_json = json.dumps(runtime.recorder.records[0], ensure_ascii=False)
+    assert "生成第 1 个视频" not in record_json
+    await runtime.executor.aclose()
+
+
+def test_agent_runtime_executor_public_import_stays_lazy_in_fresh_process() -> None:
+    """防止新增公开导出恢复 agent_runtime 包的 eager import 环。"""
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pixelflow.agent_runtime import SupervisorTurnExecutor; "
+                "print(SupervisorTurnExecutor.__name__)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "SupervisorTurnExecutor"
+
+
+def test_metrics_snapshot_is_deep_copied_and_uses_fixed_safe_dimensions() -> None:
+    """防止调用方修改指标内部状态，或把敏感动态值扩散为指标键。"""
+
+    runtime = asyncio.run(_runtime())
+    first = runtime.executor.metrics_snapshot()
+    first["actions"]["start_workflow"] = 999
+    second = runtime.executor.metrics_snapshot()
+    assert second["actions"]["start_workflow"] == 0
+    assert set(second["actions"]) == {item.value for item in AgentAction}
+    serialized = json.dumps(second, ensure_ascii=False)
+    assert "Authorization" not in serialized
+    assert "https://" not in serialized

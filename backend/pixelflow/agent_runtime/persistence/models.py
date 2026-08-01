@@ -402,7 +402,8 @@ class PixelFlowAgentInterruptRow(Base):
     interrupt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    workflow_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 仅 Supervisor 全局 clarification 允许为空；业务中断仍由 DTO 强制绑定 Workflow。
+    workflow_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     turn_id: Mapped[str] = mapped_column(String(64), nullable=False)
     thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
     checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False)

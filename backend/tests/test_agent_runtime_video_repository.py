@@ -186,6 +186,65 @@ def _interrupt(
     )
 
 
+def _global_clarification_interrupt(
+    *,
+    status: Literal["open", "responded", "closed"] = "open",
+) -> StoredAgentInterrupt:
+    """构造不绑定 Workflow 的 Supervisor 全局追问。"""
+
+    response_id = (
+        UUID("20000000-0000-0000-0000-000000000001")
+        if status == "responded"
+        else None
+    )
+    return StoredAgentInterrupt(
+        interrupt_id="interrupt-global-1",
+        conversation_id=CONVERSATION,
+        workflow_id=None,
+        turn_id="turn-1",
+        kind="clarification",
+        reason_code="ambiguous_target",
+        payload={"question": "请明确要创建什么视频。"},
+        opened_at=NOW + timedelta(seconds=8),
+        user_id=OWNER,
+        thread_id=CONVERSATION,
+        checkpoint_ns="",
+        status=status,
+        response_id=response_id,
+        response=(
+            {
+                "client_response_id": str(response_id),
+                "value": {
+                    "content": "创建一条商品介绍视频",
+                    "materials": [],
+                    "artifact_refs": [],
+                },
+            }
+            if response_id is not None
+            else None
+        ),
+        closed_at=(NOW + timedelta(seconds=20) if status == "closed" else None),
+    )
+
+
+def _global_decision(
+    *,
+    action: AgentAction,
+    action_key: str,
+) -> ActionDecision:
+    return ActionDecision(
+        action=action,
+        intent=AgentIntent.GENERAL,
+        confidence=1,
+        requires_confirmation=action is AgentAction.CLARIFY,
+        clarification_question=(
+            "请明确要创建什么视频。" if action is AgentAction.CLARIFY else None
+        ),
+        reason_code="ambiguous_target",
+        idempotency_key=action_key,
+    )
+
+
 def completed_commit(
     *,
     version: int = 1,
@@ -646,6 +705,91 @@ async def test_responded_interrupt_reclaims_original_waiting_turn(
         responded = await repository.get_interrupt(OWNER, "interrupt-1")
         assert responded is not None
         assert responded.status == "responded"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_global_clarification_interrupt_opens_responds_and_closes(
+    kind: RepositoryKind,
+) -> None:
+    """Memory/SQL 必须同构保存无 Workflow 的全局追问并恢复原 Turn。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
+        initial = await claim(repository)
+        opened = _global_clarification_interrupt()
+        await repository.commit_turn(
+            initial,
+            VideoTurnCommit(
+                decision=_global_decision(
+                    action=AgentAction.CLARIFY,
+                    action_key="decision:global-open",
+                ),
+                turn_status=TurnStatus.WAITING_USER,
+                expected_workflow_version=0,
+                open_interrupt=opened,
+                occurred_at=NOW + timedelta(seconds=10),
+            ),
+        )
+        responded = await repository.store_interrupt_response(
+            OWNER,
+            CONVERSATION,
+            opened.interrupt_id,
+            client_response_id=UUID("20000000-0000-0000-0000-000000000001"),
+            response_value={
+                "content": "创建一条商品介绍视频",
+                "materials": [],
+                "artifact_refs": [],
+            },
+            responded_at=NOW + timedelta(seconds=12),
+        )
+        assert responded.workflow_id is None
+        resumed = await repository.claim_interrupt_resume(
+            OWNER,
+            CONVERSATION,
+            opened.interrupt_id,
+            lease_owner="worker-a",
+            now=NOW + timedelta(seconds=13),
+            lease_expires_at=NOW + timedelta(seconds=43),
+        )
+        assert resumed is not None and resumed.turn.turn_id == "turn-1"
+        await repository.commit_turn(
+            resumed,
+            VideoTurnCommit(
+                decision=_global_decision(
+                    action=AgentAction.ANSWER_ONLY,
+                    action_key="decision:global-close",
+                ),
+                turn_status=TurnStatus.COMPLETED,
+                expected_workflow_version=0,
+                close_interrupt_id=opened.interrupt_id,
+                occurred_at=NOW + timedelta(seconds=20),
+            ),
+        )
+        closed = await repository.get_interrupt(OWNER, opened.interrupt_id)
+        assert closed is not None
+        assert closed.status == "closed"
+        assert closed.workflow_id is None
+
+
+def test_non_clarification_interrupt_still_requires_workflow_identity() -> None:
+    """视频业务中断不能借全局追问例外绕过 Workflow owner。"""
+
+    with pytest.raises(ValidationError, match="workflow_id"):
+        StoredAgentInterrupt(
+            interrupt_id="interrupt-video-without-workflow",
+            conversation_id=CONVERSATION,
+            workflow_id=None,
+            turn_id="turn-1",
+            kind="video_intake_form",
+            reason_code="video_intake_required",
+            payload={"stage": "intake"},
+            opened_at=NOW,
+            user_id=OWNER,
+            thread_id=CONVERSATION,
+            checkpoint_ns=f"pixelflow-supervisor:{CONVERSATION}",
+        )
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

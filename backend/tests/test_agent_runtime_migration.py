@@ -240,7 +240,12 @@ EXPECTED_NULLABLE_COLUMNS = {
         "last_reason_code",
     },
     "pixelflow_agent_projection_messages": {"run_id"},
-    "pixelflow_agent_interrupts": {"response_id", "response_json", "closed_at"},
+    "pixelflow_agent_interrupts": {
+        "workflow_id",
+        "response_id",
+        "response_json",
+        "closed_at",
+    },
     "pixelflow_agent_conversation_states": {"active_workflow_id"},
 }
 
@@ -799,6 +804,87 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
     engine.dispose()
 
 
+def test_supervisor_global_interrupt_migration_upgrade_and_safe_downgrade(
+    tmp_path: Path,
+) -> None:
+    """新迁移保留既有行；存在全局追问时降级必须失败关闭且不丢数据。"""
+
+    database_path = tmp_path / "supervisor-global-interrupt.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260731_05")
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO pixelflow_agent_interrupts ("
+                "interrupt_id, conversation_id, user_id, workflow_id, turn_id, "
+                "thread_id, checkpoint_ns, kind, reason_code, status, payload_json, opened_at"
+                ") VALUES ("
+                "'interrupt-video', 'conversation-1', 'user-1', 'workflow-1', "
+                "'turn-1', 'conversation-1', 'pixelflow-supervisor:conversation-1', "
+                "'video_intake_form', 'video_intake_required', 'open', '{}', '2026-08-01'"
+                ")"
+            )
+        )
+    assert {
+        item["name"]: item["nullable"]
+        for item in inspect(engine).get_columns("pixelflow_agent_interrupts")
+    }["workflow_id"] is False
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_database_url(database_path))
+    assert {
+        item["name"]: item["nullable"]
+        for item in inspect(engine).get_columns("pixelflow_agent_interrupts")
+    }["workflow_id"] is True
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO pixelflow_agent_interrupts ("
+                "interrupt_id, conversation_id, user_id, workflow_id, turn_id, "
+                "thread_id, checkpoint_ns, kind, reason_code, status, payload_json, opened_at"
+                ") VALUES ("
+                "'interrupt-global', 'conversation-1', 'user-1', NULL, 'turn-2', "
+                "'conversation-1', 'pixelflow-supervisor:conversation-1', "
+                "'clarification', 'ambiguous_target', 'open', '{}', '2026-08-01'"
+                ")"
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="全局 clarification"):
+        command.downgrade(config, "20260731_05")
+
+    engine = create_engine(_sync_database_url(database_path))
+    with engine.begin() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM pixelflow_agent_interrupts")
+        ).scalar_one() == 2
+        connection.execute(
+            text(
+                "DELETE FROM pixelflow_agent_interrupts "
+                "WHERE interrupt_id = 'interrupt-global'"
+            )
+        )
+    engine.dispose()
+
+    command.downgrade(config, "20260731_05")
+    engine = create_engine(_sync_database_url(database_path))
+    assert {
+        item["name"]: item["nullable"]
+        for item in inspect(engine).get_columns("pixelflow_agent_interrupts")
+    }["workflow_id"] is False
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT workflow_id FROM pixelflow_agent_interrupts "
+                "WHERE interrupt_id = 'interrupt-video'"
+            )
+        ).scalar_one() == "workflow-1"
+    engine.dispose()
+
+
 def test_video_live_migration_downgrade_preserves_existing_runtime_rows(tmp_path: Path) -> None:
     """只回滚本版本五表，并保留 sentinel 与既有 Runtime 数据。"""
 
@@ -1326,6 +1412,8 @@ def test_video_live_migration_reuses_complete_marker_schema_on_upgrade_retry(
             )
         )
     engine.dispose()
+    # 先恢复 20260731_05 的真实非空 schema，再模拟该版本写入 revision 前退出。
+    command.downgrade(config, "20260731_05")
     command.stamp(config, "20260725_04")
 
     command.upgrade(config, "head")

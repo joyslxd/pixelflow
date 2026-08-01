@@ -333,7 +333,7 @@ class StoredAgentInterrupt(AgentInterruptProjection):
 
     user_id: str = Field(min_length=1)
     thread_id: str = Field(min_length=1)
-    checkpoint_ns: str = Field(min_length=1)
+    checkpoint_ns: str
     status: Literal["open", "responded", "closed"] = "open"
     response_id: UUID | None = None
     response: dict[str, JsonValue] | None = None
@@ -341,8 +341,13 @@ class StoredAgentInterrupt(AgentInterruptProjection):
 
     @model_validator(mode="after")
     def require_workflow_identity(self):
-        if not self.workflow_id:
-            raise ValueError("视频 live interrupt 必须携带 workflow_id")
+        if self.kind == "clarification":
+            if self.workflow_id is not None:
+                raise ValueError("全局 clarification 不能伪造 workflow_id")
+            if self.checkpoint_ns != "":
+                raise ValueError("全局 clarification 必须绑定 Supervisor 根 checkpoint")
+        elif not self.workflow_id or not self.checkpoint_ns:
+            raise ValueError("非全局 interrupt 必须携带 workflow_id 与 checkpoint_ns")
         return self
 
     @field_validator("payload", mode="before")

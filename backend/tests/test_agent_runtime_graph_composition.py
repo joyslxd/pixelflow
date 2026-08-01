@@ -229,6 +229,30 @@ class _ImmediateHandler:
         )
 
 
+class _ImmediateStartHandler:
+    """记录全局追问恢复后仍使用原 Turn 派发的新 Workflow。"""
+
+    def __init__(self) -> None:
+        self.turn_ids: list[str] = []
+
+    async def dispatch(self, command: WorkflowCommand) -> WorkflowRecord:
+        self.turn_ids.append(command.turn_id)
+        return WorkflowRecord(
+            workflow_id=command.workflow_id,
+            conversation_id=command.conversation_id,
+            kind=WorkflowKind.VIDEO,
+            status=WorkflowStatus.RUNNING,
+            current_stage="intake",
+            stage_version=1,
+            creation_contract_snapshot={},
+            pending_external_job=None,
+            latest_artifact_refs=[],
+            context_version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+
 class _LiveInterruptingHandler:
     """用完整 live 结果打开中断，并在原 Turn 恢复后推进规划。"""
 
@@ -477,6 +501,138 @@ def _live_resume_value(*, stored: StoredAgentInterrupt) -> dict:
             },
         },
     }
+
+
+def _global_clarification_state(conversation_id: str) -> dict:
+    """构造没有 active Workflow 的全局追问状态。"""
+
+    turn_id = f"turn-{conversation_id}"
+    content = "帮我做一个"
+    decision = ActionDecision(
+        action=AgentAction.CLARIFY,
+        intent=AgentIntent.GENERAL,
+        confidence=1,
+        requires_confirmation=True,
+        clarification_question="请明确要创建什么内容。",
+        reason_code="ambiguous_target",
+        idempotency_key=f"decision:{turn_id}",
+    )
+    classification = ActionClassificationRequest(
+        turn_id=turn_id,
+        content=content,
+        deterministic_resolution=DeterministicResolution(
+            status=DeterministicResolutionStatus.RESOLVED,
+            action=AgentAction.CLARIFY,
+            intent=AgentIntent.GENERAL,
+            reason_code="ambiguous_target",
+            candidate_workflow_ids=(),
+        ),
+        candidates=(),
+    )
+    return {
+        "conversation_id": conversation_id,
+        "user_id": f"user-{conversation_id}",
+        "turn_id": turn_id,
+        "run_id": f"run-{conversation_id}",
+        "current_input": content,
+        "materials": [],
+        "artifact_refs": [],
+        "context_version": 1,
+        "workflows": {},
+        "active_workflow_id": None,
+        "decision": decision,
+        "decision_validation_request": DecisionValidationRequest(
+            decision=decision,
+            classification_request=classification,
+            current_candidates=(),
+            allowed_global_actions=(AgentAction.CLARIFY, AgentAction.START_WORKFLOW),
+            expected_context_version=1,
+            current_context_version=1,
+        ),
+    }
+
+
+def _global_clarification_resume_value(state: dict) -> dict:
+    """模拟 Executor 使用持久响应和权威证据构造的严格内部信封。"""
+
+    turn_id = state["turn_id"]
+    content = "创建一条商品介绍视频"
+    decision = ActionDecision(
+        action=AgentAction.START_WORKFLOW,
+        intent=AgentIntent.VIDEO,
+        confidence=1,
+        reason_code="explicit_start",
+        idempotency_key=f"decision:{turn_id}",
+    )
+    classification = ActionClassificationRequest(
+        turn_id=turn_id,
+        content=content,
+        deterministic_resolution=DeterministicResolution(
+            status=DeterministicResolutionStatus.RESOLVED,
+            action=AgentAction.START_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            reason_code="explicit_start",
+            candidate_workflow_ids=(),
+        ),
+        candidates=(),
+    )
+    response_id = "40000000-0000-4000-8000-000000000001"
+    return {
+        "client_response_id": response_id,
+        "interrupt_id": interrupt_id(turn_id, "ambiguous_target"),
+        "source_decision_idempotency_key": f"decision:{turn_id}",
+        "decision": decision.model_dump(mode="json"),
+        "decision_validation_request": DecisionValidationRequest(
+            decision=decision,
+            classification_request=classification,
+            current_candidates=(),
+            allowed_global_actions=(AgentAction.CLARIFY, AgentAction.START_WORKFLOW),
+            expected_context_version=1,
+            current_context_version=1,
+        ).model_dump(mode="json"),
+        "value": {
+            "content": content,
+            "materials": [],
+            "reply_to_message_id": None,
+            "artifact_refs": [],
+            "explicit_action": None,
+        },
+        "answer_message": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_global_clarification_resume_revalidates_and_keeps_original_turn() -> None:
+    """严格恢复信封必须回到 route_action，且不能用响应 ID 冒充原 Turn。"""
+
+    conversation_id = "conv-global-clarification"
+    state = _global_clarification_state(conversation_id)
+    handler = _ImmediateStartHandler()
+    graph = make_agent_runtime_graph(
+        registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+        checkpointer=InMemorySaver(),
+    )
+    namespace = supervisor_namespace(conversation_id)
+
+    await graph.ainvoke(state, namespace.as_runnable_config())
+    interrupted = await graph.aget_state(namespace.as_runnable_config())
+    assert interrupted.interrupts[0].value["type"] == "clarification"
+    result = await resume_graph_from_interrupt(
+        graph,
+        namespace,
+        interrupt_id=interrupted.interrupts[0].id,
+        response=_global_clarification_resume_value(state),
+    )
+
+    assert result["turn_id"] == state["turn_id"]
+    assert result["current_input"] == "创建一条商品介绍视频"
+    assert result["last_interrupt_response_id"] == (
+        "40000000-0000-4000-8000-000000000001"
+    )
+    assert result["decision"].idempotency_key == (
+        "decision:40000000-0000-4000-8000-000000000001"
+    )
+    assert handler.turn_ids == [state["turn_id"]]
 
 
 @pytest.mark.asyncio
