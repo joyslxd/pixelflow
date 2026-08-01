@@ -42,6 +42,7 @@ from .contracts import (
 )
 from .graph import resume_graph_from_interrupt, supervisor_namespace
 from .identity import conversation_message_id, interrupt_id
+from .jobs.providers import ProviderJobOutcome
 from .persistence import (
     AgentRuntimeRecordConflictError,
     StoredAgentInterrupt,
@@ -115,6 +116,15 @@ class SupervisorTurnScope:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip() or value != value.strip():
                 raise ValueError(f"{field_name} 必须是无首尾空白的非空字符串")
+
+
+@dataclass(frozen=True, slots=True)
+class _CommittedTurnResult:
+    """把 fencing 提交结果带出 heartbeat 生命周期后再做提交后工作。"""
+
+    claim: TurnExecutionClaim
+    commit: VideoTurnCommit
+    stored: TurnRecord
 
 
 @runtime_checkable
@@ -192,6 +202,14 @@ class SupervisorExecutionMetrics:
         with self._lock:
             self._data["actions"][value.value] += 1
 
+    def observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        """只接受 Provider Adapter 已校验的固定六态 DTO。"""
+
+        if not isinstance(state, ProviderJobOutcome):
+            raise TypeError("M06 指标只接受 ProviderJobOutcome")
+        with self._lock:
+            self._data["external_job_states"][state.value] += 1
+
     def reason(self, reason_code: str) -> None:
         allowed = _TRANSIENT_REASON_CODES | _FAILURE_REASON_CODES | {
             "authorization_required",
@@ -257,6 +275,11 @@ class SupervisorTurnExecutor:
         self._post_commit_recorder = post_commit_recorder
         self._metrics = SupervisorExecutionMetrics()
         self._local_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._pending_credentials: dict[
+            tuple[str, str],
+            TransientTurnCredential,
+        ] = {}
+        self._credential_active: set[tuple[str, str]] = set()
         self._task_guard = asyncio.Lock()
         self._scan_task: asyncio.Task[None] | None = None
         self._scan_wakeup = asyncio.Event()
@@ -283,7 +306,11 @@ class SupervisorTurnExecutor:
 
         await self._schedule(scope, credential=credential, interrupt=None)
 
-    async def notify_interrupt(self, interrupt: StoredAgentInterrupt) -> None:
+    async def notify_interrupt(
+        self,
+        interrupt: StoredAgentInterrupt,
+        credential: TransientTurnCredential | None = None,
+    ) -> None:
         """仅按已持久化 responded interrupt 唤醒原 Turn。"""
 
         normalized = StoredAgentInterrupt.model_validate(
@@ -297,7 +324,7 @@ class SupervisorTurnExecutor:
                 conversation_id=normalized.conversation_id,
                 turn_id=normalized.turn_id,
             ),
-            credential=None,
+            credential=credential,
             interrupt=normalized,
         )
 
@@ -352,6 +379,11 @@ class SupervisorTurnExecutor:
 
         return self._metrics.snapshot()
 
+    def observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        """为不经过 Turn Executor 的 M06 完成边界提供受限观察入口。"""
+
+        self._metrics.observe_external_job_state(state)
+
     async def wait_idle(self) -> None:
         """等待当前及其唤醒的同会话后继 Turn 全部退出。"""
 
@@ -404,12 +436,16 @@ class SupervisorTurnExecutor:
             existing = self._local_tasks.get(key)
             if existing is not None and not existing.done():
                 if credential is not None:
-                    credential.discard()
+                    if key in self._credential_active:
+                        self._credential_vault.put(scope.turn_id, credential)
+                    else:
+                        self._replace_pending_credential(key, credential)
                 return
+            if credential is not None:
+                self._replace_pending_credential(key, credential)
             task = asyncio.create_task(
                 self._claim_and_execute(
                     scope,
-                    credential=credential,
                     interrupt=interrupt,
                 ),
                 name=f"supervisor-turn:{scope.turn_id}",
@@ -427,6 +463,12 @@ class SupervisorTurnExecutor:
         current = self._local_tasks.get(key)
         if current is task:
             self._local_tasks.pop(key, None)
+            pending = self._pending_credentials.pop(key, None)
+            if pending is not None:
+                pending.discard()
+            if key in self._credential_active:
+                self._credential_active.discard(key)
+                self._credential_vault.pop(key[1])
         with suppress(asyncio.CancelledError, Exception):
             task.result()
 
@@ -434,7 +476,6 @@ class SupervisorTurnExecutor:
         self,
         scope: SupervisorTurnScope,
         *,
-        credential: TransientTurnCredential | None,
         interrupt: StoredAgentInterrupt | None,
     ) -> None:
         try:
@@ -459,8 +500,6 @@ class SupervisorTurnExecutor:
                 )
             if claim is None:
                 self._metrics.increment("lease_conflicts")
-                if credential is not None:
-                    credential.discard()
                 return
             self._metrics.increment("turn_claimed")
             self._metrics.observe_wait((now - claim.turn.created_at).total_seconds())
@@ -472,7 +511,6 @@ class SupervisorTurnExecutor:
                 )
             await self._execute_with_heartbeat(
                 claim,
-                credential=credential,
                 interrupt=interrupt,
             )
         except asyncio.CancelledError:
@@ -499,22 +537,18 @@ class SupervisorTurnExecutor:
                     reason_code=self._failure_reason_code(exc),
                     close_interrupt_id=(None if interrupt is None else interrupt.interrupt_id),
                 )
-        finally:
-            if credential is not None and self._credential_vault.get(scope.turn_id) is None:
-                credential.discard()
-
     async def _execute_with_heartbeat(
         self,
         claim: TurnExecutionClaim,
         *,
-        credential: TransientTurnCredential | None,
         interrupt: StoredAgentInterrupt | None,
     ) -> None:
+        task_key = (claim.user_id, claim.turn.turn_id)
         work = asyncio.create_task(
             (
-                self._execute_claim(claim, credential)
+                self._execute_claim(claim, task_key)
                 if interrupt is None
-                else self._resume_interrupt_claim(claim, interrupt)
+                else self._resume_interrupt_claim(claim, interrupt, task_key)
             ),
             name=f"supervisor-turn-work:{claim.turn.turn_id}",
         )
@@ -522,24 +556,37 @@ class SupervisorTurnExecutor:
             self._heartbeat_loop(claim),
             name=f"supervisor-turn-heartbeat:{claim.turn.turn_id}",
         )
+        committed: _CommittedTurnResult | None = None
         try:
             done, _ = await asyncio.wait(
                 (work, heartbeat),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if heartbeat in done:
+            if work in done:
+                committed = await work
+            elif heartbeat in done:
                 error = heartbeat.exception()
                 if error is not None:
                     work.cancel()
                     with suppress(asyncio.CancelledError):
                         await work
                     raise error
-            await work
+                committed = await work
         finally:
             for task in (work, heartbeat):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(work, heartbeat, return_exceptions=True)
+        if committed is not None:
+            await self._after_commit(
+                committed.claim,
+                committed.commit,
+                committed.stored,
+            )
+            await self._notify_next_turn(
+                committed.claim.user_id,
+                committed.claim.turn.conversation_id,
+            )
 
     async def _heartbeat_loop(self, claim: TurnExecutionClaim) -> None:
         current = claim
@@ -562,45 +609,48 @@ class SupervisorTurnExecutor:
     async def _execute_claim(
         self,
         claim: TurnExecutionClaim,
-        credential: TransientTurnCredential | None,
-    ) -> None:
-        if credential is not None:
-            self._credential_vault.put(claim.turn.turn_id, credential)
-        try:
-            evidence = await self._load_authoritative_evidence(claim)
-            decision = await self._decision_service.decide(evidence)
-            self._metrics.action(decision.decision.action)
-            started_at = self._now()
-            graph_snapshot = await self._invoke_or_recover_graph(evidence, decision)
-            graph_state = dict(getattr(graph_snapshot, "values", {}) or {})
-            commit = self._commit_from_graph(
-                claim,
-                decision.decision,
-                graph_state,
-                graph_interrupts=tuple(
-                    getattr(graph_snapshot, "interrupts", ()) or ()
-                ),
-            )
-            stored = await self._repository.commit_turn(claim, commit)
-            self._metrics.observe_stage(
-                self._commit_stage(commit),
-                (self._now() - started_at).total_seconds(),
-            )
-            await self._after_commit(claim, commit, stored)
-            await self._notify_next_turn(evidence.user_id, evidence.conversation_id)
-        finally:
-            self._credential_vault.pop(claim.turn.turn_id)
+        task_key: tuple[str, str],
+    ) -> _CommittedTurnResult:
+        evidence = await self._load_authoritative_evidence(claim)
+        decision = await self._decision_service.decide(evidence)
+        self._metrics.action(decision.decision.action)
+        started_at = self._now()
+        graph_snapshot = await self._invoke_or_recover_graph(
+            evidence,
+            decision,
+            task_key=task_key,
+        )
+        graph_state = dict(getattr(graph_snapshot, "values", {}) or {})
+        commit = self._commit_from_graph(
+            claim,
+            decision.decision,
+            graph_state,
+            graph_interrupts=tuple(
+                getattr(graph_snapshot, "interrupts", ()) or ()
+            ),
+        )
+        stored = await self._repository.commit_turn(claim, commit)
+        self._observe_commit_external_job(commit)
+        self._metrics.observe_stage(
+            self._commit_stage(commit),
+            (self._now() - started_at).total_seconds(),
+        )
+        return _CommittedTurnResult(claim=claim, commit=commit, stored=stored)
 
     async def _resume_interrupt_claim(
         self,
         claim: TurnExecutionClaim,
         interrupt: StoredAgentInterrupt,
-    ) -> None:
+        task_key: tuple[str, str],
+    ) -> _CommittedTurnResult:
         if interrupt.status != "responded" or interrupt.response is None:
             raise ValueError("恢复路径只接受已持久化响应")
         if interrupt.kind == "clarification":
-            await self._resume_clarification_claim(claim, interrupt)
-            return
+            return await self._resume_clarification_claim(
+                claim,
+                interrupt,
+                task_key,
+            )
         request = InterruptResponseRequest.model_validate(
             self._thaw_json(interrupt.response)
         )
@@ -629,11 +679,14 @@ class SupervisorTurnExecutor:
                 "decision": decision.model_dump(mode="json"),
                 "value": request.value.model_dump(mode="json"),
             }
-            await resume_graph_from_interrupt(
-                self._graph,
-                namespace,
-                interrupt_id=graph_interrupt_id,
-                response=internal_resume_envelope,
+            await self._run_graph_with_credential(
+                task_key,
+                lambda: resume_graph_from_interrupt(
+                    self._graph,
+                    namespace,
+                    interrupt_id=graph_interrupt_id,
+                    response=internal_resume_envelope,
+                ),
             )
             snapshot = await self._graph.aget_state(config)
             values = dict(getattr(snapshot, "values", {}) or {})
@@ -644,14 +697,15 @@ class SupervisorTurnExecutor:
             close_interrupt_id=interrupt.interrupt_id,
         )
         stored = await self._repository.commit_turn(claim, commit)
-        await self._after_commit(claim, commit, stored)
-        await self._notify_next_turn(evidence.user_id, evidence.conversation_id)
+        self._observe_commit_external_job(commit)
+        return _CommittedTurnResult(claim=claim, commit=commit, stored=stored)
 
     async def _resume_clarification_claim(
         self,
         claim: TurnExecutionClaim,
         interrupt: StoredAgentInterrupt,
-    ) -> None:
+        task_key: tuple[str, str],
+    ) -> _CommittedTurnResult:
         """用严格内部信封恢复全局追问，并让新决策重新经过 Graph Validator。"""
 
         request = InterruptResponseRequest.model_validate(
@@ -688,11 +742,14 @@ class SupervisorTurnExecutor:
                 "value": request.value.model_dump(mode="json"),
                 "answer_message": decision_result.answer_message,
             }
-            await resume_graph_from_interrupt(
-                self._graph,
-                namespace,
-                interrupt_id=graph_interrupt_id,
-                response=internal_resume_envelope,
+            await self._run_graph_with_credential(
+                task_key,
+                lambda: resume_graph_from_interrupt(
+                    self._graph,
+                    namespace,
+                    interrupt_id=graph_interrupt_id,
+                    response=internal_resume_envelope,
+                ),
             )
             snapshot = await self._graph.aget_state(config)
             values = dict(getattr(snapshot, "values", {}) or {})
@@ -704,8 +761,8 @@ class SupervisorTurnExecutor:
             graph_interrupts=tuple(getattr(snapshot, "interrupts", ()) or ()),
         )
         stored = await self._repository.commit_turn(claim, commit)
-        await self._after_commit(claim, commit, stored)
-        await self._notify_next_turn(evidence.user_id, evidence.conversation_id)
+        self._observe_commit_external_job(commit)
+        return _CommittedTurnResult(claim=claim, commit=commit, stored=stored)
 
     async def _load_authoritative_evidence(
         self,
@@ -842,6 +899,8 @@ class SupervisorTurnExecutor:
         self,
         evidence: SupervisorTurnEvidence,
         decision: Any,
+        *,
+        task_key: tuple[str, str],
     ) -> Any:
         namespace = supervisor_namespace(evidence.conversation_id)
         config = namespace.as_runnable_config()
@@ -853,12 +912,55 @@ class SupervisorTurnExecutor:
             action_key=decision.decision.idempotency_key,
         ):
             return snapshot
-        await self._graph.ainvoke(self._graph_input(evidence, decision), config)
+        await self._run_graph_with_credential(
+            task_key,
+            lambda: self._graph.ainvoke(
+                self._graph_input(evidence, decision),
+                config,
+            ),
+        )
         snapshot = await self._graph.aget_state(config)
         values = dict(getattr(snapshot, "values", {}) or {})
         if values.get("turn_id") != evidence.turn.turn_id:
             raise ValueError("Graph checkpoint 未绑定当前 Turn")
         return snapshot
+
+    def _replace_pending_credential(
+        self,
+        key: tuple[str, str],
+        credential: TransientTurnCredential,
+    ) -> None:
+        """在 task guard 内转移 mailbox 所有权，并清理被替换凭据。"""
+
+        previous = self._pending_credentials.get(key)
+        self._pending_credentials[key] = credential
+        if previous is not None and previous is not credential:
+            previous.discard()
+
+    async def _run_graph_with_credential(
+        self,
+        key: tuple[str, str],
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """只在一次真实 Graph invoke/resume 期间开放当前 Turn 凭据。"""
+
+        await self._activate_graph_credential(key)
+        try:
+            return await operation()
+        finally:
+            await self._deactivate_graph_credential(key)
+
+    async def _activate_graph_credential(self, key: tuple[str, str]) -> None:
+        async with self._task_guard:
+            self._credential_active.add(key)
+            credential = self._pending_credentials.pop(key, None)
+            if credential is not None:
+                self._credential_vault.put(key[1], credential)
+
+    async def _deactivate_graph_credential(self, key: tuple[str, str]) -> None:
+        async with self._task_guard:
+            self._credential_active.discard(key)
+            self._credential_vault.pop(key[1])
 
     def _commit_from_graph(
         self,
@@ -1008,6 +1110,26 @@ class SupervisorTurnExecutor:
                 raise TypeError("提交后记录端口只能返回 awaitable 或 None")
         except Exception:
             self._metrics.reason("executor_infrastructure_unavailable")
+
+    def _observe_commit_external_job(self, commit: VideoTurnCommit) -> None:
+        """只从已校验且已提交的 Workflow 投影读取固定 M06 状态。"""
+
+        workflow = commit.workflow
+        if workflow is None:
+            return
+        if workflow.status.value == ProviderJobOutcome.PAUSED_QUOTA.value:
+            self._metrics.observe_external_job_state(
+                ProviderJobOutcome.PAUSED_QUOTA,
+            )
+            return
+        pending = workflow.pending_external_job
+        if pending is None:
+            return
+        try:
+            outcome = ProviderJobOutcome(pending.status.value)
+        except ValueError:
+            return
+        self._metrics.observe_external_job_state(outcome)
 
     async def _notify_next_turn(self, user_id: str, conversation_id: str) -> None:
         if self._closing:

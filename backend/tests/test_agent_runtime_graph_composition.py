@@ -329,6 +329,9 @@ class _FixedStartContextAssembler:
     async def assemble(self, request: object) -> ContextEnvelope:
         return ContextEnvelope(
             current_input=str(getattr(request, "current_input")),
+            validated_context_version=int(
+                getattr(request, "expected_context_version")
+            ),
             budget_report=ContextBudgetReport(
                 estimated_input_tokens=1,
                 effective_context_tokens=100,

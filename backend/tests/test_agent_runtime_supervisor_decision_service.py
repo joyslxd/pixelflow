@@ -107,6 +107,28 @@ class FixedContextAssembler:
     async def assemble(self, request: object) -> ContextEnvelope:
         return ContextEnvelope(
             current_input=getattr(request, "current_input"),
+            validated_context_version=getattr(request, "expected_context_version"),
+            budget_report=ContextBudgetReport(
+                estimated_input_tokens=1,
+                effective_context_tokens=100,
+                usable_input_tokens=80,
+                max_output_tokens=10,
+                safety_reserve_tokens=10,
+                utilization=1 / 80,
+            ),
+        )
+
+
+class VersionedContextAssembler:
+    """返回指定已校验快照版本，用于约束 Validator 的可信版本来源。"""
+
+    def __init__(self, validated_context_version: int) -> None:
+        self._validated_context_version = validated_context_version
+
+    async def assemble(self, request: object) -> ContextEnvelope:
+        return ContextEnvelope(
+            current_input=getattr(request, "current_input"),
+            validated_context_version=self._validated_context_version,
             budget_report=ContextBudgetReport(
                 estimated_input_tokens=1,
                 effective_context_tokens=100,
@@ -458,7 +480,10 @@ async def test_classifier_failure_returns_stable_clarification() -> None:
 @pytest.mark.asyncio
 async def test_stale_authoritative_context_version_is_rejected() -> None:
     with pytest.raises(DecisionValidationError) as exc_info:
-        await _service(CountingDecisionModel()).decide(
+        await _service(
+            CountingDecisionModel(),
+            context_assembler=VersionedContextAssembler(5),
+        ).decide(
             _evidence(
                 explicit_action=ExplicitActionSignal(
                     action=AgentAction.CONTINUE_WORKFLOW,
@@ -471,6 +496,29 @@ async def test_stale_authoritative_context_version_is_rejected() -> None:
         )
 
     assert exc_info.value.reason_code == "context_version_conflict"
+
+
+@pytest.mark.asyncio
+async def test_validator_uses_context_assembler_version_instead_of_evidence_echo() -> None:
+    """调用方回显的 authoritative 值不能覆盖 ContextAssembler 的已校验版本。"""
+
+    result = await _service(
+        CountingDecisionModel(),
+        context_assembler=VersionedContextAssembler(4),
+    ).decide(
+        _evidence(
+            explicit_action=ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id="wf-1",
+            ),
+            expected_context_version=4,
+            authoritative_context_version=99,
+        )
+    )
+
+    assert result.decision.action is AgentAction.CONTINUE_WORKFLOW
+    assert result.validation_request.current_context_version == 4
 
 
 @pytest.mark.asyncio
@@ -523,7 +571,9 @@ async def test_invalid_model_profile_raises_stable_unavailable_error() -> None:
             *,
             user_id: str,
             conversation_id: str,
+            expected_context_version: int,
         ) -> ContextAssemblySnapshot:
+            assert expected_context_version == 5
             return ContextAssemblySnapshot(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -586,7 +636,9 @@ async def test_real_strict_profile_error_is_mapped_by_type_for_any_model_name(
             *,
             user_id: str,
             conversation_id: str,
+            expected_context_version: int,
         ) -> ContextAssemblySnapshot:
+            assert expected_context_version == 5
             return ContextAssemblySnapshot(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -989,7 +1041,9 @@ async def test_real_context_assembler_rejects_cross_user_owner_before_model() ->
             *,
             user_id: str,
             conversation_id: str,
+            expected_context_version: int,
         ) -> ContextAssemblySnapshot:
+            assert expected_context_version == 5
             self.calls.append((user_id, conversation_id))
             return ContextAssemblySnapshot(
                 user_id="user-foreign",

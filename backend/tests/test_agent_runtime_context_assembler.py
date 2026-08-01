@@ -24,15 +24,16 @@ NOW = datetime(2026, 7, 24, 8, 0, tzinfo=UTC)
 class _SnapshotSource:
     def __init__(self, snapshot: object) -> None:
         self.snapshot = snapshot
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, int]] = []
 
     async def load_context_snapshot(
         self,
         *,
         user_id: str,
         conversation_id: str,
+        expected_context_version: int,
     ) -> object:
-        self.calls.append((user_id, conversation_id))
+        self.calls.append((user_id, conversation_id, expected_context_version))
         return self.snapshot
 
 
@@ -269,6 +270,7 @@ async def test_assembler_selects_relevant_context_in_deterministic_order() -> No
     envelope = await assembler.assemble(_request())
 
     assert envelope.current_input == "把第三张图改成白色背景，保留这些空格"
+    assert envelope.validated_context_version == 7
     assert envelope.active_or_target_workflow == image
     assert [item["message_id"] for item in envelope.recent_messages] == [
         "msg-4",

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import RLock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ConfigDict, Field, JsonValue, model_validator
 
@@ -32,7 +32,10 @@ if TYPE_CHECKING:
     from pixelflow.agent_runtime.contracts import AgentEvent, ExternalJobStatus
     from pixelflow.agent_runtime.graph import GraphExecutionNamespace
     from pixelflow.agent_runtime.jobs.completion import WorkflowGraphResumePort
-    from pixelflow.agent_runtime.jobs.providers import ProviderJobAdapter
+    from pixelflow.agent_runtime.jobs.providers import (
+        ProviderJobAdapter,
+        ProviderJobOutcome,
+    )
     from pixelflow.agent_runtime.jobs.recovery import OperationRecoveryRuntime
     from pixelflow.agent_runtime.persistence import VideoRuntimeRepository
     from pixelflow.agent_runtime.persistence.repositories import EventDeliveryClaim
@@ -835,6 +838,13 @@ class _ScopedVideoOperationPort:
         raise OperationConflictError("live 视频付费调用必须通过 M06 start 协调器")
 
 
+class ExternalJobStateObserver(Protocol):
+    """接收经过 M06 或 Workflow 权威边界确认的有限外部任务状态。"""
+
+    def observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        """记录一个有限六态观察值。"""
+
+
 class VideoOperationCompletionHandler:
     """把 M06 完成 Outbox 事件原子回灌到 M11 权威状态。"""
 
@@ -844,10 +854,12 @@ class VideoOperationCompletionHandler:
         repository: VideoRuntimeRepository,
         operations: VideoLiveOperationBridge,
         clock: Any,
+        external_job_observer: ExternalJobStateObserver | None = None,
     ) -> None:
         self._repository = repository
         self._operations = operations
         self._clock = clock
+        self._external_job_observer = external_job_observer
 
     async def resume_external_job(
         self,
@@ -1216,7 +1228,22 @@ class VideoOperationCompletionHandler:
             messages=messages,
             occurred_at=self._now(),
         )
+        from pixelflow.agent_runtime.jobs.providers import ProviderJobOutcome
+
+        self._observe_external_job_state(ProviderJobOutcome(status))
         self._operations._release_published_completion(completion)
+
+    def _observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        """记录本进程已确认交付的终态；不承诺跨崩溃的精确一次语义。"""
+
+        observer = self._external_job_observer
+        if observer is None:
+            return
+        try:
+            observer.observe_external_job_state(state)
+        except Exception:
+            # 指标旁路失败不得阻塞已提交完成事件的 claim 释放。
+            return
 
     def _now(self) -> datetime:
         value = self._clock.now() if hasattr(self._clock, "now") else self._clock()

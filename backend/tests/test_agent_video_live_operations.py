@@ -34,6 +34,7 @@ from pixelflow.agent_runtime.jobs import (
     OperationManualRecoveryAction,
     OperationStartQuotaPausedError,
     ProviderJobAdapter,
+    ProviderJobOutcome,
     build_operation_request,
 )
 from pixelflow.agent_runtime.persistence import (
@@ -234,6 +235,24 @@ class _RecordingResumer:
         idempotency_key: str,
     ) -> None:
         self.calls.append((namespace, completion_event, idempotency_key))
+
+
+class _RecordingExternalJobObserver:
+    """记录本进程已经确认提交的固定 Provider 六态。"""
+
+    def __init__(self) -> None:
+        self.states: list[ProviderJobOutcome] = []
+
+    def observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        self.states.append(state)
+
+
+class _FailingExternalJobObserver(_RecordingExternalJobObserver):
+    """证明指标失败不能反向破坏已提交的 M06 完成投递。"""
+
+    def observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        super().observe_external_job_state(state)
+        raise RuntimeError("测试指标端口不可用")
 
 
 class _FailOnceResumer:
@@ -1977,10 +1996,12 @@ async def test_completion_event_atomically_updates_m11_state_and_acks_outbox() -
         clock=clock,
     ).dispatch(command)
     await repository.seed_envelope(dispatch.state, dispatch.workflow)
+    observer = _FailingExternalJobObserver()
     completion = VideoOperationCompletionHandler(
         repository=repository,
         operations=operations,
         clock=clock,
+        external_job_observer=observer,
     )
     runtime = operations.build_recovery_runtime(
         resumer=completion,
@@ -1999,6 +2020,7 @@ async def test_completion_event_atomically_updates_m11_state_and_acks_outbox() -
         limit=100,
     )
     assert pending_events == []
+    assert observer.states == [ProviderJobOutcome.SUCCEEDED]
 
 
 @pytest.mark.asyncio
@@ -2454,10 +2476,12 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
         state = await _start_generation_operations(operations)
         first_job_id = state.pending_operations[0].job_id
         await _commit_seed_state(repository, store, state)
+        observer = _RecordingExternalJobObserver()
         completion = VideoOperationCompletionHandler(
             repository=repository,
             operations=operations,
             clock=clock,
+            external_job_observer=observer,
         )
         runtime = operations.build_recovery_runtime(
             resumer=completion,
@@ -2485,6 +2509,11 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             ExternalJobStatus.EXPIRED,
         }
         assert operation.status is expected_operation_status
+        assert observer.states == [
+            ProviderJobOutcome(expected_operation_status.value),
+            ProviderJobOutcome.SUCCEEDED,
+            ProviderJobOutcome.SUCCEEDED,
+        ]
         assert [item["scene_id"] for item in updated.failed_scenes] == ["scene-1"]
         assert updated.failed_scenes[0]["retryable"] is expected_retryable
         assert "原始" not in json.dumps(updated.failed_scenes, ensure_ascii=False)

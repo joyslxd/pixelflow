@@ -296,6 +296,7 @@ class SupervisorDecisionService:
             evidence,
             decision,
             classification_request,
+            context,
         )
         decision = self._validator.validate(validation_request)
         if decision.action is not AgentAction.ANSWER_ONLY:
@@ -321,6 +322,7 @@ class SupervisorDecisionService:
                 evidence,
                 decision,
                 classification_request,
+                context,
             )
             decision = self._validator.validate(validation_request)
             return SupervisorDecisionResult(
@@ -446,6 +448,7 @@ class SupervisorDecisionService:
         evidence: SupervisorTurnEvidence,
         decision: ActionDecision,
         classification_request: ActionClassificationRequest,
+        context: ContextEnvelope,
     ) -> DecisionValidationRequest:
         return DecisionValidationRequest(
             decision=decision,
@@ -453,7 +456,7 @@ class SupervisorDecisionService:
             current_candidates=_classification_candidates(evidence),
             allowed_global_actions=_GLOBAL_ACTIONS,
             expected_context_version=evidence.expected_context_version,
-            current_context_version=evidence.authoritative_context_version,
+            current_context_version=context.validated_context_version,
         )
 
     async def _answer_message(
