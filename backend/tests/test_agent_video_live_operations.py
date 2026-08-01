@@ -911,11 +911,21 @@ def handler_without_credential(
         ({"nested": {"jwt": "task8-raw-jwt-direct"}}, "task8-raw-jwt-direct"),
         ({"nested": {"jwtToken": "task8-raw-jwt-token"}}, "task8-raw-jwt-token"),
         ({"nested": {"ＪＷＴ－ＣＲＥＤＥＮＴＩＡＬ": "task8-raw-jwt"}}, "task8-raw-jwt"),
+        ({"nested": {"auth_headers": ["task8-plural-auth-header"]}}, "task8-plural-auth-header"),
+        ({"nested": [{"jwtCredentials": "task8-plural-jwt"}]}, "task8-plural-jwt"),
+        ({"nested": {"bearer-headers": "task8-plural-bearer"}}, "task8-plural-bearer"),
+        ({"nested": {"api_keys": "task8-plural-api-key"}}, "task8-plural-api-key"),
+        ({"nested": [{"clientTokens": "task8-plural-client-token"}]}, "task8-plural-client-token"),
+        ({"nested": {"ＡＵＴＨ＿ＶＡＬＵＥＳ": "task8-plural-nfkc-value"}}, "task8-plural-nfkc-value"),
         (
             {"note": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0YXNrOCJ9.c2lnbmF0dXJlLXRhc2s4"},
             "eyJhbGciOiJIUzI1NiJ9",
         ),
         ({"note": "sk-task8rawapitoken123456789"}, "sk-task8rawapitoken123456789"),
+        (
+            {"nested": [{"note": "SK-TASK8RAWAPITOKEN123456789"}]},
+            "SK-TASK8RAWAPITOKEN123456789",
+        ),
     ],
 )
 def test_video_operation_start_request_rejects_nested_credentials_without_echo(
@@ -936,7 +946,7 @@ def test_video_operation_start_request_rejects_nested_credentials_without_echo(
             conversation_id=CONVERSATION_ID,
             operation_request=operation_request,
             provider_request=provider_request,
-        )
+        ).model_dump(mode="json")
 
     assert secret_marker not in str(raised.value)
 
@@ -985,6 +995,29 @@ def test_video_operation_start_request_keeps_normal_business_fields_and_hash_che
             operation_request=operation_request,
             provider_request={**provider_request, "prompt": "已被篡改"},
         )
+
+
+def test_video_operation_start_request_allows_product_codes_and_scene_key_urls() -> None:
+    provider_request: dict[str, JsonValue] = {
+        "prompt": "商品型号 SK-ABCDEF123456 的展示视频",
+        "key_frame": "https://cdn.example.com/assets/pk-product-model-2026.png",
+    }
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=STAGE,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    live_request = VideoOperationStartRequest(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        operation_request=operation_request,
+        provider_request=provider_request,
+    )
+
+    assert live_request.model_dump(mode="json")["provider_request"] == provider_request
 
 
 @pytest.mark.asyncio
@@ -1774,7 +1807,13 @@ async def test_checkpoint_commit_survives_exit_before_dispatcher_ack(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.parametrize(
-    ("terminal_result", "expected_operation_status"),
+    (
+        "terminal_result",
+        "expected_operation_status",
+        "expected_action_label",
+        "expected_retryable_scene_ids",
+        "expected_non_retryable_scene_ids",
+    ),
     [
         (
             {
@@ -1783,14 +1822,23 @@ async def test_checkpoint_commit_survives_exit_before_dispatcher_ack(
                 "error": "供应商内部原始失败正文",
             },
             ExternalJobStatus.FAILED,
+            "查看失败原因",
+            [],
+            ["scene-1"],
         ),
         (
             TimeoutError("不得回显的超时正文"),
             ExternalJobStatus.TIMEOUT,
+            "重新生成场景视频",
+            ["scene-1"],
+            [],
         ),
         (
             _HttpStatusError(404),
             ExternalJobStatus.EXPIRED,
+            "重新生成场景视频",
+            ["scene-1"],
+            [],
         ),
     ],
 )
@@ -1798,6 +1846,9 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
     kind: RepositoryKind,
     terminal_result: object,
     expected_operation_status: ExternalJobStatus,
+    expected_action_label: str,
+    expected_retryable_scene_ids: list[str],
+    expected_non_retryable_scene_ids: list[str],
     tmp_path: Path,
 ) -> None:
     clock = _MutableClock()
@@ -1894,11 +1945,21 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
         assert artifact["generatedSceneVideos"]["ok"] is False
         assert len(artifact["generatedSceneVideos"]["scene_videos"]) == 2
         assert len(artifact["generatedSceneVideos"]["failed_scenes"]) == 1
-        assert artifact["actionLabel"] == "重新生成场景视频"
+        assert artifact["actionLabel"] == expected_action_label
+        assert artifact["retryableSceneIds"] == expected_retryable_scene_ids
+        assert artifact["nonRetryableSceneIds"] == expected_non_retryable_scene_ids
+        assert artifact["generatedSceneVideos"]["failed_scenes"][0]["retryable"] is expected_retryable
         assert "已生成" not in message.content
         assert "可下载" not in message.content
         assert "请确认" not in message.content
         assert "未完成" in message.content
+        if expected_retryable:
+            assert "重试" in artifact["description"]
+            assert "scene-1" in message.content
+        else:
+            assert "修改" in artifact["description"]
+            assert "重试" not in artifact["actionLabel"]
+            assert "scene-1" in message.content
         if expected_retryable:
             workflow = await repository.get_workflow(USER_ID, WORKFLOW_ID)
             assert workflow is not None
@@ -1958,6 +2019,100 @@ async def test_scene_non_success_completion_becomes_safe_m11_failure(
             assert unchanged is not None
             assert unchanged.status is expected_operation_status
             assert provider.status_job_ids.count("provider-scripted-1") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_mixed_scene_failures_publish_view_only_action_and_retryable_ids(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """混合失败不能提供 Handler 无法执行的整批重试动作。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider(
+        status_results=[
+            {
+                "job_id": "provider-scripted-1",
+                "status": "failed",
+                "error": "供应商内部原始失败正文",
+            },
+            TimeoutError("不得回显的超时正文"),
+            {
+                "job_id": "provider-scripted-3",
+                "status": "succeeded",
+                "result": {
+                    "video_url": "https://videos.example.com/scene-3.mp4",
+                    "raw": {},
+                },
+            },
+        ]
+    )
+    async with _video_repository(
+        kind,
+        tmp_path / f"task8-scene-mixed-failure-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        completion = VideoOperationCompletionHandler(
+            repository=repository,
+            operations=operations,
+            clock=clock,
+        )
+        runtime = operations.build_recovery_runtime(
+            resumer=completion,
+            worker_id=f"task8-scene-mixed-failure-{kind}",
+        )
+
+        clock.advance(seconds=3)
+        await runtime.run_once()
+
+        restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert restored is not None
+        updated = decode_video_workflow_state(restored)
+        assert [item["scene_id"] for item in updated.failed_scenes] == [
+            "scene-1",
+            "scene-2",
+        ]
+        message = await _assert_new_completion_projection(
+            repository,
+            before_message_ids=set(),
+            expected_type="video_result",
+            required_fields={
+                "title",
+                "description",
+                "actionLabel",
+                "videoScenePackages",
+                "generatedSceneVideos",
+                "videoScenePackageEditedSceneIds",
+                "retryableSceneIds",
+                "nonRetryableSceneIds",
+            },
+        )
+        artifact = message.model_dump(mode="json")["payload"]["artifact"]
+        failures = artifact["generatedSceneVideos"]["failed_scenes"]
+        assert [(item["scene_id"], item["retryable"]) for item in failures] == [
+            ("scene-1", False),
+            ("scene-2", True),
+        ]
+        assert artifact["retryableSceneIds"] == ["scene-2"]
+        assert artifact["nonRetryableSceneIds"] == ["scene-1"]
+        assert artifact["actionLabel"] == "查看失败原因"
+        assert "scene-1" in artifact["description"]
+        assert "scene-2" in artifact["description"]
+        assert "scene-1" in message.content
+        assert "scene-2" in message.content
+        assert "整批重试" not in message.content
+
+        await runtime.run_once()
+        replayed = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
+        assert [item.message_id for item in replayed] == [message.message_id]
 
 
 @pytest.mark.asyncio

@@ -1071,14 +1071,7 @@ class VideoOperationCompletionHandler:
 
             artifact = VideoWebArtifactAdapter(VideoDeliveryWorkflowService(scoped)).project(updated)
             if updated.failed_scenes:
-                artifact.update(
-                    {
-                        "type": "video_result",
-                        "title": "场景视频生成未完成",
-                        "description": "部分场景视频生成失败，请查看原因后重试。",
-                        "actionLabel": "重新生成场景视频",
-                    }
-                )
+                artifact.update(_scene_failure_projection(updated.failed_scenes))
         elif isinstance(updated, VideoPostProductionWorkflowState) and stage == VideoPostProductionStage.MERGE_VIDEO.value:
             from pixelflow.agent_workflows.video.delivery import VideoWebArtifactAdapter
 
@@ -1318,6 +1311,13 @@ def _hash_operation_request(provider_request: object) -> str:
 _CREDENTIAL_KEY_PARTS = frozenset({"authorization", "secret", "password", "credential"})
 _DIRECT_CREDENTIAL_KEY_PARTS = frozenset({"auth", "bearer", "jwt"})
 _DIRECT_CREDENTIAL_QUALIFIERS = frozenset({"header", "value", "credential", "token", "key"})
+_CREDENTIAL_PART_SINGULARS = {
+    "headers": "header",
+    "values": "value",
+    "credentials": "credential",
+    "tokens": "token",
+    "keys": "key",
+}
 _TOKEN_CREDENTIAL_PREFIXES = frozenset({"access", "refresh", "auth", "bearer", "client", "session", "id", "api", "provider"})
 _TOKEN_METADATA_SUFFIXES = frozenset({"count", "counts", "budget", "limit", "length", "usage", "estimate", "hint"})
 _CREDENTIAL_VALUE_PATTERN = re.compile(
@@ -1330,7 +1330,7 @@ _JWT_CREDENTIAL_VALUE_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
 )
 _API_CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"\b(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{12,}\b",
+    r"(?:sk|rk|pk|api)[-_][A-Za-z0-9_-]{20,}",
     re.IGNORECASE,
 )
 
@@ -1353,7 +1353,7 @@ def _ensure_provider_request_has_no_credentials(value: object) -> None:
         if (
             _CREDENTIAL_VALUE_PATTERN.search(normalized)
             or _JWT_CREDENTIAL_VALUE_PATTERN.search(normalized)
-            or _API_CREDENTIAL_VALUE_PATTERN.search(normalized)
+            or _API_CREDENTIAL_VALUE_PATTERN.fullmatch(normalized.strip())
         ):
             raise ValueError("Provider 请求包含敏感凭据")
 
@@ -1362,6 +1362,7 @@ def _is_sensitive_provider_request_key(value: str) -> bool:
     normalized = unicodedata.normalize("NFKC", value)
     camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", normalized)
     parts = re.findall(r"[a-z0-9]+", camel_split.casefold())
+    parts = [_CREDENTIAL_PART_SINGULARS.get(part, part) for part in parts]
     if any(part in _CREDENTIAL_KEY_PARTS for part in parts):
         return True
     direct_parts = set(parts) & _DIRECT_CREDENTIAL_KEY_PARTS
@@ -1535,7 +1536,10 @@ def _completion_artifact_summary(
     if artifact_type == "video_result":
         generated = artifact.get("generatedSceneVideos")
         if isinstance(generated, Mapping) and generated.get("ok") is False:
-            return "场景视频生成未完成，请查看失败原因后重试。"
+            description = artifact.get("description")
+            if isinstance(description, str) and description:
+                return description
+            return "场景视频生成未完成，请查看失败原因。"
         merged = artifact.get("mergedVideo")
         if isinstance(merged, Mapping) and merged.get("ok") is False:
             return "视频合并未完成，请按提示重试。"
@@ -1548,6 +1552,67 @@ def _completion_artifact_summary(
         if isinstance(draft, Mapping) and draft.get("status") != "succeeded":
             return "剪映草稿生成未完成，请按提示重试。"
     return success_summary(artifact)  # type: ignore[arg-type]
+
+
+def _scene_failure_projection(
+    failed_scenes: list[dict[str, Any]],
+) -> dict[str, JsonValue]:
+    """按权威失败标记派生可执行动作和分镜集合。"""
+
+    retryable_scene_ids = [
+        str(item["scene_id"])
+        for item in failed_scenes
+        if item.get("retryable") is True
+    ]
+    quota_retryable_scene_ids = [
+        str(item["scene_id"])
+        for item in failed_scenes
+        if item.get("quota_insufficient") is True
+    ]
+    non_retryable_scene_ids = [
+        str(item["scene_id"])
+        for item in failed_scenes
+        if item.get("retryable") is not True
+        and item.get("quota_insufficient") is not True
+    ]
+    retryable_text = "、".join(retryable_scene_ids)
+    quota_text = "、".join(quota_retryable_scene_ids)
+    non_retryable_text = "、".join(non_retryable_scene_ids)
+    if non_retryable_scene_ids:
+        if retryable_scene_ids or quota_retryable_scene_ids:
+            recoverable_parts = []
+            if retryable_scene_ids:
+                recoverable_parts.append(f"可重试分镜：{retryable_text}")
+            if quota_retryable_scene_ids:
+                recoverable_parts.append(f"恢复额度后可重试分镜：{quota_text}")
+            description = (
+                "场景视频生成未完成。"
+                + "；".join(recoverable_parts)
+                + f"；不可直接重试分镜：{non_retryable_text}。"
+                "请先修改不可重试分镜的输入或内容。"
+            )
+        else:
+            description = (
+                f"场景视频生成未完成。不可直接重试分镜：{non_retryable_text}。"
+                "请修改输入或分镜后重新执行。"
+            )
+        action_label = "查看失败原因"
+    elif quota_retryable_scene_ids and not retryable_scene_ids:
+        description = f"场景视频生成额度不足。恢复额度后可重试分镜：{quota_text}。"
+        action_label = "恢复额度后重试"
+    else:
+        recoverable_ids = retryable_scene_ids + quota_retryable_scene_ids
+        description = f"场景视频生成未完成。可重试分镜：{'、'.join(recoverable_ids)}。"
+        action_label = "重新生成场景视频"
+    return {
+        "type": "video_result",
+        "title": "场景视频生成未完成",
+        "description": description,
+        "actionLabel": action_label,
+        "retryableSceneIds": retryable_scene_ids,
+        "quotaRetryableSceneIds": quota_retryable_scene_ids,
+        "nonRetryableSceneIds": non_retryable_scene_ids,
+    }
 
 
 def _clear_raw_provider_payloads(value: object) -> object:
