@@ -27,8 +27,8 @@ from pixelflow.agent_runtime import (
 from pixelflow.agent_runtime.config import ContextBudgetConfig
 from pixelflow.agent_runtime.context import (
     ContextAssembler,
-    ContextAssemblySnapshot,
     ContextBudgetPolicyProvider,
+    RepositoryContextSnapshotSource,
 )
 from pixelflow.agent_runtime.context.profiles import ModelContextProfile
 from pixelflow.agent_runtime.contracts import (
@@ -855,29 +855,16 @@ async def test_registered_turn_uses_its_pre_input_context_snapshot_version() -> 
     assert claim is not None
     evidence = await runtime.executor._load_authoritative_evidence(claim)
 
-    requested_snapshot_versions: list[int] = []
-
-    class RegisteredTurnSnapshotSource:
-        async def load_context_snapshot(
-            self,
-            *,
-            user_id: str,
-            conversation_id: str,
-            expected_context_version: int,
-        ) -> ContextAssemblySnapshot:
-            conversation = await runtime.task_store.get_conversation(
-                conversation_id,
-                user_id=user_id,
-            )
-            assert conversation is not None
-            current_version = conversation.context["__agent_runtime"]["context_version"]
-            assert current_version == 2
-            requested_snapshot_versions.append(expected_context_version)
-            return ContextAssemblySnapshot(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                context_version=expected_context_version,
-            )
+    source = RepositoryContextSnapshotSource(
+        task_store=runtime.task_store,
+        repository=runtime.repository,
+    )
+    registered_snapshot = await source.load_context_snapshot(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        expected_context_version=registration.turn.expected_context_version,
+    )
+    assert registered_snapshot.messages == ()
 
     model_name = "executor-version-test"
     decision_service = SupervisorDecisionService(
@@ -885,7 +872,7 @@ async def test_registered_turn_uses_its_pre_input_context_snapshot_version() -> 
         classifier=None,
         validator=DecisionValidator(),
         context_assembler=ContextAssembler(
-            source=RegisteredTurnSnapshotSource(),
+            source=source,
             model_name=model_name,
             model_profiles={
                 model_name: ModelContextProfile(
@@ -908,7 +895,6 @@ async def test_registered_turn_uses_its_pre_input_context_snapshot_version() -> 
     assert result.decision.action is AgentAction.START_WORKFLOW
     assert result.validation_request.expected_context_version == 0
     assert result.validation_request.current_context_version == 0
-    assert requested_snapshot_versions == [0]
     await runtime.executor.aclose()
 
 
@@ -1310,6 +1296,20 @@ async def test_consecutive_global_clarifications_advance_resume_snapshot() -> No
     )
     assert first_response.context_version == 2
     assert first_response.turn.expected_context_version == 1
+    source = RepositoryContextSnapshotSource(
+        task_store=runtime.task_store,
+        repository=runtime.repository,
+    )
+    first_resume_snapshot = await source.load_context_snapshot(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        expected_context_version=first_response.turn.expected_context_version,
+    )
+    assert [
+        item.payload["message_id"]
+        for item in first_resume_snapshot.messages
+        if item.payload["role"] == "user"
+    ] == [initial.message.message_id]
     await runtime.executor.notify_interrupt(first_response.interrupt)
     await runtime.executor.wait_idle()
     second = await runtime.repository.get_open_interrupt(
@@ -1329,6 +1329,19 @@ async def test_consecutive_global_clarifications_advance_resume_snapshot() -> No
     )
     assert second_response.context_version == 3
     assert second_response.turn.expected_context_version == 2
+    second_resume_snapshot = await source.load_context_snapshot(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        expected_context_version=second_response.turn.expected_context_version,
+    )
+    assert [
+        item.payload["message_id"]
+        for item in second_resume_snapshot.messages
+        if item.payload["role"] == "user"
+    ] == [
+        initial.message.message_id,
+        first_response.message.message_id,
+    ]
     await runtime.executor.notify_interrupt(second_response.interrupt)
     await runtime.executor.wait_idle()
 

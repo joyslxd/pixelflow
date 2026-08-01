@@ -42,6 +42,7 @@ from .turn_registration import (
     TurnRegistrationResult,
     TurnRegistrationUnavailableError,
     make_turn_registration_store,
+    turn_registration_context_read_scope,
 )
 from .video_runtime import (
     MemoryVideoRuntimeRepository,
@@ -51,6 +52,8 @@ from .video_runtime import (
     SupervisorProjectionMessage,
     TurnExecutionClaim,
     TurnExecutionLeaseConflictError,
+    VideoRuntimeContextSnapshot,
+    VideoRuntimeContextSnapshotConflictError,
     VideoRuntimeRepository,
     VideoRuntimeSafeSnapshot,
     VideoTurnCommit,
@@ -97,9 +100,12 @@ __all__ = [
     "TurnRegistrationContextConflictError",
     "TurnRegistrationResult",
     "TurnRegistrationUnavailableError",
+    "VideoRuntimeContextSnapshot",
+    "VideoRuntimeContextSnapshotConflictError",
     "VideoRuntimeRepository",
     "VideoRuntimeSafeSnapshot",
     "VideoTurnCommit",
     "VideoWorkflowStateConflictError",
     "make_turn_registration_store",
+    "turn_registration_context_read_scope",
 ]

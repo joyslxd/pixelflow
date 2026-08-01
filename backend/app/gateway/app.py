@@ -226,7 +226,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from pixelflow.skills.base import get_image_skill
 
         live_clock = _GatewayClock()
-        default_model_name = startup_config.models[0].name
+        default_model_name = (
+            startup_config.models[0].name if startup_config.models else ""
+        )
         live_capabilities = make_pixelflow_agent_live_capabilities(
             model_factory=create_chat_model,
             scene_asset_skill_factory=get_image_skill,

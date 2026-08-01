@@ -7,12 +7,15 @@ from typing import Protocol
 
 from pydantic import JsonValue
 
-from pixelflow.agent_runtime.contracts import ContextSummary
+from pixelflow.agent_runtime.contracts import AgentEventType, ContextSummary
 from pixelflow.agent_runtime.persistence import (
+    VideoRuntimeContextSnapshot,
+    VideoRuntimeContextSnapshotConflictError,
     VideoRuntimeRepository,
     VideoRuntimeSafeSnapshot,
+    turn_registration_context_read_scope,
 )
-from pixelflow.tasks import AGENT_RUNTIME_CONTEXT_KEY, PixelFlowTaskStore
+from pixelflow.tasks import PixelFlowTaskStore
 
 from .assembler import (
     ArtifactEvidenceRecord,
@@ -24,13 +27,7 @@ from .assembler import (
 
 
 class RepositoryContextSourceRepository(VideoRuntimeRepository, Protocol):
-    """声明 Context source 额外读取摘要所需的公开 Repository 端口。"""
-
-    async def list_summaries(
-        self,
-        user_id: str,
-        conversation_id: str,
-    ) -> list[ContextSummary]: ...
+    """声明 Context source 所需的单一公开 Repository 端口。"""
 
 
 class RepositoryContextSnapshotSource:
@@ -57,56 +54,123 @@ class RepositoryContextSnapshotSource:
         owner = _require_text("user_id", user_id)
         conversation_key = _require_text("conversation_id", conversation_id)
         expected = _require_context_version(expected_context_version)
-        conversation = await self._task_store.get_conversation(
-            conversation_key,
-            user_id=owner,
-        )
-        if conversation is None:
-            raise LookupError("对话不存在或不属于当前用户")
-        current = _conversation_context_version(conversation.context)
-        if current != expected:
-            raise ContextVersionConflictError(
-                f"上下文版本不一致：expected={expected} current={current}"
-            )
+        async with turn_registration_context_read_scope(owner, conversation_key):
+            try:
+                authoritative = (
+                    await self._repository.read_versioned_context_snapshot(
+                        owner,
+                        conversation_key,
+                        expected_context_version=expected,
+                    )
+                )
+            except VideoRuntimeContextSnapshotConflictError:
+                raise ContextVersionConflictError("上下文版本不一致") from None
 
-        runtime_snapshot = await self._repository.export_safe_snapshot(
-            owner,
-            conversation_key,
-        )
-        summaries = await self._repository.list_summaries(
-            owner,
-            conversation_key,
-        )
-        task_messages = await self._task_store.list_conversation_messages(
-            conversation_key,
-            user_id=owner,
-        )
-
-        verified_conversation = await self._task_store.get_conversation(
-            conversation_key,
-            user_id=owner,
-        )
-        if verified_conversation is None:
-            raise ContextVersionConflictError("上下文快照读取期间对话已不可用")
-        verified_version = _conversation_context_version(
-            verified_conversation.context,
-        )
-        if (
-            verified_version != expected
-            or verified_conversation.revision != conversation.revision
-        ):
-            raise ContextVersionConflictError(
-                "上下文快照读取期间版本发生变化"
-            )
+        task_messages, summaries = _select_expected_version_records(authoritative)
 
         return _build_snapshot(
             user_id=owner,
             conversation_id=conversation_key,
-            context_version=verified_version,
-            runtime_snapshot=runtime_snapshot,
+            context_version=expected,
+            runtime_snapshot=authoritative.runtime,
             task_messages=task_messages,
             summaries=summaries,
         )
+
+
+def _select_expected_version_records(
+    snapshot: VideoRuntimeContextSnapshot,
+) -> tuple[list[object], list[ContextSummary]]:
+    """按登记事件顺序选取 expected 版本之前的已提交用户输入。"""
+
+    task_user_messages = [
+        item for item in snapshot.task_messages if getattr(item, "role", None) == "user"
+    ]
+    user_events = _registered_user_events(snapshot)
+    if not user_events:
+        if snapshot.expected_context_version != snapshot.current_context_version:
+            raise ContextVersionConflictError("上下文版本不一致")
+        visible_messages = task_user_messages
+    else:
+        event_message_ids = [item[0] for item in user_events]
+        task_message_ids = [
+            _require_text("message_id", getattr(item, "message_id", None))
+            for item in task_user_messages
+        ]
+        if (
+            len(event_message_ids) != snapshot.current_context_version
+            or len(set(event_message_ids)) != len(event_message_ids)
+            or set(event_message_ids) != set(task_message_ids)
+        ):
+            raise ContextVersionConflictError("上下文登记事件不完整")
+        _validate_interrupt_response_versions(snapshot, user_events)
+        visible_ids = set(
+            event_message_ids[: snapshot.expected_context_version]
+        )
+        visible_messages = [
+            item
+            for item in task_user_messages
+            if getattr(item, "message_id", None) in visible_ids
+        ]
+
+    available_message_ids = {
+        _require_text("message_id", getattr(item, "message_id", None))
+        for item in visible_messages
+    }
+    available_message_ids.update(
+        _require_text("message_id", getattr(item, "message_id", None))
+        for item in snapshot.runtime.messages
+    )
+    workflow_ids = {item.workflow_id for item in snapshot.runtime.workflows}
+    summaries = [
+        item
+        for item in snapshot.summaries
+        if set(item.covered_message_ids).issubset(available_message_ids)
+        and set(item.workflow_states).issubset(workflow_ids)
+    ]
+    return list(visible_messages), summaries
+
+
+def _registered_user_events(
+    snapshot: VideoRuntimeContextSnapshot,
+) -> list[tuple[str, Mapping[str, object]]]:
+    """提取 MESSAGE_UPSERTED 中已登记的用户消息及其公开 payload。"""
+
+    registered: list[tuple[str, Mapping[str, object]]] = []
+    for event in snapshot.events:
+        if event.type is not AgentEventType.MESSAGE_UPSERTED:
+            continue
+        message = event.payload.get("message")
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            continue
+        message_id = _require_text("message_id", message.get("message_id"))
+        payload = message.get("payload")
+        registered.append(
+            (message_id, payload if isinstance(payload, Mapping) else {})
+        )
+    return registered
+
+
+def _validate_interrupt_response_versions(
+    snapshot: VideoRuntimeContextSnapshot,
+    user_events: list[tuple[str, Mapping[str, object]]],
+) -> None:
+    """确认每次人工响应保存的 pre-input 版本与登记顺序一致。"""
+
+    for interrupt in snapshot.runtime.interrupts:
+        if interrupt.response is None or interrupt.response_id is None:
+            continue
+        pre_input = interrupt.response.get("pre_input_context_version")
+        if type(pre_input) is not int or pre_input < 0:
+            raise ContextVersionConflictError("interrupt 响应缺少合法快照身份")
+        matches = [
+            index
+            for index, (_message_id, payload) in enumerate(user_events)
+            if payload.get("interrupt_id") == interrupt.interrupt_id
+            and payload.get("client_message_id") == str(interrupt.response_id)
+        ]
+        if matches != [pre_input]:
+            raise ContextVersionConflictError("interrupt 响应快照身份不一致")
 
 
 def _build_snapshot(
@@ -268,15 +332,6 @@ def _artifact_refs_from_payload(value: object) -> tuple[str, ...]:
         for item in value:
             refs.extend(_artifact_refs_from_payload(item))
     return tuple(dict.fromkeys(refs))
-
-
-def _conversation_context_version(context: object) -> int:
-    if not isinstance(context, Mapping):
-        raise ContextVersionConflictError("对话缺少 Agent Runtime 上下文")
-    runtime = context.get(AGENT_RUNTIME_CONTEXT_KEY)
-    if not isinstance(runtime, Mapping):
-        raise ContextVersionConflictError("对话缺少 Agent Runtime 上下文")
-    return _require_context_version(runtime.get("context_version"))
 
 
 def _require_context_version(value: object) -> int:

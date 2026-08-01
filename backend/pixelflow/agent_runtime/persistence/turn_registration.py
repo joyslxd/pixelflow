@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -149,6 +151,17 @@ def _registration_lock(
     return _REGISTRATION_LOCKS[
         hash((user_id, conversation_id)) % len(_REGISTRATION_LOCKS)
     ]
+
+
+@asynccontextmanager
+async def turn_registration_context_read_scope(
+    user_id: str,
+    conversation_id: str,
+) -> AsyncIterator[None]:
+    """让 Context 一次性读取与 Memory Turn/响应登记复用同一锁。"""
+
+    async with _registration_lock(user_id, conversation_id):
+        yield
 
 
 class MemoryTurnRegistrationStore:
@@ -739,4 +752,5 @@ __all__ = [
     "TurnRegistrationResult",
     "TurnRegistrationUnavailableError",
     "make_turn_registration_store",
+    "turn_registration_context_read_scope",
 ]

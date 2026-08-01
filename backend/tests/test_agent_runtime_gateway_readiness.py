@@ -56,7 +56,11 @@ class _Clock:
 
 
 class _SceneAssetSkill:
-    pass
+    async def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
+
+    async def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
 
 
 class _Model:
@@ -381,3 +385,61 @@ async def test_real_gateway_lifespan_keeps_video_on_frontend_v2_without_provider
         assert assignment.context["__agent_runtime"][
             "primary_execution_ready"
         ] is False
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_lifespan_keeps_r1_v2_available_without_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空模型列表只关闭 live 能力，不得阻断既有 R1/v2 Gateway。"""
+
+    from app.gateway import app as gateway_app
+
+    startup_config = AppConfig.model_validate(
+        {
+            "log_level": "info",
+            "models": [],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            "database": {"backend": "memory"},
+            "run_events": {"backend": "memory"},
+        }
+    )
+    monkeypatch.setattr(gateway_app, "load_profile_config", lambda: None)
+    monkeypatch.setattr(gateway_app, "get_app_config", lambda: startup_config)
+    monkeypatch.setattr(
+        gateway_app,
+        "validate_agent_runtime_startup_config",
+        lambda: AgentRuntimeConfig(mode="off"),
+    )
+    monkeypatch.setenv("PIXELFLOW_SEMANTIC_MEMORY_ENABLED", "false")
+    monkeypatch.setenv("PIXELFLOW_JIANYING_DRAFT_ENABLED", "false")
+    application = gateway_app.create_app()
+
+    async with application.router.lifespan_context(application):
+        live_runtime = application.state.pixelflow_agent_live_runtime
+        service = application.state.pixelflow_agent_runtime_service
+        assignment = service.assignment_for_new_conversation(
+            {},
+            initial_intent="video",
+        )
+
+        assert live_runtime.ready is False
+        assert live_runtime.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
+        assert live_runtime.registered_intents == frozenset()
+        assert live_runtime.primary_execution_intents == frozenset()
+        assert live_runtime.graph_runtime is None
+        assert live_runtime.executor is None
+        assert live_runtime.operation_recovery is None
+        assert not hasattr(application.state, "pixelflow_agent_graph_runtime")
+        assert service.primary_execution_intents == frozenset()
+        assert assignment.orchestration_mode.value == "frontend_v2"
+
+        worker_names = {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if not task.done()
+        }
+        assert "supervisor-turn-scan" not in worker_names
+        assert not any(name.startswith("operation-recovery:") for name in worker_names)

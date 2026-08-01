@@ -212,7 +212,10 @@ def make_pixelflow_agent_live_capabilities(
         return _not_ready_bundle()
     try:
         scene_asset_skill = scene_asset_skill_factory()
-        if scene_asset_skill is None:
+        if scene_asset_skill is None or any(
+            not callable(getattr(scene_asset_skill, method_name, None))
+            for method_name in ("reference_image", "text_to_image")
+        ):
             return _not_ready_bundle()
         memory_port = PowerMemVideoLivePort(power_mem_service)
         capabilities = DefaultVideoLiveCapabilities(

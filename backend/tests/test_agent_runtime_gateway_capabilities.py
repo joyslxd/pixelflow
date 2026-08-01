@@ -22,7 +22,25 @@ class _Clock:
 
 
 class _SceneAssetSkill:
+    async def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
+
+    async def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
+
+
+class _EmptySceneAssetSkill:
     pass
+
+
+class _SceneAssetSkillWithoutReferenceImage:
+    async def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
+
+
+class _SceneAssetSkillWithoutTextToImage:
+    async def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
 
 
 class _Model:
@@ -207,3 +225,29 @@ def test_capability_factory_hides_scene_skill_construction_error() -> None:
 
     assert bundle.ready is False
     assert bundle.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
+
+
+@pytest.mark.parametrize(
+    "scene_asset_skill_factory",
+    [
+        _EmptySceneAssetSkill,
+        _SceneAssetSkillWithoutReferenceImage,
+        _SceneAssetSkillWithoutTextToImage,
+    ],
+)
+def test_capability_factory_fails_closed_for_incomplete_scene_asset_skill(
+    scene_asset_skill_factory: type[object],
+) -> None:
+    """场景素材 Skill 缺少任一实际调用方法时不得进入 ready。"""
+
+    bundle = make_pixelflow_agent_live_capabilities(
+        model_factory=lambda *_args, **_kwargs: _Model([]),
+        scene_asset_skill_factory=scene_asset_skill_factory,
+        power_mem_service=_PowerMemService(),
+        clock=_Clock(),
+        model_name="deepseek-v4-pro",
+    )
+
+    assert bundle.ready is False
+    assert bundle.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
+    assert bundle.capabilities is None

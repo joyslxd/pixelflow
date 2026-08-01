@@ -43,6 +43,7 @@ from ..contracts import (
     AgentEvent,
     AgentEventType,
     AgentInterruptProjection,
+    ContextSummary,
     ExternalJobRef,
     ExternalJobStatus,
     InterruptResponseRequest,
@@ -55,6 +56,7 @@ from ..identity import conversation_message_id
 from .compaction_queue import MemoryCompactionQueueRepository, SQLCompactionQueueRepository
 from .models import (
     PixelFlowAgentCompactionLockRow,
+    PixelFlowAgentContextSummaryRow,
     PixelFlowAgentConversationStateRow,
     PixelFlowAgentEventRow,
     PixelFlowAgentInterruptRow,
@@ -77,6 +79,7 @@ from .repositories import (
     _operation_from_row,
     _repository_write_transaction,
     _require_text,
+    _summary_from_row,
     _turn_from_row,
     _workflow_from_row,
 )
@@ -510,6 +513,47 @@ class VideoRuntimeSafeSnapshot(_FrozenContractModel):
         return [item.model_dump(mode="python") for item in value]
 
 
+@dataclass(frozen=True, slots=True)
+class VideoRuntimeContextSnapshot:
+    """同一 Memory 临界区或 SQL 事务读取的完整 Context 原料。"""
+
+    conversation_id: str
+    expected_context_version: int
+    current_context_version: int
+    runtime: VideoRuntimeSafeSnapshot
+    task_messages: tuple[PixelFlowConversationMessageRecord, ...]
+    summaries: tuple[ContextSummary, ...]
+    events: tuple[AgentEvent, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.expected_context_version) is not int
+            or self.expected_context_version < 0
+            or type(self.current_context_version) is not int
+            or self.current_context_version < self.expected_context_version
+        ):
+            raise ValueError("Context Snapshot 版本边界非法")
+        object.__setattr__(
+            self,
+            "task_messages",
+            tuple(deepcopy(item) for item in self.task_messages),
+        )
+        object.__setattr__(
+            self,
+            "summaries",
+            tuple(_clone(item) for item in self.summaries),
+        )
+        object.__setattr__(
+            self,
+            "events",
+            tuple(_clone(item) for item in self.events),
+        )
+
+
+class VideoRuntimeContextSnapshotConflictError(RuntimeError):
+    """请求版本无法从当前权威记录安全还原。"""
+
+
 @runtime_checkable
 class VideoRuntimeRepository(Protocol):
     """约束 live 视频执行的 Memory/SQL 同构语义。"""
@@ -606,6 +650,14 @@ class VideoRuntimeRepository(Protocol):
     async def export_safe_snapshot(
         self, user_id: str, conversation_id: str
     ) -> VideoRuntimeSafeSnapshot: ...
+
+    async def read_versioned_context_snapshot(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        expected_context_version: int,
+    ) -> VideoRuntimeContextSnapshot: ...
 
     async def commit_operation_completion(
         self,
@@ -856,6 +908,20 @@ def _sql_runtime_context_version(row: PixelFlowConversationRow) -> int:
     return value
 
 
+def _runtime_context_version(context: object) -> int:
+    runtime = (
+        context.get(AGENT_RUNTIME_CONTEXT_KEY)
+        if isinstance(context, Mapping)
+        else None
+    )
+    value = runtime.get("context_version") if isinstance(runtime, Mapping) else None
+    if type(value) is not int or value < 0:
+        raise VideoRuntimeContextSnapshotConflictError(
+            "context_snapshot_version_conflict"
+        )
+    return value
+
+
 def _conversation_is_video_live(record: object | None) -> bool:
     if record is None or getattr(record, "orchestration_mode", None) != "supervisor_v1":
         return False
@@ -986,6 +1052,26 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
         self._projection_messages: dict[tuple[str, str], SupervisorProjectionMessage] = {}
         self._interrupts: dict[tuple[str, str], StoredAgentInterrupt] = {}
         self._active_workflows: dict[tuple[str, str], str | None] = {}
+
+    async def create_workflow(
+        self,
+        user_id: str,
+        record: WorkflowRecord,
+    ) -> WorkflowRecord:
+        """让独立 Workflow 写入与 Context 一次性读取共享 Repository 锁。"""
+
+        async with self._compaction_write_lock:
+            return await super().create_workflow(user_id, record)
+
+    async def create_summary(
+        self,
+        user_id: str,
+        record: ContextSummary,
+    ) -> ContextSummary:
+        """让独立摘要写入与 Context 一次性读取共享 Repository 锁。"""
+
+        async with self._compaction_write_lock:
+            return await super().create_summary(user_id, record)
 
     async def _eligible(self, user_id: str, conversation_id: str) -> bool:
         conversation = await self._task_store.get_conversation(
@@ -1878,62 +1964,136 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
             (_require_text("user_id", user_id, 64), _require_text("conversation_id", conversation_id, 64))
         )
 
+    def _safe_snapshot_locked(
+        self,
+        owner: str,
+        conversation: str,
+    ) -> VideoRuntimeSafeSnapshot:
+        """调用方持有 Repository 锁时复制全部 live 权威投影。"""
+
+        states = [
+            state
+            for (record_owner, _), state in self._video_states.items()
+            if record_owner == owner and state.conversation_id == conversation
+        ]
+        states.sort(key=lambda item: (item.created_at, item.workflow_id))
+        workflows = [
+            workflow
+            for (record_owner, _), workflow in self._workflows.items()
+            if record_owner == owner and workflow.conversation_id == conversation
+        ]
+        workflows.sort(
+            key=lambda item: (item.updated_at, item.workflow_id),
+            reverse=True,
+        )
+        turn_keys = [
+            key
+            for key, turn in self._turns.items()
+            if key[0] == owner and turn.conversation_id == conversation
+        ]
+        turn_keys.sort(key=self._turn_owner_sequences.__getitem__)
+        owned_turns = []
+        for key in turn_keys:
+            turn = self._turns[key]
+            execution = self._turn_executions.get(key)
+            owned_turns.append(
+                OwnedTurnRecord(
+                    user_id=owner,
+                    turn=_clone(turn),
+                    next_attempt_at=(
+                        None if execution is None else execution.next_attempt_at
+                    ),
+                )
+            )
+        messages = [
+            item
+            for (record_owner, _), item in self._projection_messages.items()
+            if record_owner == owner and item.conversation_id == conversation
+        ]
+        messages.sort(key=lambda item: (item.created_at, item.message_id))
+        interrupts = [
+            item
+            for (record_owner, _), item in self._interrupts.items()
+            if record_owner == owner and item.conversation_id == conversation
+        ]
+        interrupts.sort(key=lambda item: (item.opened_at, item.interrupt_id))
+        return VideoRuntimeSafeSnapshot(
+            conversation_id=conversation,
+            active_workflow_id=self._active_workflows.get((owner, conversation)),
+            workflow_states=tuple(_clone_state(item) for item in states),
+            workflows=tuple(_clone(item) for item in workflows),
+            turns=tuple(owned_turns),
+            messages=tuple(_clone_message(item) for item in messages),
+            interrupts=tuple(_clone_interrupt(item) for item in interrupts),
+        )
+
     async def export_safe_snapshot(
         self, user_id: str, conversation_id: str
     ) -> VideoRuntimeSafeSnapshot:
         owner = _require_text("user_id", user_id, 64)
         conversation = _require_text("conversation_id", conversation_id, 64)
         async with self._compaction_write_lock:
-            states = [
-                state for (record_owner, _), state in self._video_states.items()
-                if record_owner == owner and state.conversation_id == conversation
-            ]
-            states.sort(key=lambda item: (item.created_at, item.workflow_id))
-            workflows = [
-                workflow for (record_owner, _), workflow in self._workflows.items()
-                if record_owner == owner and workflow.conversation_id == conversation
-            ]
-            workflows.sort(
-                key=lambda item: (item.updated_at, item.workflow_id),
-                reverse=True,
+            return self._safe_snapshot_locked(owner, conversation)
+
+    async def read_versioned_context_snapshot(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        expected_context_version: int,
+    ) -> VideoRuntimeContextSnapshot:
+        """在共享 Repository/Event 锁内一次读取全部 Context 原料。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        if type(expected_context_version) is not int or expected_context_version < 0:
+            raise VideoRuntimeContextSnapshotConflictError(
+                "context_snapshot_version_conflict"
             )
-            turn_keys = [
-                key for key, turn in self._turns.items()
-                if key[0] == owner and turn.conversation_id == conversation
-            ]
-            turn_keys.sort(key=self._turn_owner_sequences.__getitem__)
-            owned_turns = []
-            for key in turn_keys:
-                turn = self._turns[key]
-                execution = self._turn_executions.get(key)
-                owned_turns.append(
-                    OwnedTurnRecord(
-                        user_id=owner,
-                        turn=_clone(turn),
-                        next_attempt_at=(
-                            None if execution is None else execution.next_attempt_at
-                        ),
-                    )
+        async with self._compaction_write_lock:
+            async with self._event_write_lock:
+                conversation_record = await self._task_store.get_conversation(
+                    conversation,
+                    user_id=owner,
                 )
-            messages = [
-                item for (record_owner, _), item in self._projection_messages.items()
-                if record_owner == owner and item.conversation_id == conversation
-            ]
-            messages.sort(key=lambda item: (item.created_at, item.message_id))
-            interrupts = [
-                item for (record_owner, _), item in self._interrupts.items()
-                if record_owner == owner and item.conversation_id == conversation
-            ]
-            interrupts.sort(key=lambda item: (item.opened_at, item.interrupt_id))
-            return VideoRuntimeSafeSnapshot(
-                conversation_id=conversation,
-                active_workflow_id=self._active_workflows.get((owner, conversation)),
-                workflow_states=tuple(_clone_state(item) for item in states),
-                workflows=tuple(_clone(item) for item in workflows),
-                turns=tuple(owned_turns),
-                messages=tuple(_clone_message(item) for item in messages),
-                interrupts=tuple(_clone_interrupt(item) for item in interrupts),
-            )
+                if conversation_record is None:
+                    raise LookupError("对话不存在或不属于当前用户")
+                current_context_version = _runtime_context_version(
+                    conversation_record.context
+                )
+                if expected_context_version > current_context_version:
+                    raise VideoRuntimeContextSnapshotConflictError(
+                        "context_snapshot_version_conflict"
+                    )
+                task_messages = await self._task_store.list_conversation_messages(
+                    conversation,
+                    user_id=owner,
+                )
+                summaries = [
+                    item
+                    for (record_owner, _), item in self._summaries.items()
+                    if record_owner == owner
+                    and item.conversation_id == conversation
+                ]
+                summaries.sort(
+                    key=lambda item: (item.version, item.created_at, item.summary_id)
+                )
+                events = [
+                    item
+                    for (record_owner, _), item in self._events.items()
+                    if record_owner == owner
+                    and item.conversation_id == conversation
+                ]
+                events.sort(key=lambda item: (item.sequence, item.event_id))
+                return VideoRuntimeContextSnapshot(
+                    conversation_id=conversation,
+                    expected_context_version=expected_context_version,
+                    current_context_version=current_context_version,
+                    runtime=self._safe_snapshot_locked(owner, conversation),
+                    task_messages=tuple(task_messages),
+                    summaries=tuple(summaries),
+                    events=tuple(events),
+                )
 
     async def commit_operation_completion(
         self,
@@ -3605,6 +3765,202 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                     ),
                     messages=tuple(_message_from_row(row) for row in message_rows),
                     interrupts=tuple(_interrupt_from_row(row) for row in interrupt_rows),
+                )
+
+    async def read_versioned_context_snapshot(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        expected_context_version: int,
+    ) -> VideoRuntimeContextSnapshot:
+        """在同一数据库一致读事务内返回全部 Context 原料。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        if type(expected_context_version) is not int or expected_context_version < 0:
+            raise VideoRuntimeContextSnapshotConflictError(
+                "context_snapshot_version_conflict"
+            )
+        conversation_statement = select(PixelFlowConversationRow).where(
+            PixelFlowConversationRow.user_id == owner,
+            PixelFlowConversationRow.conversation_id == conversation,
+        )
+        task_message_statement = (
+            select(PixelFlowConversationMessageRow)
+            .where(
+                PixelFlowConversationMessageRow.user_id == owner,
+                PixelFlowConversationMessageRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowConversationMessageRow.created_at.asc(),
+                PixelFlowConversationMessageRow.message_id.asc(),
+            )
+        )
+        state_statement = (
+            select(PixelFlowAgentVideoStateRow)
+            .where(
+                PixelFlowAgentVideoStateRow.user_id == owner,
+                PixelFlowAgentVideoStateRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentVideoStateRow.created_at.asc(),
+                PixelFlowAgentVideoStateRow.workflow_id.asc(),
+            )
+        )
+        execution_statement = select(PixelFlowAgentTurnExecutionRow).where(
+            PixelFlowAgentTurnExecutionRow.user_id == owner,
+            PixelFlowAgentTurnExecutionRow.conversation_id == conversation,
+        )
+        workflow_statement = (
+            select(PixelFlowAgentWorkflowRow)
+            .where(
+                PixelFlowAgentWorkflowRow.user_id == owner,
+                PixelFlowAgentWorkflowRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentWorkflowRow.updated_at.desc(),
+                PixelFlowAgentWorkflowRow.workflow_id.desc(),
+            )
+        )
+        turn_statement = (
+            select(PixelFlowAgentTurnRow)
+            .where(
+                PixelFlowAgentTurnRow.user_id == owner,
+                PixelFlowAgentTurnRow.conversation_id == conversation,
+            )
+            .order_by(PixelFlowAgentTurnRow.inbox_sequence.asc())
+        )
+        projection_message_statement = (
+            select(PixelFlowAgentProjectionMessageRow)
+            .where(
+                PixelFlowAgentProjectionMessageRow.user_id == owner,
+                PixelFlowAgentProjectionMessageRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentProjectionMessageRow.created_at.asc(),
+                PixelFlowAgentProjectionMessageRow.message_id.asc(),
+            )
+        )
+        interrupt_statement = (
+            select(PixelFlowAgentInterruptRow)
+            .where(
+                PixelFlowAgentInterruptRow.user_id == owner,
+                PixelFlowAgentInterruptRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentInterruptRow.opened_at.asc(),
+                PixelFlowAgentInterruptRow.interrupt_id.asc(),
+            )
+        )
+        active_statement = select(PixelFlowAgentConversationStateRow).where(
+            PixelFlowAgentConversationStateRow.user_id == owner,
+            PixelFlowAgentConversationStateRow.conversation_id == conversation,
+        )
+        summary_statement = (
+            select(PixelFlowAgentContextSummaryRow)
+            .where(
+                PixelFlowAgentContextSummaryRow.user_id == owner,
+                PixelFlowAgentContextSummaryRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentContextSummaryRow.version.asc(),
+                PixelFlowAgentContextSummaryRow.created_at.asc(),
+                PixelFlowAgentContextSummaryRow.summary_id.asc(),
+            )
+        )
+        event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.conversation_id == conversation,
+            )
+            .order_by(
+                PixelFlowAgentEventRow.sequence.asc(),
+                PixelFlowAgentEventRow.event_id.asc(),
+            )
+        )
+        async with self._session_factory() as session:
+            async with _repository_snapshot_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                conversation_row = (
+                    await session.scalars(conversation_statement)
+                ).one_or_none()
+                if conversation_row is None:
+                    raise LookupError("对话不存在或不属于当前用户")
+                try:
+                    current_context_version = _sql_runtime_context_version(
+                        conversation_row
+                    )
+                except AgentRuntimeRecordConflictError as exc:
+                    raise VideoRuntimeContextSnapshotConflictError(
+                        "context_snapshot_version_conflict"
+                    ) from exc
+                if expected_context_version > current_context_version:
+                    raise VideoRuntimeContextSnapshotConflictError(
+                        "context_snapshot_version_conflict"
+                    )
+                task_message_rows = (
+                    await session.scalars(task_message_statement)
+                ).all()
+                state_rows = (await session.scalars(state_statement)).all()
+                execution_rows = (await session.scalars(execution_statement)).all()
+                workflow_rows = (await session.scalars(workflow_statement)).all()
+                turn_rows = (await session.scalars(turn_statement)).all()
+                projection_message_rows = (
+                    await session.scalars(projection_message_statement)
+                ).all()
+                interrupt_rows = (await session.scalars(interrupt_statement)).all()
+                active_row = (
+                    await session.scalars(active_statement)
+                ).one_or_none()
+                summary_rows = (await session.scalars(summary_statement)).all()
+                event_rows = (await session.scalars(event_statement)).all()
+                schedules = {
+                    row.turn_id: (
+                        None
+                        if row.next_attempt_at is None
+                        else _database_utc(row.next_attempt_at)
+                    )
+                    for row in execution_rows
+                }
+                runtime = VideoRuntimeSafeSnapshot(
+                    conversation_id=conversation,
+                    active_workflow_id=(
+                        None if active_row is None else active_row.active_workflow_id
+                    ),
+                    workflow_states=tuple(
+                        _video_state_from_row(row) for row in state_rows
+                    ),
+                    workflows=tuple(_workflow_from_row(row) for row in workflow_rows),
+                    turns=tuple(
+                        OwnedTurnRecord(
+                            user_id=owner,
+                            turn=_turn_from_row(row),
+                            next_attempt_at=schedules.get(row.turn_id),
+                        )
+                        for row in turn_rows
+                    ),
+                    messages=tuple(
+                        _message_from_row(row) for row in projection_message_rows
+                    ),
+                    interrupts=tuple(
+                        _interrupt_from_row(row) for row in interrupt_rows
+                    ),
+                )
+                return VideoRuntimeContextSnapshot(
+                    conversation_id=conversation,
+                    expected_context_version=expected_context_version,
+                    current_context_version=current_context_version,
+                    runtime=runtime,
+                    task_messages=tuple(
+                        _conversation_message_from_row(row)
+                        for row in task_message_rows
+                    ),
+                    summaries=tuple(_summary_from_row(row) for row in summary_rows),
+                    events=tuple(_event_from_row(row) for row in event_rows),
                 )
 
     async def commit_operation_completion(
