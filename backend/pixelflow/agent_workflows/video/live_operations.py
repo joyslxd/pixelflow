@@ -1357,8 +1357,10 @@ _SAFE_PROVIDER_METADATA_KEYS = frozenset(
     {"authmode", "tokenbudget", "tokencount", "tokencounthint", "tokenhint"}
 )
 _CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"(?:\b(?:authorization|(?:access|refresh|auth|bearer|client|session|id|api|provider)"
-    r"[\s_-]*token|token|(?:api[\s_-]*)?key|secret|password|credential)\b\s*[:=]\s*"
+    r"(?:(?P<assignment_quote>[\"'`])?\b(?:authorization|"
+    r"(?:access|refresh|auth|bearer|client|session|id|api|provider)"
+    r"[\s_-]*token|token|(?:api[\s_-]*)?key|secret|password|credential)\b"
+    r"(?(assignment_quote)(?P=assignment_quote))\s*[:=]\s*"
     r"(?:bearer\s+)?\S+|\bbearer\s+[a-z0-9._~+/=-]{6,})",
     re.IGNORECASE,
 )

@@ -1054,6 +1054,120 @@ def test_video_operation_start_request_allows_product_codes_and_scene_key_urls()
 
 
 @pytest.mark.parametrize(
+    ("stage", "field", "assignment", "secret_marker"),
+    [
+        (
+            "generate_scene_video:scene-1",
+            "prompt",
+            '{"Authorization":"sk-task8rawapitoken123456789"}',
+            "sk-task8rawapitoken123456789",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            "storyline",
+            '{"api_key": "sk-task8rawapitoken123456789"}',
+            "sk-task8rawapitoken123456789",
+        ),
+        (
+            "quality_review",
+            "user_feedback",
+            "{'Authorization': 'sk-task8rawapitoken123456789'}",
+            "sk-task8rawapitoken123456789",
+        ),
+        (
+            "generate_scene_video:scene-1",
+            "prompt",
+            "`client_token` = `opaque-value`",
+            "opaque-value",
+        ),
+        (
+            "quality_review",
+            "user_feedback",
+            "｛＂Ａｕｔｈｏｒｉｚａｔｉｏｎ＂　：　＂opaque-nfkc-value＂｝",
+            "opaque-nfkc-value",
+        ),
+    ],
+)
+def test_video_operation_start_request_rejects_quoted_credential_assignments_without_echo(
+    stage: str,
+    field: str,
+    assignment: str,
+    secret_marker: str,
+) -> None:
+    provider_request: dict[str, JsonValue] = {field: assignment}
+    if stage.startswith("generate_scene_video:"):
+        provider_request["scene_id"] = "scene-1"
+    else:
+        provider_request["merged_video_url"] = "https://videos.example.com/merged.mp4"
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    with pytest.raises(ValueError, match="Provider 请求包含敏感凭据") as raised:
+        VideoOperationStartRequest(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            operation_request=operation_request,
+            provider_request=provider_request,
+        ).model_dump(mode="json")
+
+    assert secret_marker not in str(raised.value)
+    assert assignment not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("stage", "field", "business_text"),
+    [
+        (
+            "generate_scene_video:scene-1",
+            "prompt",
+            '{"product_sku":"SK-ABCDEF12345678901234567890"}',
+        ),
+        (
+            "generate_scene_video:scene-1",
+            "storyline",
+            '{"model_id":"pk-product-model-2026-edition"}',
+        ),
+        (
+            "quality_review",
+            "user_feedback",
+            "仅讨论 Authorization 与 api_key 字段名，不填写凭据值",
+        ),
+    ],
+)
+def test_video_operation_start_request_allows_quoted_business_json_and_unassigned_field_names(
+    stage: str,
+    field: str,
+    business_text: str,
+) -> None:
+    provider_request: dict[str, JsonValue] = {field: business_text}
+    if stage.startswith("generate_scene_video:"):
+        provider_request["scene_id"] = "scene-1"
+    else:
+        provider_request["merged_video_url"] = "https://videos.example.com/merged.mp4"
+    operation_request = build_operation_request(
+        workflow_id=WORKFLOW_ID,
+        stage=stage,
+        stage_version=3,
+        attempt=1,
+        provider_request=provider_request,
+    )
+
+    live_request = VideoOperationStartRequest(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        operation_request=operation_request,
+        provider_request=provider_request,
+    )
+
+    assert live_request.model_dump(mode="json")["provider_request"] == provider_request
+
+
+@pytest.mark.parametrize(
     "credential_key",
     [
         "provider_keys",
