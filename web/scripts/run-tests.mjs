@@ -216,6 +216,7 @@ try {
       "src/lib/sceneMentions.ts",
       "src/lib/scenePackages.ts",
       "src/lib/supervisor/api.ts",
+      "src/lib/supervisor/actions.ts",
       "src/lib/supervisor/contracts.ts",
       "src/lib/supervisor/events.ts",
       "src/lib/supervisor/legacyAdapter.ts",
@@ -259,6 +260,7 @@ try {
       SCENE_MENTIONS_TEST_MODULE: moduleUrl(moduleDirectory, "sceneMentions.js"),
       SCENE_PACKAGES_TEST_MODULE: moduleUrl(moduleDirectory, "scenePackages.js"),
       SUPERVISOR_API_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/api.js"),
+      SUPERVISOR_ACTIONS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/actions.js"),
       SUPERVISOR_EVENTS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/events.js"),
       SUPERVISOR_HOOK_TEST_MODULE: moduleUrl(hookTestRoot, "hooks/useSupervisorConversation.js"),
       SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE: moduleUrl(

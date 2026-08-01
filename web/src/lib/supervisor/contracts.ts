@@ -134,6 +134,7 @@ export interface TurnRecord {
 }
 
 export interface ContextEnvelope {
+  validated_context_version: number;
   current_input: string;
   active_or_target_workflow: WorkflowRecord | null;
   recent_messages: JsonObject[];
@@ -213,7 +214,7 @@ export interface TurnStartRequest {
   reply_to_message_id: string | null;
   artifact_refs: string[];
   expected_context_version: number;
-  explicit_action?: ExplicitActionSignal | null;
+  explicit_action: ExplicitActionSignal | null;
 }
 
 export type InterruptResponseRequest = Readonly<{
@@ -443,10 +444,7 @@ export function isTurnStartRequest(value: unknown): value is TurnStartRequest {
   if (!isJsonObject(value)) {
     return false;
   }
-  const keys = value.explicit_action === undefined
-    ? new Set([...TURN_START_KEYS].filter((key) => key !== "explicit_action"))
-    : TURN_START_KEYS;
-  return hasOnlyKeys(value, keys)
+  return hasOnlyKeys(value, TURN_START_KEYS)
     && isUuid(value.client_input_id)
     && isNonEmptyString(value.content)
     && isJsonObjectArray(value.materials)
@@ -456,8 +454,7 @@ export function isTurnStartRequest(value: unknown): value is TurnStartRequest {
     && typeof value.expected_context_version === "number"
     && value.expected_context_version >= 0
     && (
-      value.explicit_action === undefined
-      || value.explicit_action === null
+      value.explicit_action === null
       || isExplicitActionSignal(value.explicit_action)
     );
 }

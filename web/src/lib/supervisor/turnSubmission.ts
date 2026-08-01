@@ -1,4 +1,10 @@
-import type { JsonObject, JsonValue, TurnStartRequest } from "./contracts.js";
+import type {
+  ExplicitActionSignal,
+  InterruptResponseRequest,
+  JsonObject,
+  JsonValue,
+  TurnStartRequest,
+} from "./contracts.js";
 
 export interface SupervisorSubmissionInput {
   conversationId: string;
@@ -8,6 +14,7 @@ export interface SupervisorSubmissionInput {
   replyToMessageId?: string | null;
   artifactRefs?: string[];
   interruptId?: string | null;
+  explicitAction?: ExplicitActionSignal | null;
 }
 
 export type SupervisorSubmission =
@@ -18,7 +25,7 @@ export type SupervisorSubmission =
   | {
     kind: "interrupt";
     interruptId: string;
-    request: JsonObject;
+    request: InterruptResponseRequest;
   };
 
 const ARTIFACT_REF_PATTERN = /^artifact:\S+$/u;
@@ -51,6 +58,15 @@ function cloneMaterial(value: unknown): JsonObject {
   const cloned = cloneJsonValue(value);
   if (!isRecord(cloned)) throw new TypeError("素材元数据格式不合法");
   return cloned as JsonObject;
+}
+
+function cloneExplicitAction(
+  value: ExplicitActionSignal | null | undefined,
+): ExplicitActionSignal | null {
+  if (value === undefined || value === null) return null;
+  const cloned = cloneJsonValue(value);
+  if (!isRecord(cloned)) throw new TypeError("结构化动作格式不合法");
+  return cloned as ExplicitActionSignal;
 }
 
 function normalizeRequiredId(value: unknown, message: string): string {
@@ -134,6 +150,7 @@ export function buildSupervisorSubmission(
   const replyToMessageId = collectReplyToMessageId(input.replyToMessageId, materials);
   const artifactRefs = collectArtifactRefs(input.artifactRefs, materials);
   const interruptId = optionalId(input.interruptId);
+  const explicitAction = cloneExplicitAction(input.explicitAction);
 
   if (interruptId) {
     return {
@@ -146,6 +163,7 @@ export function buildSupervisorSubmission(
           materials,
           reply_to_message_id: replyToMessageId,
           artifact_refs: artifactRefs,
+          explicit_action: explicitAction,
         },
       },
     };
@@ -160,6 +178,7 @@ export function buildSupervisorSubmission(
       reply_to_message_id: replyToMessageId,
       artifact_refs: artifactRefs,
       expected_context_version: expectedContextVersion,
+      explicit_action: explicitAction,
     },
   };
 }

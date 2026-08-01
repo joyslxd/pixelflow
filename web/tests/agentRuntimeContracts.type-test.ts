@@ -82,6 +82,7 @@ const turn = {
 } satisfies TurnRecord;
 
 const contextEnvelope = {
+  validated_context_version: 12,
   current_input: "继续",
   active_or_target_workflow: workflow,
   recent_messages: [],

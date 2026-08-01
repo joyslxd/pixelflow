@@ -133,6 +133,7 @@ test("TypeScript 镜像覆盖 fixture 中全部冻结 DTO 字段", () => {
       "created_at",
     ]],
     [contractFixture.context_envelope, [
+      "validated_context_version",
       "current_input",
       "active_or_target_workflow",
       "recent_messages",

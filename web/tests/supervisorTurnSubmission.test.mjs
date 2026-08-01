@@ -3,20 +3,20 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const moduleUrl = process.env.SUPERVISOR_TURN_SUBMISSION_TEST_MODULE;
+const contractsModuleUrl = process.env.AGENT_RUNTIME_CONTRACTS_TEST_MODULE;
 const fixturePath = process.env.AGENT_RUNTIME_CONTRACT_FIXTURE;
 
-if (!moduleUrl || !fixturePath) {
+if (!moduleUrl || !contractsModuleUrl || !fixturePath) {
   throw new Error("缺少 Supervisor 目标定位测试模块或合同 fixture 路径");
 }
 
 const { buildSupervisorSubmission } = await import(moduleUrl);
+const { parseInterruptResponseRequest, parseTurnStartRequest } = await import(contractsModuleUrl);
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 const workspaceSource = await readFile(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
 
 test("目标定位 fixture 的 reply 与 Artifact 引用完整进入 Turn", () => {
   const canonical = fixture.turn_start_request;
-  const m12TurnRequest = { ...canonical };
-  delete m12TurnRequest.explicit_action;
   const submission = buildSupervisorSubmission({
     conversationId: "conv_001",
     clientInputId: canonical.client_input_id,
@@ -24,12 +24,14 @@ test("目标定位 fixture 的 reply 与 Artifact 引用完整进入 Turn", () =
     materials: canonical.materials,
     replyToMessageId: canonical.reply_to_message_id,
     artifactRefs: canonical.artifact_refs,
+    explicitAction: canonical.explicit_action,
   }, canonical.expected_context_version);
 
   assert.deepEqual(submission, {
     kind: "turn",
-    request: m12TurnRequest,
+    request: canonical,
   });
+  assert.deepEqual(parseTurnStartRequest(submission.request), canonical);
 });
 
 test("场景 mention 素材保留目标元数据并补齐消息与 Artifact 引用", () => {
@@ -61,18 +63,20 @@ test("场景 mention 素材保留目标元数据并补齐消息与 Artifact 引�
       "artifact:video-scene-package:wf_video_001:plan-v1:hash",
     ],
     expected_context_version: 13,
+    explicit_action: null,
   });
 });
 
 test("interrupt ID 改走幂等响应且不会构造额外 Turn", () => {
   const input = {
     conversationId: "conv_001",
-    clientInputId: "client-response-001",
+    clientInputId: "33333333-3333-4333-8333-333333333333",
     content: "同意方案",
     materials: [],
     replyToMessageId: "msg_plan_001",
     artifactRefs: ["artifact:video-plan:wf_video_001:v1:hash"],
     interruptId: " interrupt_plan_001 ",
+    explicitAction: fixture.interrupt_response_request.value.explicit_action,
   };
 
   const first = buildSupervisorSubmission(input, 14);
@@ -83,14 +87,94 @@ test("interrupt ID 改走幂等响应且不会构造额外 Turn", () => {
     kind: "interrupt",
     interruptId: "interrupt_plan_001",
     request: {
-      client_response_id: "client-response-001",
+      client_response_id: "33333333-3333-4333-8333-333333333333",
       value: {
         content: "同意方案",
         materials: [],
         reply_to_message_id: "msg_plan_001",
         artifact_refs: ["artifact:video-plan:wf_video_001:v1:hash"],
+        explicit_action: fixture.interrupt_response_request.value.explicit_action,
       },
     },
+  });
+  assert.deepEqual(parseInterruptResponseRequest(first.request), first.request);
+});
+
+test("普通 Turn 与 interrupt 始终显式发送 action 或 null", () => {
+  const ordinaryInput = {
+    conversationId: "conv_001",
+    clientInputId: "client-ordinary-explicit-001",
+    content: "继续",
+    materials: [],
+  };
+  const interruptInput = {
+    ...ordinaryInput,
+    clientInputId: "client-interrupt-explicit-001",
+    interruptId: "interrupt_plan_001",
+  };
+
+  const turn = buildSupervisorSubmission(ordinaryInput, 12);
+  const interrupt = buildSupervisorSubmission(interruptInput, 12);
+
+  assert.equal(turn.kind, "turn");
+  assert.equal(Object.hasOwn(turn.request, "explicit_action"), true);
+  assert.equal(turn.request.explicit_action, null);
+  assert.equal(interrupt.kind, "interrupt");
+  assert.equal(Object.hasOwn(interrupt.request.value, "explicit_action"), true);
+  assert.equal(interrupt.request.value.explicit_action, null);
+  assert.equal(Object.hasOwn(interrupt.request, "expected_context_version"), false);
+});
+
+test("Turn 合同 guard 不再接受缺失 explicit_action 的过渡请求", () => {
+  const legacyTurn = { ...fixture.turn_start_request };
+  delete legacyTurn.explicit_action;
+
+  assert.throws(
+    () => parseTurnStartRequest(legacyTurn),
+    /Turn 请求不符合 contracts-v1 合同/,
+  );
+});
+
+test("explicit action 在 Turn 与 interrupt 中深拷贝且重试复用同一客户端 ID", () => {
+  const explicitAction = {
+    action: "continue_workflow",
+    intent: "video",
+    workflow_id: "wf_video_001",
+    stage: "plan_review",
+    artifact_ref: "artifact:video-plan:wf_video_001:v1:hash",
+    patch: { approved: true, scene_ids: ["scene-1"] },
+  };
+  const input = {
+    conversationId: "conv_001",
+    clientInputId: "client-retry-001",
+    content: "同意方案",
+    materials: [],
+    explicitAction,
+  };
+
+  const firstTurn = buildSupervisorSubmission(input, 14);
+  const repeatedTurn = buildSupervisorSubmission(input, 14);
+  const interrupt = buildSupervisorSubmission({ ...input, interruptId: "interrupt_plan_001" }, 99);
+
+  assert.equal(firstTurn.kind, "turn");
+  assert.equal(repeatedTurn.kind, "turn");
+  assert.equal(interrupt.kind, "interrupt");
+  assert.equal(firstTurn.request.client_input_id, "client-retry-001");
+  assert.equal(repeatedTurn.request.client_input_id, "client-retry-001");
+  assert.equal(interrupt.request.client_response_id, "client-retry-001");
+  assert.notEqual(firstTurn.request.explicit_action, explicitAction);
+  assert.notEqual(firstTurn.request.explicit_action.patch, explicitAction.patch);
+  assert.notEqual(firstTurn.request.explicit_action.patch.scene_ids, explicitAction.patch.scene_ids);
+  assert.notEqual(interrupt.request.value.explicit_action, explicitAction);
+  explicitAction.patch.approved = false;
+  explicitAction.patch.scene_ids[0] = "scene-mutated";
+  assert.deepEqual(firstTurn.request.explicit_action.patch, {
+    approved: true,
+    scene_ids: ["scene-1"],
+  });
+  assert.deepEqual(interrupt.request.value.explicit_action.patch, {
+    approved: true,
+    scene_ids: ["scene-1"],
   });
 });
 

@@ -1,5 +1,10 @@
 import { getBrowserAuthorization, normalizeAuthorization } from "../authStorage.js";
-import type { JsonObject, JsonValue, TurnStartRequest } from "./contracts.js";
+import type {
+  InterruptResponseRequest,
+  JsonObject,
+  JsonValue,
+  TurnStartRequest,
+} from "./contracts.js";
 
 const AGENT_API_PREFIX = "/agent";
 const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
@@ -30,7 +35,7 @@ export interface SupervisorApiTransport {
   respondToInterrupt<TResponse extends JsonValue = JsonObject>(
     conversationId: string,
     interruptId: string,
-    request: JsonObject,
+    request: InterruptResponseRequest,
     options?: SupervisorRequestOptions,
   ): Promise<TResponse>;
   getRunStatus<TResponse extends JsonValue = JsonObject>(
@@ -129,7 +134,7 @@ export function createSupervisorApiTransport(
   async function request<TResponse extends JsonValue>(
     path: string,
     method: "GET" | "POST",
-    body: JsonObject | TurnStartRequest | undefined,
+    body: InterruptResponseRequest | JsonObject | TurnStartRequest | undefined,
     requestOptions: SupervisorRequestOptions,
   ): Promise<TResponse> {
     throwIfAborted(requestOptions.signal);
