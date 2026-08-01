@@ -1024,6 +1024,42 @@ def test_safe_projection_rejects_provider_and_bare_key_variants_recursively(
 
 
 @pytest.mark.parametrize(
+    "credential_key",
+    [
+        "key_value",
+        "keyValue",
+        "keyvalue",
+        "key_header",
+        "keyHeader",
+        "keyheader",
+        "key_id",
+        "keyId",
+        "keyID",
+        "keyid",
+        "key_hash",
+        "keyHash",
+        "keyhash",
+        "key_material",
+        "keyMaterial",
+        "keymaterial",
+    ],
+)
+def test_safe_projection_rejects_key_decoration_variants_recursively(
+    credential_key: str,
+) -> None:
+    from pixelflow.agent_workflows.video import live_capabilities
+
+    with pytest.raises(ValueError, match="场景资产结果包含敏感字段") as error_info:
+        live_capabilities._safe_json_projection(
+            {"outer": [{"nested": {credential_key: "opaque-provider-value"}}]},
+            authorization="Bearer turn-secret",
+        )
+
+    assert credential_key not in str(error_info.value)
+    assert "opaque-provider-value" not in str(error_info.value)
+
+
+@pytest.mark.parametrize(
     "unsafe_key",
     [
         "场景状态",

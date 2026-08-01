@@ -683,7 +683,7 @@ _CREDENTIAL_KEY_QUALIFIERS = frozenset(
         "ssh",
     }
 )
-_CREDENTIAL_DECORATION_SUFFIXES = ("header", "value", "id", "hash")
+_CREDENTIAL_DECORATION_SUFFIXES = ("header", "value", "id", "hash", "material")
 _CREDENTIAL_COMPACT_METADATA_SUFFIXES = (
     "expiresat",
     "expiryat",
@@ -749,8 +749,10 @@ def _has_fused_credential_semantics(component: str) -> bool:
     if any(component.endswith(f"{qualifier}key") for qualifier in _CREDENTIAL_KEY_QUALIFIERS):
         return True
     for suffix in _CREDENTIAL_DECORATION_SUFFIXES:
-        if component.endswith(suffix) and _has_fused_credential_semantics(component[: -len(suffix)]):
-            return True
+        if component.endswith(suffix):
+            undecorated = component[: -len(suffix)]
+            if undecorated == "key" or _has_fused_credential_semantics(undecorated):
+                return True
     return False
 
 
@@ -780,6 +782,11 @@ def _is_sensitive_protocol_key(key: str) -> bool:
     if words == ("key",):
         return True
     if "key" in word_set and word_set & _CREDENTIAL_KEY_QUALIFIERS:
+        return True
+    if any(
+        first == "key" and second in _CREDENTIAL_DECORATION_SUFFIXES
+        for first, second in zip(words, words[1:], strict=False)
+    ):
         return True
     return any(_has_fused_credential_semantics(word) for word in words)
 
