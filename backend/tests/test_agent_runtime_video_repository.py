@@ -26,6 +26,7 @@ from pixelflow.agent_runtime.contracts import (
     AgentEvent,
     AgentEventType,
     AgentIntent,
+    ContextSummary,
     ExternalJobStatus,
     InterruptResponseRequest,
     TurnRecord,
@@ -340,6 +341,119 @@ async def _seed_conversation(
             updated_at=NOW.isoformat(),
         )
     )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_versioned_context_snapshot_is_deeply_read_only_and_json_serializable(
+    kind: RepositoryKind,
+) -> None:
+    """Context 原料 DTO 必须阻断顶层与嵌套修改，同时可导出普通 JSON。"""
+
+    async with _repository(kind) as (repository, store):
+        await _seed_conversation(store)
+        message = PixelFlowConversationMessageRecord(
+            message_id="message-context-frozen",
+            conversation_id=CONVERSATION,
+            user_id=OWNER,
+            role="user",
+            content="请生成商品视频",
+            payload={"artifact": {"refs": ["artifact:input"]}},
+            created_at=NOW.isoformat(),
+        )
+        summary = ContextSummary(
+            summary_id="summary-context-frozen",
+            conversation_id=CONVERSATION,
+            version=1,
+            content_hash="sha256:context-frozen",
+            user_goals=["生成商品视频"],
+            workflow_states={WORKFLOW: "running:intake:v1"},
+            artifact_evidence_refs=["artifact:summary"],
+            compression_model="deterministic-test-v1",
+            created_at=NOW,
+        )
+        runtime_event = AgentEvent(
+            event_id="event-context-frozen",
+            sequence=1,
+            cursor="cursor-context-frozen",
+            conversation_id=CONVERSATION,
+            run_id="turn-context-frozen",
+            occurred_at=NOW,
+            type=AgentEventType.MESSAGE_UPSERTED,
+            payload={"message": {"metadata": {"labels": ["input"]}}},
+        )
+        await store.append_conversation_message(message)
+        await repository.create_summary(OWNER, summary)
+        await repository.create_event(OWNER, runtime_event)
+
+        snapshot = await repository.read_versioned_context_snapshot(
+            OWNER,
+            CONVERSATION,
+            expected_context_version=0,
+        )
+
+        top_level_mutations = {
+            "conversation_id": "conversation-mutated",
+            "expected_context_version": 1,
+            "current_context_version": 1,
+            "runtime": snapshot.runtime,
+            "task_messages": (),
+            "summaries": (),
+            "events": (),
+        }
+        for field_name, value in top_level_mutations.items():
+            with pytest.raises((AttributeError, TypeError, ValidationError)):
+                setattr(snapshot, field_name, value)
+        with pytest.raises((AttributeError, TypeError, ValidationError)):
+            snapshot.task_messages[0].content = "已被改写"
+        with pytest.raises(TypeError):
+            snapshot.task_messages[0].payload["artifact"] = {}  # type: ignore[index]
+        with pytest.raises((AttributeError, TypeError)):
+            snapshot.task_messages[0].payload["artifact"]["refs"].append(  # type: ignore[index,union-attr]
+                "artifact:mutated"
+            )
+        with pytest.raises((AttributeError, TypeError, ValidationError)):
+            snapshot.summaries[0].summary_id = "summary-mutated"
+        with pytest.raises(TypeError):
+            snapshot.summaries[0].workflow_states[WORKFLOW] = "mutated"
+        with pytest.raises((AttributeError, TypeError)):
+            snapshot.summaries[0].artifact_evidence_refs.append("artifact:mutated")
+        with pytest.raises((AttributeError, TypeError, ValidationError)):
+            snapshot.events[0].event_id = "event-mutated"
+        with pytest.raises(TypeError):
+            snapshot.events[0].payload["message"] = {}  # type: ignore[index]
+        with pytest.raises((AttributeError, TypeError)):
+            snapshot.events[0].payload["message"]["metadata"]["labels"].append(  # type: ignore[index,union-attr]
+                "mutated"
+            )
+
+        message.content = "输入对象已改写"
+        message.payload["artifact"]["refs"].append("artifact:alias")
+        summary.user_goals.append("输入别名改写")
+        summary.workflow_states[WORKFLOW] = "alias-mutated"
+        runtime_event.payload["message"]["metadata"]["labels"].append("alias")
+
+        assert snapshot.task_messages[0].content == "请生成商品视频"
+        assert snapshot.task_messages[0].payload == {
+            "artifact": {"refs": ["artifact:input"]}
+        }
+        assert snapshot.summaries[0].user_goals == ["生成商品视频"]
+        assert snapshot.summaries[0].workflow_states == {
+            WORKFLOW: "running:intake:v1"
+        }
+        assert snapshot.events[0].payload == {
+            "message": {"metadata": {"labels": ["input"]}}
+        }
+
+        document = snapshot.model_dump(mode="json")
+        encoded = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    assert json.loads(encoded) == document
 
 
 async def seed_two_turns(repository: VideoRuntimeRepository) -> None:

@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
+from inspect import iscoroutinefunction
 from typing import Any
 
 from pixelflow.agent_runtime.contracts import ContextEnvelope
@@ -213,7 +214,7 @@ def make_pixelflow_agent_live_capabilities(
     try:
         scene_asset_skill = scene_asset_skill_factory()
         if scene_asset_skill is None or any(
-            not callable(getattr(scene_asset_skill, method_name, None))
+            not iscoroutinefunction(getattr(scene_asset_skill, method_name, None))
             for method_name in ("reference_image", "text_to_image")
         ):
             return _not_ready_bundle()

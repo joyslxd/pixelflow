@@ -43,6 +43,42 @@ class _SceneAssetSkillWithoutTextToImage:
         return {}
 
 
+class _SynchronousSceneAssetSkill:
+    calls = 0
+
+    def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+    def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+
+class _SceneAssetSkillWithSynchronousReferenceImage:
+    calls = 0
+
+    def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+    async def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+
+class _SceneAssetSkillWithSynchronousTextToImage:
+    calls = 0
+
+    async def reference_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+    def text_to_image(self, **_kwargs: Any) -> dict[str, object]:
+        type(self).calls += 1
+        return {}
+
+
 class _Model:
     def __init__(self, calls: list[tuple[tuple[str, str], ...]]) -> None:
         self._calls = calls
@@ -251,3 +287,31 @@ def test_capability_factory_fails_closed_for_incomplete_scene_asset_skill(
     assert bundle.ready is False
     assert bundle.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
     assert bundle.capabilities is None
+
+
+@pytest.mark.parametrize(
+    "scene_asset_skill_factory",
+    [
+        _SynchronousSceneAssetSkill,
+        _SceneAssetSkillWithSynchronousReferenceImage,
+        _SceneAssetSkillWithSynchronousTextToImage,
+    ],
+)
+def test_capability_factory_requires_both_scene_methods_to_be_async(
+    scene_asset_skill_factory: type[object],
+) -> None:
+    """同步双方法或任一同步方法都不能满足异步 Scene Skill 合同。"""
+
+    scene_asset_skill_factory.calls = 0  # type: ignore[attr-defined]
+    bundle = make_pixelflow_agent_live_capabilities(
+        model_factory=lambda *_args, **_kwargs: _Model([]),
+        scene_asset_skill_factory=scene_asset_skill_factory,
+        power_mem_service=_PowerMemService(),
+        clock=_Clock(),
+        model_name="deepseek-v4-pro",
+    )
+
+    assert bundle.ready is False
+    assert bundle.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
+    assert bundle.capabilities is None
+    assert scene_asset_skill_factory.calls == 0  # type: ignore[attr-defined]

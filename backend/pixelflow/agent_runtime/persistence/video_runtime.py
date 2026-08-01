@@ -112,13 +112,40 @@ class VideoWorkflowStateConflictError(RuntimeError):
     """视频状态 CAS 版本或动作幂等摘要发生冲突。"""
 
 
-class _FrozenJsonList(tuple[object, ...]):
-    """保留 JSON 数组比较语义，同时拒绝原地修改。"""
+def _reject_frozen_json_mutation(*_args: object, **_kwargs: object) -> None:
+    """统一拒绝只读 JSON 容器的所有原地修改入口。"""
 
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, (list, tuple)) and tuple(self) == tuple(other)
+    raise TypeError("冻结的 JSON 值不能修改")
 
-    __hash__ = None
+
+class _FrozenJsonDict(dict[str, object]):
+    """保持原生 JSON 对象兼容性的只读字典。"""
+
+    __setitem__ = _reject_frozen_json_mutation
+    __delitem__ = _reject_frozen_json_mutation
+    clear = _reject_frozen_json_mutation
+    pop = _reject_frozen_json_mutation
+    popitem = _reject_frozen_json_mutation
+    setdefault = _reject_frozen_json_mutation
+    update = _reject_frozen_json_mutation
+    __ior__ = _reject_frozen_json_mutation
+
+
+class _FrozenJsonList(list[object]):
+    """保持原生 JSON 数组兼容性的只读列表。"""
+
+    __setitem__ = _reject_frozen_json_mutation
+    __delitem__ = _reject_frozen_json_mutation
+    append = _reject_frozen_json_mutation
+    clear = _reject_frozen_json_mutation
+    extend = _reject_frozen_json_mutation
+    insert = _reject_frozen_json_mutation
+    pop = _reject_frozen_json_mutation
+    remove = _reject_frozen_json_mutation
+    reverse = _reject_frozen_json_mutation
+    sort = _reject_frozen_json_mutation
+    __iadd__ = _reject_frozen_json_mutation
+    __imul__ = _reject_frozen_json_mutation
 
 
 def _validate_json(value: object, ancestors: set[int]) -> None:
@@ -129,7 +156,7 @@ def _validate_json(value: object, ancestors: set[int]) -> None:
             raise ValueError("JSON 数字必须是有限值")
         return
     if type(value) not in {dict, list} and not isinstance(
-        value, (MappingProxyType, _FrozenJsonList)
+        value, (MappingProxyType, _FrozenJsonDict, _FrozenJsonList)
     ):
         raise ValueError("只允许 JSON 原生值")
     identity = id(value)
@@ -178,7 +205,9 @@ def _json_copy(value: object, *, field_name: str) -> dict[str, JsonValue]:
 
 def _freeze_json(value: object) -> object:
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze_json(child) for key, child in value.items()})
+        return _FrozenJsonDict(
+            {key: _freeze_json(child) for key, child in value.items()}
+        )
     if isinstance(value, (list, tuple)):
         return _FrozenJsonList(_freeze_json(child) for child in value)
     return value
@@ -513,41 +542,157 @@ class VideoRuntimeSafeSnapshot(_FrozenContractModel):
         return [item.model_dump(mode="python") for item in value]
 
 
-@dataclass(frozen=True, slots=True)
-class VideoRuntimeContextSnapshot:
-    """同一 Memory 临界区或 SQL 事务读取的完整 Context 原料。"""
+class _FrozenContextTaskMessage(_FrozenContractModel):
+    """冻结任务 Store 消息在 Context 读取边界上的公开投影。"""
 
-    conversation_id: str
-    expected_context_version: int
-    current_context_version: int
+    message_id: str = Field(min_length=1)
+    conversation_id: str = Field(min_length=1)
+    user_id: str | None = None
+    role: str = Field(min_length=1)
+    content: str = ""
+    payload: dict[str, JsonValue] = Field(default_factory=dict)
+    created_at: str = ""
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def copy_payload(cls, value: object) -> object:
+        del cls
+        return _json_copy(value, field_name="Context 消息 payload")
+
+    def model_post_init(self, context: object, /) -> None:
+        del context
+        object.__setattr__(self, "payload", _freeze_json(self.payload))
+
+    @field_serializer("payload")
+    def serialize_payload(self, value: object) -> object:
+        return _thaw_json(value)
+
+
+class _FrozenContextSummary(ContextSummary):
+    """冻结摘要的列表与状态映射，同时保留 ContextSummary 公共合同。"""
+
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    def model_post_init(self, context: object, /) -> None:
+        del context
+        for field_name in (
+            "user_goals",
+            "confirmed_decisions",
+            "negative_constraints",
+            "unresolved_questions",
+            "artifact_evidence_refs",
+            "covered_message_ids",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _FrozenJsonList(getattr(self, field_name)),
+            )
+        object.__setattr__(
+            self,
+            "workflow_states",
+            _FrozenJsonDict(dict(self.workflow_states)),
+        )
+
+    @field_serializer(
+        "user_goals",
+        "confirmed_decisions",
+        "negative_constraints",
+        "unresolved_questions",
+        "artifact_evidence_refs",
+        "covered_message_ids",
+    )
+    def serialize_string_list(self, value: object) -> object:
+        return list(value)  # type: ignore[arg-type]
+
+    @field_serializer("workflow_states")
+    def serialize_workflow_states(self, value: object) -> object:
+        return dict(value)  # type: ignore[arg-type]
+
+
+class _FrozenContextEvent(AgentEvent):
+    """冻结 Context 版本裁剪依赖的事件与嵌套 payload。"""
+
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def copy_payload(cls, value: object) -> object:
+        del cls
+        return _json_copy(value, field_name="Context 事件 payload")
+
+    def model_post_init(self, context: object, /) -> None:
+        del context
+        object.__setattr__(self, "payload", _freeze_json(self.payload))
+
+    @field_serializer("payload")
+    def serialize_payload(self, value: object) -> object:
+        return _thaw_json(value)
+
+
+class VideoRuntimeContextSnapshot(_FrozenContractModel):
+    """同一 Memory 临界区或 SQL 事务读取的完整深只读 Context 原料。"""
+
+    conversation_id: str = Field(min_length=1)
+    expected_context_version: int = Field(ge=0)
+    current_context_version: int = Field(ge=0)
     runtime: VideoRuntimeSafeSnapshot
-    task_messages: tuple[PixelFlowConversationMessageRecord, ...]
+    task_messages: tuple[_FrozenContextTaskMessage, ...]
     summaries: tuple[ContextSummary, ...]
     events: tuple[AgentEvent, ...]
 
-    def __post_init__(self) -> None:
-        if (
-            type(self.expected_context_version) is not int
-            or self.expected_context_version < 0
-            or type(self.current_context_version) is not int
-            or self.current_context_version < self.expected_context_version
-        ):
+    @field_validator("task_messages", mode="before")
+    @classmethod
+    def copy_task_messages(cls, value: object) -> object:
+        del cls
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Context 消息必须是有序集合")
+        return tuple(
+            item.to_dict()
+            if isinstance(item, PixelFlowConversationMessageRecord)
+            else item
+            for item in value
+        )
+
+    def model_post_init(self, context: object, /) -> None:
+        del context
+        if self.current_context_version < self.expected_context_version:
             raise ValueError("Context Snapshot 版本边界非法")
         object.__setattr__(
             self,
-            "task_messages",
-            tuple(deepcopy(item) for item in self.task_messages),
-        )
-        object.__setattr__(
-            self,
             "summaries",
-            tuple(_clone(item) for item in self.summaries),
+            tuple(
+                _FrozenContextSummary.model_validate(item.model_dump(mode="python"))
+                for item in self.summaries
+            ),
         )
         object.__setattr__(
             self,
             "events",
-            tuple(_clone(item) for item in self.events),
+            tuple(
+                _FrozenContextEvent.model_validate(item.model_dump(mode="python"))
+                for item in self.events
+            ),
         )
+
+    @field_serializer("runtime")
+    def serialize_runtime(self, value: VideoRuntimeSafeSnapshot) -> object:
+        return value.model_dump(mode="python")
+
+    @field_serializer("task_messages")
+    def serialize_task_messages(
+        self,
+        value: tuple[_FrozenContextTaskMessage, ...],
+    ) -> object:
+        return [item.model_dump(mode="python") for item in value]
+
+    @field_serializer("summaries")
+    def serialize_summaries(self, value: tuple[ContextSummary, ...]) -> object:
+        return [item.model_dump(mode="python") for item in value]
+
+    @field_serializer("events")
+    def serialize_events(self, value: tuple[AgentEvent, ...]) -> object:
+        return [item.model_dump(mode="python") for item in value]
 
 
 class VideoRuntimeContextSnapshotConflictError(RuntimeError):
