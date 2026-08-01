@@ -1528,7 +1528,7 @@ class VideoLiveWorkflowHandler:
                     "action": command.decision.action.value,
                     "intent": "video",
                     "workflow_id": command.workflow_id,
-                    "stage": command.decision.target_stage,
+                    "stage": state.current_stage.value,
                     "artifact_ref": command.decision.target_artifact_ref,
                     "patch": deepcopy_json(command.decision.patch),
                 },

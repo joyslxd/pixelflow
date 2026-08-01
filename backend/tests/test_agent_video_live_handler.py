@@ -764,11 +764,17 @@ async def test_video_handler_plan_continue_without_credential_opens_auth_interru
             "action": "continue_workflow",
             "intent": "video",
             "workflow_id": workflow.workflow_id,
-            "stage": workflow.current_stage,
+            "stage": "generate_scene_assets",
             "artifact_ref": workflow.latest_artifact_refs[0],
             "patch": {},
         },
     }
+    assert workflow.current_stage == "plan_review"
+    assert (
+        result.interrupt.payload["authorization_action"]["stage"]
+        == result.interrupt.payload["stage"]
+        == result.workflow.current_stage
+    )
     assert "token" not in str(result.interrupt.payload).lower()
     assert "authorization" not in str(
         result.interrupt.payload["authorization_action"]

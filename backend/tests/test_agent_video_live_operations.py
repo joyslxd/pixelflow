@@ -424,6 +424,33 @@ class _UnusedCapabilities:
         raise AssertionError(f"缺凭据分支不应调用能力端口：{name}")
 
 
+class _PaidSceneAssetCapabilities:
+    """只实现 Plan 确认后真实恢复需要的付费场景资产边界。"""
+
+    def __init__(self) -> None:
+        self.generate_scene_assets_calls = 0
+
+    async def generate_scene_assets(
+        self,
+        state: object,
+        *,
+        credential: TransientTurnCredential,
+    ) -> dict[str, object]:
+        del credential
+        self.generate_scene_assets_calls += 1
+        assets = copy.deepcopy(state.scene_package.global_assets)
+        for item in assets["characters"]:
+            item["three_view_images"] = [
+                f"https://assets.example.com/{item['asset_id']}.png"
+            ]
+        for collection in ("scenes", "props"):
+            for item in assets[collection]:
+                item["images"] = [
+                    f"https://assets.example.com/{item['asset_id']}.png"
+                ]
+        return {"ok": True, "global_assets": assets}
+
+
 class _Clock:
     def now(self) -> datetime:
         return NOW
@@ -798,7 +825,7 @@ async def _complete_scenes_and_merge(
     return envelope, workflow
 
 
-def _reviewed_scene_package_state():
+def _plan_review_state():
     planning = VideoPlanningWorkflowService()
     state = planning.start(
         workflow_id=WORKFLOW_ID,
@@ -820,6 +847,12 @@ def _reviewed_scene_package_state():
         _concrete_plan(directions[0].to_dict()),
         now=NOW,
     )
+    return state
+
+
+def _reviewed_scene_package_state():
+    planning = VideoPlanningWorkflowService()
+    state = _plan_review_state()
     approved = planning.approve_plan(state, now=NOW)
     scene_service = VideoScenePackageWorkflowService()
     prepared = scene_service.prepare_from_approved_plan(
@@ -2263,6 +2296,205 @@ async def test_completion_claim_bridge_works_with_memory_and_sql_repositories(
         await runtime.run_once()
         replayed = await repository.list_projection_messages(USER_ID, CONVERSATION_ID)
         assert [item.message_id for item in replayed] == [message.message_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_plan_scene_asset_authorization_resumes_current_stage_once_after_restart(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """Plan 推进后的授权响应必须在当前权威阶段恢复一次付费场景资产调用。"""
+
+    clock = _MutableClock()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task13-plan-authorization-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        plan_state = _plan_review_state()
+        await _commit_seed_state(repository, store, plan_state)
+        capabilities = _PaidSceneAssetCapabilities()
+        vault = TransientCredentialVault()
+        handler = VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=capabilities,
+            credential_provider=vault,
+            clock=clock,
+        )
+        graph = make_agent_runtime_graph(
+            registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+            checkpointer=InMemorySaver(),
+        )
+        executor = SupervisorTurnExecutor(
+            repository=repository,
+            task_store=store,
+            decision_service=_ExplicitVideoDecisionService(),
+            graph=graph,
+            credential_vault=vault,
+            clock=clock.now,
+            worker_id=f"task13-plan-authorization-{kind}",
+            heartbeat_interval_seconds=0.01,
+            scan_interval_seconds=0.01,
+        )
+        original_turn_id = "turn-task13-plan-authorization"
+        client_input_id = UUID("00000000-0000-4000-8000-000000001321")
+        artifact_ref = plan_state.active_plan_artifact_ref
+        explicit = ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id=WORKFLOW_ID,
+            stage="plan_review",
+            artifact_ref=artifact_ref,
+            patch={},
+        )
+        turn = TurnRecord(
+            turn_id=original_turn_id,
+            conversation_id=CONVERSATION_ID,
+            client_input_id=client_input_id,
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=clock.now(),
+        )
+        await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id=conversation_message_id(
+                    CONVERSATION_ID,
+                    client_input_id,
+                ),
+                conversation_id=CONVERSATION_ID,
+                user_id=USER_ID,
+                role="user",
+                content="同意 Plan 并生成场景资产",
+                payload={
+                    "client_message_id": str(client_input_id),
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [artifact_ref],
+                    "explicit_action": explicit.model_dump(mode="json"),
+                },
+                created_at=clock.now().isoformat(),
+            )
+        )
+        await repository.enqueue_turn_for_execution(
+            USER_ID,
+            turn,
+            now=clock.now(),
+        )
+        try:
+            await executor.notify_turn(
+                SupervisorTurnScope(
+                    user_id=USER_ID,
+                    conversation_id=CONVERSATION_ID,
+                    turn_id=original_turn_id,
+                ),
+                credential=None,
+            )
+            await executor.wait_idle()
+            assert capabilities.generate_scene_assets_calls == 0
+
+            authorization = await repository.get_open_interrupt(
+                USER_ID,
+                CONVERSATION_ID,
+            )
+            assert authorization is not None
+            assert authorization.kind == "authorization_required"
+            authorization_document = authorization.model_dump(mode="json")
+            authorization_action = ExplicitActionSignal.model_validate(
+                authorization_document["payload"]["authorization_action"]
+            )
+            assert authorization_document["payload"]["stage"] == "generate_scene_assets"
+            assert authorization_action == ExplicitActionSignal(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                workflow_id=WORKFLOW_ID,
+                stage="generate_scene_assets",
+                artifact_ref=artifact_ref,
+                patch={},
+            )
+            assert authorization_action.workflow_id == authorization.workflow_id
+            assert authorization_action.stage == authorization.payload["stage"]
+            assert authorization_action.artifact_ref == authorization.payload["artifact_ref"]
+            serialized_authorization = json.dumps(
+                authorization_document,
+                ensure_ascii=False,
+            ).lower()
+            assert FAKE_AUTHORIZATION.lower() not in serialized_authorization
+            assert "bearer " not in serialized_authorization
+            assert "token" not in serialized_authorization
+            assert "credential" not in serialized_authorization
+
+            await executor.aclose()
+            executor = SupervisorTurnExecutor(
+                repository=repository,
+                task_store=store,
+                decision_service=_ExplicitVideoDecisionService(),
+                graph=graph,
+                credential_vault=vault,
+                clock=clock.now,
+                worker_id=f"task13-plan-authorization-restarted-{kind}",
+                heartbeat_interval_seconds=0.01,
+                scan_interval_seconds=0.01,
+            )
+            response_id = UUID("00000000-0000-4000-8000-000000001322")
+            response_request = InterruptResponseRequest(
+                client_response_id=response_id,
+                value={
+                    "content": "授权后继续生成场景资产",
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [artifact_ref],
+                    "explicit_action": authorization_action,
+                },
+            )
+            response = await repository.register_interrupt_response(
+                USER_ID,
+                CONVERSATION_ID,
+                authorization.interrupt_id,
+                request=response_request,
+                message=PixelFlowConversationMessageRecord(
+                    message_id=conversation_message_id(
+                        CONVERSATION_ID,
+                        response_id,
+                    ),
+                    conversation_id=CONVERSATION_ID,
+                    user_id=USER_ID,
+                    role="user",
+                    content=response_request.value.content,
+                    payload={
+                        "client_message_id": str(response_id),
+                        "interrupt_id": authorization.interrupt_id,
+                        "value": response_request.value.model_dump(mode="json"),
+                        "explicit_action": authorization_action.model_dump(
+                            mode="json"
+                        ),
+                    },
+                    created_at=clock.now().isoformat(),
+                ),
+                responded_at=clock.now(),
+            )
+            await executor.notify_interrupt(
+                response.interrupt,
+                credential=TransientTurnCredential(FAKE_AUTHORIZATION),
+            )
+            await executor.wait_idle()
+
+            assert capabilities.generate_scene_assets_calls == 1
+            restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+            assert restored is not None
+            restored_state = decode_video_workflow_state(restored)
+            assert restored_state.current_stage.value == "scene_package_review"
+            review = await repository.get_open_interrupt(
+                USER_ID,
+                CONVERSATION_ID,
+            )
+            assert review is not None
+            assert review.kind == "video_scene_package_review"
+            assert review.turn_id == original_turn_id
+        finally:
+            await executor.aclose()
 
 
 @pytest.mark.asyncio
