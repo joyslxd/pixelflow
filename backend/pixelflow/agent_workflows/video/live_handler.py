@@ -28,7 +28,13 @@ from .delivery import (
     VideoDeliveryWorkflowState,
     VideoWebArtifactAdapter,
 )
-from .live_capabilities import Clock, TurnCredentialProvider, VideoLiveCapabilityPort
+from .live_capabilities import (
+    Clock,
+    TransientTurnCredential,
+    TurnCredentialProvider,
+    VideoLiveCapabilityPort,
+)
+from .live_operations import VideoLiveOperationBridge
 from .planning import (
     VideoPlanningStage,
     VideoPlanningWorkflowService,
@@ -222,11 +228,37 @@ class VideoLiveWorkflowHandler:
                 and state.current_stage is VideoPostProductionStage.MERGE_VIDEO
             ):
                 self._require_patch_keys(command, allowed=frozenset())
-                updated = await self._postproduction.retry_merge(
-                    state,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._postproduction.retry_merge(
+                        state,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_postproduction_operation(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
                 return self._result_from_state(
                     command,
                     updated,
@@ -237,11 +269,37 @@ class VideoLiveWorkflowHandler:
                 and state.current_stage is VideoPostProductionStage.QUALITY_REVIEW
             ):
                 self._require_patch_keys(command, allowed=frozenset())
-                updated = await self._postproduction.retry_quality_review(
-                    state,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._postproduction.retry_quality_review(
+                        state,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_postproduction_operation(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
                 return self._result_from_state(
                     command,
                     updated,
@@ -250,14 +308,15 @@ class VideoLiveWorkflowHandler:
             if state.current_stage is VideoPostProductionStage.VIDEO_REVIEW:
                 if action is AgentAction.CONTINUE_WORKFLOW:
                     self._require_patch_keys(command, allowed=frozenset())
+                    operation_port = self._operation_port_for(command)
                     finished = await self._postproduction.finish(
                         state,
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                         now=self._clock.now(),
                     )
                     delivery = await self._delivery.initialize(
                         finished,
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                         now=self._clock.now(),
                     )
                     return self._result_from_state(
@@ -279,15 +338,41 @@ class VideoLiveWorkflowHandler:
                         ),
                     )
                     if set(patch) == {"user_feedback"}:
-                        updated = await self._postproduction.start_quality_review(
-                            state,
-                            user_feedback=self._required_text(
-                                patch["user_feedback"],
-                                "user_feedback",
-                            ),
-                            operation_port=self._operation_port,
-                            now=self._clock.now(),
+                        live_operations = self._live_operation_bridge()
+                        credential = (
+                            None
+                            if live_operations is None
+                            else self._credential_provider.get(command.turn_id)
                         )
+                        if live_operations is not None and credential is None:
+                            return self._wait_for_authorization(
+                                command,
+                                state,
+                                existing_envelope=existing_envelope,
+                            )
+                        operation_port = self._operation_port_for(command)
+                        try:
+                            updated = await self._postproduction.start_quality_review(
+                                state,
+                                user_feedback=self._required_text(
+                                    patch["user_feedback"],
+                                    "user_feedback",
+                                ),
+                                operation_port=operation_port,
+                                now=self._clock.now(),
+                            )
+                            if live_operations is not None:
+                                assert credential is not None
+                                updated = await self._start_postproduction_operation(
+                                    command,
+                                    updated,
+                                    operations=live_operations,
+                                    operation_port=operation_port,
+                                    credential=credential,
+                                )
+                        finally:
+                            if credential is not None:
+                                credential.discard()
                     elif set(patch) == {"scene_patches"}:
                         updated = await self._postproduction.apply_user_revision(
                             state,
@@ -295,33 +380,59 @@ class VideoLiveWorkflowHandler:
                                 patch["scene_patches"]
                             ),
                             generation_service=self._generation,
-                            operation_port=self._operation_port,
+                            operation_port=self._operation_port_for(command),
                             now=self._clock.now(),
                         )
                     elif set(patch) in (
                         {"jianying_action"},
                         {"jianying_action", "project_name"},
                     ) and patch["jianying_action"] == "start":
-                        delivery = await self._delivery.initialize(
-                            state,
-                            operation_port=self._operation_port,
-                            now=self._clock.now(),
-                        )
-                        project_name = (
+                        live_operations = self._live_operation_bridge()
+                        credential = (
                             None
-                            if "project_name" not in patch
-                            else self._required_text(
-                                patch["project_name"],
-                                "project_name",
+                            if live_operations is None
+                            else self._credential_provider.get(command.turn_id)
+                        )
+                        if live_operations is not None and credential is None:
+                            return self._wait_for_authorization(
+                                command,
+                                state,
+                                existing_envelope=existing_envelope,
                             )
-                        )
-                        updated = await self._delivery.start_jianying_draft(
-                            delivery,
-                            retry_failed=False,
-                            project_name=project_name,
-                            operation_port=self._operation_port,
-                            now=self._clock.now(),
-                        )
+                        operation_port = self._operation_port_for(command)
+                        try:
+                            delivery = await self._delivery.initialize(
+                                state,
+                                operation_port=operation_port,
+                                now=self._clock.now(),
+                            )
+                            project_name = (
+                                None
+                                if "project_name" not in patch
+                                else self._required_text(
+                                    patch["project_name"],
+                                    "project_name",
+                                )
+                            )
+                            updated = await self._delivery.start_jianying_draft(
+                                delivery,
+                                retry_failed=False,
+                                project_name=project_name,
+                                operation_port=operation_port,
+                                now=self._clock.now(),
+                            )
+                            if live_operations is not None:
+                                assert credential is not None
+                                updated = await self._start_delivery_operation(
+                                    command,
+                                    updated,
+                                    operations=live_operations,
+                                    operation_port=operation_port,
+                                    credential=credential,
+                                )
+                        finally:
+                            if credential is not None:
+                                credential.discard()
                         return self._result_from_state(
                             command,
                             updated,
@@ -366,17 +477,102 @@ class VideoLiveWorkflowHandler:
                 existing_envelope=existing_envelope,
             )
         if state.current_stage is VideoScenePackageStage.SCENE_PACKAGE_REVIEW:
-            generated = await self._generation.start_from_reviewed_scene_package(
-                state,
-                operation_port=self._operation_port,
-                now=self._clock.now(),
+            live_operations = self._live_operation_bridge()
+            credential = (
+                None
+                if live_operations is None
+                else self._credential_provider.get(command.turn_id)
             )
+            if live_operations is not None and credential is None:
+                return self._wait_for_authorization(
+                    command,
+                    state,
+                    existing_envelope=existing_envelope,
+                )
+            operation_port = self._operation_port_for(command)
+            try:
+                generated = await self._generation.start_from_reviewed_scene_package(
+                    state,
+                    operation_port=operation_port,
+                    now=self._clock.now(),
+                )
+                if live_operations is not None:
+                    assert credential is not None
+                    generated = await self._start_scene_video_operations(
+                        command,
+                        generated,
+                        operations=live_operations,
+                        operation_port=operation_port,
+                        credential=credential,
+                    )
+            finally:
+                if credential is not None:
+                    credential.discard()
             return self._result_from_state(
                 command,
                 generated,
                 existing_envelope=existing_envelope,
             )
         raise VideoLiveStateConflictError("video_action_not_allowed_for_stage")
+
+    async def _start_scene_video_operations(
+        self,
+        command: WorkflowCommand,
+        state: VideoSceneGenerationWorkflowState,
+        *,
+        operations: VideoLiveOperationBridge,
+        operation_port: OperationPort,
+        credential: TransientTurnCredential,
+    ) -> VideoSceneGenerationWorkflowState:
+        """按 M11 权威请求逐个启动分镜 Operation，再只回读原 job。"""
+
+        requests = {
+            str(item["scene_id"]): item
+            for item in state.generation_requests
+        }
+        for pending in state.pending_operations:
+            scene_id = pending.stage.partition(":")[2]
+            provider_request = requests.get(scene_id)
+            if provider_request is None:
+                raise VideoLiveStateConflictError(
+                    "video_operation_request_not_found"
+                )
+            start_request = operations.start_request_from_claim(
+                user_id=command.user_id,
+                conversation_id=command.conversation_id,
+                job=pending,
+                stage_version=state.stage_version,
+                provider_request=provider_request,
+            )
+            started = await operations.start(
+                start_request,
+                credential=credential,
+            )
+            if started.job_id != pending.job_id:
+                raise VideoLiveStateConflictError("video_operation_job_mismatch")
+        return await self._generation.resume(
+            state,
+            operation_port=operation_port,
+            now=self._clock.now(),
+        )
+
+    def _live_operation_bridge(self) -> VideoLiveOperationBridge | None:
+        return (
+            self._operation_port
+            if isinstance(self._operation_port, VideoLiveOperationBridge)
+            else None
+        )
+
+    def _operation_port_for(self, command: WorkflowCommand) -> OperationPort:
+        port = self._operation_port
+        if port is None:
+            raise VideoLiveStateConflictError("video_operation_port_required")
+        if isinstance(port, VideoLiveOperationBridge):
+            return port.bind(
+                user_id=command.user_id,
+                conversation_id=command.conversation_id,
+            )
+        return port
 
     async def _dispatch_scene_generation(
         self,
@@ -410,11 +606,37 @@ class VideoLiveWorkflowHandler:
                 )
             if action is AgentAction.REGENERATE_STAGE:
                 self._require_patch_keys(command, allowed=frozenset())
-                updated = await self._generation.regenerate_modified_scenes(
-                    state,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._generation.regenerate_modified_scenes(
+                        state,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_scene_video_operations(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
                 return self._result_from_state(
                     command,
                     updated,
@@ -430,12 +652,38 @@ class VideoLiveWorkflowHandler:
                     if "scene_ids" not in patch
                     else self._string_list(patch["scene_ids"], "scene_ids")
                 )
-                updated = await self._generation.retry_failed_scenes(
-                    state,
-                    scene_ids=scene_ids,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._generation.retry_failed_scenes(
+                        state,
+                        scene_ids=scene_ids,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_scene_video_operations(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
                 return self._result_from_state(
                     command,
                     updated,
@@ -443,11 +691,37 @@ class VideoLiveWorkflowHandler:
                 )
             if action is AgentAction.CONTINUE_WORKFLOW:
                 self._require_patch_keys(command, allowed=frozenset())
-                updated = await self._postproduction.start_merge(
-                    state,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._postproduction.start_merge(
+                        state,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_postproduction_operation(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
                 return self._result_from_state(
                     command,
                     updated,
@@ -460,6 +734,116 @@ class VideoLiveWorkflowHandler:
                 "video_action_not_allowed_for_stage"
             ) from exc
         raise VideoLiveStateConflictError("video_action_not_allowed_for_stage")
+
+    async def _start_postproduction_operation(
+        self,
+        command: WorkflowCommand,
+        state: VideoPostProductionWorkflowState,
+        *,
+        operations: VideoLiveOperationBridge,
+        operation_port: OperationPort,
+        credential: TransientTurnCredential,
+    ) -> VideoPostProductionWorkflowState:
+        """启动当前合并或质检 Operation，并回读同一内部 job。"""
+
+        pending = state.pending_operation
+        if pending is None:
+            raise VideoLiveStateConflictError("video_operation_request_not_found")
+        if state.current_stage is VideoPostProductionStage.MERGE_VIDEO:
+            provider_request = state.merge_request
+        elif state.current_stage is VideoPostProductionStage.QUALITY_REVIEW:
+            provider_request = self._quality_provider_request(state)
+        else:
+            raise VideoLiveStateConflictError("video_operation_stage_not_supported")
+        start_request = operations.start_request_from_claim(
+            user_id=command.user_id,
+            conversation_id=command.conversation_id,
+            job=pending,
+            stage_version=state.stage_version,
+            provider_request=provider_request,
+        )
+        started = await operations.start(start_request, credential=credential)
+        if started.job_id != pending.job_id:
+            raise VideoLiveStateConflictError("video_operation_job_mismatch")
+        return await self._postproduction.resume(
+            state,
+            operation_port=operation_port,
+            now=self._clock.now(),
+        )
+
+    @staticmethod
+    def _quality_provider_request(
+        state: VideoPostProductionWorkflowState,
+    ) -> dict[str, Any]:
+        """从 M11 权威状态构造与既有 QAAgent Client 一致的请求。"""
+
+        merged = state.merged_video
+        if merged is None:
+            raise VideoLiveStateConflictError("video_merged_result_required")
+        source = state.generation_state
+        contract = source.source_scene_package.creation_contract
+        return {
+            "merged_video_url": merged["video_url"],
+            "scene_videos": [
+                {
+                    "scene_id": item["scene_id"],
+                    "scene_index": item["scene_index"],
+                    "video_url": item["video_url"],
+                }
+                for item in sorted(
+                    source.scene_videos,
+                    key=lambda item: item["scene_index"],
+                )
+            ],
+            "scene_packages": source.scene_packages,
+            "brief": {
+                "creation_contract": contract,
+                "original_scene_packages": (
+                    source.source_scene_package.scene_packages
+                ),
+                "expected_duration_sec": (
+                    source.source_scene_package.target_duration_ms // 1000
+                ),
+            },
+            "materials": [
+                {"url": url}
+                for url in source.source_scene_package.material_image_urls
+            ],
+            "user_feedback": state.quality_feedback,
+            "ratio": contract.get("video_ratio"),
+            "size": contract.get("video_size"),
+        }
+
+    async def _start_delivery_operation(
+        self,
+        command: WorkflowCommand,
+        state: VideoDeliveryWorkflowState,
+        *,
+        operations: VideoLiveOperationBridge,
+        operation_port: OperationPort,
+        credential: TransientTurnCredential,
+    ) -> VideoDeliveryWorkflowState:
+        """启动当前剪映草稿 Operation，并回读同一内部 job。"""
+
+        pending = state.pending_operation
+        provider_request = state.pending_jianying_operation
+        if pending is None or provider_request is None:
+            raise VideoLiveStateConflictError("video_operation_request_not_found")
+        start_request = operations.start_request_from_claim(
+            user_id=command.user_id,
+            conversation_id=command.conversation_id,
+            job=pending,
+            stage_version=state.stage_version,
+            provider_request=provider_request,
+        )
+        started = await operations.start(start_request, credential=credential)
+        if started.job_id != pending.job_id:
+            raise VideoLiveStateConflictError("video_operation_job_mismatch")
+        return await self._delivery.resume_jianying_draft(
+            state,
+            operation_port=operation_port,
+            now=self._clock.now(),
+        )
 
     def _wait_for_scene_video_review(
         self,
@@ -504,16 +888,17 @@ class VideoLiveWorkflowHandler:
                         }
                     ),
                 )
+                operation_port = self._operation_port_for(command)
                 if not patch:
                     finished = await self._postproduction.finish(
                         state.postproduction_state,
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                         now=self._clock.now(),
                     )
                     updated = await self._delivery.synchronize_postproduction(
                         state,
                         finished,
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                         now=self._clock.now(),
                     )
                 elif set(patch) == {"download_url"}:
@@ -524,7 +909,7 @@ class VideoLiveWorkflowHandler:
                             "download_url",
                         ),
                         downloaded_at=self._clock.now(),
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                     )
                 elif set(patch) == {
                     "download_url",
@@ -542,7 +927,7 @@ class VideoLiveWorkflowHandler:
                             "download_url",
                         ),
                         downloaded_at=self._clock.now(),
-                        operation_port=self._operation_port,
+                        operation_port=operation_port,
                     )
                 else:
                     raise VideoLiveStateConflictError(
@@ -577,13 +962,39 @@ class VideoLiveWorkflowHandler:
                     if "project_name" not in patch
                     else self._required_text(patch["project_name"], "project_name")
                 )
-                updated = await self._delivery.start_jianying_draft(
-                    state,
-                    retry_failed=action is AgentAction.RETRY_FAILED,
-                    project_name=project_name,
-                    operation_port=self._operation_port,
-                    now=self._clock.now(),
+                live_operations = self._live_operation_bridge()
+                credential = (
+                    None
+                    if live_operations is None
+                    else self._credential_provider.get(command.turn_id)
                 )
+                if live_operations is not None and credential is None:
+                    return self._wait_for_authorization(
+                        command,
+                        state,
+                        existing_envelope=existing_envelope,
+                    )
+                operation_port = self._operation_port_for(command)
+                try:
+                    updated = await self._delivery.start_jianying_draft(
+                        state,
+                        retry_failed=action is AgentAction.RETRY_FAILED,
+                        project_name=project_name,
+                        operation_port=operation_port,
+                        now=self._clock.now(),
+                    )
+                    if live_operations is not None:
+                        assert credential is not None
+                        updated = await self._start_delivery_operation(
+                            command,
+                            updated,
+                            operations=live_operations,
+                            operation_port=operation_port,
+                            credential=credential,
+                        )
+                finally:
+                    if credential is not None:
+                        credential.discard()
             else:
                 raise VideoLiveStateConflictError(
                     "video_action_not_allowed_for_stage"
@@ -914,16 +1325,10 @@ class VideoLiveWorkflowHandler:
     ) -> WorkflowDispatchResult:
         credential = self._credential_provider.get(command.turn_id)
         if credential is None:
-            return self._result_from_state(
+            return self._wait_for_authorization(
                 command,
                 state,
                 existing_envelope=existing_envelope,
-                interrupt_kind="authorization_required",
-                reason_code="authorization_required",
-                interrupt_payload={
-                    "workflow_id": command.workflow_id,
-                    "stage": state.current_stage.value,
-                },
             )
         try:
             result = await self._capabilities.generate_scene_assets(
@@ -956,6 +1361,27 @@ class VideoLiveWorkflowHandler:
                 "artifact_ref": published.scene_package_artifact_ref,
             },
             artifact=self._web_artifacts.project(published),
+        )
+
+    def _wait_for_authorization(
+        self,
+        command: WorkflowCommand,
+        state,
+        *,
+        existing_envelope: VideoWorkflowStateEnvelope,
+    ) -> WorkflowDispatchResult:
+        """在任何付费 Operation 建立前打开稳定鉴权中断。"""
+
+        return self._result_from_state(
+            command,
+            state,
+            existing_envelope=existing_envelope,
+            interrupt_kind="authorization_required",
+            reason_code="authorization_required",
+            interrupt_payload={
+                "workflow_id": command.workflow_id,
+                "stage": state.current_stage.value,
+            },
         )
 
     def _wait_for_plan_review(

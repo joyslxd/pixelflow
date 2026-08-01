@@ -617,6 +617,20 @@ def _consume_authorization_for_skill_boundary(
     return authorization
 
 
+def _borrow_authorization_for_operation_boundary(
+    credential: TransientTurnCredential,
+) -> str:
+    """仅在 M06 start 调用期间借用凭据，由调用方在结束后立即清理。"""
+
+    if not isinstance(credential, TransientTurnCredential):
+        raise TypeError("credential 必须是 TransientTurnCredential")
+    with _TRANSIENT_CREDENTIAL_LOCK:
+        authorization = _TRANSIENT_CREDENTIAL_SECRETS.get(credential)
+    if authorization is None:
+        raise RuntimeError("当前 Turn 临时凭据不可用")
+    return authorization
+
+
 def _discard_transient_credential(credential: TransientTurnCredential) -> None:
     """清理未消费的临时 Authorization，重复调用保持幂等。"""
 
