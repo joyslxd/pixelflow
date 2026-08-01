@@ -353,9 +353,9 @@ async def _video_repository(
             lambda sync_connection: Base.metadata.create_all(
                 sync_connection,
                 tables=(
-                    *AGENT_RUNTIME_TABLES,
-                    *AGENT_RUNTIME_SUPPORT_TABLES,
-                    PixelFlowConversationRow.__table__,
+                    tuple(AGENT_RUNTIME_TABLES)
+                    + tuple(AGENT_RUNTIME_SUPPORT_TABLES)
+                    + (PixelFlowConversationRow.__table__,)
                 ),
             )
         )
