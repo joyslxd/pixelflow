@@ -31,10 +31,14 @@ from pixelflow.agent_runtime.jobs import (
     OperationCompletionDispatcher,
     OperationCompletionDispatchError,
     OperationLeaseCoordinator,
+    OperationQuotaCoordinator,
+    OperationQuotaEventPayload,
+    OperationQuotaState,
     ProviderJobOutcome,
     ProviderJobSnapshot,
     build_operation_completion_event_id,
     build_operation_idempotency_key,
+    build_operation_quota_event_id,
 )
 from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
 from pixelflow.agent_runtime.persistence.repositories import (
@@ -45,6 +49,7 @@ from pixelflow.agent_runtime.persistence.repositories import (
     OperationTerminalEventRecord,
     SQLAgentRuntimeRepository,
 )
+from pixelflow.agent_runtime.ports import OperationConflictError
 
 RepositoryKind = Literal["memory", "sql"]
 NOW = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
@@ -204,6 +209,19 @@ async def _leased_operation(
     return claimed
 
 
+def _quota_coordinator(
+    repository: AgentRuntimeRepository,
+    *,
+    user_id: str = OWNER,
+    conversation_id: str = CONVERSATION,
+) -> OperationQuotaCoordinator:
+    return OperationQuotaCoordinator(
+        repository,
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+
+
 def _coordinator(
     repository: AgentRuntimeRepository,
     *,
@@ -240,6 +258,149 @@ class _CheckpointingGraphResumer:
         if self._fail_after_first_checkpoint:
             self._fail_after_first_checkpoint = False
             raise RuntimeError("模拟 Workflow checkpoint 后进程退出")
+
+
+@pytest.mark.parametrize(
+    ("quota_state", "reason_code"),
+    [
+        ("paused", "provider_quota_resume_authorized"),
+        ("resumed", "provider_quota_insufficient"),
+    ],
+)
+def test_quota_payload_rejects_reason_for_the_other_state(
+    quota_state: str,
+    reason_code: str,
+) -> None:
+    """防止损坏事件把 pause 与 resume 原因交叉投递给 Workflow。"""
+
+    with pytest.raises(ValidationError):
+        OperationQuotaEventPayload(
+            job_id=JOB_ID,
+            workflow_id=f"workflow-{JOB_ID}",
+            stage="image_generate",
+            stage_version=2,
+            attempt=1,
+            quota_pause_revision=1,
+            quota_state=quota_state,
+            reason_code=reason_code,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quota_pause_uses_stable_safe_event_and_deep_readonly_snapshots(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止 quota 暂停退化为非原子状态更新、泄漏内部字段或可变快照。"""
+
+    async with _repository(
+        kind,
+        tmp_path / f"{kind}-quota-coordinator.db",
+    ) as repository:
+        await _leased_operation(repository)
+
+        transition = await _quota_coordinator(repository).record_pause(
+            JOB_ID,
+            lease_owner="poller-a",
+            now=NOW + timedelta(seconds=1),
+        )
+
+        assert transition.operation.quota_pause_revision == 1
+        assert transition.operation.next_poll_at is None
+        assert transition.event.event_id == "evt_job_quota_474ce4d38c9cd3a9e74fd897d92f9fcb"
+        assert transition.event.type is AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+        assert transition.event.payload == {
+            "job_id": JOB_ID,
+            "workflow_id": f"workflow-{JOB_ID}",
+            "stage": "image_generate",
+            "stage_version": 2,
+            "attempt": 1,
+            "quota_pause_revision": 1,
+            "quota_state": "paused",
+            "reason_code": "provider_quota_insufficient",
+        }
+        assert build_operation_quota_event_id(
+            JOB_ID,
+            1,
+            OperationQuotaState.PAUSED,
+        ) == transition.event.event_id
+        assert "provider_job_id" not in transition.event.payload
+        assert "request_hash" not in transition.event.payload
+        assert "idempotency_key" not in transition.event.payload
+        with pytest.raises(TypeError):
+            transition.event.payload["quota_state"] = "resumed"
+        with pytest.raises(ValidationError):
+            transition.operation.next_poll_at = NOW
+        assert json.loads(transition.model_dump_json())["event"]["payload"] == {
+            "job_id": JOB_ID,
+            "workflow_id": f"workflow-{JOB_ID}",
+            "stage": "image_generate",
+            "stage_version": 2,
+            "attempt": 1,
+            "quota_pause_revision": 1,
+            "quota_state": "paused",
+            "reason_code": "provider_quota_insufficient",
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quota_resume_requires_current_revision_and_returns_frozen_claim(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止旧 pause revision 恢复新一轮暂停，或向调用方暴露可变投递 claim。"""
+
+    resumed_at = NOW + timedelta(seconds=2)
+    async with _repository(
+        kind,
+        tmp_path / f"{kind}-quota-resume-coordinator.db",
+    ) as repository:
+        await _leased_operation(repository)
+        coordinator = _quota_coordinator(repository)
+        paused = await coordinator.record_pause(
+            JOB_ID,
+            lease_owner="poller-a",
+            now=NOW + timedelta(seconds=1),
+        )
+        authorized = await coordinator.authorize_resume(
+            JOB_ID,
+            workflow_id=f"workflow-{JOB_ID}",
+            expected_revision=paused.operation.quota_pause_revision,
+            delivery_lease_owner="quota-action",
+            now=resumed_at,
+            delivery_lease_expires_at=resumed_at + timedelta(seconds=30),
+        )
+
+        assert authorized.operation.next_poll_at == resumed_at
+        assert authorized.operation.quota_pause_revision == 1
+        assert authorized.claim.event.event_id == "evt_job_quota_fce90e1f777d2bba0ca2f26d258eadcd"
+        assert authorized.claim.event.payload == {
+            "job_id": JOB_ID,
+            "workflow_id": f"workflow-{JOB_ID}",
+            "stage": "image_generate",
+            "stage_version": 2,
+            "attempt": 1,
+            "quota_pause_revision": 1,
+            "quota_state": "resumed",
+            "reason_code": "provider_quota_resume_authorized",
+        }
+        with pytest.raises(TypeError):
+            authorized.claim.event.payload["reason_code"] = "changed"
+        with pytest.raises(ValidationError):
+            authorized.claim.delivery_attempts = 99
+        assert json.loads(authorized.model_dump_json())["claim"]["event"]["payload"]["quota_state"] == "resumed"
+
+        with pytest.raises(OperationConflictError, match="quota revision"):
+            await coordinator.authorize_resume(
+                JOB_ID,
+                workflow_id=f"workflow-{JOB_ID}",
+                expected_revision=2,
+                delivery_lease_owner="quota-action-other",
+                now=resumed_at,
+                delivery_lease_expires_at=resumed_at + timedelta(seconds=30),
+            )
 
 
 @pytest.mark.asyncio
