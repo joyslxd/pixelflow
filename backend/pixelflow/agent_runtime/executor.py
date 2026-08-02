@@ -40,11 +40,16 @@ from .contracts import (
     TurnStatus,
     WorkflowRecord,
 )
-from .graph import resume_graph_from_interrupt, supervisor_namespace
+from .graph import (
+    GraphExecutionNamespace,
+    resume_graph_from_interrupt,
+    supervisor_namespace,
+)
 from .identity import conversation_message_id, interrupt_id
 from .jobs.providers import ProviderJobOutcome
 from .persistence import (
     AgentRuntimeRecordConflictError,
+    EventDeliveryClaim,
     StoredAgentInterrupt,
     SupervisorProjectionMessage,
     TurnExecutionClaim,
@@ -684,6 +689,15 @@ class SupervisorTurnExecutor:
         )
         self._metrics.action(decision.action)
         namespace = supervisor_namespace(evidence.conversation_id)
+        if interrupt.thread_id.startswith("quota-paused:"):
+            namespace = GraphExecutionNamespace(
+                thread_id=interrupt.thread_id,
+                checkpoint_ns=(
+                    ""
+                    if interrupt.checkpoint_ns == "root"
+                    else interrupt.checkpoint_ns
+                ),
+            )
         config = namespace.as_runnable_config()
         snapshot = await self._graph.aget_state(config)
         values = dict(getattr(snapshot, "values", {}) or {})
@@ -1019,6 +1033,40 @@ class SupervisorTurnExecutor:
         raw_dispatch = graph_state.get("workflow_dispatch_result")
         if isinstance(raw_dispatch, Mapping):
             result = WorkflowDispatchResult.model_validate(raw_dispatch)
+            operation_event_claim = None
+            if result.operation_event_claim is not None:
+                from .jobs import OperationQuotaEventPayload, OperationQuotaState
+
+                operation_event_claim = EventDeliveryClaim.model_validate(
+                    result.operation_event_claim.model_dump(
+                        mode="json",
+                        serialize_as_any=True,
+                    )
+                )
+                payload = OperationQuotaEventPayload.model_validate(
+                    operation_event_claim.event.payload
+                )
+                expected_patch = {
+                    "job_id": payload.job_id,
+                    "quota_pause_revision": payload.quota_pause_revision,
+                }
+                if (
+                    operation_event_claim.event.type.value
+                    != "external_job.quota_state_changed"
+                    or payload.quota_state is not OperationQuotaState.RESUMED
+                    or stored_decision.action is not AgentAction.RETRY_FAILED
+                    or stored_decision.intent is not AgentIntent.VIDEO
+                    or stored_decision.target_workflow_id
+                    != payload.workflow_id
+                    or stored_decision.target_stage != payload.stage
+                    or stored_decision.target_artifact_ref is not None
+                    or stored_decision.patch != expected_patch
+                    or result.state.last_action_key
+                    != operation_event_claim.event.event_id
+                ):
+                    raise ValueError(
+                        "非授权恢复动作携带了 Operation Event claim",
+                    )
             return VideoTurnCommit(
                 decision=stored_decision,
                 turn_status=result.turn_status,
@@ -1028,6 +1076,7 @@ class SupervisorTurnExecutor:
                 messages=result.messages,
                 open_interrupt=result.interrupt,
                 close_interrupt_id=close_interrupt_id,
+                operation_event_claim=operation_event_claim,
                 update_active_workflow=result.update_active_workflow,
                 active_workflow_id=result.active_workflow_id,
                 occurred_at=self._now(),

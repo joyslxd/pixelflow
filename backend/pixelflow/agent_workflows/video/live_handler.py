@@ -6,7 +6,13 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    SerializationInfo,
+    field_serializer,
+    model_validator,
+)
 
 from pixelflow.agent_runtime.contracts import (
     AgentAction,
@@ -17,6 +23,7 @@ from pixelflow.agent_runtime.contracts import (
 from pixelflow.agent_runtime.contracts.base import ContractModel
 from pixelflow.agent_runtime.identity import interrupt_id
 from pixelflow.agent_runtime.persistence import (
+    EventDeliveryClaim,
     StoredAgentInterrupt,
     SupervisorProjectionMessage,
     VideoRuntimeRepository,
@@ -101,11 +108,43 @@ class WorkflowDispatchResult(ContractModel):
     turn_status: Literal[TurnStatus.WAITING_USER, TurnStatus.COMPLETED]
     update_active_workflow: bool = False
     active_workflow_id: str | None = Field(default=None, min_length=1)
+    operation_event_claim: EventDeliveryClaim | None = None
+
+    @field_serializer("operation_event_claim")
+    def serialize_operation_event_claim(
+        self,
+        value: EventDeliveryClaim | None,
+        info: SerializationInfo,
+    ) -> object:
+        """把深只读 claim 转成可持久化的普通 checkpoint JSON。"""
+
+        return None if value is None else value.model_dump(mode=info.mode)
 
     @model_validator(mode="after")
     def validate_active_workflow_update(self):
         if not self.update_active_workflow and self.active_workflow_id is not None:
             raise ValueError("未更新 active workflow 时不能携带 active_workflow_id")
+        if self.operation_event_claim is not None:
+            from pixelflow.agent_runtime.jobs import (
+                OperationQuotaEventPayload,
+                OperationQuotaState,
+            )
+
+            payload = OperationQuotaEventPayload.model_validate(
+                self.operation_event_claim.event.payload
+            )
+            if (
+                self.operation_event_claim.event.type.value
+                != "external_job.quota_state_changed"
+                or payload.quota_state is not OperationQuotaState.RESUMED
+                or self.interrupt is not None
+                or self.turn_status is not TurnStatus.COMPLETED
+                or self.state.last_action_key
+                != self.operation_event_claim.event.event_id
+                or self.state.workflow_id != payload.workflow_id
+                or self.workflow.workflow_id != payload.workflow_id
+            ):
+                raise ValueError("Operation Event claim 不是完整 quota resume 派发")
         return self
 
 

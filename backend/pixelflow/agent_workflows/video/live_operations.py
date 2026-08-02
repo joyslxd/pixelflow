@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         ProviderJobAdapter,
         ProviderJobOutcome,
     )
+    from pixelflow.agent_runtime.jobs.quota import WorkflowGraphQuotaStatePort
     from pixelflow.agent_runtime.jobs.recovery import OperationRecoveryRuntime
     from pixelflow.agent_runtime.persistence import VideoRuntimeRepository
     from pixelflow.agent_runtime.persistence.repositories import EventDeliveryClaim
@@ -133,8 +134,8 @@ class VideoOperationAdapterResolver:
 
 
 @dataclass(frozen=True, slots=True)
-class _OwnedCompletionClaim:
-    """把完成事件租约与原用户、会话和 Operation 身份绑定。"""
+class _OwnedOperationEventClaim:
+    """把 Operation 事件租约与原用户、会话和 job 身份绑定。"""
 
     user_id: str
     conversation_id: str
@@ -142,13 +143,13 @@ class _OwnedCompletionClaim:
     claim: EventDeliveryClaim
 
 
-class _CompletionClaimRegistry:
-    """仅暂存 Dispatcher 已领取的不可变 claim，不执行第二次领取。"""
+class _OperationEventClaimRegistry:
+    """暂存 completion/quota Dispatcher 已领取的不可变 claim。"""
 
     def __init__(self, *, maximum: int = 1000) -> None:
         self._lock = RLock()
         self._maximum = maximum
-        self._claims: dict[str, _OwnedCompletionClaim] = {}
+        self._claims: dict[str, _OwnedOperationEventClaim] = {}
 
     def remember(
         self,
@@ -164,7 +165,7 @@ class _CompletionClaimRegistry:
         )
 
         normalized = EventDeliveryClaim.model_validate(claim.model_dump(mode="python"))
-        entry = _OwnedCompletionClaim(
+        entry = _OwnedOperationEventClaim(
             user_id=_require_text("user_id", user_id, maximum=64),
             conversation_id=_require_text(
                 "conversation_id",
@@ -180,10 +181,10 @@ class _CompletionClaimRegistry:
             existing = self._claims.get(event_id)
             if existing is not None and existing != entry:
                 if existing.claim.lease_expires_at > now:
-                    raise OperationConflictError("完成事件仍绑定其他有效投递租约")
+                    raise OperationConflictError("Operation 事件仍绑定其他有效投递租约")
                 self._claims.pop(event_id, None)
             if event_id not in self._claims and len(self._claims) >= self._maximum:
-                raise OperationConflictError("完成事件临时 claim 已达到安全上限")
+                raise OperationConflictError("Operation 事件临时 claim 已达到安全上限")
             self._claims[event_id] = entry
 
     def require(
@@ -192,19 +193,19 @@ class _CompletionClaimRegistry:
         *,
         idempotency_key: str,
         now: datetime,
-    ) -> _OwnedCompletionClaim:
+    ) -> _OwnedOperationEventClaim:
         event_id = _require_text("idempotency_key", idempotency_key, maximum=64)
         if completion_event.event_id != event_id:
-            raise OperationConflictError("完成事件与 Graph 幂等键不一致")
+            raise OperationConflictError("Operation 事件与 Graph 幂等键不一致")
         with self._lock:
             entry = self._claims.get(event_id)
             if entry is None:
-                raise OperationConflictError("完成事件缺少 Dispatcher 原始 claim")
+                raise OperationConflictError("Operation 事件缺少 Dispatcher 原始 claim")
             if entry.claim.event != completion_event:
-                raise OperationConflictError("完成事件与暂存 claim 不一致")
+                raise OperationConflictError("Operation 事件与暂存 claim 不一致")
             if now >= entry.claim.lease_expires_at:
                 self._claims.pop(event_id, None)
-                raise OperationConflictError("完成事件投递租约已过期")
+                raise OperationConflictError("Operation 事件投递租约已过期")
             return entry
 
     def release_published(
@@ -219,7 +220,7 @@ class _CompletionClaimRegistry:
             if entry is None:
                 return
             if lease_owner is not None and entry.claim.lease_owner != lease_owner:
-                raise OperationConflictError("完成事件清理租约 owner 不一致")
+                raise OperationConflictError("Operation 事件清理租约 owner 不一致")
             self._claims.pop(identity, None)
 
     def _purge_expired(self, now: datetime) -> None:
@@ -228,13 +229,13 @@ class _CompletionClaimRegistry:
             self._claims.pop(event_id, None)
 
 
-class _CompletionClaimRepositoryProxy:
-    """透明转发 M06 Repository，并截获唯一完成投递 claim。"""
+class _OperationEventClaimRepositoryProxy:
+    """透明转发 M06 Repository，并截获 completion/quota claim。"""
 
     def __init__(
         self,
         repository: AgentRuntimeRepository,
-        registry: _CompletionClaimRegistry,
+        registry: _OperationEventClaimRegistry,
     ) -> None:
         self._repository = repository
         self._registry = registry
@@ -258,6 +259,42 @@ class _CompletionClaimRepositoryProxy:
             conversation_id,
             event_id,
             job_id,
+            lease_owner=lease_owner,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+        if claim is not None:
+            self._registry.remember(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                job_id=job_id,
+                claim=claim,
+                now=now,
+            )
+        return claim
+
+    async def claim_operation_quota_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        quota_pause_revision: int,
+        quota_state: str,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        """领取 quota Event，并把同一 claim 交给 Graph Handler。"""
+
+        claim = await self._repository.claim_operation_quota_event(
+            user_id,
+            conversation_id,
+            event_id,
+            job_id,
+            quota_pause_revision=quota_pause_revision,
+            quota_state=quota_state,
             lease_owner=lease_owner,
             now=now,
             lease_expires_at=lease_expires_at,
@@ -313,10 +350,10 @@ class VideoLiveOperationBridge:
         self._lease_owner = _require_text("lease_owner", lease_owner, maximum=128)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._job_id_factory = job_id_factory
-        self._completion_claims = _CompletionClaimRegistry()
-        self._recovery_repository = _CompletionClaimRepositoryProxy(
+        self._operation_event_claims = _OperationEventClaimRegistry()
+        self._recovery_repository = _OperationEventClaimRepositoryProxy(
             repository,
-            self._completion_claims,
+            self._operation_event_claims,
         )
 
     def bind(
@@ -629,6 +666,7 @@ class VideoLiveOperationBridge:
         *,
         resumer: WorkflowGraphResumePort,
         worker_id: str,
+        quota_resumer: WorkflowGraphQuotaStatePort | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=2),
         scan_interval: timedelta = timedelta(seconds=1),
@@ -643,6 +681,7 @@ class VideoLiveOperationBridge:
             resolver=self._resolver,
             resumer=resumer,
             worker_id=worker_id,
+            quota_resumer=quota_resumer,
             clock=self._now,
             lease_duration=lease_duration,
             poll_interval=poll_interval,
@@ -655,20 +694,59 @@ class VideoLiveOperationBridge:
         completion_event: AgentEvent,
         *,
         idempotency_key: str,
-    ) -> _OwnedCompletionClaim:
-        return self._completion_claims.require(
+    ) -> _OwnedOperationEventClaim:
+        return self._operation_event_claims.require(
             completion_event,
+            idempotency_key=idempotency_key,
+            now=self._now(),
+        )
+
+    def remember_quota_resume_claim(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        claim: EventDeliveryClaim,
+    ) -> None:
+        """登记当前授权事务已先领取的 resume Event claim。"""
+
+        self._operation_event_claims.remember(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            job_id=job_id,
+            claim=claim,
+            now=self._now(),
+        )
+
+    def _require_quota_claim(
+        self,
+        quota_event: AgentEvent,
+        *,
+        idempotency_key: str,
+    ) -> _OwnedOperationEventClaim:
+        return self._operation_event_claims.require(
+            quota_event,
             idempotency_key=idempotency_key,
             now=self._now(),
         )
 
     def _release_published_completion(
         self,
-        completion: _OwnedCompletionClaim,
+        completion: _OwnedOperationEventClaim,
     ) -> None:
-        self._completion_claims.release_published(
+        self._operation_event_claims.release_published(
             completion.claim.event.event_id,
             lease_owner=completion.claim.lease_owner,
+        )
+
+    def _release_published_quota(
+        self,
+        quota: _OwnedOperationEventClaim,
+    ) -> None:
+        self._operation_event_claims.release_published(
+            quota.claim.event.event_id,
+            lease_owner=quota.claim.lease_owner,
         )
 
     def _now(self) -> datetime:
@@ -687,7 +765,7 @@ class _ScopedVideoOperationPort:
         *,
         user_id: str,
         conversation_id: str,
-        completion: _OwnedCompletionClaim | None = None,
+        completion: _OwnedOperationEventClaim | None = None,
     ) -> None:
         self._bridge = bridge
         self._user_id = user_id
@@ -859,6 +937,218 @@ class OperationCompletionCheckpointGraph(Protocol):
     ) -> Any: ...
 
     async def ainvoke(self, input: Any, config: dict[str, Any]) -> Any: ...
+
+
+class VideoOperationQuotaStateHandler:
+    """把 quota Outbox 投影到独立 Graph checkpoint 与原视频 Turn。"""
+
+    def __init__(
+        self,
+        *,
+        repository: VideoRuntimeRepository,
+        operations: VideoLiveOperationBridge,
+        clock: Any,
+        graph: OperationCompletionCheckpointGraph,
+    ) -> None:
+        self._repository = repository
+        self._operations = operations
+        self._clock = clock
+        self._graph = graph
+
+    async def resume_external_job_quota(
+        self,
+        namespace: GraphExecutionNamespace,
+        *,
+        quota_event: AgentEvent,
+        idempotency_key: str,
+    ) -> None:
+        """只消费 Dispatcher 原 claim，并以同一 Event 投影 pause/resume。"""
+
+        from pixelflow.agent_runtime.graph import workflow_namespace
+        from pixelflow.agent_runtime.jobs import OperationQuotaEventPayload
+        from pixelflow.agent_workflows.video.live_quota import (
+            VideoOperationQuotaProjectionService,
+            strict_quota_agent_event,
+        )
+
+        event = strict_quota_agent_event(quota_event)
+        quota = self._operations._require_quota_claim(
+            event,
+            idempotency_key=idempotency_key,
+        )
+        payload = OperationQuotaEventPayload.model_validate(event.payload)
+        if namespace != workflow_namespace(
+            quota.conversation_id,
+            payload.workflow_id,
+        ):
+            raise OperationConflictError("quota Event Graph namespace 不一致")
+        operation = await self._repository.get_operation(
+            quota.user_id,
+            quota.job_id,
+        )
+        if operation is None or operation.conversation_id != quota.conversation_id:
+            raise OperationConflictError("quota Event 对应 Operation 不存在")
+        envelope = await self._repository.get_video_state(
+            quota.user_id,
+            payload.workflow_id,
+        )
+        if envelope is None:
+            raise OperationConflictError("quota Event 对应视频权威状态不存在")
+        projection = VideoOperationQuotaProjectionService().build(
+            user_id=quota.user_id,
+            envelope=envelope,
+            operation=operation,
+            quota_event=event,
+        )
+        await self._checkpoint_quota_projection(
+            event=event,
+            quota_state=payload.quota_state.value,
+            user_id=quota.user_id,
+            projection=projection,
+        )
+        await self._repository.commit_operation_quota_state(
+            quota.claim,
+            user_id=quota.user_id,
+            workflow_state=projection.workflow_state,
+            workflow=projection.workflow,
+            expected_workflow_version=envelope.workflow_version,
+            open_interrupt=projection.open_interrupt,
+            close_interrupt_revision=projection.close_interrupt_revision,
+            occurred_at=self._now(),
+        )
+        self._operations._release_published_quota(quota)
+
+    async def _checkpoint_quota_projection(
+        self,
+        *,
+        event: AgentEvent,
+        quota_state: str,
+        user_id: str,
+        projection: Any,
+    ) -> None:
+        """幂等建立 quota 独立 checkpoint，拒绝同线程出现第二种投影。"""
+
+        from pixelflow.agent_runtime.contracts import TurnStatus
+        from pixelflow.agent_runtime.graph import GraphExecutionNamespace
+        from pixelflow.agent_runtime.graph.composition import (
+            DISPATCH_WORKFLOW_NODE,
+            OPERATION_COMPLETION_INTERRUPT_NODE,
+            WORKFLOW_INTERRUPT_NODE,
+        )
+        from pixelflow.agent_workflows.video.live_handler import (
+            WorkflowDispatchResult,
+        )
+
+        is_pause = quota_state == "paused"
+        desired = WorkflowDispatchResult(
+            state=projection.workflow_state,
+            workflow=projection.workflow,
+            interrupt=projection.open_interrupt,
+            turn_status=(
+                TurnStatus.WAITING_USER
+                if is_pause
+                else TurnStatus.COMPLETED
+            ),
+        )
+        graph_namespace = GraphExecutionNamespace(
+            thread_id=(
+                f"quota-paused:{event.event_id}"
+                if is_pause
+                else f"quota-resumed:{event.event_id}"
+            ),
+            checkpoint_ns="",
+        )
+        config = graph_namespace.as_runnable_config()
+        snapshot = await self._graph.aget_state(config)
+        values = dict(getattr(snapshot, "values", {}) or {})
+        next_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        interrupts = tuple(getattr(snapshot, "interrupts", ()) or ())
+        raw_dispatch = values.get("workflow_dispatch_result")
+        stored_dispatch = None
+        if raw_dispatch is not None:
+            try:
+                stored_dispatch = WorkflowDispatchResult.model_validate(
+                    raw_dispatch
+                )
+            except Exception:
+                stored_dispatch = None
+
+        if stored_dispatch is not None:
+            if (
+                stored_dispatch != desired
+                or values.get("conversation_id")
+                != projection.workflow_state.conversation_id
+                or values.get("user_id") != user_id
+                or values.get("turn_id")
+                != projection.workflow_state.last_turn_id
+            ):
+                raise OperationConflictError("quota checkpoint 投影内容冲突")
+            if is_pause and _checkpoint_has_exact_quota_interrupt(
+                snapshot,
+                projection.open_interrupt,
+            ):
+                return
+            if not is_pause:
+                if next_nodes or interrupts:
+                    raise OperationConflictError("quota resume checkpoint 不是终止态")
+                return
+            if next_nodes != (WORKFLOW_INTERRUPT_NODE,) or interrupts:
+                raise OperationConflictError("quota pause checkpoint 暂存状态冲突")
+        else:
+            if raw_dispatch is not None or next_nodes or interrupts:
+                raise OperationConflictError("quota checkpoint 已存在未知状态")
+            await self._graph.aupdate_state(
+                config,
+                {
+                    "conversation_id": projection.workflow_state.conversation_id,
+                    "user_id": user_id,
+                    "turn_id": projection.workflow_state.last_turn_id,
+                    "run_id": projection.workflow_state.last_turn_id,
+                    "workflows": {
+                        projection.workflow.workflow_id: projection.workflow,
+                    },
+                    "active_workflow_id": projection.workflow.workflow_id,
+                    "workflow_dispatch_result": desired.model_dump(mode="json"),
+                },
+                as_node=(
+                    OPERATION_COMPLETION_INTERRUPT_NODE
+                    if is_pause
+                    else DISPATCH_WORKFLOW_NODE
+                ),
+            )
+            if not is_pause:
+                terminal = await self._graph.aget_state(config)
+                _require_exact_quota_checkpoint(
+                    terminal,
+                    desired=desired,
+                    user_id=user_id,
+                )
+                if tuple(getattr(terminal, "next", ()) or ()) or tuple(
+                    getattr(terminal, "interrupts", ()) or ()
+                ):
+                    raise OperationConflictError(
+                        "quota resume checkpoint 未进入终止态",
+                    )
+                return
+
+        await self._graph.ainvoke(None, config)
+        paused = await self._graph.aget_state(config)
+        _require_exact_quota_checkpoint(
+            paused,
+            desired=desired,
+            user_id=user_id,
+        )
+        if not _checkpoint_has_exact_quota_interrupt(
+            paused,
+            projection.open_interrupt,
+        ):
+            raise OperationConflictError("quota pause 未建立唯一 Graph 中断")
+
+    def _now(self) -> datetime:
+        value = self._clock.now() if hasattr(self._clock, "now") else self._clock()
+        if not isinstance(value, datetime):
+            raise TypeError("clock 必须返回 datetime")
+        return value
 
 
 class VideoOperationCompletionHandler:
@@ -1793,6 +2083,54 @@ def _checkpoint_has_completion_interrupt(
     return len(matches) == 1
 
 
+def _checkpoint_has_exact_quota_interrupt(
+    snapshot: object,
+    interrupt: object,
+) -> bool:
+    """quota checkpoint 只能包含目标授权中断这一条 pause。"""
+
+    if interrupt is None:
+        return False
+    expected = {
+        "type": interrupt.kind,
+        "interrupt_id": interrupt.interrupt_id,
+        "reason_code": interrupt.reason_code,
+        "payload": interrupt.model_dump(mode="json")["payload"],
+    }
+    interrupts = tuple(getattr(snapshot, "interrupts", ()) or ())
+    return len(interrupts) == 1 and getattr(
+        interrupts[0],
+        "value",
+        None,
+    ) == expected
+
+
+def _require_exact_quota_checkpoint(
+    snapshot: object,
+    *,
+    desired: object,
+    user_id: str,
+) -> None:
+    """精确比较 quota checkpoint 的事件投影、用户和原 Turn。"""
+
+    from pixelflow.agent_workflows.video.live_handler import WorkflowDispatchResult
+
+    values = dict(getattr(snapshot, "values", {}) or {})
+    try:
+        stored = WorkflowDispatchResult.model_validate(
+            values.get("workflow_dispatch_result")
+        )
+    except Exception as exc:
+        raise OperationConflictError("quota checkpoint 缺少权威派发结果") from exc
+    if (
+        stored != desired
+        or values.get("conversation_id") != stored.state.conversation_id
+        or values.get("user_id") != user_id
+        or values.get("turn_id") != stored.state.last_turn_id
+    ):
+        raise OperationConflictError("quota checkpoint 派发结果不一致")
+
+
 def _same_completion_interrupt_occurrence(
     stored: object,
     expected: object,
@@ -1972,5 +2310,6 @@ __all__ = [
     "VideoLiveOperationBridge",
     "VideoOperationAdapterResolver",
     "VideoOperationCompletionHandler",
+    "VideoOperationQuotaStateHandler",
     "VideoOperationStartRequest",
 ]

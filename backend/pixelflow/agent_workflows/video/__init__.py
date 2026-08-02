@@ -9,6 +9,9 @@ from typing import Any, Final
 _PUBLIC_MODULES: Final[dict[str, str]] = {
     "VideoLiveStateConflictError": "live_handler",
     "VideoLiveWorkflowHandler": "live_handler",
+    "VideoOperationQuotaProjection": "live_quota",
+    "VideoOperationQuotaProjectionService": "live_quota",
+    "VideoOperationQuotaStateHandler": "live_operations",
     "VideoDeliveryWorkflowService": "delivery",
     "VideoDeliveryWorkflowState": "delivery",
     "VideoPlanAuthoritySnapshot": "planning",
@@ -52,6 +55,9 @@ _MISSING: Final[object] = object()
 __all__ = [
     "VideoLiveStateConflictError",
     "VideoLiveWorkflowHandler",
+    "VideoOperationQuotaProjection",
+    "VideoOperationQuotaProjectionService",
+    "VideoOperationQuotaStateHandler",
     "VideoDeliveryWorkflowService",
     "VideoDeliveryWorkflowState",
     "VideoPlanAuthoritySnapshot",

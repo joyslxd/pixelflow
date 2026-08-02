@@ -15,7 +15,15 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import ConfigDict, Field, JsonValue, field_serializer, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import String, and_, cast, exists, null, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -441,6 +449,7 @@ class VideoTurnCommit(_FrozenContractModel):
     messages: tuple[SupervisorProjectionMessage, ...] = ()
     open_interrupt: StoredAgentInterrupt | None = None
     close_interrupt_id: str | None = Field(default=None, min_length=1)
+    operation_event_claim: EventDeliveryClaim | None = None
     update_active_workflow: bool = False
     active_workflow_id: str | None = Field(default=None, min_length=1)
     error_reason_code: str | None = None
@@ -451,6 +460,14 @@ class VideoTurnCommit(_FrozenContractModel):
         object.__setattr__(self, "decision", _freeze_decision(self.decision))
         if self.workflow is not None:
             object.__setattr__(self, "workflow", _freeze_workflow(self.workflow))
+        if self.operation_event_claim is not None:
+            from pixelflow.agent_runtime.jobs.quota import _freeze_claim
+
+            object.__setattr__(
+                self,
+                "operation_event_claim",
+                _freeze_claim(self.operation_event_claim),
+            )
 
     @field_serializer("decision")
     def serialize_decision(self, value: ActionDecision) -> object:
@@ -459,6 +476,16 @@ class VideoTurnCommit(_FrozenContractModel):
     @field_serializer("workflow")
     def serialize_workflow(self, value: WorkflowRecord | None) -> object:
         return None if value is None else value.model_dump(mode="python")
+
+    @field_serializer("operation_event_claim")
+    def serialize_operation_event_claim(
+        self,
+        value: EventDeliveryClaim | None,
+        info: SerializationInfo,
+    ) -> object:
+        """把深只读 claim 恢复为普通 checkpoint JSON。"""
+
+        return None if value is None else value.model_dump(mode=info.mode)
 
     @model_validator(mode="after")
     def validate_atomic_shape(self):
@@ -476,6 +503,30 @@ class VideoTurnCommit(_FrozenContractModel):
             raise ValueError("非 failed Turn 不能保存 error_reason_code")
         if not self.update_active_workflow and self.active_workflow_id is not None:
             raise ValueError("未更新 active workflow 时不能携带 active_workflow_id")
+        if self.operation_event_claim is not None:
+            from pixelflow.agent_runtime.jobs import (
+                OperationQuotaEventPayload,
+                OperationQuotaState,
+            )
+
+            payload = OperationQuotaEventPayload.model_validate(
+                self.operation_event_claim.event.payload
+            )
+            if (
+                self.operation_event_claim.event.type
+                is not AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+                or payload.quota_state is not OperationQuotaState.RESUMED
+                or self.turn_status is not TurnStatus.COMPLETED
+                or self.workflow_state is None
+                or self.workflow is None
+                or self.open_interrupt is not None
+                or self.close_interrupt_id is None
+                or self.workflow_state.last_action_key
+                != self.operation_event_claim.event.event_id
+                or self.workflow_state.workflow_id != payload.workflow_id
+                or self.workflow.workflow_id != payload.workflow_id
+            ):
+                raise ValueError("Operation Event claim 不是完整 quota resume 提交")
         return self
 
 
@@ -790,6 +841,19 @@ class VideoRuntimeRepository(Protocol):
         occurred_at: datetime,
     ) -> WorkflowRecord: ...
 
+    async def commit_operation_quota_state(
+        self,
+        claim: EventDeliveryClaim,
+        *,
+        user_id: str,
+        workflow_state: VideoWorkflowStateEnvelope,
+        workflow: WorkflowRecord,
+        expected_workflow_version: int,
+        open_interrupt: StoredAgentInterrupt | None,
+        close_interrupt_revision: int | None,
+        occurred_at: datetime,
+    ) -> WorkflowRecord: ...
+
 
 @dataclass
 class _MemoryTurnExecution:
@@ -1062,6 +1126,44 @@ def _validate_commit_contract(
 ) -> tuple[TurnExecutionClaim, VideoTurnCommit]:
     normalized_claim = TurnExecutionClaim.model_validate(claim.model_dump(mode="python"))
     normalized_commit = VideoTurnCommit.model_validate(commit.model_dump(mode="python"))
+    operation_event_claim = normalized_commit.operation_event_claim
+    expected_action_key = normalized_commit.decision.idempotency_key
+    if operation_event_claim is not None:
+        from pixelflow.agent_runtime.contracts import AgentAction, AgentIntent
+        from pixelflow.agent_runtime.jobs import (
+            OperationQuotaEventPayload,
+            OperationQuotaState,
+            build_operation_quota_event_id,
+        )
+
+        event = operation_event_claim.event
+        payload = OperationQuotaEventPayload.model_validate(event.payload)
+        expected_patch = {
+            "job_id": payload.job_id,
+            "quota_pause_revision": payload.quota_pause_revision,
+        }
+        decision = normalized_commit.decision
+        if (
+            event.type is not AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+            or event.conversation_id != normalized_claim.turn.conversation_id
+            or event.event_id
+            != build_operation_quota_event_id(
+                payload.job_id,
+                payload.quota_pause_revision,
+                payload.quota_state,
+            )
+            or payload.quota_state is not OperationQuotaState.RESUMED
+            or decision.action is not AgentAction.RETRY_FAILED
+            or decision.intent is not AgentIntent.VIDEO
+            or decision.target_workflow_id != payload.workflow_id
+            or decision.target_stage != payload.stage
+            or decision.target_artifact_ref is not None
+            or decision.patch != expected_patch
+        ):
+            raise AgentRuntimeRecordConflictError(
+                "非授权恢复动作携带了 Operation Event claim",
+            )
+        expected_action_key = event.event_id
     for message in normalized_commit.messages:
         if message.conversation_id != normalized_claim.turn.conversation_id:
             raise AgentRuntimeRecordConflictError("消息不属于当前 Turn 会话")
@@ -1081,7 +1183,7 @@ def _validate_commit_contract(
             raise AgentRuntimeRecordConflictError("视频状态不属于当前会话")
         if state.last_turn_id != normalized_claim.turn.turn_id:
             raise AgentRuntimeRecordConflictError("视频状态 last_turn_id 不属于当前 Turn")
-        if state.last_action_key != normalized_commit.decision.idempotency_key:
+        if state.last_action_key != expected_action_key:
             raise AgentRuntimeRecordConflictError("视频状态动作键与 decision 不一致")
         if canonical_video_workflow_envelope_sha256(state) != state.payload_sha256:
             raise VideoWorkflowStateConflictError("视频状态完整信封摘要不一致")
@@ -1121,6 +1223,140 @@ def _validate_operation_completion_binding(
         or workflow.workflow_id != operation.workflow_id
     ):
         raise AgentRuntimeRecordConflictError("Operation 完成事件与目标 Workflow 身份不一致")
+
+
+def _validate_operation_quota_resume_binding(
+    *,
+    user_id: str,
+    event: AgentEvent,
+    operation: OperationRecord | None,
+    workflow_state: VideoWorkflowStateEnvelope,
+    workflow: WorkflowRecord,
+) -> None:
+    """把当前授权 Turn 的 resume claim 绑定到同一原 Operation。"""
+
+    from pixelflow.agent_runtime.jobs import (
+        OperationQuotaEventPayload,
+        OperationQuotaState,
+        build_operation_quota_event_id,
+    )
+
+    payload = OperationQuotaEventPayload.model_validate(event.payload)
+    if (
+        operation is None
+        or event.type is not AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+        or payload.quota_state is not OperationQuotaState.RESUMED
+        or event.event_id
+        != build_operation_quota_event_id(
+            payload.job_id,
+            payload.quota_pause_revision,
+            payload.quota_state,
+        )
+        or event.conversation_id != operation.conversation_id
+        or payload.job_id != operation.job_id
+        or payload.workflow_id != operation.workflow_id
+        or payload.stage != operation.stage
+        or payload.stage_version != operation.stage_version
+        or payload.attempt != operation.attempt
+        or payload.quota_pause_revision != operation.quota_pause_revision
+        or operation.status is not ExternalJobStatus.POLLING
+        or operation.provider_job_id is None
+        or operation.next_poll_at is None
+        or workflow_state.user_id != user_id
+        or workflow_state.conversation_id != operation.conversation_id
+        or workflow.conversation_id != operation.conversation_id
+        or workflow_state.workflow_id != operation.workflow_id
+        or workflow.workflow_id != operation.workflow_id
+        or workflow_state.last_action_key != event.event_id
+    ):
+        raise AgentRuntimeRecordConflictError(
+            "Operation quota resume claim 与目标 Workflow 身份不一致",
+        )
+
+
+def _quota_projection_commit(
+    *,
+    claim: EventDeliveryClaim,
+    user_id: str,
+    workflow_state: VideoWorkflowStateEnvelope,
+    workflow: WorkflowRecord,
+    expected_workflow_version: int,
+    open_interrupt: StoredAgentInterrupt | None,
+    close_interrupt_id: str | None,
+    turn_status: TurnStatus,
+    occurred_at: datetime,
+) -> tuple[TurnExecutionClaim, VideoTurnCommit]:
+    """只为 quota Repository 临界区构造不依赖真实 Turn 租约的提交目标。"""
+
+    synthetic_claim = TurnExecutionClaim(
+        user_id=user_id,
+        turn=TurnRecord(
+            turn_id=workflow_state.last_turn_id,
+            conversation_id=workflow_state.conversation_id,
+            client_input_id=UUID(int=0),
+            status=TurnStatus.PROCESSING,
+            target_workflow_id=workflow_state.workflow_id,
+            decision=None,
+            expected_context_version=0,
+            created_at=workflow_state.created_at,
+        ),
+        lease_owner=claim.lease_owner,
+        lease_token=UUID(int=0),
+        lease_expires_at=claim.lease_expires_at,
+        attempt=1,
+    )
+    commit = VideoTurnCommit(
+        decision=ActionDecision(
+            action="continue_workflow",
+            intent="video",
+            target_workflow_id=workflow.workflow_id,
+            target_stage=workflow.current_stage,
+            confidence=1,
+            reason_code="operation_quota_state",
+            idempotency_key=claim.event.event_id,
+        ),
+        turn_status=turn_status,
+        workflow_state=workflow_state,
+        workflow=workflow,
+        expected_workflow_version=expected_workflow_version,
+        messages=(),
+        open_interrupt=open_interrupt,
+        close_interrupt_id=close_interrupt_id,
+        occurred_at=occurred_at,
+    )
+    return synthetic_claim, commit
+
+
+def _matches_quota_authorization_interrupt(
+    interrupt: StoredAgentInterrupt,
+    *,
+    operation: OperationRecord,
+    quota_pause_revision: int,
+) -> bool:
+    """按 job 与 pause revision 精确识别可关闭的授权中断。"""
+
+    return (
+        interrupt.conversation_id == operation.conversation_id
+        and interrupt.workflow_id == operation.workflow_id
+        and interrupt.kind == "authorization_required"
+        and interrupt.reason_code == "authorization_required"
+        and interrupt.payload
+        == {
+            "workflow_id": operation.workflow_id,
+            "stage": operation.stage,
+            "authorization_action": {
+                "action": "retry_failed",
+                "intent": "video",
+                "workflow_id": operation.workflow_id,
+                "stage": operation.stage,
+                "artifact_ref": None,
+                "patch": {
+                    "job_id": operation.job_id,
+                    "quota_pause_revision": quota_pause_revision,
+                },
+            },
+        }
+    )
 
 
 def _video_turn_commit_identity(commit: VideoTurnCommit) -> str:
@@ -1707,47 +1943,182 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
     async def commit_turn(self, claim: TurnExecutionClaim, commit: VideoTurnCommit) -> TurnRecord:
         normalized_claim, normalized_commit = _validate_commit_contract(claim, commit)
         async with self._compaction_write_lock:
-            replay = self._is_idempotent_turn_replay(normalized_claim, normalized_commit)
-            if replay is not None:
-                return replay
-            before = self._snapshot_live_runtime_state()
-            try:
-                key = (normalized_claim.user_id, normalized_claim.turn.turn_id)
-                execution = self._turn_executions.get(key)
-                if not self._execution_matches(execution, normalized_claim, normalized_commit.occurred_at):
-                    raise TurnExecutionLeaseConflictError(normalized_claim.turn.turn_id)
-                current = self._turns.get(key)
-                if current is None or current.status is not TurnStatus.PROCESSING:
-                    raise TurnExecutionLeaseConflictError(normalized_claim.turn.turn_id)
-                self._compare_and_set_video_state(normalized_commit)
-                self._upsert_workflow_and_active_projection(normalized_claim, normalized_commit)
-                self._upsert_projection_messages(normalized_claim.user_id, normalized_commit.messages)
-                self._apply_interrupt_transition(normalized_claim, normalized_commit)
+            async with self._operation_write_lock:
                 async with self._event_write_lock:
-                    self._append_events(normalized_claim, normalized_commit)
-                finished = current.model_copy(
-                    update={
-                        "status": normalized_commit.turn_status,
-                        "decision": ActionDecision.model_validate(
-                            normalized_commit.decision.model_dump(mode="python")
-                        ),
-                        "target_workflow_id": (
-                            normalized_commit.workflow.workflow_id
-                            if normalized_commit.workflow is not None
-                            else normalized_commit.decision.target_workflow_id
-                        ),
-                    }
-                )
-                self._turns[key] = _clone(finished)
-                execution.lease_owner = None
-                execution.lease_token = None
-                execution.lease_expires_at = None
-                execution.next_attempt_at = None
-                execution.last_reason_code = _video_turn_commit_identity(normalized_commit)
-                return _clone(finished)
-            except Exception:
-                self._restore_live_runtime_state(before)
-                raise
+                    replay = self._is_idempotent_turn_replay(
+                        normalized_claim,
+                        normalized_commit,
+                    )
+                    operation_claim = normalized_commit.operation_event_claim
+                    if replay is not None:
+                        if operation_claim is not None:
+                            event_key = (
+                                normalized_claim.user_id,
+                                operation_claim.event.event_id,
+                            )
+                            delivery = self._event_delivery.get(event_key)
+                            operation = self._operations.get(
+                                (
+                                    normalized_claim.user_id,
+                                    str(operation_claim.event.payload["job_id"]),
+                                )
+                            )
+                            if (
+                                self._events.get(event_key)
+                                != operation_claim.event
+                                or delivery is None
+                                or delivery.status != "published"
+                                or normalized_commit.workflow_state is None
+                                or normalized_commit.workflow is None
+                            ):
+                                raise AgentRuntimeRecordConflictError(
+                                    "quota resume Turn 重放缺少已发布 Event",
+                                )
+                            _validate_operation_quota_resume_binding(
+                                user_id=normalized_claim.user_id,
+                                event=operation_claim.event,
+                                operation=operation,
+                                workflow_state=normalized_commit.workflow_state,
+                                workflow=normalized_commit.workflow,
+                            )
+                        return replay
+                    before = self._snapshot_live_runtime_state()
+                    try:
+                        key = (
+                            normalized_claim.user_id,
+                            normalized_claim.turn.turn_id,
+                        )
+                        execution = self._turn_executions.get(key)
+                        if not self._execution_matches(
+                            execution,
+                            normalized_claim,
+                            normalized_commit.occurred_at,
+                        ):
+                            raise TurnExecutionLeaseConflictError(
+                                normalized_claim.turn.turn_id,
+                            )
+                        current = self._turns.get(key)
+                        if (
+                            current is None
+                            or current.status is not TurnStatus.PROCESSING
+                        ):
+                            raise TurnExecutionLeaseConflictError(
+                                normalized_claim.turn.turn_id,
+                            )
+                        if operation_claim is not None:
+                            event_key = (
+                                normalized_claim.user_id,
+                                operation_claim.event.event_id,
+                            )
+                            event = self._events.get(event_key)
+                            delivery = self._event_delivery.get(event_key)
+                            operation = self._operations.get(
+                                (
+                                    normalized_claim.user_id,
+                                    str(operation_claim.event.payload["job_id"]),
+                                )
+                            )
+                            if (
+                                event != operation_claim.event
+                                or delivery is None
+                                or delivery.status != "delivering"
+                                or delivery.delivery_attempts
+                                != operation_claim.delivery_attempts
+                                or delivery.lease_owner
+                                != operation_claim.lease_owner
+                                or delivery.lease_expires_at
+                                != operation_claim.lease_expires_at
+                                or normalized_commit.occurred_at
+                                >= operation_claim.lease_expires_at
+                                or normalized_commit.workflow_state is None
+                                or normalized_commit.workflow is None
+                            ):
+                                raise TurnExecutionLeaseConflictError(
+                                    operation_claim.event.event_id,
+                                )
+                            _validate_operation_quota_resume_binding(
+                                user_id=normalized_claim.user_id,
+                                event=event,
+                                operation=operation,
+                                workflow_state=normalized_commit.workflow_state,
+                                workflow=normalized_commit.workflow,
+                            )
+                            payload = operation_claim.event.payload
+                            matching_interrupts = [
+                                item
+                                for (owner, _), item in self._interrupts.items()
+                                if owner == normalized_claim.user_id
+                                and operation is not None
+                                and _matches_quota_authorization_interrupt(
+                                    item,
+                                    operation=operation,
+                                    quota_pause_revision=int(
+                                        payload["quota_pause_revision"]
+                                    ),
+                                )
+                                and item.status != "closed"
+                            ]
+                            if (
+                                len(matching_interrupts) != 1
+                                or matching_interrupts[0].interrupt_id
+                                != normalized_commit.close_interrupt_id
+                            ):
+                                raise AgentRuntimeRecordConflictError(
+                                    "quota resume Turn 未绑定唯一授权中断",
+                                )
+                        self._compare_and_set_video_state(normalized_commit)
+                        self._upsert_workflow_and_active_projection(
+                            normalized_claim,
+                            normalized_commit,
+                        )
+                        self._upsert_projection_messages(
+                            normalized_claim.user_id,
+                            normalized_commit.messages,
+                        )
+                        self._apply_interrupt_transition(
+                            normalized_claim,
+                            normalized_commit,
+                        )
+                        self._append_events(
+                            normalized_claim,
+                            normalized_commit,
+                            operation_event_id=(
+                                None
+                                if operation_claim is None
+                                else operation_claim.event.event_id
+                            ),
+                        )
+                        if operation_claim is not None:
+                            delivery = self._event_delivery[event_key]
+                            delivery.status = "published"
+                            delivery.published_at = normalized_commit.occurred_at
+                        finished = current.model_copy(
+                            update={
+                                "status": normalized_commit.turn_status,
+                                "decision": ActionDecision.model_validate(
+                                    normalized_commit.decision.model_dump(
+                                        mode="python"
+                                    )
+                                ),
+                                "target_workflow_id": (
+                                    normalized_commit.workflow.workflow_id
+                                    if normalized_commit.workflow is not None
+                                    else normalized_commit.decision.target_workflow_id
+                                ),
+                            }
+                        )
+                        self._turns[key] = _clone(finished)
+                        execution.lease_owner = None
+                        execution.lease_token = None
+                        execution.lease_expires_at = None
+                        execution.next_attempt_at = None
+                        execution.last_reason_code = _video_turn_commit_identity(
+                            normalized_commit
+                        )
+                        return _clone(finished)
+                    except Exception:
+                        self._restore_live_runtime_state(before)
+                        raise
 
     async def store_interrupt_response(
         self,
@@ -2343,6 +2714,271 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         delivery.status = "published"
                         delivery.published_at = normalized_time
                         return _clone(workflow)
+                    except Exception:
+                        self._restore_live_runtime_state(before)
+                        raise
+
+    async def commit_operation_quota_state(
+        self,
+        claim: EventDeliveryClaim,
+        *,
+        user_id: str,
+        workflow_state: VideoWorkflowStateEnvelope,
+        workflow: WorkflowRecord,
+        expected_workflow_version: int,
+        open_interrupt: StoredAgentInterrupt | None,
+        close_interrupt_revision: int | None,
+        occurred_at: datetime,
+    ) -> WorkflowRecord:
+        """在同一 Memory 临界区公开 pause overlay 与原 Turn 中断。"""
+
+        from pixelflow.agent_runtime.jobs import (
+            OperationQuotaEventPayload,
+            OperationQuotaState,
+        )
+        from pixelflow.agent_workflows.video.live_quota import (
+            VideoOperationQuotaProjectionService,
+        )
+
+        owner = _require_text("user_id", user_id, 64)
+        normalized_time = _normalize_datetime("occurred_at", occurred_at)
+        normalized_claim = EventDeliveryClaim.model_validate(
+            claim.model_dump(mode="python")
+        )
+        payload = OperationQuotaEventPayload.model_validate(
+            normalized_claim.event.payload
+        )
+        is_pause = payload.quota_state is OperationQuotaState.PAUSED
+        if is_pause:
+            if open_interrupt is None or close_interrupt_revision is not None:
+                raise AgentRuntimeRecordConflictError("quota pause 投影目标不完整")
+        elif open_interrupt is not None or close_interrupt_revision != (
+            payload.quota_pause_revision
+        ):
+            raise AgentRuntimeRecordConflictError("quota resume 投影目标不完整")
+        target_state = VideoWorkflowStateEnvelope.model_validate(
+            workflow_state.model_dump(mode="python")
+        )
+        target_workflow = WorkflowRecord.model_validate(
+            workflow.model_dump(mode="python")
+        )
+        target_interrupt = (
+            None
+            if open_interrupt is None
+            else StoredAgentInterrupt.model_validate(
+                open_interrupt.model_dump(mode="python")
+            )
+        )
+        async with self._compaction_write_lock:
+            async with self._operation_write_lock:
+                async with self._event_write_lock:
+                    event_key = (owner, normalized_claim.event.event_id)
+                    event = self._events.get(event_key)
+                    delivery = self._event_delivery.get(event_key)
+                    operation = self._operations.get((owner, payload.job_id))
+                    if (
+                        event is None
+                        or event != normalized_claim.event
+                        or delivery is None
+                        or operation is None
+                    ):
+                        raise AgentRuntimeRecordConflictError(
+                            "quota pause Event 或 Operation 不存在",
+                        )
+                    current_state = self._video_states.get(
+                        (owner, operation.workflow_id)
+                    )
+                    stored_workflow = self._workflows.get(
+                        (owner, operation.workflow_id)
+                    )
+                    turn_key = (owner, target_state.last_turn_id)
+                    current_turn = self._turns.get(turn_key)
+                    matching_interrupts = [
+                        item
+                        for (record_owner, _), item in self._interrupts.items()
+                        if record_owner == owner
+                        and _matches_quota_authorization_interrupt(
+                            item,
+                            operation=operation,
+                            quota_pause_revision=payload.quota_pause_revision,
+                        )
+                    ]
+                    unclosed_interrupts = [
+                        item
+                        for item in matching_interrupts
+                        if item.status != "closed"
+                    ]
+                    if len(unclosed_interrupts) > 1:
+                        raise AgentRuntimeRecordConflictError(
+                            "quota resume 匹配到多个未关闭授权中断",
+                        )
+                    stored_interrupt = (
+                        self._interrupts.get(
+                            (owner, target_interrupt.interrupt_id)
+                        )
+                        if target_interrupt is not None
+                        else None
+                    )
+                    close_interrupt = (
+                        unclosed_interrupts[0]
+                        if unclosed_interrupts
+                        else next(
+                            (
+                                item
+                                for item in matching_interrupts
+                                if item.status == "closed"
+                            ),
+                            None,
+                        )
+                    )
+                    if delivery.status == "published":
+                        if (
+                            delivery.delivery_attempts
+                            != normalized_claim.delivery_attempts
+                            or delivery.lease_owner
+                            != normalized_claim.lease_owner
+                            or delivery.lease_expires_at
+                            != normalized_claim.lease_expires_at
+                            or delivery.published_at is None
+                            or delivery.published_at
+                            >= normalized_claim.lease_expires_at
+                            or current_state != target_state
+                            or stored_workflow != target_workflow
+                            or current_turn is None
+                            or (
+                                is_pause
+                                and (
+                                    stored_interrupt != target_interrupt
+                                    or current_turn.status
+                                    is not TurnStatus.WAITING_USER
+                                )
+                            )
+                            or (
+                                not is_pause
+                                and (
+                                    close_interrupt is None
+                                    or close_interrupt.status != "closed"
+                                    or current_turn.status
+                                    is not TurnStatus.COMPLETED
+                                )
+                            )
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "quota pause 已发布投影与重放目标不一致",
+                            )
+                        return _clone(target_workflow)
+                    if (
+                        delivery.status != "delivering"
+                        or delivery.delivery_attempts
+                        != normalized_claim.delivery_attempts
+                        or delivery.lease_owner != normalized_claim.lease_owner
+                        or delivery.lease_expires_at
+                        != normalized_claim.lease_expires_at
+                        or normalized_time >= normalized_claim.lease_expires_at
+                        or current_state is None
+                        or current_turn is None
+                        or current_turn.conversation_id
+                        != target_state.conversation_id
+                        or (
+                            is_pause
+                            and (
+                                operation.next_poll_at is not None
+                                or current_turn.status
+                                not in {
+                                    TurnStatus.COMPLETED,
+                                    TurnStatus.WAITING_USER,
+                                }
+                            )
+                        )
+                        or (
+                            not is_pause
+                            and (
+                                operation.next_poll_at is None
+                                or close_interrupt is None
+                                or current_turn.status
+                                not in {
+                                    TurnStatus.PROCESSING,
+                                    TurnStatus.COMPLETED,
+                                }
+                            )
+                        )
+                    ):
+                        raise TurnExecutionLeaseConflictError(
+                            normalized_claim.event.event_id,
+                        )
+                    projection = VideoOperationQuotaProjectionService().build(
+                        user_id=owner,
+                        envelope=current_state,
+                        operation=operation,
+                        quota_event=event,
+                    )
+                    if (
+                        expected_workflow_version
+                        != current_state.workflow_version
+                        or projection.workflow_state != target_state
+                        or projection.workflow != target_workflow
+                        or projection.open_interrupt != target_interrupt
+                        or projection.close_interrupt_revision
+                        != close_interrupt_revision
+                    ):
+                        raise VideoWorkflowStateConflictError(
+                            "quota Event 投影与权威目标不一致",
+                        )
+                    synthetic_claim, commit = _quota_projection_commit(
+                        claim=normalized_claim,
+                        user_id=owner,
+                        workflow_state=target_state,
+                        workflow=target_workflow,
+                        expected_workflow_version=expected_workflow_version,
+                        open_interrupt=target_interrupt,
+                        close_interrupt_id=(
+                            None
+                            if is_pause or close_interrupt is None
+                            else close_interrupt.interrupt_id
+                        ),
+                        turn_status=(
+                            TurnStatus.WAITING_USER
+                            if is_pause
+                            else TurnStatus.COMPLETED
+                        ),
+                        occurred_at=normalized_time,
+                    )
+                    before = self._snapshot_live_runtime_state()
+                    try:
+                        self._compare_and_set_video_state(commit)
+                        self._upsert_workflow_and_active_projection(
+                            synthetic_claim,
+                            commit,
+                        )
+                        self._apply_interrupt_transition(
+                            synthetic_claim,
+                            commit,
+                        )
+                        self._turns[turn_key] = _clone(
+                            current_turn.model_copy(
+                                update={
+                                    "status": (
+                                        TurnStatus.WAITING_USER
+                                        if is_pause
+                                        else TurnStatus.COMPLETED
+                                    )
+                                },
+                            )
+                        )
+                        self._append_events(
+                            synthetic_claim,
+                            commit,
+                            operation_event_id=event.event_id,
+                            include_turn_terminal=(
+                                is_pause
+                                or current_turn.status
+                                is TurnStatus.PROCESSING
+                            ),
+                        )
+                        delivery = self._event_delivery[event_key]
+                        delivery.status = "published"
+                        delivery.published_at = normalized_time
+                        return _clone(target_workflow)
                     except Exception:
                         self._restore_live_runtime_state(before)
                         raise
@@ -3273,9 +3909,138 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         try:
             async with self._session_factory() as session:
                 async with _repository_write_transaction(session, self._sqlite_write_lock):
+                    operation_claim = normalized_commit.operation_event_claim
+                    operation_row = None
+                    event_row = None
+                    operation = None
+                    if operation_claim is not None:
+                        operation_row = (
+                            await session.scalars(
+                                select(PixelFlowAgentOperationRow)
+                                .where(
+                                    PixelFlowAgentOperationRow.user_id
+                                    == normalized_claim.user_id,
+                                    PixelFlowAgentOperationRow.job_id
+                                    == str(operation_claim.event.payload["job_id"]),
+                                )
+                                .with_for_update()
+                            )
+                        ).one_or_none()
+                        event_row = (
+                            await session.scalars(
+                                select(PixelFlowAgentEventRow)
+                                .where(
+                                    PixelFlowAgentEventRow.user_id
+                                    == normalized_claim.user_id,
+                                    PixelFlowAgentEventRow.event_id
+                                    == operation_claim.event.event_id,
+                                )
+                                .with_for_update()
+                            )
+                        ).one_or_none()
+                        if operation_row is None or event_row is None:
+                            raise AgentRuntimeRecordConflictError(
+                                "quota resume Turn 缺少 Event 或 Operation",
+                            )
+                        operation = _operation_from_row(operation_row)
                     replay = await self._sql_idempotent_replay(session, normalized_claim, normalized_commit)
                     if replay is not None:
+                        if (
+                            operation_claim is not None
+                            and (
+                                event_row is None
+                                or _event_from_row(event_row)
+                                != operation_claim.event
+                                or event_row.delivery_status != "published"
+                                or normalized_commit.workflow_state is None
+                                or normalized_commit.workflow is None
+                            )
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "quota resume Turn 重放缺少已发布 Event",
+                            )
+                        if operation_claim is not None:
+                            _validate_operation_quota_resume_binding(
+                                user_id=normalized_claim.user_id,
+                                event=operation_claim.event,
+                                operation=operation,
+                                workflow_state=normalized_commit.workflow_state,
+                                workflow=normalized_commit.workflow,
+                            )
                         return replay
+                    if operation_claim is not None:
+                        assert event_row is not None
+                        expiry = (
+                            None
+                            if event_row.lease_expires_at is None
+                            else _database_utc(event_row.lease_expires_at)
+                        )
+                        if (
+                            _event_from_row(event_row)
+                            != operation_claim.event
+                            or event_row.delivery_status != "delivering"
+                            or event_row.delivery_attempts
+                            != operation_claim.delivery_attempts
+                            or event_row.lease_owner
+                            != operation_claim.lease_owner
+                            or expiry != operation_claim.lease_expires_at
+                            or normalized_commit.occurred_at
+                            >= operation_claim.lease_expires_at
+                            or normalized_commit.workflow_state is None
+                            or normalized_commit.workflow is None
+                        ):
+                            raise TurnExecutionLeaseConflictError(
+                                operation_claim.event.event_id,
+                            )
+                        _validate_operation_quota_resume_binding(
+                            user_id=normalized_claim.user_id,
+                            event=operation_claim.event,
+                            operation=operation,
+                            workflow_state=normalized_commit.workflow_state,
+                            workflow=normalized_commit.workflow,
+                        )
+                        interrupt_rows = list(
+                            (
+                                await session.scalars(
+                                    select(PixelFlowAgentInterruptRow)
+                                    .where(
+                                        PixelFlowAgentInterruptRow.user_id
+                                        == normalized_claim.user_id,
+                                        PixelFlowAgentInterruptRow.conversation_id
+                                        == normalized_claim.turn.conversation_id,
+                                        PixelFlowAgentInterruptRow.workflow_id
+                                        == operation.workflow_id,
+                                        PixelFlowAgentInterruptRow.kind
+                                        == "authorization_required",
+                                        PixelFlowAgentInterruptRow.reason_code
+                                        == "authorization_required",
+                                    )
+                                    .with_for_update()
+                                )
+                            ).all()
+                        )
+                        matching_interrupts = [
+                            _interrupt_from_row(item)
+                            for item in interrupt_rows
+                            if _matches_quota_authorization_interrupt(
+                                _interrupt_from_row(item),
+                                operation=operation,
+                                quota_pause_revision=int(
+                                    operation_claim.event.payload[
+                                        "quota_pause_revision"
+                                    ]
+                                ),
+                            )
+                            and item.status != "closed"
+                        ]
+                        if (
+                            len(matching_interrupts) != 1
+                            or matching_interrupts[0].interrupt_id
+                            != normalized_commit.close_interrupt_id
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "quota resume Turn 未绑定唯一授权中断",
+                            )
                     lease_result = await session.execute(
                         update(PixelFlowAgentTurnExecutionRow)
                         .where(
@@ -3315,7 +4080,19 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                     await self._sql_upsert_workflow_and_active(session, normalized_claim, normalized_commit)
                     await self._sql_upsert_messages(session, normalized_claim.user_id, normalized_commit.messages)
                     await self._sql_apply_interrupt_transition(session, normalized_claim, normalized_commit)
-                    await self._sql_append_events(session, normalized_claim, normalized_commit)
+                    await self._sql_append_events(
+                        session,
+                        normalized_claim,
+                        normalized_commit,
+                        action_key=(
+                            None
+                            if operation_claim is None
+                            else operation_claim.event.event_id
+                        ),
+                    )
+                    if event_row is not None:
+                        event_row.delivery_status = "published"
+                        event_row.published_at = normalized_commit.occurred_at
                     turn.status = normalized_commit.turn_status.value
                     turn.decision_json = normalized_commit.decision.model_dump(mode="json")
                     turn.target_workflow_id = (
@@ -4289,6 +5066,351 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                     return _clone(workflow)
         except IntegrityError:
             raise AgentRuntimeRecordConflictError("Operation 完成事件提交唯一键冲突") from None
+
+    async def commit_operation_quota_state(
+        self,
+        claim: EventDeliveryClaim,
+        *,
+        user_id: str,
+        workflow_state: VideoWorkflowStateEnvelope,
+        workflow: WorkflowRecord,
+        expected_workflow_version: int,
+        open_interrupt: StoredAgentInterrupt | None,
+        close_interrupt_revision: int | None,
+        occurred_at: datetime,
+    ) -> WorkflowRecord:
+        """在单个 SQL 事务中公开 quota overlay 或恢复原领域状态。"""
+
+        from pixelflow.agent_runtime.jobs import (
+            OperationQuotaEventPayload,
+            OperationQuotaState,
+        )
+        from pixelflow.agent_workflows.video.live_quota import (
+            VideoOperationQuotaProjectionService,
+        )
+
+        owner = _require_text("user_id", user_id, 64)
+        normalized_time = _normalize_datetime("occurred_at", occurred_at)
+        normalized_claim = EventDeliveryClaim.model_validate(
+            claim.model_dump(mode="python")
+        )
+        payload = OperationQuotaEventPayload.model_validate(
+            normalized_claim.event.payload
+        )
+        is_pause = payload.quota_state is OperationQuotaState.PAUSED
+        if is_pause:
+            if open_interrupt is None or close_interrupt_revision is not None:
+                raise AgentRuntimeRecordConflictError("quota pause 投影目标不完整")
+        elif open_interrupt is not None or close_interrupt_revision != (
+            payload.quota_pause_revision
+        ):
+            raise AgentRuntimeRecordConflictError("quota resume 投影目标不完整")
+        target_state = VideoWorkflowStateEnvelope.model_validate(
+            workflow_state.model_dump(mode="python")
+        )
+        target_workflow = WorkflowRecord.model_validate(
+            workflow.model_dump(mode="python")
+        )
+        target_interrupt = (
+            None
+            if open_interrupt is None
+            else StoredAgentInterrupt.model_validate(
+                open_interrupt.model_dump(mode="python")
+            )
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    operation_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentOperationRow)
+                            .where(
+                                PixelFlowAgentOperationRow.user_id == owner,
+                                PixelFlowAgentOperationRow.job_id
+                                == payload.job_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    event_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentEventRow)
+                            .where(
+                                PixelFlowAgentEventRow.user_id == owner,
+                                PixelFlowAgentEventRow.event_id
+                                == normalized_claim.event.event_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if operation_row is None or event_row is None:
+                        raise AgentRuntimeRecordConflictError(
+                            "quota pause Event 或 Operation 不存在",
+                        )
+                    operation = _operation_from_row(operation_row)
+                    stored_event = _event_from_row(event_row)
+                    state_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentVideoStateRow)
+                            .where(
+                                PixelFlowAgentVideoStateRow.user_id == owner,
+                                PixelFlowAgentVideoStateRow.workflow_id
+                                == operation.workflow_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    workflow_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentWorkflowRow)
+                            .where(
+                                PixelFlowAgentWorkflowRow.user_id == owner,
+                                PixelFlowAgentWorkflowRow.workflow_id
+                                == operation.workflow_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    turn_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentTurnRow)
+                            .where(
+                                PixelFlowAgentTurnRow.user_id == owner,
+                                PixelFlowAgentTurnRow.conversation_id
+                                == target_state.conversation_id,
+                                PixelFlowAgentTurnRow.turn_id
+                                == target_state.last_turn_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    interrupt_rows = list(
+                        (
+                            await session.scalars(
+                                select(PixelFlowAgentInterruptRow)
+                                .where(
+                                    PixelFlowAgentInterruptRow.user_id == owner,
+                                    PixelFlowAgentInterruptRow.conversation_id
+                                    == operation.conversation_id,
+                                    PixelFlowAgentInterruptRow.workflow_id
+                                    == operation.workflow_id,
+                                    PixelFlowAgentInterruptRow.kind
+                                    == "authorization_required",
+                                    PixelFlowAgentInterruptRow.reason_code
+                                    == "authorization_required",
+                                )
+                                .with_for_update()
+                            )
+                        ).all()
+                    )
+                    matching_interrupts = [
+                        _interrupt_from_row(item)
+                        for item in interrupt_rows
+                        if _matches_quota_authorization_interrupt(
+                            _interrupt_from_row(item),
+                            operation=operation,
+                            quota_pause_revision=payload.quota_pause_revision,
+                        )
+                    ]
+                    unclosed_interrupts = [
+                        item
+                        for item in matching_interrupts
+                        if item.status != "closed"
+                    ]
+                    if len(unclosed_interrupts) > 1:
+                        raise AgentRuntimeRecordConflictError(
+                            "quota resume 匹配到多个未关闭授权中断",
+                        )
+                    stored_interrupt = (
+                        None
+                        if target_interrupt is None
+                        else next(
+                            (
+                                item
+                                for item in matching_interrupts
+                                if item.interrupt_id
+                                == target_interrupt.interrupt_id
+                            ),
+                            None,
+                        )
+                    )
+                    close_interrupt = (
+                        unclosed_interrupts[0]
+                        if unclosed_interrupts
+                        else next(
+                            (
+                                item
+                                for item in matching_interrupts
+                                if item.status == "closed"
+                            ),
+                            None,
+                        )
+                    )
+                    expiry = (
+                        None
+                        if event_row.lease_expires_at is None
+                        else _database_utc(event_row.lease_expires_at)
+                    )
+                    published_at = (
+                        None
+                        if event_row.published_at is None
+                        else _database_utc(event_row.published_at)
+                    )
+                    if event_row.delivery_status == "published":
+                        if (
+                            stored_event != normalized_claim.event
+                            or event_row.delivery_attempts
+                            != normalized_claim.delivery_attempts
+                            or event_row.lease_owner
+                            != normalized_claim.lease_owner
+                            or expiry != normalized_claim.lease_expires_at
+                            or published_at is None
+                            or published_at >= normalized_claim.lease_expires_at
+                            or state_row is None
+                            or _video_state_from_row(state_row) != target_state
+                            or workflow_row is None
+                            or _workflow_from_row(workflow_row)
+                            != target_workflow
+                            or turn_row is None
+                            or (
+                                is_pause
+                                and (
+                                    stored_interrupt != target_interrupt
+                                    or turn_row.status
+                                    != TurnStatus.WAITING_USER.value
+                                )
+                            )
+                            or (
+                                not is_pause
+                                and (
+                                    close_interrupt is None
+                                    or close_interrupt.status != "closed"
+                                    or turn_row.status
+                                    != TurnStatus.COMPLETED.value
+                                )
+                            )
+                        ):
+                            raise AgentRuntimeRecordConflictError(
+                                "quota Event 已发布投影与重放目标不一致",
+                            )
+                        return _clone(target_workflow)
+                    if (
+                        stored_event != normalized_claim.event
+                        or event_row.delivery_status != "delivering"
+                        or event_row.delivery_attempts
+                        != normalized_claim.delivery_attempts
+                        or event_row.lease_owner != normalized_claim.lease_owner
+                        or expiry != normalized_claim.lease_expires_at
+                        or expiry is None
+                        or normalized_time >= expiry
+                        or state_row is None
+                        or turn_row is None
+                        or turn_row.conversation_id
+                        != target_state.conversation_id
+                        or (
+                            is_pause
+                            and (
+                                operation.next_poll_at is not None
+                                or turn_row.status
+                                not in {
+                                    TurnStatus.COMPLETED.value,
+                                    TurnStatus.WAITING_USER.value,
+                                }
+                            )
+                        )
+                        or (
+                            not is_pause
+                            and (
+                                operation.next_poll_at is None
+                                or close_interrupt is None
+                                or turn_row.status
+                                not in {
+                                    TurnStatus.PROCESSING.value,
+                                    TurnStatus.COMPLETED.value,
+                                }
+                            )
+                        )
+                    ):
+                        raise TurnExecutionLeaseConflictError(
+                            normalized_claim.event.event_id,
+                        )
+                    current_state = _video_state_from_row(state_row)
+                    projection = VideoOperationQuotaProjectionService().build(
+                        user_id=owner,
+                        envelope=current_state,
+                        operation=operation,
+                        quota_event=stored_event,
+                    )
+                    if (
+                        expected_workflow_version
+                        != current_state.workflow_version
+                        or projection.workflow_state != target_state
+                        or projection.workflow != target_workflow
+                        or projection.open_interrupt != target_interrupt
+                        or projection.close_interrupt_revision
+                        != close_interrupt_revision
+                    ):
+                        raise VideoWorkflowStateConflictError(
+                            "quota Event 投影与权威目标不一致",
+                        )
+                    synthetic_claim, commit = _quota_projection_commit(
+                        claim=normalized_claim,
+                        user_id=owner,
+                        workflow_state=target_state,
+                        workflow=target_workflow,
+                        expected_workflow_version=expected_workflow_version,
+                        open_interrupt=target_interrupt,
+                        close_interrupt_id=(
+                            None
+                            if is_pause or close_interrupt is None
+                            else close_interrupt.interrupt_id
+                        ),
+                        turn_status=(
+                            TurnStatus.WAITING_USER
+                            if is_pause
+                            else TurnStatus.COMPLETED
+                        ),
+                        occurred_at=normalized_time,
+                    )
+                    await self._sql_compare_and_set_state(session, commit)
+                    await self._sql_upsert_workflow_and_active(
+                        session,
+                        synthetic_claim,
+                        commit,
+                    )
+                    await self._sql_apply_interrupt_transition(
+                        session,
+                        synthetic_claim,
+                        commit,
+                    )
+                    await self._sql_append_events(
+                        session,
+                        synthetic_claim,
+                        commit,
+                        action_key=stored_event.event_id,
+                        include_turn_terminal=(
+                            is_pause
+                            or turn_row.status
+                            == TurnStatus.PROCESSING.value
+                        ),
+                    )
+                    turn_row.status = (
+                        TurnStatus.WAITING_USER.value
+                        if is_pause
+                        else TurnStatus.COMPLETED.value
+                    )
+                    turn_row.updated_at = normalized_time
+                    event_row.delivery_status = "published"
+                    event_row.published_at = normalized_time
+                    await session.flush()
+                    return _clone(target_workflow)
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError(
+                "Operation quota Event 提交唯一键冲突",
+            ) from None
 
 
 __all__ = [
