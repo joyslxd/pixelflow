@@ -104,6 +104,26 @@ class VideoOperationQuotaProjectionService:
         )
 
 
+def quota_checkpoint_thread_id(
+    *,
+    event_id: str,
+    workflow_version: int,
+    paused: bool,
+) -> str:
+    """把事件与目标版本共同编码进线程，避免旧投影覆盖较新 checkpoint。"""
+
+    if not isinstance(event_id, str) or not event_id:
+        raise OperationConflictError("quota Event ID 不合法")
+    if (
+        not isinstance(workflow_version, int)
+        or isinstance(workflow_version, bool)
+        or workflow_version < 1
+    ):
+        raise OperationConflictError("quota checkpoint 版本不合法")
+    state = "paused" if paused else "resumed"
+    return f"quota-{state}:{event_id}:v{workflow_version}"
+
+
 def strict_quota_agent_event(value: AgentEvent) -> AgentEvent:
     """按基础 DTO 重建事件，并拒绝子类通过任意序列化注入额外字段。"""
 
@@ -215,7 +235,11 @@ def _quota_authorization_interrupt(
         },
         opened_at=event.occurred_at,
         user_id=user_id,
-        thread_id=f"quota-paused:{event.event_id}",
+        thread_id=quota_checkpoint_thread_id(
+            event_id=event.event_id,
+            workflow_version=envelope.workflow_version,
+            paused=True,
+        ),
         checkpoint_ns="root",
     )
 
@@ -223,5 +247,6 @@ def _quota_authorization_interrupt(
 __all__ = [
     "VideoOperationQuotaProjection",
     "VideoOperationQuotaProjectionService",
+    "quota_checkpoint_thread_id",
     "strict_quota_agent_event",
 ]

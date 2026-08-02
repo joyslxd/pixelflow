@@ -1181,10 +1181,13 @@ async def test_video_handler_starts_only_qc_affected_scene_live_operation() -> N
         VideoOperationCompletionHandler,
     )
 
-    store = MemoryPixelFlowTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=store)
-    await _seed_conversation(store)
     clock = _MutableClock()
+    store = MemoryPixelFlowTaskStore()
+    repository = MemoryVideoRuntimeRepository(
+        task_store=store,
+        completion_clock=clock.now,
+    )
+    await _seed_conversation(store)
     provider = ScriptedProvider(
         status_results=[
             *[

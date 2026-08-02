@@ -324,7 +324,10 @@ async def _repository(
 ) -> AsyncIterator[tuple[VideoRuntimeRepository, object]]:
     if kind == "memory":
         store = MemoryPixelFlowTaskStore()
-        yield MemoryVideoRuntimeRepository(task_store=store), store
+        yield MemoryVideoRuntimeRepository(
+            task_store=store,
+            completion_clock=lambda: NOW,
+        ), store
         return
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -346,6 +349,7 @@ async def _repository(
         yield SQLVideoRuntimeRepository(
             session_factory,
             task_store=store,
+            completion_clock=lambda: NOW,
         ), store
     finally:
         await engine.dispose()
@@ -1330,7 +1334,10 @@ async def test_memory_interrupt_response_rolls_back_when_task_store_exit_fails()
                 raise RuntimeError("注入响应写入失败")
 
     store = FailingMemoryTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=store)
+    repository = MemoryVideoRuntimeRepository(
+        task_store=store,
+        completion_clock=lambda: NOW,
+    )
     await _seed_conversation(store)
     await repository.enqueue_turn_for_execution(OWNER, _turn(1), now=NOW)
     initial = await claim(repository)

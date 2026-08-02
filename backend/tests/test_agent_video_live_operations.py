@@ -17,7 +17,9 @@ from uuid import UUID
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
+from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy import null
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
@@ -60,10 +62,16 @@ from pixelflow.agent_runtime.persistence import (
     MemoryVideoRuntimeRepository,
     SQLVideoRuntimeRepository,
     SupervisorProjectionMessage,
+    TurnExecutionLeaseConflictError,
     VideoRuntimeRepository,
     VideoTurnCommit,
+    VideoWorkflowStateConflictError,
 )
-from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
+from pixelflow.agent_runtime.persistence.models import PixelFlowAgentInterruptRow
+from pixelflow.agent_runtime.persistence.repositories import (
+    EventDeliveryClaim,
+    MemoryAgentRuntimeRepository,
+)
 from pixelflow.agent_runtime.ports import OperationConflictError
 from pixelflow.agent_runtime.supervisor import (
     ActionClassificationCandidate,
@@ -93,6 +101,7 @@ from pixelflow.agent_workflows.video.live_operations import (
     VideoOperationQuotaStateHandler,
     VideoOperationStartRequest,
     _operation_completion_interrupt,
+    _OperationEventClaimRegistry,
 )
 from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.creative.plan_markdown import build_plan_markdown
@@ -509,12 +518,22 @@ class _SeededVideoRepository(MemoryVideoRuntimeRepository):
 async def _video_repository(
     kind: RepositoryKind,
     database_path: Path,
+    *,
+    completion_clock: _MutableClock | None = None,
 ) -> AsyncIterator[tuple[VideoRuntimeRepository, object]]:
     """创建同时实现 M06 与 Task4 合同的 Memory/SQLite Repository。"""
 
     if kind == "memory":
         store = MemoryPixelFlowTaskStore()
-        yield MemoryVideoRuntimeRepository(task_store=store), store
+        repository = MemoryVideoRuntimeRepository(
+            task_store=store,
+            completion_clock=(
+                (lambda: NOW)
+                if completion_clock is None
+                else completion_clock.now
+            ),
+        )
+        yield repository, store
         return
 
     engine = create_async_engine(
@@ -538,13 +557,16 @@ async def _video_repository(
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     store = SQLPixelFlowTaskStore(session_factory)
     try:
-        yield (
-            SQLVideoRuntimeRepository(
-                session_factory,
-                task_store=store,
+        repository = SQLVideoRuntimeRepository(
+            session_factory,
+            task_store=store,
+            completion_clock=(
+                (lambda: NOW)
+                if completion_clock is None
+                else completion_clock.now
             ),
-            store,
         )
+        yield repository, store
     finally:
         await engine.dispose()
 
@@ -2092,6 +2114,10 @@ async def test_quota_pause_event_builds_original_turn_authorization_projection()
     from pixelflow.agent_workflows.video.live_quota import (
         VideoOperationQuotaProjectionService,
     )
+    from pixelflow.agent_workflows.video.state_codec import (
+        decode_video_workflow_state,
+        encode_video_workflow_state,
+    )
 
     clock = _MutableClock()
     provider = ScriptedProvider()
@@ -2099,6 +2125,7 @@ async def test_quota_pause_event_builds_original_turn_authorization_projection()
     await _seed_conversation(store)
     repository = MemoryVideoRuntimeRepository(
         task_store=store,
+        completion_clock=clock.now,
     )
     operations = build_live_operations(
         provider,
@@ -2160,7 +2187,28 @@ async def test_quota_pause_event_builds_original_turn_authorization_projection()
     assert projection.open_interrupt is not None
     assert projection.open_interrupt.turn_id == envelope.last_turn_id
     assert projection.open_interrupt.thread_id == (
-        f"quota-paused:{paused.event.event_id}"
+        f"quota-paused:{paused.event.event_id}:v2"
+    )
+    advanced_envelope = encode_video_workflow_state(
+        user_id=USER_ID,
+        state=decode_video_workflow_state(envelope),
+        workflow_version=3,
+        last_turn_id=envelope.last_turn_id,
+        last_action_key=envelope.last_action_key,
+    )
+    advanced_projection = VideoOperationQuotaProjectionService().build(
+        user_id=USER_ID,
+        envelope=advanced_envelope,
+        operation=paused.operation,
+        quota_event=paused.event,
+    )
+    assert advanced_projection.open_interrupt is not None
+    assert advanced_projection.open_interrupt.thread_id == (
+        f"quota-paused:{paused.event.event_id}:v4"
+    )
+    assert (
+        advanced_projection.open_interrupt.thread_id
+        != projection.open_interrupt.thread_id
     )
     assert projection.open_interrupt.payload == {
         "workflow_id": WORKFLOW_ID,
@@ -2194,7 +2242,10 @@ async def test_quota_projection_rejects_subclass_and_payload_extra_fields() -> N
     provider = ScriptedProvider()
     store = MemoryPixelFlowTaskStore()
     await _seed_conversation(store)
-    repository = MemoryVideoRuntimeRepository(task_store=store)
+    repository = MemoryVideoRuntimeRepository(
+        task_store=store,
+        completion_clock=clock.now,
+    )
     _, _, _, paused, envelope = await _pause_first_generation_operation(
         repository,
         store,
@@ -2221,6 +2272,69 @@ async def test_quota_projection_rejects_subclass_and_payload_extra_fields() -> N
                 operation=paused.operation,
                 quota_event=event,
             )
+
+
+def test_operation_event_claim_registry_returns_deeply_frozen_snapshots() -> None:
+    """临时 claim 的写入副本与读取副本都必须深度只读且可序列化。"""
+
+    event_snapshot = AgentEvent(
+        event_id="event-task4-frozen-claim",
+        sequence=1,
+        cursor="1",
+        conversation_id=CONVERSATION_ID,
+        run_id="run-task4-frozen-claim",
+        occurred_at=NOW,
+        type="external_job.state_changed",
+        payload={
+            "job_id": "operation-task4-frozen-claim",
+            "nested": {"items": ["scene-1"]},
+        },
+    )
+    source = EventDeliveryClaim(
+        event=AgentEvent.model_validate(event_snapshot.model_dump(mode="python")),
+        delivery_attempts=1,
+        lease_owner="task4-frozen-claim-worker",
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
+    registry = _OperationEventClaimRegistry()
+    registry.remember(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id="operation-task4-frozen-claim",
+        claim=source,
+        now=NOW,
+    )
+
+    source.lease_owner = "mutated-source-worker"
+    source.event.payload["nested"]["items"].append("scene-mutated")
+    owned = registry.require(
+        event_snapshot,
+        idempotency_key=event_snapshot.event_id,
+        now=NOW,
+    )
+
+    assert owned.claim.lease_owner == "task4-frozen-claim-worker"
+    assert owned.claim.event.payload["nested"]["items"] == ["scene-1"]
+    with pytest.raises(ValidationError):
+        owned.claim.lease_owner = "mutated-read-worker"
+    with pytest.raises(ValidationError):
+        owned.claim.event.sequence = 2
+    with pytest.raises(TypeError):
+        owned.claim.event.payload["nested"] = {"items": []}
+    with pytest.raises(AttributeError):
+        owned.claim.event.payload["nested"]["items"].append("scene-2")
+
+    serialized = owned.claim.model_dump(mode="json")
+    assert json.loads(json.dumps(serialized))["event"]["payload"]["nested"] == {
+        "items": ["scene-1"],
+    }
+    replayed = registry.require(
+        event_snapshot,
+        idempotency_key=event_snapshot.event_id,
+        now=NOW,
+    )
+    assert replayed is not owned
+    assert replayed.claim is not owned.claim
 
 
 @pytest.mark.asyncio
@@ -2338,6 +2452,489 @@ async def test_quota_pause_event_atomically_projects_original_turn_once(
 
 
 @pytest.mark.asyncio
+async def test_sql_quota_commit_locks_turn_before_interrupt(
+    tmp_path: Path,
+) -> None:
+    """后台 quota 与响应路径必须共享 Turn→Interrupt 行锁顺序。"""
+
+    from pixelflow.agent_workflows.video.live_quota import (
+        VideoOperationQuotaProjectionService,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        "sql",
+        tmp_path / "task4-quota-lock-order.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        _, _, pending, paused, envelope = (
+            await _pause_first_generation_operation(
+                repository,
+                store,
+                clock,
+                provider,
+            )
+        )
+        claim = await repository.claim_operation_quota_event(
+            USER_ID,
+            CONVERSATION_ID,
+            paused.event.event_id,
+            pending.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner="task4-quota-lock-order",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert claim is not None
+        projection = VideoOperationQuotaProjectionService().build(
+            user_id=USER_ID,
+            envelope=envelope,
+            operation=paused.operation,
+            quota_event=claim.event,
+        )
+        engine = repository._session_factory.kw["bind"]
+        selected_tables: list[str] = []
+
+        def record_select(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if not normalized.lstrip().startswith("select"):
+                return
+            if "pixelflow_agent_turns" in normalized:
+                selected_tables.append("turn")
+            elif "pixelflow_agent_interrupts" in normalized:
+                selected_tables.append("interrupt")
+
+        sqlalchemy_event.listen(
+            engine.sync_engine,
+            "before_cursor_execute",
+            record_select,
+        )
+        try:
+            await repository.commit_operation_quota_state(
+                claim,
+                user_id=USER_ID,
+                workflow_state=projection.workflow_state,
+                workflow=projection.workflow,
+                expected_workflow_version=envelope.workflow_version,
+                open_interrupt=projection.open_interrupt,
+                close_interrupt_revision=None,
+                occurred_at=clock.now(),
+            )
+        finally:
+            sqlalchemy_event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                record_select,
+            )
+
+        assert selected_tables[:2] == ["turn", "interrupt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_published_quota_replay_rejects_cross_conversation_interrupt(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """已发布 pause 重放只能绑定当前 Operation 匹配集合内的中断。"""
+
+    from pixelflow.agent_workflows.video.live_quota import (
+        VideoOperationQuotaProjectionService,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task4-quota-cross-conversation-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        _, _, pending, paused, envelope = (
+            await _pause_first_generation_operation(
+                repository,
+                store,
+                clock,
+                provider,
+            )
+        )
+        claim = await repository.claim_operation_quota_event(
+            USER_ID,
+            CONVERSATION_ID,
+            paused.event.event_id,
+            pending.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner=f"task4-quota-cross-conversation-{kind}",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert claim is not None
+        projection = VideoOperationQuotaProjectionService().build(
+            user_id=USER_ID,
+            envelope=envelope,
+            operation=paused.operation,
+            quota_event=claim.event,
+        )
+        legitimate_interrupt = projection.open_interrupt
+        assert legitimate_interrupt is not None
+        await repository.commit_operation_quota_state(
+            claim,
+            user_id=USER_ID,
+            workflow_state=projection.workflow_state,
+            workflow=projection.workflow,
+            expected_workflow_version=envelope.workflow_version,
+            open_interrupt=legitimate_interrupt,
+            close_interrupt_revision=None,
+            occurred_at=clock.now(),
+        )
+        attacker = legitimate_interrupt.model_copy(
+            update={
+                "interrupt_id": "interrupt-task4-cross-conversation",
+                "conversation_id": "conversation-task4-cross-scope",
+                "thread_id": "conversation-task4-cross-scope",
+            },
+        )
+        if kind == "memory":
+            repository._interrupts[(USER_ID, attacker.interrupt_id)] = attacker
+        else:
+            values = attacker.model_dump(mode="json")
+            async with repository._session_factory() as session:
+                session.add(
+                    PixelFlowAgentInterruptRow(
+                        interrupt_id=attacker.interrupt_id,
+                        conversation_id=attacker.conversation_id,
+                        user_id=attacker.user_id,
+                        workflow_id=attacker.workflow_id,
+                        turn_id=attacker.turn_id,
+                        thread_id=attacker.thread_id,
+                        checkpoint_ns=attacker.checkpoint_ns,
+                        kind=attacker.kind,
+                        reason_code=attacker.reason_code,
+                        status=attacker.status,
+                        payload_json=values["payload"],
+                        response_id=None,
+                        response_json=null(),
+                        opened_at=attacker.opened_at,
+                        closed_at=None,
+                    ),
+                )
+                await session.commit()
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.commit_operation_quota_state(
+                claim,
+                user_id=USER_ID,
+                workflow_state=projection.workflow_state,
+                workflow=projection.workflow,
+                expected_workflow_version=envelope.workflow_version,
+                open_interrupt=attacker,
+                close_interrupt_revision=None,
+                occurred_at=clock.now(),
+            )
+        replayed = await repository.commit_operation_quota_state(
+            claim,
+            user_id=USER_ID,
+            workflow_state=projection.workflow_state,
+            workflow=projection.workflow,
+            expected_workflow_version=envelope.workflow_version,
+            open_interrupt=legitimate_interrupt,
+            close_interrupt_revision=None,
+            occurred_at=clock.now(),
+        )
+        assert replayed == projection.workflow
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quota_commit_uses_lock_inner_completion_time(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """quota 提交等待写锁跨过 expiry 后必须保留同一 Event 给接管者。"""
+
+    from pixelflow.agent_workflows.video.live_quota import (
+        VideoOperationQuotaProjectionService,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task4-quota-lock-clock-{kind}.db",
+        completion_clock=clock,
+    ) as (repository, store):
+        await _seed_conversation(store)
+        _, _, pending, paused, envelope = (
+            await _pause_first_generation_operation(
+                repository,
+                store,
+                clock,
+                provider,
+            )
+        )
+        claim = await repository.claim_operation_quota_event(
+            USER_ID,
+            CONVERSATION_ID,
+            paused.event.event_id,
+            pending.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner=f"task4-quota-lock-clock-{kind}",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert claim is not None
+        projection = VideoOperationQuotaProjectionService().build(
+            user_id=USER_ID,
+            envelope=envelope,
+            operation=paused.operation,
+            quota_event=claim.event,
+        )
+        write_lock = (
+            repository._compaction_write_lock
+            if kind == "memory"
+            else repository._sqlite_write_lock
+        )
+        assert write_lock is not None
+        await write_lock.acquire()
+        try:
+            task = asyncio.create_task(
+                repository.commit_operation_quota_state(
+                    claim,
+                    user_id=USER_ID,
+                    workflow_state=projection.workflow_state,
+                    workflow=projection.workflow,
+                    expected_workflow_version=envelope.workflow_version,
+                    open_interrupt=projection.open_interrupt,
+                    close_interrupt_revision=None,
+                    occurred_at=clock.now(),
+                )
+            )
+            await asyncio.sleep(0)
+            assert not task.done()
+            clock.advance(seconds=31)
+        finally:
+            write_lock.release()
+
+        with pytest.raises(TurnExecutionLeaseConflictError):
+            await task
+        assert await repository.get_video_state(USER_ID, WORKFLOW_ID) == envelope
+        assert await repository.get_open_interrupt(USER_ID, CONVERSATION_ID) is None
+        takeover = await repository.claim_operation_quota_event(
+            USER_ID,
+            CONVERSATION_ID,
+            paused.event.event_id,
+            pending.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner=f"task4-quota-lock-takeover-{kind}",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert takeover is not None
+        assert takeover.event.event_id == claim.event.event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_turn_commit_uses_lock_inner_completion_time(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """当前 Turn 等待写锁跨过执行租约后不得提交旧 Graph 结果。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task4-turn-lock-clock-{kind}.db",
+        completion_clock=clock,
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert envelope is not None
+        turn = TurnRecord(
+            turn_id=f"turn-task4-lock-clock-{kind}",
+            conversation_id=CONVERSATION_ID,
+            client_input_id=UUID(
+                "00000000-0000-4000-8000-000000001413"
+            ),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=clock.now(),
+        )
+        await repository.enqueue_turn_for_execution(USER_ID, turn, now=clock.now())
+        claim = await repository.claim_turn(
+            USER_ID,
+            CONVERSATION_ID,
+            turn.turn_id,
+            lease_owner=f"task4-turn-lock-clock-{kind}",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert claim is not None
+        action_key = f"task4:turn-lock-clock:{kind}"
+        target_state = encode_video_workflow_state(
+            user_id=USER_ID,
+            state=state,
+            workflow_version=envelope.workflow_version + 1,
+            last_turn_id=turn.turn_id,
+            last_action_key=action_key,
+        )
+        commit = VideoTurnCommit(
+            decision=ActionDecision(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                target_workflow_id=WORKFLOW_ID,
+                target_stage=None,
+                target_artifact_ref=None,
+                confidence=1,
+                requires_confirmation=False,
+                patch={},
+                reason_code="task4_lock_inner_clock",
+                idempotency_key=action_key,
+            ),
+            turn_status=TurnStatus.COMPLETED,
+            workflow_state=target_state,
+            workflow=project_video_workflow_state(state),
+            expected_workflow_version=envelope.workflow_version,
+            occurred_at=clock.now(),
+        )
+        write_lock = (
+            repository._compaction_write_lock
+            if kind == "memory"
+            else repository._sqlite_write_lock
+        )
+        assert write_lock is not None
+        await write_lock.acquire()
+        try:
+            task = asyncio.create_task(repository.commit_turn(claim, commit))
+            await asyncio.sleep(0)
+            assert not task.done()
+            clock.advance(seconds=31)
+        finally:
+            write_lock.release()
+
+        with pytest.raises(TurnExecutionLeaseConflictError):
+            await task
+        stored_turn = await repository.get_turn(USER_ID, turn.turn_id)
+        assert stored_turn is not None
+        assert stored_turn.status is TurnStatus.PROCESSING
+        assert await repository.get_video_state(USER_ID, WORKFLOW_ID) == envelope
+
+
+@pytest.mark.asyncio
+async def test_sql_turn_commit_resamples_after_projection_row_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQL 投影行锁等待跨过 expiry 后必须整笔回滚，不得沿用早取时间。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        "sql",
+        tmp_path / "task4-turn-projection-lock-clock.db",
+        completion_clock=clock,
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert envelope is not None
+        turn = TurnRecord(
+            turn_id="turn-task4-projection-lock-clock",
+            conversation_id=CONVERSATION_ID,
+            client_input_id=UUID(
+                "00000000-0000-4000-8000-000000001414"
+            ),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=clock.now(),
+        )
+        await repository.enqueue_turn_for_execution(USER_ID, turn, now=clock.now())
+        claim = await repository.claim_turn(
+            USER_ID,
+            CONVERSATION_ID,
+            turn.turn_id,
+            lease_owner="task4-turn-projection-lock-clock",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert claim is not None
+        action_key = "task4:turn-projection-lock-clock"
+        target_state = encode_video_workflow_state(
+            user_id=USER_ID,
+            state=state,
+            workflow_version=envelope.workflow_version + 1,
+            last_turn_id=turn.turn_id,
+            last_action_key=action_key,
+        )
+        commit = VideoTurnCommit(
+            decision=ActionDecision(
+                action=AgentAction.CONTINUE_WORKFLOW,
+                intent=AgentIntent.VIDEO,
+                target_workflow_id=WORKFLOW_ID,
+                target_stage=None,
+                target_artifact_ref=None,
+                confidence=1,
+                requires_confirmation=False,
+                patch={},
+                reason_code="task4_projection_lock_clock",
+                idempotency_key=action_key,
+            ),
+            turn_status=TurnStatus.COMPLETED,
+            workflow_state=target_state,
+            workflow=project_video_workflow_state(state),
+            expected_workflow_version=envelope.workflow_version,
+            occurred_at=clock.now(),
+        )
+        original_compare = repository._sql_compare_and_set_state
+
+        async def wait_for_projection_row_lock(session: object, target: object) -> None:
+            clock.advance(seconds=31)
+            await original_compare(session, target)
+
+        monkeypatch.setattr(
+            repository,
+            "_sql_compare_and_set_state",
+            wait_for_projection_row_lock,
+        )
+
+        with pytest.raises(TurnExecutionLeaseConflictError):
+            await repository.commit_turn(claim, commit)
+        stored_turn = await repository.get_turn(USER_ID, turn.turn_id)
+        assert stored_turn is not None
+        assert stored_turn.status is TurnStatus.PROCESSING
+        assert await repository.get_video_state(USER_ID, WORKFLOW_ID) == envelope
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(
     kind: RepositoryKind,
@@ -2392,7 +2989,7 @@ async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(
             "job_id": pending.job_id,
             "quota_pause_revision": 1,
         }
-        assert opened.thread_id == f"quota-paused:{paused.event.event_id}"
+        assert opened.thread_id == f"quota-paused:{paused.event.event_id}:v2"
         checkpoint = await graph.aget_state(
             {
                 "configurable": {
@@ -2405,6 +3002,461 @@ async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(
         assert checkpoint.values["workflow_dispatch_result"]["state"][
             "last_action_key"
         ] == paused.event.event_id
+        assert provider.start_calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_second_quota_pause_waits_without_poisoning_checkpoint(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """同一 Workflow 的第二个 pause 必须等待首个授权中断关闭后再建 checkpoint。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task4-quota-two-pauses-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        pending = tuple(state.pending_operations[:2])
+        assert len(pending) == 2
+        transitions = []
+        clock.advance(seconds=3)
+        for index, item in enumerate(pending, start=1):
+            lease_owner = f"task4-two-pauses-poller-{kind}-{index}"
+            leased = await OperationLeaseCoordinator(
+                repository,
+                user_id=USER_ID,
+                conversation_id=CONVERSATION_ID,
+            ).claim(
+                item.job_id,
+                lease_owner=lease_owner,
+                now=clock.now(),
+                lease_expires_at=clock.now() + timedelta(seconds=30),
+            )
+            assert leased is not None
+            transitions.append(
+                await OperationQuotaCoordinator(
+                    repository,
+                    user_id=USER_ID,
+                    conversation_id=CONVERSATION_ID,
+                ).record_pause(
+                    item.job_id,
+                    lease_owner=lease_owner,
+                    now=clock.now(),
+                )
+            )
+
+        graph = make_agent_runtime_graph(
+            registry=FakeWorkflowRegistry({}),
+            checkpointer=InMemorySaver(),
+        )
+        quota_handler = VideoOperationQuotaStateHandler(
+            repository=repository,
+            operations=operations,
+            clock=clock,
+            graph=graph,
+        )
+        runtime = operations.build_recovery_runtime(
+            resumer=_RecordingResumer(),
+            quota_resumer=quota_handler,
+            worker_id=f"task4-two-pauses-{kind}",
+        )
+
+        await runtime.run_once()
+
+        first_interrupt = await repository.get_open_interrupt(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert first_interrupt is not None
+        assert first_interrupt.payload["authorization_action"]["patch"][
+            "job_id"
+        ] == pending[0].job_id
+        second_event = transitions[1].event
+        second_checkpoint = await graph.aget_state(
+            {
+                "configurable": {
+                    "thread_id": f"quota-paused:{second_event.event_id}:v2",
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+        assert dict(second_checkpoint.values or {}) == {}
+        assert tuple(second_checkpoint.next or ()) == ()
+        assert tuple(second_checkpoint.interrupts or ()) == ()
+
+        responded_first = await repository.store_interrupt_response(
+            USER_ID,
+            CONVERSATION_ID,
+            first_interrupt.interrupt_id,
+            client_response_id=UUID(
+                "00000000-0000-4000-8000-000000001411"
+            ),
+            response_value={"content": "恢复第一个分镜任务"},
+            responded_at=clock.now(),
+        )
+        first_turn_claim = await repository.claim_interrupt_resume(
+            USER_ID,
+            CONVERSATION_ID,
+            responded_first.interrupt_id,
+            lease_owner=f"task4-two-pauses-turn-{kind}-1",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=60),
+        )
+        assert first_turn_claim is not None
+        first_resume = await OperationQuotaCoordinator(
+            repository,
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+        ).authorize_resume(
+            pending[0].job_id,
+            workflow_id=WORKFLOW_ID,
+            expected_revision=1,
+            delivery_lease_owner=f"task4-two-pauses-resume-{kind}-1",
+            now=clock.now(),
+            delivery_lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        operations.remember_quota_resume_claim(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            job_id=pending[0].job_id,
+            claim=first_resume.claim,
+        )
+        await quota_handler.resume_external_job_quota(
+            workflow_namespace(CONVERSATION_ID, WORKFLOW_ID),
+            quota_event=first_resume.claim.event,
+            idempotency_key=first_resume.claim.event.event_id,
+        )
+
+        clock.advance(seconds=61)
+        await runtime.run_once()
+
+        second_interrupt = await repository.get_open_interrupt(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert second_interrupt is not None
+        assert second_interrupt.payload["authorization_action"]["patch"] == {
+            "job_id": pending[1].job_id,
+            "quota_pause_revision": 1,
+        }
+        assert second_interrupt.thread_id == (
+            f"quota-paused:{second_event.event_id}:v4"
+        )
+        replayable_checkpoint = await graph.aget_state(
+            {
+                "configurable": {
+                    "thread_id": second_interrupt.thread_id,
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+        assert len(replayable_checkpoint.interrupts) == 1
+        assert replayable_checkpoint.values["workflow_dispatch_result"]["state"][
+            "last_action_key"
+        ] == second_event.event_id
+
+        responded_second = await repository.store_interrupt_response(
+            USER_ID,
+            CONVERSATION_ID,
+            second_interrupt.interrupt_id,
+            client_response_id=UUID(
+                "00000000-0000-4000-8000-000000001412"
+            ),
+            response_value={"content": "恢复第二个分镜任务"},
+            responded_at=clock.now(),
+        )
+        second_turn_claim = await repository.claim_interrupt_resume(
+            USER_ID,
+            CONVERSATION_ID,
+            responded_second.interrupt_id,
+            lease_owner=f"task4-two-pauses-turn-{kind}-2",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=60),
+        )
+        assert second_turn_claim is not None
+        second_resume = await OperationQuotaCoordinator(
+            repository,
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+        ).authorize_resume(
+            pending[1].job_id,
+            workflow_id=WORKFLOW_ID,
+            expected_revision=1,
+            delivery_lease_owner=f"task4-two-pauses-resume-{kind}-2",
+            now=clock.now(),
+            delivery_lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        operations.remember_quota_resume_claim(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            job_id=pending[1].job_id,
+            claim=second_resume.claim,
+        )
+        await quota_handler.resume_external_job_quota(
+            workflow_namespace(CONVERSATION_ID, WORKFLOW_ID),
+            quota_event=second_resume.claim.event,
+            idempotency_key=second_resume.claim.event.event_id,
+        )
+
+        for item in pending:
+            operation = await repository.get_operation(USER_ID, item.job_id)
+            assert operation is not None
+            assert operation.next_poll_at is not None
+        assert await repository.get_open_interrupt(USER_ID, CONVERSATION_ID) is None
+        assert provider.start_calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_concurrent_quota_pauses_isolate_losing_checkpoint(
+    kind: RepositoryKind,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发 pause 的 CAS 失败方必须改用新版本线程，不能覆盖旧 checkpoint。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task4-quota-concurrent-pauses-{kind}.db",
+        completion_clock=clock,
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        state = await _start_generation_operations(operations)
+        await _commit_seed_state(repository, store, state)
+        pending = tuple(state.pending_operations[:2])
+        assert len(pending) == 2
+        transitions = []
+        clock.advance(seconds=3)
+        for index, item in enumerate(pending, start=1):
+            lease_owner = f"task4-concurrent-poller-{kind}-{index}"
+            leased = await OperationLeaseCoordinator(
+                repository,
+                user_id=USER_ID,
+                conversation_id=CONVERSATION_ID,
+            ).claim(
+                item.job_id,
+                lease_owner=lease_owner,
+                now=clock.now(),
+                lease_expires_at=clock.now() + timedelta(seconds=30),
+            )
+            assert leased is not None
+            transitions.append(
+                await OperationQuotaCoordinator(
+                    repository,
+                    user_id=USER_ID,
+                    conversation_id=CONVERSATION_ID,
+                ).record_pause(
+                    item.job_id,
+                    lease_owner=lease_owner,
+                    now=clock.now(),
+                )
+            )
+
+        claims = []
+        for index, (item, transition) in enumerate(
+            zip(pending, transitions, strict=True),
+            start=1,
+        ):
+            claim = await operations._recovery_repository.claim_operation_quota_event(
+                USER_ID,
+                CONVERSATION_ID,
+                transition.event.event_id,
+                item.job_id,
+                quota_pause_revision=1,
+                quota_state="paused",
+                lease_owner=f"task4-concurrent-event-{kind}-{index}",
+                now=clock.now(),
+                lease_expires_at=clock.now() + timedelta(seconds=30),
+            )
+            assert claim is not None
+            claims.append(claim)
+
+        graph = make_agent_runtime_graph(
+            registry=FakeWorkflowRegistry({}),
+            checkpointer=InMemorySaver(),
+        )
+        quota_handler = VideoOperationQuotaStateHandler(
+            repository=repository,
+            operations=operations,
+            clock=clock,
+            graph=graph,
+        )
+        original_checkpoint = quota_handler._checkpoint_quota_projection
+        checkpoint_gate = asyncio.Event()
+        entered = 0
+
+        async def synchronize_checkpoint(**kwargs: object) -> None:
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                checkpoint_gate.set()
+            await checkpoint_gate.wait()
+            await original_checkpoint(**kwargs)
+
+        monkeypatch.setattr(
+            quota_handler,
+            "_checkpoint_quota_projection",
+            synchronize_checkpoint,
+        )
+        namespace = workflow_namespace(CONVERSATION_ID, WORKFLOW_ID)
+        results = await asyncio.gather(
+            *(
+                quota_handler.resume_external_job_quota(
+                    namespace,
+                    quota_event=claim.event,
+                    idempotency_key=claim.event.event_id,
+                )
+                for claim in claims
+            ),
+            return_exceptions=True,
+        )
+        monkeypatch.setattr(
+            quota_handler,
+            "_checkpoint_quota_projection",
+            original_checkpoint,
+        )
+        assert len([item for item in results if item is None]) == 1
+        assert len(
+            [
+                item
+                for item in results
+                if isinstance(item, VideoWorkflowStateConflictError)
+            ]
+        ) == 1
+
+        first_interrupt = await repository.get_open_interrupt(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert first_interrupt is not None
+        first_job_id = first_interrupt.payload["authorization_action"]["patch"][
+            "job_id"
+        ]
+        loser_index = next(
+            index
+            for index, item in enumerate(pending)
+            if item.job_id != first_job_id
+        )
+        loser_claim = claims[loser_index]
+        stale_checkpoint = await graph.aget_state(
+            {
+                "configurable": {
+                    "thread_id": (
+                        f"quota-paused:{loser_claim.event.event_id}:v2"
+                    ),
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+        assert len(stale_checkpoint.interrupts) == 1
+
+        responded = await repository.store_interrupt_response(
+            USER_ID,
+            CONVERSATION_ID,
+            first_interrupt.interrupt_id,
+            client_response_id=UUID(
+                "00000000-0000-4000-8000-000000001415"
+            ),
+            response_value={"content": "恢复首个并发配额任务"},
+            responded_at=clock.now(),
+        )
+        turn_claim = await repository.claim_interrupt_resume(
+            USER_ID,
+            CONVERSATION_ID,
+            responded.interrupt_id,
+            lease_owner=f"task4-concurrent-turn-{kind}",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=60),
+        )
+        assert turn_claim is not None
+        first_resume = await OperationQuotaCoordinator(
+            repository,
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+        ).authorize_resume(
+            first_job_id,
+            workflow_id=WORKFLOW_ID,
+            expected_revision=1,
+            delivery_lease_owner=f"task4-concurrent-resume-{kind}",
+            now=clock.now(),
+            delivery_lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        operations.remember_quota_resume_claim(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            job_id=first_job_id,
+            claim=first_resume.claim,
+        )
+        await quota_handler.resume_external_job_quota(
+            namespace,
+            quota_event=first_resume.claim.event,
+            idempotency_key=first_resume.claim.event.event_id,
+        )
+
+        await quota_handler.resume_external_job_quota(
+            namespace,
+            quota_event=loser_claim.event,
+            idempotency_key=loser_claim.event.event_id,
+        )
+        second_interrupt = await repository.get_open_interrupt(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert second_interrupt is not None
+        assert second_interrupt.payload["authorization_action"]["patch"] == {
+            "job_id": pending[loser_index].job_id,
+            "quota_pause_revision": 1,
+        }
+        assert second_interrupt.thread_id == (
+            f"quota-paused:{loser_claim.event.event_id}:v4"
+        )
+        refreshed = await graph.aget_state(
+            {
+                "configurable": {
+                    "thread_id": second_interrupt.thread_id,
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+        restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert restored is not None
+        assert refreshed.values["workflow_dispatch_result"]["state"][
+            "workflow_version"
+        ] == restored.workflow_version
+        assert refreshed.values["workflow_dispatch_result"]["state"][
+            "last_action_key"
+        ] == loser_claim.event.event_id
+        stale_after_retry = await graph.aget_state(
+            {
+                "configurable": {
+                    "thread_id": (
+                        f"quota-paused:{loser_claim.event.event_id}:v2"
+                    ),
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+        assert stale_after_retry.values["workflow_dispatch_result"]["state"][
+            "workflow_version"
+        ] == 2
         assert provider.start_calls == 3
 
 
@@ -2425,6 +3477,7 @@ async def test_quota_resume_event_atomically_restores_domain_state_once(
     async with _video_repository(
         kind,
         tmp_path / f"task4-quota-resume-{kind}.db",
+        completion_clock=clock,
     ) as (repository, store):
         await _seed_conversation(store)
         _, state, pending, paused, envelope = (
@@ -2849,7 +3902,10 @@ async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
         checkpoint = await graph.aget_state(
             {
                 "configurable": {
-                    "thread_id": f"quota-resumed:{resume_event_id}",
+                    "thread_id": (
+                        f"quota-resumed:{resume_event_id}"
+                        f":v{restored.workflow_version}"
+                    ),
                     "checkpoint_ns": "",
                 }
             }
@@ -3084,7 +4140,10 @@ async def test_quota_crash_windows_replay_one_projection_after_restart(
             stable_interrupt_id,
         )
         assert stored_interrupt is not None
-        expected_thread = f"quota-{quota_state}:{target_event.event_id}"
+        expected_thread = (
+            f"quota-{quota_state}:{target_event.event_id}"
+            f":v{restored.workflow_version}"
+        )
         checkpoint = await graph.aget_state(
             {
                 "configurable": {

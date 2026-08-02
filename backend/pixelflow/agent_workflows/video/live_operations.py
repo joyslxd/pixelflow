@@ -160,11 +160,14 @@ class _OperationEventClaimRegistry:
         claim: EventDeliveryClaim,
         now: datetime,
     ) -> None:
+        from pixelflow.agent_runtime.jobs.quota import _freeze_claim
         from pixelflow.agent_runtime.persistence.repositories import (
             EventDeliveryClaim,
         )
 
-        normalized = EventDeliveryClaim.model_validate(claim.model_dump(mode="python"))
+        normalized = _freeze_claim(
+            EventDeliveryClaim.model_validate(claim.model_dump(mode="python")),
+        )
         entry = _OwnedOperationEventClaim(
             user_id=_require_text("user_id", user_id, maximum=64),
             conversation_id=_require_text(
@@ -206,7 +209,14 @@ class _OperationEventClaimRegistry:
             if now >= entry.claim.lease_expires_at:
                 self._claims.pop(event_id, None)
                 raise OperationConflictError("Operation 事件投递租约已过期")
-            return entry
+            from pixelflow.agent_runtime.jobs.quota import _freeze_claim
+
+            return _OwnedOperationEventClaim(
+                user_id=entry.user_id,
+                conversation_id=entry.conversation_id,
+                job_id=entry.job_id,
+                claim=_freeze_claim(entry.claim),
+            )
 
     def release_published(
         self,
@@ -1000,6 +1010,22 @@ class VideoOperationQuotaStateHandler:
             operation=operation,
             quota_event=event,
         )
+        if projection.open_interrupt is not None:
+            snapshot = await self._repository.export_safe_snapshot(
+                quota.user_id,
+                quota.conversation_id,
+            )
+            blockers = [
+                item
+                for item in snapshot.interrupts
+                if item.status != "closed"
+                and item.interrupt_id
+                != projection.open_interrupt.interrupt_id
+            ]
+            if blockers:
+                raise OperationConflictError(
+                    "quota pause 等待当前授权中断关闭",
+                )
         await self._checkpoint_quota_projection(
             event=event,
             quota_state=payload.quota_state.value,
@@ -1038,6 +1064,9 @@ class VideoOperationQuotaStateHandler:
         from pixelflow.agent_workflows.video.live_handler import (
             WorkflowDispatchResult,
         )
+        from pixelflow.agent_workflows.video.live_quota import (
+            quota_checkpoint_thread_id,
+        )
 
         is_pause = quota_state == "paused"
         desired = WorkflowDispatchResult(
@@ -1051,10 +1080,10 @@ class VideoOperationQuotaStateHandler:
             ),
         )
         graph_namespace = GraphExecutionNamespace(
-            thread_id=(
-                f"quota-paused:{event.event_id}"
-                if is_pause
-                else f"quota-resumed:{event.event_id}"
+            thread_id=quota_checkpoint_thread_id(
+                event_id=event.event_id,
+                workflow_version=projection.workflow_state.workflow_version,
+                paused=is_pause,
             ),
             checkpoint_ns="",
         )

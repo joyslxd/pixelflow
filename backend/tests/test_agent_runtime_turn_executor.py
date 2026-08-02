@@ -6,7 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -16,6 +16,7 @@ from uuid import UUID
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
@@ -354,8 +355,16 @@ class FakeVideoHandler:
 class FailFirstCommitRepository(MemoryVideoRuntimeRepository):
     """仅在首次提交前模拟数据库连接瞬断。"""
 
-    def __init__(self, *, task_store: MemoryPixelFlowTaskStore) -> None:
-        super().__init__(task_store=task_store)
+    def __init__(
+        self,
+        *,
+        task_store: MemoryPixelFlowTaskStore,
+        completion_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(
+            task_store=task_store,
+            completion_clock=completion_clock,
+        )
         self.failures_remaining = 1
 
     async def commit_turn(self, claim, commit):
@@ -368,8 +377,16 @@ class FailFirstCommitRepository(MemoryVideoRuntimeRepository):
 class BlockingFirstClaimRepository(MemoryVideoRuntimeRepository):
     """把扫描领取停在 Graph 前，稳定复现 HTTP 凭据后到的竞争。"""
 
-    def __init__(self, *, task_store: MemoryPixelFlowTaskStore) -> None:
-        super().__init__(task_store=task_store)
+    def __init__(
+        self,
+        *,
+        task_store: MemoryPixelFlowTaskStore,
+        completion_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(
+            task_store=task_store,
+            completion_clock=completion_clock,
+        )
         self.claim_entered = asyncio.Event()
         self.release_claim = asyncio.Event()
 
@@ -529,8 +546,11 @@ async def _runtime(
     heartbeat_interval_seconds: float = 0.01,
 ) -> RuntimeHarness:
     task_store = MemoryPixelFlowTaskStore()
-    repository = repository_type(task_store=task_store)
     clock = FakeClock()
+    repository = repository_type(
+        task_store=task_store,
+        completion_clock=clock,
+    )
     vault = TransientCredentialVault()
     handler = FakeVideoHandler(
         repository,
@@ -606,11 +626,12 @@ async def _sql_clarification_runtime(
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     task_store = SQLPixelFlowTaskStore(session_factory)
+    clock = FakeClock()
     repository = SQLVideoRuntimeRepository(
         session_factory,
         task_store=task_store,
+        completion_clock=clock,
     )
-    clock = FakeClock()
     vault = TransientCredentialVault()
     handler = FakeVideoHandler(repository, vault=vault)
     graph = make_agent_runtime_graph(
@@ -1387,6 +1408,83 @@ async def test_sqlite_atomic_response_resumes_global_clarification_snapshot(
         stored = await runtime.repository.get_turn("user-1", initial.turn.turn_id)
         assert stored is not None and stored.status is TurnStatus.COMPLETED
         assert runtime.handler.turn_ids == [initial.turn.turn_id]
+
+
+@pytest.mark.asyncio
+async def test_sql_duplicate_response_locks_turn_before_interrupt(
+    tmp_path: Path,
+) -> None:
+    """重复响应与后台 quota 必须统一为 Turn→Interrupt 行锁顺序。"""
+
+    async with _sql_clarification_runtime(
+        tmp_path / "clarification-lock-order.db",
+    ) as (runtime, registration_store):
+        await _seed_conversation(runtime.task_store, context_version=0)
+        initial = await _register_clarification_turn(
+            registration_store,
+            turn_id="turn-sql-lock-order",
+            client_input_id=UUID(
+                "42000000-0000-4000-8000-000000000011"
+            ),
+            expected_context_version=0,
+            occurred_at=NOW,
+        )
+        await runtime.executor.notify_turn(
+            scope(initial.turn.turn_id),
+            credential=None,
+        )
+        await runtime.executor.wait_idle()
+        opened = await runtime.repository.get_open_interrupt(
+            "user-1",
+            "conversation-1",
+        )
+        assert opened is not None
+        response_id = UUID("42000000-0000-4000-8000-000000000012")
+        await _register_clarification_response(
+            registration_store,
+            interrupt_id=opened.interrupt_id,
+            response_id=response_id,
+            content="创建一条商品介绍视频",
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+        engine = runtime.repository._session_factory.kw["bind"]
+        selected_tables: list[str] = []
+
+        def record_select(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if not normalized.lstrip().startswith("select"):
+                return
+            if "pixelflow_agent_turns" in normalized:
+                selected_tables.append("turn")
+            elif "pixelflow_agent_interrupts" in normalized:
+                selected_tables.append("interrupt")
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_select)
+        try:
+            replayed = await _register_clarification_response(
+                registration_store,
+                interrupt_id=opened.interrupt_id,
+                response_id=response_id,
+                content="创建一条商品介绍视频",
+                occurred_at=NOW + timedelta(seconds=2),
+            )
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                record_select,
+            )
+
+        assert replayed.created is False
+        assert selected_tables[:3] == ["interrupt", "turn", "interrupt"]
 
 
 @pytest.mark.asyncio

@@ -6,11 +6,11 @@ import base64
 import hashlib
 import json
 from asyncio import Lock
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -1399,9 +1399,17 @@ def _event(
 class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
     """复用压缩锁，在一个可回滚临界区内提交全部 live 投影。"""
 
-    def __init__(self, *, task_store: MemoryPixelFlowTaskStore) -> None:
+    def __init__(
+        self,
+        *,
+        task_store: MemoryPixelFlowTaskStore,
+        completion_clock: Callable[[], datetime] | None = None,
+    ) -> None:
         super().__init__()
         self._task_store = task_store
+        self._completion_clock = completion_clock or (
+            lambda: datetime.now(UTC)
+        )
         self._video_states: dict[tuple[str, str], VideoWorkflowStateEnvelope] = {}
         self._turn_executions: dict[tuple[str, str], _MemoryTurnExecution] = {}
         self._projection_messages: dict[tuple[str, str], SupervisorProjectionMessage] = {}
@@ -1982,6 +1990,10 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                                 workflow=normalized_commit.workflow,
                             )
                         return replay
+                    completed_at = _normalize_datetime(
+                        "completed_at",
+                        self._completion_clock(),
+                    )
                     before = self._snapshot_live_runtime_state()
                     try:
                         key = (
@@ -1992,7 +2004,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         if not self._execution_matches(
                             execution,
                             normalized_claim,
-                            normalized_commit.occurred_at,
+                            completed_at,
                         ):
                             raise TurnExecutionLeaseConflictError(
                                 normalized_claim.turn.turn_id,
@@ -2028,7 +2040,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                                 != operation_claim.lease_owner
                                 or delivery.lease_expires_at
                                 != operation_claim.lease_expires_at
-                                or normalized_commit.occurred_at
+                                or completed_at
                                 >= operation_claim.lease_expires_at
                                 or normalized_commit.workflow_state is None
                                 or normalized_commit.workflow is None
@@ -2091,7 +2103,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         if operation_claim is not None:
                             delivery = self._event_delivery[event_key]
                             delivery.status = "published"
-                            delivery.published_at = normalized_commit.occurred_at
+                            delivery.published_at = completed_at
                         finished = current.model_copy(
                             update={
                                 "status": normalized_commit.turn_status,
@@ -2741,7 +2753,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
         )
 
         owner = _require_text("user_id", user_id, 64)
-        normalized_time = _normalize_datetime("occurred_at", occurred_at)
+        _normalize_datetime("occurred_at", occurred_at)
         normalized_claim = EventDeliveryClaim.model_validate(
             claim.model_dump(mode="python")
         )
@@ -2813,11 +2825,17 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                             "quota resume 匹配到多个未关闭授权中断",
                         )
                     stored_interrupt = (
-                        self._interrupts.get(
-                            (owner, target_interrupt.interrupt_id)
+                        None
+                        if target_interrupt is None
+                        else next(
+                            (
+                                item
+                                for item in matching_interrupts
+                                if item.interrupt_id
+                                == target_interrupt.interrupt_id
+                            ),
+                            None,
                         )
-                        if target_interrupt is not None
-                        else None
                     )
                     close_interrupt = (
                         unclosed_interrupts[0]
@@ -2867,6 +2885,10 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                                 "quota pause 已发布投影与重放目标不一致",
                             )
                         return _clone(target_workflow)
+                    completed_at = _normalize_datetime(
+                        "completed_at",
+                        self._completion_clock(),
+                    )
                     if (
                         delivery.status != "delivering"
                         or delivery.delivery_attempts
@@ -2874,7 +2896,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         or delivery.lease_owner != normalized_claim.lease_owner
                         or delivery.lease_expires_at
                         != normalized_claim.lease_expires_at
-                        or normalized_time >= normalized_claim.lease_expires_at
+                        or completed_at >= normalized_claim.lease_expires_at
                         or current_state is None
                         or current_turn is None
                         or current_turn.conversation_id
@@ -2941,7 +2963,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                             if is_pause
                             else TurnStatus.COMPLETED
                         ),
-                        occurred_at=normalized_time,
+                        occurred_at=completed_at,
                     )
                     before = self._snapshot_live_runtime_state()
                     try:
@@ -2977,7 +2999,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                         )
                         delivery = self._event_delivery[event_key]
                         delivery.status = "published"
-                        delivery.published_at = normalized_time
+                        delivery.published_at = completed_at
                         return _clone(target_workflow)
                     except Exception:
                         self._restore_live_runtime_state(before)
@@ -3074,9 +3096,13 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         session_factory: async_sessionmaker[AsyncSession],
         *,
         task_store: PixelFlowTaskStore,
+        completion_clock: Callable[[], datetime] | None = None,
     ) -> None:
         super().__init__(session_factory)
         self._task_store = task_store
+        self._completion_clock = completion_clock or (
+            lambda: datetime.now(UTC)
+        )
         store_factory = getattr(task_store, "session_factory", None)
         if store_factory is not None and store_factory is not session_factory:
             raise ValueError("SQL 视频 Repository 与 Task Store 必须复用同一 Session 工厂")
@@ -3984,8 +4010,6 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             or event_row.lease_owner
                             != operation_claim.lease_owner
                             or expiry != operation_claim.lease_expires_at
-                            or normalized_commit.occurred_at
-                            >= operation_claim.lease_expires_at
                             or normalized_commit.workflow_state is None
                             or normalized_commit.workflow is None
                         ):
@@ -4041,27 +4065,6 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             raise AgentRuntimeRecordConflictError(
                                 "quota resume Turn 未绑定唯一授权中断",
                             )
-                    lease_result = await session.execute(
-                        update(PixelFlowAgentTurnExecutionRow)
-                        .where(
-                            PixelFlowAgentTurnExecutionRow.user_id == normalized_claim.user_id,
-                            PixelFlowAgentTurnExecutionRow.conversation_id == normalized_claim.turn.conversation_id,
-                            PixelFlowAgentTurnExecutionRow.turn_id == normalized_claim.turn.turn_id,
-                            PixelFlowAgentTurnExecutionRow.lease_owner == normalized_claim.lease_owner,
-                            PixelFlowAgentTurnExecutionRow.lease_token == str(normalized_claim.lease_token),
-                            PixelFlowAgentTurnExecutionRow.lease_expires_at > normalized_commit.occurred_at,
-                        )
-                        .values(
-                            lease_owner=None,
-                            lease_token=None,
-                            lease_expires_at=None,
-                            next_attempt_at=None,
-                            last_reason_code=_video_turn_commit_identity(normalized_commit),
-                            updated_at=normalized_commit.occurred_at,
-                        )
-                    )
-                    if lease_result.rowcount != 1:
-                        raise TurnExecutionLeaseConflictError(normalized_claim.turn.turn_id)
                     turn = (
                         await session.scalars(
                             select(PixelFlowAgentTurnRow)
@@ -4090,9 +4093,53 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             else operation_claim.event.event_id
                         ),
                     )
+                    await session.flush()
+                    completed_at = _normalize_datetime(
+                        "completed_at",
+                        self._completion_clock(),
+                    )
+                    if (
+                        operation_claim is not None
+                        and completed_at
+                        >= operation_claim.lease_expires_at
+                    ):
+                        raise TurnExecutionLeaseConflictError(
+                            operation_claim.event.event_id,
+                        )
+                    lease_result = await session.execute(
+                        update(PixelFlowAgentTurnExecutionRow)
+                        .where(
+                            PixelFlowAgentTurnExecutionRow.user_id
+                            == normalized_claim.user_id,
+                            PixelFlowAgentTurnExecutionRow.conversation_id
+                            == normalized_claim.turn.conversation_id,
+                            PixelFlowAgentTurnExecutionRow.turn_id
+                            == normalized_claim.turn.turn_id,
+                            PixelFlowAgentTurnExecutionRow.lease_owner
+                            == normalized_claim.lease_owner,
+                            PixelFlowAgentTurnExecutionRow.lease_token
+                            == str(normalized_claim.lease_token),
+                            PixelFlowAgentTurnExecutionRow.lease_expires_at
+                            > completed_at,
+                        )
+                        .values(
+                            lease_owner=None,
+                            lease_token=None,
+                            lease_expires_at=None,
+                            next_attempt_at=None,
+                            last_reason_code=_video_turn_commit_identity(
+                                normalized_commit,
+                            ),
+                            updated_at=completed_at,
+                        )
+                    )
+                    if lease_result.rowcount != 1:
+                        raise TurnExecutionLeaseConflictError(
+                            normalized_claim.turn.turn_id,
+                        )
                     if event_row is not None:
                         event_row.delivery_status = "published"
-                        event_row.published_at = normalized_commit.occurred_at
+                        event_row.published_at = completed_at
                     turn.status = normalized_commit.turn_status.value
                     turn.decision_json = normalized_commit.decision.model_dump(mode="json")
                     turn.target_workflow_id = (
@@ -4100,7 +4147,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         if normalized_commit.workflow is not None
                         else normalized_commit.decision.target_workflow_id
                     )
-                    turn.updated_at = normalized_commit.occurred_at
+                    turn.updated_at = completed_at
                     await session.flush()
                     return _turn_from_row(turn)
         except IntegrityError:
@@ -4191,6 +4238,37 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         raise AgentRuntimeRecordConflictError(
                             "interrupt 所属对话不可执行 live 视频",
                         )
+                    interrupt_turn_id = (
+                        await session.scalar(
+                            select(PixelFlowAgentInterruptRow.turn_id)
+                            .where(
+                                PixelFlowAgentInterruptRow.user_id == owner,
+                                PixelFlowAgentInterruptRow.conversation_id
+                                == conversation,
+                                PixelFlowAgentInterruptRow.interrupt_id == identity,
+                            )
+                        )
+                    )
+                    if interrupt_turn_id is None:
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 不存在或不属于当前会话",
+                        )
+                    turn_row = (
+                        await session.scalars(
+                            select(PixelFlowAgentTurnRow)
+                            .where(
+                                PixelFlowAgentTurnRow.user_id == owner,
+                                PixelFlowAgentTurnRow.conversation_id == conversation,
+                                PixelFlowAgentTurnRow.turn_id
+                                == interrupt_turn_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if turn_row is None:
+                        raise AgentRuntimeRecordConflictError(
+                            "interrupt 原 Turn 不存在",
+                        )
                     interrupt_row = (
                         await session.scalars(
                             select(PixelFlowAgentInterruptRow)
@@ -4203,25 +4281,12 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             .with_for_update()
                         )
                     ).one_or_none()
-                    if interrupt_row is None:
+                    if (
+                        interrupt_row is None
+                        or interrupt_row.turn_id != turn_row.turn_id
+                    ):
                         raise AgentRuntimeRecordConflictError(
                             "interrupt 不存在或不属于当前会话",
-                        )
-                    turn_row = (
-                        await session.scalars(
-                            select(PixelFlowAgentTurnRow)
-                            .where(
-                                PixelFlowAgentTurnRow.user_id == owner,
-                                PixelFlowAgentTurnRow.conversation_id == conversation,
-                                PixelFlowAgentTurnRow.turn_id
-                                == interrupt_row.turn_id,
-                            )
-                            .with_for_update()
-                        )
-                    ).one_or_none()
-                    if turn_row is None:
-                        raise AgentRuntimeRecordConflictError(
-                            "interrupt 原 Turn 不存在",
                         )
                     stored_interrupt = _interrupt_from_row(interrupt_row)
                     if interrupt_row.status in {"responded", "closed"}:
@@ -5090,7 +5155,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         )
 
         owner = _require_text("user_id", user_id, 64)
-        normalized_time = _normalize_datetime("occurred_at", occurred_at)
+        _normalize_datetime("occurred_at", occurred_at)
         normalized_claim = EventDeliveryClaim.model_validate(
             claim.model_dump(mode="python")
         )
@@ -5297,6 +5362,10 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                                 "quota Event 已发布投影与重放目标不一致",
                             )
                         return _clone(target_workflow)
+                    completed_at = _normalize_datetime(
+                        "completed_at",
+                        self._completion_clock(),
+                    )
                     if (
                         stored_event != normalized_claim.event
                         or event_row.delivery_status != "delivering"
@@ -5305,7 +5374,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         or event_row.lease_owner != normalized_claim.lease_owner
                         or expiry != normalized_claim.lease_expires_at
                         or expiry is None
-                        or normalized_time >= expiry
+                        or completed_at >= expiry
                         or state_row is None
                         or turn_row is None
                         or turn_row.conversation_id
@@ -5373,7 +5442,7 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             if is_pause
                             else TurnStatus.COMPLETED
                         ),
-                        occurred_at=normalized_time,
+                        occurred_at=completed_at,
                     )
                     await self._sql_compare_and_set_state(session, commit)
                     await self._sql_upsert_workflow_and_active(
@@ -5402,9 +5471,9 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         if is_pause
                         else TurnStatus.COMPLETED.value
                     )
-                    turn_row.updated_at = normalized_time
+                    turn_row.updated_at = completed_at
                     event_row.delivery_status = "published"
-                    event_row.published_at = normalized_time
+                    event_row.published_at = completed_at
                     await session.flush()
                     return _clone(target_workflow)
         except IntegrityError:

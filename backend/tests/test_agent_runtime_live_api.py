@@ -395,7 +395,10 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
     """相同响应必须恢复原 Turn，不能创建 follow-up Turn。"""
 
     task_store = MemoryPixelFlowTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=task_store)
+    repository = MemoryVideoRuntimeRepository(
+        task_store=task_store,
+        completion_clock=lambda: NOW,
+    )
     graph = make_agent_runtime_graph(
         registry=FakeWorkflowRegistry(
             {WorkflowKind.VIDEO: _WaitingUserVideoHandler()},
@@ -600,7 +603,10 @@ async def test_interrupt_notify_failure_keeps_http_success_and_secret_transient(
     """响应已原子登记后，进程内唤醒失败不能返回 5xx 或持久化 Authorization。"""
 
     task_store = MemoryPixelFlowTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=task_store)
+    repository = MemoryVideoRuntimeRepository(
+        task_store=task_store,
+        completion_clock=lambda: NOW,
+    )
     executor = _FailingNotificationExecutor()
     service = AgentRuntimeService(
         config=AgentRuntimeConfig(
@@ -755,7 +761,10 @@ async def test_snapshot_rejects_invalid_live_projection_with_fixed_code(
     """歧义中断或损坏消息必须 fail-closed，且不得回显内部正文。"""
 
     task_store = MemoryPixelFlowTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=task_store)
+    repository = MemoryVideoRuntimeRepository(
+        task_store=task_store,
+        completion_clock=lambda: NOW,
+    )
     service = AgentRuntimeService(
         config=AgentRuntimeConfig(
             mode="primary",

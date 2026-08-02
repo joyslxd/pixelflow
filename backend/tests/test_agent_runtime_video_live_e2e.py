@@ -250,7 +250,11 @@ async def _live_client() -> AsyncIterator[
     ]
 ]:
     task_store = MemoryPixelFlowTaskStore()
-    repository = MemoryVideoRuntimeRepository(task_store=task_store)
+    clock = _Clock()
+    repository = MemoryVideoRuntimeRepository(
+        task_store=task_store,
+        completion_clock=clock.now,
+    )
     app: FastAPI = make_authed_test_app(user_factory=_user)
     memory_service = _MemoryService()
     memory_port = PowerMemVideoLivePort(memory_service)
@@ -276,7 +280,6 @@ async def _live_client() -> AsyncIterator[
         quality_review=providers[2],
         jianying_draft=providers[3],
     )
-    clock = _Clock()
     async with make_pixelflow_agent_live_runtime(
         app,
         config=_config(),

@@ -1155,7 +1155,10 @@ class _LiveVideoFaultScenario:
             ]
         )
         store = MemoryPixelFlowTaskStore()
-        repository = MemoryVideoRuntimeRepository(task_store=store)
+        repository = MemoryVideoRuntimeRepository(
+            task_store=store,
+            completion_clock=clock.now,
+        )
         await _seed_conversation(store)
         reviewed = _reviewed_scene_package_state()
         await _commit_seed_state(repository, store, reviewed)
