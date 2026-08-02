@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
     MemoryAgentRuntimeRepository,
+    OperationQuotaEventRecord,
     OperationRecord,
     SQLAgentRuntimeRepository,
 )
@@ -195,6 +197,59 @@ def _operation(
     )
 
 
+def _quota_event_record(
+    operation: OperationRecord,
+    *,
+    revision: int,
+    quota_state: Literal["paused", "resumed"],
+) -> OperationQuotaEventRecord:
+    return OperationQuotaEventRecord(
+        event_id=(
+            f"evt_job_quota_{operation.job_id}_{revision}_{quota_state}"
+        ),
+        cursor=f"cursor-job-quota-{operation.job_id}-{revision}-{quota_state}",
+        run_id=operation.job_id,
+        occurred_at=NOW,
+        quota_pause_revision=revision,
+        quota_state=quota_state,
+        payload={
+            "job_id": operation.job_id,
+            "workflow_id": operation.workflow_id,
+            "quota_pause_revision": revision,
+            "quota_state": quota_state,
+        },
+    )
+
+
+async def _create_claimed_polling_operation(
+    repository: AgentRuntimeRepository,
+    *,
+    job_id: str,
+    quota_pause_revision: int = 0,
+) -> OperationRecord:
+    created = await repository.create_operation(
+        OWNER_A,
+        _operation(job_id).model_copy(
+            update={
+                "quota_pause_revision": quota_pause_revision,
+                "next_poll_at": NOW,
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+        ),
+    )
+    claimed = await repository.claim_operation_lease(
+        OWNER_A,
+        CONVERSATION_ID,
+        created.job_id,
+        lease_owner="worker-a",
+        now=NOW,
+        lease_expires_at=NOW + timedelta(minutes=1),
+    )
+    assert claimed is not None
+    return claimed
+
+
 def test_operation_record_defaults_quota_pause_revision_to_zero() -> None:
     """DTO 默认写入零代次，拒绝负数审计代次。"""
 
@@ -204,6 +259,271 @@ def test_operation_record_defaults_quota_pause_revision_to_zero() -> None:
         OperationRecord.model_validate(
             record.model_dump(mode="python") | {"quota_pause_revision": -1}
         )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_pause_and_resume_are_atomic_idempotent_and_block_polling(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-atomic",
+        )
+        pause_event = _quota_event_record(
+            started,
+            revision=1,
+            quota_state="paused",
+        )
+
+        paused, stored_pause = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=pause_event,
+        )
+        replayed_pause = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=pause_event,
+        )
+        assert paused.quota_pause_revision == 1
+        assert paused.next_poll_at is None
+        assert paused.lease_owner is None
+        assert paused.lease_expires_at is None
+        assert stored_pause.type is AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+        assert replayed_pause == (paused, stored_pause)
+        assert await repository.get_operation(OWNER_A, paused.job_id) == paused
+        assert await repository.list_due_operations(now=NOW, limit=100) == []
+
+        resume_event = _quota_event_record(
+            paused,
+            revision=1,
+            quota_state="resumed",
+        )
+        resumed, resume_claim = await repository.resume_operation_from_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            paused.job_id,
+            workflow_id=paused.workflow_id,
+            expected_revision=1,
+            now=NOW,
+            delivery_lease_owner="request-resume-a",
+            delivery_lease_expires_at=NOW + timedelta(seconds=30),
+            event=resume_event,
+        )
+        replayed_resume = await repository.resume_operation_from_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            paused.job_id,
+            workflow_id=paused.workflow_id,
+            expected_revision=1,
+            now=NOW + timedelta(seconds=1),
+            delivery_lease_owner="request-resume-a",
+            delivery_lease_expires_at=NOW + timedelta(seconds=30),
+            event=resume_event,
+        )
+        assert resumed.job_id == paused.job_id
+        assert resumed.provider_job_id == paused.provider_job_id
+        assert resumed.attempt == paused.attempt
+        assert resumed.quota_pause_revision == 1
+        assert resumed.next_poll_at == NOW
+        assert resume_claim.event.payload["quota_state"] == "resumed"
+        assert resume_claim.lease_owner == "request-resume-a"
+        assert resume_claim.delivery_attempts == 1
+        assert replayed_resume == (resumed, resume_claim)
+        assert await repository.list_due_operations(now=NOW, limit=100) == []
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_concurrent_quota_pause_cas_writes_only_one_revision_event(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-concurrent",
+        )
+        first_event = _quota_event_record(
+            started,
+            revision=1,
+            quota_state="paused",
+        )
+        second_event = first_event.model_copy(
+            update={
+                "event_id": "evt_job_quota_job-quota-concurrent_1_paused-rival",
+                "cursor": "cursor-job-quota-job-quota-concurrent-1-paused-rival",
+            }
+        )
+
+        results = await asyncio.gather(
+            repository.pause_operation_for_quota(
+                OWNER_A,
+                CONVERSATION_ID,
+                started.job_id,
+                provider_job_id=started.provider_job_id,
+                lease_owner="worker-a",
+                expected_revision=0,
+                now=NOW,
+                event=first_event,
+            ),
+            repository.pause_operation_for_quota(
+                OWNER_A,
+                CONVERSATION_ID,
+                started.job_id,
+                provider_job_id=started.provider_job_id,
+                lease_owner="worker-a",
+                expected_revision=0,
+                now=NOW,
+                event=second_event,
+            ),
+            return_exceptions=True,
+        )
+
+        successes = [result for result in results if isinstance(result, tuple)]
+        conflicts = [
+            result
+            for result in results
+            if isinstance(result, AgentRuntimeRecordConflictError)
+        ]
+        assert len(successes) == 1
+        assert len(conflicts) == 1
+        events = await repository.list_events(OWNER_A, CONVERSATION_ID)
+        assert len(events) == 1
+        assert events[0].payload["quota_pause_revision"] == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_resume_rejects_stale_revision_after_later_pause(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-stale",
+            quota_pause_revision=1,
+        )
+        paused, _ = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=1,
+            now=NOW,
+            event=_quota_event_record(
+                started,
+                revision=2,
+                quota_state="paused",
+            ),
+        )
+
+        with pytest.raises(
+            AgentRuntimeRecordConflictError,
+            match="quota|配额|CAS|代次",
+        ):
+            await repository.resume_operation_from_quota(
+                OWNER_A,
+                CONVERSATION_ID,
+                paused.job_id,
+                workflow_id=paused.workflow_id,
+                expected_revision=1,
+                now=NOW,
+                delivery_lease_owner="request-stale",
+                delivery_lease_expires_at=NOW + timedelta(seconds=30),
+                event=_quota_event_record(
+                    paused,
+                    revision=1,
+                    quota_state="resumed",
+                ),
+            )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_event_claim_rejects_live_lease_and_allows_expired_takeover(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-event-lease",
+        )
+        paused, pause_event = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=_quota_event_record(
+                started,
+                revision=1,
+                quota_state="paused",
+            ),
+        )
+        pending = await repository.list_pending_operation_quota_events(
+            now=NOW,
+            limit=100,
+        )
+        assert [(item.user_id, item.operation, item.event) for item in pending] == [
+            (OWNER_A, paused, pause_event)
+        ]
+
+        first_claim = await repository.claim_operation_quota_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            pause_event.event_id,
+            paused.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner="quota-worker-a",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=30),
+        )
+        blocked_claim = await repository.claim_operation_quota_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            pause_event.event_id,
+            paused.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner="quota-worker-b",
+            now=NOW + timedelta(seconds=1),
+            lease_expires_at=NOW + timedelta(seconds=31),
+        )
+        reclaimed = await repository.claim_operation_quota_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            pause_event.event_id,
+            paused.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner="quota-worker-b",
+            now=NOW + timedelta(seconds=31),
+            lease_expires_at=NOW + timedelta(seconds=61),
+        )
+
+        assert first_claim is not None
+        assert first_claim.delivery_attempts == 1
+        assert blocked_claim is None
+        assert reclaimed is not None
+        assert reclaimed.event == pause_event
+        assert reclaimed.delivery_attempts == 2
+        assert reclaimed.lease_owner == "quota-worker-b"
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

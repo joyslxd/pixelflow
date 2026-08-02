@@ -250,6 +250,38 @@ async def test_event_claim_blocks_duplicate_and_reclaims_expired_lease(
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
+async def test_operation_internal_quota_event_blocks_generic_outbox_head(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        quota_event = AgentEvent(
+            event_id="evt_job_quota_job-1_1_paused",
+            sequence=1,
+            cursor="cursor-job-quota-job-1-1-paused",
+            conversation_id=CONVERSATION_ID,
+            run_id="job-1",
+            occurred_at=NOW,
+            type=AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED,
+            payload={
+                "job_id": "job-1",
+                "quota_pause_revision": 1,
+                "quota_state": "paused",
+            },
+        )
+        await repository.create_event(OWNER_A, quota_event)
+        await repository.create_event(OWNER_A, _event("event-after-quota", 2))
+
+        assert await repository.claim_next_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            lease_owner="generic-worker",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=30),
+        ) is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
 async def test_event_claim_and_completion_hide_other_owner(
     kind: RepositoryKind,
 ) -> None:

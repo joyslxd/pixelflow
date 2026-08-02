@@ -121,6 +121,9 @@ def test_normative_fixture_round_trips_without_contract_drift(
 
 
 def test_contract_enums_match_the_frozen_wire_values() -> None:
+    assert AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value == (
+        "external_job.quota_state_changed"
+    )
     assert {item.value for item in OrchestrationMode} == {
         "frontend_v2",
         "supervisor_v1",
@@ -149,6 +152,7 @@ def test_contract_enums_match_the_frozen_wire_values() -> None:
         "interrupt.responded",
         "interrupt.closed",
         "external_job.state_changed",
+        "external_job.quota_state_changed",
         "error.raised",
     }
     assert {item.value for item in AgentIntent} == {

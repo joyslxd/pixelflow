@@ -92,4 +92,5 @@ class AgentEventType(StrEnum):
     INTERRUPT_RESPONDED = "interrupt.responded"
     INTERRUPT_CLOSED = "interrupt.closed"
     EXTERNAL_JOB_STATE_CHANGED = "external_job.state_changed"
+    EXTERNAL_JOB_QUOTA_STATE_CHANGED = "external_job.quota_state_changed"
     ERROR_RAISED = "error.raised"

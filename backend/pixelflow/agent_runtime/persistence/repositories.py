@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
@@ -73,11 +73,31 @@ class OperationTerminalEventRecord(ContractModel):
     payload: dict[str, JsonValue]
 
 
+class OperationQuotaEventRecord(ContractModel):
+    """原子暂停或恢复 Operation 时写入的安全非终态事件。"""
+
+    event_id: str = Field(min_length=1)
+    cursor: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    occurred_at: datetime
+    quota_pause_revision: int = Field(ge=1)
+    quota_state: Literal["paused", "resumed"]
+    payload: dict[str, JsonValue]
+
+
 class OwnedOperationRecord(ContractModel):
     """仅供进程级恢复扫描使用的 Operation 所有者快照。"""
 
     user_id: str = Field(min_length=1)
     operation: OperationRecord
+
+
+class OwnedOperationQuotaEvent(ContractModel):
+    """恢复扫描使用的 Operation、quota event 与所有者快照。"""
+
+    user_id: str = Field(min_length=1)
+    operation: OperationRecord
+    event: AgentEvent
 
 
 class EventDeliveryClaim(ContractModel):
@@ -197,6 +217,13 @@ class AgentRuntimeRepository(Protocol):
         limit: int = 100,
     ) -> list[OwnedOperationRecord]: ...
 
+    async def list_pending_operation_quota_events(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationQuotaEvent]: ...
+
     async def claim_operation_start(
         self,
         user_id: str,
@@ -282,6 +309,33 @@ class AgentRuntimeRepository(Protocol):
         now: datetime,
     ) -> OperationRecord | None: ...
 
+    async def pause_operation_for_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        expected_revision: int,
+        now: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]: ...
+
+    async def resume_operation_from_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        workflow_id: str,
+        expected_revision: int,
+        now: datetime,
+        delivery_lease_owner: str,
+        delivery_lease_expires_at: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, EventDeliveryClaim]: ...
+
     async def finalize_operation_terminal(
         self,
         user_id: str,
@@ -302,6 +356,20 @@ class AgentRuntimeRepository(Protocol):
         event_id: str,
         job_id: str,
         *,
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None: ...
+
+    async def claim_operation_quota_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        quota_pause_revision: int,
+        quota_state: Literal["paused", "resumed"],
         lease_owner: str,
         now: datetime,
         lease_expires_at: datetime,
@@ -561,6 +629,68 @@ def _normalize_operation_terminal_event(
     )
 
 
+def _normalize_operation_quota_event(
+    record: OperationQuotaEventRecord,
+) -> OperationQuotaEventRecord:
+    normalized = _clone(record)
+    return _clone(
+        normalized.model_copy(
+            update={
+                "event_id": _require_text(
+                    "event_id",
+                    normalized.event_id,
+                    64,
+                ),
+                "cursor": _require_text(
+                    "cursor",
+                    normalized.cursor,
+                    128,
+                ),
+                "run_id": _require_text(
+                    "run_id",
+                    normalized.run_id,
+                    64,
+                ),
+                "occurred_at": _normalize_datetime(
+                    "occurred_at",
+                    normalized.occurred_at,
+                ),
+            }
+        )
+    )
+
+
+def _require_quota_revision(field: str, value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _require_quota_state(value: str) -> Literal["paused", "resumed"]:
+    if value not in {"paused", "resumed"}:
+        raise ValueError("quota_state must be paused or resumed")
+    return value
+
+
+def _require_quota_event_contract(
+    record: OperationQuotaEventRecord,
+    *,
+    job_id: str,
+    quota_pause_revision: int,
+    quota_state: Literal["paused", "resumed"],
+) -> None:
+    payload_revision = record.payload.get("quota_pause_revision")
+    if (
+        record.quota_pause_revision != quota_pause_revision
+        or record.quota_state != quota_state
+        or record.payload.get("job_id") != job_id
+        or isinstance(payload_revision, bool)
+        or payload_revision != quota_pause_revision
+        or record.payload.get("quota_state") != quota_state
+    ):
+        raise AgentRuntimeRecordConflictError("Operation quota 事件合同不一致")
+
+
 def _require_operation_terminal_status(
     status: ExternalJobStatus,
 ) -> ExternalJobStatus:
@@ -610,10 +740,58 @@ def _operation_completion_event_matches(
     )
 
 
-def _is_operation_completion_event(event: AgentEvent) -> bool:
-    """识别必须先恢复 Workflow、不能被通用发布器抢占的完成事件。"""
+def _build_operation_quota_event(
+    *,
+    conversation_id: str,
+    sequence: int,
+    record: OperationQuotaEventRecord,
+) -> AgentEvent:
+    return _normalize_event(
+        AgentEvent(
+            event_id=record.event_id,
+            sequence=sequence,
+            cursor=record.cursor,
+            conversation_id=conversation_id,
+            run_id=record.run_id,
+            occurred_at=record.occurred_at,
+            type=AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED,
+            payload=record.payload,
+        )
+    )
 
-    return event.type is AgentEventType.EXTERNAL_JOB_STATE_CHANGED and event.event_id.startswith("evt_job_done_")
+
+def _operation_quota_event_matches(
+    event: AgentEvent,
+    *,
+    conversation_id: str,
+    record: OperationQuotaEventRecord,
+) -> bool:
+    return (
+        event.event_id == record.event_id
+        and event.cursor == record.cursor
+        and event.conversation_id == conversation_id
+        and event.run_id == record.run_id
+        and event.type is AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+        and event.payload == record.payload
+    )
+
+
+def _is_operation_quota_event(event: AgentEvent) -> bool:
+    """识别由 quota 原子事务写入的非终态内部事件。"""
+
+    return (
+        event.type is AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
+        and event.event_id.startswith("evt_job_quota_")
+    )
+
+
+def _is_operation_internal_event(event: AgentEvent) -> bool:
+    """识别必须先恢复 Workflow、不能被通用发布器抢占的内部事件。"""
+
+    return (
+        event.type is AgentEventType.EXTERNAL_JOB_STATE_CHANGED
+        and event.event_id.startswith("evt_job_done_")
+    ) or _is_operation_quota_event(event)
 
 
 class MemoryAgentRuntimeRepository:
@@ -875,7 +1053,7 @@ class MemoryAgentRuntimeRepository:
             if not owner_keys:
                 return None
             owner_key = owner_keys[0]
-            if _is_operation_completion_event(self._events[owner_key]):
+            if _is_operation_internal_event(self._events[owner_key]):
                 return None
             state = self._event_delivery[owner_key]
             if state.status == "delivering":
@@ -976,16 +1154,33 @@ class MemoryAgentRuntimeRepository:
         normalized_now, normalized_limit = _recovery_scan_window(now, limit)
         candidates: list[OwnedOperationRecord] = []
         async with self._operation_write_lock:
-            for (owner, _), record in self._operations.items():
-                lease_pair_valid = (record.lease_owner is None) == (record.lease_expires_at is None)
-                lease_available = record.lease_expires_at is None or record.lease_expires_at <= normalized_now
-                if record.status is ExternalJobStatus.POLLING and record.provider_job_id is not None and record.next_poll_at is not None and record.next_poll_at <= normalized_now and lease_pair_valid and lease_available:
-                    candidates.append(
-                        OwnedOperationRecord(
-                            user_id=owner,
-                            operation=_clone(record),
-                        )
+            async with self._event_write_lock:
+                for (owner, _), record in self._operations.items():
+                    lease_pair_valid = (record.lease_owner is None) == (record.lease_expires_at is None)
+                    lease_available = record.lease_expires_at is None or record.lease_expires_at <= normalized_now
+                    has_pending_quota_event = any(
+                        event_owner == owner
+                        and event.payload.get("job_id") == record.job_id
+                        and _is_operation_quota_event(event)
+                        and delivery.status != "published"
+                        for (event_owner, event_id), event in self._events.items()
+                        if (delivery := self._event_delivery[(event_owner, event_id)])
                     )
+                    if (
+                        record.status is ExternalJobStatus.POLLING
+                        and record.provider_job_id is not None
+                        and record.next_poll_at is not None
+                        and record.next_poll_at <= normalized_now
+                        and lease_pair_valid
+                        and lease_available
+                        and not has_pending_quota_event
+                    ):
+                        candidates.append(
+                            OwnedOperationRecord(
+                                user_id=owner,
+                                operation=_clone(record),
+                            )
+                        )
         candidates.sort(
             key=lambda candidate: (
                 candidate.operation.next_poll_at,
@@ -1039,6 +1234,59 @@ class MemoryAgentRuntimeRepository:
                             OwnedOperationRecord(
                                 user_id=owner,
                                 operation=_clone(operation),
+                            ),
+                        )
+                    )
+        candidates.sort(key=lambda candidate: candidate[0])
+        return [_clone(candidate) for _, candidate in candidates[:normalized_limit]]
+
+    async def list_pending_operation_quota_events(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationQuotaEvent]:
+        """返回尚未投递或投递租约已过期的 quota 内部事件。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        candidates: list[tuple[int, OwnedOperationQuotaEvent]] = []
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                for event_key, event in self._events.items():
+                    if not _is_operation_quota_event(event):
+                        continue
+                    state = self._event_delivery[event_key]
+                    if state.status == "published":
+                        continue
+                    if state.status == "delivering" and state.lease_expires_at is not None and state.lease_expires_at > normalized_now:
+                        continue
+                    job_id = event.payload.get("job_id")
+                    revision = event.payload.get("quota_pause_revision")
+                    quota_state = event.payload.get("quota_state")
+                    if (
+                        not isinstance(job_id, str)
+                        or isinstance(revision, bool)
+                        or not isinstance(revision, int)
+                        or quota_state not in {"paused", "resumed"}
+                    ):
+                        continue
+                    owner = event_key[0]
+                    operation = self._operations.get((owner, job_id))
+                    if (
+                        operation is None
+                        or operation.conversation_id != event.conversation_id
+                        or operation.status is not ExternalJobStatus.POLLING
+                        or operation.provider_job_id is None
+                        or operation.quota_pause_revision != revision
+                    ):
+                        continue
+                    candidates.append(
+                        (
+                            event.sequence,
+                            OwnedOperationQuotaEvent(
+                                user_id=owner,
+                                operation=_clone(operation),
+                                event=_clone(event),
                             ),
                         )
                     )
@@ -1379,6 +1627,228 @@ class MemoryAgentRuntimeRepository:
             self._operations[owner_key] = resumed
             return _clone(resumed)
 
+    async def pause_operation_for_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        expected_revision: int,
+        now: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]:
+        """在同一内存临界区递增暂停代次并写入唯一 quota 事件。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text("provider_job_id", provider_job_id, 128)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        revision = _require_quota_revision("expected_revision", expected_revision)
+        paused_at = _normalize_datetime("now", now)
+        event_record = _normalize_operation_quota_event(event)
+        _require_quota_event_contract(
+            event_record,
+            job_id=operation_id,
+            quota_pause_revision=revision + 1,
+            quota_state="paused",
+        )
+        operation_key = (owner, operation_id)
+        event_key = (owner, event_record.event_id)
+
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                current = self._operations.get(operation_key)
+                if current is None or current.conversation_id != conversation:
+                    raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                if current.quota_pause_revision == revision + 1:
+                    existing_event = self._events.get(event_key)
+                    if existing_event is not None and _operation_quota_event_matches(
+                        existing_event,
+                        conversation_id=conversation,
+                        record=event_record,
+                    ):
+                        return _clone(current), _clone(existing_event)
+                    raise AgentRuntimeRecordConflictError("Operation quota 暂停重放事件不一致")
+                if (
+                    current.quota_pause_revision != revision
+                    or current.status is not ExternalJobStatus.POLLING
+                    or current.provider_job_id != provider_id
+                    or current.lease_owner != worker
+                    or current.lease_expires_at is None
+                    or current.lease_expires_at <= paused_at
+                ):
+                    raise AgentRuntimeRecordConflictError("Operation quota pause CAS 冲突")
+
+                conversation_events = [
+                    (record_owner, stored_event)
+                    for (record_owner, _), stored_event in self._events.items()
+                    if stored_event.conversation_id == conversation
+                ]
+                if any(record_owner != owner for record_owner, _ in conversation_events):
+                    raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                sequence = 1 if not conversation_events else max(
+                    stored_event.sequence for _, stored_event in conversation_events
+                ) + 1
+                cursor_key = (conversation, event_record.cursor)
+                sequence_key = (conversation, sequence)
+                if event_record.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
+                    raise AgentRuntimeRecordConflictError("Operation quota 事件身份已被占用")
+
+                quota_event = _build_operation_quota_event(
+                    conversation_id=conversation,
+                    sequence=sequence,
+                    record=event_record,
+                )
+                paused = _clone(
+                    current.model_copy(
+                        update={
+                            "quota_pause_revision": revision + 1,
+                            "next_poll_at": None,
+                            "lease_owner": None,
+                            "lease_expires_at": None,
+                            "updated_at": paused_at,
+                        }
+                    )
+                )
+                self._operations[operation_key] = paused
+                self._event_ids.add(quota_event.event_id)
+                self._event_sequence_keys.add(sequence_key)
+                self._event_cursor_keys.add(cursor_key)
+                self._events[event_key] = _clone(quota_event)
+                self._event_delivery[event_key] = _MemoryEventDeliveryState()
+                return _clone(paused), _clone(quota_event)
+
+    async def resume_operation_from_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        workflow_id: str,
+        expected_revision: int,
+        now: datetime,
+        delivery_lease_owner: str,
+        delivery_lease_expires_at: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, EventDeliveryClaim]:
+        """原子恢复原 Provider job，并为 resume 事件预占投递租约。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        workflow = _require_text("workflow_id", workflow_id, 64)
+        revision = _require_quota_revision("expected_revision", expected_revision)
+        if revision < 1:
+            raise ValueError("expected_revision must be at least 1")
+        worker, resumed_at, normalized_expiry = _lease_window(
+            delivery_lease_owner,
+            now,
+            delivery_lease_expires_at,
+        )
+        event_record = _normalize_operation_quota_event(event)
+        _require_quota_event_contract(
+            event_record,
+            job_id=operation_id,
+            quota_pause_revision=revision,
+            quota_state="resumed",
+        )
+        operation_key = (owner, operation_id)
+        event_key = (owner, event_record.event_id)
+
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                current = self._operations.get(operation_key)
+                if current is None or current.conversation_id != conversation:
+                    raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                existing_event = self._events.get(event_key)
+                if existing_event is not None:
+                    state = self._event_delivery[event_key]
+                    if (
+                        current.status is ExternalJobStatus.POLLING
+                        and current.provider_job_id is not None
+                        and current.workflow_id == workflow
+                        and current.quota_pause_revision == revision
+                        and current.next_poll_at is not None
+                        and current.lease_owner is None
+                        and current.lease_expires_at is None
+                        and _operation_quota_event_matches(
+                            existing_event,
+                            conversation_id=conversation,
+                            record=event_record,
+                        )
+                        and state.status == "delivering"
+                        and state.delivery_attempts == 1
+                        and state.lease_owner == worker
+                        and state.lease_expires_at == normalized_expiry
+                        and state.lease_expires_at > resumed_at
+                    ):
+                        return _clone(current), EventDeliveryClaim(
+                            event=_clone(existing_event),
+                            delivery_attempts=1,
+                            lease_owner=worker,
+                            lease_expires_at=normalized_expiry,
+                        )
+                    raise AgentRuntimeRecordConflictError("Operation quota 恢复重放事件或租约不一致")
+                if (
+                    current.status is not ExternalJobStatus.POLLING
+                    or current.provider_job_id is None
+                    or current.next_poll_at is not None
+                    or current.lease_owner is not None
+                    or current.lease_expires_at is not None
+                    or current.workflow_id != workflow
+                    or current.quota_pause_revision != revision
+                ):
+                    raise AgentRuntimeRecordConflictError("Operation quota resume CAS 冲突")
+
+                conversation_events = [
+                    (record_owner, stored_event)
+                    for (record_owner, _), stored_event in self._events.items()
+                    if stored_event.conversation_id == conversation
+                ]
+                if any(record_owner != owner for record_owner, _ in conversation_events):
+                    raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                sequence = 1 if not conversation_events else max(
+                    stored_event.sequence for _, stored_event in conversation_events
+                ) + 1
+                cursor_key = (conversation, event_record.cursor)
+                sequence_key = (conversation, sequence)
+                if event_record.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
+                    raise AgentRuntimeRecordConflictError("Operation quota 事件身份已被占用")
+
+                quota_event = _build_operation_quota_event(
+                    conversation_id=conversation,
+                    sequence=sequence,
+                    record=event_record,
+                )
+                resumed = _clone(
+                    current.model_copy(
+                        update={
+                            "next_poll_at": resumed_at,
+                            "updated_at": resumed_at,
+                        }
+                    )
+                )
+                self._operations[operation_key] = resumed
+                self._event_ids.add(quota_event.event_id)
+                self._event_sequence_keys.add(sequence_key)
+                self._event_cursor_keys.add(cursor_key)
+                self._events[event_key] = _clone(quota_event)
+                self._event_delivery[event_key] = _MemoryEventDeliveryState(
+                    status="delivering",
+                    delivery_attempts=1,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
+                return _clone(resumed), EventDeliveryClaim(
+                    event=_clone(quota_event),
+                    delivery_attempts=1,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
+
     async def finalize_operation_terminal(
         self,
         user_id: str,
@@ -1530,6 +2000,78 @@ class MemoryAgentRuntimeRepository:
                 return EventDeliveryClaim(
                     event=_clone(event),
                     delivery_attempts=state.delivery_attempts,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
+
+    async def claim_operation_quota_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        quota_pause_revision: int,
+        quota_state: Literal["paused", "resumed"],
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        """按稳定事件 ID 领取指定 Operation 的 quota 恢复投递。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        event_identity = _require_text("event_id", event_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        revision = _require_quota_revision(
+            "quota_pause_revision",
+            quota_pause_revision,
+        )
+        if revision < 1:
+            raise ValueError("quota_pause_revision must be at least 1")
+        state_name = _require_quota_state(quota_state)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        operation_key = (owner, operation_id)
+        event_key = (owner, event_identity)
+
+        async with self._operation_write_lock:
+            async with self._event_write_lock:
+                operation = self._operations.get(operation_key)
+                event = self._events.get(event_key)
+                event_revision = None if event is None else event.payload.get(
+                    "quota_pause_revision"
+                )
+                if (
+                    operation is None
+                    or operation.conversation_id != conversation
+                    or operation.status is not ExternalJobStatus.POLLING
+                    or operation.provider_job_id is None
+                    or operation.quota_pause_revision != revision
+                    or event is None
+                    or event.conversation_id != conversation
+                    or not _is_operation_quota_event(event)
+                    or event.payload.get("job_id") != operation_id
+                    or isinstance(event_revision, bool)
+                    or event_revision != revision
+                    or event.payload.get("quota_state") != state_name
+                ):
+                    return None
+                delivery = self._event_delivery[event_key]
+                if delivery.status == "published":
+                    return None
+                if delivery.status == "delivering" and delivery.lease_expires_at is not None and delivery.lease_expires_at > normalized_now:
+                    return None
+                delivery.status = "delivering"
+                delivery.delivery_attempts += 1
+                delivery.lease_owner = worker
+                delivery.lease_expires_at = normalized_expiry
+                return EventDeliveryClaim(
+                    event=_clone(event),
+                    delivery_attempts=delivery.delivery_attempts,
                     lease_owner=worker,
                     lease_expires_at=normalized_expiry,
                 )
@@ -2173,7 +2715,7 @@ class SQLAgentRuntimeRepository:
                 row = (await session.scalars(statement)).first()
                 if row is None:
                     return None
-                if _is_operation_completion_event(_event_from_row(row)):
+                if _is_operation_internal_event(_event_from_row(row)):
                     return None
                 if row.delivery_status == "delivering":
                     if row.lease_expires_at is None:
@@ -2305,6 +2847,19 @@ class SQLAgentRuntimeRepository:
         """按稳定顺序返回无有效租约的到期轮询任务。"""
 
         normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        pending_quota_event = (
+            select(PixelFlowAgentEventRow.outbox_id)
+            .where(
+                PixelFlowAgentEventRow.user_id == PixelFlowAgentOperationRow.user_id,
+                PixelFlowAgentEventRow.conversation_id == PixelFlowAgentOperationRow.conversation_id,
+                PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value,
+                PixelFlowAgentEventRow.event_id.like("evt_job_quota_%"),
+                PixelFlowAgentEventRow.payload_json["job_id"].as_string() == PixelFlowAgentOperationRow.job_id,
+                PixelFlowAgentEventRow.delivery_status != "published",
+            )
+            .correlate(PixelFlowAgentOperationRow)
+            .exists()
+        )
         statement = (
             select(PixelFlowAgentOperationRow)
             .where(
@@ -2323,6 +2878,7 @@ class SQLAgentRuntimeRepository:
                         PixelFlowAgentOperationRow.lease_expires_at <= normalized_now,
                     ),
                 ),
+                ~pending_quota_event,
             )
             .order_by(
                 PixelFlowAgentOperationRow.next_poll_at.asc(),
@@ -2390,6 +2946,55 @@ class SQLAgentRuntimeRepository:
                 operation=_operation_from_row(operation),
             )
             for operation in operation_rows
+        ]
+
+    async def list_pending_operation_quota_events(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[OwnedOperationQuotaEvent]:
+        """用有界 SQL 联结返回可领取的 quota 内部事件。"""
+
+        normalized_now, normalized_limit = _recovery_scan_window(now, limit)
+        statement = (
+            select(PixelFlowAgentOperationRow, PixelFlowAgentEventRow)
+            .join(
+                PixelFlowAgentEventRow,
+                and_(
+                    PixelFlowAgentOperationRow.user_id == PixelFlowAgentEventRow.user_id,
+                    PixelFlowAgentOperationRow.conversation_id == PixelFlowAgentEventRow.conversation_id,
+                    PixelFlowAgentOperationRow.job_id == PixelFlowAgentEventRow.payload_json["job_id"].as_string(),
+                ),
+            )
+            .where(
+                PixelFlowAgentOperationRow.status == ExternalJobStatus.POLLING.value,
+                PixelFlowAgentOperationRow.provider_job_id.is_not(None),
+                PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value,
+                PixelFlowAgentEventRow.event_id.like("evt_job_quota_%"),
+                PixelFlowAgentEventRow.payload_json["quota_pause_revision"].as_integer() == PixelFlowAgentOperationRow.quota_pause_revision,
+                PixelFlowAgentEventRow.payload_json["quota_state"].as_string().in_(("paused", "resumed")),
+                or_(
+                    PixelFlowAgentEventRow.delivery_status == "pending",
+                    and_(
+                        PixelFlowAgentEventRow.delivery_status == "delivering",
+                        PixelFlowAgentEventRow.lease_expires_at.is_not(None),
+                        PixelFlowAgentEventRow.lease_expires_at <= normalized_now,
+                    ),
+                ),
+            )
+            .order_by(PixelFlowAgentEventRow.outbox_id.asc())
+            .limit(normalized_limit)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            OwnedOperationQuotaEvent(
+                user_id=operation.user_id,
+                operation=_operation_from_row(operation),
+                event=_event_from_row(event),
+            )
+            for operation, event in rows
         ]
 
     async def claim_operation_start(
@@ -2780,6 +3385,97 @@ class SQLAgentRuntimeRepository:
                     lease_expires_at=normalized_expiry,
                 )
 
+    async def claim_operation_quota_event(
+        self,
+        user_id: str,
+        conversation_id: str,
+        event_id: str,
+        job_id: str,
+        *,
+        quota_pause_revision: int,
+        quota_state: Literal["paused", "resumed"],
+        lease_owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> EventDeliveryClaim | None:
+        """按稳定事件 ID 领取指定 Operation 的 quota 恢复投递。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        event_identity = _require_text("event_id", event_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        revision = _require_quota_revision(
+            "quota_pause_revision",
+            quota_pause_revision,
+        )
+        if revision < 1:
+            raise ValueError("quota_pause_revision must be at least 1")
+        state_name = _require_quota_state(quota_state)
+        worker, normalized_now, normalized_expiry = _lease_window(
+            lease_owner,
+            now,
+            lease_expires_at,
+        )
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.conversation_id == conversation,
+                PixelFlowAgentEventRow.event_id == event_identity,
+                PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value,
+            )
+            .with_for_update()
+        )
+        async with self._session_factory() as session:
+            async with _repository_write_transaction(
+                session,
+                self._sqlite_write_lock,
+            ):
+                operation = (await session.scalars(operation_statement)).one_or_none()
+                row = (await session.scalars(event_statement)).one_or_none()
+                event_revision = None if row is None else row.payload_json.get(
+                    "quota_pause_revision"
+                )
+                if (
+                    operation is None
+                    or operation.status != ExternalJobStatus.POLLING.value
+                    or operation.provider_job_id is None
+                    or operation.quota_pause_revision != revision
+                    or row is None
+                    or not row.event_id.startswith("evt_job_quota_")
+                    or row.payload_json.get("job_id") != operation_id
+                    or isinstance(event_revision, bool)
+                    or event_revision != revision
+                    or row.payload_json.get("quota_state") != state_name
+                ):
+                    return None
+                if row.delivery_status == "published":
+                    return None
+                if row.delivery_status == "delivering":
+                    current_expiry = None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                    if current_expiry is not None and current_expiry > normalized_now:
+                        return None
+                row.delivery_status = "delivering"
+                row.delivery_attempts += 1
+                row.lease_owner = worker
+                row.lease_expires_at = normalized_expiry
+                await session.flush()
+                return EventDeliveryClaim(
+                    event=_event_from_row(row),
+                    delivery_attempts=row.delivery_attempts,
+                    lease_owner=worker,
+                    lease_expires_at=normalized_expiry,
+                )
+
     async def heartbeat_operation_lease(
         self,
         user_id: str,
@@ -2897,6 +3593,278 @@ class SQLAgentRuntimeRepository:
                 row.updated_at = normalized_now
                 await session.flush()
                 return _operation_from_row(row)
+
+    async def pause_operation_for_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        provider_job_id: str,
+        lease_owner: str,
+        expected_revision: int,
+        now: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, AgentEvent]:
+        """在一个 SQL 事务中递增暂停代次并写入唯一 quota 事件。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        provider_id = _require_text("provider_job_id", provider_job_id, 128)
+        worker = _require_text("lease_owner", lease_owner, 128)
+        revision = _require_quota_revision("expected_revision", expected_revision)
+        paused_at = _normalize_datetime("now", now)
+        event_record = _normalize_operation_quota_event(event)
+        _require_quota_event_contract(
+            event_record,
+            job_id=operation_id,
+            quota_pause_revision=revision + 1,
+            quota_state="paused",
+        )
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        existing_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.event_id == event_record.event_id,
+            )
+            .with_for_update()
+        )
+        last_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(PixelFlowAgentEventRow.conversation_id == conversation)
+            .order_by(PixelFlowAgentEventRow.sequence.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    row = (await session.scalars(operation_statement)).one_or_none()
+                    if row is None:
+                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                    existing_event_row = (
+                        await session.scalars(existing_event_statement)
+                    ).one_or_none()
+                    if row.quota_pause_revision == revision + 1:
+                        existing_event = None if existing_event_row is None else _event_from_row(existing_event_row)
+                        if existing_event is not None and _operation_quota_event_matches(
+                            existing_event,
+                            conversation_id=conversation,
+                            record=event_record,
+                        ):
+                            return _operation_from_row(row), existing_event
+                        raise AgentRuntimeRecordConflictError("Operation quota 暂停重放事件不一致")
+                    current_expiry = None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)
+                    if (
+                        row.quota_pause_revision != revision
+                        or row.status != ExternalJobStatus.POLLING.value
+                        or row.provider_job_id != provider_id
+                        or row.lease_owner != worker
+                        or current_expiry is None
+                        or current_expiry <= paused_at
+                    ):
+                        raise AgentRuntimeRecordConflictError("Operation quota pause CAS 冲突")
+                    if existing_event_row is not None:
+                        raise AgentRuntimeRecordConflictError("Operation quota 事件身份已被占用")
+
+                    last_event_row = (await session.scalars(last_event_statement)).first()
+                    if last_event_row is not None and last_event_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    sequence = 1 if last_event_row is None else last_event_row.sequence + 1
+                    quota_event = _build_operation_quota_event(
+                        conversation_id=conversation,
+                        sequence=sequence,
+                        record=event_record,
+                    )
+                    row.quota_pause_revision = revision + 1
+                    row.next_poll_at = None
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    row.updated_at = paused_at
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=quota_event.schema_version,
+                            event_id=quota_event.event_id,
+                            sequence=quota_event.sequence,
+                            cursor=quota_event.cursor,
+                            conversation_id=quota_event.conversation_id,
+                            user_id=owner,
+                            run_id=quota_event.run_id,
+                            occurred_at=quota_event.occurred_at,
+                            event_type=quota_event.type.value,
+                            payload_json=quota_event.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+                    await session.flush()
+                    paused = _operation_from_row(row)
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("Operation quota 暂停或事件发生并发冲突") from None
+        return paused, quota_event
+
+    async def resume_operation_from_quota(
+        self,
+        user_id: str,
+        conversation_id: str,
+        job_id: str,
+        *,
+        workflow_id: str,
+        expected_revision: int,
+        now: datetime,
+        delivery_lease_owner: str,
+        delivery_lease_expires_at: datetime,
+        event: OperationQuotaEventRecord,
+    ) -> tuple[OperationRecord, EventDeliveryClaim]:
+        """在一个 SQL 事务中恢复原 job 并预占 resume 事件租约。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        operation_id = _require_text("job_id", job_id, 64)
+        workflow = _require_text("workflow_id", workflow_id, 64)
+        revision = _require_quota_revision("expected_revision", expected_revision)
+        if revision < 1:
+            raise ValueError("expected_revision must be at least 1")
+        worker, resumed_at, normalized_expiry = _lease_window(
+            delivery_lease_owner,
+            now,
+            delivery_lease_expires_at,
+        )
+        event_record = _normalize_operation_quota_event(event)
+        _require_quota_event_contract(
+            event_record,
+            job_id=operation_id,
+            quota_pause_revision=revision,
+            quota_state="resumed",
+        )
+        operation_statement = (
+            select(PixelFlowAgentOperationRow)
+            .where(
+                PixelFlowAgentOperationRow.user_id == owner,
+                PixelFlowAgentOperationRow.conversation_id == conversation,
+                PixelFlowAgentOperationRow.job_id == operation_id,
+            )
+            .with_for_update()
+        )
+        existing_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.event_id == event_record.event_id,
+            )
+            .with_for_update()
+        )
+        last_event_statement = (
+            select(PixelFlowAgentEventRow)
+            .where(PixelFlowAgentEventRow.conversation_id == conversation)
+            .order_by(PixelFlowAgentEventRow.sequence.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        try:
+            async with self._session_factory() as session:
+                async with _repository_write_transaction(
+                    session,
+                    self._sqlite_write_lock,
+                ):
+                    row = (await session.scalars(operation_statement)).one_or_none()
+                    if row is None:
+                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                    existing_event_row = (
+                        await session.scalars(existing_event_statement)
+                    ).one_or_none()
+                    if existing_event_row is not None:
+                        existing_event = _event_from_row(existing_event_row)
+                        current_expiry = None if existing_event_row.lease_expires_at is None else _database_utc(existing_event_row.lease_expires_at)
+                        if (
+                            row.status == ExternalJobStatus.POLLING.value
+                            and row.provider_job_id is not None
+                            and row.workflow_id == workflow
+                            and row.quota_pause_revision == revision
+                            and row.next_poll_at is not None
+                            and row.lease_owner is None
+                            and row.lease_expires_at is None
+                            and _operation_quota_event_matches(
+                                existing_event,
+                                conversation_id=conversation,
+                                record=event_record,
+                            )
+                            and existing_event_row.delivery_status == "delivering"
+                            and existing_event_row.delivery_attempts == 1
+                            and existing_event_row.lease_owner == worker
+                            and current_expiry == normalized_expiry
+                            and current_expiry > resumed_at
+                        ):
+                            return _operation_from_row(row), EventDeliveryClaim(
+                                event=existing_event,
+                                delivery_attempts=1,
+                                lease_owner=worker,
+                                lease_expires_at=normalized_expiry,
+                            )
+                        raise AgentRuntimeRecordConflictError("Operation quota 恢复重放事件或租约不一致")
+                    if (
+                        row.status != ExternalJobStatus.POLLING.value
+                        or row.provider_job_id is None
+                        or row.next_poll_at is not None
+                        or row.lease_owner is not None
+                        or row.lease_expires_at is not None
+                        or row.workflow_id != workflow
+                        or row.quota_pause_revision != revision
+                    ):
+                        raise AgentRuntimeRecordConflictError("Operation quota resume CAS 冲突")
+
+                    last_event_row = (await session.scalars(last_event_statement)).first()
+                    if last_event_row is not None and last_event_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    sequence = 1 if last_event_row is None else last_event_row.sequence + 1
+                    quota_event = _build_operation_quota_event(
+                        conversation_id=conversation,
+                        sequence=sequence,
+                        record=event_record,
+                    )
+                    row.next_poll_at = resumed_at
+                    row.updated_at = resumed_at
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=quota_event.schema_version,
+                            event_id=quota_event.event_id,
+                            sequence=quota_event.sequence,
+                            cursor=quota_event.cursor,
+                            conversation_id=quota_event.conversation_id,
+                            user_id=owner,
+                            run_id=quota_event.run_id,
+                            occurred_at=quota_event.occurred_at,
+                            event_type=quota_event.type.value,
+                            payload_json=quota_event.payload,
+                            delivery_status="delivering",
+                            delivery_attempts=1,
+                            lease_owner=worker,
+                            lease_expires_at=normalized_expiry,
+                        )
+                    )
+                    await session.flush()
+                    resumed = _operation_from_row(row)
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("Operation quota 恢复或事件发生并发冲突") from None
+        return resumed, EventDeliveryClaim(
+            event=quota_event,
+            delivery_attempts=1,
+            lease_owner=worker,
+            lease_expires_at=normalized_expiry,
+        )
 
     async def schedule_operation_poll(
         self,

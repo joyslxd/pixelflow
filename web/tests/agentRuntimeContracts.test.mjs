@@ -277,6 +277,7 @@ test("镜像合同枚举与 contracts-v1.md 冻结值一致", () => {
     "interrupt.opened",
     "interrupt.closed",
     "external_job.state_changed",
+    "external_job.quota_state_changed",
     "error.raised",
   ]);
 });
@@ -284,6 +285,26 @@ test("镜像合同枚举与 contracts-v1.md 冻结值一致", () => {
 test("wire event 校验接受完整的 v1 事件信封", () => {
   assert.equal(isAgentEventEnvelope(validEvent), true);
   assert.deepEqual(parseAgentEventEnvelope(validEvent), validEvent);
+});
+
+test("wire event 校验接受独立的配额状态事件类型", () => {
+  const quotaStateEvent = {
+    ...validEvent,
+    event_id: "evt_job_quota_job-1_1_paused",
+    cursor: "cursor-job-quota-job-1-1-paused",
+    run_id: "job-1",
+    type: "external_job.quota_state_changed",
+    payload: {
+      job_id: "job-1",
+      quota_pause_revision: 1,
+      quota_state: "paused",
+    },
+  };
+
+  assert.equal(
+    parseAgentEventEnvelope(quotaStateEvent).type,
+    "external_job.quota_state_changed",
+  );
 });
 
 test("wire event 校验拒绝未知版本、类型和非法序号", () => {

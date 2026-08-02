@@ -32,7 +32,9 @@ from .repositories import (
     AgentRuntimeRepository,
     EventDeliveryClaim,
     MemoryAgentRuntimeRepository,
+    OperationQuotaEventRecord,
     OperationRecord,
+    OwnedOperationQuotaEvent,
     SQLAgentRuntimeRepository,
 )
 from .turn_registration import (
@@ -73,7 +75,9 @@ __all__ = [
     "MemoryCompactionQueueRepository",
     "MemoryContextPayloadStore",
     "MemoryVideoRuntimeRepository",
+    "OperationQuotaEventRecord",
     "OperationRecord",
+    "OwnedOperationQuotaEvent",
     "OwnedTurnRecord",
     "PixelFlowAgentCompactionLockRow",
     "PixelFlowAgentConversationStateRow",

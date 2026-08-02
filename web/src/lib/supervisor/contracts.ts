@@ -187,6 +187,7 @@ export const EVENT_TYPE_VALUES = [
   "interrupt.opened",
   "interrupt.closed",
   "external_job.state_changed",
+  "external_job.quota_state_changed",
   "error.raised",
 ] as const;
 
