@@ -18,7 +18,7 @@
 端到端用例从创建 `initial_intent=video` 新对话开始，首轮 Turn 携带图片 URL、名称和稳定引用，依次完成需求表单、三方向、Plan、场景包和素材、三段分镜视频、第一次合并、QA 失败反馈、只修改第二镜、该镜 attempt 2、第二次合并、最终确认与当前成片下载。
 
 - 新对话权威归属为 `supervisor_v1`。
-- Snapshot 与 SSE 最终 `cursor/sequence` 一致；SSE 测试消费到目标 cursor 后主动发送 `http.disconnect`，测试进程正常退出且无残留。
+- 从首个 intake Snapshot 开始，九次 interrupt response、五次 M06 worker completion 和最终下载后都从上一 cursor 消费 SSE；独立 reducer 重建 run、workflow、messages、interrupt、context version、cursor 与 sequence 后逐项等值，命中目标 cursor 即发送 `http.disconnect`，测试进程正常退出且无残留。
 - fake Provider start 计数：分镜 `4`、合并 `2`、QA `1`、剪映 `0`。
 - 相同 `client_input_id` 重放与三次 Snapshot 刷新新增 Provider start 为 `0`。
 - 最终 Workflow 为 `completed`；下载证据只绑定第二次合并后的当前视频，旧合并 Artifact 没有继承下载字段。
@@ -27,10 +27,10 @@
 
 `test_video_live_fault_matrix_is_recoverable_and_isolated` 参数化执行 11 个真实生产对象场景，不调用其他测试函数，也不以源码扫描替代行为验证：
 
-1. Graph checkpoint 前退出：完成事件保留，租约到期后用同一 event ID 恢复，Provider start 不重复。
-2. Graph checkpoint 后退出：已应用 checkpoint 以 event ID 去重，ack 前退出后重放仍只应用一次。
+1. Graph checkpoint 前退出：生产 Supervisor Graph 在 SQLite 持久 Checkpointer 写入前退出；重开数据库后用同一 event ID 恢复原 Turn，Provider start 不重复。
+2. Graph checkpoint 后退出：生产 Graph 已把原 interrupt 写入 SQLite，ack 前退出后重开仍复用同一 checkpoint/interrupt，只应用一次。
 3. Provider start 后、完成事件前退出：恢复扫描只查询原 provider job，新增 start 为 0。
-4. status 402：用后续请求携带的新凭据恢复原 provider job，attempt 仍为 1，不再次 start。
+4. status 402：用后续请求的新 marker 经 `TransientCredentialVault` 和 `VideoLiveOperationBridge.start()` 公开带凭据边界恢复，凭据只进入一次并立即销毁；provider job 与 attempt 仍为原值，不再次 start。
 5. timeout 与 failed：固定安全原因落库，上层显式建立 attempt 2 和新 provider job。
 6. HTTP 404：原 Operation 固定为 expired，只能创建 attempt 2。
 7. 三分镜部分失败：两条成功保持不变，只为失败的第二镜创建 attempt 2。
@@ -38,7 +38,7 @@
 9. 模型档案失效：在 Graph/Handler 前失败关闭，Graph 与 Provider 调用均为 0。
 10. Handler 重启后缺失：新视频对话保持 `frontend_v2`；已冻结的旧 `supervisor_v1` 对话在新增 Turn 登记前固定返回 `agent_runtime_unavailable`，新增 Turn 为 0，原归属不迁移。
 
-每项统一断言 expected/actual attempt、provider job ID、Turn 状态、安全 reason、敏感值零泄漏、重复 Provider start 为 0、跨租户对象为 0。`frontend_v2` 对话仍把 R1 Turn 持久化为 `accepted`，供既有 v2 接力，但 Supervisor Executor 通知计数为 0。
+每项统一断言精确 expected/actual reason、attempt、provider job ID、Operation 状态、原 Turn ID/状态、敏感值零泄漏、重复 Provider start 为 0、跨租户对象为 0；checkpoint 额外断言 Repository 与 Graph checkpoint 的 interrupt ID 相同。`frontend_v2` 对话仍把 R1 Turn 持久化为 `accepted`，供既有 v2 接力，但 Supervisor Executor 通知计数为 0。
 
 ## TDD RED → GREEN
 
@@ -48,16 +48,20 @@
 - Service 归属 RED：`2 failed, 1 warning`。`frontend_v2` 错误通知 Executor，旧 `supervisor_v1` 缺 Handler 时错误返回 200；GREEN 为 `2 passed, 1 warning`，分别固定为 `accepted + executor 0` 和 `409 agent_runtime_unavailable + 0 Turn`。
 - 11 项故障矩阵收集 RED：`11 failed, 1 warning`；完成真实场景驱动器后逐项和整组均转绿。
 - 第一版 Starlette TestClient 对无限 SSE 流发生缓冲等待；改为可主动断开的 ASGI 消费后，同一完整 E2E `1 passed, 1 warning`，并复查无遗留 Python 进程。
+- 独立复审 checkpoint RED 固定失败于 `persistent_checkpoint_verified=False`；换为生产 Graph 与 SQLite Checkpointer 后，前后两个 crash window 均转绿。402 公开恢复入口 RED 固定失败于 `credential_recovery_entrypoint=None`；接入 Vault/Bridge 后同 job/attempt、单次 marker 和销毁断言转绿。
+- 全边界泄漏扫描 RED 固定失败于 `leak_boundaries_scanned=()`；GREEN 后扫描 Turn、Graph checkpoint、公开 Snapshot/SSE、completion projection 与安全日志。带 `secret_only` 字段的 Pydantic 子类在 Turn/Context 严格 DTO 处失败关闭，completion event 只取白名单 payload。
+- 逐段投影 RED 首先是 `response-1` 的 run 命名差异，协议归一后继续发现 context version `1 != 2`；最终 reducer 只以首个 Snapshot 初始化，后续完全按连续 SSE 推演，在全部十五个检查点与公开 Snapshot 六类字段一致。
 
 ## 本地门禁证据
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
-| Task 14 公共 E2E + R2 integration | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_video_live_e2e.py tests/test_agent_runtime_r2_integration.py -q` | `31 passed, 1 warning in 10.27s` |
+| Task 14 公共 E2E + R2 integration | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_r2_integration.py tests/test_agent_runtime_video_live_e2e.py -q` | 最终重跑 `32 passed, 1 warning in 9.32s` |
+| Graph/Executor/Operation 相邻回归 | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_graph_composition.py tests/test_agent_runtime_graph_dispatcher.py tests/test_agent_runtime_graph_interrupts.py tests/test_agent_runtime_graph_state.py tests/test_agent_runtime_turn_executor.py tests/test_agent_video_live_operations.py -q` | `247 passed, 1 warning in 108.51s` |
 | Service/Executor/R1 相邻回归 | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_r2_integration.py tests/test_agent_runtime_r1_integration.py tests/test_agent_runtime_turn_executor.py -q` | `83 passed, 1 warning in 11.41s` |
 | Runtime + 视频组合 | 由 `rg --files` 展开 `test_agent_runtime_*.py` 与 `test_agent_video_*.py` 后运行 pytest | 最终 `1658 passed, 1 failed, 1 warning in 216.15s`；唯一失败为未修改基线问题 |
 | 后端全量 | `.venv\Scripts\python.exe -m pytest -q` | 最终 `5862 passed, 48 skipped, 1 failed, 7 warnings in 341.91s`；唯一失败为未修改基线问题 |
-| 黄金报告复现 | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_supervisor_evaluation.py::test_离线评估达到模块四项门槛且报告可复现 -q` | `1 passed, 1 warning in 1.98s` |
+| 黄金报告复现 | `.venv\Scripts\python.exe -m pytest tests/test_agent_runtime_supervisor_evaluation.py::test_离线评估达到模块四项门槛且报告可复现 -q` | `1 passed, 1 warning in 2.04s` |
 | Web 全量 | `corepack pnpm test` | `404 passed / 0 failed` |
 | Web 类型检查 | `corepack pnpm lint` | 退出码 `0`，`tsc --noEmit` 无错误 |
 | Web 生产构建 | `corepack pnpm build-prod` | 退出码 `0`，`2432 modules transformed`；仅既有大 chunk 警告 |
@@ -73,9 +77,9 @@ PowerShell 不会替 pytest 展开 `tests/test_agent_runtime_*.py`，直接照�
 ## 网络、安全和发布边界
 
 - 未调用真实付费供应商。所有 Provider start/status 都来自进程内 `_FaultProviderService` 或 `_ScriptedProvider`；HTTP Controller 使用本地 ASGI transport。
-- fake 不保存 Authorization；持久化 Operation、Event、Turn、Snapshot 和测试结果扫描中没有 `Bearer` 凭据、原始供应商错误、token 或 credential。
+- fake 不保存 Authorization；Turn、生产 Graph checkpoint、持久化 Operation/Event、每段公开 Snapshot/SSE、completion projection、安全日志和测试结果扫描中都没有精确凭据 marker 或供应商原始错误。对抗性 `secret_only` 子类也不能进入模型上下文或完成 payload。
 - 未修改 dev/prod 配置、模型档案、Provider 合同或发布比例；生产配置 diff 为空。
 - 未 push，未执行独立单槽集成、真实付费测试、生产 `primary(video)`、R2 发布、M13.3 或 Agent→dev 合并。
 - 若独立 reviewer 拒绝本候选，以 `b1d2a64b754982fe0eef5578f5762a8e97b1a4d8` 为回滚目标，不迁移历史对话或运行中 Turn。
 
-最终中文提交计划使用标题 `验证：完成 R2 视频 live Handler 本地门禁`，正文明确本提交不代表生产发布；实际提交 SHA 以本报告所在候选提交和最终交接输出为准。
+最终中文提交计划使用标题 `修复：补齐 R2 全流程故障与投影证据`，正文明确本提交不代表生产发布；实际提交 SHA 以本报告所在候选提交和最终交接输出为准。

@@ -502,6 +502,150 @@ async def _read_sse_until_cursor(
     return events
 
 
+class _PublicProjectionReplay:
+    """从上一公开 cursor 逐段消费 SSE，并重建下一份权威 Snapshot。"""
+
+    _PROJECTED_FIELDS = (
+        "run",
+        "workflows",
+        "messages",
+        "interrupt",
+        "context_version",
+        "resume",
+    )
+
+    def __init__(
+        self,
+        *,
+        app: FastAPI,
+        conversation_id: str,
+        initial_snapshot: dict[str, Any],
+    ) -> None:
+        self._app = app
+        self._conversation_id = conversation_id
+        self._projection = {
+            key: copy.deepcopy(initial_snapshot[key])
+            for key in self._PROJECTED_FIELDS
+        }
+        self.checkpoints: list[str] = []
+        self._assert_no_credential(
+            "initial_snapshot",
+            initial_snapshot,
+        )
+
+    async def verify(
+        self,
+        label: str,
+        snapshot: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """验证 sequence/cursor 连续，并对事件投影后的全部公开字段做等值比较。"""
+
+        previous_resume = self._projection["resume"]
+        target_resume = snapshot["resume"]
+        assert isinstance(previous_resume, dict)
+        assert isinstance(target_resume, dict)
+        previous_cursor = previous_resume["cursor"]
+        target_cursor = target_resume["cursor"]
+        assert isinstance(previous_cursor, str)
+        assert isinstance(target_cursor, str)
+        assert target_resume["sequence"] > previous_resume["sequence"]
+        events = await _read_sse_until_cursor(
+            self._app,
+            self._conversation_id,
+            after_cursor=previous_cursor,
+            target_cursor=target_cursor,
+        )
+        expected_sequences = list(
+            range(previous_resume["sequence"] + 1, target_resume["sequence"] + 1)
+        )
+        assert [event["sequence"] for event in events] == expected_sequences
+        self._assert_no_credential(f"{label}_snapshot", snapshot)
+        self._assert_no_credential(f"{label}_sse", events)
+        for event in events:
+            self._apply(event)
+        for field in self._PROJECTED_FIELDS:
+            assert self._projection[field] == snapshot[field], (
+                f"{label} 的 SSE 重建字段不一致：{field}"
+            )
+        self.checkpoints.append(label)
+        return events
+
+    def _apply(self, event: dict[str, Any]) -> None:
+        event_type = event["type"]
+        payload = event["payload"]
+        if event_type == "workflow.progressed":
+            workflow = copy.deepcopy(payload["workflow"])
+            workflows = {
+                item["workflow_id"]: item
+                for item in self._projection["workflows"]
+            }
+            workflows[workflow["workflow_id"]] = workflow
+            self._projection["workflows"] = list(workflows.values())
+        elif event_type == "message.upserted":
+            message = copy.deepcopy(payload["message"])
+            messages = {
+                item["message_id"]: item
+                for item in self._projection["messages"]
+            }
+            messages[message["message_id"]] = message
+            self._projection["messages"] = sorted(
+                messages.values(),
+                key=lambda item: (
+                    str(item.get("created_at", "")),
+                    str(item.get("message_id", "")),
+                ),
+            )
+        elif event_type == "interrupt.opened":
+            interrupt = payload["interrupt"]
+            self._projection["interrupt"] = {
+                key: copy.deepcopy(interrupt.get(key))
+                for key in (
+                    "interrupt_id",
+                    "conversation_id",
+                    "workflow_id",
+                    "turn_id",
+                    "kind",
+                    "reason_code",
+                    "payload",
+                    "opened_at",
+                )
+            }
+        elif event_type == "interrupt.closed":
+            current = self._projection["interrupt"]
+            if (
+                isinstance(current, dict)
+                and current.get("interrupt_id") == payload["interrupt_id"]
+            ):
+                self._projection["interrupt"] = None
+        elif event_type == "interrupt.responded":
+            self._projection["context_version"] += 1
+        elif event_type in {"input.state_changed", "run.state_changed"}:
+            run_id = payload.get("run_id", payload.get("turn_id", event["run_id"]))
+            status = {
+                "waiting_user": "waiting_user",
+                "failed": "failed",
+                "completed": "completed",
+            }.get(payload["status"], "running")
+            run = self._projection["run"]
+            assert isinstance(run, dict)
+            if run.get("runId") != run_id:
+                run["updatedAt"] = event["occurred_at"]
+                self._projection["context_version"] += 1
+            run["runId"] = run_id
+            run["status"] = status
+        self._projection["resume"] = {
+            "cursor": event["cursor"],
+            "sequence": event["sequence"],
+        }
+
+    @staticmethod
+    def _assert_no_credential(label: str, document: object) -> None:
+        serialized = json.dumps(document, ensure_ascii=False).lower()
+        assert AUTHORIZATION.lower() not in serialized, label
+        assert "task14-local-fake-credential" not in serialized, label
+        assert "secret_only" not in serialized, label
+
+
 @pytest.mark.asyncio
 async def test_video_live_public_entry_opens_intake_with_complete_attachment() -> None:
     """真实 Controller 必须冻结 live owner，并把首轮附件完整投影到 Snapshot。"""
@@ -552,7 +696,9 @@ async def test_video_live_public_entry_opens_intake_with_complete_attachment() -
 
 
 @pytest.mark.asyncio
-async def test_video_live_flow_from_zero_to_delivery() -> None:
+async def test_video_live_flow_from_zero_to_delivery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """从零经公开人工中断与 M06 worker 完成 QA 修改和最终交付。"""
 
     async with _live_client() as (client, live_runtime, providers, clock, app):
@@ -592,6 +738,11 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_intake_form",
             run_id=run_id,
         )
+        projection_replay = _PublicProjectionReplay(
+            app=app,
+            conversation_id=conversation_id,
+            initial_snapshot=intake,
+        )
         await _respond(
             client,
             conversation_id,
@@ -608,6 +759,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_direction_review",
             run_id=run_id,
         )
+        await projection_replay.verify("response-1", directions)
         direction_id = directions["interrupt"]["payload"]["directions"][0][
             "direction_id"
         ]
@@ -627,6 +779,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_plan_review",
             run_id=run_id,
         )
+        await projection_replay.verify("response-2", plan)
         await _respond(
             client,
             conversation_id,
@@ -643,6 +796,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_scene_package_review",
             run_id=run_id,
         )
+        await projection_replay.verify("response-3", scene_packages)
         await _respond(
             client,
             conversation_id,
@@ -658,6 +812,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             lambda value: value["workflows"]
             and value["workflows"][0]["current_stage"] == "generate_scene_videos",
         )
+        await projection_replay.verify("response-4", generating)
         first_scene_starts = providers[0].start_calls
         assert first_scene_starts > 0
         assert generating["interrupt"] is None
@@ -670,6 +825,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_scene_video_review",
             run_id=run_id,
         )
+        await projection_replay.verify("worker-scene-v1", scene_review)
         await _respond(
             client,
             conversation_id,
@@ -679,12 +835,13 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             patch={},
             content="确认分镜视频并合并",
         )
-        await _wait_for_snapshot(
+        merging = await _wait_for_snapshot(
             client,
             conversation_id,
             lambda value: value["workflows"]
             and value["workflows"][0]["current_stage"] == "merge_video",
         )
+        await projection_replay.verify("response-5", merging)
         assert providers[1].start_calls == 1
         await _advance_external_jobs(live_runtime, clock)
         video_review = await _wait_for_interrupt(
@@ -694,6 +851,7 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             kind="video_result_review",
             run_id=run_id,
         )
+        await projection_replay.verify("worker-merge-v1", video_review)
         await _respond(
             client,
             conversation_id,
@@ -703,12 +861,13 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             patch={"user_feedback": "请检查第二镜商品露出"},
             content="请先执行视频质检",
         )
-        await _wait_for_snapshot(
+        quality_running = await _wait_for_snapshot(
             client,
             conversation_id,
             lambda value: value["workflows"]
             and value["workflows"][0]["current_stage"] == "quality_review",
         )
+        await projection_replay.verify("response-6", quality_running)
         assert providers[2].start_calls == 1
         await _advance_external_jobs(live_runtime, clock)
         quality_review = await _wait_for_interrupt(
@@ -717,6 +876,10 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             conversation_id,
             kind="video_result_review",
             run_id=run_id,
+        )
+        await projection_replay.verify(
+            "worker-quality-review",
+            quality_review,
         )
         quality_artifact = _latest_artifact(
             quality_review,
@@ -737,13 +900,14 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             },
             content="只重生成质检命中的分镜",
         )
-        await _wait_for_snapshot(
+        revised_generating = await _wait_for_snapshot(
             client,
             conversation_id,
             lambda value: value["workflows"]
             and value["workflows"][0]["current_stage"]
             == "generate_scene_videos",
         )
+        await projection_replay.verify("response-7", revised_generating)
         assert providers[0].start_calls == first_scene_starts + 1
         await _advance_external_jobs(live_runtime, clock)
         revised_scene_review = await _wait_for_interrupt(
@@ -752,6 +916,10 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             conversation_id,
             kind="video_scene_video_review",
             run_id=run_id,
+        )
+        await projection_replay.verify(
+            "worker-scene-v2",
+            revised_scene_review,
         )
         await _respond(
             client,
@@ -762,12 +930,13 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             patch={},
             content="确认修改后的分镜并重新合并",
         )
-        await _wait_for_snapshot(
+        revised_merging = await _wait_for_snapshot(
             client,
             conversation_id,
             lambda value: value["workflows"]
             and value["workflows"][0]["current_stage"] == "merge_video",
         )
+        await projection_replay.verify("response-8", revised_merging)
         assert providers[1].start_calls == 2
         await _advance_external_jobs(live_runtime, clock)
         revised_video_review = await _wait_for_interrupt(
@@ -776,6 +945,10 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             conversation_id,
             kind="video_result_review",
             run_id=run_id,
+        )
+        await projection_replay.verify(
+            "worker-merge-v2",
+            revised_video_review,
         )
         await _respond(
             client,
@@ -792,8 +965,8 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             lambda value: value["workflows"]
             and value["workflows"][0]["status"] == "completed",
         )
+        await projection_replay.verify("response-9", completed)
         completed_workflow = completed["workflows"][0]
-        completed_cursor = completed["resume"]["cursor"]
         delivery_artifact = next(
             artifact
             for artifact in (
@@ -843,6 +1016,10 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             ),
             live_runtime=live_runtime,
         )
+        sse_events = await projection_replay.verify(
+            "download",
+            final_snapshot,
+        )
         final_artifact = next(
             artifact
             for artifact in (
@@ -869,15 +1046,26 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
             )
             assert refreshed.status_code == 200
         assert tuple(provider.start_calls for provider in providers) == starts_before_replay
-        sse_events = await _read_sse_until_cursor(
-            app,
-            conversation_id,
-            after_cursor=completed_cursor,
-            target_cursor=final_snapshot["resume"]["cursor"],
-        )
         assert sse_events
         assert sse_events[-1]["cursor"] == final_snapshot["resume"]["cursor"]
         assert sse_events[-1]["sequence"] == final_snapshot["resume"]["sequence"]
+        assert projection_replay.checkpoints == [
+            "response-1",
+            "response-2",
+            "response-3",
+            "response-4",
+            "worker-scene-v1",
+            "response-5",
+            "worker-merge-v1",
+            "response-6",
+            "worker-quality-review",
+            "response-7",
+            "worker-scene-v2",
+            "response-8",
+            "worker-merge-v2",
+            "response-9",
+            "download",
+        ]
 
     workflow = final_snapshot["workflows"][0]
     assert workflow["current_stage"] == "completed"
@@ -886,3 +1074,8 @@ async def test_video_live_flow_from_zero_to_delivery() -> None:
     assert providers[1].start_calls == 2
     assert providers[2].start_calls == 1
     assert providers[3].start_calls == 0
+    serialized_logs = "\n".join(
+        record.getMessage() for record in caplog.records
+    ).lower()
+    assert AUTHORIZATION.lower() not in serialized_logs
+    assert "task14-local-fake-credential" not in serialized_logs

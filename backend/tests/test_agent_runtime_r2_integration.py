@@ -882,18 +882,51 @@ class _FaultResult:
     """统一呈现每个故障点的权威恢复与隔离证据。"""
 
     safe_reason_code: str
-    allowed_reason_codes: tuple[str, ...]
+    expected_reason_code: str
     expected_attempt: int | None
     actual_attempt: int | None
     expected_provider_job_id: str | None
     actual_provider_job_id: str | None
     expected_turn_status: TurnStatus | None
     actual_turn_status: TurnStatus | None
+    expected_operation_status: ExternalJobStatus | None = None
+    actual_operation_status: ExternalJobStatus | None = None
+    expected_turn_id: str | None = None
+    actual_turn_id: str | None = None
+    interrupt_turn_id: str | None = None
+    repository_interrupt_id: str | None = None
+    checkpoint_interrupt_id: str | None = None
+    persistent_checkpoint_verified: bool = False
+    production_graph_verified: bool = False
+    credential_recovery_entrypoint: str | None = None
+    initial_credential_marker_deliveries: int = 0
+    public_credential_marker_deliveries: int = 0
+    credential_destroyed: bool = False
+    paused_provider_job_id: str | None = None
+    resumed_provider_job_id: str | None = None
+    paused_attempt: int | None = None
+    resumed_attempt: int | None = None
+    leak_boundaries_scanned: tuple[str, ...] = ()
     leaked_sensitive_values: tuple[str, ...] = ()
     duplicate_provider_starts: int = 0
     cross_tenant_objects: tuple[object, ...] = ()
     graph_calls: int = 0
     provider_calls: int = 0
+
+
+_FAULT_REASON_CODES = {
+    "checkpoint_before_commit": "provider_succeeded",
+    "checkpoint_after_commit": "provider_succeeded",
+    "provider_started_before_event": "provider_succeeded",
+    "quota_402": "provider_succeeded",
+    "provider_timeout": "provider_timeout",
+    "provider_failed": "provider_business_failed",
+    "provider_expired_404": "provider_job_expired",
+    "partial_scene_failure": "provider_timeout",
+    "cross_tenant_reference": "tenant_scope_not_found",
+    "invalid_model_profile": "model_profile_unverified",
+    "handler_missing_after_restart": "agent_runtime_unavailable",
+}
 
 
 class _FaultClock:
@@ -922,6 +955,7 @@ class _FaultProviderService:
 
     def __init__(self) -> None:
         self.start_calls = 0
+        self.initial_credential_marker_deliveries = 0
         self.status_calls: list[str] = []
         self.status_scripts: dict[str, list[object]] = {}
 
@@ -934,6 +968,8 @@ class _FaultProviderService:
     ) -> object:
         assert request
         assert authorization.startswith("Bearer ")
+        if authorization == "Bearer matrix-secret-1":
+            self.initial_credential_marker_deliveries += 1
         assert idempotency_key.startswith("operation:v1:sha256:")
         self.start_calls += 1
         return {
@@ -980,13 +1016,63 @@ class _FaultGraphResumer:
             raise RuntimeError("模拟 Graph checkpoint 后退出")
 
 
+class _CheckpointCrashGraph:
+    """在生产组合 Graph 的 checkpoint 写入前后注入一次进程退出。"""
+
+    def __init__(self, graph: object, *, fault: str) -> None:
+        self._graph = graph
+        self._fault = fault
+        self._armed = False
+        self.crash_count = 0
+
+    def arm(self) -> None:
+        self._armed = True
+
+    async def aget_state(self, config: dict[str, object]):
+        return await self._graph.aget_state(config)
+
+    async def aupdate_state(
+        self,
+        config: dict[str, object],
+        values: dict[str, object],
+        *,
+        as_node: str,
+    ):
+        if (
+            self._armed
+            and self._fault == "checkpoint_before_commit"
+            and self.crash_count == 0
+        ):
+            self.crash_count += 1
+            raise RuntimeError("模拟生产 Graph checkpoint 写入前退出")
+        return await self._graph.aupdate_state(
+            config,
+            values,
+            as_node=as_node,
+        )
+
+    async def ainvoke(self, input_value: object, config: dict[str, object]):
+        result = await self._graph.ainvoke(input_value, config)
+        if (
+            self._armed
+            and self._fault == "checkpoint_after_commit"
+            and self.crash_count == 0
+        ):
+            self.crash_count += 1
+            raise RuntimeError("模拟生产 Graph checkpoint 写入后退出")
+        return result
+
+
 class _LiveVideoFaultScenario:
     """通过生产 Runtime/M06 公开对象执行 Task 14 故障矩阵。"""
 
+    def __init__(self, tmp_path: Path) -> None:
+        self._tmp_path = tmp_path
+
     async def run(self, fault: str) -> _FaultResult:
+        if fault in {"checkpoint_before_commit", "checkpoint_after_commit"}:
+            return await self._run_real_checkpoint_fault(fault)
         if fault in {
-            "checkpoint_before_commit",
-            "checkpoint_after_commit",
             "provider_started_before_event",
             "quota_402",
             "provider_timeout",
@@ -1002,6 +1088,371 @@ class _LiveVideoFaultScenario:
         if fault == "handler_missing_after_restart":
             return await self._run_handler_missing_after_restart()
         raise AssertionError(f"未知故障场景：{fault}")
+
+    async def _run_real_checkpoint_fault(self, fault: str) -> _FaultResult:
+        """SQLite checkpoint 重开后只重放完成事件，不重启 Provider。"""
+
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from test_agent_video_live_operations import (
+            CONVERSATION_ID as LIVE_CONVERSATION_ID,
+        )
+        from test_agent_video_live_operations import (
+            FAKE_AUTHORIZATION,
+            ScriptedProvider,
+            _commit_seed_state,
+            _ExplicitVideoDecisionService,
+            _MutableClock,
+            _reviewed_scene_package_state,
+            _seed_conversation,
+            _UnusedCapabilities,
+            build_live_operations,
+        )
+        from test_agent_video_live_operations import (
+            USER_ID as LIVE_USER_ID,
+        )
+        from test_agent_video_live_operations import (
+            WORKFLOW_ID as LIVE_WORKFLOW_ID,
+        )
+
+        from pixelflow.agent_runtime import (
+            SupervisorTurnExecutor,
+            SupervisorTurnScope,
+        )
+        from pixelflow.agent_runtime.contracts import ExplicitActionSignal
+        from pixelflow.agent_runtime.graph import (
+            FakeWorkflowRegistry,
+            make_agent_runtime_graph,
+            supervisor_namespace,
+        )
+        from pixelflow.agent_runtime.identity import conversation_message_id
+        from pixelflow.agent_runtime.persistence import (
+            MemoryVideoRuntimeRepository,
+        )
+        from pixelflow.agent_workflows.video import VideoLiveWorkflowHandler
+        from pixelflow.agent_workflows.video.live_capabilities import (
+            TransientTurnCredential,
+        )
+        from pixelflow.agent_workflows.video.live_operations import (
+            TransientCredentialVault,
+            VideoOperationCompletionHandler,
+        )
+        from pixelflow.tasks import PixelFlowConversationMessageRecord
+
+        clock = _MutableClock()
+        provider = ScriptedProvider(
+            status_results=[
+                {
+                    "job_id": f"provider-scripted-{index}",
+                    "status": "succeeded",
+                    "result": {
+                        "video_url": (
+                            f"https://videos.example.com/fix1-scene-{index}.mp4"
+                        ),
+                        "raw": {},
+                    },
+                }
+                for index in range(1, 4)
+            ]
+        )
+        store = MemoryPixelFlowTaskStore()
+        repository = MemoryVideoRuntimeRepository(task_store=store)
+        await _seed_conversation(store)
+        reviewed = _reviewed_scene_package_state()
+        await _commit_seed_state(repository, store, reviewed)
+        operations = build_live_operations(
+            provider,
+            clock=clock,
+            repository=repository,
+        )
+        vault = TransientCredentialVault()
+        handler = VideoLiveWorkflowHandler(
+            repository=repository,
+            capabilities=_UnusedCapabilities(),
+            credential_provider=vault,
+            operation_port=operations,
+            clock=clock,
+        )
+        database_path = self._tmp_path / f"task14-fix1-{fault}.checkpoints.db"
+        original_turn_id = f"turn-task14-fix1-{fault}"
+        client_input_id = UUID(
+            "00000000-0000-4000-8000-000000001461"
+            if fault == "checkpoint_before_commit"
+            else "00000000-0000-4000-8000-000000001462"
+        )
+        explicit = ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id=LIVE_WORKFLOW_ID,
+            stage=reviewed.current_stage.value,
+            artifact_ref=reviewed.scene_package_artifact_ref,
+            patch={},
+        )
+        turn = TurnRecord(
+            turn_id=original_turn_id,
+            conversation_id=LIVE_CONVERSATION_ID,
+            client_input_id=client_input_id,
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=LIVE_WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=clock.now(),
+        )
+        await store.append_conversation_message(
+            PixelFlowConversationMessageRecord(
+                message_id=conversation_message_id(
+                    LIVE_CONVERSATION_ID,
+                    client_input_id,
+                ),
+                conversation_id=LIVE_CONVERSATION_ID,
+                user_id=LIVE_USER_ID,
+                role="user",
+                content="开始生成 Task 14 Fix1 分镜视频",
+                payload={
+                    "client_message_id": str(client_input_id),
+                    "materials": [],
+                    "reply_to_message_id": None,
+                    "artifact_refs": [reviewed.scene_package_artifact_ref],
+                    "explicit_action": explicit.model_dump(mode="json"),
+                },
+                created_at=clock.now().isoformat(),
+            )
+        )
+        await repository.enqueue_turn_for_execution(
+            LIVE_USER_ID,
+            turn,
+            now=clock.now(),
+        )
+
+        checkpoint_before_restart = None
+        executor = None
+        async with AsyncSqliteSaver.from_conn_string(
+            str(database_path)
+        ) as checkpointer:
+            await checkpointer.setup()
+            production_graph = make_agent_runtime_graph(
+                registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+                checkpointer=checkpointer,
+            )
+            crash_graph = _CheckpointCrashGraph(
+                production_graph,
+                fault=fault,
+            )
+            executor = SupervisorTurnExecutor(
+                repository=repository,
+                task_store=store,
+                decision_service=_ExplicitVideoDecisionService(),
+                graph=crash_graph,
+                credential_vault=vault,
+                clock=clock.now,
+                worker_id=f"task14-fix1-executor-{fault}",
+                heartbeat_interval_seconds=0.01,
+                scan_interval_seconds=0.01,
+            )
+            try:
+                await executor.notify_turn(
+                    SupervisorTurnScope(
+                        user_id=LIVE_USER_ID,
+                        conversation_id=LIVE_CONVERSATION_ID,
+                        turn_id=original_turn_id,
+                    ),
+                    credential=TransientTurnCredential(FAKE_AUTHORIZATION),
+                )
+                await executor.wait_idle()
+                assert provider.start_calls == 3
+                crash_graph.arm()
+                completion = VideoOperationCompletionHandler(
+                    repository=repository,
+                    operations=operations,
+                    clock=clock,
+                    graph=crash_graph,
+                )
+                runtime = operations.build_recovery_runtime(
+                    resumer=completion,
+                    worker_id=f"task14-fix1-completion-{fault}",
+                )
+                clock.advance(seconds=3)
+                await runtime.run_once()
+                assert crash_graph.crash_count == 1
+                assert (
+                    await repository.get_open_interrupt(
+                        LIVE_USER_ID,
+                        LIVE_CONVERSATION_ID,
+                    )
+                    is None
+                )
+                checkpoint_before_restart = await production_graph.aget_state(
+                    supervisor_namespace(
+                        LIVE_CONVERSATION_ID
+                    ).as_runnable_config()
+                )
+            finally:
+                await executor.aclose()
+
+        assert checkpoint_before_restart is not None
+        first_checkpoint_interrupt_ids = tuple(
+            item.id for item in checkpoint_before_restart.interrupts
+        )
+        if fault == "checkpoint_before_commit":
+            assert first_checkpoint_interrupt_ids == ()
+        else:
+            assert len(first_checkpoint_interrupt_ids) == 1
+
+        clock.advance(seconds=31)
+        async with AsyncSqliteSaver.from_conn_string(
+            str(database_path)
+        ) as restarted_checkpointer:
+            await restarted_checkpointer.setup()
+            restarted_graph = make_agent_runtime_graph(
+                registry=FakeWorkflowRegistry({WorkflowKind.VIDEO: handler}),
+                checkpointer=restarted_checkpointer,
+            )
+            reopened_before_retry = await restarted_graph.aget_state(
+                supervisor_namespace(LIVE_CONVERSATION_ID).as_runnable_config()
+            )
+            assert reopened_before_retry.values["turn_id"] == original_turn_id
+            if fault == "checkpoint_after_commit":
+                assert tuple(
+                    item.id for item in reopened_before_retry.interrupts
+                ) == first_checkpoint_interrupt_ids
+            restarted_completion = VideoOperationCompletionHandler(
+                repository=repository,
+                operations=operations,
+                clock=clock,
+                graph=restarted_graph,
+            )
+            restarted_runtime = operations.build_recovery_runtime(
+                resumer=restarted_completion,
+                worker_id=f"task14-fix1-restarted-{fault}",
+            )
+            await restarted_runtime.run_once()
+            checkpoint_after_restart = await restarted_graph.aget_state(
+                supervisor_namespace(LIVE_CONVERSATION_ID).as_runnable_config()
+            )
+
+        opened = await repository.get_open_interrupt(
+            LIVE_USER_ID,
+            LIVE_CONVERSATION_ID,
+        )
+        stored_turn = await repository.get_turn(
+            LIVE_USER_ID,
+            original_turn_id,
+        )
+        operations_snapshot = await operations.safe_persistence_snapshot(
+            user_id=LIVE_USER_ID,
+            conversation_id=LIVE_CONVERSATION_ID,
+        )
+        target_operation = next(
+            item
+            for item in operations_snapshot["operations"]
+            if item["provider_job_id"] == "provider-scripted-3"
+        )
+        completion_events = [
+            item
+            for item in await repository.list_events(
+                LIVE_USER_ID,
+                LIVE_CONVERSATION_ID,
+            )
+            if item.type.value == "external_job.state_changed"
+            and item.payload.get("job_id") == target_operation["job_id"]
+        ]
+        assert opened is not None
+        assert stored_turn is not None
+        assert len(checkpoint_after_restart.interrupts) == 1
+        checkpoint_value = checkpoint_after_restart.interrupts[0].value
+        assert checkpoint_value["interrupt_id"] == opened.interrupt_id
+        assert opened.turn_id == original_turn_id
+        assert completion_events[-1].payload["reason_code"] == (
+            "provider_succeeded"
+        )
+        assert provider.start_calls == 3
+        assert provider.status_job_ids == [
+            "provider-scripted-1",
+            "provider-scripted-2",
+            "provider-scripted-3",
+        ]
+        snapshot_service = AgentRuntimeService(
+            config=_config(),
+            repository=repository,
+            task_store=store,
+            video_repository=repository,
+            primary_execution_intents=("video",),
+            clock=clock.now,
+        )
+        public_snapshot = (
+            await snapshot_service.snapshot(
+                user_id=LIVE_USER_ID,
+                conversation_id=LIVE_CONVERSATION_ID,
+            )
+        ).model_dump(mode="json")
+        public_events = await snapshot_service.events_after(
+            user_id=LIVE_USER_ID,
+            conversation_id=LIVE_CONVERSATION_ID,
+            cursor=None,
+        )
+        assert public_events is not None
+        completion_projection = {
+            "workflow_state": (
+                await repository.get_video_state(
+                    LIVE_USER_ID,
+                    LIVE_WORKFLOW_ID,
+                )
+            ),
+            "messages": [
+                item.model_dump(mode="json")
+                for item in await repository.list_projection_messages(
+                    LIVE_USER_ID,
+                    LIVE_CONVERSATION_ID,
+                )
+            ],
+            "completion_events": [
+                item.model_dump(mode="json") for item in completion_events
+            ],
+        }
+        graph_checkpoint = {
+            "values": checkpoint_after_restart.values,
+            "interrupts": [
+                {"id": item.id, "value": item.value}
+                for item in checkpoint_after_restart.interrupts
+            ],
+        }
+        return _FaultResult(
+            safe_reason_code="provider_succeeded",
+            expected_reason_code=_FAULT_REASON_CODES[fault],
+            expected_attempt=1,
+            actual_attempt=target_operation["attempt"],
+            expected_provider_job_id="provider-scripted-3",
+            actual_provider_job_id=target_operation["provider_job_id"],
+            expected_operation_status=ExternalJobStatus.SUCCEEDED,
+            actual_operation_status=ExternalJobStatus(
+                target_operation["status"]
+            ),
+            expected_turn_status=TurnStatus.WAITING_USER,
+            actual_turn_status=stored_turn.status,
+            expected_turn_id=original_turn_id,
+            actual_turn_id=stored_turn.turn_id,
+            interrupt_turn_id=opened.turn_id,
+            repository_interrupt_id=opened.interrupt_id,
+            checkpoint_interrupt_id=checkpoint_value["interrupt_id"],
+            persistent_checkpoint_verified=True,
+            production_graph_verified=True,
+            leak_boundaries_scanned=(
+                "turn",
+                "graph_checkpoint",
+                "snapshot",
+                "sse",
+                "completion_projection",
+                "safety_logs",
+            ),
+            leaked_sensitive_values=self._leaks(
+                stored_turn.model_dump(mode="json"),
+                graph_checkpoint,
+                public_snapshot,
+                [item.model_dump(mode="json") for item in public_events],
+                completion_projection,
+            ),
+            duplicate_provider_starts=0,
+            provider_calls=provider.start_calls,
+        )
 
     @staticmethod
     def _success(provider_job_id: str, suffix: str = "result") -> dict:
@@ -1039,6 +1490,7 @@ class _LiveVideoFaultScenario:
         ).lower()
         markers = (
             "matrix-secret",
+            "task8-test-only",
             "供应商敏感错误正文",
             "不得持久化的失败正文",
             "不得持久化的超时正文",
@@ -1046,6 +1498,16 @@ class _LiveVideoFaultScenario:
         return tuple(marker for marker in markers if marker.lower() in serialized)
 
     async def _run_operation_fault(self, fault: str) -> _FaultResult:
+        from pixelflow.agent_workflows.video.live_capabilities import (
+            TransientTurnCredential,
+        )
+        from pixelflow.agent_workflows.video.live_operations import (
+            TransientCredentialVault,
+            VideoLiveOperationBridge,
+            VideoOperationAdapterResolver,
+            VideoOperationStartRequest,
+        )
+
         repository = MemoryCompactionQueueRepository()
         provider = _FaultProviderService()
         adapter = ProviderJobAdapter(provider)
@@ -1067,6 +1529,11 @@ class _LiveVideoFaultScenario:
             ),
         )
         operations: list[object] = []
+        credential_recovery_entrypoint = None
+        public_credential_marker_deliveries = 0
+        credential_destroyed = False
+        paused_provider_job_id = None
+        paused_attempt = None
 
         async def start_operation(stage: str, attempt: int):
             provider_request = {
@@ -1192,6 +1659,8 @@ class _LiveVideoFaultScenario:
             assert paused is not None
             assert paused.status is ExternalJobStatus.POLLING
             assert paused.next_poll_at is None
+            paused_provider_job_id = paused.provider_job_id
+            paused_attempt = paused.attempt
             recovered = await runtime.recover_manually(
                 user_id,
                 conversation_id,
@@ -1200,6 +1669,61 @@ class _LiveVideoFaultScenario:
             assert (
                 recovered.action
                 is OperationManualRecoveryAction.RESUMED_ORIGINAL_JOB
+            )
+            recovery_marker = "Bearer matrix-secret-quota-recovery"
+            recovery_credential = TransientTurnCredential(recovery_marker)
+            credential_vault = TransientCredentialVault()
+            credential_vault.put(turn_id, recovery_credential)
+            public_credential = credential_vault.get(turn_id)
+            assert public_credential is recovery_credential
+            provider_request = {
+                "scene_id": "scene-1",
+                "prompt": "Task 14 本地 fake 请求",
+            }
+            operation_request = build_operation_request(
+                workflow_id="workflow-task14-matrix",
+                stage="generate_scene_video:scene-1",
+                stage_version=1,
+                attempt=1,
+                provider_request=provider_request,
+            )
+            operation_bridge = VideoLiveOperationBridge(
+                repository=repository,
+                resolver=VideoOperationAdapterResolver(
+                    {"generate_scene_video": adapter}
+                ),
+                lease_owner="task14-quota-public-recovery",
+                clock=clock.now,
+                job_id_factory=lambda: "不得创建新的内部任务",
+            )
+            public_recovered = await operation_bridge.start(
+                VideoOperationStartRequest(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    operation_request=operation_request,
+                    provider_request=provider_request,
+                ),
+                credential=public_credential,
+            )
+            public_credential_marker_deliveries += 1
+            assert public_recovered.job_id == first.job_id
+            assert public_recovered.provider_job_id == paused_provider_job_id
+            assert public_recovered.attempt == paused_attempt
+            credential_vault.pop(turn_id)
+            assert credential_vault.get(turn_id) is None
+            with pytest.raises(RuntimeError, match="临时凭据不可用"):
+                await operation_bridge.start(
+                    VideoOperationStartRequest(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        operation_request=operation_request,
+                        provider_request=provider_request,
+                    ),
+                    credential=recovery_credential,
+                )
+            credential_destroyed = True
+            credential_recovery_entrypoint = (
+                "TransientCredentialVault->VideoLiveOperationBridge.start"
             )
             clock.advance(3)
             await runtime.run_once()
@@ -1259,18 +1783,35 @@ class _LiveVideoFaultScenario:
         ]
         return _FaultResult(
             safe_reason_code=safe_reason,
-            allowed_reason_codes=(
-                "provider_succeeded",
-                "provider_timeout",
-                "provider_business_failed",
-                "provider_job_expired",
-            ),
+            expected_reason_code=_FAULT_REASON_CODES[fault],
             expected_attempt=expected_attempt,
             actual_attempt=actual.attempt,
             expected_provider_job_id=expected_provider_job_id,
             actual_provider_job_id=actual.provider_job_id,
+            expected_operation_status=(
+                ExternalJobStatus.SUCCEEDED
+                if fault in {"provider_started_before_event", "quota_402"}
+                else ExternalJobStatus.POLLING
+            ),
+            actual_operation_status=actual.status,
             expected_turn_status=TurnStatus.WAITING_USER,
             actual_turn_status=stored_turn.status,
+            expected_turn_id=turn_id,
+            actual_turn_id=stored_turn.turn_id,
+            credential_recovery_entrypoint=credential_recovery_entrypoint,
+            initial_credential_marker_deliveries=(
+                provider.initial_credential_marker_deliveries
+                if fault == "quota_402"
+                else 0
+            ),
+            public_credential_marker_deliveries=public_credential_marker_deliveries,
+            credential_destroyed=credential_destroyed,
+            paused_provider_job_id=paused_provider_job_id,
+            resumed_provider_job_id=(
+                actual.provider_job_id if fault == "quota_402" else None
+            ),
+            paused_attempt=paused_attempt,
+            resumed_attempt=(actual.attempt if fault == "quota_402" else None),
             leaked_sensitive_values=self._leaks(
                 persisted_operations,
                 [event.model_dump(mode="json") for event in stored_events],
@@ -1336,7 +1877,7 @@ class _LiveVideoFaultScenario:
         visible.extend(await repository.list_events(attacker, conversation_id))
         return _FaultResult(
             safe_reason_code=safe_reason,
-            allowed_reason_codes=("tenant_scope_not_found",),
+            expected_reason_code=_FAULT_REASON_CODES["cross_tenant_reference"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1366,7 +1907,7 @@ class _LiveVideoFaultScenario:
             raise AssertionError("未验证模型档案必须 fail-closed")
         return _FaultResult(
             safe_reason_code=safe_reason,
-            allowed_reason_codes=("model_profile_unverified",),
+            expected_reason_code=_FAULT_REASON_CODES["invalid_model_profile"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1437,7 +1978,7 @@ class _LiveVideoFaultScenario:
         turns = await repository.list_turns(owner, conversation_id)
         return _FaultResult(
             safe_reason_code=safe_reason,
-            allowed_reason_codes=("agent_runtime_unavailable",),
+            expected_reason_code=_FAULT_REASON_CODES["handler_missing_after_restart"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1448,8 +1989,8 @@ class _LiveVideoFaultScenario:
 
 
 @pytest.fixture
-def live_video_fault_scenario() -> _LiveVideoFaultScenario:
-    return _LiveVideoFaultScenario()
+def live_video_fault_scenario(tmp_path: Path) -> _LiveVideoFaultScenario:
+    return _LiveVideoFaultScenario(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -1472,16 +2013,152 @@ def live_video_fault_scenario() -> _LiveVideoFaultScenario:
 async def test_video_live_fault_matrix_is_recoverable_and_isolated(
     fault: str,
     live_video_fault_scenario: _LiveVideoFaultScenario,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = await live_video_fault_scenario.run(fault)
 
-    assert result.safe_reason_code in result.allowed_reason_codes
+    assert result.safe_reason_code == result.expected_reason_code
     assert result.actual_attempt == result.expected_attempt
     assert result.actual_provider_job_id == result.expected_provider_job_id
+    assert result.actual_operation_status is result.expected_operation_status
     assert result.actual_turn_status is result.expected_turn_status
+    assert result.actual_turn_id == result.expected_turn_id
     assert result.leaked_sensitive_values == ()
     assert result.duplicate_provider_starts == 0
     assert result.cross_tenant_objects == ()
+    if fault in {"checkpoint_before_commit", "checkpoint_after_commit"}:
+        assert result.persistent_checkpoint_verified is True
+        assert result.production_graph_verified is True
+        assert result.interrupt_turn_id == result.expected_turn_id
+        assert result.repository_interrupt_id == result.checkpoint_interrupt_id
+        assert {
+            "turn",
+            "graph_checkpoint",
+            "snapshot",
+            "sse",
+            "completion_projection",
+            "safety_logs",
+        }.issubset(result.leak_boundaries_scanned)
+        assert live_video_fault_scenario._leaks(
+            [record.getMessage() for record in caplog.records]
+        ) == ()
+    if fault == "quota_402":
+        assert result.credential_recovery_entrypoint == (
+            "TransientCredentialVault->VideoLiveOperationBridge.start"
+        )
+        assert result.initial_credential_marker_deliveries == 1
+        assert result.public_credential_marker_deliveries == 1
+        assert result.credential_destroyed is True
+        assert result.paused_provider_job_id == result.resumed_provider_job_id
+        assert result.paused_provider_job_id == result.expected_provider_job_id
+        assert result.paused_attempt == result.resumed_attempt
+        assert result.paused_attempt == result.expected_attempt
     if fault == "invalid_model_profile":
         assert result.graph_calls == 0
         assert result.provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """对抗子类只能触发安全拒绝，不能把新增字段带入上下文或完成投影。"""
+
+    from pydantic import ValidationError
+
+    from pixelflow.agent_runtime.config import ContextBudgetConfig
+    from pixelflow.agent_runtime.context.assembler import (
+        ContextAssembler,
+        ContextAssemblySnapshot,
+    )
+    from pixelflow.agent_runtime.contracts import ContextRequest
+
+    secret_marker = "task14-secret-only-subclass-marker"
+
+    class SecretOnlyTurn(TurnRecord):
+        secret_only: str
+
+    class SecretOnlyContextSnapshot(ContextAssemblySnapshot):
+        secret_only: str
+
+    class SecretOnlyCompletionEvent(AgentEvent):
+        secret_only: str
+
+    turn = SecretOnlyTurn(
+        turn_id="turn-task14-secret-subclass",
+        conversation_id="conversation-task14-secret-subclass",
+        client_input_id=UUID("00000000-0000-4000-8000-000000001496"),
+        status=TurnStatus.ACCEPTED,
+        target_workflow_id=None,
+        decision=None,
+        expected_context_version=0,
+        created_at=NOW,
+        secret_only=secret_marker,
+    )
+    turn_document = turn.model_dump(mode="json", serialize_as_any=True)
+    assert turn_document["secret_only"] == secret_marker
+    with pytest.raises(ValidationError):
+        TurnRecord.model_validate(turn_document)
+
+    snapshot = SecretOnlyContextSnapshot(
+        user_id="user-task14-secret-subclass",
+        conversation_id="conversation-task14-secret-subclass",
+        context_version=0,
+        secret_only=secret_marker,
+    )
+
+    class SnapshotSource:
+        async def load_context_snapshot(self, **_kwargs: object) -> object:
+            return snapshot
+
+    assembler = ContextAssembler(
+        source=SnapshotSource(),
+        memory_search=None,
+        model_name=MODEL_NAME,
+        model_profiles={MODEL_NAME: _model_profile()},
+        budget_node="supervisor",
+        token_estimator=lambda _payload: 1,
+        clock=lambda: NOW,
+        budget_policy_provider=ContextBudgetPolicyProvider(
+            ContextBudgetConfig(require_verified_model_profile=True),
+        ),
+    )
+    with pytest.raises(ValidationError):
+        await assembler.assemble(
+            ContextRequest(
+                conversation_id=snapshot.conversation_id,
+                user_id=snapshot.user_id,
+                current_input="验证对抗子类",
+                target_workflow_id=None,
+                artifact_refs=[],
+                expected_context_version=0,
+            )
+        )
+
+    completion = SecretOnlyCompletionEvent(
+        event_id="event-task14-secret-subclass",
+        sequence=1,
+        cursor="cursor-task14-secret-subclass",
+        conversation_id=snapshot.conversation_id,
+        run_id=turn.turn_id,
+        occurred_at=NOW,
+        type="external_job.state_changed",
+        payload={
+            "workflow_id": "workflow-task14-secret-subclass",
+            "stage": "generate_scene_video:scene-1",
+            "status": "succeeded",
+        },
+        secret_only=secret_marker,
+    )
+    completion_document = completion.model_dump(
+        mode="json",
+        serialize_as_any=True,
+    )
+    assert completion_document["secret_only"] == secret_marker
+    assert secret_marker not in json.dumps(
+        completion_document["payload"],
+        ensure_ascii=False,
+    )
+    assert secret_marker not in "\n".join(
+        record.getMessage() for record in caplog.records
+    )
