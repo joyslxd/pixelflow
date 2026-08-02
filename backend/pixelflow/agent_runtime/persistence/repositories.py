@@ -55,6 +55,7 @@ class OperationRecord(ContractModel):
     attempt: int = Field(ge=1)
     request_hash: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
+    quota_pause_revision: int = Field(default=0, ge=0)
     next_poll_at: datetime | None = None
     lease_owner: str | None = Field(default=None, min_length=1)
     lease_expires_at: datetime | None = None
@@ -515,6 +516,7 @@ def _normalize_operation(record: OperationRecord) -> OperationRecord:
                 "stage": _require_text("stage", normalized.stage, 64),
                 "request_hash": _require_text("request_hash", normalized.request_hash, 128),
                 "idempotency_key": _require_text("idempotency_key", normalized.idempotency_key, 255),
+                "quota_pause_revision": normalized.quota_pause_revision,
                 "next_poll_at": _optional_datetime("next_poll_at", normalized.next_poll_at),
                 "lease_owner": _optional_text("lease_owner", normalized.lease_owner, 128),
                 "lease_expires_at": _optional_datetime(
@@ -1619,6 +1621,7 @@ def _operation_from_row(row: PixelFlowAgentOperationRow) -> OperationRecord:
             "attempt": row.attempt,
             "request_hash": row.request_hash,
             "idempotency_key": row.idempotency_key,
+            "quota_pause_revision": row.quota_pause_revision,
             "next_poll_at": None if row.next_poll_at is None else _database_utc(row.next_poll_at),
             "lease_owner": row.lease_owner,
             "lease_expires_at": (None if row.lease_expires_at is None else _database_utc(row.lease_expires_at)),
@@ -2245,6 +2248,7 @@ class SQLAgentRuntimeRepository:
                 attempt=normalized.attempt,
                 request_hash=normalized.request_hash,
                 idempotency_key=normalized.idempotency_key,
+                quota_pause_revision=normalized.quota_pause_revision,
                 next_poll_at=normalized.next_poll_at,
                 lease_owner=normalized.lease_owner,
                 lease_expires_at=normalized.lease_expires_at,

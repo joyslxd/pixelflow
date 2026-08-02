@@ -111,6 +111,7 @@ EXPECTED_TABLE_COLUMNS = {
         "attempt",
         "request_hash",
         "idempotency_key",
+        "quota_pause_revision",
         "next_poll_at",
         "lease_owner",
         "lease_expires_at",
@@ -337,6 +338,7 @@ EXPECTED_COLUMN_TYPE_FAMILIES = {
         "attempt": "integer",
         "request_hash": "string",
         "idempotency_key": "string",
+        "quota_pause_revision": "integer",
         "next_poll_at": "datetime",
         "lease_owner": "string",
         "lease_expires_at": "datetime",
@@ -466,6 +468,9 @@ EXPECTED_CHECK_CONSTRAINTS = {
     "pixelflow_agent_interrupts": {
         "ck_pf_agent_interrupts_response_fields",
         "ck_pf_agent_interrupts_status",
+    },
+    "pixelflow_agent_operations": {
+        "ck_pf_agent_operations_quota_pause_revision",
     },
 }
 
@@ -645,6 +650,49 @@ def _sync_database_url(database_path: Path) -> str:
     return f"sqlite:///{database_path.as_posix()}"
 
 
+def _execute_sql(database_path: Path, statement: str, parameters: dict[str, object]) -> None:
+    """在迁移测试中执行可提交的 SQL，模拟既有 Operation 数据。"""
+
+    engine = create_engine(_sync_database_url(database_path))
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(statement), parameters)
+    finally:
+        engine.dispose()
+
+
+def _insert_polling_operation(database_path: Path, *, job_id: str) -> None:
+    """插入升级前的轮询 Operation，验证新增列不会改写旧行。"""
+
+    _execute_sql(
+        database_path,
+        "INSERT INTO pixelflow_agent_operations ("
+        "job_id, provider_job_id, workflow_id, conversation_id, user_id, stage, "
+        "stage_version, status, attempt, request_hash, idempotency_key, created_at, updated_at"
+        ") VALUES ("
+        ":job_id, 'provider-job', 'workflow-1', 'conversation-1', 'user-1', "
+        "'video_generate', 1, 'polling', 1, 'request-hash', :idempotency_key, "
+        "'2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z'"
+        ")",
+        {"job_id": job_id, "idempotency_key": f"idem-{job_id}"},
+    )
+
+
+def _fetch_operation(database_path: Path, job_id: str) -> dict[str, object]:
+    """读取指定 Operation 的完整行，避免断言依赖迁移内部实现。"""
+
+    engine = create_engine(_sync_database_url(database_path))
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT * FROM pixelflow_agent_operations WHERE job_id = :job_id"),
+                {"job_id": job_id},
+            ).mappings().one()
+            return dict(row)
+    finally:
+        engine.dispose()
+
+
 def _type_family(column_type) -> str:
     if isinstance(column_type, JSON):
         return "json"
@@ -802,6 +850,88 @@ def test_agent_runtime_migration_upgrade_and_downgrade_are_additive(tmp_path):
     with engine.connect() as connection:
         assert connection.execute(text("SELECT value FROM legacy_sentinel WHERE id = 1")).scalar_one() == "keep-me"
     engine.dispose()
+
+
+def test_operation_quota_revision_migration_is_additive_and_data_safe(
+    tmp_path: Path,
+) -> None:
+    """升级保留旧 Operation，含审计代次时拒绝破坏性降级。"""
+
+    database_path = tmp_path / "operation-quota-revision.db"
+    config = _migration_config(database_path)
+    command.upgrade(config, "20260801_06")
+    _insert_polling_operation(database_path, job_id="job-quota-migration")
+
+    command.upgrade(config, "head")
+    row = _fetch_operation(database_path, "job-quota-migration")
+    assert row["quota_pause_revision"] == 0
+
+    _execute_sql(
+        database_path,
+        "UPDATE pixelflow_agent_operations SET quota_pause_revision = 1 WHERE job_id = :job_id",
+        {"job_id": "job-quota-migration"},
+    )
+    with pytest.raises(RuntimeError, match="存在 quota pause revision"):
+        command.downgrade(config, "20260801_06")
+
+
+def _prepare_preexisting_quota_revision_schema(
+    database_path: Path,
+    *,
+    default_value: int,
+    check_expression: str,
+) -> Config:
+    """构造已带目标列的旧版本库，验证升级重试的 schema 合同。"""
+
+    _execute_sql(
+        database_path,
+        "CREATE TABLE pixelflow_agent_operations ("
+        "job_id VARCHAR(64) PRIMARY KEY, "
+        f"quota_pause_revision INTEGER NOT NULL DEFAULT {default_value}, "
+        "CONSTRAINT ck_pf_agent_operations_quota_pause_revision "
+        f"CHECK ({check_expression})"
+        ")",
+        {},
+    )
+    config = _migration_config(database_path)
+    command.stamp(config, "20260801_06")
+    return config
+
+
+def test_operation_quota_revision_migration_rejects_wrong_existing_default(
+    tmp_path: Path,
+) -> None:
+    """已有同名列默认值不是零时，升级不能错误标记为完成。"""
+
+    config = _prepare_preexisting_quota_revision_schema(
+        tmp_path / "operation-quota-default.db",
+        default_value=1,
+        check_expression="quota_pause_revision >= 0",
+    )
+
+    with pytest.raises(RuntimeError, match="默认值"):
+        command.upgrade(config, "head")
+
+
+def test_operation_quota_revision_migration_accepts_equivalent_reflected_check(
+    tmp_path: Path,
+) -> None:
+    """方言反射加入引号和外层括号时，等价 CHECK 可安全重试。"""
+
+    database_path = tmp_path / "operation-quota-equivalent-check.db"
+    config = _prepare_preexisting_quota_revision_schema(
+        database_path,
+        default_value=0,
+        check_expression="(`quota_pause_revision` >= 0)",
+    )
+
+    command.upgrade(config, "head")
+    engine = create_engine(_sync_database_url(database_path))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260802_07"
+    finally:
+        engine.dispose()
 
 
 def test_supervisor_global_interrupt_migration_upgrade_and_safe_downgrade(

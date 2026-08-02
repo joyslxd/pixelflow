@@ -7,6 +7,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
@@ -192,6 +193,17 @@ def _operation(
         created_at=created_at,
         updated_at=created_at,
     )
+
+
+def test_operation_record_defaults_quota_pause_revision_to_zero() -> None:
+    """DTO 默认写入零代次，拒绝负数审计代次。"""
+
+    record = _operation("job-quota-default", idempotency_key="idem-quota-default")
+    assert record.quota_pause_revision == 0
+    with pytest.raises(ValidationError):
+        OperationRecord.model_validate(
+            record.model_dump(mode="python") | {"quota_pause_revision": -1}
+        )
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

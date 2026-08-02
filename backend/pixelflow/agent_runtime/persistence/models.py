@@ -262,6 +262,13 @@ class PixelFlowAgentOperationRow(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 用途：记录同一 Provider job 已确认的 402 暂停代次；影响：恢复请求必须匹配最新代次，默认 0。
+    quota_pause_revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     next_poll_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
@@ -269,6 +276,10 @@ class PixelFlowAgentOperationRow(Base):
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = (
+        CheckConstraint(
+            "quota_pause_revision >= 0",
+            name="ck_pf_agent_operations_quota_pause_revision",
+        ),
         UniqueConstraint("idempotency_key", name="uq_pf_agent_operations_idempotency_key"),
         UniqueConstraint(
             "workflow_id",
