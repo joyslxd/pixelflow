@@ -610,6 +610,130 @@ async def test_quota_resume_rejects_invalid_event_prefix_without_side_effects(
         ]
 
 
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_wrong_owner_cannot_poison_conversation_before_quota_pause(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-owner-safe-pause",
+        )
+        pause_event = _quota_event_record(
+            started,
+            revision=1,
+            quota_state="paused",
+        )
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.pause_operation_for_quota(
+                OWNER_B,
+                CONVERSATION_ID,
+                started.job_id,
+                provider_job_id=started.provider_job_id,
+                lease_owner="worker-a",
+                expected_revision=0,
+                now=NOW,
+                event=pause_event,
+            )
+
+        assert await repository.get_operation(OWNER_A, started.job_id) == started
+        assert await repository.list_events(OWNER_A, CONVERSATION_ID) == []
+        assert await repository.list_events(OWNER_B, CONVERSATION_ID) == []
+
+        paused, stored_event = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=pause_event,
+        )
+        assert paused.quota_pause_revision == 1
+        assert stored_event.event_id == pause_event.event_id
+        assert stored_event.sequence == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_wrong_owner_cannot_poison_conversation_before_quota_resume(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        paused = await repository.create_operation(
+            OWNER_A,
+            _operation("job-quota-owner-safe-resume").model_copy(
+                update={
+                    "quota_pause_revision": 1,
+                    "next_poll_at": None,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                }
+            ),
+        )
+        resume_event = _quota_event_record(
+            paused,
+            revision=1,
+            quota_state="resumed",
+        )
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.resume_operation_from_quota(
+                OWNER_B,
+                CONVERSATION_ID,
+                paused.job_id,
+                workflow_id=paused.workflow_id,
+                expected_revision=1,
+                now=NOW,
+                delivery_lease_owner="quota-owner-safe-resume",
+                delivery_lease_expires_at=NOW + timedelta(seconds=30),
+                event=resume_event,
+            )
+
+        assert await repository.get_operation(OWNER_A, paused.job_id) == paused
+        assert await repository.list_events(OWNER_A, CONVERSATION_ID) == []
+        assert await repository.list_events(OWNER_B, CONVERSATION_ID) == []
+
+        resumed, claim = await repository.resume_operation_from_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            paused.job_id,
+            workflow_id=paused.workflow_id,
+            expected_revision=1,
+            now=NOW,
+            delivery_lease_owner="quota-owner-safe-resume",
+            delivery_lease_expires_at=NOW + timedelta(seconds=30),
+            event=resume_event,
+        )
+        assert resumed.next_poll_at == NOW
+        assert claim.event.event_id == resume_event.event_id
+        assert claim.event.sequence == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_ordinary_event_uses_existing_operation_as_conversation_authority(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        operation = await repository.create_operation(
+            OWNER_A,
+            _operation("job-event-owner-authority"),
+        )
+        event = _event("event-owner-authority", 1)
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.create_event(OWNER_B, event)
+
+        assert await repository.get_operation(OWNER_A, operation.job_id) == operation
+        assert await repository.list_events(OWNER_A, CONVERSATION_ID) == []
+        assert await repository.list_events(OWNER_B, CONVERSATION_ID) == []
+        assert await repository.create_event(OWNER_A, event) == event
+
+
 @pytest.mark.asyncio
 async def test_sql_event_sequence_writers_lock_conversation_coordination_before_allocation() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

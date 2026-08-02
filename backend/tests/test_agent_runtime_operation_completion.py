@@ -38,9 +38,11 @@ from pixelflow.agent_runtime.jobs import (
 )
 from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
 from pixelflow.agent_runtime.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
     MemoryAgentRuntimeRepository,
     OperationRecord,
+    OperationTerminalEventRecord,
     SQLAgentRuntimeRepository,
 )
 
@@ -293,6 +295,58 @@ async def test_terminal_snapshot_atomically_updates_operation_and_outbox(
         assert "idempotency_key" not in completion.event.payload
         assert await repository.get_operation(OWNER, JOB_ID) == completion.operation
         assert await repository.list_events(OWNER, CONVERSATION) == [completion.event]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_wrong_owner_cannot_poison_conversation_before_terminal_event(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    async with _repository(
+        kind,
+        tmp_path / f"{kind}-terminal-owner-safe.db",
+    ) as repository:
+        leased = await _leased_operation(repository)
+        terminal_event = OperationTerminalEventRecord(
+            event_id="evt_job_done_owner_safe",
+            cursor="cursor-job-done-owner-safe",
+            run_id="run-job-done-owner-safe",
+            occurred_at=NOW + timedelta(seconds=1),
+            payload={"job_id": JOB_ID, "status": "succeeded"},
+        )
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await repository.finalize_operation_terminal(
+                "user-operation-completion-other",
+                CONVERSATION,
+                JOB_ID,
+                provider_job_id=PROVIDER_JOB_ID,
+                terminal_status=ExternalJobStatus.SUCCEEDED,
+                lease_owner="poller-a",
+                now=NOW + timedelta(seconds=1),
+                event=terminal_event,
+            )
+
+        assert await repository.get_operation(OWNER, JOB_ID) == leased
+        assert await repository.list_events(OWNER, CONVERSATION) == []
+        assert await repository.list_events(
+            "user-operation-completion-other",
+            CONVERSATION,
+        ) == []
+
+        operation, completion_event = await repository.finalize_operation_terminal(
+            OWNER,
+            CONVERSATION,
+            JOB_ID,
+            provider_job_id=PROVIDER_JOB_ID,
+            terminal_status=ExternalJobStatus.SUCCEEDED,
+            lease_owner="poller-a",
+            now=NOW + timedelta(seconds=1),
+            event=terminal_event,
+        )
+        assert operation.status is ExternalJobStatus.SUCCEEDED
+        assert completion_event.sequence == 1
 
 
 @pytest.mark.asyncio

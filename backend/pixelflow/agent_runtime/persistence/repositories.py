@@ -828,6 +828,24 @@ class MemoryAgentRuntimeRepository:
         self._operation_stage_keys: set[tuple[str, str, int, int]] = set()
         self._operation_write_lock = asyncio.Lock()
 
+    def _conversation_authority_owners(self, conversation_id: str) -> set[str]:
+        """汇总会话现有权威记录的所有者，防止普通 Event 抢占归属。"""
+
+        owners: set[str] = set()
+        for records in (
+            self._operations,
+            self._workflows,
+            self._turns,
+            self._summaries,
+            self._events,
+        ):
+            owners.update(
+                record_owner
+                for (record_owner, _), record in records.items()
+                if record.conversation_id == conversation_id
+            )
+        return owners
+
     async def create_workflow(self, user_id: str, record: WorkflowRecord) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_workflow(record)
@@ -968,6 +986,13 @@ class MemoryAgentRuntimeRepository:
         sequence_key = (normalized.conversation_id, normalized.sequence)
         cursor_key = (normalized.conversation_id, normalized.cursor)
         async with self._event_write_lock:
+            authority_owners = self._conversation_authority_owners(
+                normalized.conversation_id
+            )
+            if authority_owners - {owner}:
+                raise AgentRuntimeRecordConflictError(
+                    "AgentEvent conversation 已经属于其他所有者"
+                )
             conversation_records = [(record_owner, existing) for (record_owner, _), existing in self._events.items() if existing.conversation_id == normalized.conversation_id]
             if any(record_owner != owner for record_owner, _ in conversation_records):
                 raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
@@ -2250,22 +2275,102 @@ class SQLAgentRuntimeRepository:
         session: AsyncSession,
         user_id: str,
         conversation_id: str,
-    ) -> None:
-        """锁定稳定会话行，串行化同一会话的 Event 序号分配。"""
+        *,
+        now: datetime,
+        operation_id: str | None = None,
+    ) -> PixelFlowAgentOperationRow | None:
+        """在目标事务内验证归属并锁定或创建 Event 序号协调行。"""
 
-        statement = (
+        coordination_statement = (
             select(PixelFlowAgentCompactionLockRow)
-            .where(
-                PixelFlowAgentCompactionLockRow.conversation_id == conversation_id,
-                PixelFlowAgentCompactionLockRow.user_id == user_id,
-            )
+            .where(PixelFlowAgentCompactionLockRow.conversation_id == conversation_id)
             .with_for_update()
         )
-        row = (await session.scalars(statement)).one_or_none()
-        if row is None:
+        coordination = (
+            await session.scalars(coordination_statement)
+        ).one_or_none()
+        if coordination is not None and coordination.user_id != user_id:
             raise AgentRuntimeRecordConflictError(
-                "conversation Event 序号协调行不存在或所有者不一致"
+                "conversation Event 序号协调行已经属于其他所有者"
             )
+
+        operation: PixelFlowAgentOperationRow | None = None
+        if operation_id is not None:
+            operation_statement = (
+                select(PixelFlowAgentOperationRow)
+                .where(
+                    PixelFlowAgentOperationRow.user_id == user_id,
+                    PixelFlowAgentOperationRow.conversation_id == conversation_id,
+                    PixelFlowAgentOperationRow.job_id == operation_id,
+                )
+                .with_for_update()
+            )
+            operation = (
+                await session.scalars(operation_statement)
+            ).one_or_none()
+            if operation is None:
+                raise AgentRuntimeRecordConflictError(
+                    "Operation 不存在或不属于当前会话"
+                )
+
+        if coordination is None:
+            if operation is None:
+                authority_statements = (
+                    select(PixelFlowAgentOperationRow.user_id)
+                    .where(
+                        PixelFlowAgentOperationRow.conversation_id
+                        == conversation_id
+                    )
+                    .with_for_update(),
+                    select(PixelFlowAgentTurnRow.user_id)
+                    .where(PixelFlowAgentTurnRow.conversation_id == conversation_id)
+                    .with_for_update(),
+                    select(PixelFlowAgentEventRow.user_id)
+                    .where(PixelFlowAgentEventRow.conversation_id == conversation_id)
+                    .with_for_update(),
+                    select(PixelFlowAgentWorkflowRow.user_id)
+                    .where(
+                        PixelFlowAgentWorkflowRow.conversation_id == conversation_id
+                    )
+                    .with_for_update(),
+                    select(PixelFlowAgentContextSummaryRow.user_id)
+                    .where(
+                        PixelFlowAgentContextSummaryRow.conversation_id
+                        == conversation_id
+                    )
+                    .with_for_update(),
+                )
+                authority_owners: set[str] = set()
+                for authority_statement in authority_statements:
+                    authority_owners.update(
+                        (await session.scalars(authority_statement)).all()
+                    )
+                if authority_owners - {user_id}:
+                    raise AgentRuntimeRecordConflictError(
+                        "AgentEvent conversation 已经属于其他所有者"
+                    )
+
+            coordination = (
+                await session.scalars(coordination_statement)
+            ).one_or_none()
+            if coordination is not None and coordination.user_id != user_id:
+                raise AgentRuntimeRecordConflictError(
+                    "conversation Event 序号协调行已经属于其他所有者"
+                )
+            if coordination is None:
+                coordination = PixelFlowAgentCompactionLockRow(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    state="idle",
+                    lease_owner=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(coordination)
+                await session.flush()
+        return operation
 
     async def create_workflow(self, user_id: str, record: WorkflowRecord) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
@@ -2587,11 +2692,6 @@ class SQLAgentRuntimeRepository:
     async def create_event(self, user_id: str, record: AgentEvent) -> AgentEvent:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_event(record)
-        await self._ensure_compaction_coordination_row(
-            owner,
-            normalized.conversation_id,
-            now=normalized.occurred_at,
-        )
         last_statement = (
             select(PixelFlowAgentEventRow)
             .where(
@@ -2611,6 +2711,7 @@ class SQLAgentRuntimeRepository:
                         session,
                         owner,
                         normalized.conversation_id,
+                        now=normalized.occurred_at,
                     )
                     last_row = (await session.scalars(last_statement)).first()
                     if last_row is not None and last_row.user_id != owner:
@@ -3244,20 +3345,6 @@ class SQLAgentRuntimeRepository:
         completed_at = _normalize_datetime("now", now)
         target = _require_operation_terminal_status(terminal_status)
         event_record = _normalize_operation_terminal_event(event)
-        await self._ensure_compaction_coordination_row(
-            owner,
-            conversation,
-            now=completed_at,
-        )
-        operation_statement = (
-            select(PixelFlowAgentOperationRow)
-            .where(
-                PixelFlowAgentOperationRow.user_id == owner,
-                PixelFlowAgentOperationRow.conversation_id == conversation,
-                PixelFlowAgentOperationRow.job_id == operation_id,
-            )
-            .with_for_update()
-        )
         existing_event_statement = (
             select(PixelFlowAgentEventRow)
             .where(
@@ -3281,14 +3368,17 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
-                    await self._lock_event_sequence_coordination(
+                    row = await self._lock_event_sequence_coordination(
                         session,
                         owner,
                         conversation,
+                        now=completed_at,
+                        operation_id=operation_id,
                     )
-                    row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
-                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                        raise AgentRuntimeRecordConflictError(
+                            "Operation 不存在或不属于当前会话"
+                        )
                     if row.provider_job_id != provider_id:
                         raise AgentRuntimeRecordConflictError("Operation provider job ID 不一致")
 
@@ -3672,20 +3762,6 @@ class SQLAgentRuntimeRepository:
             quota_pause_revision=revision + 1,
             quota_state="paused",
         )
-        await self._ensure_compaction_coordination_row(
-            owner,
-            conversation,
-            now=paused_at,
-        )
-        operation_statement = (
-            select(PixelFlowAgentOperationRow)
-            .where(
-                PixelFlowAgentOperationRow.user_id == owner,
-                PixelFlowAgentOperationRow.conversation_id == conversation,
-                PixelFlowAgentOperationRow.job_id == operation_id,
-            )
-            .with_for_update()
-        )
         existing_event_statement = (
             select(PixelFlowAgentEventRow)
             .where(
@@ -3707,14 +3783,17 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
-                    await self._lock_event_sequence_coordination(
+                    row = await self._lock_event_sequence_coordination(
                         session,
                         owner,
                         conversation,
+                        now=paused_at,
+                        operation_id=operation_id,
                     )
-                    row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
-                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                        raise AgentRuntimeRecordConflictError(
+                            "Operation 不存在或不属于当前会话"
+                        )
                     existing_event_row = (
                         await session.scalars(existing_event_statement)
                     ).one_or_none()
@@ -3810,20 +3889,6 @@ class SQLAgentRuntimeRepository:
             quota_pause_revision=revision,
             quota_state="resumed",
         )
-        await self._ensure_compaction_coordination_row(
-            owner,
-            conversation,
-            now=resumed_at,
-        )
-        operation_statement = (
-            select(PixelFlowAgentOperationRow)
-            .where(
-                PixelFlowAgentOperationRow.user_id == owner,
-                PixelFlowAgentOperationRow.conversation_id == conversation,
-                PixelFlowAgentOperationRow.job_id == operation_id,
-            )
-            .with_for_update()
-        )
         existing_event_statement = (
             select(PixelFlowAgentEventRow)
             .where(
@@ -3845,14 +3910,17 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
-                    await self._lock_event_sequence_coordination(
+                    row = await self._lock_event_sequence_coordination(
                         session,
                         owner,
                         conversation,
+                        now=resumed_at,
+                        operation_id=operation_id,
                     )
-                    row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
-                        raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
+                        raise AgentRuntimeRecordConflictError(
+                            "Operation 不存在或不属于当前会话"
+                        )
                     existing_event_row = (
                         await session.scalars(existing_event_statement)
                     ).one_or_none()
