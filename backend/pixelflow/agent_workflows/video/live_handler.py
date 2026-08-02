@@ -395,15 +395,41 @@ class VideoLiveWorkflowHandler:
                             if credential is not None:
                                 credential.discard()
                     elif set(patch) == {"scene_patches"}:
-                        updated = await self._postproduction.apply_user_revision(
-                            state,
-                            scene_patches=self._scene_patch_map(
-                                patch["scene_patches"]
-                            ),
-                            generation_service=self._generation,
-                            operation_port=self._operation_port_for(command),
-                            now=self._clock.now(),
+                        live_operations = self._live_operation_bridge()
+                        credential = (
+                            None
+                            if live_operations is None
+                            else self._credential_provider.get(command.turn_id)
                         )
+                        if live_operations is not None and credential is None:
+                            return self._wait_for_authorization(
+                                command,
+                                state,
+                                existing_envelope=existing_envelope,
+                            )
+                        operation_port = self._operation_port_for(command)
+                        try:
+                            updated = await self._postproduction.apply_user_revision(
+                                state,
+                                scene_patches=self._scene_patch_map(
+                                    patch["scene_patches"]
+                                ),
+                                generation_service=self._generation,
+                                operation_port=operation_port,
+                                now=self._clock.now(),
+                            )
+                            if live_operations is not None:
+                                assert credential is not None
+                                updated = await self._start_scene_video_operations(
+                                    command,
+                                    updated,
+                                    operations=live_operations,
+                                    operation_port=operation_port,
+                                    credential=credential,
+                                )
+                        finally:
+                            if credential is not None:
+                                credential.discard()
                     elif set(patch) in (
                         {"jianying_action"},
                         {"jianying_action", "project_name"},

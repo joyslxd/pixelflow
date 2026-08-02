@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -234,6 +234,7 @@ class FakeVideoHandler:
         repository: MemoryVideoRuntimeRepository,
         *,
         open_first_interrupt: bool = False,
+        interrupt_count: int = 0,
         block: bool = False,
         parallel_target: int = 0,
         fail_first: bool = False,
@@ -242,7 +243,10 @@ class FakeVideoHandler:
         workflow_status: WorkflowStatus | None = None,
     ) -> None:
         self.repository = repository
-        self.open_first_interrupt = open_first_interrupt
+        self.remaining_interrupts = max(
+            interrupt_count,
+            1 if open_first_interrupt else 0,
+        )
         self.block = block
         self.parallel_target = parallel_target
         self.failures_remaining = 1 if fail_first else 0
@@ -313,9 +317,14 @@ class FakeVideoHandler:
             last_turn_id=command.turn_id,
             last_action_key=command.decision.idempotency_key,
         )
-        if existing is None and self.open_first_interrupt:
+        if self.remaining_interrupts > 0:
+            occurrence = len(self.turn_ids)
+            interrupt_id = f"interrupt-{command.turn_id}"
+            if occurrence > 1:
+                interrupt_id = f"{interrupt_id}-{occurrence}"
+            self.remaining_interrupts -= 1
             opened = StoredAgentInterrupt(
-                interrupt_id=f"interrupt-{command.turn_id}",
+                interrupt_id=interrupt_id,
                 conversation_id=command.conversation_id,
                 workflow_id=command.workflow_id,
                 turn_id=command.turn_id,
@@ -506,6 +515,7 @@ async def _runtime(
     *,
     repository_type=MemoryVideoRuntimeRepository,
     open_first_interrupt: bool = False,
+    interrupt_count: int = 0,
     block: bool = False,
     parallel_target: int = 0,
     recorder_fail: bool = False,
@@ -525,6 +535,7 @@ async def _runtime(
     handler = FakeVideoHandler(
         repository,
         open_first_interrupt=open_first_interrupt,
+        interrupt_count=interrupt_count,
         block=block,
         parallel_target=parallel_target,
         fail_first=fail_first_handler,
@@ -1046,6 +1057,123 @@ async def test_executor_resumes_interrupt_on_original_turn_without_followup() ->
     assert [item.turn_id for item in turns] == [opened.turn_id]
     assert turns[0].status in {TurnStatus.WAITING_USER, TurnStatus.COMPLETED}
     assert runtime.handler.turn_ids == [opened.turn_id, opened.turn_id]
+    await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_second_interrupt_evidence_thaws_nested_frozen_turn_decision() -> None:
+    """连续人工恢复必须消费普通 Turn DTO，同时保留冻结提交的完整身份。"""
+
+    runtime = await _runtime(interrupt_count=2)
+    await _seed_conversation(runtime.task_store, context_version=1)
+    await _seed_turn(runtime.repository, runtime.task_store, index=1)
+    registration_store = MemoryTurnRegistrationStore(
+        repository=runtime.repository,
+        task_store=runtime.task_store,
+        video_repository=runtime.repository,
+    )
+    await runtime.executor.recover_due_turns()
+    await runtime.executor.wait_idle()
+    first = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert first is not None
+    first_request = InterruptResponseRequest(
+        client_response_id=UUID("10000000-0000-4000-8000-000000000101"),
+        value={
+            "content": "确认表单",
+            "explicit_action": {
+                "action": "continue_workflow",
+                "intent": "video",
+                "workflow_id": first.workflow_id,
+                "stage": first.payload["stage"],
+                "patch": {
+                    "form_values": {
+                        "video_ratio": "9:16",
+                        "durations_sec": [5, 10, 15],
+                    }
+                },
+            },
+        },
+    )
+    first_registration = await registration_store.register_interrupt_response(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        interrupt_id=first.interrupt_id,
+        request=first_request,
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+    await runtime.executor.notify_interrupt(first_registration.interrupt)
+    await runtime.executor.wait_idle()
+
+    second = await runtime.repository.get_open_interrupt(
+        "user-1",
+        "conversation-1",
+    )
+    assert second is not None and second.interrupt_id != first.interrupt_id
+    frozen_turn = await runtime.repository.get_turn("user-1", first.turn_id)
+    assert frozen_turn is not None and frozen_turn.decision is not None
+    second_request = InterruptResponseRequest(
+        client_response_id=UUID("10000000-0000-4000-8000-000000000102"),
+        value={
+            "content": "选择方向",
+            "explicit_action": {
+                "action": "continue_workflow",
+                "intent": "video",
+                "workflow_id": second.workflow_id,
+                "stage": second.payload["stage"],
+                "patch": {"direction_id": "direction_1"},
+            },
+        },
+    )
+    second_registration = await registration_store.register_interrupt_response(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        interrupt_id=second.interrupt_id,
+        request=second_request,
+        occurred_at=NOW + timedelta(seconds=3),
+    )
+    claim = await runtime.repository.claim_interrupt_resume(
+        "user-1",
+        "conversation-1",
+        second.interrupt_id,
+        lease_owner="second-response-worker",
+        now=NOW + timedelta(seconds=3),
+        lease_expires_at=NOW + timedelta(seconds=33),
+    )
+    assert claim is not None
+    assert claim.turn.decision is not None
+    assert isinstance(claim.turn.decision.patch, MappingProxyType)
+    assert isinstance(
+        claim.turn.decision.patch["form_values"],
+        MappingProxyType,
+    )
+
+    evidence = await runtime.executor._load_authoritative_evidence(
+        claim,
+        response_value=second_request.value.model_dump(mode="json"),
+    )
+
+    assert type(evidence.turn) is TurnRecord
+    assert evidence.turn.turn_id == frozen_turn.turn_id
+    assert evidence.turn.client_input_id == frozen_turn.client_input_id
+    assert evidence.turn.expected_context_version == (
+        claim.turn.expected_context_version
+    )
+    assert evidence.turn.decision is not None
+    assert evidence.turn.decision.idempotency_key == (
+        frozen_turn.decision.idempotency_key
+    )
+    assert evidence.turn.decision.patch == {
+        "form_values": {
+            "video_ratio": "9:16",
+            "durations_sec": [5, 10, 15],
+        }
+    }
+    assert evidence.user_id == "user-1"
+    assert evidence.conversation_id == "conversation-1"
+    assert second_registration.interrupt.turn_id == first.turn_id
     await runtime.executor.aclose()
 
 

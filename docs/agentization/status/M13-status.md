@@ -46,6 +46,16 @@
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
 
+## M13.2 / R2 视频 live Handler Task 14 本地门禁（2026-08-02）
+
+- 当前状态：`development_slice_complete:Task14 / awaiting_independent_slot_integration`。只表示隔离分支已完成本地开发验收，不改变既有 `phase_integrated:R2 / awaiting_release_approval:R2`，也不表示 Agent 长期分支已经安装视频 live Handler。
+- 公共全链路：从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建 `supervisor_v1` 视频对话，完整经过带图首轮、表单、三方向、Plan、场景包/素材、三段分镜、合并、QA 定向修改第二镜、只重试该镜、再次合并、最终确认和当前成片下载。Snapshot 与 SSE 最终 cursor/sequence 一致，重复输入 ID 和三次刷新新增 Provider start 为 0。
+- fake Provider 计数：分镜 `4`、合并 `2`、QA `1`、剪映 `0`；全程未调用真实 LLM、content-app、PowerMem、图片、视频、剪映或其他付费 Provider。
+- 故障矩阵：11 个参数项逐项通过，覆盖 checkpoint 前后退出、Provider start 后/完成事件前恢复、402 以新请求凭据恢复原 provider job、timeout/failed/404 新 attempt、三分镜部分失败只重试失败镜头、跨租户引用隔离、模型档案失效和重启后 Handler 缺失。每项都显式校验 attempt、provider job ID、Turn 状态、安全原因、敏感值零泄漏、重复 start 为 0、跨租户对象为 0。
+- 归属边界：`frontend_v2` Turn 继续以 `accepted` 写入 R1 Inbox，Supervisor Executor 通知为 0；旧 `supervisor_v1` 对话在重启缺 Handler 时于登记前返回固定 `agent_runtime_unavailable`，新增 Turn 为 0，原归属不迁移；新视频对话保持 `frontend_v2`。
+- 门禁与限制：Task 14 两文件 `31 passed`，Web `404 passed`、lint/build 通过，Ruff 通过。后端组合与全量只剩未修改基线中 `agent_runtime.__all__` 测试仍硬编码四项、而基线实现已有十项的既有失败；黄金集新增 3 条后，可复现报告已机械同步为 54 条。生产配置 diff 为空。
+- 详细证据：[R2 视频 live Handler 本地门禁报告](../test-reports/R2-video-live-handler.md)。
+
 ## M13.2 / R2 测试环境人工验收修复（2026-07-29）
 
 - 触发原因：测试环境视频新对话被配置冻结为 `supervisor_v1`，但 Gateway 没有安装消费 Turn 的 live Graph Handler；Turn 长期停在 `accepted`，前端 assist 恢复反复写 pending，表现为无限请求且没有结果或错误提示。
@@ -63,7 +73,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 前端：`WorkspacePage` 从 Snapshot 的五类 `ui_kind` 纯恢复视频表单和审核卡；Supervisor 控件只提交 `ExplicitActionSignal`，每次生成一个稳定响应 UUID，pending 同时保存原 action 与目标引用，已注册恢复只查询原 run。分镜文本先形成本地草稿，显式保存后只提交一次当前分镜；`frontend_v2` 和非视频路径保持原 handler。
 - 审核整改：Operation 最终完成先在真实 Supervisor checkpoint 建立同一原 Turn 的 Graph pause，再由 Memory/SQL 原子写 state/workflow/messages、原 Turn `waiting_user`、open interrupt、`interrupt.opened` 和完成事件确认；Graph pause 后、Repository 事务前退出时，以完成事件时间重建确定性投影并复用首个 checkpoint 中断，租约重放不新建 Turn、不重复 Provider start。授权中断可跨 Executor 重启恢复原结构化 action，瞬时凭据不落库且 Provider start 不重复。前端卡片按 `run_id + workflow_id + artifact_ref + type` 精确选择；人工全局素材 ID、名称和 content asset 跨分组唯一。
 - 本地证据：Executor `26 passed`、Runtime Repository `82 passed`、视频 Operation `146 passed`、视频 Handler `53 passed`、场景包 `41 passed`、Gateway readiness `9 passed`；Web 正确测试环境 `404 passed`，`tsc --noEmit` 与生产构建通过。最终中文、静态和差异检查以本分支报告收尾记录为准。
-- 冻结边界：Task 14 的 Gateway 注册、`primary_execution_intents=[video]`、R2 真实全流程门禁、真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行。生产继续保持 R1 `assist / [] / 100 / true`；历史对话和运行中任务不迁移。
+- 后续状态：Task 14 已由另一隔离候选完成 Gateway 装配与 fake 公共全链路本地门禁，但尚未独立单槽集成。真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行；生产继续保持 R1 `assist / [] / 100 / true`，历史对话和运行中任务不迁移。
 - 详细证据：[R2 视频 live handler 开发记录](../test-reports/R2-video-live-handler-development.md)。
 
 ## M13.2 / R2 单槽阶段集成（2026-07-29）
@@ -84,7 +94,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 回放边界：新增 `SupervisorReplayRuntime`，`off/assist` 在 Handler 前关闭，Shadow 只生成冻结决策、标准命令 DTO 和预算报告，不进入 Workflow Handler、Operation 或 PowerMem record；primary 才调用 M02/M05 图内核。
 - 视频命令：`WorkflowCommand` 增加 user、Turn、当前输入、materials、reply 和 Artifact 引用；视频 Handler 必填并深拷贝附件，尚未进入 R2 的其他 Workflow 保持 M02 路由内核兼容。
 - mock E2E：以 M11 `VideoPlanningWorkflowService` 作为 Handler、M06 `OperationStartCoordinator` 与固定 Provider fake 串起视频首轮；刷新/协调器重建复用同一 operation 和 provider job，供应商 start 增量为 0。
-- 黄金对话：R2 视频子集 13 条覆盖全部 9 类 `AgentAction`，action、target 和追问召回均为 100%，计费误执行为 0。
+- 黄金对话：阶段集成时 R2 视频子集 13 条覆盖全部 9 类 `AgentAction`；Task 14 为 QA 定向修改、过期分镜重试和最终成片确认新增 3 条，当前 16 条的 action、target 和追问召回均为 100%，计费误执行为 0。
 - 上下文合同：回放只通过共享 `ContextBudgetPolicyProvider` 读取 896K/32K/32K，DeepSeek V4 Pro 档案固定为 1,000,000 tokens 且缺失已验证档案失败关闭；压缩期 Turn 排队、30 秒失败退避、同 Turn 与附件恢复均有定向测试。未增加视频节点窗口常量或 128K 业务兜底。
 - 非付费边界：所有测试只使用 Memory Store、fixture 和 fake；未调用真实图片、视频、PPT、剪映、LLM、content-app、PowerMem 或其他付费 API。未修改 `backend/config.prod.yml`，未执行 M13.3。
 - 测试与审核：完整证据见 [M13.2 / R2 测试与审核记录](../test-reports/M13.2-R2.md)。实现提交完成并复核中文规范后，只允许再修改本状态文件登记 R2 检查点。

@@ -917,7 +917,10 @@ class VideoOperationCompletionHandler:
             completion_event,
             idempotency_key=idempotency_key,
         )
-        payload = completion_event.payload
+        payload = completion_event.model_dump(
+            mode="json",
+            serialize_as_any=True,
+        )["payload"]
         completion_time = completion_event.occurred_at
         workflow_id = payload.get("workflow_id")
         if not isinstance(workflow_id, str) or namespace != workflow_namespace(

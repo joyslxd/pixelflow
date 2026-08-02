@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1154,6 +1155,152 @@ async def test_video_handler_applies_qc_scoped_scene_revision(
     assert [item["scene_id"] for item in generation.generation_requests] == [
         scene_id
     ]
+
+
+@pytest.mark.asyncio
+async def test_video_handler_starts_only_qc_affected_scene_live_operation() -> None:
+    """QA 定向修改必须只启动命中分镜，并复用稳定 Operation 身份。"""
+
+    from test_agent_video_live_operations import (
+        CONVERSATION_ID,
+        FAKE_AUTHORIZATION,
+        USER_ID,
+        WORKFLOW_ID,
+        ScriptedProvider,
+        _commit_next_state,
+        _complete_scenes_and_merge,
+        _MutableClock,
+        _seed_conversation,
+        build_live_operations,
+        explicit_stage_command,
+        quality_stage_command,
+    )
+
+    from pixelflow.agent_workflows.video.live_operations import (
+        TransientCredentialVault,
+        VideoOperationCompletionHandler,
+    )
+
+    store = MemoryPixelFlowTaskStore()
+    repository = MemoryVideoRuntimeRepository(task_store=store)
+    await _seed_conversation(store)
+    clock = _MutableClock()
+    provider = ScriptedProvider(
+        status_results=[
+            *[
+                {
+                    "job_id": f"provider-scripted-{index}",
+                    "status": "succeeded",
+                    "result": {
+                        "video_url": (
+                            f"https://videos.example.com/scene-{index}.mp4"
+                        ),
+                        "raw": {},
+                    },
+                }
+                for index in range(1, 4)
+            ],
+            {
+                "job_id": "provider-scripted-4",
+                "status": "succeeded",
+                "result": {
+                    "video_url": "https://videos.example.com/merged.mp4",
+                    "raw": {},
+                },
+            },
+            {
+                "job_id": "provider-scripted-5",
+                "status": "succeeded",
+                "result": {
+                    "passed": False,
+                    "summary_markdown": "第二镜需要调整。",
+                    "quality_report_markdown": "第二镜商品露出不足。",
+                    "issues": [
+                        {"scene_id": "scene-2", "message": "商品露出不足"}
+                    ],
+                    "affected_scene_ids": ["scene-2"],
+                    "revision_prompt": "强化第二镜商品露出",
+                    "raw": {},
+                },
+            },
+        ]
+    )
+    operations = build_live_operations(
+        provider,
+        clock=clock,
+        repository=repository,
+    )
+    merged_envelope, workflow = await _complete_scenes_and_merge(
+        repository,
+        store,
+        operations,
+        clock,
+    )
+    vault = TransientCredentialVault()
+    quality_command = quality_stage_command(workflow)
+    vault.put(
+        quality_command.turn_id,
+        TransientTurnCredential(FAKE_AUTHORIZATION),
+    )
+    handler = VideoLiveWorkflowHandler(
+        repository=repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=vault,
+        operation_port=operations,
+        clock=clock,
+    )
+    quality_started = await handler.dispatch(quality_command)
+    await _commit_next_state(
+        repository,
+        decode_video_workflow_state(quality_started.state),
+        expected_workflow_version=merged_envelope.workflow_version,
+        now=clock.now(),
+        index=3,
+    )
+    completion = VideoOperationCompletionHandler(
+        repository=repository,
+        operations=operations,
+        clock=clock,
+    )
+    runtime = operations.build_recovery_runtime(
+        resumer=completion,
+        worker_id="handler-quality-scoped-revision",
+    )
+    clock.advance(seconds=3)
+    await runtime.run_once()
+    workflow = await repository.get_workflow(USER_ID, WORKFLOW_ID)
+    assert workflow is not None
+    patch_command = explicit_stage_command(
+        workflow,
+        action=AgentAction.MODIFY_WORKFLOW,
+        patch={
+            "scene_patches": {
+                "scene-2": {"narration": "强化第二镜商品功能旁白"}
+            }
+        },
+        suffix="handler-quality-scoped-revision",
+    )
+    vault.put(
+        patch_command.turn_id,
+        TransientTurnCredential(FAKE_AUTHORIZATION),
+    )
+    starts_before_revision = provider.start_calls
+
+    revised = await handler.dispatch(patch_command)
+    revised_state = decode_video_workflow_state(revised.state)
+
+    assert provider.start_calls == starts_before_revision + 1
+    assert [item["scene_id"] for item in revised_state.generation_requests] == [
+        "scene-2"
+    ]
+    assert [item.stage for item in revised_state.pending_operations] == [
+        "generate_scene_video:scene-2"
+    ]
+    assert FAKE_AUTHORIZATION not in json.dumps(
+        revised.state.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    assert revised.workflow.conversation_id == CONVERSATION_ID
 
 
 @pytest.mark.asyncio

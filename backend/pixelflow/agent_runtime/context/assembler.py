@@ -245,7 +245,14 @@ class ContextAssembler:
             conversation_id=request.conversation_id,
             expected_context_version=request.expected_context_version,
         )
-        snapshot = ContextAssemblySnapshot.model_validate(raw_snapshot).model_copy(deep=True)
+        snapshot_document = (
+            raw_snapshot.model_dump(mode="json", serialize_as_any=True)
+            if isinstance(raw_snapshot, BaseModel)
+            else raw_snapshot
+        )
+        snapshot = ContextAssemblySnapshot.model_validate(
+            snapshot_document
+        ).model_copy(deep=True)
         self._validate_owner_and_version(request, snapshot)
 
         workflow = self._select_workflow(request, snapshot)

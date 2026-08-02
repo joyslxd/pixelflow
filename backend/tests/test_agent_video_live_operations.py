@@ -4010,8 +4010,10 @@ async def test_quality_paid_stage_requires_credential_and_starts_m06_once() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize("quality_passed", [True, False])
 async def test_quality_completion_updates_m11_review_and_acks_once(
     kind: RepositoryKind,
+    quality_passed: bool,
     tmp_path: Path,
 ) -> None:
     clock = _MutableClock()
@@ -4040,12 +4042,22 @@ async def test_quality_completion_updates_m11_review_and_acks_once(
                 "job_id": "provider-scripted-5",
                 "status": "succeeded",
                 "result": {
-                    "passed": True,
-                    "summary_markdown": "质检通过。",
-                    "quality_report_markdown": "画面与节奏符合要求。",
-                    "issues": [],
-                    "affected_scene_ids": [],
-                    "revision_prompt": "",
+                    "passed": quality_passed,
+                    "summary_markdown": (
+                        "质检通过。" if quality_passed else "第二镜需要调整。"
+                    ),
+                    "quality_report_markdown": (
+                        "画面与节奏符合要求。"
+                        if quality_passed
+                        else "第二镜商品露出不足。"
+                    ),
+                    "issues": (
+                        []
+                        if quality_passed
+                        else [{"scene_id": "scene-2", "message": "商品露出不足"}]
+                    ),
+                    "affected_scene_ids": [] if quality_passed else ["scene-2"],
+                    "revision_prompt": "" if quality_passed else "强化第二镜商品露出",
                     "raw": {},
                 },
             },
@@ -4106,7 +4118,7 @@ async def test_quality_completion_updates_m11_review_and_acks_once(
         assert restored is not None
         updated = decode_video_workflow_state(restored)
         assert updated.current_stage.value == "video_review"
-        assert updated.quality_review["passed"] is True
+        assert updated.quality_review["passed"] is quality_passed
         assert provider.status_job_ids.count("provider-scripted-5") == 1
         message = await _assert_completion_projection_replay_stable(
             repository,
@@ -4127,14 +4139,69 @@ async def test_quality_completion_updates_m11_review_and_acks_once(
         artifact = message.model_dump(mode="json")["payload"]["artifact"]
         review = artifact["videoQualityReview"]
         assert review["ok"] is True
-        assert review["passed"] is True
+        assert review["passed"] is quality_passed
         assert review["endpoint"] == "/api/creative/video_quality_review"
         assert review["task_id"] == "provider-scripted-5"
         assert review["score"] == 0
         assert review["check_results"] == []
-        assert review["issues"] == []
-        assert review["affected_scene_ids"] == []
+        assert review["issues"] == (
+            []
+            if quality_passed
+            else [{"scene_id": "scene-2", "message": "商品露出不足"}]
+        )
+        assert review["affected_scene_ids"] == (
+            [] if quality_passed else ["scene-2"]
+        )
         assert review["raw"] == {}
+        if not quality_passed:
+            workflow = await repository.get_workflow(USER_ID, WORKFLOW_ID)
+            assert workflow is not None
+            command = explicit_stage_command(
+                workflow,
+                action=AgentAction.MODIFY_WORKFLOW,
+                patch={
+                    "scene_patches": {
+                        "scene-2": {"narration": "强化第二镜商品功能旁白"}
+                    }
+                },
+                suffix="quality-scoped-scene-revision",
+            )
+            vault = TransientCredentialVault()
+            vault.put(
+                command.turn_id,
+                TransientTurnCredential(FAKE_AUTHORIZATION),
+            )
+            handler = VideoLiveWorkflowHandler(
+                repository=repository,
+                capabilities=_UnusedCapabilities(),
+                credential_provider=vault,
+                operation_port=operations,
+                clock=clock,
+            )
+            starts_before_revision = provider.start_calls
+
+            revised = await handler.dispatch(command)
+            revised_state = decode_video_workflow_state(revised.state)
+
+            assert provider.start_calls == starts_before_revision + 1
+            assert [
+                item["scene_id"] for item in revised_state.generation_requests
+            ] == ["scene-2"]
+            assert [
+                item.stage for item in revised_state.pending_operations
+            ] == ["generate_scene_video:scene-2"]
+            assert FAKE_AUTHORIZATION not in json.dumps(
+                revised.state.model_dump(mode="json"),
+                ensure_ascii=False,
+            )
+
+            vault.put(
+                command.turn_id,
+                TransientTurnCredential(FAKE_AUTHORIZATION),
+            )
+            replayed = await handler.dispatch(command)
+            assert replayed.workflow == revised.workflow
+            assert provider.start_calls == starts_before_revision + 1
 
 
 @pytest.mark.asyncio

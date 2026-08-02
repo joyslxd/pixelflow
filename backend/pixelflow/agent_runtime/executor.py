@@ -894,10 +894,13 @@ class SupervisorTurnExecutor:
             user_id,
             conversation_id,
         )
+        authoritative_turn = TurnRecord.model_validate(
+            claim.turn.model_dump(mode="json", serialize_as_any=True)
+        )
         return SupervisorTurnEvidence(
             user_id=user_id,
             conversation_id=conversation_id,
-            turn=claim.turn,
+            turn=authoritative_turn,
             content=content.strip(),
             visible_messages=tuple(visible),
             workflows=workflows,

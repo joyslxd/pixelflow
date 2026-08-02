@@ -379,6 +379,15 @@ class AgentRuntimeService:
         )
         body = TurnStartRequest.model_validate(raw_request)
         occurred_at = self._clock()
+        conversation = await self.require_conversation(
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        live_video_execution_ready = _live_video_execution_ready(conversation)
+        if live_video_execution_ready and self._turn_executor is None:
+            raise AgentRuntimeUnavailableError("视频 live Handler 当前不可用")
         try:
             registration = await self._turn_registration_store.register(
                 user_id=owner,
@@ -431,7 +440,11 @@ class AgentRuntimeService:
                 raise LookupError("Conversation not found") from exc
             raise AgentRuntimeUnavailableError(str(exc)) from exc
         response_turn = registration.turn
-        if registration.created and self._turn_executor is not None:
+        if (
+            registration.created
+            and live_video_execution_ready
+            and self._turn_executor is not None
+        ):
             self._pending_registered_turns[registration.turn.turn_id] = (
                 SupervisorTurnScope(
                     user_id=owner,

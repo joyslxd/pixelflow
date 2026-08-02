@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -156,6 +157,71 @@ def _assembler(
         ),
     )
     return assembler, estimates
+
+
+@pytest.mark.asyncio
+async def test_assembler_consumes_deeply_read_only_authoritative_workflow() -> None:
+    """消费边界必须复制深只读投影，不能要求 Repository 放弃不可变性。"""
+
+    from pixelflow.agent_runtime.context.assembler import ContextAssemblySnapshot
+    from pixelflow.agent_runtime.persistence import VideoRuntimeSafeSnapshot
+
+    runtime_snapshot = VideoRuntimeSafeSnapshot(
+        conversation_id="conv-1",
+        active_workflow_id="wf-image",
+        workflows=(
+            WorkflowRecord(
+                workflow_id="wf-image",
+                conversation_id="conv-1",
+                kind=WorkflowKind.IMAGE,
+                status=WorkflowStatus.RUNNING,
+                current_stage="review",
+                stage_version=1,
+                creation_contract_snapshot={
+                    "nested": {"ratios": ["1:1", "9:16"]}
+                },
+                latest_artifact_refs=["artifact:current"],
+                context_version=7,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
+    )
+    authoritative_workflow = runtime_snapshot.workflows[0]
+    assert isinstance(
+        authoritative_workflow.creation_contract_snapshot,
+        MappingProxyType,
+    )
+    assert isinstance(authoritative_workflow.latest_artifact_refs, tuple)
+    snapshot = ContextAssemblySnapshot(
+        user_id="user-1",
+        conversation_id="conv-1",
+        context_version=7,
+        active_workflow_id="wf-image",
+        workflows=runtime_snapshot.workflows,
+    )
+    assembler, _ = _assembler(snapshot)
+
+    envelope = await assembler.assemble(
+        _request(target_workflow_id=None, artifact_refs=[])
+    )
+
+    assert envelope.active_or_target_workflow is not None
+    assert envelope.active_or_target_workflow.creation_contract_snapshot == {
+        "nested": {"ratios": ["1:1", "9:16"]}
+    }
+    assert envelope.active_or_target_workflow.latest_artifact_refs == [
+        "artifact:current"
+    ]
+    with pytest.raises(TypeError):
+        authoritative_workflow.creation_contract_snapshot["nested"] = {}  # type: ignore[index]
+    with pytest.raises((AttributeError, TypeError)):
+        authoritative_workflow.creation_contract_snapshot["nested"][  # type: ignore[index]
+            "ratios"
+        ].append("16:9")
+    assert runtime_snapshot.model_dump(mode="json")["workflows"][0][
+        "creation_contract_snapshot"
+    ] == {"nested": {"ratios": ["1:1", "9:16"]}}
 
 
 @pytest.mark.asyncio
