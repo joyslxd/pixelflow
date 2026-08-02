@@ -9,7 +9,10 @@ from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import ORMExecuteState, Session
 
 from deerflow.persistence.base import Base
 from pixelflow.agent_runtime.contracts import (
@@ -524,6 +527,204 @@ async def test_quota_event_claim_rejects_live_lease_and_allows_expired_takeover(
         assert reclaimed.event == pause_event
         assert reclaimed.delivery_attempts == 2
         assert reclaimed.lease_owner == "quota-worker-b"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_pause_rejects_invalid_event_prefix_without_side_effects(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-invalid-pause-prefix",
+        )
+        invalid_event = _quota_event_record(
+            started,
+            revision=1,
+            quota_state="paused",
+        ).model_copy(update={"event_id": "quota_pause_without_internal_prefix"})
+
+        with pytest.raises(AgentRuntimeRecordConflictError, match="quota|配额|前缀"):
+            await repository.pause_operation_for_quota(
+                OWNER_A,
+                CONVERSATION_ID,
+                started.job_id,
+                provider_job_id=started.provider_job_id,
+                lease_owner="worker-a",
+                expected_revision=0,
+                now=NOW,
+                event=invalid_event,
+            )
+
+        assert await repository.get_operation(OWNER_A, started.job_id) == started
+        assert await repository.list_events(OWNER_A, CONVERSATION_ID) == []
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_resume_rejects_invalid_event_prefix_without_side_effects(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        started = await _create_claimed_polling_operation(
+            repository,
+            job_id="job-quota-invalid-resume-prefix",
+        )
+        paused, pause_event = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=_quota_event_record(
+                started,
+                revision=1,
+                quota_state="paused",
+            ),
+        )
+        invalid_event = _quota_event_record(
+            paused,
+            revision=1,
+            quota_state="resumed",
+        ).model_copy(update={"event_id": "quota_resume_without_internal_prefix"})
+
+        with pytest.raises(AgentRuntimeRecordConflictError, match="quota|配额|前缀"):
+            await repository.resume_operation_from_quota(
+                OWNER_A,
+                CONVERSATION_ID,
+                paused.job_id,
+                workflow_id=paused.workflow_id,
+                expected_revision=1,
+                now=NOW,
+                delivery_lease_owner="request-invalid-prefix",
+                delivery_lease_expires_at=NOW + timedelta(seconds=30),
+                event=invalid_event,
+            )
+
+        assert await repository.get_operation(OWNER_A, paused.job_id) == paused
+        assert await repository.list_events(OWNER_A, CONVERSATION_ID) == [
+            pause_event
+        ]
+
+
+@pytest.mark.asyncio
+async def test_sql_event_sequence_writers_lock_conversation_coordination_before_allocation() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(
+                sync_connection,
+                tables=AGENT_RUNTIME_TABLES,
+            )
+        )
+    repository = SQLAgentRuntimeRepository(
+        async_sessionmaker(engine, expire_on_commit=False)
+    )
+    started = await _create_claimed_polling_operation(
+        repository,
+        job_id="job-quota-sequence-lock",
+    )
+    lock_trace: list[tuple[int, str]] = []
+
+    def record_for_update(execute_state: ORMExecuteState) -> None:
+        statement = execute_state.statement
+        if getattr(statement, "_for_update_arg", None) is None:
+            return
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        label = None
+        if "pixelflow_agent_compaction_locks" in sql:
+            label = "coordination"
+        elif "pixelflow_agent_operations" in sql:
+            label = "operation"
+        elif "pixelflow_agent_events" in sql and "ORDER BY" in sql:
+            label = "event_tail"
+        if label is not None:
+            lock_trace.append((id(execute_state.session), label))
+
+    sqlalchemy_event.listen(Session, "do_orm_execute", record_for_update)
+    try:
+        paused, _ = await repository.pause_operation_for_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            started.job_id,
+            provider_job_id=started.provider_job_id,
+            lease_owner="worker-a",
+            expected_revision=0,
+            now=NOW,
+            event=_quota_event_record(
+                started,
+                revision=1,
+                quota_state="paused",
+            ),
+        )
+        operation_session = next(
+            session_id
+            for session_id, label in lock_trace
+            if label == "operation"
+        )
+        operation_labels = [
+            label
+            for session_id, label in lock_trace
+            if session_id == operation_session
+        ]
+        assert operation_labels[0] == "coordination"
+        assert operation_labels.index("coordination") < operation_labels.index(
+            "event_tail"
+        )
+
+        lock_trace.clear()
+        await repository.resume_operation_from_quota(
+            OWNER_A,
+            CONVERSATION_ID,
+            paused.job_id,
+            workflow_id=paused.workflow_id,
+            expected_revision=1,
+            now=NOW,
+            delivery_lease_owner="quota-resume-sequence-lock",
+            delivery_lease_expires_at=NOW + timedelta(seconds=30),
+            event=_quota_event_record(
+                paused,
+                revision=1,
+                quota_state="resumed",
+            ),
+        )
+        operation_session = next(
+            session_id
+            for session_id, label in lock_trace
+            if label == "operation"
+        )
+        operation_labels = [
+            label
+            for session_id, label in lock_trace
+            if session_id == operation_session
+        ]
+        assert operation_labels[0] == "coordination"
+        assert operation_labels.index("coordination") < operation_labels.index(
+            "event_tail"
+        )
+
+        lock_trace.clear()
+        await repository.create_event(
+            OWNER_A,
+            _event("event-after-quota-sequence-lock", 3),
+        )
+        event_tail_session = next(
+            session_id
+            for session_id, label in lock_trace
+            if label == "event_tail"
+        )
+        event_labels = [
+            label
+            for session_id, label in lock_trace
+            if session_id == event_tail_session
+        ]
+        assert event_labels[0] == "coordination"
+    finally:
+        sqlalchemy_event.remove(Session, "do_orm_execute", record_for_update)
+        await engine.dispose()
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

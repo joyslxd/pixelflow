@@ -36,6 +36,7 @@ from .models import (
 )
 
 _SQLITE_ENGINE_WRITE_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = WeakKeyDictionary()
+_OPERATION_QUOTA_EVENT_ID_PREFIX = "evt_job_quota_"
 
 
 class AgentRuntimeRecordConflictError(RuntimeError):
@@ -681,7 +682,8 @@ def _require_quota_event_contract(
 ) -> None:
     payload_revision = record.payload.get("quota_pause_revision")
     if (
-        record.quota_pause_revision != quota_pause_revision
+        not record.event_id.startswith(_OPERATION_QUOTA_EVENT_ID_PREFIX)
+        or record.quota_pause_revision != quota_pause_revision
         or record.quota_state != quota_state
         or record.payload.get("job_id") != job_id
         or isinstance(payload_revision, bool)
@@ -781,7 +783,7 @@ def _is_operation_quota_event(event: AgentEvent) -> bool:
 
     return (
         event.type is AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED
-        and event.event_id.startswith("evt_job_quota_")
+        and event.event_id.startswith(_OPERATION_QUOTA_EVENT_ID_PREFIX)
     )
 
 
@@ -2243,6 +2245,28 @@ class SQLAgentRuntimeRepository:
                 raise AgentRuntimeRecordConflictError("conversation 压缩协调行已经属于其他所有者") from None
         return True
 
+    async def _lock_event_sequence_coordination(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        conversation_id: str,
+    ) -> None:
+        """锁定稳定会话行，串行化同一会话的 Event 序号分配。"""
+
+        statement = (
+            select(PixelFlowAgentCompactionLockRow)
+            .where(
+                PixelFlowAgentCompactionLockRow.conversation_id == conversation_id,
+                PixelFlowAgentCompactionLockRow.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        row = (await session.scalars(statement)).one_or_none()
+        if row is None:
+            raise AgentRuntimeRecordConflictError(
+                "conversation Event 序号协调行不存在或所有者不一致"
+            )
+
     async def create_workflow(self, user_id: str, record: WorkflowRecord) -> WorkflowRecord:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_workflow(record)
@@ -2563,6 +2587,11 @@ class SQLAgentRuntimeRepository:
     async def create_event(self, user_id: str, record: AgentEvent) -> AgentEvent:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_event(record)
+        await self._ensure_compaction_coordination_row(
+            owner,
+            normalized.conversation_id,
+            now=normalized.occurred_at,
+        )
         last_statement = (
             select(PixelFlowAgentEventRow)
             .where(
@@ -2578,6 +2607,11 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
+                    await self._lock_event_sequence_coordination(
+                        session,
+                        owner,
+                        normalized.conversation_id,
+                    )
                     last_row = (await session.scalars(last_statement)).first()
                     if last_row is not None and last_row.user_id != owner:
                         raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
@@ -2853,7 +2887,10 @@ class SQLAgentRuntimeRepository:
                 PixelFlowAgentEventRow.user_id == PixelFlowAgentOperationRow.user_id,
                 PixelFlowAgentEventRow.conversation_id == PixelFlowAgentOperationRow.conversation_id,
                 PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value,
-                PixelFlowAgentEventRow.event_id.like("evt_job_quota_%"),
+                PixelFlowAgentEventRow.event_id.startswith(
+                    _OPERATION_QUOTA_EVENT_ID_PREFIX,
+                    autoescape=True,
+                ),
                 PixelFlowAgentEventRow.payload_json["job_id"].as_string() == PixelFlowAgentOperationRow.job_id,
                 PixelFlowAgentEventRow.delivery_status != "published",
             )
@@ -2971,7 +3008,10 @@ class SQLAgentRuntimeRepository:
                 PixelFlowAgentOperationRow.status == ExternalJobStatus.POLLING.value,
                 PixelFlowAgentOperationRow.provider_job_id.is_not(None),
                 PixelFlowAgentEventRow.event_type == AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED.value,
-                PixelFlowAgentEventRow.event_id.like("evt_job_quota_%"),
+                PixelFlowAgentEventRow.event_id.startswith(
+                    _OPERATION_QUOTA_EVENT_ID_PREFIX,
+                    autoescape=True,
+                ),
                 PixelFlowAgentEventRow.payload_json["quota_pause_revision"].as_integer() == PixelFlowAgentOperationRow.quota_pause_revision,
                 PixelFlowAgentEventRow.payload_json["quota_state"].as_string().in_(("paused", "resumed")),
                 or_(
@@ -3204,6 +3244,11 @@ class SQLAgentRuntimeRepository:
         completed_at = _normalize_datetime("now", now)
         target = _require_operation_terminal_status(terminal_status)
         event_record = _normalize_operation_terminal_event(event)
+        await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=completed_at,
+        )
         operation_statement = (
             select(PixelFlowAgentOperationRow)
             .where(
@@ -3236,6 +3281,11 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
+                    await self._lock_event_sequence_coordination(
+                        session,
+                        owner,
+                        conversation,
+                    )
                     row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
                         raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
@@ -3451,7 +3501,7 @@ class SQLAgentRuntimeRepository:
                     or operation.provider_job_id is None
                     or operation.quota_pause_revision != revision
                     or row is None
-                    or not row.event_id.startswith("evt_job_quota_")
+                    or not row.event_id.startswith(_OPERATION_QUOTA_EVENT_ID_PREFIX)
                     or row.payload_json.get("job_id") != operation_id
                     or isinstance(event_revision, bool)
                     or event_revision != revision
@@ -3622,6 +3672,11 @@ class SQLAgentRuntimeRepository:
             quota_pause_revision=revision + 1,
             quota_state="paused",
         )
+        await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=paused_at,
+        )
         operation_statement = (
             select(PixelFlowAgentOperationRow)
             .where(
@@ -3652,6 +3707,11 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
+                    await self._lock_event_sequence_coordination(
+                        session,
+                        owner,
+                        conversation,
+                    )
                     row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
                         raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
@@ -3750,6 +3810,11 @@ class SQLAgentRuntimeRepository:
             quota_pause_revision=revision,
             quota_state="resumed",
         )
+        await self._ensure_compaction_coordination_row(
+            owner,
+            conversation,
+            now=resumed_at,
+        )
         operation_statement = (
             select(PixelFlowAgentOperationRow)
             .where(
@@ -3780,6 +3845,11 @@ class SQLAgentRuntimeRepository:
                     session,
                     self._sqlite_write_lock,
                 ):
+                    await self._lock_event_sequence_coordination(
+                        session,
+                        owner,
+                        conversation,
+                    )
                     row = (await session.scalars(operation_statement)).one_or_none()
                     if row is None:
                         raise AgentRuntimeRecordConflictError("Operation 不存在或不属于当前会话")
