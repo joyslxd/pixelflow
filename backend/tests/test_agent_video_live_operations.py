@@ -3805,6 +3805,174 @@ async def test_authorized_resume_claim_blocks_background_until_turn_commit(
 
 
 @pytest.mark.asyncio
+async def test_sql_authorized_resume_commit_never_relocks_turn_after_interrupt(
+    tmp_path: Path,
+) -> None:
+    """授权恢复提交必须只按 Turn→Interrupt 取锁，不能再形成反向边。"""
+
+    from pixelflow.agent_workflows.video.live_quota import (
+        VideoOperationQuotaProjectionService,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        "sql",
+        tmp_path / "task4-authorized-turn-lock-order.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        _, _, pending, paused, envelope = await _pause_first_generation_operation(
+            repository,
+            store,
+            clock,
+            provider,
+        )
+        pause_claim = await repository.claim_operation_quota_event(
+            USER_ID,
+            CONVERSATION_ID,
+            paused.event.event_id,
+            pending.job_id,
+            quota_pause_revision=1,
+            quota_state="paused",
+            lease_owner="task4-lock-order-pause",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        assert pause_claim is not None
+        pause_projection = VideoOperationQuotaProjectionService().build(
+            user_id=USER_ID,
+            envelope=envelope,
+            operation=paused.operation,
+            quota_event=pause_claim.event,
+        )
+        await repository.commit_operation_quota_state(
+            pause_claim,
+            user_id=USER_ID,
+            workflow_state=pause_projection.workflow_state,
+            workflow=pause_projection.workflow,
+            expected_workflow_version=envelope.workflow_version,
+            open_interrupt=pause_projection.open_interrupt,
+            close_interrupt_revision=None,
+            occurred_at=clock.now(),
+        )
+        interrupt = await repository.get_open_interrupt(
+            USER_ID,
+            CONVERSATION_ID,
+        )
+        assert interrupt is not None
+        responded = await repository.store_interrupt_response(
+            USER_ID,
+            CONVERSATION_ID,
+            interrupt.interrupt_id,
+            client_response_id=UUID(
+                "00000000-0000-4000-8000-000000001416"
+            ),
+            response_value={"content": "已恢复额度"},
+            responded_at=clock.now(),
+        )
+        turn_claim = await repository.claim_interrupt_resume(
+            USER_ID,
+            CONVERSATION_ID,
+            responded.interrupt_id,
+            lease_owner="task4-lock-order-turn",
+            now=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=60),
+        )
+        assert turn_claim is not None
+        authorized = await OperationQuotaCoordinator(
+            repository,
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+        ).authorize_resume(
+            pending.job_id,
+            workflow_id=WORKFLOW_ID,
+            expected_revision=1,
+            delivery_lease_owner="task4-lock-order-event",
+            now=clock.now(),
+            delivery_lease_expires_at=clock.now() + timedelta(seconds=30),
+        )
+        paused_envelope = await repository.get_video_state(
+            USER_ID,
+            WORKFLOW_ID,
+        )
+        assert paused_envelope is not None
+        projection = VideoOperationQuotaProjectionService().build(
+            user_id=USER_ID,
+            envelope=paused_envelope,
+            operation=authorized.operation,
+            quota_event=authorized.claim.event,
+        )
+        decision = ActionDecision(
+            action=AgentAction.RETRY_FAILED,
+            intent=AgentIntent.VIDEO,
+            target_workflow_id=WORKFLOW_ID,
+            target_stage=authorized.operation.stage,
+            target_artifact_ref=None,
+            confidence=1,
+            requires_confirmation=False,
+            patch={
+                "job_id": pending.job_id,
+                "quota_pause_revision": 1,
+            },
+            reason_code="provider_quota_resume_authorized",
+            idempotency_key="task4:authorized-lock-order",
+        )
+        dispatch = WorkflowDispatchResult(
+            state=projection.workflow_state,
+            workflow=projection.workflow,
+            turn_status=TurnStatus.COMPLETED,
+            operation_event_claim=authorized.claim,
+        )
+        executor = object.__new__(SupervisorTurnExecutor)
+        executor._clock = clock.now
+        commit = executor._commit_from_graph(
+            turn_claim,
+            decision,
+            {
+                "decision": decision.model_dump(mode="json"),
+                "workflow_dispatch_result": dispatch.model_dump(mode="json"),
+            },
+            close_interrupt_id=interrupt.interrupt_id,
+        )
+        engine = repository._session_factory.kw["bind"]
+        selected_tables: list[str] = []
+
+        def record_select(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if not normalized.lstrip().startswith("select"):
+                return
+            if "pixelflow_agent_turns" in normalized:
+                selected_tables.append("turn")
+            elif "pixelflow_agent_interrupts" in normalized:
+                selected_tables.append("interrupt")
+
+        sqlalchemy_event.listen(
+            engine.sync_engine,
+            "before_cursor_execute",
+            record_select,
+        )
+        try:
+            await repository.commit_turn(turn_claim, commit)
+        finally:
+            sqlalchemy_event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                record_select,
+            )
+
+        first_interrupt = selected_tables.index("interrupt")
+        assert selected_tables[0] == "turn"
+        assert "turn" not in selected_tables[first_interrupt + 1 :]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
     kind: RepositoryKind,

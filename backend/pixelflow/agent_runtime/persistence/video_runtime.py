@@ -3872,19 +3872,9 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
         session: AsyncSession,
         claim: TurnExecutionClaim,
         commit: VideoTurnCommit,
+        *,
+        turn: PixelFlowAgentTurnRow,
     ) -> TurnRecord | None:
-        turn = (
-            await session.scalars(
-                select(PixelFlowAgentTurnRow)
-                .where(
-                    PixelFlowAgentTurnRow.user_id == claim.user_id,
-                    PixelFlowAgentTurnRow.turn_id == claim.turn.turn_id,
-                )
-                .with_for_update()
-            )
-        ).one_or_none()
-        if turn is None:
-            return None
         execution = (
             await session.scalars(
                 self._execution_statement(
@@ -3969,7 +3959,30 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                                 "quota resume Turn 缺少 Event 或 Operation",
                             )
                         operation = _operation_from_row(operation_row)
-                    replay = await self._sql_idempotent_replay(session, normalized_claim, normalized_commit)
+                    turn = (
+                        await session.scalars(
+                            select(PixelFlowAgentTurnRow)
+                            .where(
+                                PixelFlowAgentTurnRow.user_id
+                                == normalized_claim.user_id,
+                                PixelFlowAgentTurnRow.conversation_id
+                                == normalized_claim.turn.conversation_id,
+                                PixelFlowAgentTurnRow.turn_id
+                                == normalized_claim.turn.turn_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if turn is None:
+                        raise TurnExecutionLeaseConflictError(
+                            normalized_claim.turn.turn_id,
+                        )
+                    replay = await self._sql_idempotent_replay(
+                        session,
+                        normalized_claim,
+                        normalized_commit,
+                        turn=turn,
+                    )
                     if replay is not None:
                         if (
                             operation_claim is not None
@@ -4065,20 +4078,10 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             raise AgentRuntimeRecordConflictError(
                                 "quota resume Turn 未绑定唯一授权中断",
                             )
-                    turn = (
-                        await session.scalars(
-                            select(PixelFlowAgentTurnRow)
-                            .where(
-                                PixelFlowAgentTurnRow.user_id == normalized_claim.user_id,
-                                PixelFlowAgentTurnRow.conversation_id == normalized_claim.turn.conversation_id,
-                                PixelFlowAgentTurnRow.turn_id == normalized_claim.turn.turn_id,
-                                PixelFlowAgentTurnRow.status == TurnStatus.PROCESSING.value,
-                            )
-                            .with_for_update()
+                    if turn.status != TurnStatus.PROCESSING.value:
+                        raise TurnExecutionLeaseConflictError(
+                            normalized_claim.turn.turn_id,
                         )
-                    ).one_or_none()
-                    if turn is None:
-                        raise TurnExecutionLeaseConflictError(normalized_claim.turn.turn_id)
                     await self._sql_compare_and_set_state(session, normalized_commit)
                     await self._sql_upsert_workflow_and_active(session, normalized_claim, normalized_commit)
                     await self._sql_upsert_messages(session, normalized_claim.user_id, normalized_commit.messages)
