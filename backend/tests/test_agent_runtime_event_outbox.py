@@ -11,12 +11,17 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
-from pixelflow.agent_runtime.contracts import AgentEvent, AgentEventType
+from pixelflow.agent_runtime.contracts import (
+    AgentEvent,
+    AgentEventType,
+    ExternalJobStatus,
+)
 from pixelflow.agent_runtime.persistence import AGENT_RUNTIME_TABLES
 from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
     MemoryAgentRuntimeRepository,
+    OperationRecord,
     SQLAgentRuntimeRepository,
 )
 
@@ -246,6 +251,94 @@ async def test_event_claim_blocks_duplicate_and_reclaims_expired_lease(
         assert next_claim is not None
         assert next_claim.event == second
         assert next_claim.delivery_attempts == 1
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_operation_internal_quota_event_blocks_generic_outbox_head(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        quota_event = AgentEvent(
+            event_id="evt_job_quota_job-1_1_paused",
+            sequence=1,
+            cursor="cursor-job-quota-job-1-1-paused",
+            conversation_id=CONVERSATION_ID,
+            run_id="job-1",
+            occurred_at=NOW,
+            type=AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED,
+            payload={
+                "job_id": "job-1",
+                "quota_pause_revision": 1,
+                "quota_state": "paused",
+            },
+        )
+        await repository.create_event(OWNER_A, quota_event)
+        await repository.create_event(OWNER_A, _event("event-after-quota", 2))
+
+        assert await repository.claim_next_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            lease_owner="generic-worker",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=30),
+        ) is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_quota_prefix_matching_is_literal_across_due_and_outbox_channels(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        operation = OperationRecord(
+            job_id="job-quota-literal-prefix",
+            provider_job_id="provider-quota-literal-prefix",
+            workflow_id="workflow-quota-literal-prefix",
+            conversation_id=CONVERSATION_ID,
+            stage="scene_generation",
+            stage_version=1,
+            status=ExternalJobStatus.POLLING,
+            attempt=1,
+            request_hash="sha256:" + "1" * 64,
+            idempotency_key="operation-quota-literal-prefix",
+            quota_pause_revision=1,
+            next_poll_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        fake_prefix_event = AgentEvent(
+            event_id="evtXjobXquotaXjob-1_1_paused",
+            sequence=1,
+            cursor="cursor-fake-quota-prefix",
+            conversation_id=CONVERSATION_ID,
+            run_id=operation.job_id,
+            occurred_at=NOW,
+            type=AgentEventType.EXTERNAL_JOB_QUOTA_STATE_CHANGED,
+            payload={
+                "job_id": operation.job_id,
+                "quota_pause_revision": 1,
+                "quota_state": "paused",
+            },
+        )
+        await repository.create_operation(OWNER_A, operation)
+        await repository.create_event(OWNER_A, fake_prefix_event)
+
+        due = await repository.list_due_operations(now=NOW, limit=100)
+        assert [item.operation.job_id for item in due] == [operation.job_id]
+        assert await repository.list_pending_operation_quota_events(
+            now=NOW,
+            limit=100,
+        ) == []
+        generic_claim = await repository.claim_next_event(
+            OWNER_A,
+            CONVERSATION_ID,
+            lease_owner="generic-fake-prefix",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=30),
+        )
+        assert generic_claim is not None
+        assert generic_claim.event == fake_prefix_event
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

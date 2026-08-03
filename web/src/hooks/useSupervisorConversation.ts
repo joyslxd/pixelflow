@@ -10,7 +10,7 @@ import {
   type SupervisorApiTransport,
 } from "../lib/supervisor/api.js";
 import type {
-  JsonObject,
+  InterruptResponseRequest,
   JsonValue,
   TurnStartRequest,
 } from "../lib/supervisor/contracts.js";
@@ -48,7 +48,10 @@ export interface SupervisorConversationController {
   start(): Promise<void>;
   refreshSnapshot(): Promise<SupervisorEventResumePoint>;
   startTurn(request: TurnStartRequest): Promise<JsonValue>;
-  respondToInterrupt(interruptId: string, request: JsonObject): Promise<JsonValue>;
+  respondToInterrupt(
+    interruptId: string,
+    request: InterruptResponseRequest,
+  ): Promise<JsonValue>;
   getRunStatus(runId: string): Promise<JsonValue>;
   dispose(): void;
 }
@@ -66,7 +69,10 @@ export interface UseSupervisorConversationResult {
   getContextVersion(): number | null;
   refreshSnapshot(): Promise<SupervisorEventResumePoint>;
   startTurn(request: TurnStartRequest): Promise<JsonValue>;
-  respondToInterrupt(interruptId: string, request: JsonObject): Promise<JsonValue>;
+  respondToInterrupt(
+    interruptId: string,
+    request: InterruptResponseRequest,
+  ): Promise<JsonValue>;
   getRunStatus(runId: string): Promise<JsonValue>;
 }
 
@@ -267,7 +273,10 @@ export function createSupervisorConversationController(
     );
   };
 
-  const respondToInterrupt = (interruptId: string, request: JsonObject) => runScopedRequest(
+  const respondToInterrupt = (
+    interruptId: string,
+    request: InterruptResponseRequest,
+  ) => runScopedRequest(
     (signal) => api.respondToInterrupt(conversationId, interruptId, request, { signal }),
   );
 
@@ -345,7 +354,7 @@ export function useSupervisorConversation(
     [controller],
   );
   const respondToInterrupt = useCallback(
-    (interruptId: string, request: JsonObject) => controller.respondToInterrupt(
+    (interruptId: string, request: InterruptResponseRequest) => controller.respondToInterrupt(
       interruptId,
       request,
     ),

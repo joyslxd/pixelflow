@@ -116,6 +116,7 @@ class ContextSnapshotSource(Protocol):
         *,
         user_id: str,
         conversation_id: str,
+        expected_context_version: int,
     ) -> ContextAssemblySnapshot: ...
 
 
@@ -242,8 +243,16 @@ class ContextAssembler:
         raw_snapshot = await self._source.load_context_snapshot(
             user_id=request.user_id,
             conversation_id=request.conversation_id,
+            expected_context_version=request.expected_context_version,
         )
-        snapshot = ContextAssemblySnapshot.model_validate(raw_snapshot).model_copy(deep=True)
+        snapshot_document = (
+            raw_snapshot.model_dump(mode="json", serialize_as_any=True)
+            if isinstance(raw_snapshot, BaseModel)
+            else raw_snapshot
+        )
+        snapshot = ContextAssemblySnapshot.model_validate(
+            snapshot_document
+        ).model_copy(deep=True)
         self._validate_owner_and_version(request, snapshot)
 
         workflow = self._select_workflow(request, snapshot)
@@ -274,6 +283,7 @@ class ContextAssembler:
 
         payload: dict[str, object] = {
             "current_input": request.current_input,
+            "validated_context_version": snapshot.context_version,
             "active_or_target_workflow": (workflow.model_copy(deep=True) if workflow is not None else None),
             "recent_messages": recent_messages,
             "conversation_summary": (conversation_summary.model_copy(deep=True) if conversation_summary is not None else None),

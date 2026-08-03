@@ -365,3 +365,16 @@
 - remote guard：权威门禁后脚本重新读取 Agent、dev 和 M13 三条远端引用，三者与冻结值一致后才执行第一次原子更新；完整交接快进前再次执行同样的防漂移检查
 - rollback：如需撤回，基于本记录定位 M13.2 候选与交接提交，使用带中文说明的 `git revert` 创建回滚提交；生产当前仍为 R1，无需切换生产模式。禁止 force-push 或改写共享历史
 - synchronized docs：M13 状态、BOARD、MERGE_LOG 和 M13.2 测试报告；未修改 `CONTENT_APP_API_CALLS.md`，因为没有新增或变更 content-app API
+
+### 0014 / 2026-07-29 / R2 生产发布阻塞
+
+- release：`R2`；唯一发布负责人已明确批准只把全部新对话切换为 `primary / enabled_intents=[video] / 100% / context_compaction=true`
+- frozen refs：Agent `e645aa2040ab41b052b7e209ce12169f85dec6a0`、dev `fb7450775a227d891372c19eae1b308045c51e68`、M13 `b274fa91d919ca45c43703fe6bfdf7a89cbee9ce`、checkpoint `d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`；对象、祖先关系和阶段台账均通过
+- gate：R2 定向 `34 passed`；后端可运行全量 `5057 passed, 19 skipped`；Ruff 通过；Web Agent 合同 `9 passed`、Web 全量 `327 passed`、lint 和 `build-prod` 通过
+- model profile：统一预算保持 `896K/32K/32K`，严格模型档案和 30 秒退避保持开启；`deepseek-v4-pro` 解析为 `verified`，`max_context_tokens=1000000`，验证时间 2026-07-26，未设置过期时间
+- rollback preparation：冻结 R1 回滚包 `pixelflow-backend-prod-r2-rollback-r1-e645aa2.tar.gz`，SHA-256 `c14313aa9a4de073f5bf6006b8cc630b3d3457d566f8062aead364fd99b0395a`，kill switch 目标为 `assist / [] / 100 / true`
+- blocker：仓库没有远端 CI 或生产部署脚本，R1 依赖人工上传和重启；当前机器没有 SSH 目标、已登录生产发布平台或其他可验证的受控部署入口，无法保证配置、部署、smoke、指标观察和异常回滚为同一受控发布过程
+- safe stop：在修改 `backend/config.prod.yml`、生成 R2 发布包和触发生产部署前停止；未认证生产健康探测返回 JSON 401 且 TLS 校验通过，生产继续保持 R1，无需执行配置回滚
+- exclusions：未调用真实 LLM、content-app、图片、视频、PPT、视频分析、剪映或 PowerMem 付费接口；未执行 M13.3、Agent→dev 或 `automation_active`；未开放其他 intent
+- release state：`phase_integrated:R2 / release_blocked:R2`；后续必须先补齐受控部署入口并获得新的唯一发布负责人明确批准，不得沿用本次任务自动继续
+- synchronized docs：M13 状态、BOARD、MERGE_LOG 和 [R2 生产发布阻塞记录](../test-reports/M13.2-R2-production-release-blocked.md)

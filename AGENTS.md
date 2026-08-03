@@ -21,7 +21,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | 能力线 | 主要入口 | Java 类比 | 当前用途 |
 | --- | --- | --- | --- |
 | v2 分段工作流 | `backend/app/gateway/routers/pixelflow_intake.py`、`pixelflow_planning.py`、`pixelflow_image.py`、`pixelflow_video.py`、`pixelflow_ppt.py` | 一组面向前端步骤的 Controller + Service | 当前前端工作台主流程 |
-| R1/R2 统一会话 Runtime | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`replay.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | dev 的 R2 候选让全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；只有配置启用且 Gateway 已注册 live Graph Handler 的 intent 才能冻结为 `supervisor_v1`。当前视频 handler 尚未安装，视频安全接力 v2，避免出现无消费者 Turn。生产保持已发布的 R1 `assist / [] / 100%`，R2 未发布 |
+| R1/R2 统一会话 Runtime | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`replay.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | dev 的 R2 候选让全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；只有配置启用且 Gateway 已注册 live Graph Handler 的 intent 才能冻结为 `supervisor_v1`。Task 13 隔离候选已补齐视频 live handler 与前端结构化动作，但尚未执行 Task 14 的 Gateway 注册；当前可部署基线仍安全接力 v2。生产保持已发布的 R1 `assist / [] / 100%`，R2 未发布 |
 | R2 External Job Coordinator | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义，并通过 Final 单槽集成进入 Agent 长期分支；生产仍保持 R1 `assist`，后续 Workflow 接线与 R2 发布继续受独立门禁约束 |
 | R2 视频 Workflow Adapter | `backend/pixelflow/agent_workflows/video/`、`agent_runtime/replay.py` | 视频领域 Application Service + 权威 DTO + 回放编排 Service | M11 已完成并进入 Agent；M13.2 候选用标准 Turn/附件 DTO 串起 Supervisor Graph、视频 Planning Handler 和 M06 幂等 fake，冻结 Shadow 无副作用边界。真实付费 Provider 和生产 `primary(video)` 仍须独立批准 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
@@ -89,9 +89,11 @@ M13.2/R2 开发候选在 R1 统一会话层上把 dev profile 配置为
 `primary / enabled_intents=[video] / 100% / context_compaction=true`：全部新对话仍先原子
 保存可见消息和 Turn，并通过 Snapshot/SSE 投影压缩 Notice 与输入队列。配置范围只代表
 允许接管的上限，`AgentRuntimeService.primary_execution_intents` 还必须声明 Gateway
-已经安装的 live Graph Handler；当前 Gateway 传入空集合，因此视频新对话保持
-`frontend_v2`，再由 R1 Turn 接力既有 v2 视频流程。只有未来真实 handler 完成装配后，
-明确视频首轮提示才可冻结为 `supervisor_v1`。R1 的消息投影可以与 v2 同时启用，但空的
+已经安装的 live Graph Handler。Task 13 隔离候选已经实现视频 Turn 消费、九动作、五类
+interrupt UI 恢复和权威 Workflow/Artifact 投影，但 Task 14 尚未把它注册到 Gateway，当前
+可部署基线仍传入空集合，因此视频新对话保持 `frontend_v2`，再由 R1 Turn 接力既有 v2
+视频流程。只有 Task 14 完成装配并通过独立真实全流程门禁后，明确视频首轮提示才可冻结为
+`supervisor_v1`。R1 的消息投影可以与 v2 同时启用，但空的
 Supervisor Workflow 不能覆盖 v2 任务看板。刷新只查询权威 Snapshot、消息 Artifact 和
 原 job，不自动重发；分镜保存、素材删除、视频最终确认必须先更新权威消息再提示成功。
 生产仍保持已发布的 R1

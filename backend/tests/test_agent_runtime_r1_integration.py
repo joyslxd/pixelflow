@@ -2554,6 +2554,90 @@ def test_flag_off_keeps_legacy_conversation_and_rejects_runtime_endpoints() -> N
     assert snapshot.status_code == 409
 
 
+def test_r1_assist_snapshot_keeps_non_user_history_messages() -> None:
+    """非 live R1 继续恢复旧 Store 中的 assistant/system 历史消息。"""
+
+    app, _, _ = _r1_app()
+    with TestClient(app) as client:
+        conversation_id = client.post(
+            "/agent/conversations",
+            json={"title": "R1 历史消息恢复"},
+        ).json()["conversation_id"]
+        saved = [
+            client.post(
+                f"/agent/conversations/{conversation_id}/messages",
+                json={
+                    "role": role,
+                    "content": content,
+                    "payload": {"client_message_id": client_message_id},
+                },
+            ).json()
+            for role, content, client_message_id in (
+                ("assistant", "旧助手消息", "legacy-assistant-message"),
+                ("system", "旧系统消息", "legacy-system-message"),
+            )
+        ]
+        snapshot = client.get(
+            f"/agent/conversations/{conversation_id}/agent-snapshot",
+        )
+
+    assert snapshot.status_code == 200
+    snapshot_ids = {item["message_id"] for item in snapshot.json()["messages"]}
+    assert {item["message_id"] for item in saved}.issubset(snapshot_ids)
+
+
+@pytest.mark.parametrize(
+    ("config", "initial_intent"),
+    [
+        (_assist_config(), None),
+        (
+            AgentRuntimeConfig(
+                mode="primary",
+                enabled_intents=("video",),
+                new_conversation_rollout_percent=100,
+                context_compaction_enabled=True,
+            ),
+            "video",
+        ),
+        (
+            AgentRuntimeConfig(
+                mode="primary",
+                enabled_intents=("image",),
+                new_conversation_rollout_percent=100,
+                context_compaction_enabled=True,
+            ),
+            "image",
+        ),
+    ],
+    ids=["assist", "frontend-v2", "non-video"],
+)
+def test_r1_legacy_interrupt_response_precedes_new_body_validation(
+    config: AgentRuntimeConfig,
+    initial_intent: str | None,
+) -> None:
+    """旧 owner 的空对象必须先返回 409，不受新响应 DTO 字段影响。"""
+
+    app, _, _ = _r1_app(config=config)
+    with TestClient(app) as client:
+        create_body = {"title": "R1 人工确认仍归旧流程"}
+        if initial_intent is not None:
+            create_body["initial_intent"] = initial_intent
+        conversation_id = client.post(
+            "/agent/conversations",
+            json=create_body,
+        ).json()["conversation_id"]
+        response = client.post(
+            f"/agent/conversations/{conversation_id}/interrupts/legacy-int/responses",
+            json={},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+        "interrupt_id": "legacy-int",
+    }
+
+
 def test_r1_runtime_endpoints_keep_owner_isolation_and_context_conflict_contract() -> None:
     """新入口沿用对话 owner 隔离，版本冲突只返回安全的结构化元数据。"""
 

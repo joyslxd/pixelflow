@@ -5,6 +5,69 @@ import test from "node:test";
 const adapterModuleUrl = process.env.SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE;
 const workspaceSource = readFileSync(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
 
+function extractFunctionBody(source, functionName) {
+  const declarationPatterns = [
+    `function ${functionName}`,
+    `const ${functionName} =`,
+  ];
+  const declarationIndex = declarationPatterns
+    .map((pattern) => source.indexOf(pattern))
+    .find((index) => index >= 0);
+  assert.notEqual(declarationIndex, undefined, `${functionName} 必须存在`);
+  const openBrace = source.indexOf("{", declarationIndex);
+  assert.notEqual(openBrace, -1, `${functionName} 必须包含函数体`);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = openBrace; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (lineComment) {
+      if (character === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(openBrace + 1, index);
+    }
+  }
+  assert.fail(`${functionName} 的函数体花括号不配对`);
+}
+
 if (!adapterModuleUrl) {
   throw new Error("缺少 SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE");
 }
@@ -579,4 +642,87 @@ test("Supervisor 普通输入自动使用 Snapshot 恢复的当前 interrupt", (
     workspaceSource,
     /interruptId: ownership\.orchestrationMode === "supervisor_v1"[\s\S]*\? interruptId \?\? restoredInterruptId[\s\S]*: null/,
   );
+});
+
+test("Supervisor 视频控件只走结构化提交入口", () => {
+  const supervisorBranch = extractFunctionBody(workspaceSource, "renderSupervisorVideoArtifact");
+  assert.match(supervisorBranch, /submitSupervisorAction/);
+  assert.match(supervisorBranch, /buildSupervisorWorkflowAction/);
+  for (const legacyName of [
+    "handleSelectDirection",
+    "handleApprovePlan",
+    "handleGenerateVideoFromScenePackages",
+    "handleRetryVideoMerge",
+    "handleAcceptVideoResult",
+    "handleGenerateJianyingDraft",
+  ]) {
+    assert.doesNotMatch(supervisorBranch, new RegExp(`\\b${legacyName}\\b`));
+  }
+});
+
+test("Supervisor 动作持久化原 explicitAction 与唯一 clientInputId", () => {
+  const submitSource = extractFunctionBody(workspaceSource, "submitSupervisorAction");
+  assert.equal((submitSource.match(/crypto\.randomUUID\(\)/g) || []).length, 1);
+  assert.match(submitSource, /explicitAction/);
+  assert.match(submitSource, /persistPendingSupervisorTurns/);
+  assert.match(submitSource, /clientInputId/);
+  const turnSource = extractFunctionBody(workspaceSource, "handleSupervisorTurn");
+  assert.match(turnSource, /explicitAction:\s*pendingTurn\.explicitAction/);
+  assert.match(workspaceSource, /explicitAction:\s*ExplicitActionSignal \| null/);
+});
+
+test("已注册 Supervisor 结构化动作只轮询原 run", () => {
+  assert.match(
+    workspaceSource,
+    /pendingTurn\.explicitAction[\s\S]*pendingTurn\.registrationStatus === "registered"[\s\S]*pendingTurn\.runId[\s\S]*supervisorRuntime\.getRunStatus\(pendingTurn\.runId\)/,
+  );
+  assert.doesNotMatch(
+    workspaceSource,
+    /pendingTurn\.explicitAction[\s\S]{0,500}handleSupervisorTurn\(pendingTurn/,
+  );
+});
+
+test("Supervisor 视频界面只按权威 interrupt 纯恢复", () => {
+  const restoreSource = extractFunctionBody(workspaceSource, "restoreSupervisorVideoUi");
+  for (const uiKind of [
+    "video_intake_form",
+    "video_direction_review",
+    "video_plan_review",
+    "video_scene_package_review",
+    "video_result_review",
+  ]) {
+    assert.match(restoreSource, new RegExp(`case ["']${uiKind}["']`));
+  }
+  for (const forbidden of ["submitSupervisorAction", "handleSupervisor", "api.", "setTimeout", "startTurn"]) {
+    assert.doesNotMatch(restoreSource, new RegExp(forbidden.replace(".", "\\.")));
+  }
+  assert.match(workspaceSource, /restoreSupervisorVideoUi\(supervisorRuntime\.state\.interrupt\?\.payload/);
+  assert.match(workspaceSource, /supervisorRuntime\.state\.workflows\.find/);
+  assert.match(workspaceSource, /workflow\.workflow_id === restoredSupervisorUi\.workflowId/);
+  assert.match(workspaceSource, /workflow\.current_stage === restoredSupervisorUi\.stage/);
+});
+
+test("Supervisor 授权中断恢复原结构化动作且不保存凭据", () => {
+  const restoreSource = extractFunctionBody(workspaceSource, "restoreSupervisorVideoUi");
+  assert.match(restoreSource, /authorization_required/);
+  assert.match(restoreSource, /parseExplicitAction\(payload\.authorization_action\)/);
+  assert.match(
+    workspaceSource,
+    /restoredSupervisorUi\?\.kind === "authorization_required"[\s\S]*submitSupervisorAction[\s\S]*authorizationAction/,
+  );
+  assert.doesNotMatch(restoreSource, /token|authorization_header|credential/iu);
+});
+
+test("Supervisor 当前卡片按 Workflow 与 artifact 权威身份选择", () => {
+  assert.match(workspaceSource, /selectSupervisorArtifactMessage/);
+  assert.match(workspaceSource, /workflowId:\s*activeSupervisorVideoTarget\.workflow\.workflow_id/);
+  assert.match(workspaceSource, /artifactRef:\s*activeSupervisorVideoTarget\.artifactRef/);
+});
+
+test("Supervisor 新增全局素材复用统一分组 ID 与名称唯一化", () => {
+  const supervisorBranch = extractFunctionBody(workspaceSource, "renderSupervisorVideoArtifact");
+  assert.match(supervisorBranch, /addGlobalSceneAssetReference/);
+  assert.match(supervisorBranch, /added\.added_asset\.asset_id/);
+  assert.match(supervisorBranch, /added\.added_asset\.name/);
+  assert.doesNotMatch(supervisorBranch, /`manual-\$\{rawId\}`/);
 });

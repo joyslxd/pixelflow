@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,7 +24,13 @@ from pixelflow.tasks.model import (
     PixelFlowConversationRow,
 )
 
-from ..contracts import AgentEventType, TurnRecord, TurnStatus
+from ..contracts import (
+    AgentEventType,
+    InterruptResponseRequest,
+    TurnRecord,
+    TurnStatus,
+)
+from ..identity import conversation_message_id
 from .compaction_queue import (
     MemoryCompactionQueueRepository,
     SQLCompactionQueueRepository,
@@ -36,6 +44,10 @@ from .repositories import (
     _database_utc,
     _repository_write_transaction,
     _turn_from_row,
+)
+from .video_runtime import (
+    InterruptResponseRegistration,
+    VideoRuntimeRepository,
 )
 
 _REGISTRATION_LOCKS = tuple(asyncio.Lock() for _ in range(64))
@@ -100,6 +112,36 @@ def _message_from_row(
     )
 
 
+def _interrupt_response_message(
+    *,
+    user_id: str,
+    conversation_id: str,
+    interrupt_id: str,
+    request: InterruptResponseRequest,
+    occurred_at: datetime,
+) -> PixelFlowConversationMessageRecord:
+    """把人工响应合同映射为跨重试稳定且不含请求期凭据的用户消息。"""
+
+    value = request.value.model_dump(mode="json")
+    return PixelFlowConversationMessageRecord(
+        message_id=conversation_message_id(
+            conversation_id,
+            request.client_response_id,
+        ),
+        conversation_id=conversation_id,
+        user_id=user_id,
+        role="user",
+        content=request.value.content,
+        payload={
+            "client_message_id": str(request.client_response_id),
+            "interrupt_id": interrupt_id,
+            "value": value,
+            "explicit_action": value.get("explicit_action"),
+        },
+        created_at=occurred_at.isoformat(),
+    )
+
+
 def _registration_lock(
     user_id: str,
     conversation_id: str,
@@ -111,6 +153,17 @@ def _registration_lock(
     ]
 
 
+@asynccontextmanager
+async def turn_registration_context_read_scope(
+    user_id: str,
+    conversation_id: str,
+) -> AsyncIterator[None]:
+    """让 Context 一次性读取与 Memory Turn/响应登记复用同一锁。"""
+
+    async with _registration_lock(user_id, conversation_id):
+        yield
+
+
 class MemoryTurnRegistrationStore:
     """在 Memory 双实现的共享临界区内完成等价原子登记。"""
 
@@ -119,9 +172,11 @@ class MemoryTurnRegistrationStore:
         *,
         repository: MemoryCompactionQueueRepository,
         task_store: MemoryPixelFlowTaskStore,
+        video_repository: VideoRuntimeRepository | None = None,
     ) -> None:
         self._repository = repository
         self._task_store = task_store
+        self._video_repository = video_repository
 
     async def register(
         self,
@@ -235,6 +290,40 @@ class MemoryTurnRegistrationStore:
                 created=True,
             )
 
+    async def register_interrupt_response(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        request: InterruptResponseRequest,
+        occurred_at: datetime,
+    ) -> InterruptResponseRegistration:
+        """在登记锁内把公开响应确定性映射到原 Turn 的原子端口。"""
+
+        if self._video_repository is None:
+            raise TurnRegistrationUnavailableError(
+                "live 视频 Repository 未安装",
+            )
+        normalized = InterruptResponseRequest.model_validate(
+            request.model_dump(mode="python"),
+        )
+        async with _registration_lock(user_id, conversation_id):
+            return await self._video_repository.register_interrupt_response(
+                user_id,
+                conversation_id,
+                interrupt_id,
+                request=normalized,
+                message=_interrupt_response_message(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    interrupt_id=interrupt_id,
+                    request=normalized,
+                    occurred_at=occurred_at,
+                ),
+                responded_at=occurred_at,
+            )
+
     async def _append_memory_events(
         self,
         *,
@@ -294,11 +383,13 @@ class SQLTurnRegistrationStore:
         *,
         repository: SQLCompactionQueueRepository,
         task_store: SQLPixelFlowTaskStore,
+        video_repository: VideoRuntimeRepository | None = None,
     ) -> None:
         if repository._session_factory is not task_store.session_factory:
             raise ValueError("Turn 原子登记必须复用同一个 SQL Session 工厂")
         self._repository = repository
         self._session_factory = task_store.session_factory
+        self._video_repository = video_repository
 
     async def register(
         self,
@@ -326,6 +417,39 @@ class SQLTurnRegistrationStore:
                 if attempt + 1 == _MAX_REGISTRATION_ATTEMPTS:
                     raise
         raise AssertionError("Turn 原子登记重试循环不应自然结束")
+
+    async def register_interrupt_response(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        interrupt_id: str,
+        request: InterruptResponseRequest,
+        occurred_at: datetime,
+    ) -> InterruptResponseRegistration:
+        """复用 Video SQL Repository 的单事务响应登记实现。"""
+
+        if self._video_repository is None:
+            raise TurnRegistrationUnavailableError(
+                "live 视频 Repository 未安装",
+            )
+        normalized = InterruptResponseRequest.model_validate(
+            request.model_dump(mode="python"),
+        )
+        return await self._video_repository.register_interrupt_response(
+            user_id,
+            conversation_id,
+            interrupt_id,
+            request=normalized,
+            message=_interrupt_response_message(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                interrupt_id=interrupt_id,
+                request=normalized,
+                occurred_at=occurred_at,
+            ),
+            responded_at=occurred_at,
+        )
 
     async def _register_once(
         self,
@@ -596,6 +720,7 @@ def make_turn_registration_store(
     *,
     repository,
     task_store,
+    video_repository: VideoRuntimeRepository | None = None,
 ):
     """按已装配的双实现选择相同语义的原子登记 Store。"""
 
@@ -606,6 +731,7 @@ def make_turn_registration_store(
         return SQLTurnRegistrationStore(
             repository=repository,
             task_store=task_store,
+            video_repository=video_repository,
         )
     if isinstance(
         repository,
@@ -614,6 +740,7 @@ def make_turn_registration_store(
         return MemoryTurnRegistrationStore(
             repository=repository,
             task_store=task_store,
+            video_repository=video_repository,
         )
     raise TypeError("Agent Runtime Repository 与 Task Store 双实现不匹配")
 
@@ -625,4 +752,5 @@ __all__ = [
     "TurnRegistrationResult",
     "TurnRegistrationUnavailableError",
     "make_turn_registration_store",
+    "turn_registration_context_read_scope",
 ]

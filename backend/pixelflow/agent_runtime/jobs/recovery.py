@@ -14,7 +14,11 @@ from pydantic import ConfigDict, JsonValue
 
 from ..contracts import ExternalJobStatus, OperationRequest
 from ..contracts.base import ContractModel
-from ..persistence.repositories import AgentRuntimeRepository, OperationRecord
+from ..persistence.repositories import (
+    AgentRuntimeRepository,
+    OperationRecord,
+    OwnedOperationQuotaEvent,
+)
 from ..ports import OperationConflictError
 from .completion import (
     OperationCompletionCoordinator,
@@ -28,6 +32,11 @@ from .providers import (
     ProviderJobCallError,
     ProviderJobMappingError,
     ProviderJobOutcome,
+)
+from .quota import (
+    OperationQuotaCoordinator,
+    OperationQuotaDispatcher,
+    WorkflowGraphQuotaStatePort,
 )
 
 logger = logging.getLogger(__name__)
@@ -240,6 +249,7 @@ class OperationRecoveryRuntime:
         resolver: ProviderJobAdapterResolver,
         resumer: WorkflowGraphResumePort,
         worker_id: str,
+        quota_resumer: WorkflowGraphQuotaStatePort | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=2),
@@ -250,13 +260,20 @@ class OperationRecoveryRuntime:
             raise TypeError("resolver 必须实现 ProviderJobAdapterResolver")
         if not isinstance(resumer, WorkflowGraphResumePort):
             raise TypeError("resumer 必须实现 WorkflowGraphResumePort")
+        if quota_resumer is not None and not isinstance(
+            quota_resumer,
+            WorkflowGraphQuotaStatePort,
+        ):
+            raise TypeError("quota_resumer 必须实现 WorkflowGraphQuotaStatePort")
         if isinstance(scan_limit, bool) or not isinstance(scan_limit, int) or scan_limit < 1 or scan_limit > 1000:
             raise ValueError("scan_limit 必须是 1 到 1000 的整数")
         self._repository = repository
         self._resolver = resolver
         self._resumer = resumer
+        self._quota_resumer = quota_resumer
         self._worker_id = _scope_text("worker_id", worker_id, maximum=96)
         self._delivery_worker_id = f"{self._worker_id}:completion"
+        self._quota_delivery_worker_id = f"{self._worker_id}:quota"
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lease_duration = _positive_duration(
             "lease_duration",
@@ -274,17 +291,33 @@ class OperationRecoveryRuntime:
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
+    @property
+    def quota_resumer(self) -> WorkflowGraphQuotaStatePort | None:
+        """只读暴露配额恢复处理器身份，供 Gateway 就绪检查使用。"""
+
+        return self._quota_resumer
+
     async def run_once(self) -> None:
-        """先补投递终态事件，再领取到期任务并查询一次原 job。"""
+        """先投递 quota、再投递终态，最后查询到期的原 job。"""
 
         scan_time = self._clock()
-        pending = await self._repository.list_pending_operation_completions(
+        pending_quota = await self._repository.list_pending_operation_quota_events(
             now=scan_time,
             limit=self._scan_limit,
         )
-        for candidate in pending:
+        for candidate in pending_quota:
             try:
-                await self._dispatch(
+                await self._dispatch_quota(candidate, now=self._clock())
+            except Exception as exc:
+                self._log_candidate_failure("quota_dispatch", exc)
+
+        pending_completion = await self._repository.list_pending_operation_completions(
+            now=self._clock(),
+            limit=self._scan_limit,
+        )
+        for candidate in pending_completion:
+            try:
+                await self._dispatch_completion(
                     candidate.user_id,
                     candidate.operation,
                     now=self._clock(),
@@ -369,15 +402,26 @@ class OperationRecoveryRuntime:
                 raise OperationConflictError("Operation 下一轮轮询计划发生冲突")
             return
         if snapshot.outcome is ProviderJobOutcome.PAUSED_QUOTA:
-            paused = await self._repository.pause_operation_poll(
-                user_id,
-                operation.conversation_id,
+            transition = await OperationQuotaCoordinator(
+                self._repository,
+                user_id=user_id,
+                conversation_id=operation.conversation_id,
+            ).record_pause(
                 operation.job_id,
                 lease_owner=self._worker_id,
                 now=observed_at,
             )
-            if paused is None:
-                raise OperationConflictError("Operation 额度暂停发生并发冲突")
+            try:
+                await self._dispatch_quota(
+                    OwnedOperationQuotaEvent(
+                        user_id=user_id,
+                        operation=transition.operation,
+                        event=transition.event,
+                    ),
+                    now=self._clock(),
+                )
+            except Exception as exc:
+                self._log_candidate_failure("quota_dispatch", exc)
             return
 
         completion = await OperationCompletionCoordinator(
@@ -390,13 +434,13 @@ class OperationRecoveryRuntime:
             lease_owner=self._worker_id,
             now=observed_at,
         )
-        await self._dispatch(
+        await self._dispatch_completion(
             user_id,
             completion.operation,
             now=self._clock(),
         )
 
-    async def _dispatch(
+    async def _dispatch_completion(
         self,
         user_id: str,
         operation: OperationRecord,
@@ -416,13 +460,32 @@ class OperationRecoveryRuntime:
             lease_expires_at=now + self._lease_duration,
         )
 
+    async def _dispatch_quota(
+        self,
+        candidate: OwnedOperationQuotaEvent,
+        *,
+        now: datetime,
+    ) -> None:
+        if self._quota_resumer is None:
+            raise OperationConflictError("quota_resumer 未装配")
+        await OperationQuotaDispatcher(
+            self._repository,
+            quota_resumer=self._quota_resumer,
+            clock=self._clock,
+        ).dispatch(
+            candidate,
+            lease_owner=self._quota_delivery_worker_id,
+            now=now,
+            lease_expires_at=now + self._lease_duration,
+        )
+
     async def recover_manually(
         self,
         user_id: str,
         conversation_id: str,
         job_id: str,
     ) -> OperationManualRecoveryResult:
-        """额度暂停继续原 job；过期及其他终态只能由上层创建新 attempt。"""
+        """已暂停 Operation 只允许授权处理器恢复；终态要求新 attempt。"""
 
         owner = _scope_text("user_id", user_id)
         conversation = _scope_text("conversation_id", conversation_id)
@@ -431,18 +494,7 @@ class OperationRecoveryRuntime:
         if operation is None or operation.conversation_id != conversation:
             raise OperationConflictError("Operation 不存在或不属于当前会话")
         if operation.status is ExternalJobStatus.POLLING and operation.provider_job_id is not None and operation.next_poll_at is None:
-            resumed = await self._repository.resume_operation_poll(
-                owner,
-                conversation,
-                operation_id,
-                now=self._clock(),
-            )
-            if resumed is None:
-                raise OperationConflictError("Operation 人工恢复发生并发冲突")
-            return OperationManualRecoveryResult(
-                action=OperationManualRecoveryAction.RESUMED_ORIGINAL_JOB,
-                operation=resumed,
-            )
+            raise OperationConflictError("quota_resume_requires_authorized_handler")
         if operation.status in {
             ExternalJobStatus.SUCCEEDED,
             ExternalJobStatus.FAILED,

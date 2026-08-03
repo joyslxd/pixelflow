@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from langchain_core.messages import AIMessage
 from langgraph.types import Command, interrupt
@@ -16,8 +16,10 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    InterruptResponseRequest,
     WorkflowRecord,
 )
+from pixelflow.agent_runtime.identity import interrupt_id as stable_interrupt_id
 
 from .validator import (
     DecisionValidationError,
@@ -62,6 +64,35 @@ class SupervisorActionRouter:
             )
         validated = self.validator.validate(request)
         _validate_request_binding(state, request)
+        answer_message_update: AIMessage | None = None
+        response_id = state.get("last_interrupt_response_id")
+        if response_id is not None:
+            try:
+                normalized_response_id = str(UUID(str(response_id)))
+            except (TypeError, ValueError, AttributeError):
+                raise SupervisorRoutingError(
+                    reason_code="invalid_clarification_response_id",
+                ) from None
+            original_key = validated.idempotency_key
+            validated = validated.model_copy(
+                update={
+                    "idempotency_key": f"decision:{normalized_response_id}",
+                },
+                deep=True,
+            )
+            if validated.action is AgentAction.ANSWER_ONLY:
+                source_answer = state.get("answer_message")
+                if (
+                    not isinstance(source_answer, AIMessage)
+                    or source_answer.id != f"assistant:{original_key}"
+                ):
+                    raise SupervisorRoutingError(
+                        reason_code="answer_message_required",
+                    )
+                answer_message_update = source_answer.model_copy(
+                    update={"id": f"assistant:{validated.idempotency_key}"},
+                    deep=True,
+                )
         dispatch_workflow_id: str | None = None
         if validated.action == AgentAction.START_WORKFLOW:
             if validated.target_workflow_id is not None or validated.target_stage is not None or validated.target_artifact_ref is not None:
@@ -81,11 +112,14 @@ class SupervisorActionRouter:
             destination = CLARIFICATION_NODE
         else:
             destination = WORKFLOW_COMMAND_NODE
-        return Command(
-            update={
+        update: dict[str, Any] = {
                 "decision": validated.model_copy(deep=True),
                 "dispatch_workflow_id": dispatch_workflow_id,
-            },
+            }
+        if answer_message_update is not None:
+            update["answer_message"] = answer_message_update
+        return Command(
+            update=update,
             goto=destination,
         )
 
@@ -121,14 +155,14 @@ class SupervisorActionRouter:
     def open_clarification(
         self,
         state: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """打开可恢复追问中断，恢复后仍不修改 Workflow 业务状态。"""
+    ) -> Command:
+        """打开全局追问，并只接受 Executor 构造的严格恢复信封。"""
 
         decision = _decision_for_action(
             state,
             expected=AgentAction.CLARIFY,
         )
-        interrupt(
+        response = interrupt(
             {
                 "type": "clarification",
                 "question": decision.clarification_question,
@@ -136,7 +170,151 @@ class SupervisorActionRouter:
                 "idempotency_key": decision.idempotency_key,
             }
         )
-        return {}
+        return _clarification_resume_command(
+            state,
+            source_decision=decision,
+            response=response,
+        )
+
+
+def _clarification_resume_command(
+    state: Mapping[str, Any],
+    *,
+    source_decision: ActionDecision,
+    response: Any,
+) -> Command:
+    """复验全局追问恢复身份，并把新证据送回统一 Validator。"""
+
+    expected_keys = {
+        "answer_message",
+        "client_response_id",
+        "decision",
+        "decision_validation_request",
+        "interrupt_id",
+        "resume_context_version",
+        "source_decision_idempotency_key",
+        "value",
+    }
+    if type(response) is not dict or set(response) != expected_keys:
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_envelope",
+        )
+    resume_context_version = response["resume_context_version"]
+    if type(resume_context_version) is not int or resume_context_version < 0:
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_context_version",
+        )
+    checkpoint_context_version = state.get("context_version")
+    if (
+        type(checkpoint_context_version) is not int
+        or checkpoint_context_version < 0
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_context_state_corrupted",
+        )
+    if resume_context_version < checkpoint_context_version:
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_context_rollback",
+        )
+    turn_id = state.get("turn_id")
+    if not isinstance(turn_id, str) or not turn_id:
+        raise SupervisorRoutingError(reason_code="turn_id_required")
+    previous_response_id = state.get("last_interrupt_response_id")
+    if previous_response_id is not None and (
+        not isinstance(previous_response_id, str)
+        or not previous_response_id.strip()
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_response_state_corrupted",
+        )
+    identity_turn_id = (
+        turn_id
+        if previous_response_id is None
+        else f"{turn_id}:{previous_response_id}"
+    )
+    expected_interrupt_id = stable_interrupt_id(
+        identity_turn_id,
+        source_decision.reason_code,
+    )
+    if (
+        response["interrupt_id"] != expected_interrupt_id
+        or response["source_decision_idempotency_key"]
+        != source_decision.idempotency_key
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_identity_conflict",
+        )
+    raw_validation_request = response["decision_validation_request"]
+    if not isinstance(raw_validation_request, Mapping) or any(
+        type(raw_validation_request.get(field_name)) is not int
+        or raw_validation_request[field_name] < 0
+        for field_name in (
+            "expected_context_version",
+            "current_context_version",
+        )
+    ):
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_validation_context",
+        )
+    try:
+        request = InterruptResponseRequest.model_validate(
+            {
+                "client_response_id": response["client_response_id"],
+                "value": response["value"],
+            }
+        )
+        decision = ActionDecision.model_validate(response["decision"])
+        validation_request = DecisionValidationRequest.model_validate(
+            raw_validation_request
+        )
+    except ValidationError:
+        raise SupervisorRoutingError(
+            reason_code="invalid_clarification_resume_contract",
+        ) from None
+    if (
+        validation_request.decision != decision
+        or validation_request.classification_request.turn_id != turn_id
+        or validation_request.classification_request.content
+        != request.value.content
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_evidence_conflict",
+        )
+    if (
+        validation_request.expected_context_version
+        != resume_context_version
+        or validation_request.current_context_version
+        != resume_context_version
+    ):
+        raise SupervisorRoutingError(
+            reason_code="clarification_resume_context_conflict",
+        )
+    answer_message = response["answer_message"]
+    if decision.action is AgentAction.ANSWER_ONLY:
+        if not isinstance(answer_message, AIMessage):
+            raise SupervisorRoutingError(
+                reason_code="answer_message_required",
+            )
+    elif answer_message is not None:
+        raise SupervisorRoutingError(
+            reason_code="unexpected_answer_message",
+        )
+    return Command(
+        update={
+            "current_input": request.value.content,
+            "materials": [dict(item) for item in request.value.materials],
+            "reply_to_message_id": request.value.reply_to_message_id,
+            "artifact_refs": list(request.value.artifact_refs),
+            "context_version": resume_context_version,
+            "decision": decision.model_copy(deep=True),
+            "decision_validation_request": validation_request.model_copy(deep=True),
+            "answer_message": deepcopy(answer_message),
+            "dispatch_workflow_id": None,
+            "workflow_dispatch_result": None,
+            "last_interrupt_response_id": str(request.client_response_id),
+        },
+        goto=ROUTE_ACTION_NODE,
+    )
 
 
 def _decision_for_action(

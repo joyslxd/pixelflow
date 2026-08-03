@@ -14,6 +14,12 @@ from .enums import (
     WorkflowStatus,
 )
 from .events import AgentEvent
+from .live import (
+    AgentInterruptProjection,
+    ExplicitActionSignal,
+    InterruptResponseRequest,
+    InterruptResponseValue,
+)
 from .records import ExternalJobRef, TurnRecord, WorkflowRecord
 
 __all__ = [
@@ -22,6 +28,7 @@ __all__ = [
     "AgentEvent",
     "AgentEventType",
     "AgentIntent",
+    "AgentInterruptProjection",
     "ContextBudgetReport",
     "ContextEnvelope",
     "ContextRequest",
@@ -29,6 +36,9 @@ __all__ = [
     "ConversationOrchestration",
     "ExternalJobRef",
     "ExternalJobStatus",
+    "ExplicitActionSignal",
+    "InterruptResponseRequest",
+    "InterruptResponseValue",
     "OperationRequest",
     "OrchestrationMode",
     "TurnRecord",

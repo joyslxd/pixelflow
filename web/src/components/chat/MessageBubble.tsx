@@ -18,6 +18,7 @@ interface MessageBubbleProps {
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
+  onRegeneratePlanDirections?: (msg: ChatMessage) => void;
   onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   hidePlanEdit?: boolean;
@@ -220,6 +221,7 @@ export function MessageBubble({
   onSelectDirection,
   onRegenerateDirections,
   onApprovePlan,
+  onRegeneratePlanDirections,
   onEditPlan,
   onRevisePlan,
   hidePlanEdit = false,
@@ -618,6 +620,16 @@ export function MessageBubble({
                 <Sparkles size={15} />
                 Agent 修改
               </button>
+              {onRegeneratePlanDirections ? (
+                <button
+                  type="button"
+                  onClick={() => onRegeneratePlanDirections(msg)}
+                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                >
+                  <RefreshCw size={15} />
+                  新创意
+                </button>
+              ) : null}
             </div>
           </div>
         ) : msg.artifact?.type === "image_edit_options" && msg.artifact.imageEditModelConfigs ? (

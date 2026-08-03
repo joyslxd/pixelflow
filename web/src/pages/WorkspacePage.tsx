@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
@@ -117,11 +117,15 @@ import {
   type WorkflowProgressSnapshot,
 } from "@/lib/workflowTaskBoard";
 import type {
+  AgentAction,
+  ExplicitActionSignal,
   JsonObject,
   JsonValue,
   OrchestrationMode,
   TurnStartRequest,
+  WorkflowRecord,
 } from "@/lib/supervisor/contracts";
+import { buildSupervisorWorkflowAction } from "@/lib/supervisor/actions";
 import {
   createConversationWriteSequencer,
   resolveAssistHandoffAction,
@@ -139,6 +143,7 @@ import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
 import {
   mergeSupervisorMessagesWithPending,
   projectSupervisorWorkflowProgress,
+  selectSupervisorArtifactMessage,
 } from "@/lib/supervisor/workspaceProjection";
 
 interface ConversationOwnership {
@@ -155,9 +160,37 @@ interface PendingSupervisorTurn {
   replyToMessageId: string | null;
   artifactRefs: string[];
   interruptId: string | null;
+  explicitAction: ExplicitActionSignal | null;
   continueLegacy: boolean;
   registrationStatus: "pending" | "registered";
   runId?: string;
+}
+
+type SupervisorVideoUiKind =
+  | "video_intake_form"
+  | "video_direction_review"
+  | "video_plan_review"
+  | "video_scene_package_review"
+  | "video_result_review"
+  | "authorization_required";
+
+interface RestoredSupervisorVideoUi {
+  kind: SupervisorVideoUiKind;
+  workflowId: string;
+  stage: string;
+  artifactRef: string | null;
+  formValues: JsonObject;
+  coreMessage: string;
+  materials: JsonObject[];
+  intakeRounds: number;
+  authorizationAction: ExplicitActionSignal | null;
+}
+
+interface SupervisorVideoTarget {
+  ui: RestoredSupervisorVideoUi;
+  workflow: WorkflowRecord;
+  stage: string;
+  artifactRef: string | null;
 }
 
 interface RegisteredSupervisorTurn {
@@ -175,6 +208,12 @@ interface SendRuntimeOptions {
   clientInputId?: string;
 }
 
+interface SubmitSupervisorActionOptions {
+  materials?: JsonObject[];
+  replyToMessageId?: string | null;
+  artifactRefs?: string[];
+}
+
 // 统一使用 UUID 作为消息 ID 与 Runtime client_input_id，旧消息 API 会映射到同一稳定主键。
 const uid = (): string => crypto.randomUUID();
 const UNAVAILABLE_SUPERVISOR_NOTICE_VERSION = 1;
@@ -188,6 +227,88 @@ const failedSupervisorNoticeId = (
 ): string => `agent-runtime-failed:${conversationId}:${clientInputId}:v1`;
 const now = () => formatMessageTime(new Date().toISOString());
 
+const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const parseExplicitAction = (value: unknown): ExplicitActionSignal | null => {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const action = value as Record<string, unknown>;
+  if (typeof action.action !== "string") return null;
+  try {
+    return buildSupervisorWorkflowAction({
+      action: action.action as AgentAction,
+      intent: action.intent === "video" ? "video" : null,
+      workflowId: typeof action.workflow_id === "string" ? action.workflow_id : null,
+      stage: typeof action.stage === "string" ? action.stage : null,
+      artifactRef: typeof action.artifact_ref === "string" ? action.artifact_ref : null,
+      patch: action.patch && typeof action.patch === "object" && !Array.isArray(action.patch)
+        ? action.patch as Readonly<Record<string, unknown>>
+        : {},
+    });
+  } catch {
+    return null;
+  }
+};
+
+function restoreSupervisorVideoUi(
+  payload: JsonObject | undefined,
+): RestoredSupervisorVideoUi | null {
+  if (!payload) return null;
+  const workflowId = typeof payload.workflow_id === "string" ? payload.workflow_id.trim() : "";
+  const stage = typeof payload.stage === "string" ? payload.stage.trim() : "";
+  const artifactRef = typeof payload.artifact_ref === "string" ? payload.artifact_ref.trim() : null;
+  if (!workflowId || !stage || (artifactRef !== null && !/^artifact:\S+$/u.test(artifactRef))) return null;
+  const formValues = isJsonObject(payload.form_values) ? payload.form_values : {};
+  const coreMessage = typeof payload.core_message === "string" ? payload.core_message : "";
+  const materials = Array.isArray(payload.materials)
+    ? payload.materials.filter(isJsonObject)
+    : [];
+  const intakeRounds = Number.isSafeInteger(payload.intake_rounds)
+    && Number(payload.intake_rounds) >= 0
+    ? Number(payload.intake_rounds)
+    : 0;
+  const authorizationAction = parseExplicitAction(payload.authorization_action);
+  switch (payload.ui_kind) {
+    case "video_intake_form":
+    case "video_direction_review":
+    case "video_plan_review":
+    case "video_scene_package_review":
+    case "video_result_review":
+      return {
+        kind: payload.ui_kind,
+        workflowId,
+        stage,
+        artifactRef,
+        formValues,
+        coreMessage,
+        materials,
+        intakeRounds,
+        authorizationAction: null,
+      };
+    case "authorization_required":
+      if (
+        !authorizationAction
+        || authorizationAction.workflow_id !== workflowId
+        || authorizationAction.stage !== stage
+        || authorizationAction.artifact_ref !== artifactRef
+      ) return null;
+      return {
+        kind: payload.ui_kind,
+        workflowId,
+        stage,
+        artifactRef,
+        formValues,
+        coreMessage,
+        materials,
+        intakeRounds,
+        authorizationAction,
+      };
+    default:
+      return null;
+  }
+}
+
 const parsePendingSupervisorTurn = (
   value: unknown,
   conversationId: string,
@@ -199,6 +320,11 @@ const parsePendingSupervisorTurn = (
     || typeof item.clientInputId !== "string"
     || typeof item.content !== "string"
     || !Array.isArray(item.materials)
+    || (
+      item.explicitAction !== undefined
+      && item.explicitAction !== null
+      && parseExplicitAction(item.explicitAction) === null
+    )
     || (item.continueLegacy !== undefined && typeof item.continueLegacy !== "boolean")
     || (
       item.registrationStatus !== undefined
@@ -232,6 +358,7 @@ const parsePendingSupervisorTurn = (
     replyToMessageId: typeof item.replyToMessageId === "string" ? item.replyToMessageId : null,
     artifactRefs: Array.isArray(item.artifactRefs) ? item.artifactRefs as string[] : [],
     interruptId: typeof item.interruptId === "string" ? item.interruptId : null,
+    explicitAction: parseExplicitAction(item.explicitAction),
     continueLegacy: item.continueLegacy === true,
     registrationStatus: item.registrationStatus === "registered" ? "registered" : "pending",
     ...(typeof item.runId === "string" ? { runId: item.runId } : {}),
@@ -1986,6 +2113,70 @@ export function WorkspacePage() {
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
   });
+  const restoredSupervisorUi = useMemo(
+    () => restoreSupervisorVideoUi(supervisorRuntime.state.interrupt?.payload),
+    [supervisorRuntime.state.interrupt?.payload],
+  );
+  const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
+    if (
+      orchestrationMode !== "supervisor_v1"
+      || !restoredSupervisorUi
+      || supervisorRuntime.state.conversationId !== currentConversationId
+    ) return null;
+    const workflow = supervisorRuntime.state.workflows.find(
+      (workflow) => workflow.workflow_id === restoredSupervisorUi.workflowId
+        && workflow.conversation_id === currentConversationId
+        && workflow.kind === "video"
+        && workflow.current_stage === restoredSupervisorUi.stage,
+    );
+    if (!workflow) return null;
+    if (
+      restoredSupervisorUi.artifactRef
+      && !workflow.latest_artifact_refs.includes(restoredSupervisorUi.artifactRef)
+    ) return null;
+    return {
+      ui: restoredSupervisorUi,
+      workflow,
+      stage: restoredSupervisorUi.stage,
+      artifactRef: restoredSupervisorUi.artifactRef,
+    };
+  }, [
+    currentConversationId,
+    orchestrationMode,
+    restoredSupervisorUi,
+    supervisorRuntime.state.conversationId,
+    supervisorRuntime.state.workflows,
+  ]);
+  const activeSupervisorVideoMessage = useMemo<ChatMessage | null>(() => {
+    if (!activeSupervisorVideoTarget) return null;
+    const allowedTypes = activeSupervisorVideoTarget.ui.kind === "video_direction_review"
+      ? new Set(["directions"])
+      : activeSupervisorVideoTarget.ui.kind === "video_plan_review"
+        ? new Set(["plan"])
+        : activeSupervisorVideoTarget.ui.kind === "video_scene_package_review"
+          ? new Set(["video_scene_packages"])
+          : activeSupervisorVideoTarget.ui.kind === "video_result_review"
+            ? new Set(["video_scene_packages", "video_quality_review", "video_result", "jianying_draft"])
+            : new Set<string>();
+    const projected = selectSupervisorArtifactMessage(
+      supervisorRuntime.state.messages,
+      {
+        workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+        artifactRef: activeSupervisorVideoTarget.artifactRef,
+        allowedTypes: [...allowedTypes],
+      },
+    );
+    if (!projected) return null;
+    return messages.find(
+      (message) => message.id === projected.id
+        && messageConversationId(message, currentConversationId) === currentConversationId,
+    ) ?? null;
+  }, [
+    activeSupervisorVideoTarget,
+    currentConversationId,
+    messages,
+    supervisorRuntime.state.messages,
+  ]);
   const interactionPolicy = resolveWorkspaceInteractionPolicy({
     mode: orchestrationMode,
     conversationId: currentConversationId,
@@ -2969,6 +3160,29 @@ export function WorkspacePage() {
   };
 
   const handleDeleteGlobalAsset = (asset: SceneGlobalAssetReference) => {
+    if (activeSupervisorVideoTarget?.ui.kind === "video_scene_package_review") {
+      void submitSupervisorAction(
+        "删除视频全局素材",
+        buildSupervisorWorkflowAction({
+          action: "modify_workflow",
+          intent: "video",
+          workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+          stage: activeSupervisorVideoTarget.stage,
+          artifactRef: activeSupervisorVideoTarget.artifactRef,
+          patch: {
+            asset_action: "delete",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+          },
+        }),
+        {
+          artifactRefs: activeSupervisorVideoTarget.artifactRef
+            ? [activeSupervisorVideoTarget.artifactRef]
+            : [],
+        },
+      );
+      return;
+    }
     const material = selectedStoryboardMessageId
       ? { ...asset, conversation_id: currentConversationId, storyboard_message_id: selectedStoryboardMessageId }
       : { ...asset, conversation_id: currentConversationId };
@@ -7120,6 +7334,7 @@ export function WorkspacePage() {
       replyToMessageId: null,
       artifactRefs: [],
       interruptId: null,
+      explicitAction: null,
       continueLegacy: orchestrationModeRef.current === "frontend_v2",
       registrationStatus: "registered",
       runId: recoverableInput.turnId || undefined,
@@ -7445,6 +7660,7 @@ export function WorkspacePage() {
         interruptId: orchestrationModeRef.current === "supervisor_v1"
           ? pendingTurn.interruptId
           : null,
+        explicitAction: pendingTurn.explicitAction,
       }, expectedContextVersion);
       if (submission.kind === "interrupt") {
         if (orchestrationModeRef.current !== "supervisor_v1") return null;
@@ -7478,6 +7694,42 @@ export function WorkspacePage() {
     }
   };
 
+  async function submitSupervisorAction(
+    content: string,
+    explicitAction: ExplicitActionSignal,
+    options: SubmitSupervisorActionOptions,
+  ): Promise<void> {
+    const clientInputId = crypto.randomUUID();
+    const targetConversationId = currentConversationId;
+    const interruptId = supervisorRuntime.state.interrupt?.interruptId ?? null;
+    if (
+      orchestrationModeRef.current !== "supervisor_v1"
+      || !targetConversationId
+      || !interruptId
+      || !content.trim()
+    ) return;
+    const pendingTurn: PendingSupervisorTurn = {
+      conversationId: targetConversationId,
+      clientInputId,
+      content,
+      materials: options.materials || [],
+      replyToMessageId: options.replyToMessageId ?? null,
+      artifactRefs: options.artifactRefs
+        ?? (explicitAction.artifact_ref ? [explicitAction.artifact_ref] : []),
+      interruptId,
+      explicitAction,
+      continueLegacy: false,
+      registrationStatus: "pending",
+    };
+    await persistPendingSupervisorTurns(
+      (current) => current.some((item) => item.clientInputId === clientInputId)
+        ? current
+        : [...current, pendingTurn],
+      targetConversationId,
+    );
+    ensurePendingSupervisorTurnVisible(pendingTurn);
+  }
+
   useEffect(() => {
     // 恢复时优先处理尚未提交到 Runtime 的输入；已注册 Turn 则优先选择
     // Snapshot 中仍存在的 input，避免已失效的旧 registered Turn 一直 wait，
@@ -7510,6 +7762,31 @@ export function WorkspacePage() {
     // 一次最新 Snapshot，因此不能因为这里暂时为 null 而把已落库 Turn 卡死。
     if (supervisorRuntime.state.connection.status !== "connected") return;
     if (serverInput) ensurePendingSupervisorTurnVisible(pendingTurn);
+    if (
+      pendingTurn.explicitAction
+      && pendingTurn.registrationStatus === "registered"
+      && pendingTurn.runId
+    ) {
+      supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+      void supervisorRuntime.getRunStatus(pendingTurn.runId)
+        .then(async (value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return;
+          const status = value.status;
+          if (status !== "waiting_user" && status !== "completed" && status !== "failed") return;
+          await persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          );
+          await supervisorRuntime.refreshSnapshot().catch(() => {});
+        })
+        .catch(() => {})
+        .finally(() => {
+          supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+        });
+      return;
+    }
     const handoffAction = resolveAssistHandoffAction({
       orchestrationMode: orchestrationModeRef.current ?? "frontend_v2",
       primaryExecutionReady: primaryExecutionReadyRef.current,
@@ -7708,6 +7985,7 @@ export function WorkspacePage() {
           interruptId: ownership.orchestrationMode === "supervisor_v1"
             ? interruptId ?? restoredInterruptId
             : null,
+          explicitAction: null,
           continueLegacy: ownership.orchestrationMode === "frontend_v2",
           registrationStatus: "pending",
         };
@@ -9877,7 +10155,33 @@ export function WorkspacePage() {
     const sourceMessage = sourceMessageId
       ? messagesRef.current.find((message) => message.id === sourceMessageId)
       : [...messagesRef.current].reverse().find((message) => message.artifact?.mergedVideo?.merged_video_url === video.url);
-    if (sourceMessage) void recordArtifactDownload(sourceMessage, video.url);
+    if (
+      sourceMessage
+      && activeSupervisorVideoTarget?.ui.kind === "video_result_review"
+      && activeSupervisorVideoMessage?.id === sourceMessage.id
+      && video.url.startsWith("https://")
+    ) {
+      void submitSupervisorAction(
+        "下载最终视频",
+        buildSupervisorWorkflowAction({
+          action: "continue_workflow",
+          intent: "video",
+          workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+          stage: activeSupervisorVideoTarget.stage,
+          artifactRef: activeSupervisorVideoTarget.artifactRef,
+          patch: { delivery_download_url: video.url },
+        }),
+        {
+          artifactRefs: activeSupervisorVideoTarget.artifactRef
+            ? [activeSupervisorVideoTarget.artifactRef]
+            : [],
+        },
+      );
+      return;
+    }
+    if (sourceMessage && legacyArtifactActionsEnabled) {
+      void recordArtifactDownload(sourceMessage, video.url);
+    }
   };
 
   useEffect(() => {
@@ -9932,13 +10236,14 @@ export function WorkspacePage() {
   };
 
   const getJianyingDraftResult = (msg: ChatMessage): JianyingDraftJobResponse | null => {
-    if (msg.artifact?.type === "jianying_draft") return msg.artifact.jianyingDraft || null;
+    if (msg.artifact?.jianyingDraft) return msg.artifact.jianyingDraft;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const storyboardVersionId = jianyingDraftVersionForMessage(msg);
     return storyboardVersionId ? jianyingDraftRecordsForConversation(targetConversationId)[storyboardVersionId] || null : null;
   };
 
   const isJianyingDraftRunning = (msg: ChatMessage): boolean => {
+    if (msg.artifact?.pendingJianyingDraftJob) return true;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const storyboardVersionId = jianyingDraftVersionForMessage(msg);
     const pending = pendingJianyingDraftJobRef.current;
@@ -9951,6 +10256,298 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     if (targetConversationId) pushAssistant("剪映草稿已开始下载。", targetConversationId);
   };
+
+  function renderSupervisorVideoArtifact(target: SupervisorVideoTarget) {
+    const currentMessage = activeSupervisorVideoMessage;
+    if (!currentMessage) return null;
+    const acceptsMessage = (msg: ChatMessage): boolean => Boolean(
+      msg.id === currentMessage.id
+      && messageConversationId(msg, currentConversationId) === currentConversationId,
+    );
+    const submit = (
+      content: string,
+      request: {
+        action: AgentAction;
+        patch?: Readonly<Record<string, unknown>>;
+      },
+    ): Promise<void> => {
+      return submitSupervisorAction(
+        content,
+        buildSupervisorWorkflowAction({
+          action: request.action,
+          intent: "video",
+          workflowId: target.workflow.workflow_id,
+          stage: target.stage,
+          artifactRef: target.artifactRef,
+          patch: request.patch || {},
+        }),
+        {
+          artifactRefs: target.artifactRef ? [target.artifactRef] : [],
+        },
+      );
+    };
+    const replacementPatch = (replacement: SceneGlobalAssetReplacement): Record<string, unknown> => ({
+      source: replacement.source,
+      display_image_url: replacement.displayImageUrl,
+      generation_reference_url: replacement.generationReferenceUrl,
+      ...(replacement.thirdAssetId ? { third_asset_id: replacement.thirdAssetId } : {}),
+      ...(replacement.assetType ? { asset_type: replacement.assetType } : {}),
+      ...(replacement.contentAssetId ? { content_asset_id: replacement.contentAssetId } : {}),
+      ...(replacement.assetName ? { asset_name: replacement.assetName } : {}),
+    });
+    const failedSceneIds = (msg: ChatMessage): string[] => Array.from(new Set(
+      (msg.artifact?.generatedSceneVideos?.failed_scenes || [])
+        .map((item) => typeof item.scene_id === "string" ? item.scene_id.trim() : "")
+        .filter(Boolean),
+    ));
+    const submitSceneReviewDecision = (msg: ChatMessage): void => {
+      if (!acceptsMessage(msg)) return;
+      const failedIds = failedSceneIds(msg);
+      if (failedIds.length > 0) {
+        submit("重试失败的分镜视频", {
+          action: "retry_failed",
+          patch: { scene_ids: failedIds },
+        });
+        return;
+      }
+      if ((msg.artifact?.videoScenePackageEditedSceneIds || []).length > 0) {
+        submit("重新生成已修改的分镜视频", { action: "regenerate_stage" });
+        return;
+      }
+      submit("确认当前视频阶段", { action: "continue_workflow" });
+    };
+    const submitRevision = (msg: ChatMessage, useQualityReview: boolean): void => {
+      if (!acceptsMessage(msg)) return;
+      const packages = msg.artifact?.videoScenePackages;
+      const scenes = packages?.scene_packages as ScenePackageRecord[] | undefined;
+      if (!packages || !scenes?.length) return;
+      const requested = window.prompt(
+        useQualityReview ? "可补充修改意见；留空则只按质检结果修改。" : "请输入本次视频修改意见。",
+        msg.artifact?.videoRevisionFeedback || "",
+      );
+      if (requested === null) return;
+      const feedback = requested.trim();
+      const qualityReview = useQualityReview ? msg.artifact?.videoQualityReview : undefined;
+      const revisionFeedback = feedback || qualityReview?.revision_prompt?.trim() || "";
+      if (!revisionFeedback) return;
+      const affectedIds = sceneIdsForRevision(
+        scenes,
+        revisionFeedback,
+        qualityReview,
+        useQualityReview,
+      );
+      const revisedScenes = scenePackagesWithRevisionContract(
+        scenes,
+        affectedIds,
+        revisionFeedback,
+        qualityReview,
+        packages.global_assets,
+        msg.artifact?.originalVideoScenePackages?.scene_packages as ScenePackageRecord[] | undefined,
+      );
+      const scene_patches = Object.fromEntries(
+        revisedScenes
+          .filter((scene) => affectedIds.has(scene.scene_id))
+          .map((scene) => [scene.scene_id, {
+            storyline: scene.storyline || "",
+            shot_description: scene.shot_description || {},
+            narration: scene.narration || "",
+            reference_asset_ids: scene.reference_asset_ids || [],
+          }]),
+      );
+      if (Object.keys(scene_patches).length === 0) return;
+      submit("按修改范围重新生成分镜", {
+        action: "modify_workflow",
+        patch: { scene_patches },
+      });
+    };
+
+    return {
+      message: currentMessage,
+      onSelectDirection: (msg: ChatMessage, direction: CreativeDirectionResponse) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_direction_review") return;
+        submit(`选择创意方向：${direction.title}`, {
+          action: "continue_workflow",
+          patch: { direction_id: direction.direction_id },
+        });
+      },
+      onRegenerateDirections: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_direction_review") return;
+        submit("重新生成视频创意方向", { action: "regenerate_stage" });
+      },
+      onApprovePlan: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit("同意当前视频创作方案", { action: "continue_workflow" });
+      },
+      onRevisePlan: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        const feedback = window.prompt("请输入方案修改意见。")?.trim();
+        if (!feedback) return;
+        submit("修改当前视频创作方案", {
+          action: "modify_workflow",
+          patch: { revision_feedback: feedback },
+        });
+      },
+      onRollbackPlan: (msg: ChatMessage, version: number) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit(`恢复视频方案 v${version}`, {
+          action: "modify_workflow",
+          patch: { plan_version: version },
+        });
+      },
+      onRegeneratePlanDirections: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit("返回创意方向并生成新创意", { action: "regenerate_stage" });
+      },
+      onGenerateVideoFromScenePackages: submitSceneReviewDecision,
+      onRetrySceneAssets: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("继续生成视频场景素材", { action: "continue_workflow" });
+      },
+      onRetryVideoMerge: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("重试视频合并", { action: "retry_failed" });
+      },
+      onAcceptVideoResult: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("确认最终视频", { action: "continue_workflow" });
+      },
+      onReviseVideoResult: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const feedback = window.prompt("请输入视频修改意见。")?.trim();
+        if (!feedback) return;
+        submit("提交视频修改意见并启动质检", {
+          action: "modify_workflow",
+          patch: { user_feedback: feedback },
+        });
+      },
+      onRegenerateVideoWithRevision: submitRevision,
+      onGenerateJianyingDraft: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const result = getJianyingDraftResult(msg);
+        if (result?.status === "failed" || result?.status === "timeout") {
+          submit("重新生成剪映草稿", {
+            action: "retry_failed",
+            patch: { jianying_action: "start" },
+          });
+          return;
+        }
+        submit("生成剪映草稿", {
+          action: "modify_workflow",
+          patch: { jianying_action: "start" },
+        });
+      },
+      onDownloadJianyingDraft: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const result = getJianyingDraftResult(msg);
+        if (!result?.storyboard_version_id || !result.download_url?.startsWith("https://")) return;
+        submit("下载剪映草稿", {
+          action: "continue_workflow",
+          patch: {
+            jianying_action: "download",
+            storyboard_version_id: result.storyboard_version_id,
+            download_url: result.download_url,
+          },
+        });
+      },
+      onDownloadArtifact: (msg: ChatMessage, url: string) => {
+        if (!acceptsMessage(msg) || !url.startsWith("https://")) return;
+        submit("下载最终视频", {
+          action: "continue_workflow",
+          patch: { delivery_download_url: url },
+        });
+      },
+      onUpdateVideoScenePackage: (sceneId: string, patch: ScenePackagePatch) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        const normalizedPatch: Record<string, unknown> = {};
+        if (typeof patch.storyline === "string" && patch.storyline.trim()) {
+          normalizedPatch.storyline = patch.storyline;
+        }
+        if (typeof patch.narration === "string") normalizedPatch.narration = patch.narration;
+        if (patch.shot_description && typeof patch.shot_description === "object") {
+          const text = typeof patch.shot_description.text === "string"
+            ? patch.shot_description.text.trim()
+            : "";
+          if (text) normalizedPatch.shot_description = { text };
+          const mentions = Array.isArray(patch.shot_description.mentions)
+            ? patch.shot_description.mentions
+            : [];
+          normalizedPatch.reference_asset_ids = mentions
+            .map((item) => item && typeof item === "object" && typeof item.asset_id === "string" ? item.asset_id : "")
+            .filter(Boolean)
+            .slice(0, 9);
+        } else if (Array.isArray(patch.reference_asset_ids)) {
+          normalizedPatch.reference_asset_ids = patch.reference_asset_ids.slice(0, 9);
+        }
+        if (Object.keys(normalizedPatch).length === 0) return;
+        return submit("修改视频分镜", {
+          action: "modify_workflow",
+          patch: {
+            scene_id: sceneId,
+            scene_patch: normalizedPatch,
+          },
+        });
+      },
+      onDeleteGlobalAsset: (asset: SceneGlobalAssetReference) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        submit("删除视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "delete",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+          },
+        });
+      },
+      onReplaceGlobalAsset: (
+        asset: SceneGlobalAssetReference,
+        replacement: SceneGlobalAssetReplacement,
+      ) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        submit("替换视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "replace",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+            asset_patch: replacementPatch(replacement),
+          },
+        });
+      },
+      onAddGlobalAsset: (
+        assetGroup: GlobalSceneAssetGroup,
+        replacement: SceneGlobalAssetReplacement,
+      ) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        const videoScenePackages = currentMessage.artifact?.videoScenePackages;
+        if (!videoScenePackages) return;
+        const added = addGlobalSceneAssetReference(videoScenePackages.global_assets, {
+          assetGroup,
+          manualId: replacement.contentAssetId || replacement.thirdAssetId || uid(),
+          replacement,
+        });
+        submit("新增视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "add",
+            asset_group: assetGroup,
+            asset_id: added.added_asset.asset_id,
+            asset_patch: {
+              ...replacementPatch(replacement),
+              asset_name: added.added_asset.name,
+            },
+          },
+        });
+      },
+      onSaveStoryboard: () => {
+        setCanvasOpen(false);
+        setSelectedStoryboardMessageId("");
+      },
+    };
+  }
+
+  const supervisorVideoArtifact = activeSupervisorVideoTarget
+    ? renderSupervisorVideoArtifact(activeSupervisorVideoTarget)
+    : null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -9965,25 +10562,37 @@ export function WorkspacePage() {
         runtimeBusy={interactionPolicy.runtime.busy}
         runtimeNotice={runtimeNotice}
         workflowTaskBoard={workflowTaskBoard}
-        onSelectDirection={legacyArtifactActionsEnabled ? handleSelectDirection : undefined}
-        onRegenerateDirections={legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined}
-        onApprovePlan={legacyArtifactActionsEnabled ? handleApprovePlan : undefined}
+        onSelectDirection={(legacyArtifactActionsEnabled ? handleSelectDirection : undefined)
+          ?? supervisorVideoArtifact?.onSelectDirection}
+        onRegenerateDirections={(legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined)
+          ?? supervisorVideoArtifact?.onRegenerateDirections}
+        onApprovePlan={(legacyArtifactActionsEnabled ? handleApprovePlan : undefined)
+          ?? supervisorVideoArtifact?.onApprovePlan}
+        onRegeneratePlanDirections={supervisorVideoArtifact?.onRegeneratePlanDirections}
         onEditPlan={legacyArtifactActionsEnabled ? handleEditPlan : undefined}
-        onRevisePlan={legacyArtifactActionsEnabled ? handleRevisePlan : undefined}
+        onRevisePlan={(legacyArtifactActionsEnabled ? handleRevisePlan : undefined)
+          ?? supervisorVideoArtifact?.onRevisePlan}
         agentRevisionSourceMessageId={agentRevisionSourceMessageId}
-        onRollbackPlan={legacyArtifactActionsEnabled ? handleRollbackPlan : undefined}
+        onRollbackPlan={(legacyArtifactActionsEnabled ? handleRollbackPlan : undefined)
+          ?? supervisorVideoArtifact?.onRollbackPlan}
         onGenerateImage={legacyArtifactActionsEnabled ? handleGenerateImage : undefined}
         onConfirmImageEditOptions={legacyArtifactActionsEnabled ? handleConfirmImageEditOptions : undefined}
         onAcceptImageResult={legacyArtifactActionsEnabled ? handleAcceptImageResult : undefined}
         onReviseImageResult={legacyArtifactActionsEnabled ? handleReviseImageResult : undefined}
-        onGenerateVideoFromScenePackages={legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined}
-        onAcceptVideoResult={legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined}
-        onReviseVideoResult={legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined}
+        onGenerateVideoFromScenePackages={(legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined)
+          ?? supervisorVideoArtifact?.onGenerateVideoFromScenePackages}
+        onAcceptVideoResult={(legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined)
+          ?? supervisorVideoArtifact?.onAcceptVideoResult}
+        onReviseVideoResult={(legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined)
+          ?? supervisorVideoArtifact?.onReviseVideoResult}
         onOpenVideoResult={handleOpenVideoResult}
-        onRegenerateVideoWithRevision={legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined}
+        onRegenerateVideoWithRevision={(legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined)
+          ?? supervisorVideoArtifact?.onRegenerateVideoWithRevision}
         onRetryImageResult={legacyArtifactActionsEnabled ? handleRetryImageResult : undefined}
-        onRetrySceneAssets={legacyArtifactActionsEnabled ? handleRetrySceneAssets : undefined}
-        onRetryVideoMerge={legacyArtifactActionsEnabled ? handleRetryVideoMerge : undefined}
+        onRetrySceneAssets={(legacyArtifactActionsEnabled ? handleRetrySceneAssets : undefined)
+          ?? supervisorVideoArtifact?.onRetrySceneAssets}
+        onRetryVideoMerge={(legacyArtifactActionsEnabled ? handleRetryVideoMerge : undefined)
+          ?? supervisorVideoArtifact?.onRetryVideoMerge}
         onRetryVideoAnalysis={legacyArtifactActionsEnabled ? handleRetryVideoAnalysis : undefined}
         onApprovePptOutline={legacyArtifactActionsEnabled ? handleApprovePptOutline : undefined}
         onRevisePptOutline={legacyArtifactActionsEnabled ? handleRevisePptOutline : undefined}
@@ -9991,14 +10600,27 @@ export function WorkspacePage() {
         onGeneratePptFile={legacyArtifactActionsEnabled ? handleGeneratePptFile : undefined}
         onAcceptPptFile={legacyArtifactActionsEnabled ? handleAcceptPptFile : undefined}
         onRegeneratePptFile={legacyArtifactActionsEnabled ? handleRegeneratePptFile : undefined}
-        onGenerateJianyingDraft={legacyArtifactActionsEnabled ? handleGenerateJianyingDraft : undefined}
-        onDownloadJianyingDraft={legacyArtifactActionsEnabled ? handleDownloadJianyingDraft : undefined}
+        onGenerateJianyingDraft={(legacyArtifactActionsEnabled ? handleGenerateJianyingDraft : undefined)
+          ?? supervisorVideoArtifact?.onGenerateJianyingDraft}
+        onDownloadJianyingDraft={(legacyArtifactActionsEnabled ? handleDownloadJianyingDraft : undefined)
+          ?? supervisorVideoArtifact?.onDownloadJianyingDraft}
         jianyingDraftCapability={jianyingDraftCapability}
         getJianyingDraftResult={getJianyingDraftResult}
         isJianyingDraftRunning={isJianyingDraftRunning}
-        onDownloadArtifact={(msg, url) => void recordArtifactDownload(msg, url)}
+        onDownloadArtifact={(msg, url) => {
+          if (supervisorVideoArtifact?.message?.id === msg.id) {
+            supervisorVideoArtifact.onDownloadArtifact(msg, url);
+            return;
+          }
+          if (legacyArtifactActionsEnabled) void recordArtifactDownload(msg, url);
+        }}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
+          if (
+            supervisorVideoArtifact
+            && supervisorVideoArtifact.message?.id !== msg.id
+            && !legacyArtifactActionsEnabled
+          ) return;
           setCanvasOpen(true);
           setSelectedPlanEditorMessageId("");
           if (msg.artifact.type === "video_scene_packages") {
@@ -10034,24 +10656,28 @@ export function WorkspacePage() {
       ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
         <StoryboardPanel
           msg={selectedStoryboardMessage}
+          deferSceneUpdates={Boolean(supervisorVideoArtifact)}
           onUpdateVideoScenePackage={legacyArtifactActionsEnabled
             ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
+            : supervisorVideoArtifact?.onUpdateVideoScenePackage}
+          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleReferenceGlobalAsset
             : undefined}
-          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
-            ? handleReferenceGlobalAsset
-            : undefined}
-          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
-            ? handleDeleteGlobalAsset
+          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleDeleteGlobalAsset
             : undefined}
           onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
+          onSupervisorReplaceGlobalAsset={supervisorVideoArtifact?.onReplaceGlobalAsset}
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
-            : undefined}
+            : supervisorVideoArtifact?.onAddGlobalAsset}
           onGenerateVideo={legacyArtifactActionsEnabled
             ? () => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)
-            : undefined}
-          onRetrySceneAssets={legacyArtifactActionsEnabled ? () => handleRetrySceneAssets(selectedStoryboardMessage) : undefined}
-          onSave={legacyArtifactActionsEnabled ? () => handleSaveVideoScenePackage(selectedStoryboardMessage) : undefined}
+            : () => supervisorVideoArtifact?.onGenerateVideoFromScenePackages(selectedStoryboardMessage)}
+          onRetrySceneAssets={legacyArtifactActionsEnabled
+            ? () => handleRetrySceneAssets(selectedStoryboardMessage)
+            : () => supervisorVideoArtifact?.onRetrySceneAssets(selectedStoryboardMessage)}
+          onSave={legacyArtifactActionsEnabled
+            ? () => handleSaveVideoScenePackage(selectedStoryboardMessage)
+            : supervisorVideoArtifact?.onSaveStoryboard}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
@@ -10086,6 +10712,85 @@ export function WorkspacePage() {
           onCancel={handleCancelParamsDialog}
         />
       )}
+      {restoredSupervisorUi?.kind === "video_intake_form" && activeSupervisorVideoTarget ? (
+        <GenParamsDialog
+          key={`supervisor-video:${activeSupervisorVideoTarget.workflow.workflow_id}:${activeSupervisorVideoTarget.workflow.stage_version}`}
+          open
+          intent="video"
+          initialCoreMessage={activeSupervisorVideoTarget.ui.coreMessage}
+          initialValues={activeSupervisorVideoTarget.ui.formValues}
+          initialMaterials={activeSupervisorVideoTarget.ui.materials}
+          onConfirm={(form) => {
+            void submitSupervisorAction(
+              "确认视频创作需求",
+              buildSupervisorWorkflowAction({
+                action: "continue_workflow",
+                intent: "video",
+                workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+                stage: activeSupervisorVideoTarget.stage,
+                artifactRef: activeSupervisorVideoTarget.artifactRef,
+                patch: {
+                  form_values: form,
+                  intake_rounds: activeSupervisorVideoTarget.ui.intakeRounds,
+                },
+              }),
+              {
+                materials: activeSupervisorVideoTarget.ui.materials,
+                artifactRefs: activeSupervisorVideoTarget.artifactRef
+                  ? [activeSupervisorVideoTarget.artifactRef]
+                  : [],
+              },
+            );
+          }}
+          onCancel={() => {
+            void submitSupervisorAction(
+              "取消视频创作流程",
+              buildSupervisorWorkflowAction({
+                action: "cancel_workflow",
+                intent: "video",
+                workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+                stage: activeSupervisorVideoTarget.stage,
+                artifactRef: activeSupervisorVideoTarget.artifactRef,
+                patch: { form_cancelled: true },
+              }),
+              {
+                artifactRefs: activeSupervisorVideoTarget.artifactRef
+                  ? [activeSupervisorVideoTarget.artifactRef]
+                  : [],
+              },
+            );
+          }}
+        />
+      ) : null}
+      {restoredSupervisorUi?.kind === "authorization_required"
+        && activeSupervisorVideoTarget
+        && restoredSupervisorUi.authorizationAction ? (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 px-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl">
+              <h2 className="text-base font-semibold text-slate-900">需要重新授权</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                当前操作尚未调用供应商。请确认登录状态后继续原操作。
+              </p>
+              <button
+                type="button"
+                className="mt-4 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+                onClick={() => {
+                  void submitSupervisorAction(
+                    "授权后继续原视频操作",
+                    restoredSupervisorUi.authorizationAction as ExplicitActionSignal,
+                    {
+                      artifactRefs: activeSupervisorVideoTarget.artifactRef
+                        ? [activeSupervisorVideoTarget.artifactRef]
+                        : [],
+                    },
+                  );
+                }}
+              >
+                重新授权并继续
+              </button>
+            </div>
+          </div>
+        ) : null}
       <PlanRevisionDialog
         open={Boolean(legacyArtifactActionsEnabled && pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
         feedback={pendingPlanRevisionChoice?.feedback || ""}

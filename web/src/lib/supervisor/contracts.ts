@@ -33,6 +33,15 @@ export const INTENT_VALUES = ["image", "video", "ppt", "video_analysis", "genera
 
 export type AgentIntent = (typeof INTENT_VALUES)[number];
 
+export type ExplicitActionSignal = Readonly<{
+  action: AgentAction;
+  intent: "video" | null;
+  workflow_id: string | null;
+  stage: string | null;
+  artifact_ref: string | null;
+  patch: Readonly<Record<string, JsonValue>>;
+}>;
+
 export const WORKFLOW_KIND_VALUES = ["image", "video", "ppt", "video_analysis"] as const;
 
 export type WorkflowKind = (typeof WORKFLOW_KIND_VALUES)[number];
@@ -125,6 +134,7 @@ export interface TurnRecord {
 }
 
 export interface ContextEnvelope {
+  validated_context_version: number;
   current_input: string;
   active_or_target_workflow: WorkflowRecord | null;
   recent_messages: JsonObject[];
@@ -177,6 +187,7 @@ export const EVENT_TYPE_VALUES = [
   "interrupt.opened",
   "interrupt.closed",
   "external_job.state_changed",
+  "external_job.quota_state_changed",
   "error.raised",
 ] as const;
 
@@ -204,7 +215,30 @@ export interface TurnStartRequest {
   reply_to_message_id: string | null;
   artifact_refs: string[];
   expected_context_version: number;
+  explicit_action: ExplicitActionSignal | null;
 }
+
+export type InterruptResponseRequest = Readonly<{
+  client_response_id: string;
+  value: Readonly<{
+    content: string;
+    materials: readonly JsonObject[];
+    reply_to_message_id: string | null;
+    artifact_refs: readonly string[];
+    explicit_action: ExplicitActionSignal | null;
+  }>;
+}>;
+
+export type AgentInterruptProjection = Readonly<{
+  interrupt_id: string;
+  conversation_id: string;
+  workflow_id: string | null;
+  turn_id: string;
+  kind: string;
+  reason_code: string;
+  payload: Readonly<Record<string, JsonValue>>;
+  opened_at: string;
+}>;
 
 export interface OperationRequest {
   workflow_id: string;
@@ -236,6 +270,32 @@ const AGENT_EVENT_KEYS = new Set([
   "type",
   "payload",
 ]);
+const TURN_START_KEYS = new Set([
+  "client_input_id",
+  "content",
+  "materials",
+  "reply_to_message_id",
+  "artifact_refs",
+  "expected_context_version",
+  "explicit_action",
+]);
+const INTERRUPT_RESPONSE_KEYS = new Set(["client_response_id", "value"]);
+const INTERRUPT_RESPONSE_VALUE_KEYS = new Set([
+  "content",
+  "materials",
+  "reply_to_message_id",
+  "artifact_refs",
+  "explicit_action",
+]);
+const EXPLICIT_ACTION_KEYS = new Set([
+  "action",
+  "intent",
+  "workflow_id",
+  "stage",
+  "artifact_ref",
+  "patch",
+]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -243,6 +303,18 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isIso8601(value: unknown): value is string {
   return isNonEmptyString(value) && ISO_8601_PATTERN.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function isDenseArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonValue {
@@ -257,15 +329,177 @@ function isJsonValue(value: unknown, ancestors: WeakSet<object>): value is JsonV
   }
 
   ancestors.add(value);
-  const valid = Array.isArray(value)
-    ? value.every((item) => isJsonValue(item, ancestors))
-    : Object.values(value).every((item) => isJsonValue(item, ancestors));
+  let valid = false;
+  try {
+    if (Array.isArray(value)) {
+      valid = isDenseArray(value);
+      for (let index = 0; valid && index < value.length; index += 1) {
+        valid = isJsonValue(value[index], ancestors);
+      }
+    } else {
+      const prototype = Object.getPrototypeOf(value);
+      valid = (prototype === Object.prototype || prototype === null)
+        && Object.values(value).every((item) => isJsonValue(item, ancestors));
+    }
+  } catch {
+    valid = false;
+  }
   ancestors.delete(value);
   return valid;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value) && isJsonValue(value, new WeakSet());
+}
+
+function cloneAndFreezeJson(value: unknown, ancestors = new WeakSet<object>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("JSON 数字必须是有限值");
+    }
+    return value;
+  }
+  if (typeof value !== "object" || ancestors.has(value)) {
+    throw new TypeError("只允许无循环引用的 JSON 值");
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (!isDenseArray(value)) {
+        throw new TypeError("JSON 数组不能包含空槽");
+      }
+      const clone: JsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        clone.push(cloneAndFreezeJson(value[index], ancestors));
+      }
+      return Object.freeze(clone) as unknown as JsonValue[];
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError("JSON 对象必须使用普通对象原型");
+    }
+    const clone: JsonObject = prototype === null ? Object.create(null) : {};
+    for (const [key, item] of Object.entries(value)) {
+      clone[key] = cloneAndFreezeJson(item, ancestors);
+    }
+    return Object.freeze(clone);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function hasOnlyKeys(value: JsonObject, keys: ReadonlySet<string>): boolean {
+  return Object.keys(value).length === keys.size
+    && Object.keys(value).every((key) => keys.has(key));
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function isOptionalNonEmptyString(value: unknown): value is string | null {
+  return value === null || isNonEmptyString(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  if (!isDenseArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== "string") {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isJsonObjectArray(value: unknown): value is JsonObject[] {
+  if (!isDenseArray(value)) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isJsonObject(value[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isExplicitActionSignal(value: unknown): value is ExplicitActionSignal {
+  if (!isJsonObject(value) || !hasOnlyKeys(value, EXPLICIT_ACTION_KEYS)) {
+    return false;
+  }
+  return (ACTION_VALUES as readonly unknown[]).includes(value.action)
+    && (value.intent === "video" || value.intent === null)
+    && isOptionalNonEmptyString(value.workflow_id)
+    && isOptionalNonEmptyString(value.stage)
+    && isOptionalNonEmptyString(value.artifact_ref)
+    && isJsonObject(value.patch);
+}
+
+export function isTurnStartRequest(value: unknown): value is TurnStartRequest {
+  if (!isJsonObject(value)) {
+    return false;
+  }
+  return hasOnlyKeys(value, TURN_START_KEYS)
+    && isUuid(value.client_input_id)
+    && isNonEmptyString(value.content)
+    && isJsonObjectArray(value.materials)
+    && isOptionalNonEmptyString(value.reply_to_message_id)
+    && isStringArray(value.artifact_refs)
+    && Number.isSafeInteger(value.expected_context_version)
+    && typeof value.expected_context_version === "number"
+    && value.expected_context_version >= 0
+    && (
+      value.explicit_action === null
+      || isExplicitActionSignal(value.explicit_action)
+    );
+}
+
+export function parseTurnStartRequest(value: unknown): TurnStartRequest {
+  try {
+    const snapshot = cloneAndFreezeJson(value);
+    if (!isTurnStartRequest(snapshot)) {
+      throw new TypeError("Turn 请求不符合 contracts-v1 合同");
+    }
+    return snapshot;
+  } catch {
+    throw new TypeError("Turn 请求不符合 contracts-v1 合同");
+  }
+}
+
+export function isInterruptResponseRequest(value: unknown): value is InterruptResponseRequest {
+  if (!isJsonObject(value) || !hasOnlyKeys(value, INTERRUPT_RESPONSE_KEYS)) {
+    return false;
+  }
+  const responseValue = value.value;
+  return isUuid(value.client_response_id)
+    && isJsonObject(responseValue)
+    && hasOnlyKeys(responseValue, INTERRUPT_RESPONSE_VALUE_KEYS)
+    && isNonEmptyString(responseValue.content)
+    && isJsonObjectArray(responseValue.materials)
+    && isOptionalNonEmptyString(responseValue.reply_to_message_id)
+    && isStringArray(responseValue.artifact_refs)
+    && (
+      responseValue.explicit_action === null
+      || isExplicitActionSignal(responseValue.explicit_action)
+    );
+}
+
+export function parseInterruptResponseRequest(value: unknown): InterruptResponseRequest {
+  try {
+    const snapshot = cloneAndFreezeJson(value);
+    if (!isInterruptResponseRequest(snapshot)) {
+      throw new TypeError("interrupt response 不符合 contracts-v1 合同");
+    }
+    return snapshot;
+  } catch {
+    throw new TypeError("interrupt response 不符合 contracts-v1 合同");
+  }
 }
 
 function isAgentEventType(value: unknown): value is AgentEventType {

@@ -195,6 +195,105 @@ async def test_memory_conversation_store_concurrent_duplicate_message_returns_ex
     assert [message.content for message in messages] == ["plan.md 首次写入"]
 
 
+@pytest.mark.asyncio
+async def test_memory_agent_runtime_response_write_commits_message_and_version_together():
+    """专用写单元必须同时提交可见消息和响应后的上下文版本。"""
+
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="c-live-response",
+            user_id="u1",
+            orchestration_mode="supervisor_v1",
+            context={
+                "__agent_runtime": {
+                    "mode": "primary",
+                    "context_version": 4,
+                }
+            },
+        )
+    )
+    message = PixelFlowConversationMessageRecord(
+        message_id="response-message-1",
+        conversation_id="c-live-response",
+        user_id="u1",
+        role="user",
+        content="同意方案",
+        payload={"interrupt_id": "interrupt-1"},
+        created_at="2026-08-01T08:00:00+00:00",
+    )
+
+    async with store.agent_runtime_interrupt_response_write(
+        conversation_id="c-live-response",
+        user_id="u1",
+        message=message,
+        occurred_at="2026-08-01T08:00:00+00:00",
+    ) as write:
+        assert write.pre_input_context_version == 4
+        assert write.context_version == 5
+        assert write.message == message
+
+    conversation = await store.get_conversation(
+        "c-live-response",
+        user_id="u1",
+    )
+    assert conversation is not None
+    assert conversation.context["__agent_runtime"]["context_version"] == 5
+    assert conversation.revision == 2
+    assert await store.list_conversation_messages(
+        "c-live-response",
+        user_id="u1",
+    ) == [message]
+
+
+@pytest.mark.asyncio
+async def test_memory_agent_runtime_response_write_rolls_back_on_outer_failure():
+    """Repository 后续写入失败时，专用写单元必须回滚消息、版本和 revision。"""
+
+    store = MemoryPixelFlowTaskStore()
+    await store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="c-live-rollback",
+            user_id="u1",
+            orchestration_mode="supervisor_v1",
+            context={
+                "__agent_runtime": {
+                    "mode": "primary",
+                    "context_version": 9,
+                }
+            },
+        )
+    )
+    before = await store.get_conversation("c-live-rollback", user_id="u1")
+    message = PixelFlowConversationMessageRecord(
+        message_id="response-message-rollback",
+        conversation_id="c-live-rollback",
+        user_id="u1",
+        role="user",
+        content="同意方案",
+        payload={"interrupt_id": "interrupt-1"},
+        created_at="2026-08-01T08:00:00+00:00",
+    )
+
+    with pytest.raises(RuntimeError, match="注入写入失败"):
+        async with store.agent_runtime_interrupt_response_write(
+            conversation_id="c-live-rollback",
+            user_id="u1",
+            message=message,
+            occurred_at="2026-08-01T08:00:00+00:00",
+        ):
+            raise RuntimeError("注入写入失败")
+
+    assert await store.get_conversation(
+        "c-live-rollback",
+        user_id="u1",
+    ) == before
+    assert await store.list_conversation_messages(
+        "c-live-rollback",
+        user_id="u1",
+    ) == []
+
+
 def _jianying_pending(job_id: str, conversation_id: str, storyboard_version_id: str) -> dict[str, str]:
     return {
         "job_id": job_id,

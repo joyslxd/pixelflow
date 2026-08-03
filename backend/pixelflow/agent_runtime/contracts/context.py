@@ -104,6 +104,7 @@ class ContextEnvelope(ContractModel):
     """每次模型调用收到的相关上下文，而不是全部数据库原文。"""
 
     current_input: str = Field(min_length=1)
+    validated_context_version: int = Field(ge=0)
     active_or_target_workflow: WorkflowRecord | None = None
     recent_messages: list[dict[str, JsonValue]] = Field(default_factory=list)
     conversation_summary: ContextSummary | None = None

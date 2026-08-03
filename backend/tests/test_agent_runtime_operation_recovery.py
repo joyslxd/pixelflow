@@ -26,6 +26,7 @@ from pixelflow.agent_runtime.contracts import (
 from pixelflow.agent_runtime.jobs import (
     MappingProviderJobAdapterResolver,
     OperationManualRecoveryAction,
+    OperationQuotaCoordinator,
     OperationRecoveryRuntime,
     OperationStartCoordinator,
     OperationStartQuotaPausedError,
@@ -41,6 +42,7 @@ from pixelflow.agent_runtime.persistence.repositories import (
     OperationRecord,
     SQLAgentRuntimeRepository,
 )
+from pixelflow.agent_runtime.ports import OperationConflictError
 
 RepositoryKind = Literal["memory", "sql"]
 NOW = datetime(2026, 7, 28, 10, 0, tzinfo=UTC)
@@ -202,6 +204,63 @@ class _RecordingGraphResumer:
         self.calls.append((namespace, completion_event, idempotency_key))
 
 
+class _RecordingQuotaGraph:
+    """记录 quota 事件的 Workflow 恢复边界，不执行真实业务图。"""
+
+    def __init__(self, *, fail_first: bool = False) -> None:
+        self.calls: list[tuple[object, AgentEvent, str]] = []
+        self._fail_first = fail_first
+
+    async def resume_external_job_quota(
+        self,
+        namespace: object,
+        *,
+        quota_event: AgentEvent,
+        idempotency_key: str,
+    ) -> None:
+        self.calls.append((namespace, quota_event, idempotency_key))
+        if self._fail_first:
+            self._fail_first = False
+            raise RuntimeError("模拟 quota checkpoint 失败")
+
+
+class _OrderedRepository:
+    """仅记录恢复扫描三个公开 Repository 边界的顺序。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def list_pending_operation_quota_events(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[object]:
+        del now, limit
+        self.calls.append("list_pending_operation_quota_events")
+        return []
+
+    async def list_pending_operation_completions(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[object]:
+        del now, limit
+        self.calls.append("list_pending_operation_completions")
+        return []
+
+    async def list_due_operations(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[object]:
+        del now, limit
+        self.calls.append("list_due_operations")
+        return []
+
+
 def _resolver(
     service: _ScriptedExistingJobService,
 ) -> MappingProviderJobAdapterResolver:
@@ -352,25 +411,15 @@ async def test_start_quota_pause_returns_safe_recoverable_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
-async def test_quota_pause_only_resumes_original_provider_job_after_user_action(
+async def test_status_402_persists_pause_event_before_graph_and_replays_same_identity(
     kind: RepositoryKind,
     tmp_path: Path,
 ) -> None:
-    clock = [NOW]
     service = _ScriptedExistingJobService(
-        status_results=[
-            {
-                "job_id": PROVIDER_JOB_ID,
-                "status": "quota_paused",
-            },
-            {
-                "job_id": PROVIDER_JOB_ID,
-                "status": "succeeded",
-                "result": {"artifact_refs": ["artifact-image-1"]},
-            },
-        ]
+        status_results=[{"job_id": PROVIDER_JOB_ID, "status": "quota_paused"}]
     )
     resumer = _RecordingGraphResumer()
+    quota_graph = _RecordingQuotaGraph()
 
     async with _repositories(
         kind,
@@ -381,8 +430,9 @@ async def test_quota_pause_only_resumes_original_provider_job_after_user_action(
             repository,
             resolver=_resolver(service),
             resumer=resumer,
+            quota_resumer=quota_graph,
             worker_id="runtime-quota",
-            clock=lambda: clock[0],
+            clock=lambda: NOW,
             lease_duration=timedelta(seconds=30),
             poll_interval=timedelta(seconds=5),
             scan_interval=timedelta(seconds=1),
@@ -396,24 +446,318 @@ async def test_quota_pause_only_resumes_original_provider_job_after_user_action(
         assert paused.next_poll_at is None
         assert paused.lease_owner is None
         assert paused.lease_expires_at is None
+        assert paused.quota_pause_revision == 1
+        assert len(quota_graph.calls) == 1
+        first_event = quota_graph.calls[0][1]
+        assert first_event.payload["quota_state"] == "paused"
+        assert first_event.payload["quota_pause_revision"] == 1
+        assert quota_graph.calls[0][2] == first_event.event_id
 
-        clock[0] = NOW + timedelta(minutes=1)
-        recovery = await runtime.recover_manually(
-            OWNER,
-            CONVERSATION,
-            JOB_ID,
+        await runtime.run_once()
+
+        assert len(quota_graph.calls) == 1
+        assert service.status_calls == [PROVIDER_JOB_ID]
+        assert service.start_calls == []
+        assert resumer.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_paused_operation_rejects_unauthorized_manual_recovery(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止旧 recover_manually 绕过 quota resume 授权事件直接续跑 Provider。"""
+
+    service = _ScriptedExistingJobService(
+        status_results=[{"job_id": PROVIDER_JOB_ID, "status": "quota_paused"}]
+    )
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-quota-manual-closed.db",
+    ) as (repository, _):
+        await repository.create_operation(OWNER, _polling_operation())
+        runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=_RecordingGraphResumer(),
+            quota_resumer=_RecordingQuotaGraph(),
+            worker_id="runtime-quota-manual-closed",
+            clock=lambda: NOW,
         )
-        assert recovery.action is OperationManualRecoveryAction.RESUMED_ORIGINAL_JOB
-        assert recovery.operation.next_poll_at == clock[0]
+        await runtime.run_once()
 
+        with pytest.raises(
+            OperationConflictError,
+            match="quota_resume_requires_authorized_handler",
+        ):
+            await runtime.recover_manually(OWNER, CONVERSATION, JOB_ID)
+
+        paused = await repository.get_operation(OWNER, JOB_ID)
+        assert paused.next_poll_at is None
+        assert service.status_calls == [PROVIDER_JOB_ID]
+        assert service.start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_scan_order_is_quota_then_completion_then_due() -> None:
+    """防止到期轮询越过 quota 或 completion Outbox，导致重复副作用。"""
+
+    repository = _OrderedRepository()
+    service = _ScriptedExistingJobService()
+    runtime = OperationRecoveryRuntime(
+        repository,
+        resolver=_resolver(service),
+        resumer=_RecordingGraphResumer(),
+        quota_resumer=_RecordingQuotaGraph(),
+        worker_id="runtime-scan-order",
+        clock=lambda: NOW,
+    )
+
+    await runtime.run_once()
+
+    assert repository.calls == [
+        "list_pending_operation_quota_events",
+        "list_pending_operation_completions",
+        "list_due_operations",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_missing_quota_resumer_keeps_event_pending_and_stops_polling(
+    kind: RepositoryKind,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """防止未装配 quota Graph 时丢弃事件或继续查询原 Provider job。"""
+
+    caplog.set_level("WARNING")
+    service = _ScriptedExistingJobService(
+        status_results=[{"job_id": PROVIDER_JOB_ID, "status": "quota_paused"}]
+    )
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-quota-resumer-missing.db",
+    ) as (repository, _):
+        await repository.create_operation(OWNER, _polling_operation())
+        runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=_RecordingGraphResumer(),
+            worker_id="runtime-quota-resumer-missing",
+            clock=lambda: NOW,
+        )
+
+        await runtime.run_once()
+        await runtime.run_once()
+
+        pending = await repository.list_pending_operation_quota_events(
+            now=NOW,
+            limit=10,
+        )
+        assert len(pending) == 1
+        assert pending[0].event.payload["quota_state"] == "paused"
+        assert service.status_calls == [PROVIDER_JOB_ID]
+        assert service.start_calls == []
+        assert "phase=quota_dispatch error_type=OperationConflictError" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_second_status_402_increments_revision_and_rejects_old_resume(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止第二次 402 复用旧事件身份，或旧 revision 授权穿透新暂停。"""
+
+    clock = [NOW]
+    service = _ScriptedExistingJobService(
+        status_results=[
+            {"job_id": PROVIDER_JOB_ID, "status": "quota_paused"},
+            {"job_id": PROVIDER_JOB_ID, "status": "quota_paused"},
+        ]
+    )
+    quota_graph = _RecordingQuotaGraph()
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-quota-revision-two.db",
+    ) as (repository, _):
+        await repository.create_operation(OWNER, _polling_operation())
+        runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=_RecordingGraphResumer(),
+            quota_resumer=quota_graph,
+            worker_id="runtime-quota-revision",
+            clock=lambda: clock[0],
+            lease_duration=timedelta(seconds=30),
+        )
+        await runtime.run_once()
+
+        clock[0] = NOW + timedelta(seconds=1)
+        coordinator = OperationQuotaCoordinator(
+            repository,
+            user_id=OWNER,
+            conversation_id=CONVERSATION,
+        )
+        authorized = await coordinator.authorize_resume(
+            JOB_ID,
+            workflow_id=WORKFLOW,
+            expected_revision=1,
+            delivery_lease_owner="quota-user-action",
+            now=clock[0],
+            delivery_lease_expires_at=clock[0] + timedelta(seconds=30),
+        )
+        await repository.complete_event_delivery(
+            OWNER,
+            authorized.claim.event.event_id,
+            lease_owner="quota-user-action",
+            published_at=clock[0],
+        )
+        await runtime.run_once()
+
+        paused_again = await repository.get_operation(OWNER, JOB_ID)
+        assert paused_again.quota_pause_revision == 2
+        assert [call[1].payload["quota_pause_revision"] for call in quota_graph.calls] == [1, 2]
+        assert quota_graph.calls[0][1].event_id != quota_graph.calls[1][1].event_id
+        with pytest.raises(OperationConflictError, match="quota revision"):
+            await coordinator.authorize_resume(
+                JOB_ID,
+                workflow_id=WORKFLOW,
+                expected_revision=1,
+                delivery_lease_owner="stale-quota-user-action",
+                now=clock[0],
+                delivery_lease_expires_at=clock[0] + timedelta(seconds=30),
+            )
+        assert service.status_calls == [PROVIDER_JOB_ID, PROVIDER_JOB_ID]
+        assert service.start_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_graph_failure_keeps_pause_event_for_expired_lease_takeover(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止 Graph 失败后误确认 pause 事件，或有效租约期内被其他 worker 重放。"""
+
+    clock = [NOW]
+    service = _ScriptedExistingJobService(
+        status_results=[{"job_id": PROVIDER_JOB_ID, "status": "quota_paused"}]
+    )
+    first_graph = _RecordingQuotaGraph(fail_first=True)
+    second_graph = _RecordingQuotaGraph()
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-quota-lease-takeover.db",
+    ) as (repository, _):
+        await repository.create_operation(OWNER, _polling_operation())
+        first_runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=_RecordingGraphResumer(),
+            quota_resumer=first_graph,
+            worker_id="runtime-quota-first",
+            clock=lambda: clock[0],
+            lease_duration=timedelta(seconds=10),
+        )
+        await first_runtime.run_once()
+        event_id = first_graph.calls[0][1].event_id
+
+        second_runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=_RecordingGraphResumer(),
+            quota_resumer=second_graph,
+            worker_id="runtime-quota-second",
+            clock=lambda: clock[0],
+            lease_duration=timedelta(seconds=10),
+        )
+        clock[0] = NOW + timedelta(seconds=5)
+        await second_runtime.run_once()
+        assert second_graph.calls == []
+
+        clock[0] = NOW + timedelta(seconds=11)
+        await second_runtime.run_once()
+        pending = await repository.list_pending_operation_quota_events(
+            now=clock[0],
+            limit=10,
+        )
+
+        assert len(second_graph.calls) == 1
+        assert second_graph.calls[0][1].event_id == event_id
+        assert pending == []
+        assert service.status_calls == [PROVIDER_JOB_ID]
+        assert service.start_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_resume_event_blocks_polling_until_delivery_lease_takeover(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """防止已授权 resume 事件尚未投递时提前轮询，并验证租约过期后可独立接管。"""
+
+    clock = [NOW]
+    service = _ScriptedExistingJobService(
+        status_results=[
+            {"job_id": PROVIDER_JOB_ID, "status": "quota_paused"},
+            {
+                "job_id": PROVIDER_JOB_ID,
+                "status": "succeeded",
+                "result": {"artifact_refs": ["artifact-after-quota"]},
+            },
+        ]
+    )
+    quota_graph = _RecordingQuotaGraph()
+    completion_graph = _RecordingGraphResumer()
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-resume-event-blocks-polling.db",
+    ) as (repository, _):
+        await repository.create_operation(OWNER, _polling_operation())
+        runtime = OperationRecoveryRuntime(
+            repository,
+            resolver=_resolver(service),
+            resumer=completion_graph,
+            quota_resumer=quota_graph,
+            worker_id="runtime-resume-event",
+            clock=lambda: clock[0],
+            lease_duration=timedelta(seconds=10),
+        )
+        await runtime.run_once()
+
+        clock[0] = NOW + timedelta(seconds=1)
+        authorized = await OperationQuotaCoordinator(
+            repository,
+            user_id=OWNER,
+            conversation_id=CONVERSATION,
+        ).authorize_resume(
+            JOB_ID,
+            workflow_id=WORKFLOW,
+            expected_revision=1,
+            delivery_lease_owner="quota-user-action",
+            now=clock[0],
+            delivery_lease_expires_at=clock[0] + timedelta(seconds=10),
+        )
+
+        clock[0] = NOW + timedelta(seconds=5)
+        await runtime.run_once()
+        assert service.status_calls == [PROVIDER_JOB_ID]
+        assert len(quota_graph.calls) == 1
+
+        clock[0] = NOW + timedelta(seconds=12)
         await runtime.run_once()
         completed = await repository.get_operation(OWNER, JOB_ID)
 
-        assert completed.status is ExternalJobStatus.SUCCEEDED
+        assert quota_graph.calls[-1][1].event_id == authorized.claim.event.event_id
+        assert quota_graph.calls[-1][1].payload["quota_state"] == "resumed"
         assert service.status_calls == [PROVIDER_JOB_ID, PROVIDER_JOB_ID]
         assert service.start_calls == []
-        assert len(resumer.calls) == 1
-        assert resumer.calls[0][2] == resumer.calls[0][1].event_id
+        assert completed.status is ExternalJobStatus.SUCCEEDED
+        assert len(completion_graph.calls) == 1
 
 
 @pytest.mark.asyncio

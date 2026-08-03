@@ -12,20 +12,30 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
-from pixelflow.agent_runtime.contracts import TurnStartRequest
+from pixelflow.agent_runtime.contracts import (
+    InterruptResponseRequest,
+    TurnStartRequest,
+)
 from pixelflow.agent_runtime.service import (
     AgentRuntimeContextConflictError,
+    AgentRuntimeInterruptConflictError,
+    AgentRuntimeInterruptRequestValidationError,
+    AgentRuntimeInterruptStateError,
+    AgentRuntimeLegacyInterruptOwnershipError,
     AgentRuntimeService,
     AgentRuntimeSnapshotResponse,
     AgentRuntimeUnavailableError,
     AgentTurnJobResponse,
     AgentTurnStartResponse,
+)
+from pixelflow.agent_workflows.video.live_capabilities import (
+    TransientTurnCredential,
 )
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
@@ -218,9 +228,70 @@ def _runtime_http_exception(exc: Exception) -> HTTPException:
                 "current_context_version": exc.current_context_version,
             },
         )
+    if isinstance(exc, AgentRuntimeInterruptConflictError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "agent_runtime_interrupt_conflict"},
+        )
+    if isinstance(exc, AgentRuntimeInterruptStateError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "agent_runtime_interrupt_state_invalid"},
+        )
     if isinstance(exc, LookupError):
         return HTTPException(status_code=404, detail="Conversation not found")
     return HTTPException(status_code=500, detail="Agent Runtime request failed")
+
+
+async def _preflight_agent_interrupt_response(
+    conversation_id: str,
+    interrupt_id: str,
+    request: Request,
+) -> None:
+    """在 FastAPI DTO 校验前只读确认所有权并生成固定安全错误。"""
+
+    try:
+        raw_body = await request.json()
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
+        ) from None
+    service = _agent_runtime_service(request)
+    try:
+        await service.preflight_interrupt_response(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            request=raw_body,
+        )
+    except AgentRuntimeLegacyInterruptOwnershipError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+                "interrupt_id": interrupt_id,
+            },
+        ) from exc
+    except AgentRuntimeInterruptRequestValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
+        ) from exc
+    except (
+        AgentRuntimeInterruptStateError,
+        AgentRuntimeUnavailableError,
+        LookupError,
+    ) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+def _transient_turn_credential(request: Request) -> TransientTurnCredential | None:
+    """只把当前 HTTP Authorization 封装为不可序列化的一次性凭据。"""
+
+    authorization = request.headers.get("Authorization")
+    if authorization is None or not authorization.strip():
+        return None
+    return TransientTurnCredential(authorization=authorization)
 
 
 def _conversation_response(record: PixelFlowConversationRecord) -> ConversationResponse:
@@ -295,8 +366,9 @@ async def start_agent_turn(
     """保存统一输入并注册可幂等恢复的 Turn。"""
 
     user_id = await get_current_user(request)
+    service = _agent_runtime_service(request)
     try:
-        return await _agent_runtime_service(request).start_turn(
+        result = await service.start_turn(
             user_id=user_id,
             conversation_id=conversation_id,
             request=body,
@@ -307,6 +379,11 @@ async def start_agent_turn(
         LookupError,
     ) as exc:
         raise _runtime_http_exception(exc) from exc
+    service.notify_registered_turn(
+        result.turn_id,
+        credential=_transient_turn_credential(request),
+    )
+    return result
 
 
 @router.get(
@@ -325,7 +402,11 @@ async def get_agent_snapshot(
             user_id=user_id,
             conversation_id=conversation_id,
         )
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
+    except (
+        AgentRuntimeInterruptStateError,
+        AgentRuntimeUnavailableError,
+        LookupError,
+    ) as exc:
         raise _runtime_http_exception(exc) from exc
 
 
@@ -419,36 +500,57 @@ async def get_agent_turn_job(
 
 @router.post(
     "/{conversation_id}/interrupts/{interrupt_id}/responses",
-    status_code=409,
+    response_model=AgentTurnJobResponse,
+    dependencies=[Depends(_preflight_agent_interrupt_response)],
 )
 async def respond_to_agent_interrupt(
     conversation_id: str,
     interrupt_id: str,
-    body: dict[str, Any],
+    body: InterruptResponseRequest,
     request: Request,
-) -> None:
-    """R1 assist 的人工确认仍由旧 v2 业务 Controller 处理。"""
+) -> AgentTurnJobResponse:
+    """live 对话在原 Turn 上登记响应；旧 v2 继续保持原所有权。"""
 
     user_id = await get_current_user(request)
+    service = _agent_runtime_service(request)
     try:
-        conversation = await _agent_runtime_service(
-            request,
-        ).require_conversation(
+        result = await service.respond_to_interrupt(
             user_id=user_id,
             conversation_id=conversation_id,
+            interrupt_id=interrupt_id,
+            request=body,
         )
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
+    except AgentRuntimeLegacyInterruptOwnershipError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_runtime_interrupt_owned_by_legacy_v2",
+                "interrupt_id": interrupt_id,
+            },
+        ) from exc
+    except AgentRuntimeInterruptRequestValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_runtime_interrupt_response_invalid"},
+        ) from exc
+    except AgentRuntimeInterruptConflictError as exc:
+        if exc.reason_code == "video_quota_resume_stale":
+            return JSONResponse(
+                status_code=409,
+                content={"reason_code": "video_quota_resume_stale"},
+            )
         raise _runtime_http_exception(exc) from exc
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    del body
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": "agent_runtime_interrupt_owned_by_legacy_v2",
-            "interrupt_id": interrupt_id,
-        },
+    except (
+        AgentRuntimeInterruptStateError,
+        AgentRuntimeUnavailableError,
+        LookupError,
+    ) as exc:
+        raise _runtime_http_exception(exc) from exc
+    service.notify_registered_interrupt(
+        interrupt_id,
+        credential=_transient_turn_credential(request),
     )
+    return result
 
 
 @router.get("", response_model=ConversationListResponse)
