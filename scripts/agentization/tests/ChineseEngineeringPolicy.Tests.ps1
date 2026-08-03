@@ -208,6 +208,26 @@ Describe "中文工程规范门禁" {
         $result.Passed | Should Be $true
     }
 
+    It "不把 Python 星号解包表达式误判为人工注释" {
+        $repository = New-PolicyTestRepository
+        $content = "MAPPING = {'value': 1}`nITERABLE = (1, 2)`nresult = target(`n    **MAPPING,`n)`nitems = (`n    *ITERABLE,`n)"
+        Add-TestCommit -RepositoryPath $repository -RelativePath "sample.py" -Content $content -Message "测试：验证 Python 星号解包表达式"
+
+        $result = & $PolicyScript -RepositoryPath $repository -BaseRef "HEAD~1" -HeadRef "HEAD"
+
+        $result.Passed | Should Be $true
+    }
+
+    It "继续拒绝 JavaScript 和 TypeScript 块注释中的英文人工说明" {
+        foreach ($extension in @("js", "ts")) {
+            $repository = New-PolicyTestRepository
+            $content = "/*`n * explain the behavior`n */`nexport const value = 1;"
+            Add-TestCommit -RepositoryPath $repository -RelativePath "sample.$extension" -Content $content -Message "测试：验证块注释英文说明拒绝"
+
+            { & $PolicyScript -RepositoryPath $repository -BaseRef "HEAD~1" -HeadRef "HEAD" } | Should Throw
+        }
+    }
+
     It "拒绝多行英文 Python docstring" {
         $repository = New-PolicyTestRepository
         $content = "def value():`n    `"`"`"`n    English explanation.`n    `"`"`"`n    return 1"

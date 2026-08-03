@@ -1492,6 +1492,9 @@ def test_video_package_keeps_all_public_exports_in_clean_process() -> None:
     module_by_name = {
         "VideoLiveStateConflictError": "live_handler",
         "VideoLiveWorkflowHandler": "live_handler",
+        "VideoOperationQuotaProjection": "live_quota",
+        "VideoOperationQuotaProjectionService": "live_quota",
+        "VideoOperationQuotaStateHandler": "live_operations",
         "VideoDeliveryWorkflowService": "delivery",
         "VideoDeliveryWorkflowState": "delivery",
         "VideoPlanAuthoritySnapshot": "planning",

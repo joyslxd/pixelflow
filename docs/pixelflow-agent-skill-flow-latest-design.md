@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-07-24
+更新时间：2026-08-03
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -937,6 +937,22 @@ flowchart TD
 3. 保存当前 conversation context 和 artifact。
 4. 用户充值后回到同一对话，仍可以点击当前阶段或上一步按钮继续。
 
+R2 视频 live Handler 的 status 402 候选在上述 v2 提示语义之外增加持久化恢复合同。Provider 已经返回
+`provider_job_id` 后，status 402 不允许重启原 Operation，也不允许再次调用 Provider start。Memory/SQL
+Repository 在同一临界区或事务中把 `quota_pause_revision` 从 `0` 单调递增，并原子提交对应的
+`external_job.quota_state_changed` pause Event；每个 revision 的 pause/resume Event ID 只由内部
+`job_id + revision + quota_state` 派生，恢复 Runtime 必须先投递 quota Event，再投递 completion，最后才允许
+继续轮询原 provider job。402 本身不是 completion，timeout、failed 和 404/expired 仍沿用终态及新 attempt
+合同。
+
+用户恢复复用公开 interrupt response Controller 与既有 `retry_failed` 动作，安全 patch 只包含 `job_id` 和
+`quota_pause_revision`。Controller 接收的新 Authorization 只沿 Router → Service → Executor → Vault → Handler
+→ Bridge 当前调用栈传递；Handler 用 Graph 已校验的精确 `source_interrupt_id` 回读权威中断，再由 Repository
+在写入 response/message/context/Event 前原子校验 owner、conversation、workflow、stage、job、revision、
+status、provider job、轮询计划和租约。旧 revision 固定返回 `409 video_quota_resume_stale` 且零副作用；
+有效响应只恢复同一内部 job、同一 provider job 和同一 attempt，Provider start 增量为 `0`。生产当前仍是
+R1，以上只属于尚未单槽集成的 R2 本地候选。
+
 ## 11. 对话与上下文恢复
 
 对话隔离是前端流程正确性的关键。
@@ -1027,11 +1043,14 @@ flowchart TD
 | `PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS=30` | 压缩失败后持久化 30 秒重试边界，读取接口到期前不重复唤醒 |
 | `models[].context_profile.max_context_tokens=1000000` | 当前 DeepSeek V4 Pro 已确认的物理上下文窗口；统一有效窗口还保留 82,496 tokens 余量 |
 
-M13.1/R1 测试环境冻结为 `assist / [] / 100 / true`；生产配置显式保存
-`off / [] / 0 / false`。dev/prod 都保存相同的 896K/32K/32K 预算结构、30 秒退避和
-DeepSeek V4 Pro 1,000,000 tokens 已验证档案，避免未来 R2–R4 启用或新增节点时
-回落旧常量。配置修改后必须重启，统一影响新进程；历史对话和运行中任务不迁移。
-生产启用仍必须取得独立发布批准。
+当前实际 dev profile 为 `primary / [video] / 100 / true`，生产 profile 为
+R1 `assist / [] / 100 / true`。Task 14 隔离候选没有修改 `backend/config.dev.yml` 或
+`backend/config.prod.yml`；dev 配置只代表允许接管的上限，当前可部署 Agent 基线仍未安装
+视频 live Graph Handler，就绪集合为空，因此新视频对话继续安全归属 `frontend_v2`。
+dev/prod 都保存相同的 896K/32K/32K 预算结构、30 秒退避和 DeepSeek V4 Pro
+1,000,000 tokens 已验证档案，避免未来 R2–R4 启用或新增节点时回落旧常量。配置修改后
+必须重启，统一影响新进程；历史对话和运行中任务不迁移。生产继续保持 R1，安装 Handler、
+切换 `primary(video)` 和发布 R2 仍必须分别取得独立批准。
 
 配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
 
@@ -1133,13 +1152,19 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 已通过阶段单槽进入 Agent，dev profile 声明为 `primary / enabled_intents=[video] / 100% / true`；这个配置只代表允许接管的上限，不能单独证明业务执行链已安装。创建 Controller 接收保守的首轮 intent 提示后，`AgentRuntimeService` 还必须同时命中进程启动时注册的 `primary_execution_intents`，才允许把新对话冻结为 `supervisor_v1`。Task 13 隔离候选补齐了视频 live Graph Handler 的 Turn 消费、五类人工 interrupt、九动作分发、权威 Workflow/Artifact 投影和 Web 结构化 action 接线；Task 14 隔离候选进一步完成 Gateway 全有或全无装配及 fake 公共全链路门禁。该候选尚未进入 Agent 长期分支，因此当前可部署 Agent 基线仍没有 live Handler，就绪集合为空，视频新对话安全保持 `frontend_v2`，但仍完整经过 R1 Turn、Snapshot/SSE、压缩和输入队列，再由既有 v2 视频 Service 推进。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 已通过阶段单槽进入 Agent，dev profile 声明为 `primary / enabled_intents=[video] / 100% / true`；这个配置只代表允许接管的上限，不能单独证明业务执行链已安装。创建 Controller 接收保守的首轮 intent 提示后，`AgentRuntimeService` 还必须同时命中进程启动时注册的 `primary_execution_intents`，才允许把新对话冻结为 `supervisor_v1`。Task 13 隔离候选补齐了视频 live Graph Handler 的 Turn 消费、五类人工 interrupt、九动作分发、权威 Workflow/Artifact 投影和 Web 结构化 action 接线；Task 14 隔离候选进一步完成 Gateway 全有或全无装配、status 402 持久化暂停/恢复和 fake 公共全链路门禁，当前实现检查点为 `d32adf4`，状态为 `review_fix_local_verified:Task14 / awaiting_independent_slot_integration`。该候选尚未进入 Agent 长期分支，因此当前可部署 Agent 基线仍没有 live Handler，就绪集合为空，视频新对话安全保持 `frontend_v2`，但仍完整经过 R1 Turn、Snapshot/SSE、压缩和输入队列，再由既有 v2 视频 Service 推进。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
 
-R2 候选新增 `SupervisorReplayRuntime`，相当于会话回放编排 Service：`off/assist` 在 Graph Handler 前执行 kill switch，未启用 intent 返回 delegated，`shadow` 只形成冻结 `ActionDecision`、标准命令 DTO 和统一预算报告，禁止进入 Workflow Handler、Operation 或 PowerMem record；只有 `primary` 才调用 M02/M05 图内核。视频 `WorkflowCommand` 明确携带 `user_id/turn_id/current_input/materials/reply_to_message_id/artifact_refs`，并在 Handler 边界深拷贝附件。Task 13 在此基础上实现真实 live handler 开发候选：表单确认/取消、方向选择/重生成、Plan 同意/修订/历史恢复/返回新创意、场景包单镜与全局素材增删改、分镜失败重试和局部重生成、合并与质检重试、最终确认/修改、剪映生成/重试/下载及成片下载均由当前 interrupt 的 `workflow_id + stage + artifact_ref` 定向；前端为每次结构化响应只生成一个 `client_response_id`，已注册恢复只查询原 run，不重发动作。Task 14 只在隔离开发候选中装配 Gateway Handler，并使用本地 fake Provider 运行门禁，不调用真实 LLM、content-app、PowerMem 或付费 Provider。该候选尚未完成独立单槽集成、真实付费验证或生产切换，不能据此认定 `primary(video)` 已可发布。
+R2 候选新增 `SupervisorReplayRuntime`，相当于会话回放编排 Service：`off/assist` 在 Graph Handler 前执行 kill switch，未启用 intent 返回 delegated，`shadow` 只形成冻结 `ActionDecision`、标准命令 DTO 和统一预算报告，禁止进入 Workflow Handler、Operation 或 PowerMem record；只有 `primary` 才调用 M02/M05 图内核。视频 `WorkflowCommand` 明确携带 `user_id/turn_id/current_input/materials/reply_to_message_id/artifact_refs`，并在 Handler 边界深拷贝附件。Task 13 在此基础上实现真实 live handler 开发候选：表单确认/取消、方向选择/重生成、Plan 同意/修订/历史恢复/返回新创意、场景包单镜与全局素材增删改、分镜失败重试和局部重生成、合并与质检重试、最终确认/修改、剪映生成/重试/下载及成片下载均由当前 interrupt 的 `workflow_id + stage + artifact_ref` 定向；前端为每次结构化响应只生成一个 `client_response_id`，已注册恢复只查询原 run，不重发动作。Task 14 只在隔离开发候选中装配 Gateway Handler，并使用本地 fake Provider 运行门禁，不调用真实 LLM、content-app、PowerMem 或付费 Provider。Task 7 的独立复审最终为 Critical `0`、Important `0`、Minor `0`；Task 8 已执行最终本地门禁，候选相关聚焦、Ruff、Web、中文和静态隔离检查通过，后端全量只剩计划登记的 Runtime 公开导出基线失败。首轮 spec compliance 的三个 Important 已通过正式计划同步、配置事实校正和公共 E2E 四事件实采关闭；最终 spec compliance 与 code quality 独立复审均为 Critical `0`、Important `0`、Minor `0`。这仍只是隔离候选证据；该候选尚未完成独立单槽集成、真实付费验证或生产切换，不能据此认定 `primary(video)` 已可发布。
 
 M13.2/R2 测试环境人工验收进一步冻结组合运行合同：`frontend_v2 + primary/assist` 允许 R1 统一会话消息投影与 v2 业务 runner 同时挂载，但只有真实 `supervisor_v1` owner 才能用 Supervisor Workflow 投影任务看板；空 Workflow 不得清空 v2 的 `workflowProgress`。前端必须只信任服务端保留命名空间中的 `primary_execution_ready`；历史误分配会话缺少该证据时停止从 inputQueue 重建，先按会话稳定消息 ID 持久化一次安全说明，再写 `agent_runtime_unavailable_notice_version=1` 并一次清空全部 pending。即使本地 pending 已空但服务端仍有孤儿 input，或进程在提示与 marker 写入之间退出，刷新也只补齐同一恢复事务，不得重复消息或 Conversation `PUT`。分镜故事、全局素材删除和视频最终确认都以消息 Artifact 为权威 DTO，必须先 `PATCH` 权威消息，再保存 Conversation Snapshot 并提示成功；存在物化消息时旧 context 只能作为缺失字段兜底，不能覆盖后续编辑。QAAgent QC 没有返回 `target_scene_ids/affected_scene_ids` 时仍默认失败关闭；只有用户意见明确包含“修改/修复/重生成第 N 个分镜（或第 N 段）”时，才允许把对应 scene ID 作为严格兜底作用域，模糊意见以及“不要/不用/无需/不/别修改第 N 个分镜”等否定表达不得触发重生成。
 
-Task 14 的本地验收从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建全新视频对话，带图片附件依次通过表单、三方向、Plan、场景包与素材、三段分镜、合并、QA 定向修改、单镜新 attempt、再次合并、最终确认和当前成片下载。fake Provider start 计数固定为分镜 `4`、合并 `2`、QA `1`、剪映 `0`；刷新和相同输入 ID 重放新增 start 为 `0`。验收从首个 intake Snapshot 开始，在九次 interrupt response、五次 M06 worker completion 和最终下载后，逐段从上一 cursor 消费 SSE；独立 reducer 重建并精确比较 run、workflow、messages、interrupt、context version、cursor 与 sequence，附件 URL、名称和引用保持完整，最终下载证据只绑定第二版合并视频。11 项参数化故障矩阵覆盖 Graph checkpoint 前后退出、Provider start 后恢复、402 原 job 人工恢复、timeout/failed/404 新 attempt、部分分镜只重试失败镜头、跨租户隔离、失效模型档案和重启缺 Handler。其中 checkpoint 前后退出使用生产 Supervisor Graph 与 SQLite 持久 Checkpointer，重启后仍绑定原 Turn/interrupt；402 由后续请求的新瞬时凭据经 `TransientCredentialVault` 和 `VideoLiveOperationBridge.start()` 公开边界恢复原 provider job/attempt，凭据用后销毁且不重复 start。Turn、Graph checkpoint、Snapshot/SSE、completion projection 与安全日志统一扫描后没有凭据或供应商原始错误；带 `secret_only` 字段的 Pydantic 对抗子类在严格 DTO 边界失败关闭，完成事件只投影白名单 payload。`frontend_v2` Turn 仍以 `accepted` 写入 R1 Inbox 供既有 v2 接力，但不通知 Supervisor Executor；已冻结的 `supervisor_v1` 对话在 Handler 缺失时于新增 Turn 登记前固定返回 `agent_runtime_unavailable`，不暗中改回 v2，也不新增或迁移 Turn。
+Task 14 的本地验收从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建全新视频对话，带图片附件依次通过表单、三方向、Plan、场景包与素材、三段分镜、合并、QA 定向修改、单镜新 attempt、再次合并、最终确认和当前成片下载。fake Provider start 计数固定为分镜 `4`、合并 `2`、QA `1`、剪映 `0`；刷新和相同输入 ID 重放新增 start 为 `0`。验收从首个 intake Snapshot 开始，在九次普通 interrupt response、两次 quota pause、两次 quota resume、五次 M06 worker completion 和最终下载后，逐段从上一 cursor 消费 SSE；独立 reducer 重建并精确比较 run、workflow、messages、interrupt、context version、cursor 与 sequence，附件 URL、名称和引用保持完整，最终下载证据只绑定第二版合并视频。
+
+status 402 的真实链不调用 `recover_manually()`，也不预置 `WAITING_USER` Turn。fake Provider 的 status 先经生产 `OperationRecoveryRuntime` 产生 revision `1` 的 pause Outbox，再由生产 `QuotaStateHandler`、Supervisor Graph 和原 Turn 打开 `authorization_required`；用户的新 Authorization 通过公开 FastAPI interrupt response 进入。Graph 把精确 `source_interrupt_id` 传给 Handler，Handler 以中断主键回读权威记录，Memory/SQL Repository 在任何响应副作用前复核冻结 action 和 Operation 的 owner/conversation/workflow/stage/job/revision/status/provider job/轮询状态，最后才消费一次性凭据并恢复原 job。第二次 402 产生 revision `2`；旧 revision `1` 固定返回 `409 video_quota_resume_stale` 且不污染原 Turn，revision `2` 随后仍可恢复。两轮恢复的内部 job、provider job、attempt 和原 Turn 不变，Provider start 增量为 `0`；pause/resume 分别拥有独立稳定业务 Event，但不能等同为始终各自创建独立物理 checkpoint。
+
+2026-08-03 人工裁定冻结 quota 幂等层次：Event ID 是 Outbox、投递 claim 与业务提交幂等键；后台 Handler 的物理线程使用 `quota-paused:<event_id>:v<workflow_version>` 或 `quota-resumed:<event_id>:v<workflow_version>`。这是因为 LangGraph Checkpointer 没有 CAS，同 Event 不同目标版本若共享线程会出现旧版本通过检查后晚写覆盖新版本的 TOCTOU；同 Event 加同目标版本才允许命中同一线程并精确重放，不同目标版本必须隔离。正常公共授权响应继续原 pause interrupt 所在的版本化线程，resume Event 通过新的 `last_action_key` 与提交 claim 绑定；只有提交前退出、由后台 resume Outbox 接管时才创建该 resume Event 自己的 `quota-resumed:*:v*` 线程。一次真实公共 fake E2E 实采得到四条 Event 的 sequence `42/52/56/64`：revision 1 pause/resume 关联 pause 线程 `...a1442601...:v7` 的状态版本 `7/9`，revision 2 pause/resume 关联 pause 线程 `...049ffe78...:v10` 的状态版本 `10/11`；完整 event ID、cursor 与 run ID 见 [R2 视频 status 402 本地候选报告](agentization/test-reports/R2-video-live-handler.md)。
+
+11 项参数化故障矩阵覆盖 Graph checkpoint 前后退出、Provider start 后恢复、公共 402 原 job 授权恢复、timeout/failed/404 新 attempt、部分分镜只重试失败镜头、跨租户隔离、失效模型档案和重启缺 Handler。其中 checkpoint 前后退出使用生产 Supervisor Graph 与 SQLite 持久 Checkpointer，重启后仍绑定原 Turn/interrupt。凭据守卫同时扫描四个实际 Authorization 完整值及去掉 scheme 后的四个裸 token，共八个精确 marker；边界覆盖 Repository Turns/Operations/全部 Events、两轮 pause/resume Graph checkpoint、逐段 Snapshot/SSE、projection messages 和安全日志。两轮有效 quota 凭据各消费一次并销毁，带 `secret_only` 字段的 Pydantic 对抗子类继续在严格 DTO 边界失败关闭。`frontend_v2` Turn 仍以 `accepted` 写入 R1 Inbox 供既有 v2 接力，但不通知 Supervisor Executor；已冻结的 `supervisor_v1` 对话在 Handler 缺失时于新增 Turn 登记前固定返回 `agent_runtime_unavailable`，不暗中改回 v2，也不新增或迁移 Turn。
 
 M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 54 条中文离线黄金集达到 action 53/54（98.15%）、target 24/25（96.00%）、歧义追问 20/21（95.24%）、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
 

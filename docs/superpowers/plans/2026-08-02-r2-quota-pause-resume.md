@@ -702,6 +702,8 @@ git commit -m "实现：接入配额事件协调与恢复调度" -m "status 402 
 - Consumes: Task 3 的 `WorkflowGraphQuotaStatePort`、`OperationQuotaTransitionRecord` 与事件 ID。
 - Produces: `VideoOperationQuotaProjectionService.build()`、`VideoOperationQuotaStateHandler.resume_external_job_quota()`、`VideoRuntimeRepository.commit_operation_quota_state()`，以及 `WorkflowDispatchResult.operation_event_claim` → `VideoTurnCommit.operation_event_claim` 的安全传递。
 
+人工裁定（2026-08-03）：quota Graph checkpoint 不再只用 Event ID 作为物理线程身份。LangGraph Checkpointer 没有 compare-and-set；共享 event-only 线程存在“旧版本通过检查后阻塞、新版本先写入、旧版本随后无条件覆盖”的 TOCTOU。后台 Handler 必须使用 `quota-paused:<event_id>:v<workflow_version>` 或 `quota-resumed:<event_id>:v<workflow_version>`。Event ID 仍是 Outbox、投递 claim 与业务提交的幂等键；同一 Event 加同一目标 Workflow 版本重放命中同一线程并精确比较内容，不同目标版本使用隔离线程，旧版本晚写不能覆盖新版本。不能再把“同一 Event 幂等”表述为该 Event 永远只有一个物理 checkpoint；正常公共授权响应会继续原 pause interrupt 所在的版本化线程，resume Event 仍通过 `last_action_key` 与提交 claim 保持业务幂等。
+
 - [ ] **Step 1: 写 Graph、原 Turn 与 crash window RED 测试**
 
 Memory/SQL 各覆盖 pause 与 resume：
@@ -722,7 +724,12 @@ async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(kind
         "job_id": pause.operation.job_id,
         "quota_pause_revision": 1,
     }
-    assert harness.checkpoint_interrupt_count(pause.event.event_id) == 1
+    assert harness.pause_checkpoint_thread_id.startswith(
+        f"quota-paused:{pause.event.event_id}:v"
+    )
+    assert harness.checkpoint_interrupt_count(
+        harness.pause_checkpoint_thread_id
+    ) == 1
 ```
 
 为 pause/resume 分别注入四个 crash hook：事件领取后、Graph checkpoint 前、业务 Repository 提交后、Outbox 确认前。每次重启后断言同一 event、同一 interrupt、同一 Turn，消息和状态不重复。
@@ -898,10 +905,10 @@ pause 原子写 Workflow `paused_quota`、原 Turn `waiting_user`、唯一 inter
 1. 从 Bridge 的 claim registry 取得原 claim；
 2. 严格重建 `AgentEvent` 与 quota payload，拒绝 `serialize_as_any=True` 子类额外字段；
 3. 用 `VideoOperationQuotaProjectionService.build()` 构造唯一目标；
-4. pause 使用 thread ID `quota-paused:<event_id>`，resume 使用 `quota-resumed:<event_id>`；
-5. checkpoint 已存在时精确比较 event ID、workflow version、interrupt ID 与投影摘要；
+4. 后台 pause 使用 thread ID `quota-paused:<event_id>:v<workflow_version>`，后台 resume 使用 `quota-resumed:<event_id>:v<workflow_version>`；正常公共授权响应继续原 pause interrupt 的版本化线程，不另造同步 resume 物理线程；
+5. 同 Event 与同目标 Workflow 版本的 checkpoint 已存在时，精确比较 event ID、workflow version、interrupt ID 与投影摘要；不同目标版本必须隔离，不能覆盖；
 6. 调用 `commit_operation_quota_state()`；
-7. Graph/Repository 后退出时由同 event ID 重放，绝不调用 Provider。
+7. Graph/Repository 后退出时由同 Event ID 与同目标 Workflow 版本重放相同线程；Event ID 继续约束 Outbox/claim/业务提交，绝不调用 Provider。
 
 - [ ] **Step 6: 运行 GREEN 与 completion 回归**
 
@@ -914,7 +921,7 @@ cd backend
 .venv\Scripts\python.exe -m ruff check pixelflow/agent_runtime/persistence/video_runtime.py pixelflow/agent_runtime/executor.py pixelflow/agent_workflows/video/live_quota.py pixelflow/agent_workflows/video/live_operations.py pixelflow/agent_workflows/video/live_handler.py tests/test_agent_video_live_operations.py
 ```
 
-Expected: exit 0；pause/resume crash window 均只产生一个 checkpoint/interrupt；既有 completion 行为不变。
+Expected: exit 0；pause/resume crash window 对“同 Event + 同目标 Workflow 版本”只保留一个权威 checkpoint/interrupt，不同目标版本的物理线程彼此隔离；既有 completion 行为不变。
 
 - [ ] **Step 7: 提交 Task 4**
 

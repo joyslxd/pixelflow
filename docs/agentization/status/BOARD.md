@@ -1,10 +1,10 @@
 # PixelFlow Agent 化总进度看板
 
-> 更新时间：2026-07-29
+> 更新时间：2026-08-03
 >
 > 原始设计基线：`02493711e8c9b74ec5f8e54cfadac3881297754c`；M00-A/M00-B 共同 Agent 基线：`8e626ae232d984f14fa9954b672b4e025894d426`。M00-I.1 不固定使用本页旧快照，必须在执行时重新 fetch 四条远端引用。
 >
-> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`，发布状态仍记录为 `awaiting_release_approval:R2`；测试环境人工验收随后确认 Gateway 尚未安装视频 live Graph Handler，因此运行时现在只有在 intent 同时命中配置范围和已注册 handler 就绪集合时才允许 `supervisor_v1` 接管。Task 14 已在隔离开发分支完成 Gateway 全有或全无装配、从零 fake 公共全链路、11 项恢复/隔离矩阵和本地前后端门禁，状态为 `development_slice_complete:Task14 / awaiting_independent_slot_integration`；该候选尚未进入 Agent。当前可部署视频仍安全使用 `frontend_v2 + R1 Turn/Snapshot/SSE/压缩队列` 组合，不能把 fake 门禁当作已发布 handler。生产继续保持 R1 `assist + enabled_intents=[] + 100% + context_compaction=true`，现有阶段工作流继续拥有业务推进权；本次开发不授权发布 `primary(video)`。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。M13.3 和生产 R2 发布均未执行。
+> 当前结论：M13.2 / R2 已通过唯一单槽阶段候选进入 Agent，代码状态为 `phase_integrated:R2`，发布状态仍记录为 `awaiting_release_approval:R2`；测试环境人工验收随后确认 Gateway 尚未安装视频 live Graph Handler，因此运行时只有 intent 同时命中配置范围和已注册 handler 就绪集合时才允许 `supervisor_v1` 接管。Task 14 隔离候选的 Tasks 1–7 已推进到 `d32adf4`：Memory/SQL 原子保存 revision 与 pause/resume Outbox，公共 FastAPI 402 经生产 Supervisor Graph/Handler 恢复同一 job、attempt 且 Provider start 增量为 0，两轮 revision/Event/checkpoint、逐段 SSE、完整 Authorization 与裸 token 泄漏扫描及 11 项故障矩阵均已形成证据；Task 7 独立复审为 Critical 0、Important 0、Minor 0。Task 8 已实际执行候选聚焦、后端全量、Ruff、Web、中文、diff/config/占位符和进程门禁；候选相关检查通过，后端全量只剩计划登记的 Runtime 公开导出基线失败。Task 8 首轮 spec compliance 的三个 Important 已通过正式计划同步、实际配置校正和公共 E2E 四事件实采关闭；最终 spec compliance 与 code quality 独立复审均为 Critical 0、Important 0、Minor 0。按冻结口径，当前状态保持 `review_fix_local_verified:Task14 / awaiting_independent_slot_integration`，该候选仍未进入 Agent。当前可部署视频仍安全使用 `frontend_v2 + R1 Turn/Snapshot/SSE/压缩队列` 组合，不能把本地 fake 门禁当作已发布 handler。生产继续保持 R1 `assist / [] / 100 / true`，现有阶段工作流继续拥有业务推进权；本次开发不授权发布 `primary(video)`。自动化状态仍为 `automation_local_ready`；没有 Jenkins 或其他远端 CI，不标记 `automation_active`。未执行生产迁移、真实付费 Provider、R2 发布、M13.3、独立单槽集成、push 或 Agent→dev 合并。
 
 ## 上线里程碑
 
@@ -30,7 +30,7 @@
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
 | M11 | 视频生成 Adapter | B | `merged` | 5/5 | 无；已进入 Agent，R2 真实联调可使用 M06 | `5ed26af` |
 | M12 | 交互 UI 与 Legacy 迁移 | B | `merged` | 5/5 | 无；已进入 Agent | `e71cd8e` |
-| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；R2 已进入 Agent 并等待独立生产批准；Task 14 视频 live 开发切片待独立单槽集成；R3–R4 尚未执行 | `95ef865` |
+| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；R2 既有阶段代码已进入 Agent 并等待独立生产批准；Task 14 status 402 候选为 `review_fix_local_verified / awaiting_independent_slot_integration`，实现 HEAD `d32adf4`，尚未进入 Agent；R3–R4 尚未执行 | `95ef865` |
 
 ## 当前文件所有权
 
@@ -41,6 +41,6 @@ M00-A、M00-B 和 M00-I.1 写锁均已释放。M00-I.1 使用唯一新候选 `co
 1. M13.2 / R2 已完成唯一单槽阶段集成，不得重复执行该检查点或自动启动 M13.3；R2 生产继续保持 R1，等待唯一发布负责人另行批准 `primary(video)`。
 2. 当前自动化状态为 `automation_local_ready`。模块开工、阶段/最终集成和 dev→agent 漂移检查均人工触发仓库脚本；只有未来实际部署并验收远端 CI 后才能提升为 `automation_active`。
 3. R1 已按运行手册 9.17 完成人工发布并保持 `assist+100%`；R2 代码已进入最新 Agent，但本记录不授权 `primary(video)`、真实付费供应商测试、M13.3 或 Agent→dev 合并。
-4. Task 14 隔离候选只完成本地 fake Provider 验收；独立单槽集成、生产配置、真实付费 Provider、R2 发布和 Agent→dev 合并仍须分别授权。
+4. Task 14 隔离候选的 Tasks 1–7 已完成本地整改并通过 Task 7 独立复审；Task 8 已记录实际门禁结果，首轮 spec compliance 三项问题全部关闭，最终 spec compliance 与 code quality 独立复审均为 `0/0/0`。后端全量保留一个计划登记的 Runtime 公开导出基线失败，不得写成全绿；独立单槽集成、生产迁移、生产配置、真实付费 Provider、R2 发布、M13.3、push 和 Agent→dev 合并仍须分别授权。
 
 总看板在合法阶段检查点或最终模块通过闸门并由单槽候选合入 `feature/agent_0.8.4_boguan` 后更新；当前单槽候选由开发者人工触发。`phase_integrated` 只表示该批次增量已进入 Agent，不表示模块完成。模块分支内的逐切片实时进度写对应模块状态文件。

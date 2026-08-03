@@ -46,15 +46,18 @@
 
 Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响新对话；运行中的 Supervisor 对话继续排空或人工处理，不能强切 owner。
 
-## M13.2 / R2 视频 live Handler Task 14 本地门禁（2026-08-02）
+## M13.2 / R2 视频 live Handler Task 14 status 402 候选（2026-08-03）
 
-- 当前状态：`development_slice_complete:Task14 / awaiting_independent_slot_integration`。只表示隔离分支已完成本地开发验收，不改变既有 `phase_integrated:R2 / awaiting_release_approval:R2`，也不表示 Agent 长期分支已经安装视频 live Handler。
-- 公共全链路：从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建 `supervisor_v1` 视频对话，完整经过带图首轮、表单、三方向、Plan、场景包/素材、三段分镜、合并、QA 定向修改第二镜、只重试该镜、再次合并、最终确认和当前成片下载。Snapshot 与 SSE 最终 cursor/sequence 一致，重复输入 ID 和三次刷新新增 Provider start 为 0。
-- fake Provider 计数：分镜 `4`、合并 `2`、QA `1`、剪映 `0`；全程未调用真实 LLM、content-app、PowerMem、图片、视频、剪映或其他付费 Provider。
-- 故障矩阵：11 个参数项逐项通过，覆盖 checkpoint 前后退出、Provider start 后/完成事件前恢复、402 以新请求凭据恢复原 provider job、timeout/failed/404 新 attempt、三分镜部分失败只重试失败镜头、跨租户引用隔离、模型档案失效和重启后 Handler 缺失。每项都显式校验 attempt、provider job ID、Turn 状态、安全原因、敏感值零泄漏、重复 start 为 0、跨租户对象为 0。
-- 归属边界：`frontend_v2` Turn 继续以 `accepted` 写入 R1 Inbox，Supervisor Executor 通知为 0；旧 `supervisor_v1` 对话在重启缺 Handler 时于登记前返回固定 `agent_runtime_unavailable`，新增 Turn 为 0，原归属不迁移；新视频对话保持 `frontend_v2`。
-- 门禁与限制：Task 14 两文件 `31 passed`，Web `404 passed`、lint/build 通过，Ruff 通过。后端组合与全量只剩未修改基线中 `agent_runtime.__all__` 测试仍硬编码四项、而基线实现已有十项的既有失败；黄金集新增 3 条后，可复现报告已机械同步为 54 条。生产配置 diff 为空。
-- 详细证据：[R2 视频 live Handler 本地门禁报告](../test-reports/R2-video-live-handler.md)。
+- 当前状态：`review_fix_local_verified:Task14 / awaiting_independent_slot_integration`。Tasks 1–7 的最终实现 HEAD 为 `d32adf4`，Task 7 独立复审为 Critical `0`、Important `0`、Minor `0`；Task 8 最终门禁已按实际结果执行，首轮 spec compliance 的三个 Important 已全部整改并在第二轮关闭，最终 spec compliance 与 code quality 独立复审均为 Critical `0`、Important `0`、Minor `0`。该状态不改变既有 `phase_integrated:R2 / awaiting_release_approval:R2`，也不表示 Agent 长期分支已经安装视频 live Handler。
+- 提交链：Task 1 `95654b5`；Task 2 `ea471f0/1a4feab/2e0ca32`；Task 3 `5e76d3c`；Task 4 `567c92f/db53eaf/66cd0b1`；Task 5 `660b228/9fdfee6`；Task 6 `38ad218/f9b0ed3`；Task 7 `d32adf4`。Memory/SQL 对 `quota_pause_revision`、pause/resume Event、租约、due-operation 和 owner 校验保持同一事务语义。
+- revision 与 checkpoint：每次 status 402 单调增加 revision，并分别产生由 `job_id + revision + quota_state` 派生的稳定 pause/resume Event；Graph 使用版本化 `quota-paused`/`quota-resumed` checkpoint。公开全流程验证 revision `1` 与 `2`，旧 revision `1` 在第二轮固定返回 `409 video_quota_resume_stale` 且零副作用。
+- 公共 402：不调用 `recover_manually()`，不预置 `WAITING_USER` Turn。真实 FastAPI conversation/turn 先运行到 fake Provider status 402，再由 Recovery Runtime、QuotaStateHandler 和 Supervisor Graph 在原 Turn 打开授权中断；公开 interrupt response 的新 Authorization 经精确 `source_interrupt_id` 和 Repository 权威校验后，只恢复原内部 job、provider job 和 attempt，Provider start 增量为 `0`。
+- 公共全链路：从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建 `supervisor_v1` 视频对话，完整经过带图首轮、表单、三方向、Plan、场景包/素材、三段分镜、两轮 402、合并、QA 定向修改第二镜、只重试该镜、再次合并、最终确认和当前成片下载。从上一 cursor 逐段消费 SSE，并在九次普通响应、两次 pause、两次 resume、五次 worker completion 和下载后与公开 Snapshot 的 run/workflow/messages/interrupt/context version/cursor/sequence 精确等值。
+- fake Provider 与安全：分镜 start `4`、合并 `2`、QA `1`、剪映 `0`；相同输入 ID 和三次刷新新增 start 为 `0`。泄漏守卫扫描四个实际 Authorization 完整值及各自裸 token，共八个 marker，覆盖 Repository Turns/Operations/全部 Events、两轮 pause/resume checkpoint、逐段 Snapshot/SSE、projection messages 和安全日志；有效 quota 凭据各消费一次并销毁。
+- 故障矩阵：11 个参数项逐项覆盖 checkpoint 前后退出、Provider start 后/完成事件前恢复、公共 402、timeout/failed/404 新 attempt、三分镜部分失败只重试失败镜头、跨租户引用隔离、模型档案失效和重启后 Handler 缺失。每项显式校验 attempt、provider job ID、原 Turn/interrupt、安全原因、敏感值零泄漏、重复 start 为 0、跨租户对象为 0；checkpoint 使用生产 Supervisor Graph 与 SQLite 持久 Checkpointer。
+- 归属与发布边界：`frontend_v2` Turn 继续以 `accepted` 写入 R1 Inbox，Supervisor Executor 通知为 0；旧 `supervisor_v1` 对话在重启缺 Handler 时于登记前返回固定 `agent_runtime_unavailable`，新增 Turn 为 0，原归属不迁移；当前可部署基线的新视频对话仍保持 `frontend_v2`。生产继续保持 R1 `assist / [] / 100 / true`。未执行生产迁移、真实付费 Provider、R2 发布、M13.3、独立单槽集成、push 或 Agent→dev 合并。
+- Task 8 门禁：后端 12 文件聚焦为 `607 passed`；Ruff、Web 合同 `18 passed`、Web 全量 `405 passed`、lint/build、中文工程门禁、diff/config/占位符/进程残留均通过。后端全量重跑为 `6017 passed, 48 skipped, 1 failed`，唯一失败是计划登记且 `b1d2a64..HEAD` 对相关包入口和测试均零差异的 Runtime 公开导出基线；不得表述为后端全量全绿。中文门禁曾因 Python 星号解包被跨语言块注释正则误判，最窄 Pester RED/GREEN 修复只把行首独立 `*+` 限定到 JS/TS 类扩展。
+- 详细证据：[R2 视频 status 402 持久化暂停与恢复本地候选报告](../test-reports/R2-video-live-handler.md)。
 
 ## M13.2 / R2 测试环境人工验收修复（2026-07-29）
 
@@ -73,7 +76,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 前端：`WorkspacePage` 从 Snapshot 的五类 `ui_kind` 纯恢复视频表单和审核卡；Supervisor 控件只提交 `ExplicitActionSignal`，每次生成一个稳定响应 UUID，pending 同时保存原 action 与目标引用，已注册恢复只查询原 run。分镜文本先形成本地草稿，显式保存后只提交一次当前分镜；`frontend_v2` 和非视频路径保持原 handler。
 - 审核整改：Operation 最终完成先在真实 Supervisor checkpoint 建立同一原 Turn 的 Graph pause，再由 Memory/SQL 原子写 state/workflow/messages、原 Turn `waiting_user`、open interrupt、`interrupt.opened` 和完成事件确认；Graph pause 后、Repository 事务前退出时，以完成事件时间重建确定性投影并复用首个 checkpoint 中断，租约重放不新建 Turn、不重复 Provider start。授权中断可跨 Executor 重启恢复原结构化 action，瞬时凭据不落库且 Provider start 不重复。前端卡片按 `run_id + workflow_id + artifact_ref + type` 精确选择；人工全局素材 ID、名称和 content asset 跨分组唯一。
 - 本地证据：Executor `26 passed`、Runtime Repository `82 passed`、视频 Operation `146 passed`、视频 Handler `53 passed`、场景包 `41 passed`、Gateway readiness `9 passed`；Web 正确测试环境 `404 passed`，`tsc --noEmit` 与生产构建通过。最终中文、静态和差异检查以本分支报告收尾记录为准。
-- 后续状态：Task 14 已由另一隔离候选完成 Gateway 装配与 fake 公共全链路本地门禁，但尚未独立单槽集成。真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行；生产继续保持 R1 `assist / [] / 100 / true`，历史对话和运行中任务不迁移。
+- 后续状态：Task 14 隔离候选已在 `d32adf4` 完成 Tasks 1–7 的 status 402 整改并记录 Task 8 实际门禁，按冻结口径当前保持 `review_fix_local_verified / awaiting_independent_slot_integration`；Task 8 最终 spec compliance 与 code quality 独立复审均为 `0/0/0`，尚未独立单槽集成。后端全量仍保留一个已登记 Runtime 基线失败；真实付费 Provider、生产 `primary(video)`、R2 发布、Agent→dev 合并均未执行。生产继续保持 R1 `assist / [] / 100 / true`，历史对话和运行中任务不迁移。
 - 详细证据：[R2 视频 live handler 开发记录](../test-reports/R2-video-live-handler-development.md)。
 
 ## M13.2 / R2 单槽阶段集成（2026-07-29）
