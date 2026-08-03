@@ -1,10 +1,10 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`ready_for_phase_integration`
+- phase：`phase_integrated`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：`M13.2`
+- 当前切片：`M13.3`
 - base Agent SHA：`6fdb7ddfffd496c908c31903869c62b8bb43812a`
 - 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
@@ -12,8 +12,8 @@
 - release_id：`R2`
 - checkpoint_slice：`M13.2`
 - checkpoint_commit：`0ff5d02961c76ef4f92ddcbcfce3922621c6daef`
-- last_integrated_commit：`95ef865f2a084ce57b91be5eb326e1045247d4a0`
-- checkpoint_status：`ready`
+- last_integrated_commit：`d47b1b32bf935f828f3769ab561e74077d20a1e0`
+- checkpoint_status：`phase_integrated:R2`
 - 当前发布门禁：`released:R1 / phase_integrated:R2 / release_blocked:R2 / ready_for_phase_integration:Task14`；Task 14 是 `last_integrated_commit` 之后的新 M13.2 维护增量，只等待独立单槽集成，不恢复已经失败关闭的生产发布授权
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
@@ -136,7 +136,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 - 详细证据：[M13.1-R1 测试与审核记录](../test-reports/M13.1-R1.md)。
 - 门禁入口修复证据：[M13.1-R1 门禁入口修复记录](../test-reports/M13-R1-gate-repair.md)。
 - locked files：`无`
-- integration failure evidence：`首次候选 codex/integrate-r2-m13-20260803-141553-39f80f40 因前端依赖目录联接触发 pnpm 非交互清理保护而阻塞，Agent 未更新；保留候选已复现精确错误，全新独立依赖复核 worktree 按锁文件安装后 M13/R2 八项权威门禁全绿，现恢复入口并要求创建全新候选`
+- integration failure evidence：`无`
 
 ## M13.1 / R1 统一预算与压缩恢复修复（2026-07-26）
 
