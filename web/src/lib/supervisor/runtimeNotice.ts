@@ -18,6 +18,7 @@ export interface SupervisorRuntimeNoticeModel {
 export interface SupervisorRuntimeNoticeInput {
   enabled: boolean;
   runStatus: SupervisorRunStatus;
+  runUpdatedAt: string | null;
   compression: SupervisorCompressionState;
   inputQueue: SupervisorInputQueueItem[];
 }
@@ -37,6 +38,17 @@ function resolveQueueBadge(
     .filter((value): value is number => value !== null)
     .sort((left, right) => left - right)[0];
   return `已排队 ${queuedCount} 条${queuePosition ? ` · 第 ${queuePosition} 位` : ""}`;
+}
+
+function isCurrentRunCompressionResult(
+  compressionUpdatedAt: string | null,
+  runUpdatedAt: string | null,
+): boolean {
+  if (!compressionUpdatedAt || !runUpdatedAt) return false;
+  const compressionTime = Date.parse(compressionUpdatedAt);
+  const runTime = Date.parse(runUpdatedAt);
+  if (!Number.isFinite(compressionTime) || !Number.isFinite(runTime)) return false;
+  return compressionTime >= runTime;
 }
 
 export function resolveSupervisorRuntimeNotice(
@@ -70,7 +82,11 @@ export function resolveSupervisorRuntimeNotice(
     };
   }
 
-  if (input.compression.lastOutcome === "completed" && input.runStatus === "running") {
+  if (
+    input.compression.lastOutcome === "completed"
+    && input.runStatus === "running"
+    && isCurrentRunCompressionResult(input.compression.updatedAt, input.runUpdatedAt)
+  ) {
     return {
       kind: "compression",
       tone: "success",

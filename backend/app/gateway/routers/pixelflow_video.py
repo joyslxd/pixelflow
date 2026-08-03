@@ -195,7 +195,7 @@ class ScenePackageAssetRevisionRequest(BaseModel):
     asset_id: str = Field(min_length=1)
     asset_group: Literal["characters", "scenes", "props"]
     asset_name: str = ""
-    source_image_url: str = Field(min_length=1)
+    source_image_url: str = ""
     new_image_url: str | None = None
     generation_reference_url: str | None = None
     replacement_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -203,7 +203,9 @@ class ScenePackageAssetRevisionRequest(BaseModel):
     scene_packages: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def require_new_image_for_replacement(self) -> ScenePackageAssetRevisionRequest:
+    def require_images_for_replacement(self) -> ScenePackageAssetRevisionRequest:
+        if self.operation == "replace" and not str(self.source_image_url or "").strip():
+            raise ValueError("替换素材时 source_image_url 不能为空")
         if self.operation == "replace" and not str(self.new_image_url or "").strip():
             raise ValueError("替换素材时 new_image_url 不能为空")
         return self

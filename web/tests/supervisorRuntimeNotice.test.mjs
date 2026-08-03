@@ -29,6 +29,7 @@ test("仅 supervisor_v1 投影压缩开始与进度提示", () => {
   const input = {
     enabled: true,
     runStatus: "running",
+    runUpdatedAt: "2026-07-25T03:00:00Z",
     compression: compression({
       status: "compacting",
       progressPercent: null,
@@ -68,9 +69,11 @@ test("压缩完成只在继续运行时提示，失败提示保持可恢复语�
   const completed = {
     enabled: true,
     runStatus: "running",
+    runUpdatedAt: "2026-07-25T03:00:00Z",
     compression: compression({
       progressPercent: 100,
       lastOutcome: "completed",
+      updatedAt: "2026-07-25T03:00:01Z",
     }),
     inputQueue: [],
   };
@@ -104,10 +107,25 @@ test("压缩完成只在继续运行时提示，失败提示保持可恢复语�
   });
 });
 
+test("新 Run 不会重复展示旧的上下文整理完成提示", () => {
+  assert.equal(resolveSupervisorRuntimeNotice({
+    enabled: true,
+    runStatus: "running",
+    runUpdatedAt: "2026-07-25T03:10:00Z",
+    compression: compression({
+      progressPercent: 100,
+      lastOutcome: "completed",
+      updatedAt: "2026-07-25T03:00:01Z",
+    }),
+    inputQueue: [],
+  }), null);
+});
+
 test("没有压缩提示时仍按服务端队列显示排队 badge", () => {
   assert.deepEqual(resolveSupervisorRuntimeNotice({
     enabled: true,
     runStatus: "running",
+    runUpdatedAt: "2026-07-25T03:00:00Z",
     compression: compression(),
     inputQueue: [
       queuedInput({ clientInputId: "sending", status: "sending", queuePosition: null }),
@@ -128,6 +146,7 @@ test("排队 badge 仅以 inputQueue 为权威来源，不沿用压缩快照旧�
   assert.equal(resolveSupervisorRuntimeNotice({
     enabled: true,
     runStatus: "completed",
+    runUpdatedAt: "2026-07-25T03:00:00Z",
     compression: compression({
       queuedInputCount: 4,
       lastOutcome: "completed",

@@ -96,6 +96,34 @@ test("删除分镜素材必须持久化更新后的权威消息", () => {
   assert.match(revisionCompletion, /await api\.updateConversationMessage/, "删除完成后必须更新权威消息，避免 Snapshot 用旧素材覆盖");
 });
 
+test("无图片的历史素材空壳仍可进入异步删除流程", () => {
+  const referenceStart = workspaceSource.indexOf("function sceneGlobalAssetReferenceFromMaterials");
+  const referenceEnd = workspaceSource.indexOf("function isGlobalSceneAssetGroup", referenceStart);
+  assert.notEqual(referenceStart, -1, "Workspace 必须解析场景包全局素材引用");
+  assert.notEqual(referenceEnd, -1, "全局素材分组校验函数必须位于引用解析之后");
+  const referenceSource = workspaceSource.slice(referenceStart, referenceEnd);
+  assert.match(referenceSource, /action !== "delete" && !sourceImageUrl/, "只有编辑操作必须要求原图片 URL");
+  assert.doesNotMatch(storyboardPanelSource, /disabled=\{!image\}/, "无图片空壳仍必须允许打开详情");
+  assert.match(storyboardPanelSource, /当前素材没有可用图片，可以直接删除后重新添加/, "空壳详情必须提示可直接删除");
+  assert.match(storyboardPanelSource, /disabled=\{!previewAsset\.source_image_url\}/, "无图素材的引用和替换动作必须禁用");
+});
+
+test("QA 未定位分镜时保留并持久化同一视频修改上下文", () => {
+  const start = workspaceSource.indexOf("async function handleRegenerateVideoWithRevision");
+  const end = workspaceSource.indexOf("const handleApprove = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供结合质检结果重生成的处理器");
+  assert.notEqual(end, -1, "旧任务 Brief 确认处理器必须位于视频修改处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(
+    handler,
+    /affectedSceneIds\.size === 0[\s\S]*videoRevisionArtifactRef\.current = \{[\s\S]*originalVideoScenePackages/,
+    "质检未定位分镜时必须重新挂载原视频 Artifact",
+  );
+  assert.match(handler, /last_phase: "video_revision_scene_required"/, "恢复点必须记录等待用户补充分镜");
+  assert.match(handler, /pendingVideoRevision: videoRevisionArtifactRef\.current/, "恢复点必须持久化同一修改上下文");
+  assert.match(handler, /pending_video_revision: videoRevisionArtifactRef\.current/, "兼容字段也必须持久化同一修改上下文");
+});
+
 test("刷新恢复不得用旧 Conversation context 覆盖权威分镜消息", () => {
   const start = workspaceSource.indexOf("function restoreLatestVideoScenePackagesFromContext");
   const end = workspaceSource.indexOf("function markLatestPptFileDoneFromContext", start);
@@ -1290,6 +1318,27 @@ test("restored conversations resume existing scene package jobs without starting
   assert.equal(resumeSource.includes("已恢复上次场景包生成任务"), false, "restore polling should not append duplicate progress messages");
   assert.match(resumeSource, /const shouldContinuePolling = \(\) => isVisibleConversation\(pendingScenePackageJob\.conversation_id\)/, "scene package polling must stop when the conversation is no longer visible");
   assert.match(resumeSource, /pausedForHiddenConversation[\s\S]*releaseArtifactAction\(processedKey\)/, "stopping hidden conversation polling must release the local action lock without clearing the pending job");
+  assert.match(workspaceSource, /pendingScenePackageResumeVersion/, "restored scene package jobs must trigger a post-render resume signal");
+  assert.match(workspaceSource, /hasMaterializedScenePackageJob\(messagesRef\.current, pendingScenePackageJob\)/, "post-render resume must not rematerialize a completed scene package job");
+  assert.match(
+    workspaceSource,
+    /终态场景包也通过可恢复消息 job 落库[\s\S]*?startConversationMessageJobForConversation\([\s\S]*?completedMessage[\s\S]*?targetConversationId/,
+    "素材修订终态卡片必须通过可恢复消息 job 保存，避免切换对话时只留下处理中消息",
+  );
+  assert.match(
+    workspaceSource,
+    /结束时必须等权威 context 成功落库后再清空[\s\S]*?await updateConversationWithProgress[\s\S]*?pendingScenePackageJobRef\.current = null/,
+    "场景包 pending 句柄必须在终态 context 落库后清空，防止自动保存回写旧运行态",
+  );
+});
+
+test("REST 与 Supervisor 两条消息恢复投影都转换为完整本地时间", () => {
+  assert.match(workspaceSource, /time: formatMessageTime\(message\.created_at\)/, "REST 恢复消息必须格式化服务端时间");
+  assert.match(
+    workspaceSource,
+    /mergeSupervisorMessagesWithPending\([\s\S]*?\)\.map\(\(message\) => \(\{[\s\S]*?time: formatMessageTime\(message\.time, "zh-CN", undefined, message\.time\)/,
+    "Supervisor 连接后的权威消息覆盖也必须格式化时间",
+  );
 });
 
 test("video revision regeneration also uses recoverable scene video jobs", () => {

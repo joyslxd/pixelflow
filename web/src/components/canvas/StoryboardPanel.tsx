@@ -233,7 +233,6 @@ export function StoryboardPanel({
 
   const openAssetPreview = (group: AssetGroup, record: Record<string, unknown>, fallback: string) => {
     const image = assetImage(record);
-    if (!image) return;
     const id = assetId(record, fallback);
     const name = assetName(record, id);
     setPreviewAsset({
@@ -315,8 +314,7 @@ export function StoryboardPanel({
                             key={id}
                             type="button"
                             onClick={() => openAssetPreview(group, asset, `${group}-${index + 1}`)}
-                            disabled={!image}
-                            className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent disabled:cursor-default disabled:hover:border-line"
+                            className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent"
                           >
                             {image ? (
                               <img src={image} alt={assetName(asset, id)} className="h-16 w-full object-cover" />
@@ -496,12 +494,17 @@ export function StoryboardPanel({
             <div className="pr-12 text-[22px] font-semibold text-ink">{previewAsset.name}</div>
             <div className="mt-5 overflow-hidden rounded-[8px] bg-canvas">
               <div className="relative mx-auto flex max-h-[420px] min-h-[260px] items-center justify-center">
-                <img src={previewAsset.source_image_url} alt={previewAsset.name} className="max-h-[420px] w-full object-contain" />
+                {previewAsset.source_image_url ? (
+                  <img src={previewAsset.source_image_url} alt={previewAsset.name} className="max-h-[420px] w-full object-contain" />
+                ) : (
+                  <div className="text-[13px] text-ink-soft">当前素材没有可用图片，可以直接删除后重新添加。</div>
+                )}
                 <div className="absolute right-4 top-4 flex overflow-hidden rounded-[8px] bg-ink/55 text-white backdrop-blur">
                   <button
                     type="button"
                     onClick={referencePreviewAsset}
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    disabled={!previewAsset.source_image_url}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40"
                     title="引用素材"
                     aria-label="引用素材"
                   >
@@ -510,7 +513,8 @@ export function StoryboardPanel({
                   <button
                     type="button"
                     onClick={replacePreviewAsset}
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    disabled={!previewAsset.source_image_url}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40"
                     title="替换素材"
                     aria-label="替换素材"
                   >
@@ -525,17 +529,23 @@ export function StoryboardPanel({
                   >
                     <Trash2 size={17} />
                   </button>
-                  <a
-                    href={previewAsset.source_image_url}
-                    download={previewAsset.filename}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
-                    title="下载"
-                    aria-label="下载"
-                  >
-                    <Download size={17} />
-                  </a>
+                  {previewAsset.source_image_url ? (
+                    <a
+                      href={previewAsset.source_image_url}
+                      download={previewAsset.filename}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                      title="下载"
+                      aria-label="下载"
+                    >
+                      <Download size={17} />
+                    </a>
+                  ) : (
+                    <button type="button" disabled className="flex h-10 w-10 cursor-not-allowed items-center justify-center opacity-40" aria-label="下载">
+                      <Download size={17} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

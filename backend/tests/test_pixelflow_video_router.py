@@ -500,9 +500,7 @@ def test_video_router_starts_scene_asset_revision_job_and_polls_result(monkeypat
         job_id = started_response.json()["job_id"]
         status = None
         for _ in range(20):
-            status_response = client.get(
-                f"/agent/flows/video/update-scene-package-asset/jobs/{job_id}"
-            )
+            status_response = client.get(f"/agent/flows/video/update-scene-package-asset/jobs/{job_id}")
             assert status_response.status_code == 200
             status = status_response.json()
             if status["status"] == "completed":
@@ -512,9 +510,100 @@ def test_video_router_starts_scene_asset_revision_job_and_polls_result(monkeypat
     assert status is not None
     assert status["status"] == "completed"
     assert status["result"]["affected_scene_ids"] == ["scene-1"]
-    assert status["result"]["global_assets"]["characters"][0]["three_view_images"] == [
-        "https://x/new-host.png"
-    ]
+    assert status["result"]["global_assets"]["characters"][0]["three_view_images"] == ["https://x/new-host.png"]
+
+
+def test_video_router_deletes_empty_scene_asset_placeholder(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+
+    async def fake_revise_scene_package_asset(**kwargs):
+        assert kwargs["operation"] == "delete"
+        assert kwargs["asset_id"] == "manual-prop"
+        assert kwargs["source_image_url"] == ""
+        return {
+            "ok": True,
+            "operation": "delete",
+            "asset_id": "manual-prop",
+            "asset_group": "props",
+            "global_assets": {"props": []},
+            "scene_packages": [
+                {
+                    "scene_id": "scene-1",
+                    "scene_index": 1,
+                    "duration_ms": 8_000,
+                    "prompt": "商品展示",
+                }
+            ],
+            "affected_scene_ids": [],
+            "message": "素材已删除。",
+        }
+
+    monkeypatch.setattr(
+        pixelflow_video,
+        "revise_scene_package_asset",
+        fake_revise_scene_package_asset,
+    )
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+    with TestClient(app) as client:
+        started_response = client.post(
+            "/agent/flows/video/update-scene-package-asset/start",
+            json={
+                "operation": "delete",
+                "asset_id": "manual-prop",
+                "asset_group": "props",
+                "asset_name": "手工新增道具",
+                "source_image_url": "",
+                "global_assets": {
+                    "props": [
+                        {
+                            "asset_id": "manual-prop",
+                            "name": "手工新增道具",
+                            "images": [],
+                        }
+                    ]
+                },
+                "scene_packages": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8_000,
+                        "prompt": "商品展示",
+                    }
+                ],
+            },
+        )
+        assert started_response.status_code == 200
+        job_id = started_response.json()["job_id"]
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/update-scene-package-asset/jobs/{job_id}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["result"]["global_assets"]["props"] == []
+
+
+def test_scene_asset_replacement_rejects_empty_source_image():
+    from app.gateway.routers.pixelflow_video import ScenePackageAssetRevisionRequest
+
+    with pytest.raises(ValueError, match="source_image_url"):
+        ScenePackageAssetRevisionRequest(
+            operation="replace",
+            asset_id="manual-prop",
+            asset_group="props",
+            source_image_url="",
+            new_image_url="https://x/new-prop.png",
+            scene_packages=[{"scene_id": "scene-1"}],
+        )
 
 
 def test_video_router_generates_scene_asset_images(monkeypatch):
@@ -1651,20 +1740,12 @@ def test_scene_video_prompt_keeps_authoritative_plan_transition() -> None:
 def test_scene_video_prompt_uses_structured_fields_once_in_fixed_order() -> None:
     from app.gateway.routers.pixelflow_video import SceneGenerationItem, _build_scene_video_prompt
 
-    shot_description = (
-        "0-6秒：地点：地铁口；主体：通勤者；动作：抬起背包；景别：中景；"
-        "运镜：缓慢推进；光影：清晨逆光；声音：雨声；收束：定格品牌标识。"
-    )
+    shot_description = "0-6秒：地点：地铁口；主体：通勤者；动作：抬起背包；景别：中景；运镜：缓慢推进；光影：清晨逆光；声音：雨声；收束：定格品牌标识。"
     scene = SceneGenerationItem(
         scene_id="scene-1",
         scene_index=1,
         duration_ms=6000,
-        prompt=(
-            "故事线：雨滴落在背包表面。\n"
-            "镜头描述：旧镜头。\n"
-            "视觉风格：电影写实。\n"
-            "旁白：旧旁白。"
-        ),
+        prompt=("故事线：雨滴落在背包表面。\n镜头描述：旧镜头。\n视觉风格：电影写实。\n旁白：旧旁白。"),
         storyline="雨滴落在背包表面。",
         shot_description={"text": shot_description},
         narration="下雨也能从容通勤。",
@@ -1694,12 +1775,7 @@ def test_scene_video_prompt_extracts_only_visual_style_from_legacy_prompt() -> N
         duration_ms=4000,
         prompt="故事线：旧故事；镜头描述：旧镜头；视觉风格：冷调写实；旁白：旧旁白",
         storyline="新故事",
-        shot_description={
-            "text": (
-                "镜头描述：地点：实验室；主体：研究员；动作：观察样本；景别：近景；"
-                "运镜：固定；光影：冷白光；声音：仪器声；收束：样本进入焦点。"
-            )
-        },
+        shot_description={"text": ("镜头描述：地点：实验室；主体：研究员；动作：观察样本；景别：近景；运镜：固定；光影：冷白光；声音：仪器声；收束：样本进入焦点。")},
         narration="旁白：观察微观变化。",
         transition="转场：淡出。",
     )
@@ -1734,10 +1810,7 @@ def test_long_scene_video_prompt_reaches_skill(monkeypatch) -> None:
     monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: FakeVideoSkill())
     app = make_authed_test_app(user_factory=_stable_user)
     app.include_router(pixelflow_video.router)
-    long_shot = (
-        "地点：演播室；主体：产品；动作：旋转展示；景别：近景；运镜：环绕；"
-        "光影：轮廓光；声音：节奏音乐；收束：品牌标识定格。"
-    ) * 50
+    long_shot = ("地点：演播室；主体：产品；动作：旋转展示；景别：近景；运镜：环绕；光影：轮廓光；声音：节奏音乐；收束：品牌标识定格。") * 50
 
     with TestClient(app) as client:
         response = client.post(
