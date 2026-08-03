@@ -3643,11 +3643,13 @@ async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(
             registry=FakeWorkflowRegistry({}),
             checkpointer=InMemorySaver(),
         )
+        observer = _RecordingExternalJobObserver()
         quota_handler = VideoOperationQuotaStateHandler(
             repository=repository,
             operations=operations,
             clock=clock,
             graph=graph,
+            external_job_observer=observer,
         )
         runtime = operations.build_recovery_runtime(
             resumer=_RecordingResumer(),
@@ -3684,7 +3686,60 @@ async def test_quota_pause_event_opens_one_graph_interrupt_on_original_turn(
         assert checkpoint.values["workflow_dispatch_result"]["state"][
             "last_action_key"
         ] == paused.event.event_id
+        assert observer.states == [ProviderJobOutcome.PAUSED_QUOTA]
         assert provider.start_calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quota_observer_failure_does_not_block_published_pause(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    """指标旁路抛错后 pause Event 仍须提交、发布且重放不重复观察。"""
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        kind,
+        tmp_path / f"task6-quota-observer-failure-{kind}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations, _, _, paused, _ = await _pause_first_generation_operation(
+            repository,
+            store,
+            clock,
+            provider,
+        )
+        graph = make_agent_runtime_graph(
+            registry=FakeWorkflowRegistry({}),
+            checkpointer=InMemorySaver(),
+        )
+        observer = _FailingExternalJobObserver()
+        quota_handler = VideoOperationQuotaStateHandler(
+            repository=repository,
+            operations=operations,
+            clock=clock,
+            graph=graph,
+            external_job_observer=observer,
+        )
+        runtime = operations.build_recovery_runtime(
+            resumer=_RecordingResumer(),
+            quota_resumer=quota_handler,
+            worker_id=f"task6-quota-observer-failure-{kind}",
+        )
+
+        await runtime.run_once()
+        await runtime.run_once()
+
+        restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
+        assert restored is not None
+        assert restored.last_action_key == paused.event.event_id
+        assert observer.states == [ProviderJobOutcome.PAUSED_QUOTA]
+        assert not await repository.list_pending_operation_quota_events(
+            now=clock.now(),
+            limit=10,
+        )
 
 
 @pytest.mark.asyncio
@@ -4687,11 +4742,13 @@ async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
             registry=FakeWorkflowRegistry({}),
             checkpointer=InMemorySaver(),
         )
+        observer = _RecordingExternalJobObserver()
         quota_handler = VideoOperationQuotaStateHandler(
             repository=repository,
             operations=operations,
             clock=clock,
             graph=graph,
+            external_job_observer=observer,
         )
         runtime = operations.build_recovery_runtime(
             resumer=_RecordingResumer(),
@@ -4699,6 +4756,7 @@ async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
             worker_id=f"task4-quota-claim-crash-{kind}",
         )
         await runtime.run_once()
+        assert observer.states == [ProviderJobOutcome.PAUSED_QUOTA]
         interrupt = await repository.get_open_interrupt(
             USER_ID,
             CONVERSATION_ID,
@@ -4742,6 +4800,7 @@ async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
 
         clock.advance(seconds=31)
         await runtime.run_once()
+        await runtime.run_once()
 
         restored = await repository.get_video_state(USER_ID, WORKFLOW_ID)
         assert restored is not None
@@ -4767,6 +4826,10 @@ async def test_quota_crash_after_authorized_claim_replays_same_resume_event(
         ] == resume_event_id
         events = await repository.list_events(USER_ID, CONVERSATION_ID)
         assert len([item for item in events if item.event_id == resume_event_id]) == 1
+        assert observer.states == [
+            ProviderJobOutcome.PAUSED_QUOTA,
+            ProviderJobOutcome.POLLING,
+        ]
         assert provider.start_calls == 3
 
 

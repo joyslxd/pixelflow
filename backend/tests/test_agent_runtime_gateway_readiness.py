@@ -29,6 +29,7 @@ from deerflow.persistence.base import Base
 from pixelflow.agent_runtime.config import AgentRuntimeConfig
 from pixelflow.agent_runtime.context import ModelContextProfile
 from pixelflow.agent_runtime.contracts import WorkflowKind
+from pixelflow.agent_runtime.jobs import ProviderJobOutcome
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
@@ -352,6 +353,17 @@ async def test_gateway_wires_quota_and_completion_to_same_live_graph() -> None:
             assert completion_handler._repository is repository
             assert runtime.quota_handler._repository is repository
             assert completion_handler._operations is runtime.quota_handler._operations
+            assert runtime.quota_handler._external_job_observer is runtime.executor
+            before = runtime.executor.metrics_snapshot()["external_job_states"]
+            runtime.quota_handler._observe_external_job_state(
+                ProviderJobOutcome.PAUSED_QUOTA,
+            )
+            runtime.quota_handler._observe_external_job_state(
+                ProviderJobOutcome.POLLING,
+            )
+            after = runtime.executor.metrics_snapshot()["external_job_states"]
+            assert after["paused_quota"] == before["paused_quota"] + 1
+            assert after["polling"] == before["polling"] + 1
 
 
 @pytest.mark.asyncio

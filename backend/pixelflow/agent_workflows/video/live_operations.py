@@ -1018,11 +1018,13 @@ class VideoOperationQuotaStateHandler:
         operations: VideoLiveOperationBridge,
         clock: Any,
         graph: OperationCompletionCheckpointGraph,
+        external_job_observer: ExternalJobStateObserver | None = None,
     ) -> None:
         self._repository = repository
         self._operations = operations
         self._clock = clock
         self._graph = graph
+        self._external_job_observer = external_job_observer
 
     async def resume_external_job_quota(
         self,
@@ -1100,6 +1102,13 @@ class VideoOperationQuotaStateHandler:
             open_interrupt=projection.open_interrupt,
             close_interrupt_revision=projection.close_interrupt_revision,
             occurred_at=self._now(),
+        )
+        from pixelflow.agent_runtime.jobs.providers import ProviderJobOutcome
+
+        self._observe_external_job_state(
+            ProviderJobOutcome.PAUSED_QUOTA
+            if payload.quota_state.value == "paused"
+            else ProviderJobOutcome.POLLING,
         )
         self._operations._release_published_quota(quota)
 
@@ -1231,6 +1240,18 @@ class VideoOperationQuotaStateHandler:
             projection.open_interrupt,
         ):
             raise OperationConflictError("quota pause 未建立唯一 Graph 中断")
+
+    def _observe_external_job_state(self, state: ProviderJobOutcome) -> None:
+        """提交成功后只上报固定六态，指标异常不得阻断事件发布。"""
+
+        observer = self._external_job_observer
+        if observer is None:
+            return
+        try:
+            observer.observe_external_job_state(state)
+        except Exception:
+            # 指标旁路失败不得阻断已提交 quota 事件的 claim 释放。
+            return
 
     def _now(self) -> datetime:
         value = self._clock.now() if hasattr(self._clock, "now") else self._clock()
