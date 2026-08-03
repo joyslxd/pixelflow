@@ -82,6 +82,7 @@ from pixelflow.agent_runtime.supervisor import (
     DeterministicResolutionStatus,
 )
 from pixelflow.agent_workflows.video import (
+    VideoLiveStateConflictError,
     VideoLiveWorkflowHandler,
     VideoPlanningWorkflowService,
     VideoPostProductionWorkflowService,
@@ -732,6 +733,95 @@ async def _pause_first_generation_operation(
     envelope = await repository.get_video_state(USER_ID, WORKFLOW_ID)
     assert envelope is not None
     return operations, state, pending, paused, envelope
+
+
+async def _paused_quota_handler_harness() -> SimpleNamespace:
+    """建立已投影授权中断的真实 Memory Handler 测试环境。"""
+
+    from pixelflow.agent_workflows.video.live_quota import (
+        VideoOperationQuotaProjectionService,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    store = MemoryPixelFlowTaskStore()
+    repository = MemoryVideoRuntimeRepository(
+        task_store=store,
+        completion_clock=clock.now,
+    )
+    await _seed_conversation(store)
+    operations, state, pending, paused, envelope = (
+        await _pause_first_generation_operation(
+            repository,
+            store,
+            clock,
+            provider,
+        )
+    )
+    pause_claim = await repository.claim_operation_quota_event(
+        USER_ID,
+        CONVERSATION_ID,
+        paused.event.event_id,
+        pending.job_id,
+        quota_pause_revision=1,
+        quota_state="paused",
+        lease_owner="task5-pause-projection",
+        now=clock.now(),
+        lease_expires_at=clock.now() + timedelta(seconds=30),
+    )
+    assert pause_claim is not None
+    projection = VideoOperationQuotaProjectionService().build(
+        user_id=USER_ID,
+        envelope=envelope,
+        operation=paused.operation,
+        quota_event=pause_claim.event,
+    )
+    await repository.commit_operation_quota_state(
+        pause_claim,
+        user_id=USER_ID,
+        workflow_state=projection.workflow_state,
+        workflow=projection.workflow,
+        expected_workflow_version=envelope.workflow_version,
+        open_interrupt=projection.open_interrupt,
+        close_interrupt_revision=None,
+        occurred_at=clock.now(),
+    )
+    return SimpleNamespace(
+        clock=clock,
+        provider=provider,
+        repository=repository,
+        operations=operations,
+        state=state,
+        pending=pending,
+        paused=paused,
+        workflow=projection.workflow,
+    )
+
+
+def _quota_retry_command(
+    harness: SimpleNamespace,
+    *,
+    suffix: str,
+    job_id: str | None = None,
+    revision: int = 1,
+) -> WorkflowCommand:
+    """构造只携带安全 job/revision 的 quota 授权恢复动作。"""
+
+    command = explicit_stage_command(
+        harness.workflow,
+        action=AgentAction.RETRY_FAILED,
+        patch={
+            "job_id": job_id or harness.pending.job_id,
+            "quota_pause_revision": revision,
+        },
+        suffix=suffix,
+    )
+    return replace(
+        command,
+        decision=command.decision.model_copy(
+            update={"target_stage": harness.pending.stage}
+        ),
+    )
 
 
 async def _commit_next_state(
@@ -1880,6 +1970,567 @@ def test_transient_credential_vault_lifecycle_and_empty_credential_rejection() -
     assert vault.get("turn-live-2") is None
 
 
+@pytest.mark.asyncio
+async def test_quota_credential_resumes_original_operation_and_is_consumed(
+    tmp_path: Path,
+) -> None:
+    """授权恢复只续跑原 Provider job，并把当前凭据消费一次。"""
+
+    from pixelflow.agent_workflows.video.live_capabilities import (
+        _consume_authorization_for_quota_resume_boundary,
+    )
+
+    clock = _MutableClock()
+    provider = ScriptedProvider()
+    async with _video_repository(
+        "memory",
+        tmp_path / "task5-quota-credential.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        operations, _, pending, paused, _ = (
+            await _pause_first_generation_operation(
+                repository,
+                store,
+                clock,
+                provider,
+            )
+        )
+        credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+
+        authorized = await operations.resume_paused_operation(
+            user_id=USER_ID,
+            conversation_id=CONVERSATION_ID,
+            workflow_id=WORKFLOW_ID,
+            job_id=pending.job_id,
+            expected_revision=1,
+            resume_request_key="decision:task5-quota-credential",
+            credential=credential,
+        )
+
+        assert authorized.operation.job_id == pending.job_id
+        assert authorized.operation.provider_job_id == paused.operation.provider_job_id
+        assert authorized.operation.attempt == paused.operation.attempt == 1
+        assert provider.start_calls == 3
+        with pytest.raises(RuntimeError, match="不可用"):
+            _consume_authorization_for_quota_resume_boundary(credential)
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_without_credential_reopens_same_revision_interrupt() -> None:
+    """缺凭据时保持原 Operation 暂停，并重开同 revision 授权中断。"""
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(harness, suffix="task5-quota-missing")
+    handler = handler_without_credential(
+        repository=harness.repository,
+        operations=harness.operations,
+        clock=harness.clock,
+    )
+
+    result = await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.next_poll_at is None
+    assert operation.quota_pause_revision == 1
+    assert result.workflow.status is WorkflowStatus.RUNNING
+    assert result.interrupt is not None
+    assert result.interrupt.payload["authorization_action"]["patch"] == {
+        "job_id": harness.pending.job_id,
+        "quota_pause_revision": 1,
+    }
+    events = await harness.repository.list_events(USER_ID, CONVERSATION_ID)
+    assert not any(
+        item.type.value == "external_job.quota_state_changed"
+        and item.payload["quota_state"] == "resumed"
+        for item in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_consumes_new_credential_and_resumes_same_operation() -> None:
+    """有效授权只恢复原 job，不 start、不换 attempt。"""
+
+    from pixelflow.agent_workflows.video.live_capabilities import (
+        _consume_authorization_for_quota_resume_boundary,
+    )
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(harness, suffix="task5-quota-valid")
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    result = await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.job_id == harness.pending.job_id
+    assert operation.provider_job_id == harness.paused.operation.provider_job_id
+    assert operation.attempt == 1
+    assert harness.provider.start_calls == 3
+    assert result.workflow.status is WorkflowStatus.RUNNING
+    assert result.operation_event_claim is not None
+    assert result.state.last_action_key == result.operation_event_claim.event.event_id
+    with pytest.raises(RuntimeError, match="不可用"):
+        _consume_authorization_for_quota_resume_boundary(credential)
+
+
+@pytest.mark.asyncio
+async def test_missing_quota_credential_commits_then_new_credential_resumes() -> None:
+    """缺凭据重开可真实提交，下一响应仍能恢复同一 revision。"""
+
+    harness = await _paused_quota_handler_harness()
+    first_interrupt = await harness.repository.get_open_interrupt(
+        USER_ID,
+        CONVERSATION_ID,
+    )
+    assert first_interrupt is not None
+    first_response = await harness.repository.store_interrupt_response(
+        USER_ID,
+        CONVERSATION_ID,
+        first_interrupt.interrupt_id,
+        client_response_id=UUID("00000000-0000-4000-8000-000000001501"),
+        response_value={"content": "尚未取得新凭据"},
+        responded_at=harness.clock.now(),
+    )
+    first_claim = await harness.repository.claim_interrupt_resume(
+        USER_ID,
+        CONVERSATION_ID,
+        first_response.interrupt_id,
+        lease_owner="task5-missing-credential-turn",
+        now=harness.clock.now(),
+        lease_expires_at=harness.clock.now() + timedelta(seconds=60),
+    )
+    assert first_claim is not None
+    first_command = replace(
+        _quota_retry_command(harness, suffix="task5-quota-missing-commit"),
+        turn_id=first_claim.turn.turn_id,
+    )
+    handler = handler_without_credential(
+        repository=harness.repository,
+        operations=harness.operations,
+        clock=harness.clock,
+    )
+    waiting = await handler.dispatch(first_command)
+    executor = object.__new__(SupervisorTurnExecutor)
+    executor._clock = harness.clock.now
+    waiting_commit = executor._commit_from_graph(
+        first_claim,
+        first_command.decision,
+        {
+            "decision": first_command.decision.model_dump(mode="json"),
+            "workflow_dispatch_result": waiting.model_dump(mode="json"),
+        },
+        close_interrupt_id=first_interrupt.interrupt_id,
+    )
+
+    await harness.repository.commit_turn(first_claim, waiting_commit)
+
+    reopened = await harness.repository.get_open_interrupt(
+        USER_ID,
+        CONVERSATION_ID,
+    )
+    assert reopened is not None
+    assert reopened.interrupt_id != first_interrupt.interrupt_id
+    assert reopened.payload["authorization_action"]["patch"] == {
+        "job_id": harness.pending.job_id,
+        "quota_pause_revision": 1,
+    }
+    running_workflow = await harness.repository.get_workflow(USER_ID, WORKFLOW_ID)
+    assert running_workflow is not None
+    assert running_workflow.status is WorkflowStatus.RUNNING
+    second_response = await harness.repository.store_interrupt_response(
+        USER_ID,
+        CONVERSATION_ID,
+        reopened.interrupt_id,
+        client_response_id=UUID("00000000-0000-4000-8000-000000001502"),
+        response_value={"content": "已取得新凭据"},
+        responded_at=harness.clock.now(),
+    )
+    second_claim = await harness.repository.claim_interrupt_resume(
+        USER_ID,
+        CONVERSATION_ID,
+        second_response.interrupt_id,
+        lease_owner="task5-valid-credential-turn",
+        now=harness.clock.now(),
+        lease_expires_at=harness.clock.now() + timedelta(seconds=60),
+    )
+    assert second_claim is not None
+    second_command = replace(
+        explicit_stage_command(
+            running_workflow,
+            action=AgentAction.RETRY_FAILED,
+            patch={
+                "job_id": harness.pending.job_id,
+                "quota_pause_revision": 1,
+            },
+            suffix="task5-quota-valid-after-missing",
+        ),
+        turn_id=second_claim.turn.turn_id,
+    )
+    second_command = replace(
+        second_command,
+        decision=second_command.decision.model_copy(
+            update={"target_stage": harness.pending.stage}
+        ),
+    )
+    vault = TransientCredentialVault()
+    vault.put(second_command.turn_id, TransientTurnCredential(FAKE_AUTHORIZATION))
+    resumed_handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    resumed = await resumed_handler.dispatch(second_command)
+    resumed_commit = executor._commit_from_graph(
+        second_claim,
+        second_command.decision,
+        {
+            "decision": second_command.decision.model_dump(mode="json"),
+            "workflow_dispatch_result": resumed.model_dump(mode="json"),
+        },
+        close_interrupt_id=reopened.interrupt_id,
+    )
+    await harness.repository.commit_turn(second_claim, resumed_commit)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.provider_job_id == harness.paused.operation.provider_job_id
+    assert operation.attempt == 1
+    assert operation.next_poll_at == harness.clock.now()
+    assert harness.provider.start_calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_id", "revision"),
+    [
+        (None, 2),
+        ("operation-not-in-current-workflow", 1),
+    ],
+)
+async def test_quota_revision_or_job_mismatch_fails_closed(
+    job_id: str | None,
+    revision: int,
+) -> None:
+    """旧 revision 与错误 job 均返回固定冲突，不改变暂停状态。"""
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(
+        harness,
+        suffix=f"task5-quota-stale-{revision}-{job_id is not None}",
+        job_id=job_id,
+        revision=revision,
+    )
+    from pixelflow.agent_workflows.video.live_capabilities import (
+        _consume_authorization_for_quota_resume_boundary,
+    )
+
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_quota_resume_stale",
+    ):
+        await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.next_poll_at is None
+    assert operation.quota_pause_revision == 1
+    with pytest.raises(RuntimeError, match="不可用"):
+        _consume_authorization_for_quota_resume_boundary(credential)
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_rejects_forged_paused_workflow_projection() -> None:
+    """只有 Repository 中完整的 paused WorkflowRecord 可以进入 quota 窄路由。"""
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(harness, suffix="task5-quota-forged-workflow")
+    forged = harness.workflow.model_copy(
+        update={"updated_at": harness.workflow.updated_at + timedelta(seconds=1)}
+    )
+    command = replace(command, workflow=forged)
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_workflow_projection_stale",
+    ):
+        await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.next_poll_at is None
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_rejects_running_projection_with_original_pause_thread() -> None:
+    """RUNNING 投影不能借用原 quota pause checkpoint 冒充缺凭据重开。"""
+
+    harness = await _paused_quota_handler_harness()
+    original_interrupt = await harness.repository.get_open_interrupt(
+        USER_ID,
+        CONVERSATION_ID,
+    )
+    assert original_interrupt is not None
+    assert original_interrupt.thread_id.startswith("quota-paused:")
+    envelope = await harness.repository.get_video_state(USER_ID, WORKFLOW_ID)
+    assert envelope is not None
+    from pixelflow.agent_workflows.video.state_codec import (
+        decode_video_workflow_state,
+    )
+
+    running_workflow = project_video_workflow_state(
+        decode_video_workflow_state(envelope)
+    )
+    harness.repository._workflows[(USER_ID, WORKFLOW_ID)] = running_workflow
+    command = replace(
+        _quota_retry_command(harness, suffix="task5-forged-running-projection"),
+        workflow=running_workflow,
+    )
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, TransientTurnCredential(FAKE_AUTHORIZATION))
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_quota_resume_stale",
+    ):
+        await handler.dispatch(command)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_id", "conversation_id", "workflow_id"),
+    [
+        ("other-user", CONVERSATION_ID, WORKFLOW_ID),
+        (USER_ID, "other-conversation", WORKFLOW_ID),
+        (USER_ID, CONVERSATION_ID, "other-workflow"),
+    ],
+)
+async def test_quota_resume_bridge_rejects_cross_scope_identity(
+    user_id: str,
+    conversation_id: str,
+    workflow_id: str,
+) -> None:
+    """跨用户、跨会话与错误 Workflow 均不能恢复原 Operation。"""
+
+    harness = await _paused_quota_handler_harness()
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+
+    with pytest.raises(OperationConflictError):
+        await harness.operations.resume_paused_operation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            workflow_id=workflow_id,
+            job_id=harness.pending.job_id,
+            expected_revision=1,
+            resume_request_key="decision:task5-cross-scope",
+            credential=credential,
+        )
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.next_poll_at is None
+    assert operation.quota_pause_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_rejects_pending_attempt_mismatch() -> None:
+    """Operation attempt 与 M11 pending 不一致时必须在授权前失败关闭。"""
+
+    harness = await _paused_quota_handler_harness()
+    current = await harness.repository.get_operation(
+        USER_ID,
+        harness.pending.job_id,
+    )
+    assert current is not None
+    harness.repository._operations[(USER_ID, current.job_id)] = current.model_copy(
+        update={"attempt": current.attempt + 1}
+    )
+    command = _quota_retry_command(harness, suffix="task5-quota-attempt-stale")
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_quota_resume_stale",
+    ):
+        await handler.dispatch(command)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "reason_code"),
+    [
+        ("user", "video_workflow_state_required"),
+        ("conversation", "video_conversation_mismatch"),
+        ("workflow", "video_workflow_state_required"),
+    ],
+)
+async def test_quota_retry_handler_rejects_cross_scope_command(
+    scope: str,
+    reason_code: str,
+) -> None:
+    """Handler 在任何 Operation 变更前拒绝跨作用域恢复命令。"""
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(harness, suffix=f"task5-quota-{scope}")
+    if scope == "user":
+        command = replace(command, user_id="other-user")
+    elif scope == "conversation":
+        command = replace(
+            command,
+            conversation_id="other-conversation",
+            namespace=workflow_namespace("other-conversation", WORKFLOW_ID),
+        )
+    else:
+        command = replace(
+            command,
+            workflow_id="other-workflow",
+            namespace=workflow_namespace(CONVERSATION_ID, "other-workflow"),
+            decision=command.decision.model_copy(
+                update={"target_workflow_id": "other-workflow"}
+            ),
+        )
+    handler = handler_without_credential(
+        repository=harness.repository,
+        operations=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(VideoLiveStateConflictError, match=reason_code):
+        await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.next_poll_at is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_quota_retry_allows_one_client_and_rejects_the_other(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """两个不同响应并发恢复同 revision 时只允许一个 claim。"""
+
+    harness = await _paused_quota_handler_harness()
+    first = _quota_retry_command(harness, suffix="task5-quota-client-a")
+    second = _quota_retry_command(harness, suffix="task5-quota-client-b")
+    first_marker = "Bearer task5-quota-client-a-marker"
+    second_marker = "Bearer task5-quota-client-b-marker"
+    vault = TransientCredentialVault()
+    vault.put(first.turn_id, TransientTurnCredential(first_marker))
+    vault.put(second.turn_id, TransientTurnCredential(second_marker))
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    outcomes = await asyncio.gather(
+        handler.dispatch(first),
+        handler.dispatch(second),
+        return_exceptions=True,
+    )
+
+    successes = [item for item in outcomes if isinstance(item, WorkflowDispatchResult)]
+    conflicts = [item for item in outcomes if isinstance(item, VideoLiveStateConflictError)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].reason_code == "video_quota_resume_stale"
+    events = await harness.repository.list_events(USER_ID, CONVERSATION_ID)
+    resumed = [
+        item
+        for item in events
+        if item.type.value == "external_job.quota_state_changed"
+        and item.payload["quota_state"] == "resumed"
+    ]
+    assert len(resumed) == 1
+    assert harness.provider.start_calls == 3
+    safe_snapshot = await harness.operations.safe_persistence_snapshot(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+    )
+    serialized = json.dumps(safe_snapshot, ensure_ascii=False, sort_keys=True)
+    assert first_marker not in serialized + caplog.text
+    assert second_marker not in serialized + caplog.text
+
+
 def test_video_operation_adapter_resolver_rejects_unknown_stage() -> None:
     provider = CountingProvider()
     adapter = ProviderJobAdapter(provider)
@@ -2063,48 +2714,36 @@ async def test_start_402_releases_lease_and_explicit_retry_reuses_operation() ->
 
 
 @pytest.mark.asyncio
-async def test_status_402_pauses_original_job_and_manual_recovery_never_restarts() -> None:
-    clock = _MutableClock()
-    provider = ScriptedProvider(
-        status_results=[
-            _HttpStatusError(402),
-            {
-                "job_id": "provider-scripted-1",
-                "status": "running",
-                "result": {"progress": 50},
-            },
-        ]
-    )
-    operations = build_live_operations(provider, clock=clock)
-    started = await operations.start(
-        request(),
-        credential=TransientTurnCredential(FAKE_AUTHORIZATION),
-    )
-    runtime = operations.build_recovery_runtime(
-        resumer=_RecordingResumer(),
-        worker_id="task8-recovery-quota",
-    )
+async def test_quota_pause_authorized_handler_resumes_original_job_without_restart() -> None:
+    """quota 暂停只能经真实 Handler 恢复，且不得重新执行 Provider start。"""
 
-    clock.advance(seconds=3)
-    await runtime.run_once()
-    paused = await operations.get_operation(
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(harness, suffix="task5-authorized-handler")
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, TransientTurnCredential(FAKE_AUTHORIZATION))
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+    start_calls_before = harness.provider.start_calls
+
+    result = await handler.dispatch(command)
+
+    resumed = await harness.operations.get_operation(
         user_id=USER_ID,
         conversation_id=CONVERSATION_ID,
-        job_id=started.job_id,
+        job_id=harness.pending.job_id,
     )
-    recovery = await runtime.recover_manually(
-        USER_ID,
-        CONVERSATION_ID,
-        started.job_id,
-    )
-    await runtime.run_once()
-
-    assert paused is not None
-    assert paused.status is ExternalJobStatus.POLLING
-    assert paused.next_poll_at is None
-    assert recovery.action is OperationManualRecoveryAction.RESUMED_ORIGINAL_JOB
-    assert provider.start_calls == 1
-    assert provider.status_job_ids == ["provider-scripted-1", "provider-scripted-1"]
+    assert resumed is not None
+    assert resumed.job_id == harness.pending.job_id
+    assert resumed.provider_job_id == harness.paused.operation.provider_job_id
+    assert resumed.attempt == harness.paused.operation.attempt == 1
+    assert resumed.next_poll_at == harness.clock.now()
+    assert result.operation_event_claim is not None
+    assert harness.provider.start_calls == start_calls_before
 
 
 @pytest.mark.asyncio

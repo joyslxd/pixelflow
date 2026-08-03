@@ -617,6 +617,20 @@ def _consume_authorization_for_skill_boundary(
     return authorization
 
 
+def _consume_authorization_for_quota_resume_boundary(
+    credential: TransientTurnCredential,
+) -> str:
+    """仅为原 Provider job 的 quota resume 原子消费一次 Authorization。"""
+
+    if not isinstance(credential, TransientTurnCredential):
+        raise TypeError("credential 必须是 TransientTurnCredential")
+    with _TRANSIENT_CREDENTIAL_LOCK:
+        authorization = _TRANSIENT_CREDENTIAL_SECRETS.pop(credential, None)
+    if authorization is None:
+        raise RuntimeError("当前 Turn 临时凭据不可用")
+    return authorization
+
+
 def _borrow_authorization_for_operation_boundary(
     credential: TransientTurnCredential,
 ) -> str:

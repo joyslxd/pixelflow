@@ -24,6 +24,7 @@ from pixelflow.agent_runtime.ports import OperationConflictError
 from .live_capabilities import (
     TransientTurnCredential,
     _borrow_authorization_for_operation_boundary,
+    _consume_authorization_for_quota_resume_boundary,
     _is_sensitive_protocol_key,
     _normalize_protocol_key,
 )
@@ -36,7 +37,10 @@ if TYPE_CHECKING:
         ProviderJobAdapter,
         ProviderJobOutcome,
     )
-    from pixelflow.agent_runtime.jobs.quota import WorkflowGraphQuotaStatePort
+    from pixelflow.agent_runtime.jobs.quota import (
+        OperationQuotaAuthorizedResume,
+        WorkflowGraphQuotaStatePort,
+    )
     from pixelflow.agent_runtime.jobs.recovery import OperationRecoveryRuntime
     from pixelflow.agent_runtime.persistence import VideoRuntimeRepository
     from pixelflow.agent_runtime.persistence.repositories import EventDeliveryClaim
@@ -352,6 +356,7 @@ class VideoLiveOperationBridge:
         lease_owner: str,
         clock: Callable[[], datetime] | Any | None = None,
         job_id_factory: Callable[[], str] | None = None,
+        quota_lease_duration: timedelta = timedelta(seconds=30),
     ) -> None:
         if not isinstance(resolver, VideoOperationAdapterResolver):
             raise TypeError("resolver 必须是 VideoOperationAdapterResolver")
@@ -360,6 +365,9 @@ class VideoLiveOperationBridge:
         self._lease_owner = _require_text("lease_owner", lease_owner, maximum=128)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._job_id_factory = job_id_factory
+        if quota_lease_duration <= timedelta(0):
+            raise ValueError("quota_lease_duration 必须大于零")
+        self._quota_lease_duration = quota_lease_duration
         self._operation_event_claims = _OperationEventClaimRegistry()
         self._recovery_repository = _OperationEventClaimRepositoryProxy(
             repository,
@@ -442,6 +450,57 @@ class VideoLiveOperationBridge:
                 authorization=authorization,
                 lease_owner=self._lease_owner,
             )
+        finally:
+            authorization = ""
+
+    async def resume_paused_operation(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workflow_id: str,
+        job_id: str,
+        expected_revision: int,
+        resume_request_key: str,
+        credential: TransientTurnCredential,
+    ) -> OperationQuotaAuthorizedResume:
+        """消费当前凭据并原子恢复原 Provider job，不重新执行 start。"""
+
+        from pixelflow.agent_runtime.jobs import OperationQuotaCoordinator
+
+        authorization = _consume_authorization_for_quota_resume_boundary(credential)
+        try:
+            if not authorization.strip():
+                raise OperationConflictError("quota_resume_authorization_required")
+            if not isinstance(resume_request_key, str) or not resume_request_key.strip():
+                raise OperationConflictError("quota_resume_request_key_required")
+            claim_time = self._now()
+            request_digest = hashlib.sha256(
+                resume_request_key.strip().encode()
+            ).hexdigest()[:16]
+            authorized = await OperationQuotaCoordinator(
+                self._repository,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            ).authorize_resume(
+                job_id,
+                workflow_id=workflow_id,
+                expected_revision=expected_revision,
+                delivery_lease_owner=(
+                    f"{self._lease_owner}:quota-resume:{request_digest}"
+                ),
+                now=claim_time,
+                delivery_lease_expires_at=(
+                    claim_time + self._quota_lease_duration
+                ),
+            )
+            self.remember_quota_resume_claim(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                job_id=job_id,
+                claim=authorized.claim,
+            )
+            return authorized
         finally:
             authorization = ""
 

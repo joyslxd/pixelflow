@@ -16,9 +16,11 @@ from pydantic import (
 
 from pixelflow.agent_runtime.contracts import (
     AgentAction,
+    ExternalJobStatus,
     TurnStatus,
     WorkflowKind,
     WorkflowRecord,
+    WorkflowStatus,
 )
 from pixelflow.agent_runtime.contracts.base import ContractModel
 from pixelflow.agent_runtime.identity import interrupt_id
@@ -28,7 +30,7 @@ from pixelflow.agent_runtime.persistence import (
     SupervisorProjectionMessage,
     VideoRuntimeRepository,
 )
-from pixelflow.agent_runtime.ports import OperationPort
+from pixelflow.agent_runtime.ports import OperationConflictError, OperationPort
 
 from .delivery import (
     VideoDeliveryWorkflowService,
@@ -197,6 +199,11 @@ class VideoLiveWorkflowHandler:
             return self._start_workflow(command, existing_envelope)
         if existing_envelope is None:
             raise VideoLiveStateConflictError("video_workflow_state_required")
+        if self._is_quota_resume_action(command):
+            return await self._resume_quota_operation(
+                command,
+                existing_envelope=existing_envelope,
+            )
         state = self._decode_existing_state(command, existing_envelope)
         if command.decision.action is AgentAction.SWITCH_WORKFLOW:
             self._require_patch_keys(command, allowed=frozenset())
@@ -251,6 +258,248 @@ class VideoLiveWorkflowHandler:
                 existing_envelope=existing_envelope,
             )
         raise VideoLiveStateConflictError("video_action_not_implemented")
+
+    @staticmethod
+    def _is_quota_resume_action(command: WorkflowCommand) -> bool:
+        """只识别冻结的 job/revision quota 恢复补丁。"""
+
+        return (
+            command.decision.action is AgentAction.RETRY_FAILED
+            and set(command.decision.patch) == {"job_id", "quota_pause_revision"}
+        )
+
+    async def _resume_quota_operation(
+        self,
+        command: WorkflowCommand,
+        *,
+        existing_envelope: VideoWorkflowStateEnvelope,
+    ) -> WorkflowDispatchResult:
+        """验证暂停投影并使用一次性凭据恢复原 Provider job。"""
+
+        operations = self._live_operation_bridge()
+        if operations is None:
+            raise VideoLiveStateConflictError("video_quota_resume_unavailable")
+        credential = self._credential_provider.get(command.turn_id)
+        if credential is None:
+            state, operation, _ = await self._quota_resume_authority(
+                command,
+                existing_envelope=existing_envelope,
+                operations=operations,
+            )
+            return self._wait_for_authorization(
+                command,
+                state,
+                existing_envelope=existing_envelope,
+                authorization_stage=operation.stage,
+            )
+        try:
+            state, operation, revision = await self._quota_resume_authority(
+                command,
+                existing_envelope=existing_envelope,
+                operations=operations,
+            )
+            try:
+                authorized = await operations.resume_paused_operation(
+                    user_id=command.user_id,
+                    conversation_id=command.conversation_id,
+                    workflow_id=command.workflow_id,
+                    job_id=operation.job_id,
+                    expected_revision=revision,
+                    resume_request_key=command.decision.idempotency_key,
+                    credential=credential,
+                )
+            except OperationConflictError as exc:
+                raise VideoLiveStateConflictError(
+                    "video_quota_resume_stale"
+                ) from exc
+            from .live_quota import VideoOperationQuotaProjectionService
+
+            projection = VideoOperationQuotaProjectionService().build(
+                user_id=command.user_id,
+                envelope=existing_envelope,
+                operation=authorized.operation,
+                quota_event=authorized.claim.event,
+            )
+            return WorkflowDispatchResult(
+                state=projection.workflow_state,
+                workflow=projection.workflow,
+                turn_status=TurnStatus.COMPLETED,
+                operation_event_claim=authorized.claim,
+            )
+        finally:
+            credential.discard()
+
+    async def _quota_resume_authority(
+        self,
+        command: WorkflowCommand,
+        *,
+        existing_envelope: VideoWorkflowStateEnvelope,
+        operations: VideoLiveOperationBridge,
+    ):
+        """在绕过普通 RUNNING 投影比较前验证全部 quota 权威身份。"""
+
+        patch = command.decision.patch
+        job_id = patch.get("job_id")
+        revision = patch.get("quota_pause_revision")
+        if (
+            not isinstance(job_id, str)
+            or not job_id.strip()
+            or job_id != job_id.strip()
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 1
+        ):
+            raise VideoLiveStateConflictError("video_action_patch_invalid")
+        if existing_envelope.user_id != command.user_id:
+            raise VideoLiveStateConflictError("video_user_mismatch")
+        if existing_envelope.conversation_id != command.conversation_id:
+            raise VideoLiveStateConflictError("video_conversation_mismatch")
+        try:
+            state = decode_video_workflow_state(existing_envelope)
+            domain_workflow = project_video_workflow_state(state)
+        except (TypeError, ValueError) as exc:
+            raise VideoLiveStateConflictError("video_state_corrupted") from exc
+        stored_workflow = await self._repository.get_workflow(
+            command.user_id,
+            command.workflow_id,
+        )
+        stored_document = (
+            None
+            if stored_workflow is None
+            else stored_workflow.model_dump(mode="json")
+        )
+        domain_document = domain_workflow.model_dump(mode="json")
+        paused_projection_document = (
+            None
+            if stored_workflow is None
+            else domain_workflow.model_copy(
+                update={
+                    "status": stored_workflow.status,
+                    "updated_at": stored_workflow.updated_at,
+                }
+            ).model_dump(mode="json")
+        )
+        valid_initial_pause = (
+            stored_workflow is not None
+            and stored_workflow.status is WorkflowStatus.PAUSED_QUOTA
+            and paused_projection_document == stored_document
+        )
+        valid_reopened_wait = (
+            stored_workflow is not None
+            and stored_workflow.status is WorkflowStatus.RUNNING
+            and domain_workflow.status is WorkflowStatus.RUNNING
+            and domain_document == stored_document
+        )
+        if (
+            stored_workflow is None
+            or not (valid_initial_pause or valid_reopened_wait)
+            or command.workflow is None
+            or command.workflow.model_dump(mode="json")
+            != stored_document
+        ):
+            raise VideoLiveStateConflictError("video_workflow_projection_stale")
+        if command.decision.target_artifact_ref is not None:
+            raise VideoLiveStateConflictError("video_target_artifact_stale")
+        operation = await operations.get_operation(
+            user_id=command.user_id,
+            conversation_id=command.conversation_id,
+            job_id=job_id,
+        )
+        if (
+            operation is None
+            or operation.status is not ExternalJobStatus.POLLING
+            or operation.provider_job_id is None
+            or operation.workflow_id != command.workflow_id
+            or operation.quota_pause_revision != revision
+            or operation.next_poll_at is not None
+            or operation.lease_owner is not None
+            or operation.lease_expires_at is not None
+        ):
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        if command.decision.target_stage != operation.stage:
+            raise VideoLiveStateConflictError("video_target_stage_stale")
+        pending_items = list(getattr(state, "pending_operations", ()) or ())
+        pending = getattr(state, "pending_operation", None)
+        if pending is not None:
+            pending_items.append(pending)
+        matches = [item for item in pending_items if item.job_id == operation.job_id]
+        if (
+            len(matches) != 1
+            or matches[0].workflow_id != operation.workflow_id
+            or matches[0].stage != operation.stage
+            or matches[0].attempt != operation.attempt
+            or getattr(state, "workflow_id", None) != operation.workflow_id
+            or getattr(state, "conversation_id", None) != operation.conversation_id
+            or getattr(state, "stage_version", None) != operation.stage_version
+        ):
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        interrupt_id_value = self._interrupt_occurrence_id(
+            turn_id=existing_envelope.last_turn_id,
+            reason_code="authorization_required",
+            workflow=stored_workflow,
+            workflow_version=existing_envelope.workflow_version,
+        )
+        interrupt = await self._repository.get_interrupt(
+            command.user_id,
+            interrupt_id_value,
+        )
+        expected_patch = {
+            "job_id": operation.job_id,
+            "quota_pause_revision": revision,
+        }
+        expected_interrupt_payload = {
+            "workflow_id": operation.workflow_id,
+            "stage": operation.stage,
+            "authorization_action": {
+                "action": "retry_failed",
+                "intent": "video",
+                "workflow_id": operation.workflow_id,
+                "stage": operation.stage,
+                "artifact_ref": None,
+                "patch": expected_patch,
+            },
+        }
+        from pixelflow.agent_runtime.jobs import (
+            OperationQuotaState,
+            build_operation_quota_event_id,
+        )
+
+        from .live_quota import quota_checkpoint_thread_id
+
+        pause_event_id = build_operation_quota_event_id(
+            operation.job_id,
+            revision,
+            OperationQuotaState.PAUSED,
+        )
+        valid_interrupt_location = (
+            valid_initial_pause
+            and interrupt is not None
+            and interrupt.thread_id
+            == quota_checkpoint_thread_id(
+                event_id=pause_event_id,
+                workflow_version=existing_envelope.workflow_version,
+                paused=True,
+            )
+            and interrupt.checkpoint_ns == "root"
+        ) or (
+            valid_reopened_wait
+            and interrupt is not None
+            and interrupt.thread_id == command.namespace.thread_id
+            and interrupt.checkpoint_ns == "root"
+        )
+        if (
+            interrupt is None
+            or not valid_interrupt_location
+            or interrupt.status not in {"open", "responded"}
+            or interrupt.kind != "authorization_required"
+            or interrupt.reason_code != "authorization_required"
+            or interrupt.workflow_id != command.workflow_id
+            or interrupt.conversation_id != command.conversation_id
+            or interrupt.turn_id != existing_envelope.last_turn_id
+            or interrupt.payload != expected_interrupt_payload
+        ):
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        return state, operation, revision
 
     def _cancel_state(self, state):
         """按具体领域类型调用取消 Service，不直接改写嵌套权威字段。"""
@@ -1576,28 +1825,39 @@ class VideoLiveWorkflowHandler:
         state,
         *,
         existing_envelope: VideoWorkflowStateEnvelope,
+        authorization_stage: str | None = None,
     ) -> WorkflowDispatchResult:
         """在任何付费 Operation 建立前打开稳定鉴权中断。"""
 
+        stage = authorization_stage or state.current_stage.value
+        quota_resume = authorization_stage is not None
+        authorization_action = {
+            "action": command.decision.action.value,
+            "intent": "video",
+            "workflow_id": command.workflow_id,
+            "stage": stage,
+            "artifact_ref": (
+                None
+                if quota_resume
+                else command.decision.target_artifact_ref
+            ),
+            "patch": deepcopy_json(command.decision.patch),
+        }
+        interrupt_payload = {
+            "workflow_id": command.workflow_id,
+            "stage": stage,
+            "authorization_action": authorization_action,
+        }
+        if not quota_resume:
+            interrupt_payload["artifact_ref"] = command.decision.target_artifact_ref
         return self._result_from_state(
             command,
             state,
             existing_envelope=existing_envelope,
             interrupt_kind="authorization_required",
             reason_code="authorization_required",
-            interrupt_payload={
-                "workflow_id": command.workflow_id,
-                "stage": state.current_stage.value,
-                "artifact_ref": command.decision.target_artifact_ref,
-                "authorization_action": {
-                    "action": command.decision.action.value,
-                    "intent": "video",
-                    "workflow_id": command.workflow_id,
-                    "stage": state.current_stage.value,
-                    "artifact_ref": command.decision.target_artifact_ref,
-                    "patch": deepcopy_json(command.decision.patch),
-                },
-            },
+            interrupt_payload=interrupt_payload,
+            include_interrupt_ui_kind=not quota_resume,
         )
 
     def _wait_for_plan_review(
@@ -1633,6 +1893,7 @@ class VideoLiveWorkflowHandler:
         artifact: Mapping[str, JsonValue] | None = None,
         update_active_workflow: bool = False,
         active_workflow_id: str | None = None,
+        include_interrupt_ui_kind: bool = True,
     ) -> WorkflowDispatchResult:
         workflow = project_video_workflow_state(state)
         envelope = encode_video_workflow_state(
@@ -1653,6 +1914,7 @@ class VideoLiveWorkflowHandler:
                 payload=interrupt_payload or {},
                 workflow=workflow,
                 workflow_version=envelope.workflow_version,
+                include_ui_kind=include_interrupt_ui_kind,
             )
         messages = ()
         if artifact is not None:
@@ -1687,9 +1949,11 @@ class VideoLiveWorkflowHandler:
         payload: Mapping[str, JsonValue],
         workflow: WorkflowRecord,
         workflow_version: int,
+        include_ui_kind: bool = True,
     ) -> StoredAgentInterrupt:
         copied_payload = cast(dict[str, JsonValue], deepcopy_json(payload))
-        copied_payload["ui_kind"] = _INTERRUPT_UI_KINDS.get(kind, kind)
+        if include_ui_kind:
+            copied_payload["ui_kind"] = _INTERRUPT_UI_KINDS.get(kind, kind)
         return StoredAgentInterrupt(
             interrupt_id=self._interrupt_occurrence_id(
                 turn_id=command.turn_id,

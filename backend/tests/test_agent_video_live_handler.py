@@ -651,6 +651,39 @@ async def test_video_handler_retries_failed_merge_with_existing_operation_port(
 
 
 @pytest.mark.asyncio
+async def test_non_quota_retry_cannot_bypass_paused_workflow_projection_check(
+    state_repository: _SeededMemoryVideoRuntimeRepository,
+    command_factory,
+) -> None:
+    """普通 retry_failed 即使伪装 paused 投影也必须继续严格拒绝。"""
+
+    state = _planning_state("plan_review")
+    _, workflow = await state_repository.seed_state(state)
+    paused = workflow.model_copy(
+        update={"status": WorkflowStatus.PAUSED_QUOTA}
+    )
+    state_repository._workflows[("user-1", workflow.workflow_id)] = paused
+    handler = VideoLiveWorkflowHandler(
+        repository=state_repository,
+        capabilities=_FakeCapabilities(),
+        credential_provider=_FakeCredentialProvider(),
+        clock=_FakeClock(),
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_workflow_projection_stale",
+    ):
+        await handler.dispatch(
+            command_factory(
+                action=AgentAction.RETRY_FAILED,
+                patch={},
+                workflow=paused,
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_video_handler_selects_direction_and_opens_plan_review(
     state_repository: _SeededMemoryVideoRuntimeRepository,
     command_factory,
