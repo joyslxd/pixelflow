@@ -1,20 +1,20 @@
 # M13 集成、Shadow、全量发布、回滚与交付
 
-- phase：`phase_integrated`
+- phase：`ready_for_phase_integration`
 - owner：A+B；当周单一集成人
 - branch：`codex/agent-0.8.4-m13-integration`
 - 依赖：按 R1–R4 增量满足；最终收口依赖 M01–M12
-- 当前切片：`M13.3`
-- base Agent SHA：`2b7bd44813dbbe63836e8fd2434c0b9be08af404`
+- 当前切片：`M13.2`
+- base Agent SHA：`6fdb7ddfffd496c908c31903869c62b8bb43812a`
 - 当前唯一写入者：`尚未领取`
 - 开始时间：`2026-07-25 13:38:00 +08:00`
 - M13.2 已释放文件：R2 Runtime/Graph/创建路由、dev 配置、前端接力、定向测试、AGENTS/README/最新设计、状态和测试报告全部解除写锁
 - release_id：`R2`
 - checkpoint_slice：`M13.2`
-- checkpoint_commit：`d2a5970fa2c61ab7974451b38cc3bd8fbefa6b56`
+- checkpoint_commit：`0ff5d02961c76ef4f92ddcbcfce3922621c6daef`
 - last_integrated_commit：`95ef865f2a084ce57b91be5eb326e1045247d4a0`
-- checkpoint_status：`phase_integrated:R2`
-- 当前发布门禁：`released:R1 / phase_integrated:R2 / release_blocked:R2`；唯一发布负责人已于 2026-07-29 批准 R2，但本机没有受控生产部署入口，发布在修改生产配置前失败关闭，生产继续保持 R1
+- checkpoint_status：`ready`
+- 当前发布门禁：`released:R1 / phase_integrated:R2 / release_blocked:R2 / ready_for_phase_integration:Task14`；Task 14 是 `last_integrated_commit` 之后的新 M13.2 维护增量，只等待独立单槽集成，不恢复已经失败关闭的生产发布授权
 - 生产配置：`assist / [] / 100 / true`；只影响新对话，历史对话和运行中任务不迁移
 
 ## 切片
@@ -60,7 +60,7 @@ Shadow 不能调用付费 API，也不能写 PowerMem 经验。回滚只影响�
 
 ## M13.2 / R2 视频 live Handler Task 14 status 402 候选（2026-08-03）
 
-- 当前状态：`phase_gate_passed:Task14 / preparing_M13.2_maintenance_checkpoint`。Tasks 1–7 的最终实现 HEAD 为 `d32adf4`，Task 7 独立复审为 Critical `0`、Important `0`、Minor `0`；Task 8 首轮 spec compliance 的三个 Important 已全部整改并在第二轮关闭，最终 spec compliance 与 code quality 独立复审均为 Critical `0`、Important `0`、Minor `0`。随后合入最新 Agent 业务修复，并在 `c86eef8` 同步 Runtime 十个稳定公开导出的测试契约；该状态不改变既有 `phase_integrated:R2 / release_blocked:R2`，也不表示 Agent 长期分支已经安装视频 live Handler。
+- 当前状态：`ready_for_phase_integration:Task14 / awaiting_independent_slot_integration`。Tasks 1–7 的最终实现 HEAD 为 `d32adf4`，Task 7 独立复审为 Critical `0`、Important `0`、Minor `0`；Task 8 首轮 spec compliance 的三个 Important 已全部整改并在第二轮关闭，最终 spec compliance 与 code quality 独立复审均为 Critical `0`、Important `0`、Minor `0`。随后合入最新 Agent 业务修复，并在 `c86eef8` 同步 Runtime 十个稳定公开导出的测试契约；标准 M13 组合提交固定为 `0ff5d02961c76ef4f92ddcbcfce3922621c6daef`。该状态不改变既有 `phase_integrated:R2 / release_blocked:R2`，也不表示 Agent 长期分支已经安装视频 live Handler。
 - 提交链：Task 1 `95654b5`；Task 2 `ea471f0/1a4feab/2e0ca32`；Task 3 `5e76d3c`；Task 4 `567c92f/db53eaf/66cd0b1`；Task 5 `660b228/9fdfee6`；Task 6 `38ad218/f9b0ed3`；Task 7 `d32adf4`。Memory/SQL 对 `quota_pause_revision`、pause/resume Event、租约、due-operation 和 owner 校验保持同一事务语义。
 - revision 与 checkpoint：每次 status 402 单调增加 revision，并分别产生由 `job_id + revision + quota_state` 派生的稳定 pause/resume Event；Graph 使用版本化 `quota-paused`/`quota-resumed` checkpoint。公开全流程验证 revision `1` 与 `2`，旧 revision `1` 在第二轮固定返回 `409 video_quota_resume_stale` 且零副作用。
 - 公共 402：不调用 `recover_manually()`，不预置 `WAITING_USER` Turn。真实 FastAPI conversation/turn 先运行到 fake Provider status 402，再由 Recovery Runtime、QuotaStateHandler 和 Supervisor Graph 在原 Turn 打开授权中断；公开 interrupt response 的新 Authorization 经精确 `source_interrupt_id` 和 Repository 权威校验后，只恢复原内部 job、provider job 和 attempt，Provider start 增量为 `0`。
