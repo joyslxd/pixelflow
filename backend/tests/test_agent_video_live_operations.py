@@ -2357,6 +2357,49 @@ async def test_quota_retry_rejects_running_projection_with_original_pause_thread
 
 
 @pytest.mark.asyncio
+async def test_quota_retry_rejects_double_forged_running_namespace() -> None:
+    """RUNNING 命令与中断同时伪造旧 quota thread 也必须拒绝。"""
+
+    harness = await _paused_quota_handler_harness()
+    original_interrupt = await harness.repository.get_open_interrupt(
+        USER_ID,
+        CONVERSATION_ID,
+    )
+    assert original_interrupt is not None
+    old_pause_thread = original_interrupt.thread_id
+    assert old_pause_thread.startswith("quota-paused:")
+    envelope = await harness.repository.get_video_state(USER_ID, WORKFLOW_ID)
+    assert envelope is not None
+    running_workflow = project_video_workflow_state(
+        decode_video_workflow_state(envelope)
+    )
+    harness.repository._workflows[(USER_ID, WORKFLOW_ID)] = running_workflow
+    command = replace(
+        _quota_retry_command(harness, suffix="task5-double-forged-namespace"),
+        workflow=running_workflow,
+    )
+    command = replace(
+        command,
+        namespace=replace(command.namespace, thread_id=old_pause_thread),
+    )
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, TransientTurnCredential(FAKE_AUTHORIZATION))
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_quota_resume_stale",
+    ):
+        await handler.dispatch(command)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("user_id", "conversation_id", "workflow_id"),
     [

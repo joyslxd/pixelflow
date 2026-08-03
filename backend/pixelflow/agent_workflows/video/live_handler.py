@@ -471,6 +471,12 @@ class VideoLiveWorkflowHandler:
             revision,
             OperationQuotaState.PAUSED,
         )
+        from pixelflow.agent_runtime.graph.namespaces import workflow_namespace
+
+        canonical_namespace = workflow_namespace(
+            command.conversation_id,
+            command.workflow_id,
+        )
         valid_interrupt_location = (
             valid_initial_pause
             and interrupt is not None
@@ -484,7 +490,8 @@ class VideoLiveWorkflowHandler:
         ) or (
             valid_reopened_wait
             and interrupt is not None
-            and interrupt.thread_id == command.namespace.thread_id
+            and command.namespace == canonical_namespace
+            and interrupt.thread_id == canonical_namespace.thread_id
             and interrupt.checkpoint_ns == "root"
         )
         if (
