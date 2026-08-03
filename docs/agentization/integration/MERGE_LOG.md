@@ -378,3 +378,4 @@
 - exclusions：未调用真实 LLM、content-app、图片、视频、PPT、视频分析、剪映或 PowerMem 付费接口；未执行 M13.3、Agent→dev 或 `automation_active`；未开放其他 intent
 - release state：`phase_integrated:R2 / release_blocked:R2`；后续必须先补齐受控部署入口并获得新的唯一发布负责人明确批准，不得沿用本次任务自动继续
 - synchronized docs：M13 状态、BOARD、MERGE_LOG 和 [R2 生产发布阻塞记录](../test-reports/M13.2-R2-production-release-blocked.md)
+- 2026-08-03 22:55:21 +08:00：M13 阶段 R2 候选通过，模块提交 `d47b1b32bf935f828f3769ab561e74077d20a1e0` 已纳入最新 Agent/dev 基线。

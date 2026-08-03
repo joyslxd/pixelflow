@@ -30,7 +30,7 @@
 | M10 | 视频分析 Adapter | B | `not_started` | 0/4 | M00；联调 M03/M06 | — |
 | M11 | 视频生成 Adapter | B | `merged` | 5/5 | 无；已进入 Agent，R2 真实联调可使用 M06 | `5ed26af` |
 | M12 | 交互 UI 与 Legacy 迁移 | B | `merged` | 5/5 | 无；已进入 Agent | `e71cd8e` |
-| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；既有 R2 已进入 Agent且生产发布失败关闭；Task 14 增量已通过候选门禁，正在准备标准 M13.2 维护检查点；R3–R4 尚未执行 | `95ef865` |
+| M13 | R1–R4 增量 E2E、Shadow、全量发布、回滚 | A+B | `phase_integrated` | 2/5 | R1 已发布生产；既有 R2 已进入 Agent且生产发布失败关闭；Task 14 增量已通过候选门禁，正在准备标准 M13.2 维护检查点；R3–R4 尚未执行 | `d47b1b3` |
 
 ## 当前文件所有权
 
