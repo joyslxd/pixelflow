@@ -291,6 +291,12 @@ class OperationRecoveryRuntime:
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
+    @property
+    def quota_resumer(self) -> WorkflowGraphQuotaStatePort | None:
+        """只读暴露配额恢复处理器身份，供 Gateway 就绪检查使用。"""
+
+        return self._quota_resumer
+
     async def run_once(self) -> None:
         """先投递 quota、再投递终态，最后查询到期的原 job。"""
 

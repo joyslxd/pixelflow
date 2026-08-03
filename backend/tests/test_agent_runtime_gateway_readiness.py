@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.gateway import pixelflow_agent_runtime as live_runtime_module
 from app.gateway.pixelflow_agent_live_capabilities import (
     make_pixelflow_agent_live_capabilities,
 )
@@ -232,6 +233,125 @@ async def test_gateway_registers_same_real_video_handler_only_when_ready(
     }
     assert "supervisor-turn-scan" not in worker_names
     assert not any(name.startswith("operation-recovery:") for name in worker_names)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["quota_handler", "graph", "providers", "repository"],
+)
+@pytest.mark.asyncio
+async def test_gateway_keeps_video_on_v2_when_quota_recovery_is_incomplete(
+    missing: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """任一配额恢复依赖缺失时不得注册 live video 或启动恢复任务。"""
+
+    app = FastAPI()
+    providers, _services = _providers()
+    live_repository: VideoRuntimeRepository | None
+
+    if missing == "quota_handler":
+        class _UnavailableQuotaHandler:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                raise RuntimeError("测试模拟 quota handler 不可用")
+
+        monkeypatch.setattr(
+            live_runtime_module,
+            "VideoOperationQuotaStateHandler",
+            _UnavailableQuotaHandler,
+            raising=False,
+        )
+    elif missing == "graph":
+        @asynccontextmanager
+        async def _unavailable_graph(*_args: Any, **_kwargs: Any):
+            raise RuntimeError("测试模拟 Graph 不可用")
+            yield
+
+        monkeypatch.setattr(
+            live_runtime_module,
+            "make_pixelflow_agent_graph_runtime",
+            _unavailable_graph,
+        )
+    elif missing == "providers":
+        providers = make_video_live_provider_adapters()
+
+    async with _repository("memory") as (repository, task_store):
+        live_repository = None if missing == "repository" else repository
+        async with make_pixelflow_agent_live_runtime(
+            app,
+            config=_config("video"),
+            repository=live_repository,
+            task_store=task_store,
+            checkpointer=InMemorySaver(),
+            capabilities=_capabilities(),
+            providers=providers,
+            model_name="deepseek-v4-pro",
+            model_profiles=_profiles(),
+            memory_search=_PowerMemService(),
+            clock=_Clock(),
+        ) as runtime:
+            assert runtime.ready is False
+            assert runtime.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
+            assert runtime.registered_intents == frozenset()
+            assert runtime.primary_execution_intents == frozenset()
+            assert runtime.registry is None
+            assert runtime.video_handler is None
+            assert runtime.graph_runtime is None
+            assert runtime.executor is None
+            assert runtime.operation_recovery is None
+            assert runtime.quota_handler is None
+
+    assert runtime.closed is True
+    assert not hasattr(app.state, "pixelflow_agent_live_runtime")
+    assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
+    await asyncio.sleep(0)
+    worker_names = {
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if not task.done()
+    }
+    assert "supervisor-turn-scan" not in worker_names
+    assert not any(name.startswith("operation-recovery:") for name in worker_names)
+
+
+@pytest.mark.asyncio
+async def test_gateway_wires_quota_and_completion_to_same_live_graph() -> None:
+    """就绪 Gateway 的完成与配额处理器必须共享 Graph、Repository 与 Bridge。"""
+
+    app = FastAPI()
+    providers, _services = _providers()
+    async with _repository("memory") as (repository, task_store):
+        async with make_pixelflow_agent_live_runtime(
+            app,
+            config=_config("video"),
+            repository=repository,
+            task_store=task_store,
+            checkpointer=InMemorySaver(),
+            capabilities=_capabilities(),
+            providers=providers,
+            model_name="deepseek-v4-pro",
+            model_profiles=_profiles(),
+            memory_search=_PowerMemService(),
+            clock=_Clock(),
+        ) as runtime:
+            assert runtime.ready is True
+            assert runtime.registered_intents == frozenset({"video"})
+            assert runtime.primary_execution_intents == frozenset({"video"})
+            assert runtime.operation_recovery is not None
+            assert runtime.graph_runtime is not None
+            assert runtime.quota_handler is not None
+            assert (
+                runtime.operation_recovery.quota_resumer
+                is runtime.quota_handler
+            )
+            with pytest.raises(AttributeError):
+                setattr(runtime.operation_recovery, "quota_resumer", object())
+            completion_handler = runtime.operation_recovery._resumer
+            assert completion_handler._graph is runtime.graph_runtime.graph
+            assert runtime.quota_handler._graph is runtime.graph_runtime.graph
+            assert completion_handler._repository is repository
+            assert runtime.quota_handler._repository is repository
+            assert completion_handler._operations is runtime.quota_handler._operations
 
 
 @pytest.mark.asyncio

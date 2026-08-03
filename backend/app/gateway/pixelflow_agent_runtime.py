@@ -43,6 +43,7 @@ from pixelflow.agent_workflows.video.live_operations import (
     VideoLiveOperationBridge,
     VideoOperationAdapterResolver,
     VideoOperationCompletionHandler,
+    VideoOperationQuotaStateHandler,
 )
 from pixelflow.tasks import PixelFlowTaskStore
 
@@ -92,6 +93,7 @@ class PixelFlowAgentLiveRuntime:
     graph_runtime: AgentRuntimeGraphComposition | None = None
     executor: SupervisorTurnExecutor | None = None
     operation_recovery: OperationRecoveryRuntime | None = None
+    quota_handler: VideoOperationQuotaStateHandler | None = None
     reason_code: str | None = VIDEO_LIVE_HANDLER_NOT_READY
     registered_intents: frozenset[str] = frozenset()
     primary_execution_intents: frozenset[str] = frozenset()
@@ -108,6 +110,7 @@ class PixelFlowAgentLiveRuntime:
             and self.graph_runtime is not None
             and self.executor is not None
             and self.operation_recovery is not None
+            and self.quota_handler is not None
             and self._executor_started
             and self._recovery_started
         )
@@ -235,6 +238,7 @@ async def _assemble_ready_runtime(
     graph_runtime: AgentRuntimeGraphComposition | None = None
     executor: SupervisorTurnExecutor | None = None
     recovery: OperationRecoveryRuntime | None = None
+    quota_handler: VideoOperationQuotaStateHandler | None = None
     try:
         if (
             runtime.repository is None
@@ -314,9 +318,16 @@ async def _assemble_ready_runtime(
             graph=graph_runtime.graph,
             external_job_observer=executor,
         )
+        quota_handler = VideoOperationQuotaStateHandler(
+            repository=runtime.repository,
+            operations=operation_bridge,
+            clock=clock,
+            graph=graph_runtime.graph,
+        )
         recovery = operation_bridge.build_recovery_runtime(
             resumer=completion_handler,
             worker_id=f"gateway-video-recovery:{worker_suffix}",
+            quota_resumer=quota_handler,
         )
         await executor.start()
         runtime._executor_started = True
@@ -339,6 +350,7 @@ async def _assemble_ready_runtime(
     runtime.graph_runtime = graph_runtime
     runtime.executor = executor
     runtime.operation_recovery = recovery
+    runtime.quota_handler = quota_handler
     runtime.reason_code = None
     runtime.registered_intents = frozenset({"video"})
     runtime.primary_execution_intents = frozenset(
