@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -248,6 +248,8 @@ class VideoSceneGenerationWorkflowService:
         """恢复时只查询原 Operation；任务丢失时失败关闭，绝不重新 claim。"""
 
         _validate_generation_state(state)
+        if state.status is WorkflowStatus.CANCELLED:
+            raise ValueError("已取消的分镜生成 Workflow 属于终态，不能恢复 Operation")
         port = self._port(operation_port)
         refreshed: list[ExternalJobRef] = []
         for pending in state.pending_operations:
@@ -260,6 +262,27 @@ class VideoSceneGenerationWorkflowService:
         if timestamp < state.updated_at:
             raise ValueError("Workflow 更新时间不能早于当前状态")
         return replace(state, updated_at=timestamp, _pending_operations=tuple(refreshed))
+
+    def cancel(
+        self,
+        state: VideoSceneGenerationWorkflowState,
+        *,
+        now: datetime | None = None,
+    ) -> VideoSceneGenerationWorkflowState:
+        """取消分镜生成，但保留原 pending Operation 供审计与恢复查询。"""
+
+        _validate_generation_state(state)
+        if state.status in {WorkflowStatus.CANCELLED, WorkflowStatus.COMPLETED}:
+            raise ValueError("已取消或已完成的分镜生成 Workflow 属于终态，不能再次取消")
+        result = replace(
+            state,
+            status=WorkflowStatus.CANCELLED,
+            stage_version=state.stage_version + 1,
+            context_version=state.context_version + 1,
+            updated_at=_cancellation_timestamp(state.updated_at, now),
+        )
+        _validate_generation_state(result)
+        return result
 
     async def record_scene_success(
         self,
@@ -1095,6 +1118,12 @@ async def _after_quota_pause(
 
 def _validate_generation_state(state: VideoSceneGenerationWorkflowState) -> None:
     _validate_scene_package_state_authority(state._source_state)
+    if (
+        state._source_state.current_stage
+        is not VideoScenePackageStage.SCENE_PACKAGE_REVIEW
+        or state._source_state.status is not WorkflowStatus.AWAITING_USER
+    ):
+        raise ValueError("分镜生成来源必须是未取消且等待人工确认的场景包")
     if state.workflow_id != state._source_state.workflow_id or state.conversation_id != state._source_state.conversation_id:
         raise ValueError("分镜生成状态必须属于来源场景包的同一 Workflow 和对话")
     scenes = state.scene_packages
@@ -1157,9 +1186,14 @@ def _validate_generation_state(state: VideoSceneGenerationWorkflowState) -> None
         request_hash = hashlib.sha256(
             _canonical_json(request, field_name=f"分镜 {scene_id} 权威 Operation 请求").encode("utf-8")
         ).hexdigest()
+        operation_stage_version = (
+            state.stage_version - 1
+            if state.status is WorkflowStatus.CANCELLED
+            else state.stage_version
+        )
         expected_key = _operation_idempotency_key(
             workflow_id=state.workflow_id,
-            stage_version=state.stage_version,
+            stage_version=operation_stage_version,
             scene_id=scene_id,
             attempt=item.attempt,
             request_hash=request_hash,
@@ -1217,12 +1251,20 @@ def _validate_generation_state(state: VideoSceneGenerationWorkflowState) -> None
     if covered_scene_ids != expected_scene_ids:
         raise ValueError("每个分镜必须处于成功、失败、运行中或待重生成状态")
     if state.current_stage is VideoSceneGenerationStage.GENERATE_SCENE_VIDEOS:
-        if state.status not in {WorkflowStatus.RUNNING, WorkflowStatus.PAUSED_QUOTA} or not pending:
+        if state.status not in {
+            WorkflowStatus.RUNNING,
+            WorkflowStatus.PAUSED_QUOTA,
+            WorkflowStatus.CANCELLED,
+        } or not pending:
             raise ValueError("分镜生成阶段必须处于运行或额度暂停状态并持有 pending Operation")
         if state.status is WorkflowStatus.PAUSED_QUOTA and not state.quota_insufficient:
             raise ValueError("生成中的额度暂停状态必须保留额度失败分镜")
     elif state.current_stage is VideoSceneGenerationStage.SCENE_VIDEO_REVIEW:
-        if state.status not in {WorkflowStatus.AWAITING_USER, WorkflowStatus.PAUSED_QUOTA} or pending:
+        if state.status not in {
+            WorkflowStatus.AWAITING_USER,
+            WorkflowStatus.PAUSED_QUOTA,
+            WorkflowStatus.CANCELLED,
+        } or pending:
             raise ValueError("分镜复核阶段必须等待用户或暂停额度且不得保留 pending Operation")
         if state.status is WorkflowStatus.PAUSED_QUOTA and not state.quota_insufficient:
             raise ValueError("额度暂停状态必须保留可恢复的额度失败分镜")
@@ -1440,6 +1482,8 @@ def _validate_result_state(state: VideoSceneGenerationWorkflowState) -> None:
 
 def _validate_review_state(state: VideoSceneGenerationWorkflowState) -> None:
     _validate_generation_state(state)
+    if state.status is WorkflowStatus.CANCELLED:
+        raise ValueError("已取消的分镜生成 Workflow 属于终态，不能继续修改或重试")
     if state.current_stage is not VideoSceneGenerationStage.SCENE_VIDEO_REVIEW:
         raise ValueError("只有分镜视频复核阶段才能修改或重试")
 
@@ -1634,6 +1678,20 @@ def _next_timestamp(state: VideoSceneGenerationWorkflowState, value: datetime | 
     timestamp = _timestamp(value)
     if timestamp < state.updated_at:
         raise ValueError("Workflow 更新时间不能早于当前状态")
+    return timestamp
+
+
+def _cancellation_timestamp(
+    updated_at: datetime,
+    value: datetime | None,
+) -> datetime:
+    """生成严格前进的取消时间，并拒绝调用方提供倒退时间。"""
+
+    timestamp = _timestamp(value)
+    if timestamp < updated_at:
+        raise ValueError("Workflow 取消时间不能早于当前状态")
+    if timestamp == updated_at:
+        return timestamp + timedelta(microseconds=1)
     return timestamp
 
 

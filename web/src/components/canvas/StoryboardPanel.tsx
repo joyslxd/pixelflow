@@ -18,13 +18,16 @@ import { useMemo, useState } from "react";
 
 interface StoryboardPanelProps {
   msg: ChatMessage;
-  onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void;
+  onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void | Promise<void>;
+  deferSceneUpdates?: boolean;
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onDeleteGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
   onReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
+  onSupervisorReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
   onAddGlobalAsset?: (assetGroup: GlobalSceneAssetGroup, replacement: SceneGlobalAssetReplacement) => void;
   onGenerateVideo?: () => void;
   onRetrySceneAssets?: () => void;
+  onSave?: () => void | Promise<void>;
   onClose?: () => void;
 }
 
@@ -79,6 +82,22 @@ function shotRecord(scene: ScenePackageRecord | undefined): Record<string, unkno
   return value && typeof value === "object" ? value : {};
 }
 
+function sceneWithDraft(
+  scene: ScenePackageRecord | undefined,
+  patch: ScenePackagePatch | undefined,
+): ScenePackageRecord | undefined {
+  if (!scene || !patch) return scene;
+  return {
+    ...scene,
+    ...(typeof patch.storyline === "string" ? { storyline: patch.storyline } : {}),
+    ...(typeof patch.narration === "string" ? { narration: patch.narration } : {}),
+    ...(patch.shot_description ? { shot_description: patch.shot_description } : {}),
+    ...(Array.isArray(patch.reference_asset_ids)
+      ? { reference_asset_ids: patch.reference_asset_ids }
+      : {}),
+  };
+}
+
 function textareaClass(extra = "") {
   return cn("min-h-24 w-full resize-none rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none focus:border-accent", extra);
 }
@@ -123,12 +142,15 @@ function sceneVideoForScene(
 export function StoryboardPanel({
   msg,
   onUpdateVideoScenePackage,
+  deferSceneUpdates = false,
   onReferenceGlobalAsset,
   onDeleteGlobalAsset,
   onReplaceGlobalAsset,
+  onSupervisorReplaceGlobalAsset,
   onAddGlobalAsset,
-  onGenerateVideo,
-  onRetrySceneAssets,
+  onGenerateVideo: onGenerateVideoRequested,
+  onRetrySceneAssets: onRetrySceneAssetsRequested,
+  onSave: onSaveRequested,
   onClose,
 }: StoryboardPanelProps) {
   const videoScenePackages = msg.artifact?.videoScenePackages;
@@ -136,10 +158,16 @@ export function StoryboardPanel({
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
+  const [sceneDraftPatches, setSceneDraftPatches] = useState<Record<string, ScenePackagePatch>>({});
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
   const [additionTarget, setAdditionTarget] = useState<AssetGroup | null>(null);
-  const selectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
+  const authoritativeSelectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
+  const selectedScenePatch = authoritativeSelectedScene
+    ? sceneDraftPatches[authoritativeSelectedScene.scene_id]
+    : undefined;
+  const selectedScene = sceneWithDraft(authoritativeSelectedScene, selectedScenePatch);
+  const hasSceneDraft = Object.keys(sceneDraftPatches).length > 0;
   const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
@@ -169,8 +197,28 @@ export function StoryboardPanel({
 
   const updateScene = (patch: ScenePackagePatch) => {
     if (!selectedScene) return;
+    if (deferSceneUpdates) {
+      setSceneDraftPatches((current) => ({
+        ...current,
+        [selectedScene.scene_id]: {
+          ...current[selectedScene.scene_id],
+          ...patch,
+        },
+      }));
+      return;
+    }
     onUpdateVideoScenePackage?.(selectedScene.scene_id, patch);
   };
+
+  const saveStoryboardDraft = async () => {
+    if (deferSceneUpdates && authoritativeSelectedScene && selectedScenePatch) {
+      await onUpdateVideoScenePackage?.(authoritativeSelectedScene.scene_id, selectedScenePatch);
+    }
+    await onSaveRequested?.();
+  };
+  const onSave = deferSceneUpdates ? saveStoryboardDraft : onSaveRequested;
+  const onGenerateVideo = hasSceneDraft ? undefined : onGenerateVideoRequested;
+  const onRetrySceneAssets = hasSceneDraft ? undefined : onRetrySceneAssetsRequested;
 
   const updateShotDescription = (next: { text: string; mentions: SceneMention[] }) => {
     updateScene({
@@ -185,7 +233,6 @@ export function StoryboardPanel({
 
   const openAssetPreview = (group: AssetGroup, record: Record<string, unknown>, fallback: string) => {
     const image = assetImage(record);
-    if (!image) return;
     const id = assetId(record, fallback);
     const name = assetName(record, id);
     setPreviewAsset({
@@ -222,7 +269,7 @@ export function StoryboardPanel({
 
   const confirmReplacement = (replacement: SceneGlobalAssetReplacement) => {
     if (!replacementTarget) return;
-    onReplaceGlobalAsset?.(replacementTarget, replacement);
+    (onSupervisorReplaceGlobalAsset ?? onReplaceGlobalAsset)?.(replacementTarget, replacement);
     setReplacementTarget(null);
   };
 
@@ -233,7 +280,7 @@ export function StoryboardPanel({
   };
 
   return (
-    <aside className="flex h-full w-[52vw] min-w-[680px] max-w-[980px] flex-col border-l border-line bg-[#f8fafc]">
+    <aside className="fixed inset-0 z-50 flex h-full w-full min-w-0 max-w-none flex-col border-l border-line bg-[#f8fafc] xl:static xl:z-auto xl:w-[52vw] xl:min-w-[680px] xl:max-w-[980px]">
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-white px-4">
         <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-canvas" aria-label="返回">
           <ArrowLeft size={18} />
@@ -244,7 +291,7 @@ export function StoryboardPanel({
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(280px,42%)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(280px,42%)]">
         <div className="min-h-0 overflow-y-auto px-4 py-4">
           <section className="rounded-2xl border border-line bg-white p-4">
             <div className="mb-3 text-[14px] font-semibold text-ink">全局素材</div>
@@ -267,8 +314,7 @@ export function StoryboardPanel({
                             key={id}
                             type="button"
                             onClick={() => openAssetPreview(group, asset, `${group}-${index + 1}`)}
-                            disabled={!image}
-                            className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent disabled:cursor-default disabled:hover:border-line"
+                            className="w-24 shrink-0 overflow-hidden rounded-xl border border-line bg-canvas text-left transition-colors hover:border-accent"
                           >
                             {image ? (
                               <img src={image} alt={assetName(asset, id)} className="h-16 w-full object-cover" />
@@ -314,8 +360,12 @@ export function StoryboardPanel({
                   key={scene.scene_id}
                   type="button"
                   onClick={() => setSelectedSceneId(scene.scene_id)}
+                  disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
+                  title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
+                    ? "请先保存当前分镜"
+                    : undefined}
                   className={cn(
-                    "rounded-full border px-3 py-1.5 text-[12px]",
+                    "rounded-full border px-3 py-1.5 text-[12px] disabled:cursor-not-allowed disabled:opacity-50",
                     scene.scene_id === selectedScene?.scene_id ? "border-accent bg-accent-soft text-accent" : "border-line text-ink-soft hover:bg-canvas",
                   )}
                 >
@@ -379,8 +429,12 @@ export function StoryboardPanel({
                     key={scene.scene_id}
                     type="button"
                     onClick={() => setSelectedSceneId(scene.scene_id)}
+                    disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
+                    title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
+                      ? "请先保存当前分镜"
+                      : undefined}
                     className={cn(
-                      "w-32 shrink-0 overflow-hidden rounded-xl border bg-canvas text-left",
+                      "w-32 shrink-0 overflow-hidden rounded-xl border bg-canvas text-left disabled:cursor-not-allowed disabled:opacity-50",
                       scene.scene_id === selectedScene?.scene_id ? "border-accent" : "border-line",
                     )}
                   >
@@ -399,13 +453,25 @@ export function StoryboardPanel({
               })}
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <button type="button" onClick={onClose} className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas">
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={!onSave}
+                title={onSave ? undefined : "当前运行模式不允许保存"}
+                className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 保存
               </button>
               <button
                 type="button"
                 onClick={sceneAssetQuotaPaused ? onRetrySceneAssets : onGenerateVideo}
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+                disabled={sceneAssetQuotaPaused ? !onRetrySceneAssets : !onGenerateVideo}
+                title={
+                  sceneAssetQuotaPaused
+                    ? (onRetrySceneAssets ? undefined : "当前运行模式不允许继续生成参考图")
+                    : (onGenerateVideo ? undefined : "当前运行模式不允许生成视频")
+                }
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Sparkles size={15} />
                 {sceneAssetQuotaPaused ? "继续生成参考图" : "确认并生成视频"}
@@ -428,12 +494,17 @@ export function StoryboardPanel({
             <div className="pr-12 text-[22px] font-semibold text-ink">{previewAsset.name}</div>
             <div className="mt-5 overflow-hidden rounded-[8px] bg-canvas">
               <div className="relative mx-auto flex max-h-[420px] min-h-[260px] items-center justify-center">
-                <img src={previewAsset.source_image_url} alt={previewAsset.name} className="max-h-[420px] w-full object-contain" />
+                {previewAsset.source_image_url ? (
+                  <img src={previewAsset.source_image_url} alt={previewAsset.name} className="max-h-[420px] w-full object-contain" />
+                ) : (
+                  <div className="text-[13px] text-ink-soft">当前素材没有可用图片，可以直接删除后重新添加。</div>
+                )}
                 <div className="absolute right-4 top-4 flex overflow-hidden rounded-[8px] bg-ink/55 text-white backdrop-blur">
                   <button
                     type="button"
                     onClick={referencePreviewAsset}
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    disabled={!previewAsset.source_image_url}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40"
                     title="引用素材"
                     aria-label="引用素材"
                   >
@@ -442,7 +513,8 @@ export function StoryboardPanel({
                   <button
                     type="button"
                     onClick={replacePreviewAsset}
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                    disabled={!previewAsset.source_image_url}
+                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-40"
                     title="替换素材"
                     aria-label="替换素材"
                   >
@@ -457,17 +529,23 @@ export function StoryboardPanel({
                   >
                     <Trash2 size={17} />
                   </button>
-                  <a
-                    href={previewAsset.source_image_url}
-                    download={previewAsset.filename}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
-                    title="下载"
-                    aria-label="下载"
-                  >
-                    <Download size={17} />
-                  </a>
+                  {previewAsset.source_image_url ? (
+                    <a
+                      href={previewAsset.source_image_url}
+                      download={previewAsset.filename}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-10 w-10 items-center justify-center hover:bg-white/15"
+                      title="下载"
+                      aria-label="下载"
+                    >
+                      <Download size={17} />
+                    </a>
+                  ) : (
+                    <button type="button" disabled className="flex h-10 w-10 cursor-not-allowed items-center justify-center opacity-40" aria-label="下载">
+                      <Download size={17} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

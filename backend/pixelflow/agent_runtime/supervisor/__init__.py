@@ -8,6 +8,13 @@ from .classifier import (
     DecisionModel,
     LLMActionClassifier,
 )
+from .decision_service import (
+    SupervisorAnswerPort,
+    SupervisorDecisionResult,
+    SupervisorDecisionService,
+    SupervisorDecisionUnavailableError,
+    SupervisorTurnEvidence,
+)
 from .evaluation import (
     ACTION_ACCURACY_THRESHOLD,
     BILLING_MISEXECUTION_THRESHOLD,
@@ -67,11 +74,16 @@ __all__ = [
     "ROUTE_ACTION_NODE",
     "ResolverCandidate",
     "SupervisorActionRouter",
+    "SupervisorAnswerPort",
+    "SupervisorDecisionResult",
+    "SupervisorDecisionService",
+    "SupervisorDecisionUnavailableError",
     "SupervisorDecisionLabel",
     "SupervisorEvaluationReport",
     "SupervisorGoldenCase",
     "SupervisorGoldenDataset",
     "SupervisorRoutingError",
+    "SupervisorTurnEvidence",
     "TARGET_ACCURACY_THRESHOLD",
     "WORKFLOW_COMMAND_NODE",
     "evaluate_supervisor_cases",

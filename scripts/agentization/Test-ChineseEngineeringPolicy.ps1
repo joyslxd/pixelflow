@@ -45,7 +45,7 @@ function Get-AddedCommentText {
     )
 
     $trimmed = $Line.TrimStart([char]0xFEFF).Trim()
-    if ($trimmed -match "^(#|//|/\*+|\*+|<!--|'''|`"`"`")\s*(.*)$") {
+    if ($trimmed -match "^(#|//|/\*+|<!--|'''|`"`"`")\s*(.*)$") {
         return $matches[2].Trim()
     }
     if ($Extension -in @(".py", ".ps1", ".psm1", ".sh", ".yml", ".yaml", ".toml")) {
@@ -54,6 +54,9 @@ function Get-AddedCommentText {
         }
     }
     if ($Extension -in @(".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")) {
+        if ($trimmed -match "^\*+\s*(.*)$") {
+            return $matches[1].Trim()
+        }
         if ($Line -match "\s+//\s*(.+)$") {
             return $matches[1].Trim()
         }

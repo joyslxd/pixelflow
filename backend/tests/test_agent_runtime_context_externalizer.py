@@ -310,7 +310,9 @@ class _SnapshotSource:
         *,
         user_id: str,
         conversation_id: str,
+        expected_context_version: int,
     ) -> ContextAssemblySnapshot:
+        assert expected_context_version == self.snapshot.context_version
         return self.snapshot
 
 

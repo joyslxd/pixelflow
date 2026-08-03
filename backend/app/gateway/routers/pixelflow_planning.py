@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -16,11 +17,18 @@ from app.gateway.pixelflow_memory import (
     record_power_mem_background,
     search_power_mem,
 )
+from pixelflow.agent_workflows.video.live_capabilities import (
+    generate_application_plan as build_plan_markdown_with_llm,
+)
+from pixelflow.agent_workflows.video.live_capabilities import (
+    restore_application_plan as restore_plan_version,
+)
+from pixelflow.agent_workflows.video.live_capabilities import (
+    revise_application_plan as revise_plan_markdown_with_llm,
+)
 from pixelflow.creative.plan_markdown import (
     CreationIntent,
-    build_plan_markdown_with_llm,
-    restore_plan_version,
-    revise_plan_markdown_with_llm,
+    build_plan_markdown,
 )
 from pixelflow.creative.revision_contract import build_manual_plan_revision_feedback
 from pixelflow.memory import build_memory_query, with_semantic_memory
@@ -29,8 +37,11 @@ router = APIRouter(prefix="/agent/flows/planning", tags=["pixelflow-flows"])
 
 _PLAN_GENERATION_JOBS: dict[str, dict[str, Any]] = {}
 _PLAN_REVISION_JOBS: dict[str, dict[str, Any]] = {}
+_PLAN_MANUAL_EDIT_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_PLAN_GENERATION_JOBS = 200
 _MAX_PLAN_REVISION_JOBS = 200
+_MAX_PLAN_MANUAL_EDIT_JOBS = 200
+_PLAN_JOB_TIMEOUT_SECONDS = 1200.0
 
 
 class PlanMarkdownRequest(BaseModel):
@@ -81,9 +92,7 @@ class PlanMarkdownResponse(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
     llm_used: bool = False
     model_name: str = "deepseek-v4-pro"
     error: str | None = None
@@ -104,6 +113,9 @@ class PlanJobStatusResponse(BaseModel):
     result: PlanMarkdownResponse | None = None
     error: str | None = None
     message: str = ""
+    stage: str | None = None
+    started_at: str | None = None
+    updated_at: str | None = None
 
 
 class PlanRevisionRequest(PlanMarkdownRequest):
@@ -113,9 +125,7 @@ class PlanRevisionRequest(PlanMarkdownRequest):
     revision_feedback: str = Field(min_length=1)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
 
 class PlanRestoreRequest(BaseModel):
@@ -127,9 +137,7 @@ class PlanRestoreRequest(BaseModel):
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_durations_sec: list[int] = Field(default_factory=list)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -144,9 +152,7 @@ class PlanManualEditRequest(PlanMarkdownRequest):
     plan_history: list[dict[str, Any]] = Field(default_factory=list)
     creation_contract: dict[str, Any] = Field(default_factory=dict)
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
-    asset_manifest: dict[str, list[dict[str, str]]] = Field(
-        default_factory=lambda: {"characters": [], "scenes": [], "props": []}
-    )
+    asset_manifest: dict[str, list[dict[str, str]]] = Field(default_factory=lambda: {"characters": [], "scenes": [], "props": []})
 
 
 @router.post("/plan", response_model=PlanMarkdownResponse)
@@ -159,12 +165,13 @@ async def start_create_plan_markdown(body: PlanMarkdownRequest, request: Request
     _trim_plan_jobs(_PLAN_GENERATION_JOBS, _MAX_PLAN_GENERATION_JOBS)
     job_id = uuid.uuid4().hex
     user_id = await current_user_id(request)
-    _PLAN_GENERATION_JOBS[job_id] = {
-        "status": "running",
-        "result": None,
-        "error": None,
-        "user_id": user_id,
-    }
+    _update_plan_job(
+        _PLAN_GENERATION_JOBS,
+        job_id,
+        status="running",
+        stage="planning",
+        user_id=user_id,
+    )
     asyncio.create_task(
         _run_plan_generation_job(
             job_id,
@@ -252,12 +259,13 @@ async def start_revise_plan_markdown(body: PlanRevisionRequest, request: Request
     _trim_plan_jobs(_PLAN_REVISION_JOBS, _MAX_PLAN_REVISION_JOBS)
     job_id = uuid.uuid4().hex
     user_id = await current_user_id(request)
-    _PLAN_REVISION_JOBS[job_id] = {
-        "status": "running",
-        "result": None,
-        "error": None,
-        "user_id": user_id,
-    }
+    _update_plan_job(
+        _PLAN_REVISION_JOBS,
+        job_id,
+        status="running",
+        stage="planning",
+        user_id=user_id,
+    )
     asyncio.create_task(
         _run_plan_revision_job(
             job_id,
@@ -355,25 +363,74 @@ async def _run_plan_generation_job(
     user_id: str | None = None,
 ) -> None:
     try:
-        result = await _create_plan_markdown(
-            body,
-            power_mem=power_mem,
+        async with asyncio.timeout(_PLAN_JOB_TIMEOUT_SECONDS):
+            result = await _create_plan_markdown(
+                body,
+                power_mem=power_mem,
+                user_id=user_id,
+                run_id=job_id,
+            )
+        _update_plan_job(
+            _PLAN_GENERATION_JOBS,
+            job_id,
+            status="completed",
+            stage="completed",
+            result=result,
             user_id=user_id,
-            run_id=job_id,
         )
-        _PLAN_GENERATION_JOBS[job_id] = {
-            "status": "completed",
-            "result": result,
-            "error": None,
-            "user_id": user_id,
-        }
-    except Exception as exc:  # noqa: BLE001 - background boundary persists failure for polling clients
-        _PLAN_GENERATION_JOBS[job_id] = {
-            "status": "failed",
-            "result": None,
-            "error": str(exc),
-            "user_id": user_id,
-        }
+    except TimeoutError:
+        _update_plan_job(
+            _PLAN_GENERATION_JOBS,
+            job_id,
+            status="running",
+            stage="fallback",
+            user_id=user_id,
+        )
+        fallback = build_plan_markdown(
+            body.intent,
+            body.form_values,
+            body.selected_direction,
+            body.product_creative_profile,
+            body.materials,
+            body.intake_context,
+        )
+        fallback_payload = fallback.to_dict()
+        fallback_payload["consistency_issues"] = [
+            *fallback.consistency_issues,
+            "Plan job 达到总执行预算，已使用确定性创作合同生成可审核方案",
+        ]
+        result = PlanMarkdownResponse(**fallback_payload)
+        _update_plan_job(
+            _PLAN_GENERATION_JOBS,
+            job_id,
+            status="completed",
+            stage="completed",
+            result=result,
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步生成 plan.md 超时降级",
+                {"intent": body.intent, "ok": True},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_job", "job_id": job_id, "status": "completed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 后台边界必须持久化供轮询客户端读取的失败状态
+        _update_plan_job(
+            _PLAN_GENERATION_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error=str(exc),
+            user_id=user_id,
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -398,25 +455,53 @@ async def _run_plan_revision_job(
     user_id: str | None = None,
 ) -> None:
     try:
-        result = await _revise_plan_markdown(
-            body,
-            power_mem=power_mem,
+        async with asyncio.timeout(_PLAN_JOB_TIMEOUT_SECONDS):
+            result = await _revise_plan_markdown(
+                body,
+                power_mem=power_mem,
+                user_id=user_id,
+                run_id=job_id,
+            )
+        _update_plan_job(
+            _PLAN_REVISION_JOBS,
+            job_id,
+            status="completed",
+            stage="completed",
+            result=result,
             user_id=user_id,
-            run_id=job_id,
         )
-        _PLAN_REVISION_JOBS[job_id] = {
-            "status": "completed",
-            "result": result,
-            "error": None,
-            "user_id": user_id,
-        }
-    except Exception as exc:  # noqa: BLE001 - background boundary persists failure for polling clients
-        _PLAN_REVISION_JOBS[job_id] = {
-            "status": "failed",
-            "result": None,
-            "error": str(exc),
-            "user_id": user_id,
-        }
+    except TimeoutError:
+        _update_plan_job(
+            _PLAN_REVISION_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error="Plan 修订超时，当前版本已保留。",
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步修订 plan.md 超时",
+                {"intent": body.intent, "ok": False},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_revision_job", "job_id": job_id, "status": "failed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 后台边界必须持久化供轮询客户端读取的失败状态
+        _update_plan_job(
+            _PLAN_REVISION_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error=str(exc),
+            user_id=user_id,
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -464,6 +549,9 @@ async def _plan_job_status(
         result=result,
         error=error,
         message=message,
+        stage=str(job.get("stage")) if job.get("stage") else None,
+        started_at=str(job.get("started_at")) if job.get("started_at") else None,
+        updated_at=str(job.get("updated_at")) if job.get("updated_at") else None,
     )
 
 
@@ -494,6 +582,34 @@ def _trim_plan_jobs(jobs: dict[str, dict[str, Any]], max_jobs: int) -> None:
         jobs.pop(job_id, None)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _update_plan_job(
+    jobs: dict[str, dict[str, Any]],
+    job_id: str,
+    *,
+    status: str,
+    stage: str,
+    result: PlanMarkdownResponse | None = None,
+    error: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    """原子替换进程内 Plan job 快照，并保留首次启动时间和用户归属。"""
+    previous = jobs.get(job_id) or {}
+    now = _utc_now_iso()
+    jobs[job_id] = {
+        "status": status,
+        "stage": stage,
+        "result": result,
+        "error": error,
+        "user_id": user_id if user_id is not None else previous.get("user_id"),
+        "started_at": previous.get("started_at") or now,
+        "updated_at": now,
+    }
+
+
 @router.post("/plan/restore", response_model=PlanMarkdownResponse)
 async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownResponse:
     result = restore_plan_version(
@@ -512,20 +628,73 @@ async def restore_plan_markdown(body: PlanRestoreRequest) -> PlanMarkdownRespons
 
 @router.post("/plan/save-edit", response_model=PlanMarkdownResponse)
 async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -> PlanMarkdownResponse:
-    user_id, memories = await search_power_mem(
-        request,
-        source_agent="planning_agent",
-        query_values=[
-            body.form_values,
-            body.selected_direction,
-            body.product_creative_profile,
-            body.intake_context,
-            body.materials,
-            body.current_plan_markdown,
-            body.edited_plan_markdown,
-        ],
-        categories=["preference", "brand", "skill", "experience"],
+    return await _save_manual_plan_edit(body, request=request)
+
+
+@router.post("/plan/save-edit/start", response_model=PlanJobStartResponse)
+async def start_save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -> PlanJobStartResponse:
+    _trim_plan_jobs(_PLAN_MANUAL_EDIT_JOBS, _MAX_PLAN_MANUAL_EDIT_JOBS)
+    job_id = uuid.uuid4().hex
+    user_id = await current_user_id(request)
+    _update_plan_job(
+        _PLAN_MANUAL_EDIT_JOBS,
+        job_id,
+        status="running",
+        stage="planning",
+        user_id=user_id,
     )
+    asyncio.create_task(
+        _run_plan_manual_edit_job(
+            job_id,
+            body,
+            power_mem=power_mem_service(request),
+            user_id=user_id,
+        )
+    )
+    return PlanJobStartResponse(job_id=job_id, message="Plan 手工编辑发布任务已启动。")
+
+
+@router.get("/plan/save-edit/jobs/{job_id}", response_model=PlanJobStatusResponse)
+async def get_save_manual_plan_edit_job(job_id: str, request: Request) -> PlanJobStatusResponse:
+    return await _plan_job_status(
+        _PLAN_MANUAL_EDIT_JOBS,
+        job_id,
+        request,
+        not_found_detail="Plan 手工编辑发布任务不存在",
+        running_message="Plan 手工编辑稿正在对齐创作合同。",
+        completed_message="Plan 手工编辑稿发布完成。",
+        failed_message="Plan 手工编辑稿发布失败。",
+    )
+
+
+async def _save_manual_plan_edit(
+    body: PlanManualEditRequest,
+    request: Request | None = None,
+    *,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    run_id: str | None = None,
+) -> PlanMarkdownResponse:
+    query_values = [
+        body.form_values,
+        body.selected_direction,
+        body.product_creative_profile,
+        body.intake_context,
+        body.materials,
+        body.current_plan_markdown,
+        body.edited_plan_markdown,
+    ]
+    if request is not None:
+        user_id, memories = await search_power_mem(
+            request,
+            source_agent="planning_agent",
+            query_values=query_values,
+            categories=["preference", "brand", "skill", "experience"],
+        )
+        service = power_mem_service(request)
+    else:
+        service = power_mem
+        memories = await _search_planning_memories(service, user_id=user_id, query_values=query_values)
     intake_context, product_creative_profile = with_semantic_memory(
         body.intake_context,
         memories,
@@ -548,7 +717,7 @@ async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -
         change_source="manual_edit",
     )
     record_power_mem_background(
-        power_mem_service(request),
+        service,
         user_id=user_id,
         content=concise_result_summary(
             "用户手工发布 plan.md",
@@ -558,6 +727,78 @@ async def save_manual_plan_edit(body: PlanManualEditRequest, request: Request) -
         source_agent="planning_agent",
         metadata={"source": "planning_plan_manual_edit", "intent": body.intent, "plan_version": result.plan_version},
         memory_type="experience",
+        run_id=run_id,
         infer=False,
     )
     return PlanMarkdownResponse(**result.to_dict())
+
+
+async def _run_plan_manual_edit_job(
+    job_id: str,
+    body: PlanManualEditRequest,
+    *,
+    power_mem: Any = None,
+    user_id: str | None = None,
+) -> None:
+    try:
+        async with asyncio.timeout(_PLAN_JOB_TIMEOUT_SECONDS):
+            result = await _save_manual_plan_edit(
+                body,
+                power_mem=power_mem,
+                user_id=user_id,
+                run_id=job_id,
+            )
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="completed",
+            stage="completed",
+            result=result,
+            user_id=user_id,
+        )
+    except TimeoutError:
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error="Plan 手工编辑发布超时，当前版本已保留。",
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步发布 plan.md 手工编辑稿超时",
+                {"intent": body.intent, "ok": False},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_manual_edit_job", "job_id": job_id, "status": "failed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 后台边界必须持久化供轮询客户端读取的失败状态
+        _update_plan_job(
+            _PLAN_MANUAL_EDIT_JOBS,
+            job_id,
+            status="failed",
+            stage="failed",
+            error=str(exc),
+            user_id=user_id,
+        )
+        record_power_mem_background(
+            power_mem,
+            user_id=user_id,
+            content=concise_result_summary(
+                "策划 Agent 异步发布 plan.md 手工编辑稿失败",
+                {"intent": body.intent, "ok": False},
+            ),
+            category="experience",
+            source_agent="planning_agent",
+            metadata={"source": "planning_plan_manual_edit_job", "job_id": job_id, "status": "failed", "intent": body.intent},
+            memory_type="experience",
+            run_id=job_id,
+            infer=False,
+        )

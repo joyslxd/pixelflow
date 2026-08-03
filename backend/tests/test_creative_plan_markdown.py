@@ -711,6 +711,72 @@ def test_build_video_plan_with_llm_uses_uploaded_template_and_constrains_scene_i
     assert fake_model.prompts
 
 
+def test_initial_plan_timeout_returns_reviewable_contract_without_error() -> None:
+    class TimeoutModel:
+        def invoke(self, _prompt):
+            raise TimeoutError("供应商原始异常不得越过边界")
+
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            {
+                "direction_id": "direction_1",
+                "title": "全天健康陪伴",
+                "description": "从晨跑、办公到睡眠展示戒指价值。",
+            },
+            model_factory=lambda *_args, **_kwargs: TimeoutModel(),
+        )
+    )
+
+    assert result.llm_used is False
+    assert result.error is None
+    assert sum(result.scene_durations_sec) == result.creation_contract["video_duration_sec"]
+    assert any("模型请求超时" in item for item in result.consistency_issues)
+
+
+def test_seedance_timeout_does_not_retry_same_slow_call() -> None:
+    initial_payload = {
+        "plan_markdown": (
+            "# AuroraFit 智能健康戒指新品宣传\n\n"
+            "## 一、选题方向\n全天健康陪伴。\n\n"
+            "## 三、视频规格\n- 时长：180 秒\n- 画幅：9:16\n\n"
+            "## 五、镜头列表\n按完整健康旅程推进。\n"
+        ),
+        "scene_image_ratio": "9:16",
+        "scene_image_size": "4K",
+        "scene_blueprints": _valid_generation_blueprints(180),
+    }
+
+    class FirstPlanThenTimeoutModel:
+        def __init__(self) -> None:
+            self.prompts: list[object] = []
+
+        def invoke(self, prompt):
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return FakeMessage(json.dumps(initial_payload, ensure_ascii=False))
+            raise TimeoutError("供应商原始异常不得越过边界")
+
+    model = FirstPlanThenTimeoutModel()
+    result = asyncio.run(
+        build_plan_markdown_with_llm(
+            "video",
+            VIDEO_FORM,
+            {
+                "direction_id": "direction_1",
+                "title": "全天健康陪伴",
+                "description": "从晨跑、办公到睡眠展示戒指价值。",
+            },
+            model_factory=lambda *_args, **_kwargs: model,
+        )
+    )
+
+    assert len(model.prompts) == 2
+    assert result.error is None
+    assert all(item["shot_description"] for item in result.scene_blueprints)
+
+
 def test_build_video_plan_with_llm_uses_seedance_skill_and_llm_scene_schedule() -> None:
     fake_model = FakeModel(
         """

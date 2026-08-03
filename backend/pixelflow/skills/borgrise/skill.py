@@ -22,6 +22,7 @@ from typing import Any
 from pixelflow.skills.base import (
     BatchStoryboardResult,
     GenerationResult,
+    ImageAnalysisResult,
     ImageGenerationResult,
     MediaLinkExtractionResult,
     PptGenerationResult,
@@ -88,6 +89,31 @@ def _to_image_result(raw: dict[str, Any]) -> ImageGenerationResult:
     asset_prefix = task_id or "image"
     images = [{"asset_id": f"{asset_prefix}-{index}", "url": url, "download_url": url} for index, url in enumerate(deduped)]
     return ImageGenerationResult(ok=True, images=images, task_id=task_id, raw=raw)
+
+
+def _to_image_analysis_result(raw: dict[str, Any]) -> ImageAnalysisResult:
+    """把单张图片分析原始响应映射成统一结果。"""
+    if not raw or raw.get("error") or raw.get("success") is False:
+        return ImageAnalysisResult(
+            ok=False,
+            task_id=raw.get("task_id") if raw else None,
+            error=(raw.get("message") if raw else "empty response") or "image analysis failed",
+            raw=raw or {},
+        )
+    markdown = str(raw.get("image_analysis_markdown") or "").strip()
+    if not markdown:
+        return ImageAnalysisResult(
+            ok=False,
+            task_id=raw.get("task_id"),
+            error=raw.get("message") or "image analysis returned no markdown",
+            raw=raw,
+        )
+    return ImageAnalysisResult(
+        ok=True,
+        analysis_markdown=markdown,
+        task_id=raw.get("task_id"),
+        raw=raw,
+    )
 
 
 def _to_quality_review_result(raw: dict[str, Any]) -> VideoQualityReviewResult:
@@ -550,6 +576,15 @@ class BorgriseSkill:
         if model:
             kwargs["model"] = model
         return await _run_image(run_generation.image_edit, **kwargs)
+
+    async def analyze_image(self, image_url: str) -> ImageAnalysisResult:
+        """调用 content-app 分析单张图片的人物、物品、场景和视觉特征。"""
+        try:
+            raw = await asyncio.to_thread(run_generation.analyze_image, image_url=image_url)
+        except Exception as exc:  # noqa: BLE001 - 供应商边界统一归一化异常
+            logger.exception("borgrise image analysis failed")
+            return ImageAnalysisResult(ok=False, error=str(exc))
+        return _to_image_analysis_result(raw)
 
     async def multi_image_fusion(
         self,

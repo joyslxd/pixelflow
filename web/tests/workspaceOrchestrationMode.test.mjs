@@ -5,6 +5,69 @@ import test from "node:test";
 const adapterModuleUrl = process.env.SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE;
 const workspaceSource = readFileSync(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
 
+function extractFunctionBody(source, functionName) {
+  const declarationPatterns = [
+    `function ${functionName}`,
+    `const ${functionName} =`,
+  ];
+  const declarationIndex = declarationPatterns
+    .map((pattern) => source.indexOf(pattern))
+    .find((index) => index >= 0);
+  assert.notEqual(declarationIndex, undefined, `${functionName} 必须存在`);
+  const openBrace = source.indexOf("{", declarationIndex);
+  assert.notEqual(openBrace, -1, `${functionName} 必须包含函数体`);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = openBrace; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (lineComment) {
+      if (character === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(openBrace + 1, index);
+    }
+  }
+  assert.fail(`${functionName} 的函数体花括号不配对`);
+}
+
 if (!adapterModuleUrl) {
   throw new Error("缺少 SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE");
 }
@@ -14,9 +77,11 @@ const {
   inferInitialRuntimeIntent,
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceAgentRuntimeMode,
+  resolveWorkspacePrimaryExecutionReady,
   resolveWorkspaceRuntimePolicy,
   resolveWorkspaceInteractionPolicy,
   resolveAssistHandoffAction,
+  resolveUnavailableSupervisorRecovery,
 } = await import(adapterModuleUrl);
 
 test("同一会话的 pending Turn 写入串行读取最新状态", async () => {
@@ -164,6 +229,37 @@ test("R1 assist 只从服务端保留命名空间解析且不改变业务归属"
   }), "off");
 });
 
+test("live Handler 就绪只能由服务端保留命名空间声明", () => {
+  assert.equal(resolveWorkspacePrimaryExecutionReady({
+    conversation: conversation({
+      context: {
+        __agent_runtime: {
+          mode: "primary",
+          enabled_intents: ["video"],
+          context_compaction_enabled: true,
+          context_version: 0,
+          primary_execution_ready: true,
+        },
+      },
+    }),
+    messages: [],
+  }), true);
+  assert.equal(resolveWorkspacePrimaryExecutionReady({
+    conversation: conversation({
+      context: {
+        primary_execution_ready: true,
+        __agent_runtime: {
+          mode: "primary",
+          enabled_intents: ["video"],
+          context_compaction_enabled: true,
+          context_version: 0,
+        },
+      },
+    }),
+    messages: [],
+  }), false);
+});
+
 test("运行时策略保证 Supervisor 与旧 runner、旧动作互斥", () => {
   assert.deepEqual(resolveWorkspaceRuntimePolicy("supervisor_v1", "conv-m12", "off"), {
     supervisorEnabled: true,
@@ -184,6 +280,19 @@ test("R1 assist 同时挂载统一会话基础设施与旧业务 runner", () => 
     legacyRunnerEnabled: true,
     legacyArtifactActionsEnabled: true,
   });
+});
+
+test("R1 assist 不得用空 Supervisor Workflow 覆盖 v2 任务看板", () => {
+  const effectStart = workspaceSource.indexOf("const projectedMessages = mergeSupervisorMessagesWithPending");
+  const effectEnd = workspaceSource.indexOf("void api.getJianyingDraftCapability", effectStart);
+  assert.notEqual(effectStart, -1, "Workspace 必须投影统一会话消息");
+  assert.notEqual(effectEnd, -1, "剪映能力加载必须位于统一会话投影之后");
+  const effectSource = workspaceSource.slice(effectStart, effectEnd);
+  assert.match(
+    effectSource,
+    /if \(orchestrationModeRef\.current === "supervisor_v1"\) \{[\s\S]*projectSupervisorWorkflowProgress/,
+    "只有 supervisor_v1 业务归属才能投影 Supervisor Workflow",
+  );
 });
 
 test("R2 primary 先挂载统一会话层，并只对明确视频首轮提示申请接管", () => {
@@ -238,6 +347,133 @@ test("R1 assist 只在服务端 Turn 可执行后接力旧流程", () => {
     serverInputStatus: "processing",
     pendingPlanRevision: true,
   }), "wait");
+});
+
+test("supervisor_v1 accepted Turn 不得由 assist 接力确认", () => {
+  assert.equal(resolveAssistHandoffAction({
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: true,
+    registrationStatus: "registered",
+    serverInputStatus: "accepted",
+    serverRunStatus: "running",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  }), "wait");
+});
+
+test("supervisor_v1 按权威失败或完成状态清理 pending", () => {
+  const base = {
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: true,
+    registrationStatus: "registered",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  };
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: "failed",
+    serverRunStatus: "failed",
+  }), "failed");
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: undefined,
+    serverRunStatus: "completed",
+  }), "acknowledge");
+  assert.equal(resolveAssistHandoffAction({
+    ...base,
+    serverInputStatus: undefined,
+    serverRunStatus: "running",
+  }), "wait");
+  assert.match(
+    workspaceSource,
+    /handoffAction === "failed"[\s\S]*appendPersistedSupervisorNotice[\s\S]*failedSupervisorNoticeId[\s\S]*persistPendingSupervisorTurns/,
+    "终态失败提示必须先按稳定 ID 持久化，再清理 pending",
+  );
+});
+
+test("历史 supervisor_v1 缺少 live Handler 就绪证据时停止自动重试", () => {
+  assert.equal(resolveAssistHandoffAction({
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: false,
+    registrationStatus: "registered",
+    serverInputStatus: "accepted",
+    serverRunStatus: "running",
+    continueLegacy: false,
+    legacyBusy: false,
+    dialogOpen: false,
+    pendingPlanRevision: false,
+  }), "unavailable");
+  assert.match(workspaceSource, /该历史会话由未接线的 R2 候选创建，已停止自动重试/);
+});
+
+test("历史未就绪 Supervisor 按会话幂等收敛孤儿 inputQueue", () => {
+  const base = {
+    orchestrationMode: "supervisor_v1",
+    primaryExecutionReady: false,
+    connectionStatus: "connected",
+    markerVersion: 0,
+    noticePersisted: false,
+  };
+
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+  }), "persist_notice");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 3,
+    hasActiveInput: true,
+  }), "persist_notice");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+    noticePersisted: true,
+  }), "finalize");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: true,
+    markerVersion: 1,
+    noticePersisted: true,
+  }), "none");
+  assert.equal(resolveUnavailableSupervisorRecovery({
+    ...base,
+    pendingCount: 0,
+    hasActiveInput: false,
+  }), "none");
+});
+
+test("未就绪 Supervisor 不得从服务端 inputQueue 反复重建本地 pending", () => {
+  const recoveryStart = workspaceSource.indexOf("刷新或压缩完成后，服务端 Turn");
+  const recoveryEnd = workspaceSource.indexOf("const handleVisibilityResume", recoveryStart);
+  const recoverySource = workspaceSource.slice(recoveryStart, recoveryEnd);
+
+  assert.match(
+    recoverySource,
+    /orchestrationModeRef\.current === "supervisor_v1"[\s\S]*!primaryExecutionReadyRef\.current[\s\S]*return/,
+  );
+  assert.match(workspaceSource, /agent-runtime-unavailable:\$\{conversationId\}:v1/);
+  assert.match(
+    workspaceSource,
+    /await appendPersistedSupervisorNotice[\s\S]*unavailableSupervisorNoticeVersionsRef\.current\.set[\s\S]*await persistPendingSupervisorTurns/,
+    "必须先幂等保存说明，再写会话级 marker 并一次清空全部 pending",
+  );
+  assert.match(
+    workspaceSource,
+    /enabled: runtimePolicy\.supervisorEnabled && !primaryExecutionUnavailable/,
+    "历史未就绪会话不得继续投影永久 running Notice",
+  );
+  assert.match(
+    workspaceSource,
+    /const primaryExecutionUnavailable = orchestrationResolved[\s\S]*orchestrationMode === "supervisor_v1"/,
+    "切换对话时必须先完成服务端归属解析，不能沿用上一会话状态执行恢复",
+  );
 });
 
 test("旧运行时的 composer 与 artifact 动作共享业务 busy 闸门", () => {
@@ -319,6 +555,10 @@ test("WorkspacePage 使用创建响应的权威归属并等待 Snapshot 后提�
   assert.match(workspaceSource, /supervisorRuntime\.getContextVersion\(\)/);
   assert.doesNotMatch(workspaceSource, /expected_context_version:\s*1[,\n]/);
   assert.match(workspaceSource, /supervisorRuntime\.startTurn/);
+  assert.match(
+    workspaceSource,
+    /resolveAssistHandoffAction\(\{[\s\S]*orchestrationMode:\s*orchestrationModeRef\.current/,
+  );
 });
 
 test("WorkspacePage 的 assist Turn 使用同一 UUID 幂等键并在注册后续跑旧流程", () => {
@@ -402,4 +642,87 @@ test("Supervisor 普通输入自动使用 Snapshot 恢复的当前 interrupt", (
     workspaceSource,
     /interruptId: ownership\.orchestrationMode === "supervisor_v1"[\s\S]*\? interruptId \?\? restoredInterruptId[\s\S]*: null/,
   );
+});
+
+test("Supervisor 视频控件只走结构化提交入口", () => {
+  const supervisorBranch = extractFunctionBody(workspaceSource, "renderSupervisorVideoArtifact");
+  assert.match(supervisorBranch, /submitSupervisorAction/);
+  assert.match(supervisorBranch, /buildSupervisorWorkflowAction/);
+  for (const legacyName of [
+    "handleSelectDirection",
+    "handleApprovePlan",
+    "handleGenerateVideoFromScenePackages",
+    "handleRetryVideoMerge",
+    "handleAcceptVideoResult",
+    "handleGenerateJianyingDraft",
+  ]) {
+    assert.doesNotMatch(supervisorBranch, new RegExp(`\\b${legacyName}\\b`));
+  }
+});
+
+test("Supervisor 动作持久化原 explicitAction 与唯一 clientInputId", () => {
+  const submitSource = extractFunctionBody(workspaceSource, "submitSupervisorAction");
+  assert.equal((submitSource.match(/crypto\.randomUUID\(\)/g) || []).length, 1);
+  assert.match(submitSource, /explicitAction/);
+  assert.match(submitSource, /persistPendingSupervisorTurns/);
+  assert.match(submitSource, /clientInputId/);
+  const turnSource = extractFunctionBody(workspaceSource, "handleSupervisorTurn");
+  assert.match(turnSource, /explicitAction:\s*pendingTurn\.explicitAction/);
+  assert.match(workspaceSource, /explicitAction:\s*ExplicitActionSignal \| null/);
+});
+
+test("已注册 Supervisor 结构化动作只轮询原 run", () => {
+  assert.match(
+    workspaceSource,
+    /pendingTurn\.explicitAction[\s\S]*pendingTurn\.registrationStatus === "registered"[\s\S]*pendingTurn\.runId[\s\S]*supervisorRuntime\.getRunStatus\(pendingTurn\.runId\)/,
+  );
+  assert.doesNotMatch(
+    workspaceSource,
+    /pendingTurn\.explicitAction[\s\S]{0,500}handleSupervisorTurn\(pendingTurn/,
+  );
+});
+
+test("Supervisor 视频界面只按权威 interrupt 纯恢复", () => {
+  const restoreSource = extractFunctionBody(workspaceSource, "restoreSupervisorVideoUi");
+  for (const uiKind of [
+    "video_intake_form",
+    "video_direction_review",
+    "video_plan_review",
+    "video_scene_package_review",
+    "video_result_review",
+  ]) {
+    assert.match(restoreSource, new RegExp(`case ["']${uiKind}["']`));
+  }
+  for (const forbidden of ["submitSupervisorAction", "handleSupervisor", "api.", "setTimeout", "startTurn"]) {
+    assert.doesNotMatch(restoreSource, new RegExp(forbidden.replace(".", "\\.")));
+  }
+  assert.match(workspaceSource, /restoreSupervisorVideoUi\(supervisorRuntime\.state\.interrupt\?\.payload/);
+  assert.match(workspaceSource, /supervisorRuntime\.state\.workflows\.find/);
+  assert.match(workspaceSource, /workflow\.workflow_id === restoredSupervisorUi\.workflowId/);
+  assert.match(workspaceSource, /workflow\.current_stage === restoredSupervisorUi\.stage/);
+});
+
+test("Supervisor 授权中断恢复原结构化动作且不保存凭据", () => {
+  const restoreSource = extractFunctionBody(workspaceSource, "restoreSupervisorVideoUi");
+  assert.match(restoreSource, /authorization_required/);
+  assert.match(restoreSource, /parseExplicitAction\(payload\.authorization_action\)/);
+  assert.match(
+    workspaceSource,
+    /restoredSupervisorUi\?\.kind === "authorization_required"[\s\S]*submitSupervisorAction[\s\S]*authorizationAction/,
+  );
+  assert.doesNotMatch(restoreSource, /token|authorization_header|credential/iu);
+});
+
+test("Supervisor 当前卡片按 Workflow 与 artifact 权威身份选择", () => {
+  assert.match(workspaceSource, /selectSupervisorArtifactMessage/);
+  assert.match(workspaceSource, /workflowId:\s*activeSupervisorVideoTarget\.workflow\.workflow_id/);
+  assert.match(workspaceSource, /artifactRef:\s*activeSupervisorVideoTarget\.artifactRef/);
+});
+
+test("Supervisor 新增全局素材复用统一分组 ID 与名称唯一化", () => {
+  const supervisorBranch = extractFunctionBody(workspaceSource, "renderSupervisorVideoArtifact");
+  assert.match(supervisorBranch, /addGlobalSceneAssetReference/);
+  assert.match(supervisorBranch, /added\.added_asset\.asset_id/);
+  assert.match(supervisorBranch, /added\.added_asset\.name/);
+  assert.doesNotMatch(supervisorBranch, /`manual-\$\{rawId\}`/);
 });

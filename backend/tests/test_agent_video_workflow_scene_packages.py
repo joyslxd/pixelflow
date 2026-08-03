@@ -453,6 +453,373 @@ def test_generated_global_asset_images_are_bound_once_and_projected_for_review()
         assert [item["image_url"] for item in scene["shot_description"]["mentions"]] == [url_by_id[asset_id] for asset_id in scene["reference_asset_ids"]]
 
 
+def _scene_package_review_state():
+    service = VideoScenePackageWorkflowService()
+    approved = _approved_plan_state()
+    generating = service.prepare_from_approved_plan(
+        approved,
+        now=approved.updated_at + timedelta(seconds=1),
+    )
+    return service, service.publish_generated_asset_images(
+        generating,
+        _generated_global_assets(generating.scene_package.global_assets),
+        now=generating.updated_at + timedelta(seconds=1),
+    )
+
+
+def test_review_scene_patch_updates_authority_and_recomputes_prompt() -> None:
+    service, review = _scene_package_review_state()
+    scene = review.scene_package.scene_packages[0]
+    original_contract = review.scene_package.creation_contract
+    original_duration = review.scene_package.target_duration_ms
+
+    updated = service.modify_review_scene(
+        review,
+        scene_id=scene["scene_id"],
+        patch={
+            "storyline": "林岚在晨光中查看戒指的健康趋势。",
+            "shot_description": {"text": "中景跟拍 @都市健康管理师林岚 抬手查看数据。"},
+            "narration": "清晨数据，尽在指间。",
+            "reference_asset_ids": scene["reference_asset_ids"],
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    changed = updated.scene_package.scene_packages[0]
+    assert changed["storyline"] == "林岚在晨光中查看戒指的健康趋势。"
+    assert "清晨数据" in changed["prompt"]
+    assert changed["shot_description"]["mentions"]
+    assert updated.scene_package.creation_contract == original_contract
+    assert updated.scene_package.target_duration_ms == original_duration
+    assert [item["scene_id"] for item in updated.scene_package.scene_packages] == [
+        item["scene_id"] for item in review.scene_package.scene_packages
+    ]
+    assert updated.stage_version == review.stage_version + 1
+    assert updated.context_version == review.context_version + 1
+
+
+def test_review_asset_replace_delete_and_add_are_bounded_and_authoritative() -> None:
+    service, review = _scene_package_review_state()
+    scene = review.scene_package.scene_packages[0]
+    asset_id = scene["reference_asset_ids"][0]
+    group = next(
+        collection
+        for collection in ("characters", "scenes", "props")
+        if any(item["asset_id"] == asset_id for item in review.scene_package.global_assets[collection])
+    )
+    replacement = {
+        "source": "image_asset",
+        "display_image_url": "https://assets.example.com/replacement.png",
+        "generation_reference_url": "https://assets.example.com/replacement-source.png",
+        "content_asset_id": "content-asset-1",
+        "asset_name": "替换参考图",
+    }
+
+    replaced = service.replace_review_asset(
+        review,
+        asset_group=group,
+        asset_id=asset_id,
+        asset_patch=replacement,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+    replaced_asset = next(
+        item for item in replaced.scene_package.global_assets[group]
+        if item["asset_id"] == asset_id
+    )
+    assert replaced_asset["generation_reference_url"] == replacement["generation_reference_url"]
+    assert any(
+        mention["image_url"] == replacement["display_image_url"]
+        for item in replaced.scene_package.scene_packages
+        for mention in item["shot_description"]["mentions"]
+        if mention["asset_id"] == asset_id
+    )
+
+    deleted = service.delete_review_asset(
+        replaced,
+        asset_group=group,
+        asset_id=asset_id,
+        now=replaced.updated_at + timedelta(seconds=1),
+    )
+    assert all(
+        asset_id not in item["reference_asset_ids"]
+        for item in deleted.scene_package.scene_packages
+    )
+
+    added_asset_patch = dict(replacement)
+    added_asset_patch.update(
+        {
+            "display_image_url": "https://assets.example.com/water-bottle.png",
+            "generation_reference_url": "https://assets.example.com/water-bottle-source.png",
+            "asset_name": "运动水杯",
+        }
+    )
+    added = service.add_review_asset(
+        deleted,
+        asset_group="props",
+        asset_id="prop-manual-water-bottle",
+        asset_patch=added_asset_patch,
+        now=deleted.updated_at + timedelta(seconds=1),
+    )
+    assert any(
+        item["asset_id"] == "prop-manual-water-bottle"
+        for item in added.scene_package.global_assets["props"]
+    )
+    assert added.scene_package.creation_contract == review.scene_package.creation_contract
+    assert added.scene_package.target_duration_ms == review.scene_package.target_duration_ms
+
+
+def test_review_asset_accepts_matching_digital_human_generation_reference() -> None:
+    service, review = _scene_package_review_state()
+    character = review.scene_package.global_assets["characters"][0]
+
+    replaced = service.replace_review_asset(
+        review,
+        asset_group="characters",
+        asset_id=character["asset_id"],
+        asset_patch={
+            "source": "digital_human",
+            "display_image_url": "https://assets.example.com/digital-human.png",
+            "generation_reference_url": "asset://digital-human-7",
+            "third_asset_id": "digital-human-7",
+            "asset_type": "model",
+            "asset_name": "数字人七号",
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    replaced_character = replaced.scene_package.global_assets["characters"][0]
+    assert replaced_character["generation_reference_url"] == "asset://digital-human-7"
+    assert replaced_character["third_asset_id"] == "digital-human-7"
+
+
+@pytest.mark.parametrize(
+    ("asset_group", "asset_id"),
+    [
+        ("characters", "character-manual-host"),
+        ("scenes", "scene-manual-studio"),
+        ("props", "prop-manual-bottle"),
+    ],
+)
+def test_review_asset_requires_group_prefix_and_accepts_three_legal_prefixes(
+    asset_group: str,
+    asset_id: str,
+) -> None:
+    service, review = _scene_package_review_state()
+
+    added = service.add_review_asset(
+        review,
+        asset_group=asset_group,
+        asset_id=asset_id,
+        asset_patch={
+            "source": "image_asset",
+            "display_image_url": f"https://assets.example.com/{asset_id}.png",
+            "generation_reference_url": f"https://assets.example.com/{asset_id}-source.png",
+            "asset_name": f"新增{asset_group}",
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert any(
+        item["asset_id"] == asset_id
+        for item in added.scene_package.global_assets[asset_group]
+    )
+
+
+@pytest.mark.parametrize(
+    ("asset_group", "asset_id"),
+    [
+        ("characters", "manual-without-group-prefix"),
+        ("characters", "scene-manual-wrong-group"),
+        ("scenes", "prop-manual-wrong-group"),
+        ("props", "character-manual-wrong-group"),
+    ],
+)
+def test_review_asset_rejects_missing_or_cross_group_prefix(
+    asset_group: str,
+    asset_id: str,
+) -> None:
+    service, review = _scene_package_review_state()
+
+    with pytest.raises(ValueError, match="前缀"):
+        service.add_review_asset(
+            review,
+            asset_group=asset_group,
+            asset_id=asset_id,
+            asset_patch={
+                "source": "image_asset",
+                "display_image_url": "https://assets.example.com/new.png",
+                "generation_reference_url": "https://assets.example.com/new-source.png",
+                "asset_name": "新增素材",
+            },
+            now=review.updated_at + timedelta(seconds=1),
+        )
+
+
+def test_review_asset_rejects_global_id_and_name_conflicts() -> None:
+    service, review = _scene_package_review_state()
+    global_assets = review.scene_package.global_assets
+    existing_character = global_assets["characters"][0]
+    visual_style_id = global_assets["visual_style"]["asset_id"]
+
+    for asset_group, asset_id, asset_name, expected in (
+        ("characters", visual_style_id, "唯一角色", "唯一"),
+        ("props", "prop-manual-duplicate-name", existing_character["name"], "名称"),
+    ):
+        with pytest.raises(ValueError, match=expected):
+            service.add_review_asset(
+                review,
+                asset_group=asset_group,
+                asset_id=asset_id,
+                asset_patch={
+                    "source": "image_asset",
+                    "display_image_url": "https://assets.example.com/new.png",
+                    "generation_reference_url": "https://assets.example.com/new-source.png",
+                    "asset_name": asset_name,
+                },
+                now=review.updated_at + timedelta(seconds=1),
+            )
+
+
+def test_review_asset_rejects_reusing_content_asset_across_groups() -> None:
+    service, review = _scene_package_review_state()
+    first = service.add_review_asset(
+        review,
+        asset_group="props",
+        asset_id="prop-manual-content-42",
+        asset_patch={
+            "source": "image_asset",
+            "display_image_url": "https://assets.example.com/content-42.png",
+            "generation_reference_url": "https://assets.example.com/content-42.png",
+            "content_asset_id": "content-42",
+            "asset_name": "素材库水杯",
+        },
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    with pytest.raises(ValueError, match="content asset"):
+        service.add_review_asset(
+            first,
+            asset_group="scenes",
+            asset_id="scene-manual-content-42",
+            asset_patch={
+                "source": "image_asset",
+                "display_image_url": "https://assets.example.com/content-42.png",
+                "generation_reference_url": "https://assets.example.com/content-42.png",
+                "content_asset_id": "content-42",
+                "asset_name": "素材库展台",
+            },
+            now=first.updated_at + timedelta(seconds=1),
+        )
+
+
+def test_review_asset_rejects_mismatched_digital_human_generation_reference() -> None:
+    service, review = _scene_package_review_state()
+    character = review.scene_package.global_assets["characters"][0]
+
+    with pytest.raises(ValueError, match="数字人"):
+        service.replace_review_asset(
+            review,
+            asset_group="characters",
+            asset_id=character["asset_id"],
+            asset_patch={
+                "source": "digital_human",
+                "display_image_url": "https://assets.example.com/digital-human.png",
+                "generation_reference_url": "asset://different-human",
+                "third_asset_id": "digital-human-7",
+            },
+            now=review.updated_at + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs", "message"),
+    [
+        (
+            "modify_review_scene",
+            {"scene_id": "missing-scene", "patch": {"storyline": "非法越权"}},
+            "分镜",
+        ),
+        (
+            "modify_review_scene",
+            {"scene_id": None, "patch": {"duration_ms": 1}},
+            "字段",
+        ),
+        (
+            "replace_review_asset",
+            {
+                "asset_group": "props",
+                "asset_id": "missing-asset",
+                "asset_patch": {
+                    "source": "image_asset",
+                    "display_image_url": "http://unsafe.example.com/a.png",
+                    "generation_reference_url": "https://assets.example.com/a.png",
+                },
+            },
+            "资产|HTTPS",
+        ),
+        (
+            "add_review_asset",
+            {
+                "asset_group": "props",
+                "asset_id": "duplicate",
+                "asset_patch": {
+                    "source": "image_asset",
+                    "display_image_url": "https://assets.example.com/a.png",
+                    "generation_reference_url": "https://assets.example.com/a-source.png",
+                    "unknown_metadata": "forbidden",
+                },
+            },
+            "字段",
+        ),
+    ],
+)
+def test_review_modification_rejects_unknown_targets_and_unbounded_fields(
+    operation: str,
+    kwargs: dict,
+    message: str,
+) -> None:
+    service, review = _scene_package_review_state()
+    if operation == "modify_review_scene" and kwargs["scene_id"] is None:
+        kwargs = {**kwargs, "scene_id": review.scene_package.scene_packages[0]["scene_id"]}
+
+    with pytest.raises(ValueError, match=message):
+        getattr(service, operation)(review, **kwargs, now=review.updated_at + timedelta(seconds=1))
+
+
+@pytest.mark.parametrize("at_review", [False, True])
+def test_scene_package_cancel_preserves_authoritative_snapshots(at_review: bool) -> None:
+    planning_state = _approved_plan_state()
+    service = VideoScenePackageWorkflowService()
+    state = service.prepare_from_approved_plan(
+        planning_state,
+        now=planning_state.updated_at + timedelta(seconds=1),
+    )
+    if at_review:
+        state = service.publish_generated_asset_images(
+            state,
+            _generated_global_assets(state.scene_package.global_assets),
+            now=state.updated_at + timedelta(seconds=1),
+        )
+
+    cancelled = service.cancel(
+        state,
+        now=state.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is state.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == state.stage_version + 1
+    assert cancelled.context_version == state.context_version + 1
+    assert cancelled.updated_at > state.updated_at
+    assert cancelled.source_plan == state.source_plan
+    assert cancelled.source_plan_artifact_ref == state.source_plan_artifact_ref
+    assert cancelled.scene_package == state.scene_package
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
+
+
 def test_generated_asset_publication_revalidates_restored_scene_package_authority():
     planning_state = _approved_plan_state()
     service = VideoScenePackageWorkflowService()

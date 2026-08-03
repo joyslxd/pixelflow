@@ -165,6 +165,26 @@ def test_video_planning_workflow_projects_each_review_boundary(service: VideoPla
     assert projection.context_version == 5
 
 
+def test_planning_state_validation_rejects_illegal_review_or_approval_authority(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+    approved = service.approve_plan(review, now=review.updated_at + timedelta(seconds=1))
+    forged_states = (
+        replace(review, status=WorkflowStatus.RUNNING),
+        replace(approved, status=WorkflowStatus.AWAITING_USER),
+        replace(review, _active_plan=None),
+        replace(approved, _active_plan=None),
+        replace(review, context_version=review.context_version + 1),
+        replace(review, stage_version=1, context_version=1),
+        replace(review, updated_at=review.created_at - timedelta(seconds=1)),
+    )
+
+    for forged in forged_states:
+        with pytest.raises(ValueError, match="规划状态|Plan"):
+            service.validate_state(forged)
+
+
 def test_intake_and_direction_contracts_fail_closed(service: VideoPlanningWorkflowService):
     now = datetime(2026, 7, 28, 2, 0, tzinfo=UTC)
     with pytest.raises(ValueError, match="video"):
@@ -245,6 +265,52 @@ def test_direction_regeneration_and_form_cancellation_are_explicit(service: Vide
     assert regenerated.status is WorkflowStatus.RUNNING
     assert regenerated.creative_directions == []
     assert regenerated.selected_direction == {}
+
+
+def test_plan_review_can_explicitly_restart_with_new_directions(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+
+    restarted = service.restart_directions_from_plan(
+        review,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert restarted.current_stage is VideoPlanningStage.DIRECTION_GENERATION
+    assert restarted.status is WorkflowStatus.RUNNING
+    assert restarted.form_values == review.form_values
+    assert restarted.intake_context == review.intake_context
+    assert restarted.creative_directions == []
+    assert restarted.selected_direction == {}
+    assert restarted.active_plan is None
+    assert restarted.stage_version == review.stage_version + 1
+    assert restarted.context_version == review.context_version + 1
+
+
+def test_planning_cancel_preserves_authority_and_projects_cancelled_status(
+    service: VideoPlanningWorkflowService,
+) -> None:
+    review = _advance_to_plan_review(service)
+    cancelled = service.cancel(
+        review,
+        now=review.updated_at + timedelta(seconds=1),
+    )
+
+    assert cancelled.current_stage is review.current_stage
+    assert cancelled.status is WorkflowStatus.CANCELLED
+    assert cancelled.stage_version == review.stage_version + 1
+    assert cancelled.context_version == review.context_version + 1
+    assert cancelled.updated_at > review.updated_at
+    assert cancelled.intake_context == review.intake_context
+    assert cancelled.form_values == review.form_values
+    assert cancelled.creative_directions == review.creative_directions
+    assert cancelled.selected_direction == review.selected_direction
+    assert cancelled.active_plan == review.active_plan
+    assert service.to_workflow_record(cancelled).status is WorkflowStatus.CANCELLED
+
+    with pytest.raises(ValueError, match="终态"):
+        service.cancel(cancelled, now=cancelled.updated_at + timedelta(seconds=1))
 
 
 def test_initial_plan_inherits_confirmed_intake_contract_and_model_capabilities(

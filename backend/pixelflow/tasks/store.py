@@ -573,6 +573,15 @@ class PixelFlowConversationMessageRecord:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRuntimeInterruptResponseWrite:
+    """Memory Runtime 响应写单元向 Repository 暴露的只读结果。"""
+
+    message: PixelFlowConversationMessageRecord
+    pre_input_context_version: int
+    context_version: int
+
+
 class PixelFlowTaskStore(Protocol):
     """业务任务 Store 接口。
 
@@ -1345,6 +1354,81 @@ class MemoryPixelFlowTaskStore:
                 )
                 record.updated_at = _dt(_now())
             return deepcopy(record)
+
+    @asynccontextmanager
+    async def agent_runtime_interrupt_response_write(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        message: PixelFlowConversationMessageRecord,
+        occurred_at: datetime | str,
+    ) -> AsyncIterator[AgentRuntimeInterruptResponseWrite]:
+        """为 live interrupt 响应提供可由外层异常触发回滚的窄写单元。"""
+
+        lock = _conversation_lock(self._conversation_locks, conversation_id)
+        async with lock:
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None or conversation.user_id != user_id:
+                raise ValueError("Agent Runtime 响应所属对话不存在")
+            if (
+                message.conversation_id != conversation_id
+                or message.user_id != user_id
+                or message.role != "user"
+            ):
+                raise ValueError("Agent Runtime 响应消息身份不一致")
+            runtime = conversation.context.get(AGENT_RUNTIME_CONTEXT_KEY)
+            current_version = (
+                None if not isinstance(runtime, dict) else runtime.get("context_version")
+            )
+            if (
+                isinstance(current_version, bool)
+                or not isinstance(current_version, int)
+                or current_version < 0
+            ):
+                raise ValueError("Agent Runtime 响应缺少合法上下文版本")
+            existing = next(
+                (
+                    item
+                    for rows in self._conversation_messages.values()
+                    for item in rows
+                    if item.message_id == message.message_id
+                ),
+                None,
+            )
+            if existing is not None:
+                raise ValueError("Agent Runtime 响应消息 ID 已存在")
+
+            before_conversation = deepcopy(conversation)
+            before_messages = deepcopy(
+                self._conversation_messages.get(conversation_id, []),
+            )
+            stored_message = deepcopy(message)
+            stored_message.created_at = stored_message.created_at or _dt(occurred_at)
+            next_version = current_version + 1
+            patched_context = _patch_agent_runtime_context(
+                conversation.context,
+                {"context_version": next_version},
+            )
+            conversation.context = patched_context
+            conversation.revision = _require_conversation_revision(
+                conversation.revision,
+            ) + 1
+            conversation.updated_at = _dt(occurred_at)
+            self._conversation_messages.setdefault(conversation_id, []).append(
+                stored_message,
+            )
+            write = AgentRuntimeInterruptResponseWrite(
+                message=deepcopy(stored_message),
+                pre_input_context_version=current_version,
+                context_version=next_version,
+            )
+            try:
+                yield write
+            except BaseException:
+                self._conversations[conversation_id] = before_conversation
+                self._conversation_messages[conversation_id] = before_messages
+                raise
 
     async def patch_jianying_draft_conversation_context(
         self,

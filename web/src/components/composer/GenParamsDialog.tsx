@@ -549,7 +549,7 @@ export function GenParamsDialog({ open, intent, initialCoreMessage, initialValue
               type="button"
               onClick={() => setCollapsed((v) => !v)}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-canvas text-ink-soft hover:text-ink"
-              aria-label="折叠表单"
+              aria-label={collapsed ? "展开表单" : "折叠表单"}
             >
               <ChevronUp size={18} className={collapsed ? "rotate-180 transition-transform" : "transition-transform"} />
             </button>

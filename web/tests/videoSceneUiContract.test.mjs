@@ -92,3 +92,31 @@ test("original scene package button reopens storyboard with generated scene vide
   assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/);
   assert.match(workspaceSource, /videoScenePackageEditedSceneIds/);
 });
+
+test("Supervisor 场景包和分镜操作提交结构化 modify continue regenerate retry", () => {
+  assert.match(workspaceSource, /scene_packages/);
+  assert.match(workspaceSource, /global_assets/);
+  assert.match(workspaceSource, /scene_patches/);
+  assert.match(workspaceSource, /action:\s*"modify_workflow"/);
+  assert.match(workspaceSource, /action:\s*"regenerate_stage"/);
+  assert.match(workspaceSource, /action:\s*"retry_failed"/);
+  assert.match(workspaceSource, /action:\s*"continue_workflow"/);
+  assert.match(storyboardPanelSource, /onUpdateVideoScenePackage/);
+  assert.match(storyboardPanelSource, /onGenerateVideo/);
+  assert.match(storyboardPanelSource, /onRetrySceneAssets/);
+  assert.match(storyboardPanelSource, /onSave/);
+});
+
+test("Supervisor 分镜编辑只在显式保存时提交一次当前草稿", () => {
+  assert.match(workspaceSource, /deferSceneUpdates=\{Boolean\(supervisorVideoArtifact\)\}/);
+  assert.match(storyboardPanelSource, /sceneDraftPatches/);
+  assert.match(storyboardPanelSource, /saveStoryboardDraft/);
+  assert.match(storyboardPanelSource, /await onUpdateVideoScenePackage/);
+  assert.match(storyboardPanelSource, /请先保存当前分镜/);
+});
+
+test("Supervisor 最终视频下载携带当前成品 URL 更新交付状态", () => {
+  assert.match(workspaceSource, /delivery_download_url/);
+  assert.match(workspaceSource, /action:\s*"continue_workflow"/);
+  assert.doesNotMatch(workspaceSource, /action:\s*"answer_only"[\s\S]{0,200}delivery_download_url/);
+});

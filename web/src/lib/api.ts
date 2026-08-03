@@ -36,7 +36,6 @@ const CONVERSATION_MESSAGE_JOB_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
 const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const PLAN_JOB_POLL_INTERVAL_MS = 3000;
-const PLAN_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
 const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
@@ -359,6 +358,26 @@ export interface PlanJobStatusResponse {
   result: PlanMarkdownResponse | null;
   error: string | null;
   message: string;
+  stage?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface PlanManualEditRequest {
+  intent: CreationIntent;
+  form_values: Record<string, unknown>;
+  selected_direction: Record<string, unknown>;
+  current_plan_markdown: string;
+  edited_plan_markdown: string;
+  current_plan_version: number;
+  plan_history: PlanMarkdownResponse["plan_history"];
+  creation_contract?: Record<string, unknown>;
+  scene_durations_sec?: number[];
+  scene_blueprints?: PlanSceneBlueprint[];
+  asset_manifest?: PlanAssetManifest;
+  product_creative_profile?: Record<string, unknown>;
+  intake_context?: Record<string, unknown>;
+  materials?: Array<Record<string, unknown>>;
 }
 
 export interface VideoCreationContract extends Record<string, unknown> {
@@ -606,6 +625,48 @@ export interface GenerateSceneAssetsJobStatusResponse {
   status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
   stage: "generate_scene_assets" | "completed" | string;
   result: GenerateSceneAssetsResponse | null;
+  error: string | null;
+  message: string;
+}
+
+export interface ScenePackageAssetRevisionRequest {
+  operation: "replace" | "delete";
+  asset_id: string;
+  asset_group: "characters" | "scenes" | "props";
+  asset_name?: string;
+  source_image_url: string;
+  new_image_url?: string | null;
+  generation_reference_url?: string | null;
+  replacement_metadata?: Record<string, unknown>;
+  global_assets: Record<string, unknown>;
+  scene_packages: PrepareScenePackagesResponse["scene_packages"];
+}
+
+export interface ScenePackageAssetRevisionResponse {
+  ok: boolean;
+  operation: "replace" | "delete";
+  asset_id: string;
+  asset_group: "characters" | "scenes" | "props";
+  global_assets: Record<string, unknown>;
+  scene_packages: PrepareScenePackagesResponse["scene_packages"];
+  affected_scene_ids: string[];
+  image_analysis_markdown: string;
+  quota_insufficient?: boolean;
+  message: string;
+}
+
+export interface ScenePackageAssetRevisionJobStartResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  message: string;
+}
+
+export interface ScenePackageAssetRevisionJobStatusResponse {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
+  result: ScenePackageAssetRevisionResponse | null;
   error: string | null;
   message: string;
 }
@@ -1086,24 +1147,32 @@ async function pollCreativeDirectionsJob(
 
 async function pollPlanJob(
   jobId: string,
-  kind: "generation" | "revision",
+  kind: "generation" | "revision" | "manual_edit",
   shouldContinue: () => boolean = () => true,
 ): Promise<PlanMarkdownResponse | null> {
-  const deadline = Date.now() + PLAN_JOB_TIMEOUT_MS;
-  const path = kind === "revision"
-    ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
-    : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
+  const path = kind === "manual_edit"
+    ? `${FLOW_BASE}/planning/plan/save-edit/jobs/${encodeURIComponent(jobId)}`
+    : kind === "revision"
+      ? `${FLOW_BASE}/planning/plan/revise/jobs/${encodeURIComponent(jobId)}`
+      : `${FLOW_BASE}/planning/plan/jobs/${encodeURIComponent(jobId)}`;
+  while (shouldContinue()) {
     const status = await req<PlanJobStatusResponse>(path);
     if (!shouldContinue()) return null;
-    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "completed") {
+      if (status.result) return status.result;
+      throw new ApiError(422, "Plan job completed without result");
+    }
     if (status.status === "failed") {
-      throw new ApiError(500, status.error || status.message || (kind === "revision" ? "Plan revision failed" : "Plan generation failed"));
+      const fallbackMessage = kind === "manual_edit"
+        ? "Plan 手工编辑发布失败"
+        : kind === "revision"
+          ? "Plan revision failed"
+          : "Plan generation failed";
+      throw new ApiError(409, status.error || status.message || fallbackMessage);
     }
     await delay(PLAN_JOB_POLL_INTERVAL_MS);
   }
-  throw new ApiError(408, kind === "revision" ? "Plan revision polling timed out" : "Plan generation polling timed out");
+  return null;
 }
 
 async function pollSceneVideoJob(
@@ -1401,6 +1470,62 @@ async function pollSceneAssetsJob(
     scene_packages: [],
     failed_assets: [{ error: "场景参考图生成轮询超时" }],
     message: "场景参考图生成轮询超时",
+  };
+}
+
+async function pollScenePackageAssetRevisionJob(
+  jobId: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<ScenePackageAssetRevisionResponse | null> {
+  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!shouldContinue()) return null;
+    const status = await req<ScenePackageAssetRevisionJobStatusResponse>(
+      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (!shouldContinue()) return null;
+    if (status.status === "completed" && status.result) return status.result;
+    if (status.status === "quota_paused") {
+      return status.result || {
+        ok: false,
+        operation: "replace",
+        asset_id: "",
+        asset_group: "characters",
+        global_assets: {},
+        scene_packages: [],
+        affected_scene_ids: [],
+        image_analysis_markdown: "",
+        quota_insufficient: true,
+        message: status.error || status.message || "图片分析额度不足",
+      };
+    }
+    if (status.status === "failed") {
+      return {
+        ok: false,
+        operation: "replace",
+        asset_id: "",
+        asset_group: "characters",
+        global_assets: {},
+        scene_packages: [],
+        affected_scene_ids: [],
+        image_analysis_markdown: "",
+        quota_insufficient: false,
+        message: status.error || status.message || "分镜素材修订失败",
+      };
+    }
+    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
+  }
+  return {
+    ok: false,
+    operation: "replace",
+    asset_id: "",
+    asset_group: "characters",
+    global_assets: {},
+    scene_packages: [],
+    affected_scene_ids: [],
+    image_analysis_markdown: "",
+    quota_insufficient: false,
+    message: "分镜素材修订轮询超时",
   };
 }
 
@@ -1725,22 +1850,17 @@ export const api = {
   pollPlanRevisionJob: (jobId: string, shouldContinue?: () => boolean) =>
     pollPlanJob(jobId, "revision", shouldContinue),
 
-  savePlanMarkdownEdit: (body: {
-    intent: CreationIntent;
-    form_values: Record<string, unknown>;
-    selected_direction: Record<string, unknown>;
-    current_plan_markdown: string;
-    edited_plan_markdown: string;
-    current_plan_version: number;
-    plan_history: PlanMarkdownResponse["plan_history"];
-    creation_contract?: Record<string, unknown>;
-    scene_durations_sec?: number[];
-    scene_blueprints?: PlanSceneBlueprint[];
-    asset_manifest?: PlanAssetManifest;
-    product_creative_profile?: Record<string, unknown>;
-    intake_context?: Record<string, unknown>;
-    materials?: Array<Record<string, unknown>>;
-  }) => req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
+  savePlanMarkdownEdit: (body: PlanManualEditRequest) =>
+    req<PlanMarkdownResponse>(`${FLOW_BASE}/planning/plan/save-edit`, { method: "POST", body: JSON.stringify(body) }),
+
+  startPlanManualEditJob: (body: PlanManualEditRequest) =>
+    req<PlanJobStartResponse>(`${FLOW_BASE}/planning/plan/save-edit/start`, { method: "POST", body: JSON.stringify(body) }),
+
+  getPlanManualEditJob: (jobId: string) =>
+    req<PlanJobStatusResponse>(`${FLOW_BASE}/planning/plan/save-edit/jobs/${encodeURIComponent(jobId)}`),
+
+  pollPlanManualEditJob: (jobId: string, shouldContinue?: () => boolean) =>
+    pollPlanJob(jobId, "manual_edit", shouldContinue),
 
   restorePlanMarkdown: (body: {
     intent: CreationIntent;
@@ -1906,6 +2026,19 @@ export const api = {
     req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`),
 
   pollSceneAssetsJob,
+
+  startScenePackageAssetRevisionJob: (body: ScenePackageAssetRevisionRequest) =>
+    req<ScenePackageAssetRevisionJobStartResponse>(`${FLOW_BASE}/video/update-scene-package-asset/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getScenePackageAssetRevisionJob: (jobId: string) =>
+    req<ScenePackageAssetRevisionJobStatusResponse>(
+      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
+    ),
+
+  pollScenePackageAssetRevisionJob,
 
   startSceneVideosJob: (body: {
     scenes: SceneGenerationPayload[];

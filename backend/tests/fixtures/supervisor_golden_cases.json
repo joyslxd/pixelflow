@@ -76,6 +76,12 @@
       "observed": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-03", "target_artifact_ref": "artifact:plan:video:v1"}
     },
     {
+      "case_id": "modify-video-quality-affected-scene",
+      "user_input": "按质检建议只修改第二个分镜，再重新生成这个镜头。",
+      "expected": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-08", "target_artifact_ref": "artifact:quality:video:v1"},
+      "observed": {"action": "modify_workflow", "intent": "video", "target_workflow_id": "wf-video-08", "target_artifact_ref": "artifact:quality:video:v1"}
+    },
+    {
       "case_id": "modify-analysis-source",
       "user_input": "把当前视频拆解任务换成我刚上传的素材。",
       "expected": {"action": "modify_workflow", "intent": "video_analysis", "target_workflow_id": "wf-analysis-02", "target_artifact_ref": "artifact:analysis:source:v1"},
@@ -118,6 +124,12 @@
       "observed": {"action": "retry_failed", "intent": "video", "target_workflow_id": "wf-video-05", "target_artifact_ref": "artifact:scene:4"}
     },
     {
+      "case_id": "retry-video-expired-scene",
+      "user_input": "第二个分镜任务已经过期，只重试这个失败镜头。",
+      "expected": {"action": "retry_failed", "intent": "video", "target_workflow_id": "wf-video-09", "target_artifact_ref": "artifact:scene:expired:2"},
+      "observed": {"action": "retry_failed", "intent": "video", "target_workflow_id": "wf-video-09", "target_artifact_ref": "artifact:scene:expired:2"}
+    },
+    {
       "case_id": "retry-ppt-failed",
       "user_input": "重试生成失败的演示文稿第六页。",
       "expected": {"action": "retry_failed", "intent": "ppt", "target_workflow_id": "wf-ppt-04", "target_artifact_ref": "artifact:ppt:page:6"},
@@ -146,6 +158,12 @@
       "user_input": "新建任务分析我刚上传的两段视频。",
       "expected": {"action": "start_workflow", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null},
       "observed": {"action": "start_workflow", "intent": "video_analysis", "target_workflow_id": null, "target_artifact_ref": null}
+    },
+    {
+      "case_id": "continue-video-final-confirmation",
+      "user_input": "当前合并成片没有问题，确认结束并进入下载交付。",
+      "expected": {"action": "continue_workflow", "intent": "video", "target_workflow_id": "wf-video-10", "target_artifact_ref": "artifact:merged:video:v2"},
+      "observed": {"action": "continue_workflow", "intent": "video", "target_workflow_id": "wf-video-10", "target_artifact_ref": "artifact:merged:video:v2"}
     },
     {
       "case_id": "switch-video",

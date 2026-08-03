@@ -44,7 +44,7 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
   const review = phase in REVIEW_COPY ? REVIEW_COPY[phase as keyof typeof REVIEW_COPY] : null;
   if (selectedVideo) {
     return (
-      <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
+      <div className="fixed inset-0 z-50 flex w-full min-w-0 flex-col bg-canvas xl:static xl:z-auto xl:w-[46%] xl:min-w-[380px]">
         <VideoPreviewPanel
           video={selectedVideo}
           onDownload={(video) => onDownloadVideo?.(video, selectedVideoSourceMessageId)}
@@ -57,7 +57,7 @@ export function CanvasPanel({ state, onApprove, onRevise, onConfirmStage, onClos
     );
   }
   return (
-    <div className="flex w-[46%] min-w-[380px] flex-col bg-canvas">
+    <div className="fixed inset-0 z-50 flex w-full min-w-0 flex-col bg-canvas xl:static xl:z-auto xl:w-[46%] xl:min-w-[380px]">
       <div className="flex h-12 shrink-0 items-center justify-between px-5">
         <span className="text-[14px] font-semibold text-ink">
           {PHASE_LABEL[phase] ?? "画布"}

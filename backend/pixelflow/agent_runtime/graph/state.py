@@ -76,3 +76,6 @@ class SupervisorState(TypedDict, total=False):
     decision_validation_request: Any
     answer_message: AnyMessage | None
     dispatch_workflow_id: str | None
+    workflow_dispatch_result: dict[str, Any] | None
+    last_interrupt_response_id: str | None
+    source_interrupt_id: str | None

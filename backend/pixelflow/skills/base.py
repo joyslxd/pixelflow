@@ -91,6 +91,17 @@ class ImageGenerationResult:
 
 
 @dataclass
+class ImageAnalysisResult:
+    """单张图片语义分析的统一返回 DTO。"""
+
+    ok: bool
+    analysis_markdown: str = ""
+    task_id: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class EditResult:
     """剪辑/装配调用的统一返回 DTO。
 
@@ -312,6 +323,12 @@ class ImageGenerationSkill(Protocol):
     ) -> ImageGenerationResult: ...
 
 
+class ImageAnalysisSkill(Protocol):
+    """单张图片人物、物品、场景和视觉特征分析能力接口。"""
+
+    async def analyze_image(self, image_url: str) -> ImageAnalysisResult: ...
+
+
 class VideoEditSkill(Protocol):
     """EDIT 阶段依赖的视频剪辑/渲染能力接口。
 
@@ -427,6 +444,14 @@ def get_video_skill() -> VideoGenerationSkill:
 
 def get_image_skill() -> ImageGenerationSkill:
     """返回当前配置的图片生成 skill。"""
+    impl = _get_media_skill_impl()
+    if impl == "borgrise":
+        return _get_borgrise_media_skill()
+    raise ValueError(f"Unknown media skill implementation: {impl!r}")
+
+
+def get_image_analysis_skill() -> ImageAnalysisSkill:
+    """返回当前配置的单张图片语义分析 skill。"""
     impl = _get_media_skill_impl()
     if impl == "borgrise":
         return _get_borgrise_media_skill()

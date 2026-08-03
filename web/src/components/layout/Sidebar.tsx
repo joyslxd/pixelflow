@@ -6,6 +6,38 @@ import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 5;
 
+const CONVERSATION_PHASE_LABELS: Record<string, string> = {
+  idle: "新",
+  plan_generation_running: "正在生成方案",
+  plan_revision_running: "正在修改方案",
+  plan_manual_edit_running: "正在发布编辑",
+  plan_review: "待确认方案",
+  scene_package_generation_running: "正在准备分镜",
+  scene_global_asset_edit_model_pending: "待确认素材参数",
+  scene_global_asset_revision_requested: "正在编辑素材",
+  scene_global_asset_added: "素材已添加",
+  scene_global_asset_deleted: "素材已删除",
+  video_accepted: "已完成",
+  form_cancelled: "已取消",
+};
+
+function conversationPhaseLabel(lastPhase: string): string {
+  const normalized = lastPhase.trim().toLowerCase();
+  const exactLabel = CONVERSATION_PHASE_LABELS[normalized];
+  if (exactLabel) return exactLabel;
+  if (normalized.includes("failed") || normalized.includes("error")) return "执行失败";
+  if (normalized.includes("running") || normalized.includes("processing")) return "处理中";
+  if (normalized.includes("review") || normalized.includes("pending") || normalized.includes("waiting")) return "待确认";
+  if (
+    normalized.includes("done")
+    || normalized.includes("accepted")
+    || normalized.includes("completed")
+  ) {
+    return "已完成";
+  }
+  return normalized ? "进行中" : "新";
+}
+
 export function Sidebar() {
   const navigate = useNavigate();
   const [items, setItems] = useState<ConversationSummaryResponse[]>([]);
@@ -36,7 +68,7 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside className="flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
+    <aside className="hidden xl:flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="px-3 pt-5">
         <button
           onClick={() => navigate("/")}
@@ -66,7 +98,7 @@ export function Sidebar() {
           >
             <span className="truncate">{t.title || "新的对话"}</span>
             <span className="ml-2 shrink-0 text-[12px] text-ink-soft/70">
-              {t.last_phase === "idle" ? "新" : t.last_phase}
+              {conversationPhaseLabel(t.last_phase)}
             </span>
           </NavLink>
         ))}

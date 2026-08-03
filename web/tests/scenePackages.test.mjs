@@ -866,11 +866,72 @@ test("sceneIdsForRevision maps explicit scene mentions and non-QC revisions fall
   assert.deepEqual([...sceneIdsForRevision(scenes, "整体更高级", undefined, false)], ["scene-1", "scene-2"]);
 });
 
-test("sceneIdsForRevision does not regenerate every scene or parse text when QC has no backend scope", () => {
+test("sceneIdsForRevision only falls back to an explicitly requested scene when QC has no backend scope", () => {
   const scenes = sampleScenes();
 
   assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检修复", { affected_scene_ids: [] }, true)], []);
-  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检只修改第2段", { affected_scene_ids: [] }, true)], []);
+  assert.deepEqual([...sceneIdsForRevision(scenes, "结合质检只修改第2段", { affected_scene_ids: [] }, true)], ["scene-2"]);
+  assert.deepEqual([...sceneIdsForRevision(scenes, "请修改第1个分镜，让结尾更醒目", { affected_scene_ids: [] }, true)], ["scene-1"]);
+});
+
+test("sceneIdsForRevision excludes negated scene directives from QC text fallback", () => {
+  const scenes = sampleScenes();
+
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "不要修改第1个分镜，只修改第2个分镜",
+        { affected_scene_ids: [] },
+        true,
+      ),
+    ],
+    ["scene-2"],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "无需重生成第1段，请修复第2段",
+        { affected_scene_ids: [] },
+        true,
+      ),
+    ],
+    ["scene-2"],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "别修改第1个分镜，也不要修改第2个分镜",
+        { affected_scene_ids: [] },
+        true,
+      ),
+    ],
+    [],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "不修改第1个分镜，只修改第2个分镜",
+        { affected_scene_ids: [] },
+        true,
+      ),
+    ],
+    ["scene-2"],
+  );
+  assert.deepEqual(
+    [
+      ...sceneIdsForRevision(
+        scenes,
+        "不重生成第1段，请修复第2段",
+        { affected_scene_ids: [] },
+        true,
+      ),
+    ],
+    ["scene-2"],
+  );
 });
 
 test("sceneIdsForRevision uses backend target scene ids instead of frontend text parsing on QC revisions", () => {
@@ -937,14 +998,14 @@ test("sceneIdsForRevision trusts backend target scene ids for QC revisions", () 
   );
 });
 
-test("sceneIdsForRevision does not parse user text or default to all scenes on QC revisions without backend scope", () => {
+test("sceneIdsForRevision keeps vague QC feedback fail-closed without defaulting to all scenes", () => {
   const scenes = [
     { scene_id: "scene-1", scene_index: 1 },
     { scene_id: "scene-2", scene_index: 2 },
     { scene_id: "scene-3", scene_index: 3 },
   ];
 
-  assert.deepEqual([...sceneIdsForRevision(scenes, "分镜3也不对 你怎么没修改", { affected_scene_ids: [] }, true)], []);
+  assert.deepEqual([...sceneIdsForRevision(scenes, "画面效果不太好，请优化", { affected_scene_ids: [] }, true)], []);
 });
 
 test("scenePackagesWithRevisionContract preserves each repaired scene contract and appends QC constraints", () => {

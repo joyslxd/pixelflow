@@ -15,11 +15,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
+from pixelflow.agent_workflows.video.live_capabilities import (
+    generate_application_directions as draft_creative_directions_with_llm,
+)
+from pixelflow.agent_workflows.video.live_capabilities import (
+    validate_video_application_form as validate_form,
+)
 from pixelflow.intake.context import IntakeContext as StandardIntakeContext
 from pixelflow.intake.context import normalize_intake_context
-from pixelflow.intake.forms import CreationIntent, get_form_schema, validate_form
+from pixelflow.intake.forms import CreationIntent, get_form_schema
 from pixelflow.intake.industry_profile import resolve_industry_profile
-from pixelflow.intake.llm import IntakeIntent, draft_creative_directions_with_llm, recognize_intent_with_llm
+from pixelflow.intake.llm import IntakeIntent, recognize_intent_with_llm
 from pixelflow.memory import build_memory_query, with_semantic_memory
 
 router = APIRouter(prefix="/agent/flows/intake", tags=["pixelflow-flows"])

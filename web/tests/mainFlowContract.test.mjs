@@ -67,6 +67,103 @@ test("manual global asset addition persists in place without clearing generated 
   assert.doesNotMatch(handler, /videoScenePackageEditedSceneIds:\s*\[\]/);
 });
 
+test("分镜保存必须更新权威消息后再关闭画布", () => {
+  const start = workspaceSource.indexOf("const handleSaveVideoScenePackage = async");
+  const end = workspaceSource.indexOf("const handleGenerateVideoFromScenePackages = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供分镜显式保存处理器");
+  assert.notEqual(end, -1, "视频生成处理器必须位于分镜保存处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /messagesRef\.current\.find/, "保存时必须读取最新消息，不能使用画布旧闭包");
+  assert.match(handler, /await api\.updateConversationMessage/, "保存时必须先更新权威消息");
+  assert.match(handler, /persistScenePackageSnapshot/, "保存后必须同步会话快照");
+  assert.match(handler, /setCanvasOpen\(false\)/, "权威消息更新成功后才能关闭画布");
+  assert.match(storyboardPanelSource, /onSave\?: \(\) => void \| Promise<void>/, "分镜画布必须暴露独立保存动作");
+  assert.match(storyboardPanelSource, /onClick=\{onSave\}/, "保存按钮不能继续复用仅关闭画布的动作");
+  assert.match(workspaceSource, /onSave=\{legacyArtifactActionsEnabled[\s\S]*handleSaveVideoScenePackage/, "Workspace 必须把权威保存处理器接到画布");
+});
+
+test("删除分镜素材必须持久化更新后的权威消息", () => {
+  const start = workspaceSource.indexOf("const handleDeleteReferencedGlobalAsset = async");
+  const end = workspaceSource.indexOf("const showImageEditOptions = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供分镜素材删除处理器");
+  assert.notEqual(end, -1, "图片编辑参数处理器必须位于删除处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  const revisionStart = startSceneGlobalAssetRevisionSource();
+  const revisionCompletion = handleCompletedSceneAssetRevisionJobSource();
+  assert.match(handler, /startSceneGlobalAssetRevision\(reference, "delete"/, "删除必须进入统一的素材语义修订任务");
+  assert.match(revisionStart, /operation:\s*"replace" \| "delete"/, "统一任务必须区分替换和删除");
+  assert.match(revisionCompletion, /const updatedSourceArtifact: ChatArtifact = \{[\s\S]*videoScenePackages: updatedPackages/, "任务完成后必须以当前消息构造完整更新 artifact");
+  assert.match(revisionCompletion, /await api\.updateConversationMessage/, "删除完成后必须更新权威消息，避免 Snapshot 用旧素材覆盖");
+});
+
+test("无图片的历史素材空壳仍可进入异步删除流程", () => {
+  const referenceStart = workspaceSource.indexOf("function sceneGlobalAssetReferenceFromMaterials");
+  const referenceEnd = workspaceSource.indexOf("function isGlobalSceneAssetGroup", referenceStart);
+  assert.notEqual(referenceStart, -1, "Workspace 必须解析场景包全局素材引用");
+  assert.notEqual(referenceEnd, -1, "全局素材分组校验函数必须位于引用解析之后");
+  const referenceSource = workspaceSource.slice(referenceStart, referenceEnd);
+  assert.match(referenceSource, /action !== "delete" && !sourceImageUrl/, "只有编辑操作必须要求原图片 URL");
+  assert.doesNotMatch(storyboardPanelSource, /disabled=\{!image\}/, "无图片空壳仍必须允许打开详情");
+  assert.match(storyboardPanelSource, /当前素材没有可用图片，可以直接删除后重新添加/, "空壳详情必须提示可直接删除");
+  assert.match(storyboardPanelSource, /disabled=\{!previewAsset\.source_image_url\}/, "无图素材的引用和替换动作必须禁用");
+});
+
+test("QA 未定位分镜时保留并持久化同一视频修改上下文", () => {
+  const start = workspaceSource.indexOf("async function handleRegenerateVideoWithRevision");
+  const end = workspaceSource.indexOf("const handleApprove = async", start);
+  assert.notEqual(start, -1, "Workspace 必须提供结合质检结果重生成的处理器");
+  assert.notEqual(end, -1, "旧任务 Brief 确认处理器必须位于视频修改处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(
+    handler,
+    /affectedSceneIds\.size === 0[\s\S]*videoRevisionArtifactRef\.current = \{[\s\S]*originalVideoScenePackages/,
+    "质检未定位分镜时必须重新挂载原视频 Artifact",
+  );
+  assert.match(handler, /last_phase: "video_revision_scene_required"/, "恢复点必须记录等待用户补充分镜");
+  assert.match(handler, /pendingVideoRevision: videoRevisionArtifactRef\.current/, "恢复点必须持久化同一修改上下文");
+  assert.match(handler, /pending_video_revision: videoRevisionArtifactRef\.current/, "兼容字段也必须持久化同一修改上下文");
+});
+
+test("刷新恢复不得用旧 Conversation context 覆盖权威分镜消息", () => {
+  const start = workspaceSource.indexOf("function restoreLatestVideoScenePackagesFromContext");
+  const end = workspaceSource.indexOf("function markLatestPptFileDoneFromContext", start);
+  assert.notEqual(start, -1, "Workspace 必须提供历史场景包恢复函数");
+  assert.notEqual(end, -1, "PPT 恢复函数必须位于场景包恢复函数之后");
+  const restoreSource = workspaceSource.slice(start, end);
+  assert.doesNotMatch(
+    restoreSource,
+    /global_assets:\s*\(globalAssets\s*\|\|/,
+    "已有消息时不得让 context.global_assets 抢占权威 Artifact",
+  );
+  assert.doesNotMatch(
+    restoreSource,
+    /scene_packages:\s*\(Array\.isArray\(scenePackages\)/,
+    "已有消息时不得让 context.scene_packages 抢占权威 Artifact",
+  );
+  assert.match(
+    restoreSource,
+    /if \(latestIndex < 0\)[\s\S]*restoredVideoScenePackages/,
+    "只有没有物化场景包消息时才能用 context 补建",
+  );
+});
+
+test("分镜画布缺少动作 Handler 时必须禁用按钮", () => {
+  assert.match(storyboardPanelSource, /disabled=\{!onSave\}/, "没有保存 Handler 时保存按钮必须禁用");
+  assert.match(
+    storyboardPanelSource,
+    /disabled=\{sceneAssetQuotaPaused \? !onRetrySceneAssets : !onGenerateVideo\}/,
+    "没有生成或恢复 Handler 时主动作必须禁用",
+  );
+});
+
+test("需求表单折叠按钮的读屏标签必须反映下一步动作", () => {
+  assert.match(
+    genParamsDialogSource,
+    /aria-label=\{collapsed \? "展开表单" : "折叠表单"\}/,
+    "折叠后按钮必须提示可展开，展开时按钮必须提示可折叠",
+  );
+});
+
 function handleSendSource() {
   const start = workspaceSource.indexOf("const handleSend = async");
   const end = workspaceSource.indexOf("async function onEvent", start);
@@ -99,6 +196,14 @@ function handleConfirmPlanRevisionModeSource() {
   return workspaceSource.slice(start, end);
 }
 
+function handlePublishPlanEditSource() {
+  const start = workspaceSource.indexOf("const handlePublishPlanEdit = async");
+  const end = workspaceSource.indexOf("const handleRetrySceneAssets = async", start);
+  assert.notEqual(start, -1, "Plan 手工编辑发布处理器必须存在");
+  assert.notEqual(end, -1, "场景素材重试处理器必须位于手工编辑处理器之后");
+  return workspaceSource.slice(start, end);
+}
+
 function resumePendingMessageJobSource() {
   const start = workspaceSource.indexOf("const resumePendingMessageJob = async");
   const end = workspaceSource.indexOf("const resumePendingPlanJob = async", start);
@@ -117,12 +222,18 @@ function resumePendingPlanJobSource() {
 
 function assertRecoverablePlanJobOrder(source, startCall, label) {
   const startIndex = source.indexOf(startCall);
-  const persistIndex = source.indexOf("await persistPendingPlanJob", startIndex);
-  const resumeIndex = source.indexOf("await resumePendingPlanJob", persistIndex);
+  const continuationIndex = source.indexOf("await continueStartedPlanJob", startIndex);
+  const recoveryIndex = source.indexOf("savePendingPlanJobRecovery", continuationIndex);
+  const persistIndex = source.indexOf("persistPendingPlanJob(", recoveryIndex);
+  const resumeIndex = source.indexOf("resumePending: resumePendingPlanJob", persistIndex);
   assert.notEqual(startIndex, -1, `${label} must start a recoverable Plan job`);
+  assert.notEqual(continuationIndex, -1, `${label} must enter the start-success continuation`);
+  assert.notEqual(recoveryIndex, -1, `${label} must preserve a refresh-safe recovery handle`);
   assert.notEqual(persistIndex, -1, `${label} must persist the Plan job before polling`);
   assert.notEqual(resumeIndex, -1, `${label} must enter the shared Plan resume path`);
-  assert.ok(startIndex < persistIndex, `${label} must start the Plan job before persisting its handle`);
+  assert.ok(startIndex < continuationIndex, `${label} must start the Plan job before continuing it`);
+  assert.ok(continuationIndex < recoveryIndex, `${label} must enter continuation before saving its recovery handle`);
+  assert.ok(recoveryIndex < persistIndex, `${label} must save the recovery handle before server persistence`);
   assert.ok(persistIndex < resumeIndex, `${label} must persist the Plan job before resuming it`);
 }
 
@@ -246,6 +357,22 @@ function handleAcceptImageResultSource() {
   return workspaceSource.slice(start, end);
 }
 
+function startSceneGlobalAssetRevisionSource() {
+  const start = workspaceSource.indexOf("const startSceneGlobalAssetRevision = async");
+  const end = workspaceSource.indexOf("const handleReplaceGlobalAsset", start);
+  assert.notEqual(start, -1, "startSceneGlobalAssetRevision must exist");
+  assert.notEqual(end, -1, "handleReplaceGlobalAsset must follow global asset revision start");
+  return workspaceSource.slice(start, end);
+}
+
+function handleCompletedSceneAssetRevisionJobSource() {
+  const start = workspaceSource.indexOf("const handleCompletedSceneAssetRevisionJob = async");
+  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
+  assert.notEqual(start, -1, "handleCompletedSceneAssetRevisionJob must exist");
+  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow global asset revision completion");
+  return workspaceSource.slice(start, end);
+}
+
 test("new conversation stores the user message before agent replies", () => {
   const source = handleSendSource();
   const appendIndex = source.indexOf("await appendMessageForConversation(message, activeConversation)");
@@ -298,6 +425,29 @@ test("plan revision defaults to modifying the current creative and only regenera
   assert.match(apiSource, /planning\/plan\/restore/, "api client must expose Plan restore");
   assert.match(messageBubbleSource, /plan\.plan_version/, "Plan cards must display their version");
   assert.match(messageBubbleSource, /onRollbackPlan/, "Plan cards with history must expose rollback");
+});
+
+test("Plan 手工编辑发布使用可恢复异步任务", () => {
+  const manualEditSource = handlePublishPlanEditSource();
+  const planResumeSource = resumePendingPlanJobSource();
+
+  assertRecoverablePlanJobOrder(manualEditSource, "api.startPlanManualEditJob", "manual Plan edit");
+  assert.match(manualEditSource, /kind:\s*"plan_manual_edit"/, "恢复句柄必须区分手工编辑任务");
+  assert.equal(
+    manualEditSource.includes("api.savePlanMarkdownEdit"),
+    false,
+    "前端不得再同步等待手工编辑发布",
+  );
+  const existingJobIndex = manualEditSource.indexOf("const existingPlanJob = pendingPlanJobRef.current");
+  const startJobIndex = manualEditSource.indexOf("api.startPlanManualEditJob");
+  assert.notEqual(existingJobIndex, -1, "再次发布前必须检查原 Plan job");
+  assert.ok(existingJobIndex < startJobIndex, "原任务恢复门禁必须早于新的 start 调用");
+  assert.match(apiSource, /planning\/plan\/save-edit\/start/, "API Client 必须暴露手工编辑启动接口");
+  assert.match(apiSource, /planning\/plan\/save-edit\/jobs/, "API Client 必须暴露手工编辑查询接口");
+  assert.match(planResumeSource, /api\.getPlanManualEditJob/, "共享恢复路径必须查询原手工编辑任务");
+  assert.match(planResumeSource, /api\.pollPlanManualEditJob/, "运行中任务必须继续轮询同一 job_id");
+  assert.match(planResumeSource, /用户编辑内容已发布为 plan\.md v/, "完成后必须恢复原发布成功语义");
+  assert.match(planResumeSource, /plan_approved:\s*false/, "手工编辑产生的新版本必须重新人工审核");
 });
 
 test("plan rollback activates history directly and persists conversation context", () => {
@@ -363,7 +513,7 @@ test("current-creative Plan revision persists the returned message before author
   assert.equal(revisionSource.includes("api.updateConversation"), false, "message rejection must prevent any revision context write");
   assert.match(
     revisionSource,
-    /await persistPendingPlanJob\([\s\S]*pendingPlanRevisionChoice:\s*null,[\s\S]*pending_plan_revision_choice:\s*null/,
+    /const persistenceContext = \{[\s\S]*pendingPlanRevisionChoice:\s*null,[\s\S]*pending_plan_revision_choice:\s*null,[\s\S]*persistPendingPlanJob\(/,
     "persisting the pending job must clear the completed revision-mode choice so refresh cannot reopen it",
   );
   assert.match(planResumeSource, /await persistPlanArtifactForConversation\(/, "the shared resume path must await strict Plan message persistence");
@@ -397,6 +547,35 @@ test("initial v1 Plan uses the recoverable strict message job before writing con
   assert.match(planResumeSource, /await persistPlanArtifactForConversation\(/, "the shared resume path must await recoverable Plan message persistence");
   assert.match(planResumeSource, /type:\s*"plan_save"/, "initial v1 must persist a plan_save continuation");
   assert.match(planResumeSource, /flowDraft:\s*null/, "initial Plan completion must clear the direction draft");
+});
+
+test("Plan job 轮询不再用前端时长误判，临时失败继续恢复原任务", () => {
+  const planResumeSource = resumePendingPlanJobSource();
+  const revisionSource = handleConfirmPlanRevisionModeSource();
+  const restoredConversationSource = applyConversationSource();
+
+  assert.equal(apiSource.includes("PLAN_JOB_TIMEOUT_MS"), false, "Plan job 终态只能由后端权威状态决定");
+  assert.match(planResumeSource, /classifyPlanJobResume/, "恢复路径必须按纯合同分类");
+  assert.match(planResumeSource, /planJobResumeDelayMs/, "临时失败必须有限退避后恢复同一 job");
+  assert.match(
+    planResumeSource,
+    /Plan 查询暂时中断，正在使用原任务继续恢复/,
+    "用户只接收一次可恢复提示，不能误报任务失败",
+  );
+  const existingJobGuardIndex = revisionSource.indexOf("const existingPlanJob = pendingPlanJobRef.current");
+  const revisionStartIndex = revisionSource.indexOf("api.startPlanRevisionJob");
+  assert.notEqual(existingJobGuardIndex, -1, "修订确认必须先检查现存 Plan job");
+  assert.ok(existingJobGuardIndex < revisionStartIndex, "现存 job 门禁必须早于修订 start");
+  assert.match(
+    revisionSource,
+    /existingPlanJob\.conversation_id === targetConversationId[\s\S]*await resumePendingPlanJob\(existingPlanJob\);[\s\S]*return;/,
+    "刷新后再次确认修订时只能恢复同一对话的原 job",
+  );
+  assert.match(
+    restoredConversationSource,
+    /pendingPlanRevisionChoice:\s*pendingPlanJob\?\.kind === "plan_revision" \? null/,
+    "恢复修订 job 时必须覆盖旧 Snapshot 的修订方式选择",
+  );
 });
 
 test("recoverable Plan message jobs retain unknown results and resume with server artifact authority", () => {
@@ -683,6 +862,34 @@ test("restoring or creating a conversation clears stale pending dialog attachmen
   assert.match(resetSource, /setPendingFormValues\(\{\}\)/, "new conversation reset must clear pending form values");
 });
 
+test("恢复快照必须用响应中的对话 ID 绑定工作流进度", () => {
+  const applyStart = workspaceSource.indexOf("const applySnapshot = ");
+  const applyEnd = workspaceSource.indexOf("const makeSnapshot", applyStart);
+  const conversationStart = workspaceSource.indexOf("const applyConversation = async");
+  const conversationEnd = workspaceSource.indexOf("const resumeVisiblePendingJobs", conversationStart);
+  assert.notEqual(applyStart, -1, "applySnapshot 必须存在");
+  assert.notEqual(applyEnd, -1, "makeSnapshot 必须位于 applySnapshot 之后");
+  assert.notEqual(conversationStart, -1, "applyConversation 必须存在");
+  assert.notEqual(conversationEnd, -1, "待恢复任务处理器必须位于 applyConversation 之后");
+  const applySource = workspaceSource.slice(applyStart, applyEnd);
+  const conversationSource = workspaceSource.slice(conversationStart, conversationEnd);
+  assert.match(
+    applySource,
+    /const applySnapshot = \(snapshot: Partial<WorkspaceSnapshot>, targetConversationId: string\)/,
+    "快照应用必须显式接收目标对话 ID，不能依赖渲染时序中的可变 ref",
+  );
+  assert.match(
+    applySource,
+    /workflowProgressConversationIdRef\.current = targetConversationId/,
+    "恢复的任务看板必须绑定权威对话 ID",
+  );
+  assert.match(
+    conversationSource,
+    /applySnapshot\(\{[\s\S]*\}, detail\.conversation\.conversation_id\)/,
+    "恢复入口必须把服务端响应中的对话 ID 传给快照应用",
+  );
+});
+
 test("image edit intake bypasses the normal directions and plan flow", () => {
   const source = handleSendSource();
   const intakeCompletionSource = handleCompletedIntakeJobSource();
@@ -739,6 +946,25 @@ test("video results require explicit user confirmation", () => {
   assert.doesNotMatch(workspaceSource, /timeoutReviewMessage\("video"/, "video flow must not emit timeout auto-finish messages");
   assert.match(messageBubbleSource, /无意见，结束/, "video result cards must still expose manual accept");
   assert.match(messageBubbleSource, /提出修改意见/, "video result cards must still expose manual revision");
+});
+
+test("视频结束必须先持久化权威产物再保存完成快照", () => {
+  const start = workspaceSource.indexOf("async function handleAcceptVideoResult");
+  const end = workspaceSource.indexOf("function handleReviseVideoResult", start);
+  assert.notEqual(start, -1, "Workspace 必须提供视频结束处理器");
+  assert.notEqual(end, -1, "视频修改处理器必须位于结束处理器之后");
+  const handler = workspaceSource.slice(start, end);
+  assert.match(handler, /videoAccepted:\s*true/, "结束动作必须把确认标记写入视频 artifact");
+  assert.match(handler, /await api\.updateConversationMessage/, "结束动作必须更新权威视频消息");
+  assert.match(handler, /await updateConversationWithProgress/, "结束动作必须等待完成快照落库");
+  assert.ok(
+    handler.indexOf("await api.updateConversationMessage") < handler.indexOf("await updateConversationWithProgress"),
+    "必须先保存权威产物，再保存 video_accepted 快照",
+  );
+  assert.ok(
+    handler.indexOf("await updateConversationWithProgress") < handler.indexOf("已确认视频无修改意见，流程结束。"),
+    "只有权威产物和完成快照都落库后才能提示成功",
+  );
 });
 
 test("confirmed image edit options survive conversation restore", () => {
@@ -938,6 +1164,8 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   const lookupSource = findStoryboardMessageForGlobalAssetSource();
   const completionSource = handleCompletedImageAssetEditJobSource();
   const acceptSource = handleAcceptImageResultSource();
+  const revisionStartSource = startSceneGlobalAssetRevisionSource();
+  const revisionCompletionSource = handleCompletedSceneAssetRevisionJobSource();
   const startIndex = executeSource.indexOf("api.startImageAssetEditJob(jobRequest)");
   const fusionStartIndex = executeSource.indexOf("api.startImageAssetFusionJob(jobRequest)");
   const persistIndex = executeSource.indexOf("await persistPendingImageJob(pendingImageJob");
@@ -965,9 +1193,14 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   assert.match(completionSource, /sceneGlobalAssetEditReview/, "completion must create a review payload instead of replacing immediately");
   assert.match(completionSource, /scene_global_asset_edit_review/, "completion must persist the pending review payload");
   assert.doesNotMatch(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "completion must not replace scene package assets before user confirmation");
-  assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*syncGlobalSceneAssetEditAcrossConversation/, "accepting the review must sync edited images back into scene package cards");
-  assert.match(acceptSource, /pushArtifact\("素材已替换，已推送更新后的场景包[\s\S]*type:\s*"video_scene_packages"/, "accepting the review must push a fresh scene package card after replacement");
-  assert.match(acceptSource, /setSelectedStoryboardMessageId\(updatedScenePackageMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
+  assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*startSceneGlobalAssetRevision/, "accepting the review must start semantic scene package revision");
+  assert.match(revisionStartSource, /api\.startScenePackageAssetRevisionJob\(request\)/, "asset replacement must start the backend analysis and revision job");
+  assert.match(revisionStartSource, /await persistPendingScenePackageJob\(pendingScenePackageJob/, "asset revision job id must be persisted before polling");
+  assert.match(revisionStartSource, /await resumePendingScenePackageJob\(pendingScenePackageJob/, "asset revision must poll the persisted job");
+  assert.match(revisionCompletionSource, /await api\.updateConversationMessage/, "asset revision must update the authoritative source message");
+  assert.match(revisionCompletionSource, /type:\s*"video_scene_packages"/, "asset revision completion must push a fresh scene package card");
+  assert.match(revisionCompletionSource, /videoScenePackageEditedSceneIds:\s*affectedSceneIds/, "affected scenes must be marked dirty for selective video regeneration");
+  assert.match(revisionCompletionSource, /setSelectedStoryboardMessageId\(completedMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
   assert.match(completionSource, /baseVideoScenePackages/, "completion must be able to patch the fallback scene package snapshot");
 });
 
@@ -1023,6 +1256,9 @@ test("scene package jobs persist their id before polling so conversations can re
   assert.match(apiSource, /startSceneAssetsJob:/, "API client must expose a start-only scene asset job call");
   assert.match(apiSource, /getSceneAssetsJob:/, "API client must expose a query-only scene asset job call");
   assert.match(apiSource, /pollSceneAssetsJob,/, "API client must expose polling for existing scene asset jobs");
+  assert.match(apiSource, /startScenePackageAssetRevisionJob:/, "API client must expose a start-only scene asset revision job call");
+  assert.match(apiSource, /getScenePackageAssetRevisionJob:/, "API client must expose a query-only scene asset revision job call");
+  assert.match(apiSource, /pollScenePackageAssetRevisionJob,/, "API client must expose polling for an existing scene asset revision job");
   assert.match(workspaceSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
   assert.match(workspaceSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
   assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending scene package job");
@@ -1082,6 +1318,27 @@ test("restored conversations resume existing scene package jobs without starting
   assert.equal(resumeSource.includes("已恢复上次场景包生成任务"), false, "restore polling should not append duplicate progress messages");
   assert.match(resumeSource, /const shouldContinuePolling = \(\) => isVisibleConversation\(pendingScenePackageJob\.conversation_id\)/, "scene package polling must stop when the conversation is no longer visible");
   assert.match(resumeSource, /pausedForHiddenConversation[\s\S]*releaseArtifactAction\(processedKey\)/, "stopping hidden conversation polling must release the local action lock without clearing the pending job");
+  assert.match(workspaceSource, /pendingScenePackageResumeVersion/, "restored scene package jobs must trigger a post-render resume signal");
+  assert.match(workspaceSource, /hasMaterializedScenePackageJob\(messagesRef\.current, pendingScenePackageJob\)/, "post-render resume must not rematerialize a completed scene package job");
+  assert.match(
+    workspaceSource,
+    /终态场景包也通过可恢复消息 job 落库[\s\S]*?startConversationMessageJobForConversation\([\s\S]*?completedMessage[\s\S]*?targetConversationId/,
+    "素材修订终态卡片必须通过可恢复消息 job 保存，避免切换对话时只留下处理中消息",
+  );
+  assert.match(
+    workspaceSource,
+    /结束时必须等权威 context 成功落库后再清空[\s\S]*?await updateConversationWithProgress[\s\S]*?pendingScenePackageJobRef\.current = null/,
+    "场景包 pending 句柄必须在终态 context 落库后清空，防止自动保存回写旧运行态",
+  );
+});
+
+test("REST 与 Supervisor 两条消息恢复投影都转换为完整本地时间", () => {
+  assert.match(workspaceSource, /time: formatMessageTime\(message\.created_at\)/, "REST 恢复消息必须格式化服务端时间");
+  assert.match(
+    workspaceSource,
+    /mergeSupervisorMessagesWithPending\([\s\S]*?\)\.map\(\(message\) => \(\{[\s\S]*?time: formatMessageTime\(message\.time, "zh-CN", undefined, message\.time\)/,
+    "Supervisor 连接后的权威消息覆盖也必须格式化时间",
+  );
 });
 
 test("video revision regeneration also uses recoverable scene video jobs", () => {
@@ -1149,8 +1406,16 @@ test("final storyboard edits persist and restore the latest scene package contex
   assert.match(workspaceSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
   assert.match(workspaceSource, /latestScenePackageSnapshotForConversation/, "snapshots must preserve latest scene package restore fields");
   assert.match(workspaceSource, /latestVideoResultArtifactForConversation/, "restoring after refresh must recover scene videos from the persisted video_result card");
-  assert.match(workspaceSource, /contextGeneratedSceneVideos \|\| latestVideoResultArtifact\?\.generatedSceneVideos/, "restore should fall back to video_result generated scene videos when context is stale");
-  assert.match(workspaceSource, /latestVideoResultArtifact\?\.videoScenePackages\?\.scene_packages/, "restore should fall back to video_result scene packages when context is stale");
+  assert.match(
+    workspaceSource,
+    /latestVideoResultArtifact\?\.generatedSceneVideos \|\|[\s\S]*message\.artifact\.generatedSceneVideos \|\|[\s\S]*contextGeneratedSceneVideos/,
+    "存在权威消息时必须优先用视频结果或原场景包消息恢复分镜视频",
+  );
+  assert.match(
+    workspaceSource,
+    /global_assets:\s*videoScenePackages\.global_assets,[\s\S]*scene_packages:\s*videoScenePackages\.scene_packages/,
+    "存在权威场景包消息时不得用旧 context 覆盖素材和分镜",
+  );
   assert.match(workspaceSource, /messagesRef\.current = snapshot\.messages/, "restored messages must update the ref used by snapshot persistence");
   assert.match(workspaceSource, /generated_scene_videos:\s*artifact\.generatedSceneVideos\?\.scene_videos/, "snapshot must include generated scene videos from the latest scene package card");
   assert.match(workspaceSource, /merged_video:\s*artifact\.mergedVideo/, "snapshot must include merged video from the latest scene package card");
@@ -1158,4 +1423,25 @@ test("final storyboard edits persist and restore the latest scene package contex
   assert.match(workspaceSource, /message\.artifact\?\.type === "video_scene_packages" && Boolean\(message\.artifact\.videoScenePackages\)/, "restored context must target the latest original scene package card");
   assert.match(workspaceSource, /generated_scene_videos[\s\S]*merged_video/, "restored scene package context must include generated scene videos and merged video");
   assert.match(workspaceSource, /api\s*\.\s*updateConversation\(targetConversationId,[\s\S]*global_assets:[\s\S]*scene_packages:[\s\S]*video_scene_package_edited_scene_ids/, "scene package edits must update conversation context");
+});
+
+test("Supervisor 视频表单按 Snapshot interrupt 恢复并提交结构化确认或取消", () => {
+  assert.match(workspaceSource, /restoredSupervisorUi\?\.kind === "video_intake_form"/);
+  assert.match(workspaceSource, /<GenParamsDialog[\s\S]*intent="video"/);
+  assert.match(workspaceSource, /form_values:\s*form/);
+  assert.match(workspaceSource, /form_cancelled:\s*true/);
+  assert.match(workspaceSource, /action:\s*"cancel_workflow"/);
+});
+
+test("Supervisor 方向和 Plan 审核绑定当前 workflow stage artifact", () => {
+  const supervisorBranch = workspaceSource.match(
+    /function renderSupervisorVideoArtifact[\s\S]*?(?=\n\s{2}(?:const|function) \w)/,
+  );
+  assert.ok(supervisorBranch, "renderSupervisorVideoArtifact 必须存在");
+  assert.match(supervisorBranch[0], /direction_id/);
+  assert.match(supervisorBranch[0], /revision_feedback/);
+  assert.match(supervisorBranch[0], /plan_version/);
+  assert.match(supervisorBranch[0], /workflowId:\s*target\.workflow\.workflow_id/);
+  assert.match(supervisorBranch[0], /stage:\s*target\.stage/);
+  assert.match(supervisorBranch[0], /artifactRef:\s*target\.artifactRef/);
 });

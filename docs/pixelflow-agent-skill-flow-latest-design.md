@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-07-24
+更新时间：2026-08-03
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -91,6 +91,8 @@ flowchart TD
 ### 3.1 图片、视频、PPT 任务看板
 
 前端在 Composer 后方展示当前主流程的业务任务看板。看板从输入框左上圆角结束位置开始排列并限制最大宽度，输入框保持前景层级；默认折叠，只显示“当前步骤 + 状态”，折叠态由输入框覆盖看板底边和下方圆角。用户展开后才显示全部步骤和任务数量，内容向上滑出、关闭时向下收回。切换对话或重新进入页面时恢复默认折叠，折叠偏好不写入 PowerMem。
+
+响应式边界固定为：小于 `xl`（1280px）断点时隐藏 244px 历史侧栏，让对话、任务看板和 Composer 使用完整视口宽度；Plan 编辑器、分镜编辑器和通用结果画布作为全屏层展示，关闭画布后回到完整对话。`xl` 及以上恢复历史侧栏和左右画布分栏。手机、平板和桌面端都不得产生水平溢出。
 
 | intent | 看板步骤 |
 | --- | --- |
@@ -381,9 +383,10 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 全部分镜成功时，合并视频仍严格按 `scene_index` 排序，不按接口完成顺序排序；前端调用 `/agent/flows/video/merge/start` 启动可恢复合并 job，再轮询 `/agent/flows/video/merge/jobs/{job_id}`。如果只有 1 个分镜，PixelFlow merge job 直接把该分镜视频作为最终视频返回，不调用 content-app `/api/video/merge`。多个分镜合并时，content-app `/api/video/merge` 是同步下载、ffmpeg 合并并上传的接口，不是 task 轮询接口；PixelFlow 用 Python job 包住该同步调用，并使用 `BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT` 控制合并读等待，默认 1 小时，避免浏览器、网关或 content-app 普通 30 秒读超时截断长视频合并。合并失败时 job 必须返回 `status=failed`，并保留 `result.error`、`result.message`、`result.raw.details` 中的 content-app 原始错误，前端据此展示“视频合并失败”。
 - 单个分镜出现可恢复网络或服务异常时最多尝试 3 次；3 次仍失败才写入 `failed_scenes`。HTTP 4xx 参数校验、模型价格配置缺失和实时能力不匹配属于不可重试业务失败，只调用一次并保留 content-app 的 `status_code/data/details`。`failed_scenes` 必须带 `scene_id`、`scene_index`、`error`、`attempts`，前端用于展示具体哪个分镜失败以及失败原因。
 - 多个分镜额度不足时，前端只展示一次额度不足提示；额度暂停的分镜也保留在 `failed_scenes` 中。用户充值后点击重试，只重新提交这些额度暂停分镜和普通异常分镜，已成功分镜复用旧视频 URL。
-- 生成场景视频前，前端也允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset`，后端复用 `ImageEditSkill` 调用 `/api/picture/image_edit`；如果同一条消息里存在有效上传图片素材，前端改走 `/agent/flows/image/fuse-asset`，后端调用 `MultiImageFusionSkill` 把引用素材图和上传图片融合成新图。进入 job 前前端会先展示图片编辑模型/比例/清晰度确认卡，默认模型 `gpt-image-2`，比例优先保持原素材比例。两条链路成功后只展示候选新图，必须用户点击确认后才替换原全局素材图片，并同步场景包 mentions 中同一 `asset_id` 的 `image_url`；点击重新编辑会基于当前候选图继续弹参数确认卡，不重新走 intake。两条链路失败时，结果 artifact 必须保留素材引用、修改意见、模型参数、场景包来源和融合参考图；“重新生成图片”优先恢复全局素材编辑上下文并重新展示参数确认卡，确认后调用对应 `/start`，不能被普通图片重试的 `imagePrepare` 前置条件静默拦截。
+- 生成场景视频前，前端允许用户点击 `global_assets` 中的角色、场景、道具图片进行预览，并引用到左侧输入框发送图片编辑指令。仅引用素材且没有有效上传图片时走 `/agent/flows/image/edit-asset/start`；存在有效上传图片时走 `/agent/flows/image/fuse-asset/start`。两条链路成功后只展示候选新图，必须用户点击确认才进入 `/agent/flows/video/update-scene-package-asset/start`。该 job 先通过 content-app `/api/creative/analyze_image` 异步分析新图中的人物、物品、场景和视觉特征，再让 LLM 以精确旧文本替换清单的形式，只改受影响分镜中旧素材的 `@` 引用及外貌、外观、特征、特点描述；时间范围、故事结构、其他角色/场景/道具、旁白和无关文本均不得变化。后端会校验每个精确补丁；首轮若破坏时间结构、目标引用或其他素材引用，只允许把校验原因回传 LLM 定向修复一次，第二轮仍不合法则安全失败。成功后同步 `global_assets`、mentions 和分镜 `image_urls`，先持久化权威消息，再展示最新场景包卡片；切换对话或刷新只恢复已有 job。
 - `StoryboardPanel` 在角色、场景、道具三行末尾固定展示“添加素材”。添加入口复用素材替换弹层和 content-app 素材库 Client，但使用独立的添加文案；新增素材使用 `character-manual-*`、`scene-manual-*` 或 `prop-manual-*` ID，名称在三类素材中自动追加序号去重，并只原地追加到当前场景包 `global_assets` 与 conversation context，不修改当前 Plan 的 `asset_manifest`、蓝图或任何镜头引用。用户之后必须在目标镜头描述中手动通过 `@` 选择，新素材才会进入该镜头 `mentions/reference_asset_ids`、标记该镜头已修改并参与首次生成或局部二次生成。
-- 全局素材预览还支持删除素材。点击删除只会预填左侧固定删除文案和素材 chip，用户发送后由 `WorkspacePage` 在当前场景包 artifact 内原地清理该素材的结构化引用，并清空 `global_assets` 中该素材图片 URL 作为占位符，不推送新的 `video_scene_packages` 卡片。
+- 全局素材预览还支持删除素材。点击删除会预填左侧固定删除文案和素材 chip，用户发送后复用 `/agent/flows/video/update-scene-package-asset/start`；删除操作不调用图片分析，只让 LLM 精确删除目标素材 `@` 引用及其直接相关描述。后端验证其他引用、时间范围和无关文本未被改写后，从 `global_assets` 对应分组彻底移除目标记录并清理结构化引用，不能留下“待生成”空壳。历史空壳素材仍可打开详情并直接删除；删除操作不依赖原图片 URL，引用、替换和下载则继续要求存在有效图片。最终结果先持久化权威消息，再展示最新场景包卡片。
+- 素材替换与删除都会返回 `affected_scene_ids` 并合入前端 dirty scene 集合。场景视频已经生成或合并后仍复用同一链路；再次确认生成时只重生成受影响分镜，其余分镜视频保持不变，然后按原顺序重新合并。
 - 前端对话可以保留多个历史 `video_scene_packages` 卡片，但只有最后一个卡片展示查看、确认生成或重新生成参考图操作；旧卡片不再暴露操作入口。
 - 单个场景片段最多 9 张参考图。
 - 视频 plan.md 同意后，前端调用 `/agent/flows/video/prepare-scene-packages/start` 启动 Python job，后端在同一个 job 内顺序完成“生成可编辑场景包”和“生成角色三视图、场景图、道具图”。前端拿到 `job_id` 后立即保存 `pendingScenePackageJob` / `pending_scene_package_job` 到 conversation context；用户切换历史对话、切到创作页、离开 iframe 或刷新后，只继续查询 `/agent/flows/video/prepare-scene-packages/jobs/{job_id}`，不重复启动。
@@ -725,7 +728,7 @@ sequenceDiagram
 - 图片编辑成功后，前端展示“满意，结束 / 重新生成”；60 秒未操作时默认满意并结束当前图片编辑流程。图片编辑失败后，前端“重新生成图片”先重新打开模型/尺寸/清晰度确认卡，允许用户修正参数后再调用 `/api/picture/image_edit`。
 - 图片编辑的生成数量仍使用 `requested_output_count` / `image_count`，默认 1 张，最多 10 张。
 - 图片 plan.md 同意、图片修改重生成、直接图片编辑确认后，前端调用 `/agent/flows/image/generate/start` 启动 Python 内存 job，并把 `pendingImageJob` / `pending_image_job` 写入 conversation context。恢复同一对话时只查询 `/agent/flows/image/generate/jobs/{job_id}`，不重复调用 `/start`；job 404 或过期时只提示手动重试，避免重复计费。
-- 视频场景包全局素材图片更新由前端分流：没有有效上传图片时调用 `/agent/flows/image/edit-asset/start`；用户上传素材中存在有效图片格式时调用 `/agent/flows/image/fuse-asset/start`。启动前先复用图片编辑参数确认卡，默认模型 `gpt-image-2`，尺寸默认保持原素材比例，清晰度按模型可用项选择。两者都保存 `pendingImageJob`，恢复时只查询对应的 `/edit-asset/jobs/{job_id}` 或 `/fuse-asset/jobs/{job_id}`。job 成功后先生成 `image_result.sceneGlobalAssetEditReview` 候选图卡片，不自动替换；用户确认后才替换 `global_assets` 与同 `asset_id` 的 mentions 图片 URL，且该确认不做 60 秒自动同意。job 失败后生成的 `image_result` 卡片保存可恢复 `imageEditRequest`；点击“重新生成图片”先重新查询实时模型配置并展示参数确认卡，用户确认后才启动新的编辑或融合 job。
+- 视频场景包全局素材图片更新由前端分流：没有有效上传图片时调用 `/agent/flows/image/edit-asset/start`；用户上传素材中存在有效图片格式时调用 `/agent/flows/image/fuse-asset/start`。启动前先复用图片编辑参数确认卡，默认模型 `gpt-image-2`，尺寸默认保持原素材比例，清晰度按模型可用项选择。两者都保存 `pendingImageJob`，恢复时只查询对应的 `/edit-asset/jobs/{job_id}` 或 `/fuse-asset/jobs/{job_id}`。job 成功后先生成 `image_result.sceneGlobalAssetEditReview` 候选图卡片，不自动替换；用户确认后再启动 `/agent/flows/video/update-scene-package-asset/start`，图片分析和语义补丁全部成功后才原子更新 `global_assets`、mentions 和分镜图片 URL，且该确认不做 60 秒自动同意。job 失败后生成的 `image_result` 卡片保存可恢复 `imageEditRequest`；点击“重新生成图片”先重新查询实时模型配置并展示参数确认卡，用户确认后才启动新的编辑或融合 job。
 - `pendingImageJob.kind` 为 `image_generation`、`image_regeneration`、`direct_image_edit`、`scene_global_asset_edit` 或 `scene_global_asset_fusion`；`job_api` 为 `generate`、`edit_asset` 或 `fuse_asset`；字段包含 `job_id`、`conversation_id`、`source_message_id`、`started_at`、`request`、`artifact`。
 
 ## 8. 视频流程
@@ -761,6 +764,13 @@ sequenceDiagram
     FE->>FE: "保存 pendingPlanJob(kind=plan_revision)"
     FE->>PA: "轮询 /agent/flows/planning/plan/revise/jobs/{job_id}"
     PA-->>FE: "plan.md v2/v3 + 历史版本"
+  else "右侧手工编辑发布"
+    U->>FE: "编辑完整 plan.md 并点击发布"
+    FE->>PA: "POST /agent/flows/planning/plan/save-edit/start"
+    PA-->>FE: "job_id"
+    FE->>FE: "保存 pendingPlanJob(kind=plan_manual_edit)"
+    FE->>PA: "轮询 /agent/flows/planning/plan/save-edit/jobs/{job_id}"
+    PA-->>FE: "manual_edit 新版本 + 对齐后的合同与蓝图"
   else "重新生成新创意"
     FE->>IA: "POST /agent/flows/intake/directions"
     IA-->>FE: "新的 3 个创意方向"
@@ -797,9 +807,11 @@ Plan 审核与版本规则：
 
 - 用户点击“继续修改”后必须先选择“在当前创意基础上扩展/修改”或“放弃当前创意，重新生成新创意”，默认前者。
 - Plan 卡片点击“Agent 修改”后立即隐藏当前卡片的“编辑”入口；等待修改意见、选择修改方式或执行 Agent 修订期间都保持隐藏，刷新恢复待处理上下文后仍保持一致。取消修改方式选择时恢复当前卡片的“编辑”入口，新 Plan 版本继续提供自己的“编辑”入口，已被后续产物替代的历史 Plan 不再展示该入口。
-- 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`。前端必须把 `pendingPlanJob` / `pending_plan_job` 写入 conversation context，恢复时只轮询已有 job，不得因刷新、离开或切换对话重新提交生成请求；同步 `/plan` 与 `/plan/revise` 仅保留兼容旧调用。
+- 初次 Plan 生成使用 `/agent/flows/planning/plan/start` + `/agent/flows/planning/plan/jobs/{job_id}`；当前创意内修订使用 `/agent/flows/planning/plan/revise/start` + `/agent/flows/planning/plan/revise/jobs/{job_id}`；右侧手工编辑发布使用 `/agent/flows/planning/plan/save-edit/start` + `/agent/flows/planning/plan/save-edit/jobs/{job_id}`。前端必须把三类任务都写入 `pendingPlanJob` / `pending_plan_job`，恢复时只轮询已有 job，不得因刷新、离开、切换对话或再次点击发布重新提交生成请求；同步 `/plan`、`/plan/revise` 与 `/plan/save-edit` 仅保留兼容旧调用。
+- Plan 专用模型 Client 的单次请求边界固定为 600 秒并关闭传输层透明重试；生成和修订 job 的总预算固定为 1200 秒，查询快照额外返回 `stage`、`started_at` 和 `updated_at`。初始模型请求超时时发布 `error=null` 的确定性可审核合同；Seedance 专用写作超时时停止第二次慢调用，在保留故事线、对白和资产合同后确定性重建连续秒段与稳定资产绑定；修订总预算耗尽时保留当前版本并返回固定失败摘要。
+- 前端不得再用固定 10 分钟轮询时长推断 Plan 失败。`/plan/start`、`/plan/revise/start` 或 `/plan/save-edit/start` 返回后，先按对话把不含 Authorization 的 `pendingPlanJob` 临时副本写入当前标签页 `sessionStorage`，再更新 conversation context；首次 context 写入失败不能释放动作锁或重新调用 `/start`，必须继续查询原 `job_id`、按最长 30 秒的有限退避重试持久化，并在刷新时优先使用服务端句柄、缺失时才使用标签页副本。句柄 PUT 在页面隐藏时暂停、恢复可见后继续，重试窗口不超过 job 启动后的 25 分钟。修订 job 恢复时必须把 `pendingPlanRevisionChoice` / `pending_plan_revision_choice` 覆盖为 `null`；即使旧弹窗发生迟到确认，或者手工编辑器发生再次发布，处理器也必须先检查同一对话的现存 Plan job 并只恢复原任务。服务端写入成功、Plan 已物化或进入明确终态后立即清除副本。临时网络失败、请求取消、页面隐藏、刷新或切换对话都必须保留原句柄；只有后端明确完成、失败、完成但缺结果的协议终态或 404 才清理。该恢复规则只修复既有 `frontend_v2` 视频链路，不安装 live Graph Handler、不扩大 `primary_execution_intents`，R1 Turn/Snapshot/SSE/压缩/队列与 v2 业务接力边界保持不变。
 - 当前创意内修改不得返回创意方向列表；job 完成后再保存 plan artifact，消息保存失败时继续复用已有 Plan 结果和消息 job。
-- 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit`，但该接口不能直接保存 Markdown；它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本，失败则保留当前权威版本。
+- 右侧编辑器提交完整稿时调用 `/agent/flows/planning/plan/save-edit/start`，并按返回的 `job_id` 查询 `/agent/flows/planning/plan/save-edit/jobs/{job_id}`；同步 `/plan/save-edit` 只保留兼容旧调用。后台任务不能直接保存 Markdown：它必须先确定性计算当前稿与编辑稿的差异，只允许差异中真正涉及的合同字段进入白名单，再复用 Plan 修订 LLM 把完整稿重新对齐 `creation_contract` 与视频 `scene_blueprints`。全部校验通过后才发布 `manual_edit` 新版本并重新进入人工审核，失败或总预算超时则保留当前权威版本。
 - 修订先把用户意见解析为白名单合同补丁：相对时长按当前合同增减，自然语言中的明确总时长按绝对值覆盖；未提及字段保持不变。视频/图片模型变更必须返回需求表单重新取得并确认实时能力快照，不能把旧模型能力沿用到新模型。
 - 候选合同、分镜时间线或镜头描述八维完整度校验失败时只把原因反馈给 LLM 重试 1 次；再次失败不创建新版本，保留当前 Plan、合同、蓝图和历史，由前端显示真实失败原因。
 - 修订值优先级固定为“用户意见中的明确值 > LLM `creation_contract_patch` > 当前版本合同”；用户未提及字段不得变化。
@@ -925,6 +937,22 @@ flowchart TD
 3. 保存当前 conversation context 和 artifact。
 4. 用户充值后回到同一对话，仍可以点击当前阶段或上一步按钮继续。
 
+R2 视频 live Handler 的 status 402 候选在上述 v2 提示语义之外增加持久化恢复合同。Provider 已经返回
+`provider_job_id` 后，status 402 不允许重启原 Operation，也不允许再次调用 Provider start。Memory/SQL
+Repository 在同一临界区或事务中把 `quota_pause_revision` 从 `0` 单调递增，并原子提交对应的
+`external_job.quota_state_changed` pause Event；每个 revision 的 pause/resume Event ID 只由内部
+`job_id + revision + quota_state` 派生，恢复 Runtime 必须先投递 quota Event，再投递 completion，最后才允许
+继续轮询原 provider job。402 本身不是 completion，timeout、failed 和 404/expired 仍沿用终态及新 attempt
+合同。
+
+用户恢复复用公开 interrupt response Controller 与既有 `retry_failed` 动作，安全 patch 只包含 `job_id` 和
+`quota_pause_revision`。Controller 接收的新 Authorization 只沿 Router → Service → Executor → Vault → Handler
+→ Bridge 当前调用栈传递；Handler 用 Graph 已校验的精确 `source_interrupt_id` 回读权威中断，再由 Repository
+在写入 response/message/context/Event 前原子校验 owner、conversation、workflow、stage、job、revision、
+status、provider job、轮询计划和租约。旧 revision 固定返回 `409 video_quota_resume_stale` 且零副作用；
+有效响应只恢复同一内部 job、同一 provider job 和同一 attempt，Provider start 增量为 `0`。生产当前仍是
+R1，以上只属于尚未单槽集成的 R2 本地候选。
+
 ## 11. 对话与上下文恢复
 
 对话隔离是前端流程正确性的关键。
@@ -950,11 +978,13 @@ flowchart TD
 - 创意方向生成使用 `/agent/flows/intake/directions/start` + `/agent/flows/intake/directions/jobs/{job_id}`，前端保存 `pendingDirectionJob` / `pending_direction_job`；返回历史对话或 iframe 恢复时只轮询已有 job，不重复调用 `/start`，job 404 或过期时只提示从表单手动继续。
 - 如果 context 中存在 `pendingMessageJob` / `pending_message_job`，进入历史对话后前端优先恢复并轮询已有消息保存 job；完成后按 job 中的 continuation 启动或恢复采集 job。
 - 如果 context 中存在 `pendingIntakeJob` / `pending_intake_job`，进入历史对话后前端继续查询已有采集意图识别 job，不重新调用 `/start`。
-- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包/参考图 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。完成后补齐 `video_scene_packages` 卡片，额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
+- 如果 context 中存在 `pendingScenePackageJob` / `pending_scene_package_job`，进入历史对话后前端静默继续查询已有场景包、参考图或全局素材语义修订 job，不重复追加“已恢复上次场景包生成任务”这类进度消息；如果用户再次切走该对话，前端停止轮询但保留 pending job，等用户回来再查询已有 job。对话快照先恢复 Ref、再提交 React 可见状态，因此素材替换、重新引用或删除任务还必须在状态提交后执行一次幂等接力，避免首次定时器早于对话切换完成而永久停止。完成后的 `video_scene_packages` 终态卡片必须再通过可恢复消息 job 持久化；若用户恰好在终态保存期间切走或刷新，context 保留该消息 job，返回对话后继续保存同一条终态消息，不得只剩“处理中”提示。场景包 pending Ref 只有在终态 context 成功落库后才能清空，避免消息或画布自动保存用旧 `running` 阶段覆盖已经完成的任务。额度不足时保留可继续卡片，恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingVideoJob` / `pending_video_job`，进入历史对话后前端继续查询已有视频 job；恢复失败或 404 只提示用户手动重试，不自动重新生成。
 - 如果 context 中存在 `pendingImageJob` / `pending_image_job`，进入历史对话后前端继续查询已有图片生成或全局素材编辑 job；恢复失败或 404 只提示用户手动重试，不自动重新启动，避免重复计费。
 - 最近对话默认展示最新 5 条，下拉按 cursor 再取 5 条。
 - 对话列表当前按创建时间倒序，不按最后更新时间倒序。
+- 服务端 Python `datetime` 可能返回 6 位微秒和 UTC 偏移；前端恢复历史消息时必须先把微秒收敛到浏览器稳定支持的毫秒精度，再按浏览器本地时区展示为 `YYYY-MM-DD HH:mm:ss`。不得直接显示原始 ISO，也不得把 UTC 时间当成本地时间。
+- “上下文整理完成”只在本次运行的压缩完成时间不早于本次 Run 更新时间时展示。历史压缩快照不得在素材替换、重新引用、删除或其他后续业务运行中重复显示；业务操作本身不会为了展示该提示而主动触发压缩。
 
 ## 12. 鉴权与上传
 
@@ -1015,11 +1045,14 @@ flowchart TD
 | `PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS=30` | 压缩失败后持久化 30 秒重试边界，读取接口到期前不重复唤醒 |
 | `models[].context_profile.max_context_tokens=1000000` | 当前 DeepSeek V4 Pro 已确认的物理上下文窗口；统一有效窗口还保留 82,496 tokens 余量 |
 
-M13.1/R1 测试环境冻结为 `assist / [] / 100 / true`；生产配置显式保存
-`off / [] / 0 / false`。dev/prod 都保存相同的 896K/32K/32K 预算结构、30 秒退避和
-DeepSeek V4 Pro 1,000,000 tokens 已验证档案，避免未来 R2–R4 启用或新增节点时
-回落旧常量。配置修改后必须重启，统一影响新进程；历史对话和运行中任务不迁移。
-生产启用仍必须取得独立发布批准。
+当前实际 dev profile 为 `primary / [video] / 100 / true`，生产 profile 为
+R1 `assist / [] / 100 / true`。Task 14 隔离候选没有修改 `backend/config.dev.yml` 或
+`backend/config.prod.yml`；dev 配置只代表允许接管的上限，当前可部署 Agent 基线仍未安装
+视频 live Graph Handler，就绪集合为空，因此新视频对话继续安全归属 `frontend_v2`。
+dev/prod 都保存相同的 896K/32K/32K 预算结构、30 秒退避和 DeepSeek V4 Pro
+1,000,000 tokens 已验证档案，避免未来 R2–R4 启用或新增节点时回落旧常量。配置修改后
+必须重启，统一影响新进程；历史对话和运行中任务不迁移。生产继续保持 R1，安装 Handler、
+切换 `primary(video)` 和发布 R2 仍必须分别取得独立批准。
 
 配置可读性是硬性要求：以后新增或修改配置文件时，每个新增或修改的叶子配置项都必须有紧邻的详细中文注释，至少说明用途和运行影响；适用时还要说明类型、单位、默认值、取值范围、是否需要重启、影响新对话还是运行中任务、回滚方式和敏感值获取方式。JSON 等不支持注释的格式必须通过 schema `description` 或同目录中文说明逐键建立映射，不能省略。注释中不得出现真实 token、密钥或账号。
 
@@ -1047,7 +1080,7 @@ DeepSeek V4 Pro 1,000,000 tokens 已验证档案，避免未来 R2–R4 启用�
 
 视频场景包的素材选择弹层通过 `operation=add|replace` 同时服务添加和替换，并保留两条互不混用的本地图片入口。原“本地上传”只调用 content-app `/api/upload` 得到临时图片 URL，上传成功后展示图片预览和文件名，必须由用户二次确认才执行当前操作；图片素材列表第一张“上传到资产库”则先调用 `/api/projects`，再用 `/api/upload` 和 `/api/asset/create` 创建长期图片资产，最后重新查询 `/api/asset/assets` 第一页。创建响应 `data.id` 只用于本次弹层定位“刚刚上传”和同步回查；取消时已创建资产继续保留。
 
-替换模式保持原合同：更新 `global_assets` 和所有同 `asset_id` 的 `shot_description.mentions`，保留原 ID、名称和镜头 `@` 标识。添加模式只追加带 `manual_added=true/asset_origin=manual_addition` 的新全局素材并持久化当前消息与 conversation context，不自动修改 `scene_packages`；当用户随后在 `SceneMentionEditor` 中选择该素材时，现有编辑链路才写入 mention、参考 ID 和 dirty scene。角色素材使用 `three_view_images`，场景/道具使用 `images`；数字人生成引用保存为 `asset://thirdAssetId`，普通图片保存 HTTPS URL。
+替换模式不再由前端直接改 URL。用户确认新图后，前端保存 `pendingScenePackageJob.kind=scene_asset_revision` 并调用 `/agent/flows/video/update-scene-package-asset/start`；后端分析新图并通过 `deepseek-v4-pro` 生成逐镜精确替换清单，校验清单只命中受影响分镜、每段旧文本恰好出现一次、时间范围不变、无关 `@` 引用集合不变，再更新 `global_assets`、mentions 和镜头正文。删除模式使用同一 job 但不调用图片分析，只删除目标素材及直接相关描述。添加模式仍只追加带 `manual_added=true/asset_origin=manual_addition` 的新全局素材，不自动修改镜头；当用户随后在 `SceneMentionEditor` 中选择该素材时，现有编辑链路才写入 mention、参考 ID 和 dirty scene。角色素材使用 `three_view_images`，场景/道具使用 `images`；数字人生成引用保存为 `asset://thirdAssetId`，普通图片保存 HTTPS URL。
 
 - 角色素材 `characters` 可替换为数字人素材或图片素材；场景 `scenes` 和道具 `props` 只能替换为图片素材。
 - 数字人素材前端直连 `/api/asset/character-assets`，支持 `xnszr`、`zrszr`、`ipsc` 三类；展示图取 `refrenceUrl` 的首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`。
@@ -1121,11 +1154,21 @@ corepack pnpm build
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
 
-当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 开发候选只把 dev profile 改为 `primary / enabled_intents=[video] / 100% / true`；创建 Controller 接收保守的首轮 intent 提示，服务端只允许命中启动快照中的 `enabled_intents`，明确视频新对话冻结为 `supervisor_v1`，其他 intent 继续使用 R1 会话层并接力 v2。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
+当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 已通过阶段单槽进入 Agent，dev profile 声明为 `primary / enabled_intents=[video] / 100% / true`；这个配置只代表允许接管的上限，不能单独证明业务执行链已安装。创建 Controller 接收保守的首轮 intent 提示后，`AgentRuntimeService` 还必须同时命中进程启动时注册的 `primary_execution_intents`，才允许把新对话冻结为 `supervisor_v1`。Task 13 隔离候选补齐了视频 live Graph Handler 的 Turn 消费、五类人工 interrupt、九动作分发、权威 Workflow/Artifact 投影和 Web 结构化 action 接线；Task 14 隔离候选进一步完成 Gateway 全有或全无装配、status 402 持久化暂停/恢复和 fake 公共全链路门禁，当前实现检查点为 `d32adf4`，状态为 `review_fix_local_verified:Task14 / awaiting_independent_slot_integration`。该候选尚未进入 Agent 长期分支，因此当前可部署 Agent 基线仍没有 live Handler，就绪集合为空，视频新对话安全保持 `frontend_v2`，但仍完整经过 R1 Turn、Snapshot/SSE、压缩和输入队列，再由既有 v2 视频 Service 推进。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
 
-R2 候选新增 `SupervisorReplayRuntime`，相当于会话回放编排 Service：`off/assist` 在 Graph Handler 前执行 kill switch，未启用 intent 返回 delegated，`shadow` 只形成冻结 `ActionDecision`、标准命令 DTO 和统一预算报告，禁止进入 Workflow Handler、Operation 或 PowerMem record；只有 `primary` 才调用 M02/M05 图内核。视频 `WorkflowCommand` 明确携带 `user_id/turn_id/current_input/materials/reply_to_message_id/artifact_refs`，并在 Handler 边界深拷贝附件。非付费 mock E2E 使用 M11 `VideoPlanningWorkflowService` 和 M06 `OperationStartCoordinator` fake，验证刷新/进程重建后的供应商 start 增量为 0，不调用真实 Provider、LLM、content-app 或 PowerMem。此候选尚未进入 Agent，也不构成生产 `primary(video)` 授权。
+R2 候选新增 `SupervisorReplayRuntime`，相当于会话回放编排 Service：`off/assist` 在 Graph Handler 前执行 kill switch，未启用 intent 返回 delegated，`shadow` 只形成冻结 `ActionDecision`、标准命令 DTO 和统一预算报告，禁止进入 Workflow Handler、Operation 或 PowerMem record；只有 `primary` 才调用 M02/M05 图内核。视频 `WorkflowCommand` 明确携带 `user_id/turn_id/current_input/materials/reply_to_message_id/artifact_refs`，并在 Handler 边界深拷贝附件。Task 13 在此基础上实现真实 live handler 开发候选：表单确认/取消、方向选择/重生成、Plan 同意/修订/历史恢复/返回新创意、场景包单镜与全局素材增删改、分镜失败重试和局部重生成、合并与质检重试、最终确认/修改、剪映生成/重试/下载及成片下载均由当前 interrupt 的 `workflow_id + stage + artifact_ref` 定向；前端为每次结构化响应只生成一个 `client_response_id`，已注册恢复只查询原 run，不重发动作。Task 14 只在隔离开发候选中装配 Gateway Handler，并使用本地 fake Provider 运行门禁，不调用真实 LLM、content-app、PowerMem 或付费 Provider。Task 7 的独立复审最终为 Critical `0`、Important `0`、Minor `0`；Task 8 已执行最终本地门禁，候选相关聚焦、Ruff、Web、中文和静态隔离检查通过，后端全量只剩计划登记的 Runtime 公开导出基线失败。首轮 spec compliance 的三个 Important 已通过正式计划同步、配置事实校正和公共 E2E 四事件实采关闭；最终 spec compliance 与 code quality 独立复审均为 Critical `0`、Important `0`、Minor `0`。这仍只是隔离候选证据；该候选尚未完成独立单槽集成、真实付费验证或生产切换，不能据此认定 `primary(video)` 已可发布。
 
-M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 51 条中文离线黄金集达到 action 98.04%、target 95.45%、歧义追问 95.24%、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
+M13.2/R2 测试环境人工验收进一步冻结组合运行合同：`frontend_v2 + primary/assist` 允许 R1 统一会话消息投影与 v2 业务 runner 同时挂载，但只有真实 `supervisor_v1` owner 才能用 Supervisor Workflow 投影任务看板；空 Workflow 不得清空 v2 的 `workflowProgress`。前端必须只信任服务端保留命名空间中的 `primary_execution_ready`；历史误分配会话缺少该证据时停止从 inputQueue 重建，先按会话稳定消息 ID 持久化一次安全说明，再写 `agent_runtime_unavailable_notice_version=1` 并一次清空全部 pending。即使本地 pending 已空但服务端仍有孤儿 input，或进程在提示与 marker 写入之间退出，刷新也只补齐同一恢复事务，不得重复消息或 Conversation `PUT`。分镜故事、全局素材删除和视频最终确认都以消息 Artifact 为权威 DTO，必须先 `PATCH` 权威消息，再保存 Conversation Snapshot 并提示成功；存在物化消息时旧 context 只能作为缺失字段兜底，不能覆盖后续编辑。QAAgent QC 没有返回 `target_scene_ids/affected_scene_ids` 时仍默认失败关闭；只有用户意见明确包含“修改/修复/重生成第 N 个分镜（或第 N 段）”时，才允许把对应 scene ID 作为严格兜底作用域，模糊意见以及“不要/不用/无需/不/别修改第 N 个分镜”等否定表达不得触发重生成。若当前意见仍未定位到具体分镜，前端必须重新挂载并持久化同一 `pendingVideoRevision`，用户补充明确分镜后继续对原成品做 QAAgent QC 和定向重生成，不能误走新的需求识别。
+
+Task 14 的本地验收从真实 FastAPI conversation/turn/snapshot/SSE/interrupt response 入口创建全新视频对话，带图片附件依次通过表单、三方向、Plan、场景包与素材、三段分镜、合并、QA 定向修改、单镜新 attempt、再次合并、最终确认和当前成片下载。fake Provider start 计数固定为分镜 `4`、合并 `2`、QA `1`、剪映 `0`；刷新和相同输入 ID 重放新增 start 为 `0`。验收从首个 intake Snapshot 开始，在九次普通 interrupt response、两次 quota pause、两次 quota resume、五次 M06 worker completion 和最终下载后，逐段从上一 cursor 消费 SSE；独立 reducer 重建并精确比较 run、workflow、messages、interrupt、context version、cursor 与 sequence，附件 URL、名称和引用保持完整，最终下载证据只绑定第二版合并视频。
+
+status 402 的真实链不调用 `recover_manually()`，也不预置 `WAITING_USER` Turn。fake Provider 的 status 先经生产 `OperationRecoveryRuntime` 产生 revision `1` 的 pause Outbox，再由生产 `QuotaStateHandler`、Supervisor Graph 和原 Turn 打开 `authorization_required`；用户的新 Authorization 通过公开 FastAPI interrupt response 进入。Graph 把精确 `source_interrupt_id` 传给 Handler，Handler 以中断主键回读权威记录，Memory/SQL Repository 在任何响应副作用前复核冻结 action 和 Operation 的 owner/conversation/workflow/stage/job/revision/status/provider job/轮询状态，最后才消费一次性凭据并恢复原 job。第二次 402 产生 revision `2`；旧 revision `1` 固定返回 `409 video_quota_resume_stale` 且不污染原 Turn，revision `2` 随后仍可恢复。两轮恢复的内部 job、provider job、attempt 和原 Turn 不变，Provider start 增量为 `0`；pause/resume 分别拥有独立稳定业务 Event，但不能等同为始终各自创建独立物理 checkpoint。
+
+2026-08-03 人工裁定冻结 quota 幂等层次：Event ID 是 Outbox、投递 claim 与业务提交幂等键；后台 Handler 的物理线程使用 `quota-paused:<event_id>:v<workflow_version>` 或 `quota-resumed:<event_id>:v<workflow_version>`。这是因为 LangGraph Checkpointer 没有 CAS，同 Event 不同目标版本若共享线程会出现旧版本通过检查后晚写覆盖新版本的 TOCTOU；同 Event 加同目标版本才允许命中同一线程并精确重放，不同目标版本必须隔离。正常公共授权响应继续原 pause interrupt 所在的版本化线程，resume Event 通过新的 `last_action_key` 与提交 claim 绑定；只有提交前退出、由后台 resume Outbox 接管时才创建该 resume Event 自己的 `quota-resumed:*:v*` 线程。一次真实公共 fake E2E 实采得到四条 Event 的 sequence `42/52/56/64`：revision 1 pause/resume 关联 pause 线程 `...a1442601...:v7` 的状态版本 `7/9`，revision 2 pause/resume 关联 pause 线程 `...049ffe78...:v10` 的状态版本 `10/11`；完整 event ID、cursor 与 run ID 见 [R2 视频 status 402 本地候选报告](agentization/test-reports/R2-video-live-handler.md)。
+
+11 项参数化故障矩阵覆盖 Graph checkpoint 前后退出、Provider start 后恢复、公共 402 原 job 授权恢复、timeout/failed/404 新 attempt、部分分镜只重试失败镜头、跨租户隔离、失效模型档案和重启缺 Handler。其中 checkpoint 前后退出使用生产 Supervisor Graph 与 SQLite 持久 Checkpointer，重启后仍绑定原 Turn/interrupt。凭据守卫同时扫描四个实际 Authorization 完整值及去掉 scheme 后的四个裸 token，共八个精确 marker；边界覆盖 Repository Turns/Operations/全部 Events、两轮 pause/resume Graph checkpoint、逐段 Snapshot/SSE、projection messages 和安全日志。两轮有效 quota 凭据各消费一次并销毁，带 `secret_only` 字段的 Pydantic 对抗子类继续在严格 DTO 边界失败关闭。`frontend_v2` Turn 仍以 `accepted` 写入 R1 Inbox 供既有 v2 接力，但不通知 Supervisor Executor；已冻结的 `supervisor_v1` 对话在 Handler 缺失时于新增 Turn 登记前固定返回 `agent_runtime_unavailable`，不暗中改回 v2，也不新增或迁移 Turn。
+
+M05 Supervisor 已通过最终单槽集成进入 Agent：图路由把 M05.3 `DecisionValidator` 接到 M02 图内核入口，校验请求必须与当前 Turn、会话版本和 Workflow 投影一致；`answer_only` 只追加具备本 Turn 稳定消息 ID 的助手回答，`clarify` 打开可定向恢复的 clarification interrupt，其余业务命令才进入目标 Workflow dispatcher。`start_workflow` 在校验通过后按 conversation 与决策幂等键派生稳定的新 Workflow ID，分类决策本身仍保持无目标；任何校验失败、低置信度降级或投影漂移都不能调用业务处理器。M05.5 的 54 条中文离线黄金集达到 action 53/54（98.15%）、target 24/25（96.00%）、歧义追问 20/21（95.24%）、计费误执行 0；这些结果只证明 M05 模块代码和非付费门禁已进入 Agent，不代表 M13.2/R2 已完成，也不授权生产切换到 `primary(video)`。
 
 M06.1 在独立模块分支建立持久化 External Job 的首段领域合同：operation 幂等身份固定为 `workflow_id + stage + stage_version + attempt`，生成带版本的固定长度哈希键；供应商 JSON 请求经过稳定排序和 UTF-8 编码后只保存 `sha256`，Authorization、token 和原始请求体不进入 operation 表。相同 start 的顺序重试或并发竞争回读同一内部 job，相同身份被不同摘要复用时 fail-closed。状态表允许 `created` 进入 `polling` 或终态、`polling` 进入终态、同状态幂等重放，并禁止终态重开。
 

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
@@ -26,6 +26,7 @@ import {
   type JianyingDraftJobResponse,
   type JianyingDraftStartRequest,
   type MergeSceneVideosResponse,
+  type PlanManualEditRequest,
   type PlanMarkdownResponse,
   type PptFileResult,
   type PptImagesResult,
@@ -37,6 +38,8 @@ import {
   type PrepareScenePackagesJobResult,
   type PrepareScenePackagesJobStatusResponse,
   type PrepareScenePackagesResponse,
+  type ScenePackageAssetRevisionRequest,
+  type ScenePackageAssetRevisionResponse,
   type SceneGenerationPayload,
   type SceneVideoPayload,
   type TaskEvent,
@@ -52,6 +55,15 @@ import {
   planMessageResumeDelayMs,
   resumePlanMessageJobStep,
 } from "@/lib/planMessageRecovery";
+import {
+  classifyPlanJobResume,
+  clearPendingPlanJobRecovery,
+  continueStartedPlanJob,
+  loadPendingPlanJobRecovery,
+  planJobResumeDelayMs,
+  savePendingPlanJobRecovery,
+  shouldRetryPlanJobPersistence,
+} from "@/lib/planJobRecovery";
 
 const PlanMarkdownEditor = lazy(() =>
   import("@/components/canvas/PlanMarkdownEditor").then((module) => ({ default: module.PlanMarkdownEditor })),
@@ -68,12 +80,8 @@ import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSumm
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
   addGlobalSceneAssetReference,
-  applyGlobalSceneAssetReplacement,
-  applyGlobalSceneAssetImageEdit,
   DEFAULT_TARGET_DURATION_MS,
   defaultGlobalSceneAssetRatio,
-  deleteGlobalSceneAssetReference,
-  globalAssetsContainAsset,
   globalSceneAssetRatioFromMetadata,
   inferGlobalSceneAssetRatioFromMetadata,
   mergeSceneAssetRetryFailures,
@@ -92,7 +100,7 @@ import {
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
-import { formatClockTime } from "@/lib/time";
+import { formatMessageTime } from "@/lib/time";
 import type { FlowTimelineEntry, TaskPhase, VideoResult } from "@/lib/types";
 import type { SceneGlobalAssetEditReview } from "@/lib/chat";
 import {
@@ -109,16 +117,22 @@ import {
   type WorkflowProgressSnapshot,
 } from "@/lib/workflowTaskBoard";
 import type {
+  AgentAction,
+  ExplicitActionSignal,
   JsonObject,
   JsonValue,
   OrchestrationMode,
   TurnStartRequest,
+  WorkflowRecord,
 } from "@/lib/supervisor/contracts";
+import { buildSupervisorWorkflowAction } from "@/lib/supervisor/actions";
 import {
   createConversationWriteSequencer,
   resolveAssistHandoffAction,
+  resolveUnavailableSupervisorRecovery,
   resolveWorkspaceAgentRuntimeMode,
   resolveWorkspaceOrchestrationMode,
+  resolveWorkspacePrimaryExecutionReady,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
   inferInitialRuntimeIntent,
@@ -129,6 +143,7 @@ import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
 import {
   mergeSupervisorMessagesWithPending,
   projectSupervisorWorkflowProgress,
+  selectSupervisorArtifactMessage,
 } from "@/lib/supervisor/workspaceProjection";
 
 interface ConversationOwnership {
@@ -145,9 +160,37 @@ interface PendingSupervisorTurn {
   replyToMessageId: string | null;
   artifactRefs: string[];
   interruptId: string | null;
+  explicitAction: ExplicitActionSignal | null;
   continueLegacy: boolean;
   registrationStatus: "pending" | "registered";
   runId?: string;
+}
+
+type SupervisorVideoUiKind =
+  | "video_intake_form"
+  | "video_direction_review"
+  | "video_plan_review"
+  | "video_scene_package_review"
+  | "video_result_review"
+  | "authorization_required";
+
+interface RestoredSupervisorVideoUi {
+  kind: SupervisorVideoUiKind;
+  workflowId: string;
+  stage: string;
+  artifactRef: string | null;
+  formValues: JsonObject;
+  coreMessage: string;
+  materials: JsonObject[];
+  intakeRounds: number;
+  authorizationAction: ExplicitActionSignal | null;
+}
+
+interface SupervisorVideoTarget {
+  ui: RestoredSupervisorVideoUi;
+  workflow: WorkflowRecord;
+  stage: string;
+  artifactRef: string | null;
 }
 
 interface RegisteredSupervisorTurn {
@@ -165,9 +208,106 @@ interface SendRuntimeOptions {
   clientInputId?: string;
 }
 
+interface SubmitSupervisorActionOptions {
+  materials?: JsonObject[];
+  replyToMessageId?: string | null;
+  artifactRefs?: string[];
+}
+
 // 统一使用 UUID 作为消息 ID 与 Runtime client_input_id，旧消息 API 会映射到同一稳定主键。
 const uid = (): string => crypto.randomUUID();
-const now = () => formatClockTime(new Date().toISOString());
+const UNAVAILABLE_SUPERVISOR_NOTICE_VERSION = 1;
+const UNAVAILABLE_SUPERVISOR_NOTICE =
+  "该历史会话由未接线的 R2 候选创建，已停止自动重试。请新建对话继续，原消息和素材仍保留。";
+const unavailableSupervisorNoticeId = (conversationId: string): string =>
+  `agent-runtime-unavailable:${conversationId}:v1`;
+const failedSupervisorNoticeId = (
+  conversationId: string,
+  clientInputId: string,
+): string => `agent-runtime-failed:${conversationId}:${clientInputId}:v1`;
+const now = () => formatMessageTime(new Date().toISOString());
+
+const isJsonObject = (value: JsonValue | undefined): value is JsonObject =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const parseExplicitAction = (value: unknown): ExplicitActionSignal | null => {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const action = value as Record<string, unknown>;
+  if (typeof action.action !== "string") return null;
+  try {
+    return buildSupervisorWorkflowAction({
+      action: action.action as AgentAction,
+      intent: action.intent === "video" ? "video" : null,
+      workflowId: typeof action.workflow_id === "string" ? action.workflow_id : null,
+      stage: typeof action.stage === "string" ? action.stage : null,
+      artifactRef: typeof action.artifact_ref === "string" ? action.artifact_ref : null,
+      patch: action.patch && typeof action.patch === "object" && !Array.isArray(action.patch)
+        ? action.patch as Readonly<Record<string, unknown>>
+        : {},
+    });
+  } catch {
+    return null;
+  }
+};
+
+function restoreSupervisorVideoUi(
+  payload: JsonObject | undefined,
+): RestoredSupervisorVideoUi | null {
+  if (!payload) return null;
+  const workflowId = typeof payload.workflow_id === "string" ? payload.workflow_id.trim() : "";
+  const stage = typeof payload.stage === "string" ? payload.stage.trim() : "";
+  const artifactRef = typeof payload.artifact_ref === "string" ? payload.artifact_ref.trim() : null;
+  if (!workflowId || !stage || (artifactRef !== null && !/^artifact:\S+$/u.test(artifactRef))) return null;
+  const formValues = isJsonObject(payload.form_values) ? payload.form_values : {};
+  const coreMessage = typeof payload.core_message === "string" ? payload.core_message : "";
+  const materials = Array.isArray(payload.materials)
+    ? payload.materials.filter(isJsonObject)
+    : [];
+  const intakeRounds = Number.isSafeInteger(payload.intake_rounds)
+    && Number(payload.intake_rounds) >= 0
+    ? Number(payload.intake_rounds)
+    : 0;
+  const authorizationAction = parseExplicitAction(payload.authorization_action);
+  switch (payload.ui_kind) {
+    case "video_intake_form":
+    case "video_direction_review":
+    case "video_plan_review":
+    case "video_scene_package_review":
+    case "video_result_review":
+      return {
+        kind: payload.ui_kind,
+        workflowId,
+        stage,
+        artifactRef,
+        formValues,
+        coreMessage,
+        materials,
+        intakeRounds,
+        authorizationAction: null,
+      };
+    case "authorization_required":
+      if (
+        !authorizationAction
+        || authorizationAction.workflow_id !== workflowId
+        || authorizationAction.stage !== stage
+        || authorizationAction.artifact_ref !== artifactRef
+      ) return null;
+      return {
+        kind: payload.ui_kind,
+        workflowId,
+        stage,
+        artifactRef,
+        formValues,
+        coreMessage,
+        materials,
+        intakeRounds,
+        authorizationAction,
+      };
+    default:
+      return null;
+  }
+}
 
 const parsePendingSupervisorTurn = (
   value: unknown,
@@ -180,6 +320,11 @@ const parsePendingSupervisorTurn = (
     || typeof item.clientInputId !== "string"
     || typeof item.content !== "string"
     || !Array.isArray(item.materials)
+    || (
+      item.explicitAction !== undefined
+      && item.explicitAction !== null
+      && parseExplicitAction(item.explicitAction) === null
+    )
     || (item.continueLegacy !== undefined && typeof item.continueLegacy !== "boolean")
     || (
       item.registrationStatus !== undefined
@@ -213,6 +358,7 @@ const parsePendingSupervisorTurn = (
     replyToMessageId: typeof item.replyToMessageId === "string" ? item.replyToMessageId : null,
     artifactRefs: Array.isArray(item.artifactRefs) ? item.artifactRefs as string[] : [],
     interruptId: typeof item.interruptId === "string" ? item.interruptId : null,
+    explicitAction: parseExplicitAction(item.explicitAction),
     continueLegacy: item.continueLegacy === true,
     registrationStatus: item.registrationStatus === "registered" ? "registered" : "pending",
     ...(typeof item.runId === "string" ? { runId: item.runId } : {}),
@@ -238,6 +384,14 @@ const parseRegisteredSupervisorTurn = (
 };
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
+
+const browserSessionStorage = (): Storage | null => {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
 const workflowIntentFromPhase = (phase: string): CreationIntent | null => {
   if (phase.startsWith("ppt_")) return "ppt";
   if (phase.startsWith("scene_") || (phase.startsWith("video_") && !phase.startsWith("video_analysis"))) return "video";
@@ -357,7 +511,7 @@ function toTimelineEntry(event: TaskEvent): FlowTimelineEntry | null {
     summary: String(data.summary || ""),
     phase: data.phase ? String(data.phase) : undefined,
     status: data.status ? String(data.status) : undefined,
-    time: formatClockTime(event.created_at, "zh-CN", undefined, now()),
+    time: formatMessageTime(event.created_at, "zh-CN", undefined, now()),
   };
 }
 
@@ -370,6 +524,8 @@ interface WorkspaceSnapshot {
   pending_message_job?: PendingMessageJob | null;
   pendingAgentRuntimeTurns?: PendingSupervisorTurn[];
   pending_agent_runtime_turns?: PendingSupervisorTurn[];
+  agentRuntimeUnavailableNoticeVersion?: number;
+  agent_runtime_unavailable_notice_version?: number;
   pendingIntakeJob?: PendingIntakeJob | null;
   pending_intake_job?: PendingIntakeJob | null;
   pendingDirectionJob?: PendingDirectionJob | null;
@@ -564,6 +720,8 @@ interface PlanRevisionJobRequest extends PlanGenerationJobRequest {
   asset_manifest?: PlanMarkdownResponse["asset_manifest"];
 }
 
+type PlanManualEditJobRequest = PlanManualEditRequest;
+
 interface PendingPlanJobContext {
   intent: CreationIntent;
   formValues: Record<string, unknown>;
@@ -578,10 +736,55 @@ interface PendingPlanJob {
   job_id: string;
   conversation_id: string;
   source_message_id: string;
-  kind: "plan_generation" | "plan_revision";
+  kind: "plan_generation" | "plan_revision" | "plan_manual_edit";
   started_at: string;
-  request: PlanGenerationJobRequest | PlanRevisionJobRequest;
+  request: PlanGenerationJobRequest | PlanRevisionJobRequest | PlanManualEditJobRequest;
   context: PendingPlanJobContext;
+}
+
+function pendingPlanJobRunningPhase(kind: PendingPlanJob["kind"]): string {
+  if (kind === "plan_revision") return "plan_revision_running";
+  if (kind === "plan_manual_edit") return "plan_manual_edit_running";
+  return "plan_generation_running";
+}
+
+function pendingPlanJobPersistenceContext(kind: PendingPlanJob["kind"]): Record<string, unknown> {
+  if (kind === "plan_revision") {
+    return {
+        pendingPlanRevisionChoice: null,
+        pending_plan_revision_choice: null,
+      };
+  }
+  return kind === "plan_manual_edit" ? { plan_approved: false } : {};
+}
+
+function isRecoverablePendingPlanJob(value: unknown): value is PendingPlanJob {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const pendingPlanJob = value as Partial<PendingPlanJob>;
+  const context = pendingPlanJob.context as Partial<PendingPlanJobContext> | undefined;
+  return (
+    typeof pendingPlanJob.job_id === "string"
+    && Boolean(pendingPlanJob.job_id)
+    && typeof pendingPlanJob.conversation_id === "string"
+    && Boolean(pendingPlanJob.conversation_id)
+    && typeof pendingPlanJob.source_message_id === "string"
+    && (
+      pendingPlanJob.kind === "plan_generation"
+      || pendingPlanJob.kind === "plan_revision"
+      || pendingPlanJob.kind === "plan_manual_edit"
+    )
+    && typeof pendingPlanJob.started_at === "string"
+    && Boolean(pendingPlanJob.request)
+    && typeof pendingPlanJob.request === "object"
+    && Boolean(context)
+    && isCreationIntent(context?.intent)
+    && Boolean(context?.formValues)
+    && typeof context?.formValues === "object"
+    && Boolean(context?.selectedDirection)
+    && typeof context?.selectedDirection === "object"
+    && typeof context?.coreMessage === "string"
+    && Array.isArray(context?.materials)
+  );
 }
 
 const DIRECTION_SUCCESSOR_ARTIFACT_TYPES = new Set<ChatArtifact["type"]>([
@@ -867,7 +1070,7 @@ interface PendingImageJob {
   revision_feedback?: string;
 }
 
-type PendingScenePackageJobKind = "scene_package_generation" | "scene_asset_generation";
+type PendingScenePackageJobKind = "scene_package_generation" | "scene_asset_generation" | "scene_asset_revision";
 
 interface PrepareScenePackagesJobRequest {
   form_values: Record<string, unknown>;
@@ -897,8 +1100,9 @@ interface PendingScenePackageJob {
   source_message_id: string;
   kind: PendingScenePackageJobKind;
   started_at: string;
-  request: PrepareScenePackagesJobRequest | SceneAssetsJobRequest;
+  request: PrepareScenePackagesJobRequest | SceneAssetsJobRequest | ScenePackageAssetRevisionRequest;
   artifact: ChatArtifact;
+  review_message_id?: string;
 }
 
 type PendingVideoJobKind = "scene_generation" | "scene_regeneration" | "scene_failed_retry" | "video_merge";
@@ -1358,13 +1562,14 @@ function sceneGlobalAssetReferenceFromMaterials(materials: Array<Record<string, 
   const assetId = String(material.asset_id || "");
   const assetGroup = String(material.asset_group || "");
   const sourceImageUrl = String(material.source_image_url || material.url || "");
-  if (!assetId || !isGlobalSceneAssetGroup(assetGroup) || !sourceImageUrl) return null;
+  const action = material.scene_global_asset_action === "delete" ? "delete" : "edit";
+  if (!assetId || !isGlobalSceneAssetGroup(assetGroup) || (action !== "delete" && !sourceImageUrl)) return null;
   return {
     ...material,
     source: "scene_global_asset",
     asset_id: assetId,
     asset_group: assetGroup,
-    scene_global_asset_action: material.scene_global_asset_action === "delete" ? "delete" : "edit",
+    scene_global_asset_action: action,
     name: String(material.name || material.asset_name || assetId),
     source_image_url: sourceImageUrl,
     url: sourceImageUrl,
@@ -1523,6 +1728,14 @@ function scenePackageJobMessageId(job: Pick<PendingScenePackageJob, "kind" | "jo
 
 function hasMaterializedScenePackageJob(messages: ChatMessage[], job: PendingScenePackageJob): boolean {
   const expectedMessageId = scenePackageJobMessageId(job);
+  if (job.kind === "scene_asset_revision") {
+    return messages.some(
+      (message) =>
+        message.artifact?.type === "video_scene_packages" &&
+        Boolean(message.artifact.videoScenePackages) &&
+        (message.id === expectedMessageId || message.id.startsWith(`${expectedMessageId}-`)),
+    );
+  }
   const sourceMessageIndex = messages.findIndex((message) => message.id === job.source_message_id);
   return messages.some((message, index) => {
     if (message.artifact?.type !== "video_scene_packages" || !message.artifact.videoScenePackages) return false;
@@ -1564,7 +1777,7 @@ function messageFromResponse(message: ConversationMessageResponse, conversationI
     role: message.role,
     content: message.content,
     materials,
-    time: formatClockTime(message.created_at),
+    time: formatMessageTime(message.created_at),
     artifact,
   };
 }
@@ -1694,14 +1907,22 @@ function restoreLatestVideoScenePackagesFromContext(
         ...message.artifact,
         videoScenePackages: {
           ...videoScenePackages,
-          global_assets: (globalAssets || latestVideoResultArtifact?.videoScenePackages?.global_assets || videoScenePackages.global_assets) as typeof videoScenePackages.global_assets,
-          scene_packages: (Array.isArray(scenePackages)
-            ? scenePackages
-            : latestVideoResultArtifact?.videoScenePackages?.scene_packages || videoScenePackages.scene_packages) as typeof videoScenePackages.scene_packages,
+          global_assets: videoScenePackages.global_assets,
+          scene_packages: videoScenePackages.scene_packages,
         },
-        generatedSceneVideos: generatedSceneVideos || message.artifact.generatedSceneVideos,
-        mergedVideo: mergedVideo || message.artifact.mergedVideo,
-        videoScenePackageEditedSceneIds: editedSceneIds || message.artifact.videoScenePackageEditedSceneIds,
+        generatedSceneVideos:
+          latestVideoResultArtifact?.generatedSceneVideos ||
+          message.artifact.generatedSceneVideos ||
+          contextGeneratedSceneVideos,
+        mergedVideo:
+          latestVideoResultArtifact?.mergedVideo ||
+          message.artifact.mergedVideo ||
+          mergedVideo,
+        videoScenePackageEditedSceneIds:
+          message.artifact.videoScenePackageEditedSceneIds ??
+          latestVideoResultArtifact?.videoScenePackageEditedSceneIds ??
+          editedSceneIds ??
+          [],
       },
     };
   });
@@ -1860,11 +2081,18 @@ export function WorkspacePage() {
   );
   const orchestrationModeRef = useRef<OrchestrationMode | null>("frontend_v2");
   const agentRuntimeModeRef = useRef<WorkspaceAgentRuntimeMode | null>("off");
+  const primaryExecutionReadyRef = useRef(false);
   const deferredOwnershipInputsRef = useRef<DeferredOwnershipInput[]>([]);
   const supervisorTurnInFlightRef = useRef<Set<string>>(new Set());
   // 旧 v2 接力可能持续数秒；在接力完成并写回上下文前，禁止同一 Turn 被
   // Runtime effect 因状态刷新重复执行，避免重复计费或重复启动供应商任务。
   const supervisorLegacyHandoffClaimedRef = useRef<Set<string>>(new Set());
+  const unavailableSupervisorNoticeVersionsRef = useRef(
+    new Map<string, number>(),
+  );
+  const unavailableSupervisorRecoveryInFlightRef = useRef(
+    new Set<string>(),
+  );
   const resolvedRuntimePolicy = resolveWorkspaceRuntimePolicy(
     orchestrationMode,
     currentConversationId,
@@ -1877,11 +2105,78 @@ export function WorkspacePage() {
       legacyRunnerEnabled: false,
       legacyArtifactActionsEnabled: false,
     };
+  const primaryExecutionUnavailable = orchestrationResolved
+    && orchestrationMode === "supervisor_v1"
+    && !primaryExecutionReadyRef.current;
   // 新旧运行时共用同一个页面入口；R1 assist 只挂载会话基础设施，业务仍由旧 runner 推进。
   // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
   });
+  const restoredSupervisorUi = useMemo(
+    () => restoreSupervisorVideoUi(supervisorRuntime.state.interrupt?.payload),
+    [supervisorRuntime.state.interrupt?.payload],
+  );
+  const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
+    if (
+      orchestrationMode !== "supervisor_v1"
+      || !restoredSupervisorUi
+      || supervisorRuntime.state.conversationId !== currentConversationId
+    ) return null;
+    const workflow = supervisorRuntime.state.workflows.find(
+      (workflow) => workflow.workflow_id === restoredSupervisorUi.workflowId
+        && workflow.conversation_id === currentConversationId
+        && workflow.kind === "video"
+        && workflow.current_stage === restoredSupervisorUi.stage,
+    );
+    if (!workflow) return null;
+    if (
+      restoredSupervisorUi.artifactRef
+      && !workflow.latest_artifact_refs.includes(restoredSupervisorUi.artifactRef)
+    ) return null;
+    return {
+      ui: restoredSupervisorUi,
+      workflow,
+      stage: restoredSupervisorUi.stage,
+      artifactRef: restoredSupervisorUi.artifactRef,
+    };
+  }, [
+    currentConversationId,
+    orchestrationMode,
+    restoredSupervisorUi,
+    supervisorRuntime.state.conversationId,
+    supervisorRuntime.state.workflows,
+  ]);
+  const activeSupervisorVideoMessage = useMemo<ChatMessage | null>(() => {
+    if (!activeSupervisorVideoTarget) return null;
+    const allowedTypes = activeSupervisorVideoTarget.ui.kind === "video_direction_review"
+      ? new Set(["directions"])
+      : activeSupervisorVideoTarget.ui.kind === "video_plan_review"
+        ? new Set(["plan"])
+        : activeSupervisorVideoTarget.ui.kind === "video_scene_package_review"
+          ? new Set(["video_scene_packages"])
+          : activeSupervisorVideoTarget.ui.kind === "video_result_review"
+            ? new Set(["video_scene_packages", "video_quality_review", "video_result", "jianying_draft"])
+            : new Set<string>();
+    const projected = selectSupervisorArtifactMessage(
+      supervisorRuntime.state.messages,
+      {
+        workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+        artifactRef: activeSupervisorVideoTarget.artifactRef,
+        allowedTypes: [...allowedTypes],
+      },
+    );
+    if (!projected) return null;
+    return messages.find(
+      (message) => message.id === projected.id
+        && messageConversationId(message, currentConversationId) === currentConversationId,
+    ) ?? null;
+  }, [
+    activeSupervisorVideoTarget,
+    currentConversationId,
+    messages,
+    supervisorRuntime.state.messages,
+  ]);
   const interactionPolicy = resolveWorkspaceInteractionPolicy({
     mode: orchestrationMode,
     conversationId: currentConversationId,
@@ -1889,14 +2184,17 @@ export function WorkspacePage() {
     legacyBusy,
     dialogOpen,
     pendingPlanRevision: Boolean(pendingPlanRevisionChoice),
-    supervisorConnection: supervisorRuntime.state.connection.status,
+    supervisorConnection: primaryExecutionUnavailable
+      ? "fatal"
+      : supervisorRuntime.state.connection.status,
     supervisorRun: supervisorRuntime.state.run.status,
     supervisorCompression: supervisorRuntime.state.compression.status,
     pendingSupervisorTurns: pendingSupervisorTurns.length,
   });
   const runtimeNotice = resolveSupervisorRuntimeNotice({
-    enabled: runtimePolicy.supervisorEnabled,
+    enabled: runtimePolicy.supervisorEnabled && !primaryExecutionUnavailable,
     runStatus: supervisorRuntime.state.run.status,
+    runUpdatedAt: supervisorRuntime.state.run.updatedAt,
     compression: supervisorRuntime.state.compression,
     inputQueue: supervisorRuntime.state.inputQueue,
   });
@@ -1940,6 +2238,11 @@ export function WorkspacePage() {
   const activeDirectionJobPollsRef = useRef(new Set<string>());
   const pendingPlanJobRef = useRef<PendingPlanJob | null>(null);
   const activePlanJobPollsRef = useRef(new Set<string>());
+  const planJobResumeAttemptsRef = useRef(new Map<string, number>());
+  const planJobRecoveryNoticesRef = useRef(new Set<string>());
+  const planJobPersistenceAttemptsRef = useRef(new Map<string, number>());
+  const planJobPersistenceNoticesRef = useRef(new Set<string>());
+  const scheduledPlanJobPersistenceRef = useRef(new Set<string>());
   const pendingImageEditRequestRef = useRef<PendingImageEditRequest | null>(null);
   const imageEditConfirmedSelectionsRef = useRef<Record<string, ImageEditModelSelection>>({});
   const pendingImageJobRef = useRef<PendingImageJob | null>(null);
@@ -1949,6 +2252,7 @@ export function WorkspacePage() {
   const imageRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const videoRevisionArtifactRef = useRef<PendingConversationArtifact | null>(null);
   const pendingScenePackageJobRef = useRef<PendingScenePackageJob | null>(null);
+  const [pendingScenePackageResumeVersion, setPendingScenePackageResumeVersion] = useState(0);
   const activeScenePackageJobPollsRef = useRef(new Set<string>());
   const pendingVideoJobRef = useRef<PendingVideoJob | null>(null);
   const activeVideoJobPollsRef = useRef(new Set<string>());
@@ -1999,15 +2303,22 @@ export function WorkspacePage() {
         materials: pendingTurn.materials as JsonObject[],
       })),
       currentConversationId,
-    );
+    ).map((message) => ({
+      ...message,
+      // R1/Supervisor 会在连接建立后覆盖 REST 恢复消息，必须在这一投影边界再次转换时间。
+      time: formatMessageTime(message.time, "zh-CN", undefined, message.time),
+    }));
     messagesRef.current = projectedMessages;
     setMessages(projectedMessages);
-    const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
-    workflowProgressConversationIdRef.current = currentConversationId;
-    workflowProgressRef.current = nextProgress;
-    setWorkflowProgress(nextProgress);
+    if (orchestrationModeRef.current === "supervisor_v1") {
+      const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
+      workflowProgressConversationIdRef.current = currentConversationId;
+      workflowProgressRef.current = nextProgress;
+      setWorkflowProgress(nextProgress);
+    }
   }, [
     currentConversationId,
+    orchestrationMode,
     pendingSupervisorTurns,
     runtimePolicy.supervisorEnabled,
     supervisorRuntime.state.connection.status,
@@ -2102,7 +2413,7 @@ export function WorkspacePage() {
     return next;
   };
 
-  const updateConversationWithProgress = (
+  const updateConversationWithProgress = async (
     targetConversationId: string,
     body: { title?: string; current_task_id?: string | null; last_phase?: string; context?: Record<string, unknown> },
     progressPatch: Partial<Omit<WorkflowProgressSnapshot, "version" | "last_phase" | "updated_at">> = {},
@@ -2112,7 +2423,7 @@ export function WorkspacePage() {
       : workflowProgressConversationIdRef.current === targetConversationId
         ? workflowProgressRef.current
         : null;
-    return api.updateConversation(targetConversationId, {
+    const updated = await api.updateConversation(targetConversationId, {
       ...body,
       context: body.context
         ? {
@@ -2122,6 +2433,9 @@ export function WorkspacePage() {
           }
         : body.context,
     });
+    // 会话阶段写入成功后刷新左侧列表，避免异步 Job 完成后仍展示旧的运行态。
+    window.dispatchEvent(new Event("pixelflow-conversations-updated"));
+    return updated;
   };
 
   const setBusyForConversation = (targetConversationId: string, value: boolean) => {
@@ -2268,7 +2582,7 @@ export function WorkspacePage() {
       ...message,
       id: message.id,
       conversationId: conversation,
-      time: formatClockTime(saved.created_at),
+      time: formatMessageTime(saved.created_at),
     };
   };
 
@@ -2705,59 +3019,6 @@ export function WorkspacePage() {
     return updatedPackages;
   };
 
-  const syncGlobalSceneAssetEditAcrossConversation = (
-    targetConversationId: string,
-    input: { assetId: string; assetGroup: GlobalSceneAssetGroup; editedImageUrl: string },
-    preferredMessageId?: string,
-    fallbackPackages?: PrepareScenePackagesResponse,
-  ): PrepareScenePackagesResponse | undefined => {
-    let latestPackages: PrepareScenePackagesResponse | undefined;
-    setMessages((items) => {
-      const nextItems = items.map((message) => {
-        if (messageConversationId(message, targetConversationId) !== targetConversationId) return message;
-        const artifact = message.artifact;
-        const videoScenePackages = artifact?.videoScenePackages;
-        if (!artifact || !videoScenePackages) return message;
-        if (!globalAssetsContainAsset(videoScenePackages.global_assets, input.assetId)) return message;
-        const patched = applyGlobalSceneAssetImageEdit(
-          videoScenePackages.global_assets,
-          videoScenePackages.scene_packages as ScenePackageRecord[],
-          input,
-        );
-        const updatedPackages: PrepareScenePackagesResponse = {
-          ...videoScenePackages,
-          global_assets: patched.global_assets,
-          scene_packages: patched.scene_packages as typeof videoScenePackages.scene_packages,
-        };
-        if (message.id === preferredMessageId || !latestPackages) {
-          latestPackages = updatedPackages;
-        }
-        return {
-          ...message,
-          artifact: {
-            ...artifact,
-            videoScenePackages: updatedPackages,
-          },
-        };
-      });
-      messagesRef.current = nextItems;
-      return nextItems;
-    });
-    if (!latestPackages && fallbackPackages && globalAssetsContainAsset(fallbackPackages.global_assets, input.assetId)) {
-      const patched = applyGlobalSceneAssetImageEdit(
-        fallbackPackages.global_assets,
-        fallbackPackages.scene_packages as ScenePackageRecord[],
-        input,
-      );
-      latestPackages = {
-        ...fallbackPackages,
-        global_assets: patched.global_assets,
-        scene_packages: patched.scene_packages as typeof fallbackPackages.scene_packages,
-      };
-    }
-    return latestPackages;
-  };
-
   const persistScenePackageSnapshot = (
     targetConversationId: string,
     packages: PrepareScenePackagesResponse,
@@ -2899,6 +3160,29 @@ export function WorkspacePage() {
   };
 
   const handleDeleteGlobalAsset = (asset: SceneGlobalAssetReference) => {
+    if (activeSupervisorVideoTarget?.ui.kind === "video_scene_package_review") {
+      void submitSupervisorAction(
+        "删除视频全局素材",
+        buildSupervisorWorkflowAction({
+          action: "modify_workflow",
+          intent: "video",
+          workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+          stage: activeSupervisorVideoTarget.stage,
+          artifactRef: activeSupervisorVideoTarget.artifactRef,
+          patch: {
+            asset_action: "delete",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+          },
+        }),
+        {
+          artifactRefs: activeSupervisorVideoTarget.artifactRef
+            ? [activeSupervisorVideoTarget.artifactRef]
+            : [],
+        },
+      );
+      return;
+    }
     const material = selectedStoryboardMessageId
       ? { ...asset, conversation_id: currentConversationId, storyboard_message_id: selectedStoryboardMessageId }
       : { ...asset, conversation_id: currentConversationId };
@@ -2910,64 +3194,80 @@ export function WorkspacePage() {
     setComposerPrefillRequest({ id: uid(), content: SCENE_GLOBAL_ASSET_DELETE_PROMPT(deleteMaterial.name) });
   };
 
-  const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
-    const targetConversationId = currentConversationId || conversationIdRef.current;
-    const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+  const startSceneGlobalAssetRevision = async (
+    reference: SceneGlobalAssetReference,
+    operation: "replace" | "delete",
+    replacement?: SceneGlobalAssetReplacement,
+    options: { processedKey?: string; reviewMessageId?: string; targetConversationId?: string } = {},
+  ): Promise<boolean> => {
+    const targetConversationId = options.targetConversationId || currentConversationId || conversationIdRef.current;
     const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
     if (!storyboardMessage?.artifact?.videoScenePackages) {
-      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再替换。", targetConversationId);
-      return;
+      if (options.processedKey) releaseArtifactAction(options.processedKey);
+      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后重试。", targetConversationId);
+      return false;
     }
-    const patched = applyGlobalSceneAssetReplacement(
-      storyboardMessage.artifact.videoScenePackages.global_assets,
-      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
-      {
-        assetId: reference.asset_id,
-        assetGroup: reference.asset_group,
-        replacement,
-      },
-    );
-    const updatedPackages: PrepareScenePackagesResponse = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: patched.global_assets,
-      scene_packages: patched.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
+    const request: ScenePackageAssetRevisionRequest = {
+      operation,
+      asset_id: reference.asset_id,
+      asset_group: reference.asset_group,
+      asset_name: replacement?.assetName || reference.name,
+      source_image_url: reference.source_image_url,
+      new_image_url: replacement?.displayImageUrl || null,
+      generation_reference_url: replacement?.generationReferenceUrl || null,
+      replacement_metadata: replacement
+        ? {
+            replacement_source: replacement.source,
+            third_asset_id: replacement.thirdAssetId,
+            replacement_asset_type: replacement.assetType,
+            replacement_asset_id: replacement.contentAssetId,
+            replacement_asset_name: replacement.assetName,
+          }
+        : {},
+      global_assets: storyboardMessage.artifact.videoScenePackages.global_assets,
+      scene_packages: storyboardMessage.artifact.videoScenePackages.scene_packages,
     };
 
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
-    const sourceScenePackageArtifact = storyboardMessage.artifact;
-    const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
-      type: "video_scene_packages",
-      title: sourceScenePackageArtifact.title || "视频场景包",
-      description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
-      actionLabel: "确认",
-      videoScenePackages: updatedPackages,
-      originalVideoScenePackages: sourceScenePackageArtifact.originalVideoScenePackages || storyboardMessage.artifact.videoScenePackages,
-      sceneAssetFailures: sourceScenePackageArtifact.sceneAssetFailures || [],
-      intent: "video",
-      formValues: sourceScenePackageArtifact.formValues,
-      intakeContext: sourceScenePackageArtifact.intakeContext,
-      materials: sourceScenePackageArtifact.materials || [],
-      selectedDirection: sourceScenePackageArtifact.selectedDirection,
-      plan: sourceScenePackageArtifact.plan,
-      videoScenePackageEditedSceneIds: [],
-    }, targetConversationId);
-    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
-    if (isVisibleConversation(targetConversationId)) {
-      setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-      setCanvasOpen(true);
+    try {
+      setBusyForConversation(targetConversationId, true);
+      pushAssistant(
+        operation === "replace"
+          ? "正在分析新素材，并同步更新受影响的分镜内容…"
+          : "正在移除素材，并同步清理各分镜中的引用和相关描述…",
+        targetConversationId,
+      );
+      const started = await api.startScenePackageAssetRevisionJob(request);
+      const pendingScenePackageJob: PendingScenePackageJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: storyboardMessage.id,
+        kind: "scene_asset_revision",
+        started_at: new Date().toISOString(),
+        request,
+        artifact: storyboardMessage.artifact,
+        review_message_id: options.reviewMessageId,
+      };
+      await persistPendingScenePackageJob(pendingScenePackageJob, targetConversationId, "scene_asset_revision_running", {
+        scene_global_asset_revision: {
+          operation,
+          asset_id: reference.asset_id,
+          asset_group: reference.asset_group,
+        },
+      });
+      await resumePendingScenePackageJob(pendingScenePackageJob, options.processedKey || "");
+      return true;
+    } catch (err) {
+      if (options.processedKey) releaseArtifactAction(options.processedKey);
+      pushAssistant(`分镜素材修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      return false;
+    } finally {
+      setBusyForConversation(targetConversationId, false);
     }
-    persistScenePackageSnapshot(targetConversationId, updatedPackages, "scene_global_asset_replaced", {
-      scene_global_asset_replacement: {
-        asset_id: reference.asset_id,
-        asset_group: reference.asset_group,
-        replacement_source: replacement.source,
-        display_image_url: replacement.displayImageUrl,
-        generation_reference_url: replacement.generationReferenceUrl,
-        third_asset_id: replacement.thirdAssetId,
-        replacement_asset_type: replacement.assetType,
-        replacement_asset_id: replacement.contentAssetId,
-      },
-    });
+  };
+
+  const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
+    const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
+    void startSceneGlobalAssetRevision(reference, "replace", replacement);
   };
 
   const handleAddGlobalAsset = (
@@ -3213,53 +3513,7 @@ export function WorkspacePage() {
     reference: SceneGlobalAssetReference,
     targetConversationId: string,
   ): Promise<boolean> => {
-    const storyboardMessage = findStoryboardMessageForGlobalAsset(reference, targetConversationId);
-    if (!storyboardMessage?.artifact?.videoScenePackages) {
-      pushAssistant("当前没有找到包含这个全局素材的场景包，请先打开对应的场景包卡片后再删除。", targetConversationId);
-      return true;
-    }
-
-    const updated = deleteGlobalSceneAssetReference(
-      storyboardMessage.artifact.videoScenePackages.global_assets,
-      storyboardMessage.artifact.videoScenePackages.scene_packages as ScenePackageRecord[],
-      {
-        assetId: reference.asset_id,
-        assetGroup: reference.asset_group,
-        assetName: reference.name,
-        sourceImageUrl: reference.source_image_url,
-      },
-    );
-    const updatedPackages = {
-      ...storyboardMessage.artifact.videoScenePackages,
-      global_assets: updated.global_assets,
-      scene_packages: updated.scene_packages as typeof storyboardMessage.artifact.videoScenePackages.scene_packages,
-    };
-
-    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== reference.asset_id));
-    updateVideoScenePackageArtifactInMessage(storyboardMessage.id, () => updatedPackages);
-    if (isVisibleConversation(targetConversationId)) {
-      setSelectedStoryboardMessageId(storyboardMessage.id);
-      setCanvasOpen(true);
-    }
-    pushAssistant(`已在当前场景包中删除「${reference.name}」的素材引用，并保留空占位符。`, targetConversationId);
-
-    if (targetConversationId) {
-      void updateConversationWithProgress(targetConversationId, {
-          last_phase: "scene_global_asset_deleted",
-          context: {
-            ...makeSnapshot(),
-            global_assets: updatedPackages.global_assets,
-            scene_packages: updatedPackages.scene_packages,
-            scene_global_asset_deleted: {
-              asset_id: reference.asset_id,
-              asset_group: reference.asset_group,
-              name: reference.name,
-            },
-          } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
-    }
-    return true;
+    return startSceneGlobalAssetRevision(reference, "delete", undefined, { targetConversationId });
   };
 
   const showImageEditOptions = async (request: PendingImageEditRequest): Promise<void> => {
@@ -3885,8 +4139,13 @@ export function WorkspacePage() {
     lastPhase: string,
     extraContext: Record<string, unknown> = {},
   ) => {
-    pendingScenePackageJobRef.current = pendingScenePackageJob;
-    if (!targetConversationId) return;
+    // 启动时立即暴露恢复句柄；结束时必须等权威 context 成功落库后再清空，
+    // 防止消息/画布自动保存拿着旧 running 阶段覆盖已经完成的任务。
+    if (pendingScenePackageJob) pendingScenePackageJobRef.current = pendingScenePackageJob;
+    if (!targetConversationId) {
+      if (!pendingScenePackageJob) pendingScenePackageJobRef.current = null;
+      return;
+    }
     const baseSnapshot = makeSnapshot(targetConversationId);
     await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
@@ -3897,6 +4156,12 @@ export function WorkspacePage() {
         pending_scene_package_job: pendingScenePackageJob,
       } as unknown as Record<string, unknown>,
     });
+    if (
+      !pendingScenePackageJob
+      && pendingScenePackageJobRef.current?.conversation_id === targetConversationId
+    ) {
+      pendingScenePackageJobRef.current = null;
+    }
   };
 
   const clearPendingScenePackageJob = async (
@@ -3966,13 +4231,45 @@ export function WorkspacePage() {
     await persistPendingDirectionJob(null, targetConversationId, lastPhase, flowDraft, extraContext);
   };
 
+  const planJobPersistenceKey = (pendingPlanJob: PendingPlanJob) =>
+    `${pendingPlanJob.conversation_id}:${pendingPlanJob.kind}:${pendingPlanJob.job_id}`;
+
+  const clearPlanJobPersistenceState = (pendingPlanJob: PendingPlanJob) => {
+    const key = planJobPersistenceKey(pendingPlanJob);
+    planJobPersistenceAttemptsRef.current.delete(key);
+    planJobPersistenceNoticesRef.current.delete(key);
+    scheduledPlanJobPersistenceRef.current.delete(key);
+  };
+
+  const notifyPlanJobPersistenceRecovery = (pendingPlanJob: PendingPlanJob) => {
+    const key = planJobPersistenceKey(pendingPlanJob);
+    if (planJobPersistenceNoticesRef.current.has(key)) return;
+    planJobPersistenceNoticesRef.current.add(key);
+    pushAssistant(
+      "Plan 任务已经启动，但恢复句柄暂未同步到对话；正在继续查询原任务并重试同步，不会重复生成。",
+      pendingPlanJob.conversation_id,
+    );
+  };
+
   const persistPendingPlanJob = async (
     pendingPlanJob: PendingPlanJob | null,
     targetConversationId: string,
     lastPhase: string,
     extraContext: Record<string, unknown> = {},
   ) => {
+    const previousPendingPlanJob = pendingPlanJobRef.current;
     pendingPlanJobRef.current = pendingPlanJob;
+    if (
+      !pendingPlanJob
+      && previousPendingPlanJob?.conversation_id === targetConversationId
+    ) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        previousPendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(previousPendingPlanJob);
+    }
     if (!targetConversationId) return;
     await updateConversationWithProgress(targetConversationId, {
       last_phase: lastPhase,
@@ -3983,6 +4280,56 @@ export function WorkspacePage() {
         pending_plan_job: pendingPlanJob,
       } as unknown as Record<string, unknown>,
     });
+    if (pendingPlanJob) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
+    }
+  };
+
+  const schedulePendingPlanJobPersistence = (
+    pendingPlanJob: PendingPlanJob,
+    lastPhase: string,
+    extraContext: Record<string, unknown> = {},
+  ): void => {
+    if (!shouldRetryPlanJobPersistence({
+      hidden: !pageVisibleRef.current,
+      startedAt: pendingPlanJob.started_at,
+    })) {
+      return;
+    }
+    const key = planJobPersistenceKey(pendingPlanJob);
+    if (scheduledPlanJobPersistenceRef.current.has(key)) return;
+    const attempt = planJobPersistenceAttemptsRef.current.get(key) || 0;
+    planJobPersistenceAttemptsRef.current.set(key, attempt + 1);
+    scheduledPlanJobPersistenceRef.current.add(key);
+    window.setTimeout(() => {
+      scheduledPlanJobPersistenceRef.current.delete(key);
+      if (!shouldRetryPlanJobPersistence({
+        hidden: !pageVisibleRef.current,
+        startedAt: pendingPlanJob.started_at,
+      })) {
+        return;
+      }
+      const current = pendingPlanJobRef.current;
+      if (
+        current?.job_id !== pendingPlanJob.job_id
+        || current.conversation_id !== pendingPlanJob.conversation_id
+      ) {
+        return;
+      }
+      void persistPendingPlanJob(
+        pendingPlanJob,
+        pendingPlanJob.conversation_id,
+        lastPhase,
+        extraContext,
+      ).catch(() => {
+        schedulePendingPlanJobPersistence(pendingPlanJob, lastPhase, extraContext);
+      });
+    }, planJobResumeDelayMs(attempt));
   };
 
   const clearPendingPlanJob = async (
@@ -4573,35 +4920,65 @@ export function WorkspacePage() {
     const targetConversationId = pendingPlanJob.conversation_id;
     const shouldContinuePolling = () => isVisibleConversation(targetConversationId);
     const stopIfHidden = () => !shouldContinuePolling();
+    const clearRecoveryState = () => {
+      planJobResumeAttemptsRef.current.delete(pollKey);
+      planJobRecoveryNoticesRef.current.delete(pollKey);
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        targetConversationId,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
+    };
     setBusyForConversation(targetConversationId, true);
     try {
       if (stopIfHidden()) return;
       if (hasMaterializedPlanJob(messagesRef.current, targetConversationId, pendingPlanJob)) {
+        clearRecoveryState();
         await clearPendingPlanJob(targetConversationId, "plan_review").catch(() => {});
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         return;
       }
-      const status = pendingPlanJob.kind === "plan_revision"
-        ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
-        : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
-      if (stopIfHidden()) return;
-      if (status.status === "failed") {
-        throw new Error(status.error || status.message || "Plan job failed");
-      }
-      const plan = status.status === "completed" && status.result
-        ? status.result
+      const status = pendingPlanJob.kind === "plan_manual_edit"
+        ? await api.getPlanManualEditJob(pendingPlanJob.job_id)
         : pendingPlanJob.kind === "plan_revision"
-          ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
-          : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
+          ? await api.getPlanRevisionJob(pendingPlanJob.job_id)
+          : await api.getPlanMarkdownJob(pendingPlanJob.job_id);
+      if (stopIfHidden()) return;
+      const statusAction = classifyPlanJobResume({
+        status: status.status,
+        hasResult: Boolean(status.result),
+      });
+      if (statusAction === "clear_failed") {
+        throw new ApiError(
+          status.status === "failed" ? 409 : 422,
+          status.error || status.message || "Plan job failed",
+        );
+      }
+      const plan = statusAction === "complete"
+        ? status.result!
+        : pendingPlanJob.kind === "plan_manual_edit"
+          ? await api.pollPlanManualEditJob(pendingPlanJob.job_id, shouldContinuePolling)
+          : pendingPlanJob.kind === "plan_revision"
+            ? await api.pollPlanRevisionJob(pendingPlanJob.job_id, shouldContinuePolling)
+            : await api.pollPlanMarkdownJob(pendingPlanJob.job_id, shouldContinuePolling);
       if (!plan || stopIfHidden()) return;
       if (plan.error) {
+        clearRecoveryState();
         if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
         const isRevision = pendingPlanJob.kind === "plan_revision";
-        await clearPendingPlanJob(targetConversationId, isRevision ? "plan_revision_failed" : "plan_generation_failed", {
-          plan_job_resume_error: plan.error,
-        }).catch(() => {});
+        const isManualEdit = pendingPlanJob.kind === "plan_manual_edit";
+        await clearPendingPlanJob(
+          targetConversationId,
+          isManualEdit ? "plan_manual_edit_failed" : isRevision ? "plan_revision_failed" : "plan_generation_failed",
+          {
+            plan_job_resume_error: plan.error,
+          },
+        ).catch(() => {});
         pushAssistant(
-          isRevision
+          isManualEdit
+            ? `plan.md 编辑发布失败，已保留当前版本：${plan.error}`
+            : isRevision
             ? `plan.md 修改失败，已保留当前版本：${plan.error}`
             : `plan.md 生成失败，未展示不符合创作合同的候选方案：${plan.error}`,
           targetConversationId,
@@ -4627,6 +5004,9 @@ export function WorkspacePage() {
           type: "plan_save",
           last_phase: "plan_review",
           processed_key: pendingPlanJob.context.processedKey,
+          success_message: pendingPlanJob.kind === "plan_manual_edit"
+            ? `用户编辑内容已发布为 plan.md v${plan.plan_version}，请确认后继续。`
+            : undefined,
           context: {
             flowDraft: null,
             pendingDirectionJob: null,
@@ -4639,24 +5019,60 @@ export function WorkspacePage() {
             form_values: pendingPlanJob.context.formValues,
             intake_context: pendingPlanJob.context.intakeContext,
             materials: pendingPlanJob.context.materials,
+            ...(pendingPlanJob.kind === "plan_manual_edit" ? { plan_approved: false } : {}),
           },
         },
       );
+      if (pendingPlanJob.kind === "plan_manual_edit" && isVisibleConversation(targetConversationId)) {
+        setCanvasOpen(false);
+        setSelectedPlanEditorMessageId("");
+        setSavingPlanEdit(false);
+      }
+      clearRecoveryState();
     } catch (err) {
-      if (stopIfHidden()) return;
-      if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
       const message = err instanceof Error ? err.message : String(err);
+      const action = classifyPlanJobResume({
+        hidden: stopIfHidden(),
+        errorStatus: err instanceof ApiError ? err.status : undefined,
+      });
+      if (action === "retain_pending") {
+        if (!stopIfHidden()) {
+          const attempt = planJobResumeAttemptsRef.current.get(pollKey) || 0;
+          planJobResumeAttemptsRef.current.set(pollKey, attempt + 1);
+          if (!planJobRecoveryNoticesRef.current.has(pollKey)) {
+            planJobRecoveryNoticesRef.current.add(pollKey);
+            pushAssistant("Plan 查询暂时中断，正在使用原任务继续恢复…", targetConversationId);
+          }
+          window.setTimeout(() => {
+            const current = pendingPlanJobRef.current;
+            if (
+              !document.hidden &&
+              current?.job_id === pendingPlanJob.job_id &&
+              current.conversation_id === targetConversationId
+            ) {
+              void resumePendingPlanJob(pendingPlanJob);
+            }
+          }, planJobResumeDelayMs(attempt));
+        }
+        return;
+      }
+      clearRecoveryState();
+      if (pendingPlanJob.context.processedKey) releaseArtifactAction(pendingPlanJob.context.processedKey);
+      const isManualEdit = pendingPlanJob.kind === "plan_manual_edit";
       pushAssistant(
-        message.includes("404")
+        action === "clear_not_found"
           ? "之前的 plan.md 任务不存在或已过期。为避免重复生成，我没有自动重启任务，请从最新创意方向或 Plan 卡片手动重试。"
-          : `继续查询 plan.md 任务失败：${message}`,
+          : isManualEdit
+            ? `plan.md 编辑发布失败，已保留当前版本：${message}`
+            : `继续查询 plan.md 任务失败：${message}`,
         targetConversationId,
       );
-      await clearPendingPlanJob(targetConversationId, "plan_job_resume_failed", {
+      await clearPendingPlanJob(targetConversationId, isManualEdit ? "plan_manual_edit_failed" : "plan_job_resume_failed", {
         plan_job_resume_error: message,
       }).catch(() => {});
     } finally {
       activePlanJobPollsRef.current.delete(pollKey);
+      if (pendingPlanJob.kind === "plan_manual_edit") setSavingPlanEdit(false);
       setBusyForConversation(targetConversationId, false);
     }
   };
@@ -4994,6 +5410,129 @@ export function WorkspacePage() {
       pending_image_edit_request: null,
     }).catch(() => {});
     return;
+  };
+
+  const handleCompletedSceneAssetRevisionJob = async (
+    pendingScenePackageJob: PendingScenePackageJob,
+    result: ScenePackageAssetRevisionResponse,
+    processedKey: string,
+  ) => {
+    const targetConversationId = pendingScenePackageJob.conversation_id;
+    const request = pendingScenePackageJob.request as ScenePackageAssetRevisionRequest;
+    const sourceMessage = messagesRef.current.find(
+      (message) =>
+        message.id === pendingScenePackageJob.source_message_id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        Boolean(message.artifact?.videoScenePackages),
+    );
+    const sourceArtifact = sourceMessage?.artifact?.videoScenePackages
+      ? sourceMessage.artifact
+      : pendingScenePackageJob.artifact;
+    const sourcePackages = sourceArtifact.videoScenePackages;
+    const quotaPaused = Boolean(result.quota_insufficient) || isQuotaInsufficientPayload(result);
+    if (!result.ok || quotaPaused || !sourcePackages || !result.scene_packages.length) {
+      releaseArtifactAction(processedKey);
+      pushAssistant(
+        quotaPaused
+          ? quotaMessage(result.message || "图片分析额度不足，充值后可重新执行本次素材修改。")
+          : `分镜素材修改失败:${result.message || "任务没有返回更新后的场景包"}`,
+        targetConversationId,
+      );
+      await clearPendingScenePackageJob(
+        targetConversationId,
+        quotaPaused ? "scene_asset_revision_quota_paused" : "scene_asset_revision_failed",
+        {
+          scene_global_asset_revision_error: result.message || "任务没有返回更新后的场景包",
+          scene_global_asset_revision_request: request,
+        },
+      ).catch(() => {});
+      return;
+    }
+
+    const affectedSceneIds = Array.from(
+      new Set([...(sourceArtifact.videoScenePackageEditedSceneIds || []), ...(result.affected_scene_ids || [])]),
+    );
+    const updatedPackages: PrepareScenePackagesResponse = {
+      ...sourcePackages,
+      global_assets: result.global_assets,
+      scene_packages: result.scene_packages,
+      message: result.message || sourcePackages.message,
+    };
+    const updatedSourceArtifact: ChatArtifact = {
+      ...sourceArtifact,
+      videoScenePackages: updatedPackages,
+      videoScenePackageEditedSceneIds: affectedSceneIds,
+    };
+
+    if (sourceMessage) {
+      await api.updateConversationMessage(targetConversationId, sourceMessage.id, {
+        content: sourceMessage.content,
+        payload: {
+          artifact: updatedSourceArtifact,
+          materials: updatedSourceArtifact.materials || [],
+          client_message_id: sourceMessage.id,
+        } as unknown as Record<string, unknown>,
+      });
+      if (isVisibleConversation(targetConversationId)) {
+        setMessages((items) => {
+          const nextItems = items.map((message) =>
+            message.id === sourceMessage.id &&
+            messageConversationId(message, targetConversationId) === targetConversationId
+              ? { ...message, artifact: updatedSourceArtifact }
+              : message,
+          );
+          messagesRef.current = nextItems;
+          return nextItems;
+        });
+      }
+    }
+
+    if (pendingScenePackageJob.review_message_id) {
+      markImageResultAccepted(pendingScenePackageJob.review_message_id, targetConversationId);
+    }
+    setReferencedMaterials((items) => items.filter((item) => item.asset_id !== request.asset_id));
+    const completedMessage: ChatMessage = {
+      id: scenePackageJobMessageId(pendingScenePackageJob),
+      conversationId: targetConversationId,
+      role: "assistant",
+      content: request.operation === "replace"
+        ? "素材分析完成，已仅更新引用该素材的分镜描述。最新场景包已生成，请打开「查看分镜」确认。"
+        : "素材已删除，相关分镜中的引用和描述已同步清理。最新场景包已生成，请打开「查看分镜」确认。",
+      time: "",
+      artifact: {
+        ...updatedSourceArtifact,
+        type: "video_scene_packages",
+        title: sourceArtifact.title || "视频场景包",
+        description: `${updatedPackages.scene_packages.length} 个场景片段，${result.affected_scene_ids.length} 个分镜已同步更新。`,
+        actionLabel: "确认",
+        videoScenePackages: updatedPackages,
+        originalVideoScenePackages: sourceArtifact.originalVideoScenePackages || sourcePackages,
+        videoScenePackageEditedSceneIds: affectedSceneIds,
+      },
+    };
+    // 终态场景包也通过可恢复消息 job 落库；刷新或切换对话时，后续恢复会继续保存同一条消息。
+    const completionMessageJob = await startConversationMessageJobForConversation(
+      completedMessage,
+      targetConversationId,
+    );
+    if (completionMessageJob) await resumePendingMessageJob(completionMessageJob);
+    if (isVisibleConversation(targetConversationId)) {
+      setSelectedStoryboardMessageId(completedMessage.id);
+      setCanvasOpen(true);
+    }
+    await clearPendingScenePackageJob(targetConversationId, "scene_asset_revision_completed", {
+      global_assets: updatedPackages.global_assets,
+      scene_packages: updatedPackages.scene_packages,
+      generated_scene_videos: sourceArtifact.generatedSceneVideos?.scene_videos,
+      merged_video: sourceArtifact.mergedVideo,
+      video_scene_package_edited_scene_ids: affectedSceneIds,
+      scene_global_asset_revision: {
+        operation: request.operation,
+        asset_id: request.asset_id,
+        asset_group: request.asset_group,
+        affected_scene_ids: result.affected_scene_ids,
+      },
+    }).catch(() => {});
   };
 
   const handleCompletedSceneAssetJob = async (
@@ -5732,7 +6271,11 @@ export function WorkspacePage() {
         : null;
       advanceWorkflowProgress(
         pendingScenePackageJob.conversation_id,
-        pendingScenePackageJob.kind === "scene_asset_generation" ? "scene_asset_generation_running" : "scene_package_generation_running",
+        pendingScenePackageJob.kind === "scene_asset_generation"
+          ? "scene_asset_generation_running"
+          : pendingScenePackageJob.kind === "scene_asset_revision"
+            ? "scene_asset_revision_running"
+            : "scene_package_generation_running",
         {
           intent: "video",
           scene_package_stage: status.stage,
@@ -5755,7 +6298,26 @@ export function WorkspacePage() {
     };
     try {
       if (stopIfHidden()) return;
-      if (pendingScenePackageJob.kind === "scene_asset_generation") {
+      if (pendingScenePackageJob.kind === "scene_asset_revision") {
+        const request = pendingScenePackageJob.request as ScenePackageAssetRevisionRequest;
+        const status = await api.getScenePackageAssetRevisionJob(pendingScenePackageJob.job_id);
+        if (stopIfHidden()) return;
+        const revision =
+          status.status === "completed" && status.result
+            ? status.result
+            : await api.pollScenePackageAssetRevisionJob(pendingScenePackageJob.job_id, shouldContinuePolling);
+        if (!revision || stopIfHidden()) return;
+        await handleCompletedSceneAssetRevisionJob(
+          pendingScenePackageJob,
+          {
+            ...revision,
+            operation: revision.asset_id ? revision.operation : request.operation,
+            asset_id: revision.asset_id || request.asset_id,
+            asset_group: revision.asset_id ? revision.asset_group : request.asset_group,
+          },
+          processedKey,
+        );
+      } else if (pendingScenePackageJob.kind === "scene_asset_generation") {
         const status = await api.getSceneAssetsJob(pendingScenePackageJob.job_id);
         if (stopIfHidden()) return;
         const sceneAssets =
@@ -5780,7 +6342,7 @@ export function WorkspacePage() {
       const message = err instanceof Error ? err.message : String(err);
       pushAssistant(
         message.includes("404")
-          ? "之前的场景包或参考图生成任务不存在或已过期。为避免重复生成，我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
+          ? "之前的场景包、参考图或素材修订任务不存在或已过期。为避免重复生成，我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
           : `继续查询场景包生成任务失败:${message}`,
         pendingScenePackageJob.conversation_id,
       );
@@ -6131,7 +6693,7 @@ export function WorkspacePage() {
     }
   }
 
-  const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>) => {
+  const applySnapshot = (snapshot: Partial<WorkspaceSnapshot>, targetConversationId: string) => {
     if (Array.isArray(snapshot.messages)) {
       messagesRef.current = snapshot.messages;
       setMessages(snapshot.messages);
@@ -6148,14 +6710,30 @@ export function WorkspacePage() {
     const restoredRuntimeTurns = (
       Array.isArray(rawRuntimeTurns) ? rawRuntimeTurns : []
     )
-      .map((item) => parsePendingSupervisorTurn(item, conversationIdRef.current))
+      .map((item) => parsePendingSupervisorTurn(item, targetConversationId))
       .filter((item): item is PendingSupervisorTurn => item !== null);
     pendingSupervisorTurnsRef.current = restoredRuntimeTurns;
-    if (conversationIdRef.current) {
+    if (targetConversationId) {
       pendingSupervisorTurnsByConversationRef.current.set(
-        conversationIdRef.current,
+        targetConversationId,
         restoredRuntimeTurns,
       );
+      const unavailableNoticeVersion = snapshot.agentRuntimeUnavailableNoticeVersion
+        ?? snapshot.agent_runtime_unavailable_notice_version;
+      if (
+        typeof unavailableNoticeVersion === "number"
+        && Number.isFinite(unavailableNoticeVersion)
+        && unavailableNoticeVersion > 0
+      ) {
+        unavailableSupervisorNoticeVersionsRef.current.set(
+          targetConversationId,
+          unavailableNoticeVersion,
+        );
+      } else {
+        unavailableSupervisorNoticeVersionsRef.current.delete(
+          targetConversationId,
+        );
+      }
     }
     setPendingSupervisorTurns(restoredRuntimeTurns);
     pendingPlanMessagePersistenceIdsRef.current = new Set(
@@ -6180,21 +6758,22 @@ export function WorkspacePage() {
     imageRevisionArtifactRef.current = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     pptOutlineRevisionArtifactRef.current = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
     pendingScenePackageJobRef.current = snapshot.pendingScenePackageJob || snapshot.pending_scene_package_job || null;
+    setPendingScenePackageResumeVersion((version) => version + 1);
     pendingVideoJobRef.current = snapshot.pendingVideoJob || snapshot.pending_video_job || null;
     videoRevisionArtifactRef.current = snapshot.pendingVideoRevision || snapshot.pending_video_revision || null;
     pendingPptJobRef.current = snapshot.pendingPptJob || snapshot.pending_ppt_job || null;
     const pendingJianyingDraftJob = snapshot.pendingJianyingDraftJob || snapshot.pending_jianying_draft_job || null;
     pendingJianyingDraftJobRef.current =
-      pendingJianyingDraftJob?.conversation_id === conversationIdRef.current ? pendingJianyingDraftJob : null;
+      pendingJianyingDraftJob?.conversation_id === targetConversationId ? pendingJianyingDraftJob : null;
     setJianyingDraftRecordsForConversation(
-      conversationIdRef.current,
+      targetConversationId,
       snapshot.jianyingDraftRecords || snapshot.jianying_draft_records || {},
     );
     const restoredWorkflowProgress = snapshot.workflowProgress || snapshot.workflow_progress || null;
-    workflowProgressConversationIdRef.current = conversationIdRef.current;
+    workflowProgressConversationIdRef.current = targetConversationId;
     workflowProgressRef.current = restoredWorkflowProgress;
     setWorkflowProgress(restoredWorkflowProgress);
-    setPptDoneForConversation(conversationIdRef.current, snapshot.ppt_done === true);
+    setPptDoneForConversation(targetConversationId, snapshot.ppt_done === true);
     setReferencedMaterials([]);
     if (snapshot.canvas) setCanvas(snapshot.canvas);
     if (typeof snapshot.canvasOpen === "boolean") setCanvasOpen(snapshot.canvasOpen);
@@ -6232,6 +6811,10 @@ export function WorkspacePage() {
       pending_agent_runtime_turns: pendingSupervisorTurnsRef.current.filter(
         (item) => item.conversationId === snapshotConversationId,
       ),
+      agentRuntimeUnavailableNoticeVersion:
+        unavailableSupervisorNoticeVersionsRef.current.get(snapshotConversationId),
+      agent_runtime_unavailable_notice_version:
+        unavailableSupervisorNoticeVersionsRef.current.get(snapshotConversationId),
       pendingIntakeJob:
         pendingIntakeJobRef.current?.conversation_id === snapshotConversationId ? pendingIntakeJobRef.current : null,
       pending_intake_job:
@@ -6325,7 +6908,10 @@ export function WorkspacePage() {
     setBusy(false);
     setResolvedOrchestrationMode("frontend_v2");
     setResolvedAgentRuntimeMode("off");
+    primaryExecutionReadyRef.current = false;
     pendingSupervisorTurnsRef.current = [];
+    unavailableSupervisorNoticeVersionsRef.current = new Map();
+    unavailableSupervisorRecoveryInFlightRef.current = new Set();
     setPendingSupervisorTurns([]);
     setBriefConfirmed(false);
     briefConfirmedRef.current = false;
@@ -6362,6 +6948,10 @@ export function WorkspacePage() {
   };
 
   const applyConversation = async (detail: ConversationDetailResponse) => {
+    primaryExecutionReadyRef.current = resolveWorkspacePrimaryExecutionReady({
+      conversation: detail.conversation,
+      messages: detail.messages,
+    });
     const resolvedMode = resolveWorkspaceOrchestrationMode({
       conversation: detail.conversation,
       messages: detail.messages,
@@ -6380,7 +6970,22 @@ export function WorkspacePage() {
     const pendingMessageJob = snapshot.pendingMessageJob || snapshot.pending_message_job || null;
     const pendingIntakeJob = snapshot.pendingIntakeJob || snapshot.pending_intake_job || null;
     const pendingDirectionJob = snapshot.pendingDirectionJob || snapshot.pending_direction_job || null;
-    const pendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
+    const storedPendingPlanJob = snapshot.pendingPlanJob || snapshot.pending_plan_job || null;
+    const recoveredPendingPlanJobCandidate = storedPendingPlanJob
+      ? null
+      : loadPendingPlanJobRecovery<PendingPlanJob>(
+          browserSessionStorage(),
+          detail.conversation.conversation_id,
+        );
+    const recoveredPendingPlanJob = isRecoverablePendingPlanJob(recoveredPendingPlanJobCandidate)
+      ? recoveredPendingPlanJobCandidate
+      : null;
+    if (storedPendingPlanJob) {
+      clearPendingPlanJobRecovery(browserSessionStorage(), detail.conversation.conversation_id);
+    } else if (recoveredPendingPlanJobCandidate && !recoveredPendingPlanJob) {
+      clearPendingPlanJobRecovery(browserSessionStorage(), detail.conversation.conversation_id);
+    }
+    const pendingPlanJob = storedPendingPlanJob || recoveredPendingPlanJob;
     const pendingImageJob = snapshot.pendingImageJob || snapshot.pending_image_job || null;
     const pendingImageRevision = snapshot.pendingImageRevision || snapshot.pending_image_revision || null;
     const pendingPptOutlineRevision = snapshot.pendingPptOutlineRevision || snapshot.pending_ppt_outline_revision || null;
@@ -6403,6 +7008,18 @@ export function WorkspacePage() {
     const normalizedMessages = normalizeRestoredMessageReferences(
       dedupeRestoredScenePackageMessages(restorePendingMessageJobMessage(videoAwareMessages, pendingMessageJob)),
     );
+    const pendingPlanJobMaterialized = Boolean(
+      pendingPlanJob
+      && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob),
+    );
+    if (pendingPlanJobMaterialized && pendingPlanJob) {
+      clearPendingPlanJobRecovery(
+        browserSessionStorage(),
+        detail.conversation.conversation_id,
+        pendingPlanJob.job_id,
+      );
+      clearPlanJobPersistenceState(pendingPlanJob);
+    }
     const contextIntent = isCreationIntent((detail.conversation.context || {}).intent)
       ? (detail.conversation.context || {}).intent as CreationIntent
       : null;
@@ -6436,10 +7053,12 @@ export function WorkspacePage() {
       pending_intake_job: pendingIntakeJob,
       pendingDirectionJob,
       pending_direction_job: pendingDirectionJob,
-      pendingPlanJob:
-        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
-      pending_plan_job:
-        pendingPlanJob && hasMaterializedPlanJob(normalizedMessages, detail.conversation.conversation_id, pendingPlanJob) ? null : pendingPlanJob,
+      pendingPlanJob: pendingPlanJobMaterialized ? null : pendingPlanJob,
+      pending_plan_job: pendingPlanJobMaterialized ? null : pendingPlanJob,
+      pendingPlanRevisionChoice:
+        pendingPlanJob?.kind === "plan_revision" ? null : snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null,
+      pending_plan_revision_choice:
+        pendingPlanJob?.kind === "plan_revision" ? null : snapshot.pendingPlanRevisionChoice || snapshot.pending_plan_revision_choice || null,
       pendingImageEditRequest: pendingImageEditRequest as PendingImageEditRequest | null,
       pendingImageJob,
       pending_image_job: pendingImageJob,
@@ -6461,8 +7080,19 @@ export function WorkspacePage() {
       workflowProgress: restoredWorkflowProgress,
       workflow_progress: restoredWorkflowProgress,
       messages: normalizedMessages,
-    });
+    }, detail.conversation.conversation_id);
+    if (!pendingPlanJobMaterialized && pendingPlanJob?.context.processedKey) {
+      processedArtifactIdsRef.current.add(pendingPlanJob.context.processedKey);
+    }
     if (resolvedMode !== "frontend_v2") return;
+    if (recoveredPendingPlanJob && !pendingPlanJobMaterialized) {
+      notifyPlanJobPersistenceRecovery(recoveredPendingPlanJob);
+      schedulePendingPlanJobPersistence(
+        recoveredPendingPlanJob,
+        pendingPlanJobRunningPhase(recoveredPendingPlanJob.kind),
+        pendingPlanJobPersistenceContext(recoveredPendingPlanJob.kind),
+      );
+    }
     if (pendingMessageJob?.job_id && pendingMessageJob.conversation_id === detail.conversation.conversation_id) {
       window.setTimeout(() => {
         void resumePendingMessageJob(pendingMessageJob);
@@ -6587,6 +7217,17 @@ export function WorkspacePage() {
     }
     const pendingPlanJob = pendingPlanJobRef.current;
     if (pendingPlanJob?.job_id && pendingPlanJob.conversation_id === activeConversationId) {
+      const recoveryHandle = loadPendingPlanJobRecovery<PendingPlanJob>(
+        browserSessionStorage(),
+        activeConversationId,
+      );
+      if (recoveryHandle?.job_id === pendingPlanJob.job_id) {
+        schedulePendingPlanJobPersistence(
+          pendingPlanJob,
+          pendingPlanJobRunningPhase(pendingPlanJob.kind),
+          pendingPlanJobPersistenceContext(pendingPlanJob.kind),
+        );
+      }
       void resumePendingPlanJob(pendingPlanJob);
     }
     const pendingImageJob = pendingImageJobRef.current;
@@ -6611,10 +7252,29 @@ export function WorkspacePage() {
     }
   };
 
+  // 对话恢复是“先写 Ref、再提交 React 状态”。素材修订 job 额外在提交完成后接力一次，
+  // 避免切换对话或刷新时，首个 setTimeout 早于可见对话状态而永久停止轮询。
+  useEffect(() => {
+    if (!orchestrationResolved || !currentConversationId || !pageVisibleRef.current) return;
+    const pendingScenePackageJob = pendingScenePackageJobRef.current;
+    if (
+      !pendingScenePackageJob?.job_id
+      || pendingScenePackageJob.conversation_id !== currentConversationId
+      || hasMaterializedScenePackageJob(messagesRef.current, pendingScenePackageJob)
+    ) {
+      return;
+    }
+    void resumePendingScenePackageJob(pendingScenePackageJob);
+  }, [currentConversationId, orchestrationResolved, pendingScenePackageResumeVersion]);
+
   // 刷新或压缩完成后，服务端 Turn 可能已经进入 processing，但旧版页面内存里的
   // pendingSupervisorTurns 已丢失。这里按服务端队列和已保存用户消息重建接力 DTO，
   // 类似从数据库恢复一条待执行的 Service Command，绝不重新注册或重复计费。
   useEffect(() => {
+    if (
+      orchestrationModeRef.current === "supervisor_v1"
+      && !primaryExecutionReadyRef.current
+    ) return;
     const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow"
@@ -6674,6 +7334,7 @@ export function WorkspacePage() {
       replyToMessageId: null,
       artifactRefs: [],
       interruptId: null,
+      explicitAction: null,
       continueLegacy: orchestrationModeRef.current === "frontend_v2",
       registrationStatus: "registered",
       runId: recoverableInput.turnId || undefined,
@@ -6690,6 +7351,87 @@ export function WorkspacePage() {
     pendingSupervisorTurns,
     orchestrationMode,
     orchestrationResolved,
+    supervisorRuntime.state.connection.status,
+    supervisorRuntime.state.inputQueue,
+  ]);
+
+  // M13.2 早期候选可能已经把 Turn 保存为 accepted，却没有真实 Graph Handler。
+  // 这里按会话写一次稳定提示和版本 marker，再一次性清空全部本地 pending；
+  // 即使进程在两次写入之间退出，刷新也只补齐 marker，不会重复新增消息。
+  useEffect(() => {
+    if (
+      !orchestrationResolved
+      || !currentConversationId
+      || !primaryExecutionUnavailable
+    ) {
+      return;
+    }
+    const targetConversationId = currentConversationId;
+    const noticeId = unavailableSupervisorNoticeId(targetConversationId);
+    const noticePersisted = messagesRef.current.some(
+      (message) => (
+        message.id === noticeId
+        || message.content === UNAVAILABLE_SUPERVISOR_NOTICE
+      )
+        && messageConversationId(message, targetConversationId) === targetConversationId,
+    );
+    const pendingCount = pendingSupervisorTurns.filter(
+      (item) => item.conversationId === targetConversationId,
+    ).length;
+    const hasActiveInput = supervisorRuntime.state.inputQueue.some(
+      (item) => ["sending", "queued", "processing", "accepted"].includes(item.status),
+    );
+    const recoveryAction = resolveUnavailableSupervisorRecovery({
+      orchestrationMode,
+      primaryExecutionReady: primaryExecutionReadyRef.current,
+      connectionStatus: supervisorRuntime.state.connection.status,
+      pendingCount,
+      hasActiveInput,
+      markerVersion:
+        unavailableSupervisorNoticeVersionsRef.current.get(targetConversationId) ?? 0,
+      noticePersisted,
+    });
+    if (
+      recoveryAction === "none"
+      || unavailableSupervisorRecoveryInFlightRef.current.has(targetConversationId)
+    ) {
+      return;
+    }
+    unavailableSupervisorRecoveryInFlightRef.current.add(targetConversationId);
+    const convergeUnavailableSupervisor = async () => {
+      try {
+        if (recoveryAction === "persist_notice") {
+          await appendPersistedSupervisorNotice(
+            UNAVAILABLE_SUPERVISOR_NOTICE,
+            targetConversationId,
+            noticeId,
+          );
+        }
+        unavailableSupervisorNoticeVersionsRef.current.set(
+          targetConversationId,
+          UNAVAILABLE_SUPERVISOR_NOTICE_VERSION,
+        );
+        await persistPendingSupervisorTurns(
+          () => [],
+          targetConversationId,
+        );
+      } catch {
+        unavailableSupervisorNoticeVersionsRef.current.delete(
+          targetConversationId,
+        );
+      } finally {
+        unavailableSupervisorRecoveryInFlightRef.current.delete(
+          targetConversationId,
+        );
+      }
+    };
+    void convergeUnavailableSupervisor();
+  }, [
+    currentConversationId,
+    orchestrationMode,
+    orchestrationResolved,
+    pendingSupervisorTurns,
+    primaryExecutionUnavailable,
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.inputQueue,
   ]);
@@ -6741,6 +7483,7 @@ export function WorkspacePage() {
       setActiveConversationId(conversationId);
       orchestrationModeRef.current = null;
       agentRuntimeModeRef.current = null;
+      primaryExecutionReadyRef.current = false;
       setOrchestrationResolved(false);
       setBusy(true);
       try {
@@ -6814,6 +7557,7 @@ export function WorkspacePage() {
     });
     const createdMode = resolveWorkspaceOrchestrationMode(created);
     const createdAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode(created);
+    primaryExecutionReadyRef.current = resolveWorkspacePrimaryExecutionReady(created);
     skipRouteRestoreConversationRef.current = created.conversation_id;
     setResolvedAgentRuntimeMode(createdAgentRuntimeMode);
     setResolvedOrchestrationMode(createdMode);
@@ -6857,6 +7601,41 @@ export function WorkspacePage() {
     });
   };
 
+  const appendPersistedSupervisorNotice = async (
+    content: string,
+    targetConversationId: string,
+    messageId: string,
+  ) => {
+    if (messagesRef.current.some(
+      (message) => message.id === messageId
+        && messageConversationId(message, targetConversationId) === targetConversationId,
+    )) {
+      return;
+    }
+    const optimisticMessage = appendOptimisticMessageForConversation({
+      id: messageId,
+      conversationId: targetConversationId,
+      role: "assistant",
+      content,
+      time: "",
+    }, targetConversationId);
+    try {
+      const savedMessage = await persistChatMessage(
+        targetConversationId,
+        optimisticMessage,
+      );
+      replaceOptimisticMessage(
+        optimisticMessage.id,
+        savedMessage,
+        targetConversationId,
+      );
+    } catch (error) {
+      removeOptimisticMessage(optimisticMessage.id, targetConversationId);
+      throw error;
+    }
+    await supervisorRuntime.refreshSnapshot().catch(() => {});
+  };
+
   const handleSupervisorTurn = async (
     pendingTurn: PendingSupervisorTurn,
     contextVersion: number,
@@ -6881,6 +7660,7 @@ export function WorkspacePage() {
         interruptId: orchestrationModeRef.current === "supervisor_v1"
           ? pendingTurn.interruptId
           : null,
+        explicitAction: pendingTurn.explicitAction,
       }, expectedContextVersion);
       if (submission.kind === "interrupt") {
         if (orchestrationModeRef.current !== "supervisor_v1") return null;
@@ -6914,6 +7694,42 @@ export function WorkspacePage() {
     }
   };
 
+  async function submitSupervisorAction(
+    content: string,
+    explicitAction: ExplicitActionSignal,
+    options: SubmitSupervisorActionOptions,
+  ): Promise<void> {
+    const clientInputId = crypto.randomUUID();
+    const targetConversationId = currentConversationId;
+    const interruptId = supervisorRuntime.state.interrupt?.interruptId ?? null;
+    if (
+      orchestrationModeRef.current !== "supervisor_v1"
+      || !targetConversationId
+      || !interruptId
+      || !content.trim()
+    ) return;
+    const pendingTurn: PendingSupervisorTurn = {
+      conversationId: targetConversationId,
+      clientInputId,
+      content,
+      materials: options.materials || [],
+      replyToMessageId: options.replyToMessageId ?? null,
+      artifactRefs: options.artifactRefs
+        ?? (explicitAction.artifact_ref ? [explicitAction.artifact_ref] : []),
+      interruptId,
+      explicitAction,
+      continueLegacy: false,
+      registrationStatus: "pending",
+    };
+    await persistPendingSupervisorTurns(
+      (current) => current.some((item) => item.clientInputId === clientInputId)
+        ? current
+        : [...current, pendingTurn],
+      targetConversationId,
+    );
+    ensurePendingSupervisorTurnVisible(pendingTurn);
+  }
+
   useEffect(() => {
     // 恢复时优先处理尚未提交到 Runtime 的输入；已注册 Turn 则优先选择
     // Snapshot 中仍存在的 input，避免已失效的旧 registered Turn 一直 wait，
@@ -6946,9 +7762,37 @@ export function WorkspacePage() {
     // 一次最新 Snapshot，因此不能因为这里暂时为 null 而把已落库 Turn 卡死。
     if (supervisorRuntime.state.connection.status !== "connected") return;
     if (serverInput) ensurePendingSupervisorTurnVisible(pendingTurn);
+    if (
+      pendingTurn.explicitAction
+      && pendingTurn.registrationStatus === "registered"
+      && pendingTurn.runId
+    ) {
+      supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+      void supervisorRuntime.getRunStatus(pendingTurn.runId)
+        .then(async (value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return;
+          const status = value.status;
+          if (status !== "waiting_user" && status !== "completed" && status !== "failed") return;
+          await persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          );
+          await supervisorRuntime.refreshSnapshot().catch(() => {});
+        })
+        .catch(() => {})
+        .finally(() => {
+          supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+        });
+      return;
+    }
     const handoffAction = resolveAssistHandoffAction({
+      orchestrationMode: orchestrationModeRef.current ?? "frontend_v2",
+      primaryExecutionReady: primaryExecutionReadyRef.current,
       registrationStatus: pendingTurn.registrationStatus,
       serverInputStatus: serverInput?.status,
+      serverRunStatus: supervisorRuntime.state.run.status,
       continueLegacy: pendingTurn.continueLegacy,
       legacyBusy,
       dialogOpen,
@@ -6956,8 +7800,29 @@ export function WorkspacePage() {
     });
     if (handoffAction !== "register") {
       if (handoffAction === "wait") return;
+      // 历史未接线会话由上面的会话级恢复 effect 统一收敛，避免每条 pending
+      // 各写一条随机提示或在清空后因孤儿 inputQueue 再次重建。
+      if (handoffAction === "unavailable") return;
       if (handoffAction === "failed") {
-        appendSupervisorNotice("会话 Agent 未能处理已保存输入，请稍后重试。", pendingTurn.conversationId);
+        supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
+        void appendPersistedSupervisorNotice(
+          "会话 Agent 未能处理已保存输入，请稍后重试。",
+          pendingTurn.conversationId,
+          failedSupervisorNoticeId(
+            pendingTurn.conversationId,
+            pendingTurn.clientInputId,
+          ),
+        )
+          .then(() => persistPendingSupervisorTurns(
+            (current) => current.filter(
+              (item) => item.clientInputId !== pendingTurn.clientInputId,
+            ),
+            pendingTurn.conversationId,
+          ))
+          .catch(() => {})
+          .finally(() => {
+            supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
+          });
         return;
       }
       supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
@@ -7046,6 +7911,7 @@ export function WorkspacePage() {
     supervisorRuntime.getContextVersion,
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.inputQueue,
+    supervisorRuntime.state.run.status,
   ]);
 
   const shouldUseRecoverableIntakeEntry = (
@@ -7119,6 +7985,7 @@ export function WorkspacePage() {
           interruptId: ownership.orchestrationMode === "supervisor_v1"
             ? interruptId ?? restoredInterruptId
             : null,
+          explicitAction: null,
           continueLegacy: ownership.orchestrationMode === "frontend_v2",
           registrationStatus: "pending",
         };
@@ -8082,18 +8949,32 @@ export function WorkspacePage() {
           processedKey,
         },
       };
-      await persistPendingPlanJob(
+      const persistenceContext = {
+        selected_direction: direction,
+        form_values: msg.artifact.formValues,
+        intake_context: msg.artifact.intakeContext,
+        materials: msg.artifact.materials || [],
+      };
+      await continueStartedPlanJob({
         pendingPlanJob,
-        targetConversationId,
-        "plan_generation_running",
-        {
-          selected_direction: direction,
-          form_values: msg.artifact.formValues,
-          intake_context: msg.artifact.intakeContext,
-          materials: msg.artifact.materials || [],
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
         },
-      );
-      await resumePendingPlanJob(pendingPlanJob);
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_generation_running",
+          persistenceContext,
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_generation_running",
+          persistenceContext,
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -8265,12 +9146,24 @@ export function WorkspacePage() {
     const artifact = msg.artifact;
     if (!artifact?.plan || !isCreationIntent(artifact.intent) || !artifact.formValues || !artifact.selectedDirection) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const existingPlanJob = pendingPlanJobRef.current;
+    if (existingPlanJob?.job_id && existingPlanJob.conversation_id === targetConversationId) {
+      setSavingPlanEdit(existingPlanJob.kind === "plan_manual_edit");
+      setBusyForConversation(targetConversationId, true);
+      schedulePendingPlanJobPersistence(
+        existingPlanJob,
+        pendingPlanJobRunningPhase(existingPlanJob.kind),
+        pendingPlanJobPersistenceContext(existingPlanJob.kind),
+      );
+      await resumePendingPlanJob(existingPlanJob);
+      return;
+    }
     const processedKey = beginArtifactAction(msg, targetConversationId);
     if (!processedKey) return;
     setSavingPlanEdit(true);
     setBusyForConversation(targetConversationId, true);
     try {
-      const plan = await api.savePlanMarkdownEdit({
+      const request: PlanManualEditJobRequest = {
         intent: artifact.intent,
         form_values: artifact.formValues,
         selected_direction: artifact.selectedDirection as unknown as Record<string, unknown>,
@@ -8285,42 +9178,45 @@ export function WorkspacePage() {
         product_creative_profile: { core_message: artifact.coreMessage || pendingCore },
         intake_context: artifact.intakeContext,
         materials: artifact.materials || [],
-      });
-      if (plan.error) {
-        releaseArtifactAction(processedKey);
-        pushAssistant(
-          `plan.md 编辑发布失败，已保留当前 v${artifact.plan.plan_version || 1}：${plan.error}`,
-          targetConversationId,
-        );
-        return;
-      }
-      await persistPlanArtifactForConversation(
-        createPlanArtifactMessage(
-          plan,
-          artifact.selectedDirection,
-          {
-            intent: artifact.intent,
-            formValues: artifact.formValues,
-            materials: artifact.materials || [],
-            coreMessage: artifact.coreMessage || pendingCore,
-            intakeContext: artifact.intakeContext,
-          },
-          targetConversationId,
-        ),
-        targetConversationId,
-        {
-          type: "plan_save",
-          last_phase: "plan_review",
-          processed_key: processedKey,
-          success_message: `用户编辑内容已发布为 plan.md v${plan.plan_version}，请确认后继续。`,
-          context: {
-            ...makeSnapshot(targetConversationId),
-            plan_approved: false,
-          } as unknown as Record<string, unknown>,
+      };
+      const started = await api.startPlanManualEditJob(request);
+      const pendingPlanJob: PendingPlanJob = {
+        job_id: started.job_id,
+        conversation_id: targetConversationId,
+        source_message_id: msg.id,
+        kind: "plan_manual_edit",
+        started_at: new Date().toISOString(),
+        request,
+        context: {
+          intent: artifact.intent,
+          formValues: artifact.formValues,
+          selectedDirection: artifact.selectedDirection,
+          materials: artifact.materials || [],
+          coreMessage: artifact.coreMessage || pendingCore,
+          intakeContext: artifact.intakeContext,
+          processedKey,
         },
-      );
-      setCanvasOpen(false);
-      setSelectedPlanEditorMessageId("");
+      };
+      await continueStartedPlanJob({
+        pendingPlanJob,
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
+        },
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_manual_edit_running",
+          { plan_approved: false },
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_manual_edit_running",
+          { plan_approved: false },
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       releaseArtifactAction(processedKey);
       pushAssistant(`plan.md 编辑发布失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -8416,6 +9312,19 @@ export function WorkspacePage() {
     setPendingPlanRevisionChoice(null);
     setBusyForConversation(targetConversationId, true);
     try {
+      const existingPlanJob = pendingPlanJobRef.current;
+      if (
+        existingPlanJob?.job_id
+        && existingPlanJob.conversation_id === targetConversationId
+      ) {
+        schedulePendingPlanJobPersistence(
+          existingPlanJob,
+          pendingPlanJobRunningPhase(existingPlanJob.kind),
+          pendingPlanJobPersistenceContext(existingPlanJob.kind),
+        );
+        await resumePendingPlanJob(existingPlanJob);
+        return;
+      }
       if (mode === "regenerate_directions") {
         pushAssistant("已选择放弃当前创意，正在重新生成 3 个创意方向…", targetConversationId);
         await startDirectionJob(
@@ -8475,16 +9384,30 @@ export function WorkspacePage() {
           processedKey: pending.processedKey,
         },
       };
-      await persistPendingPlanJob(
+      const persistenceContext = {
+        pendingPlanRevisionChoice: null,
+        pending_plan_revision_choice: null,
+      };
+      await continueStartedPlanJob({
         pendingPlanJob,
-        targetConversationId,
-        "plan_revision_running",
-        {
-          pendingPlanRevisionChoice: null,
-          pending_plan_revision_choice: null,
+        saveRecovery: (job) => {
+          pendingPlanJobRef.current = job;
+          savePendingPlanJobRecovery(browserSessionStorage(), job);
         },
-      );
-      await resumePendingPlanJob(pendingPlanJob);
+        persistPending: (job) => persistPendingPlanJob(
+          job,
+          targetConversationId,
+          "plan_revision_running",
+          persistenceContext,
+        ),
+        notifyRecovery: notifyPlanJobPersistenceRecovery,
+        schedulePersistenceRetry: (job) => schedulePendingPlanJobPersistence(
+          job,
+          "plan_revision_running",
+          persistenceContext,
+        ),
+        resumePending: resumePendingPlanJob,
+      });
     } catch (err) {
       if (pending.processedKey) releaseArtifactAction(pending.processedKey);
       pushAssistant(`plan.md 修改失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
@@ -8678,64 +9601,32 @@ export function WorkspacePage() {
     imageRevisionArtifactRef.current = null;
     const sceneAssetReview = msg.artifact.sceneGlobalAssetEditReview;
     if (sceneAssetReview) {
-      const updatedPackages = syncGlobalSceneAssetEditAcrossConversation(
-        targetConversationId,
+      await startSceneGlobalAssetRevision(
         {
-          assetId: sceneAssetReview.asset_id,
-          assetGroup: sceneAssetReview.asset_group,
-          editedImageUrl: sceneAssetReview.edited_image_url,
+          source: "scene_global_asset",
+          asset_id: sceneAssetReview.asset_id,
+          asset_group: sceneAssetReview.asset_group,
+          name: sceneAssetReview.asset_name || sceneAssetReview.asset_id,
+          source_image_url: sceneAssetReview.source_image_url,
+          url: sceneAssetReview.source_image_url,
+          type: "image",
+          filename: sceneAssetReview.asset_name || sceneAssetReview.asset_id,
+          storyboard_message_id: sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
         },
-        sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id,
-        sceneAssetReview.videoScenePackages,
-      );
-      if (!updatedPackages) {
-        releaseArtifactAction(processedKey);
-        pushAssistant("素材候选图已确认，但没有找到可写回的场景包。请从最新场景包重新引用素材后再试。", targetConversationId);
-        return;
-      }
-      const storyboardMessageId = sceneAssetReview.storyboard_message_id || sceneAssetReview.source_message_id;
-      const sourceScenePackageArtifact = messagesRef.current.find(
-        (message) =>
-          message.id === storyboardMessageId &&
-          messageConversationId(message, targetConversationId) === targetConversationId &&
-          message.artifact?.type === "video_scene_packages" &&
-          Boolean(message.artifact.videoScenePackages),
-      )?.artifact;
-      markImageResultAccepted(msg.id, targetConversationId);
-      const updatedScenePackageMessage = pushArtifact("素材已替换，已推送更新后的场景包，请继续确认或生成视频。", {
-        type: "video_scene_packages",
-        title: sourceScenePackageArtifact?.title || "视频场景包",
-        description: `${updatedPackages.scene_packages.length} 个场景片段，素材已更新，生成视频前请再次确认。`,
-        actionLabel: "确认",
-        videoScenePackages: updatedPackages,
-        originalVideoScenePackages:
-          sourceScenePackageArtifact?.originalVideoScenePackages ||
-          sceneAssetReview.originalVideoScenePackages ||
-          sceneAssetReview.videoScenePackages,
-        sceneAssetFailures: sourceScenePackageArtifact?.sceneAssetFailures || [],
-        intent: "video",
-        formValues: sourceScenePackageArtifact?.formValues,
-        intakeContext: sourceScenePackageArtifact?.intakeContext,
-        materials: sourceScenePackageArtifact?.materials || [],
-        selectedDirection: sourceScenePackageArtifact?.selectedDirection,
-        plan: sourceScenePackageArtifact?.plan,
-        videoScenePackageEditedSceneIds: [],
-      }, targetConversationId);
-      persistScenePackageSnapshot(
-        targetConversationId,
-        updatedPackages,
-        sceneAssetReview.is_fusion ? "scene_global_asset_fused" : "scene_global_asset_edited",
+        "replace",
         {
-          scene_global_asset_edit_review: sceneAssetReview,
-          scene_global_asset_edit: sceneAssetReview.editResult,
-          scene_global_asset_fusion: sceneAssetReview.is_fusion ? sceneAssetReview.editResult : undefined,
+          source: "image_asset",
+          displayImageUrl: sceneAssetReview.edited_image_url,
+          generationReferenceUrl: sceneAssetReview.edited_image_url,
+          assetName: sceneAssetReview.asset_name,
+          raw: sceneAssetReview.editResult as unknown as Record<string, unknown>,
+        },
+        {
+          processedKey,
+          reviewMessageId: msg.id,
+          targetConversationId,
         },
       );
-      if (isVisibleConversation(targetConversationId)) {
-        setSelectedStoryboardMessageId(updatedScenePackageMessage.id);
-        setCanvasOpen(true);
-      }
-      pushAssistant(`已确认并替换「${sceneAssetReview.asset_name || sceneAssetReview.asset_id}」，场景包里的分镜引用也已同步更新。`, targetConversationId);
       return;
     }
     markImageResultAccepted(msg.id, targetConversationId);
@@ -8894,6 +9785,42 @@ export function WorkspacePage() {
     }
   };
 
+  const handleSaveVideoScenePackage = async (msg: ChatMessage) => {
+    const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+    const latestMessage = messagesRef.current.find(
+      (message) =>
+        message.id === msg.id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        Boolean(message.artifact?.videoScenePackages),
+    );
+    const artifact = latestMessage?.artifact;
+    const videoScenePackages = artifact?.videoScenePackages;
+    if (!latestMessage || !artifact || !videoScenePackages) {
+      pushAssistant("当前没有找到可保存的分镜场景包，请重新打开后再试。", targetConversationId);
+      return;
+    }
+    try {
+      if (targetConversationId) {
+        await api.updateConversationMessage(targetConversationId, latestMessage.id, {
+          content: latestMessage.content,
+          payload: {
+            artifact,
+            materials: artifact.materials || [],
+            client_message_id: latestMessage.id,
+          } as unknown as Record<string, unknown>,
+        });
+      }
+      persistScenePackageSnapshot(targetConversationId, videoScenePackages, "scene_package_saved", {
+        video_scene_package_edited_scene_ids: artifact.videoScenePackageEditedSceneIds || [],
+      });
+      setCanvasOpen(false);
+      setSelectedStoryboardMessageId("");
+      setSelectedPlanEditorMessageId("");
+    } catch {
+      pushAssistant("分镜保存失败，请检查网络后重试。", targetConversationId);
+    }
+  };
+
   const handleGenerateVideoFromScenePackages = async (msg: ChatMessage) => {
     const latestMessage =
       messagesRef.current.find(
@@ -9018,15 +9945,42 @@ export function WorkspacePage() {
   async function handleAcceptVideoResult(msg: ChatMessage) {
     if (!msg.artifact?.mergedVideo?.ok) return;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
-    videoRevisionArtifactRef.current = null;
-    markVideoResultAccepted(msg.id, targetConversationId);
-    pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
-    if (targetConversationId) {
-      void updateConversationWithProgress(targetConversationId, {
+    if (!targetConversationId) return;
+    const processedKey = beginArtifactAction(msg, targetConversationId);
+    if (!processedKey) return;
+    const currentMessage = messagesRef.current.find(
+      (message) =>
+        message.id === msg.id &&
+        messageConversationId(message, targetConversationId) === targetConversationId &&
+        message.artifact?.type === "video_result",
+    ) || msg;
+    if (!currentMessage.artifact) {
+      releaseArtifactAction(processedKey);
+      return;
+    }
+    const acceptedArtifact: ChatArtifact = {
+      ...currentMessage.artifact,
+      videoAccepted: true,
+    };
+    try {
+      await api.updateConversationMessage(targetConversationId, currentMessage.id, {
+        content: currentMessage.content,
+        payload: {
+          artifact: acceptedArtifact,
+          materials: currentMessage.materials || acceptedArtifact.materials || [],
+          client_message_id: currentMessage.id,
+        } as unknown as Record<string, unknown>,
+      });
+      videoRevisionArtifactRef.current = null;
+      markVideoResultAccepted(currentMessage.id, targetConversationId);
+      await updateConversationWithProgress(targetConversationId, {
           last_phase: "video_accepted",
           context: { ...makeSnapshot(), video_accepted: true, pendingVideoRevision: null, pending_video_revision: null } as unknown as Record<string, unknown>,
-        })
-        .catch(() => {});
+        });
+      pushAssistant("已确认视频无修改意见，流程结束。", targetConversationId);
+    } catch {
+      releaseArtifactAction(processedKey);
+      pushAssistant("视频结束状态保存失败，请检查网络后重试。", targetConversationId);
     }
   }
 
@@ -9070,7 +10024,27 @@ export function WorkspacePage() {
     );
     if (affectedSceneIds.size === 0) {
       releaseArtifactAction(processedKey);
+      videoRevisionArtifactRef.current = {
+        conversationId: targetConversationId,
+        artifact: {
+          ...artifact,
+          originalVideoScenePackages,
+        },
+      };
       pushAssistant("QAAgent QC 质检没有定位到具体分镜。为了避免误把整条视频重做，请在修改意见里明确写出要修改的分镜，例如“只修改第2个分镜”。", targetConversationId);
+      if (targetConversationId) {
+        void updateConversationWithProgress(targetConversationId, {
+            last_phase: "video_revision_scene_required",
+            context: {
+              ...makeSnapshot(),
+              pendingVideoRevision: videoRevisionArtifactRef.current,
+              pending_video_revision: videoRevisionArtifactRef.current,
+              video_revision_feedback: artifact.videoRevisionFeedback,
+              video_quality_review: artifact.videoQualityReview,
+            } as unknown as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
       setBusyForConversation(targetConversationId, false);
       return;
     }
@@ -9181,7 +10155,33 @@ export function WorkspacePage() {
     const sourceMessage = sourceMessageId
       ? messagesRef.current.find((message) => message.id === sourceMessageId)
       : [...messagesRef.current].reverse().find((message) => message.artifact?.mergedVideo?.merged_video_url === video.url);
-    if (sourceMessage) void recordArtifactDownload(sourceMessage, video.url);
+    if (
+      sourceMessage
+      && activeSupervisorVideoTarget?.ui.kind === "video_result_review"
+      && activeSupervisorVideoMessage?.id === sourceMessage.id
+      && video.url.startsWith("https://")
+    ) {
+      void submitSupervisorAction(
+        "下载最终视频",
+        buildSupervisorWorkflowAction({
+          action: "continue_workflow",
+          intent: "video",
+          workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+          stage: activeSupervisorVideoTarget.stage,
+          artifactRef: activeSupervisorVideoTarget.artifactRef,
+          patch: { delivery_download_url: video.url },
+        }),
+        {
+          artifactRefs: activeSupervisorVideoTarget.artifactRef
+            ? [activeSupervisorVideoTarget.artifactRef]
+            : [],
+        },
+      );
+      return;
+    }
+    if (sourceMessage && legacyArtifactActionsEnabled) {
+      void recordArtifactDownload(sourceMessage, video.url);
+    }
   };
 
   useEffect(() => {
@@ -9236,13 +10236,14 @@ export function WorkspacePage() {
   };
 
   const getJianyingDraftResult = (msg: ChatMessage): JianyingDraftJobResponse | null => {
-    if (msg.artifact?.type === "jianying_draft") return msg.artifact.jianyingDraft || null;
+    if (msg.artifact?.jianyingDraft) return msg.artifact.jianyingDraft;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const storyboardVersionId = jianyingDraftVersionForMessage(msg);
     return storyboardVersionId ? jianyingDraftRecordsForConversation(targetConversationId)[storyboardVersionId] || null : null;
   };
 
   const isJianyingDraftRunning = (msg: ChatMessage): boolean => {
+    if (msg.artifact?.pendingJianyingDraftJob) return true;
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     const storyboardVersionId = jianyingDraftVersionForMessage(msg);
     const pending = pendingJianyingDraftJobRef.current;
@@ -9255,6 +10256,298 @@ export function WorkspacePage() {
     const targetConversationId = messageConversationId(msg, conversationIdRef.current);
     if (targetConversationId) pushAssistant("剪映草稿已开始下载。", targetConversationId);
   };
+
+  function renderSupervisorVideoArtifact(target: SupervisorVideoTarget) {
+    const currentMessage = activeSupervisorVideoMessage;
+    if (!currentMessage) return null;
+    const acceptsMessage = (msg: ChatMessage): boolean => Boolean(
+      msg.id === currentMessage.id
+      && messageConversationId(msg, currentConversationId) === currentConversationId,
+    );
+    const submit = (
+      content: string,
+      request: {
+        action: AgentAction;
+        patch?: Readonly<Record<string, unknown>>;
+      },
+    ): Promise<void> => {
+      return submitSupervisorAction(
+        content,
+        buildSupervisorWorkflowAction({
+          action: request.action,
+          intent: "video",
+          workflowId: target.workflow.workflow_id,
+          stage: target.stage,
+          artifactRef: target.artifactRef,
+          patch: request.patch || {},
+        }),
+        {
+          artifactRefs: target.artifactRef ? [target.artifactRef] : [],
+        },
+      );
+    };
+    const replacementPatch = (replacement: SceneGlobalAssetReplacement): Record<string, unknown> => ({
+      source: replacement.source,
+      display_image_url: replacement.displayImageUrl,
+      generation_reference_url: replacement.generationReferenceUrl,
+      ...(replacement.thirdAssetId ? { third_asset_id: replacement.thirdAssetId } : {}),
+      ...(replacement.assetType ? { asset_type: replacement.assetType } : {}),
+      ...(replacement.contentAssetId ? { content_asset_id: replacement.contentAssetId } : {}),
+      ...(replacement.assetName ? { asset_name: replacement.assetName } : {}),
+    });
+    const failedSceneIds = (msg: ChatMessage): string[] => Array.from(new Set(
+      (msg.artifact?.generatedSceneVideos?.failed_scenes || [])
+        .map((item) => typeof item.scene_id === "string" ? item.scene_id.trim() : "")
+        .filter(Boolean),
+    ));
+    const submitSceneReviewDecision = (msg: ChatMessage): void => {
+      if (!acceptsMessage(msg)) return;
+      const failedIds = failedSceneIds(msg);
+      if (failedIds.length > 0) {
+        submit("重试失败的分镜视频", {
+          action: "retry_failed",
+          patch: { scene_ids: failedIds },
+        });
+        return;
+      }
+      if ((msg.artifact?.videoScenePackageEditedSceneIds || []).length > 0) {
+        submit("重新生成已修改的分镜视频", { action: "regenerate_stage" });
+        return;
+      }
+      submit("确认当前视频阶段", { action: "continue_workflow" });
+    };
+    const submitRevision = (msg: ChatMessage, useQualityReview: boolean): void => {
+      if (!acceptsMessage(msg)) return;
+      const packages = msg.artifact?.videoScenePackages;
+      const scenes = packages?.scene_packages as ScenePackageRecord[] | undefined;
+      if (!packages || !scenes?.length) return;
+      const requested = window.prompt(
+        useQualityReview ? "可补充修改意见；留空则只按质检结果修改。" : "请输入本次视频修改意见。",
+        msg.artifact?.videoRevisionFeedback || "",
+      );
+      if (requested === null) return;
+      const feedback = requested.trim();
+      const qualityReview = useQualityReview ? msg.artifact?.videoQualityReview : undefined;
+      const revisionFeedback = feedback || qualityReview?.revision_prompt?.trim() || "";
+      if (!revisionFeedback) return;
+      const affectedIds = sceneIdsForRevision(
+        scenes,
+        revisionFeedback,
+        qualityReview,
+        useQualityReview,
+      );
+      const revisedScenes = scenePackagesWithRevisionContract(
+        scenes,
+        affectedIds,
+        revisionFeedback,
+        qualityReview,
+        packages.global_assets,
+        msg.artifact?.originalVideoScenePackages?.scene_packages as ScenePackageRecord[] | undefined,
+      );
+      const scene_patches = Object.fromEntries(
+        revisedScenes
+          .filter((scene) => affectedIds.has(scene.scene_id))
+          .map((scene) => [scene.scene_id, {
+            storyline: scene.storyline || "",
+            shot_description: scene.shot_description || {},
+            narration: scene.narration || "",
+            reference_asset_ids: scene.reference_asset_ids || [],
+          }]),
+      );
+      if (Object.keys(scene_patches).length === 0) return;
+      submit("按修改范围重新生成分镜", {
+        action: "modify_workflow",
+        patch: { scene_patches },
+      });
+    };
+
+    return {
+      message: currentMessage,
+      onSelectDirection: (msg: ChatMessage, direction: CreativeDirectionResponse) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_direction_review") return;
+        submit(`选择创意方向：${direction.title}`, {
+          action: "continue_workflow",
+          patch: { direction_id: direction.direction_id },
+        });
+      },
+      onRegenerateDirections: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_direction_review") return;
+        submit("重新生成视频创意方向", { action: "regenerate_stage" });
+      },
+      onApprovePlan: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit("同意当前视频创作方案", { action: "continue_workflow" });
+      },
+      onRevisePlan: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        const feedback = window.prompt("请输入方案修改意见。")?.trim();
+        if (!feedback) return;
+        submit("修改当前视频创作方案", {
+          action: "modify_workflow",
+          patch: { revision_feedback: feedback },
+        });
+      },
+      onRollbackPlan: (msg: ChatMessage, version: number) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit(`恢复视频方案 v${version}`, {
+          action: "modify_workflow",
+          patch: { plan_version: version },
+        });
+      },
+      onRegeneratePlanDirections: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg) || target.ui.kind !== "video_plan_review") return;
+        submit("返回创意方向并生成新创意", { action: "regenerate_stage" });
+      },
+      onGenerateVideoFromScenePackages: submitSceneReviewDecision,
+      onRetrySceneAssets: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("继续生成视频场景素材", { action: "continue_workflow" });
+      },
+      onRetryVideoMerge: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("重试视频合并", { action: "retry_failed" });
+      },
+      onAcceptVideoResult: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        submit("确认最终视频", { action: "continue_workflow" });
+      },
+      onReviseVideoResult: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const feedback = window.prompt("请输入视频修改意见。")?.trim();
+        if (!feedback) return;
+        submit("提交视频修改意见并启动质检", {
+          action: "modify_workflow",
+          patch: { user_feedback: feedback },
+        });
+      },
+      onRegenerateVideoWithRevision: submitRevision,
+      onGenerateJianyingDraft: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const result = getJianyingDraftResult(msg);
+        if (result?.status === "failed" || result?.status === "timeout") {
+          submit("重新生成剪映草稿", {
+            action: "retry_failed",
+            patch: { jianying_action: "start" },
+          });
+          return;
+        }
+        submit("生成剪映草稿", {
+          action: "modify_workflow",
+          patch: { jianying_action: "start" },
+        });
+      },
+      onDownloadJianyingDraft: (msg: ChatMessage) => {
+        if (!acceptsMessage(msg)) return;
+        const result = getJianyingDraftResult(msg);
+        if (!result?.storyboard_version_id || !result.download_url?.startsWith("https://")) return;
+        submit("下载剪映草稿", {
+          action: "continue_workflow",
+          patch: {
+            jianying_action: "download",
+            storyboard_version_id: result.storyboard_version_id,
+            download_url: result.download_url,
+          },
+        });
+      },
+      onDownloadArtifact: (msg: ChatMessage, url: string) => {
+        if (!acceptsMessage(msg) || !url.startsWith("https://")) return;
+        submit("下载最终视频", {
+          action: "continue_workflow",
+          patch: { delivery_download_url: url },
+        });
+      },
+      onUpdateVideoScenePackage: (sceneId: string, patch: ScenePackagePatch) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        const normalizedPatch: Record<string, unknown> = {};
+        if (typeof patch.storyline === "string" && patch.storyline.trim()) {
+          normalizedPatch.storyline = patch.storyline;
+        }
+        if (typeof patch.narration === "string") normalizedPatch.narration = patch.narration;
+        if (patch.shot_description && typeof patch.shot_description === "object") {
+          const text = typeof patch.shot_description.text === "string"
+            ? patch.shot_description.text.trim()
+            : "";
+          if (text) normalizedPatch.shot_description = { text };
+          const mentions = Array.isArray(patch.shot_description.mentions)
+            ? patch.shot_description.mentions
+            : [];
+          normalizedPatch.reference_asset_ids = mentions
+            .map((item) => item && typeof item === "object" && typeof item.asset_id === "string" ? item.asset_id : "")
+            .filter(Boolean)
+            .slice(0, 9);
+        } else if (Array.isArray(patch.reference_asset_ids)) {
+          normalizedPatch.reference_asset_ids = patch.reference_asset_ids.slice(0, 9);
+        }
+        if (Object.keys(normalizedPatch).length === 0) return;
+        return submit("修改视频分镜", {
+          action: "modify_workflow",
+          patch: {
+            scene_id: sceneId,
+            scene_patch: normalizedPatch,
+          },
+        });
+      },
+      onDeleteGlobalAsset: (asset: SceneGlobalAssetReference) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        submit("删除视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "delete",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+          },
+        });
+      },
+      onReplaceGlobalAsset: (
+        asset: SceneGlobalAssetReference,
+        replacement: SceneGlobalAssetReplacement,
+      ) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        submit("替换视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "replace",
+            asset_group: asset.asset_group,
+            asset_id: asset.asset_id,
+            asset_patch: replacementPatch(replacement),
+          },
+        });
+      },
+      onAddGlobalAsset: (
+        assetGroup: GlobalSceneAssetGroup,
+        replacement: SceneGlobalAssetReplacement,
+      ) => {
+        if (target.ui.kind !== "video_scene_package_review") return;
+        const videoScenePackages = currentMessage.artifact?.videoScenePackages;
+        if (!videoScenePackages) return;
+        const added = addGlobalSceneAssetReference(videoScenePackages.global_assets, {
+          assetGroup,
+          manualId: replacement.contentAssetId || replacement.thirdAssetId || uid(),
+          replacement,
+        });
+        submit("新增视频全局素材", {
+          action: "modify_workflow",
+          patch: {
+            asset_action: "add",
+            asset_group: assetGroup,
+            asset_id: added.added_asset.asset_id,
+            asset_patch: {
+              ...replacementPatch(replacement),
+              asset_name: added.added_asset.name,
+            },
+          },
+        });
+      },
+      onSaveStoryboard: () => {
+        setCanvasOpen(false);
+        setSelectedStoryboardMessageId("");
+      },
+    };
+  }
+
+  const supervisorVideoArtifact = activeSupervisorVideoTarget
+    ? renderSupervisorVideoArtifact(activeSupervisorVideoTarget)
+    : null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -9269,25 +10562,37 @@ export function WorkspacePage() {
         runtimeBusy={interactionPolicy.runtime.busy}
         runtimeNotice={runtimeNotice}
         workflowTaskBoard={workflowTaskBoard}
-        onSelectDirection={legacyArtifactActionsEnabled ? handleSelectDirection : undefined}
-        onRegenerateDirections={legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined}
-        onApprovePlan={legacyArtifactActionsEnabled ? handleApprovePlan : undefined}
+        onSelectDirection={(legacyArtifactActionsEnabled ? handleSelectDirection : undefined)
+          ?? supervisorVideoArtifact?.onSelectDirection}
+        onRegenerateDirections={(legacyArtifactActionsEnabled ? handleRegenerateDirections : undefined)
+          ?? supervisorVideoArtifact?.onRegenerateDirections}
+        onApprovePlan={(legacyArtifactActionsEnabled ? handleApprovePlan : undefined)
+          ?? supervisorVideoArtifact?.onApprovePlan}
+        onRegeneratePlanDirections={supervisorVideoArtifact?.onRegeneratePlanDirections}
         onEditPlan={legacyArtifactActionsEnabled ? handleEditPlan : undefined}
-        onRevisePlan={legacyArtifactActionsEnabled ? handleRevisePlan : undefined}
+        onRevisePlan={(legacyArtifactActionsEnabled ? handleRevisePlan : undefined)
+          ?? supervisorVideoArtifact?.onRevisePlan}
         agentRevisionSourceMessageId={agentRevisionSourceMessageId}
-        onRollbackPlan={legacyArtifactActionsEnabled ? handleRollbackPlan : undefined}
+        onRollbackPlan={(legacyArtifactActionsEnabled ? handleRollbackPlan : undefined)
+          ?? supervisorVideoArtifact?.onRollbackPlan}
         onGenerateImage={legacyArtifactActionsEnabled ? handleGenerateImage : undefined}
         onConfirmImageEditOptions={legacyArtifactActionsEnabled ? handleConfirmImageEditOptions : undefined}
         onAcceptImageResult={legacyArtifactActionsEnabled ? handleAcceptImageResult : undefined}
         onReviseImageResult={legacyArtifactActionsEnabled ? handleReviseImageResult : undefined}
-        onGenerateVideoFromScenePackages={legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined}
-        onAcceptVideoResult={legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined}
-        onReviseVideoResult={legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined}
+        onGenerateVideoFromScenePackages={(legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined)
+          ?? supervisorVideoArtifact?.onGenerateVideoFromScenePackages}
+        onAcceptVideoResult={(legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined)
+          ?? supervisorVideoArtifact?.onAcceptVideoResult}
+        onReviseVideoResult={(legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined)
+          ?? supervisorVideoArtifact?.onReviseVideoResult}
         onOpenVideoResult={handleOpenVideoResult}
-        onRegenerateVideoWithRevision={legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined}
+        onRegenerateVideoWithRevision={(legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined)
+          ?? supervisorVideoArtifact?.onRegenerateVideoWithRevision}
         onRetryImageResult={legacyArtifactActionsEnabled ? handleRetryImageResult : undefined}
-        onRetrySceneAssets={legacyArtifactActionsEnabled ? handleRetrySceneAssets : undefined}
-        onRetryVideoMerge={legacyArtifactActionsEnabled ? handleRetryVideoMerge : undefined}
+        onRetrySceneAssets={(legacyArtifactActionsEnabled ? handleRetrySceneAssets : undefined)
+          ?? supervisorVideoArtifact?.onRetrySceneAssets}
+        onRetryVideoMerge={(legacyArtifactActionsEnabled ? handleRetryVideoMerge : undefined)
+          ?? supervisorVideoArtifact?.onRetryVideoMerge}
         onRetryVideoAnalysis={legacyArtifactActionsEnabled ? handleRetryVideoAnalysis : undefined}
         onApprovePptOutline={legacyArtifactActionsEnabled ? handleApprovePptOutline : undefined}
         onRevisePptOutline={legacyArtifactActionsEnabled ? handleRevisePptOutline : undefined}
@@ -9295,14 +10600,27 @@ export function WorkspacePage() {
         onGeneratePptFile={legacyArtifactActionsEnabled ? handleGeneratePptFile : undefined}
         onAcceptPptFile={legacyArtifactActionsEnabled ? handleAcceptPptFile : undefined}
         onRegeneratePptFile={legacyArtifactActionsEnabled ? handleRegeneratePptFile : undefined}
-        onGenerateJianyingDraft={legacyArtifactActionsEnabled ? handleGenerateJianyingDraft : undefined}
-        onDownloadJianyingDraft={legacyArtifactActionsEnabled ? handleDownloadJianyingDraft : undefined}
+        onGenerateJianyingDraft={(legacyArtifactActionsEnabled ? handleGenerateJianyingDraft : undefined)
+          ?? supervisorVideoArtifact?.onGenerateJianyingDraft}
+        onDownloadJianyingDraft={(legacyArtifactActionsEnabled ? handleDownloadJianyingDraft : undefined)
+          ?? supervisorVideoArtifact?.onDownloadJianyingDraft}
         jianyingDraftCapability={jianyingDraftCapability}
         getJianyingDraftResult={getJianyingDraftResult}
         isJianyingDraftRunning={isJianyingDraftRunning}
-        onDownloadArtifact={(msg, url) => void recordArtifactDownload(msg, url)}
+        onDownloadArtifact={(msg, url) => {
+          if (supervisorVideoArtifact?.message?.id === msg.id) {
+            supervisorVideoArtifact.onDownloadArtifact(msg, url);
+            return;
+          }
+          if (legacyArtifactActionsEnabled) void recordArtifactDownload(msg, url);
+        }}
         onOpenArtifact={(msg) => {
           if (!msg.artifact) return;
+          if (
+            supervisorVideoArtifact
+            && supervisorVideoArtifact.message?.id !== msg.id
+            && !legacyArtifactActionsEnabled
+          ) return;
           setCanvasOpen(true);
           setSelectedPlanEditorMessageId("");
           if (msg.artifact.type === "video_scene_packages") {
@@ -9323,7 +10641,7 @@ export function WorkspacePage() {
         }}
       />
       {legacyArtifactActionsEnabled && canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (
-        <Suspense fallback={<aside className="flex h-full w-[52vw] min-w-[680px] items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft">正在加载 Markdown 编辑器…</aside>}>
+        <Suspense fallback={<aside className="fixed inset-0 z-50 flex h-full w-full min-w-0 items-center justify-center border-l border-line bg-[#f8fafc] text-[13px] text-ink-soft xl:static xl:z-auto xl:w-[52vw] xl:min-w-[680px]">正在加载 Markdown 编辑器…</aside>}>
           <PlanMarkdownEditor
             planVersion={selectedPlanEditorMessage.artifact.plan.plan_version || 1}
             initialMarkdown={selectedPlanEditorMessage.artifact.plan.plan_markdown}
@@ -9338,23 +10656,28 @@ export function WorkspacePage() {
       ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
         <StoryboardPanel
           msg={selectedStoryboardMessage}
+          deferSceneUpdates={Boolean(supervisorVideoArtifact)}
           onUpdateVideoScenePackage={legacyArtifactActionsEnabled
             ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
+            : supervisorVideoArtifact?.onUpdateVideoScenePackage}
+          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleReferenceGlobalAsset
             : undefined}
-          onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
-            ? handleReferenceGlobalAsset
-            : undefined}
-          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled
-            ? handleDeleteGlobalAsset
+          onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleDeleteGlobalAsset
             : undefined}
           onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
+          onSupervisorReplaceGlobalAsset={supervisorVideoArtifact?.onReplaceGlobalAsset}
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
-            : undefined}
+            : supervisorVideoArtifact?.onAddGlobalAsset}
           onGenerateVideo={legacyArtifactActionsEnabled
             ? () => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)
-            : undefined}
-          onRetrySceneAssets={legacyArtifactActionsEnabled ? () => handleRetrySceneAssets(selectedStoryboardMessage) : undefined}
+            : () => supervisorVideoArtifact?.onGenerateVideoFromScenePackages(selectedStoryboardMessage)}
+          onRetrySceneAssets={legacyArtifactActionsEnabled
+            ? () => handleRetrySceneAssets(selectedStoryboardMessage)
+            : () => supervisorVideoArtifact?.onRetrySceneAssets(selectedStoryboardMessage)}
+          onSave={legacyArtifactActionsEnabled
+            ? () => handleSaveVideoScenePackage(selectedStoryboardMessage)
+            : supervisorVideoArtifact?.onSaveStoryboard}
           onClose={() => {
             setCanvasOpen(false);
             setSelectedStoryboardMessageId("");
@@ -9389,6 +10712,85 @@ export function WorkspacePage() {
           onCancel={handleCancelParamsDialog}
         />
       )}
+      {restoredSupervisorUi?.kind === "video_intake_form" && activeSupervisorVideoTarget ? (
+        <GenParamsDialog
+          key={`supervisor-video:${activeSupervisorVideoTarget.workflow.workflow_id}:${activeSupervisorVideoTarget.workflow.stage_version}`}
+          open
+          intent="video"
+          initialCoreMessage={activeSupervisorVideoTarget.ui.coreMessage}
+          initialValues={activeSupervisorVideoTarget.ui.formValues}
+          initialMaterials={activeSupervisorVideoTarget.ui.materials}
+          onConfirm={(form) => {
+            void submitSupervisorAction(
+              "确认视频创作需求",
+              buildSupervisorWorkflowAction({
+                action: "continue_workflow",
+                intent: "video",
+                workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+                stage: activeSupervisorVideoTarget.stage,
+                artifactRef: activeSupervisorVideoTarget.artifactRef,
+                patch: {
+                  form_values: form,
+                  intake_rounds: activeSupervisorVideoTarget.ui.intakeRounds,
+                },
+              }),
+              {
+                materials: activeSupervisorVideoTarget.ui.materials,
+                artifactRefs: activeSupervisorVideoTarget.artifactRef
+                  ? [activeSupervisorVideoTarget.artifactRef]
+                  : [],
+              },
+            );
+          }}
+          onCancel={() => {
+            void submitSupervisorAction(
+              "取消视频创作流程",
+              buildSupervisorWorkflowAction({
+                action: "cancel_workflow",
+                intent: "video",
+                workflowId: activeSupervisorVideoTarget.workflow.workflow_id,
+                stage: activeSupervisorVideoTarget.stage,
+                artifactRef: activeSupervisorVideoTarget.artifactRef,
+                patch: { form_cancelled: true },
+              }),
+              {
+                artifactRefs: activeSupervisorVideoTarget.artifactRef
+                  ? [activeSupervisorVideoTarget.artifactRef]
+                  : [],
+              },
+            );
+          }}
+        />
+      ) : null}
+      {restoredSupervisorUi?.kind === "authorization_required"
+        && activeSupervisorVideoTarget
+        && restoredSupervisorUi.authorizationAction ? (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 px-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl">
+              <h2 className="text-base font-semibold text-slate-900">需要重新授权</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                当前操作尚未调用供应商。请确认登录状态后继续原操作。
+              </p>
+              <button
+                type="button"
+                className="mt-4 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+                onClick={() => {
+                  void submitSupervisorAction(
+                    "授权后继续原视频操作",
+                    restoredSupervisorUi.authorizationAction as ExplicitActionSignal,
+                    {
+                      artifactRefs: activeSupervisorVideoTarget.artifactRef
+                        ? [activeSupervisorVideoTarget.artifactRef]
+                        : [],
+                    },
+                  );
+                }}
+              >
+                重新授权并继续
+              </button>
+            </div>
+          </div>
+        ) : null}
       <PlanRevisionDialog
         open={Boolean(legacyArtifactActionsEnabled && pendingPlanRevisionChoice && pendingPlanRevisionChoice.conversationId === currentConversationId)}
         feedback={pendingPlanRevisionChoice?.feedback || ""}

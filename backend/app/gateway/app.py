@@ -3,7 +3,8 @@
 import logging
 import os
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +60,13 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _GatewayClock:
+    """为 Gateway 内同一组 live 组件提供统一的 UTC 时间。"""
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
 
 
 def _build_jianying_draft_skill(runtime_config):
@@ -170,7 +178,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         from pixelflow.agent_runtime.persistence import (
             MemoryCompactionQueueRepository,
-            SQLCompactionQueueRepository,
+            MemoryVideoRuntimeRepository,
+            SQLVideoRuntimeRepository,
         )
         from pixelflow.agent_runtime.runtime_compaction import (
             build_agent_context_compactor,
@@ -179,11 +188,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         task_store = app.state.pixelflow_task_store
         if isinstance(task_store, SQLPixelFlowTaskStore):
-            agent_runtime_repository = SQLCompactionQueueRepository(
+            agent_runtime_repository = SQLVideoRuntimeRepository(
                 task_store.session_factory,
+                task_store=task_store,
             )
+            video_runtime_repository = agent_runtime_repository
+        elif isinstance(task_store, MemoryPixelFlowTaskStore):
+            agent_runtime_repository = MemoryVideoRuntimeRepository(
+                task_store=task_store,
+            )
+            video_runtime_repository = agent_runtime_repository
         else:
+            # MySQL 对话 Store 尚无同事务 VideoRuntimeRepository，保持 R1 压缩并固定关闭 live。
             agent_runtime_repository = MemoryCompactionQueueRepository()
+            video_runtime_repository = None
         context_compactor = (
             build_agent_context_compactor(
                 task_store=task_store,
@@ -194,16 +212,101 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if agent_runtime_config.context_compaction_enabled
             else None
         )
-        app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
-            config=agent_runtime_config,
-            repository=agent_runtime_repository,
-            task_store=task_store,
-            context_compactor=context_compactor,
+        from app.gateway.pixelflow_agent_live_capabilities import (
+            make_pixelflow_agent_live_capabilities,
         )
+        from app.gateway.pixelflow_agent_live_providers import (
+            make_video_live_provider_adapters,
+        )
+        from app.gateway.pixelflow_agent_runtime import (
+            make_pixelflow_agent_live_runtime,
+        )
+        from deerflow.models.factory import create_chat_model
+        from pixelflow.agent_runtime.context import parse_model_context_profiles
+        from pixelflow.skills.base import get_image_skill
+
+        live_clock = _GatewayClock()
+        default_model_name = (
+            startup_config.models[0].name if startup_config.models else ""
+        )
+        live_capabilities = make_pixelflow_agent_live_capabilities(
+            model_factory=create_chat_model,
+            scene_asset_skill_factory=get_image_skill,
+            power_mem_service=app.state.pixelflow_power_mem_service,
+            clock=live_clock,
+            model_name=default_model_name,
+        )
+        live_providers = make_video_live_provider_adapters(
+            generate_scene_video=getattr(
+                app.state,
+                "pixelflow_generate_scene_video_job_service",
+                None,
+            ),
+            merge_video=getattr(
+                app.state,
+                "pixelflow_merge_video_job_service",
+                None,
+            ),
+            quality_review=getattr(
+                app.state,
+                "pixelflow_quality_review_job_service",
+                None,
+            ),
+            jianying_draft=getattr(
+                app.state,
+                "pixelflow_jianying_draft_job_service",
+                None,
+            ),
+        )
+        try:
+            live_model_profiles = parse_model_context_profiles(
+                startup_config.models,
+            )
+        except Exception as error:  # noqa: BLE001 - live 档案异常固定降级，不中断 R1
+            logger.warning(
+                "PixelFlow Agent live 模型档案不可用：exception_type=%s",
+                type(error).__name__,
+            )
+            live_model_profiles = {}
+        agent_live_stack = AsyncExitStack()
+        try:
+            live_runtime = await agent_live_stack.enter_async_context(
+                make_pixelflow_agent_live_runtime(
+                    app,
+                    config=agent_runtime_config,
+                    repository=video_runtime_repository,
+                    task_store=task_store,
+                    checkpointer=app.state.checkpointer,
+                    capabilities=live_capabilities,
+                    providers=live_providers,
+                    model_name=default_model_name,
+                    model_profiles=live_model_profiles,
+                    memory_search=app.state.pixelflow_power_mem_service,
+                    clock=live_clock,
+                )
+            )
+            app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
+                config=agent_runtime_config,
+                repository=agent_runtime_repository,
+                task_store=task_store,
+                context_compactor=context_compactor,
+                turn_executor=live_runtime.executor,
+                video_repository=video_runtime_repository,
+                primary_execution_intents=(
+                    live_runtime.primary_execution_intents
+                ),
+            )
+        except BaseException:
+            await agent_live_stack.aclose()
+            raise
         logger.info(
-            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s",
+            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s primary_execution_intents=%s live_status=%s",
             agent_runtime_config.mode,
             agent_runtime_config.new_conversation_rollout_percent,
+            sorted(
+                app.state.pixelflow_agent_runtime_service.primary_execution_intents,
+            ),
+            live_runtime.status_snapshot(),
         )
 
         from pixelflow.tracing import configure_trace_sink
@@ -226,6 +329,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_agent_runtime_service is not None:
                 await pixelflow_agent_runtime_service.aclose()
                 logger.info("PixelFlow Agent Runtime closed")
+            await agent_live_stack.aclose()
+            logger.info("PixelFlow Agent live Runtime closed")
             pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
             if pixelflow_jianying_draft_service is not None:
                 await pixelflow_jianying_draft_service.aclose()

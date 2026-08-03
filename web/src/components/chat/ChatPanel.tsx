@@ -21,6 +21,7 @@ interface ChatPanelProps {
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
+  onRegeneratePlanDirections?: (msg: ChatMessage) => void;
   onEditPlan?: (msg: ChatMessage) => void;
   onRevisePlan?: (msg: ChatMessage) => void;
   agentRevisionSourceMessageId?: string;
@@ -87,6 +88,7 @@ export function ChatPanel({
   onSelectDirection,
   onRegenerateDirections,
   onApprovePlan,
+  onRegeneratePlanDirections,
   onEditPlan,
   onRevisePlan,
   agentRevisionSourceMessageId,
@@ -172,6 +174,7 @@ export function ChatPanel({
                 onSelectDirection={onSelectDirection}
                 onRegenerateDirections={onRegenerateDirections}
                 onApprovePlan={onApprovePlan}
+                onRegeneratePlanDirections={onRegeneratePlanDirections}
                 onEditPlan={onEditPlan}
                 onRevisePlan={onRevisePlan}
                 hidePlanEdit={isSupersededArtifact || m.id === agentRevisionSourceMessageId}

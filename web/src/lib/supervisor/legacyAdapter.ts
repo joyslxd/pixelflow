@@ -255,6 +255,17 @@ export function resolveWorkspaceAgentRuntimeMode(
   return mode as WorkspaceAgentRuntimeMode;
 }
 
+/**
+ * 只信任服务端 Runtime 命名空间冻结的本会话 live Handler 就绪事实。
+ */
+export function resolveWorkspacePrimaryExecutionReady(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const conversation = isRecord(value.conversation) ? value.conversation : value;
+  if (!isRecord(conversation.context)) return false;
+  const runtime = conversation.context.__agent_runtime;
+  return isRecord(runtime) && runtime.primary_execution_ready === true;
+}
+
 export interface WorkspaceRuntimePolicy {
   supervisorEnabled: boolean;
   legacyRunnerEnabled: boolean;
@@ -266,15 +277,61 @@ export type AssistHandoffAction =
   | "wait"
   | "continue_legacy"
   | "acknowledge"
-  | "failed";
+  | "failed"
+  | "unavailable";
 
 export interface AssistHandoffPolicyInput {
+  orchestrationMode?: OrchestrationMode;
+  primaryExecutionReady?: boolean;
   registrationStatus: "pending" | "registered";
   serverInputStatus?: "sending" | "queued" | "processing" | "accepted" | "failed";
+  serverRunStatus?: "idle" | "running" | "waiting_user" | "paused" | "failed" | "completed";
   continueLegacy: boolean;
   legacyBusy: boolean;
   dialogOpen: boolean;
   pendingPlanRevision: boolean;
+}
+
+export type UnavailableSupervisorRecoveryAction =
+  | "none"
+  | "persist_notice"
+  | "finalize";
+
+export interface UnavailableSupervisorRecoveryInput {
+  orchestrationMode?: OrchestrationMode;
+  primaryExecutionReady?: boolean;
+  connectionStatus: "idle" | "connecting" | "connected" | "reconnecting" | "fatal";
+  pendingCount: number;
+  hasActiveInput: boolean;
+  markerVersion: number;
+  noticePersisted: boolean;
+}
+
+/**
+ * 历史未接线 Supervisor 只按会话收敛一次。
+ *
+ * 提示已经落库但 marker 尚未写回时返回 finalize，用于修复进程在两次写入之间
+ * 中断的窗口；没有服务端活跃输入时不主动污染历史会话。
+ */
+export function resolveUnavailableSupervisorRecovery(
+  input: UnavailableSupervisorRecoveryInput,
+): UnavailableSupervisorRecoveryAction {
+  if (
+    input.orchestrationMode !== "supervisor_v1"
+    || input.primaryExecutionReady === true
+    || input.connectionStatus !== "connected"
+    || (input.pendingCount <= 0 && !input.hasActiveInput)
+  ) {
+    return "none";
+  }
+  if (
+    input.markerVersion >= 1
+    && input.noticePersisted
+    && input.pendingCount <= 0
+  ) {
+    return "none";
+  }
+  return input.noticePersisted ? "finalize" : "persist_notice";
 }
 
 /**
@@ -286,7 +343,29 @@ export interface AssistHandoffPolicyInput {
 export function resolveAssistHandoffAction(
   input: AssistHandoffPolicyInput,
 ): AssistHandoffAction {
+  if (
+    input.orchestrationMode === "supervisor_v1" &&
+    input.primaryExecutionReady !== true
+  ) {
+    return "unavailable";
+  }
   if (input.registrationStatus === "pending") return "register";
+  if (input.orchestrationMode === "supervisor_v1") {
+    if (
+      input.serverInputStatus === "failed" ||
+      input.serverRunStatus === "failed"
+    ) {
+      return "failed";
+    }
+    if (
+      input.serverInputStatus === undefined &&
+      input.serverRunStatus === "completed"
+    ) {
+      return "acknowledge";
+    }
+    // 活跃 Turn 必须由真实 Graph 执行器推进，assist 接力层只等待权威终态。
+    return "wait";
+  }
   if (
     input.serverInputStatus === undefined
     || input.serverInputStatus === "queued"

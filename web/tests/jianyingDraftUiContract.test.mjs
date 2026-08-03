@@ -234,3 +234,13 @@ test("从视频结果卡重试失败草稿会显式传 retry_failed，错误展�
   assert.match(resumeMatch[0], /jianyingDraftPublicErrorMessage\("poll"\)/);
   assert.doesNotMatch(resumeMatch[0], /继续查询剪映草稿任务失败:\$\{message\}|err\.message|String\(err\)/);
 });
+
+test("Supervisor 剪映生成重试下载均提交当前 workflow 的结构化动作", () => {
+  assert.match(workspaceSource, /jianying_action:\s*"start"/);
+  assert.match(workspaceSource, /jianying_action:\s*"download"/);
+  assert.match(workspaceSource, /storyboard_version_id/);
+  assert.match(workspaceSource, /action:\s*"retry_failed"/);
+  assert.match(workspaceSource, /action:\s*"continue_workflow"/);
+  assert.match(chatPanelSource, /onGenerateJianyingDraft/);
+  assert.match(messageBubbleSource, /onDownloadJianyingDraft/);
+});

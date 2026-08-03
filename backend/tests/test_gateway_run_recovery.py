@@ -86,7 +86,8 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
-        assert app.state.pixelflow_agent_graph_runtime.graph.checkpointer is app.state.checkpointer
+        assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
+        assert app.state.checkpointer is not None
 
     assert len(_FakeRunManager.instances) == 1
     assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
@@ -130,7 +131,8 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
-        assert app.state.pixelflow_agent_graph_runtime.graph.checkpointer is app.state.checkpointer
+        assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
+        assert app.state.checkpointer is not None
 
     assert len(_FakeRunManager.instances) == 1
     assert not hasattr(app.state, "pixelflow_agent_graph_runtime")
