@@ -1703,22 +1703,36 @@ def test_agent_runtime_package_keeps_public_export_identity_and_errors() -> None
     script = """
 import pixelflow.agent_runtime as runtime
 from pixelflow.agent_runtime import (
+    SupervisorExecutionMetrics,
+    SupervisorExecutorClosedError,
+    SupervisorPostCommitRecorder,
+    SupervisorTransientExecutionError,
+    SupervisorTurnExecutor,
+    SupervisorTurnScope,
     SupervisorReplayDisposition,
     SupervisorReplayResult,
     SupervisorReplayRuntime,
     WorkflowCommandPreview,
 )
-from pixelflow.agent_runtime import replay
+from pixelflow.agent_runtime import executor, replay
 
 expected = [
+    "SupervisorExecutionMetrics",
+    "SupervisorExecutorClosedError",
+    "SupervisorPostCommitRecorder",
+    "SupervisorTransientExecutionError",
+    "SupervisorTurnExecutor",
+    "SupervisorTurnScope",
     "SupervisorReplayDisposition",
     "SupervisorReplayResult",
     "SupervisorReplayRuntime",
     "WorkflowCommandPreview",
 ]
 assert runtime.__all__ == expected
+public_modules = {"executor": executor, "replay": replay}
 for name in expected:
-    assert globals()[name] is getattr(replay, name)
+    module = public_modules[runtime._PUBLIC_MODULES[name]]
+    assert globals()[name] is getattr(module, name)
 try:
     runtime.not_a_public_symbol
 except AttributeError:
@@ -1743,4 +1757,4 @@ print(len(expected))
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "4"
+    assert completed.stdout.strip() == "10"
