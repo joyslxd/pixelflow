@@ -39,6 +39,7 @@ from .contracts import (
 from .executor import SupervisorTurnExecutor, SupervisorTurnScope
 from .identity import conversation_message_id, turn_id
 from .persistence import (
+    AgentRuntimeQuotaResumeStaleError,
     AgentRuntimeRecordConflictError,
     CompactionQueueRepository,
     ConversationCompactionLease,
@@ -84,6 +85,11 @@ class AgentRuntimeContextConflictError(RuntimeError):
 
 class AgentRuntimeInterruptConflictError(RuntimeError):
     """人工响应身份、内容或当前状态与权威记录冲突。"""
+
+
+    def __init__(self, message: str, *, reason_code: str | None = None) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
 
 
 class AgentRuntimeInterruptRequestValidationError(ValueError):
@@ -543,6 +549,11 @@ class AgentRuntimeService:
                     occurred_at=self._clock(),
                 )
             )
+        except AgentRuntimeQuotaResumeStaleError as exc:
+            raise AgentRuntimeInterruptConflictError(
+                "额度恢复响应已经失效",
+                reason_code=exc.reason_code,
+            ) from exc
         except AgentRuntimeRecordConflictError as exc:
             raise AgentRuntimeInterruptConflictError(
                 "interrupt 响应与权威状态冲突",

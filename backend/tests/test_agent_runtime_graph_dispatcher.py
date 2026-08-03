@@ -341,6 +341,37 @@ async def test_dispatcher_routes_multiple_workflow_kinds_to_distinct_handlers() 
 
     assert image_handler.commands == []
     assert [item.workflow_id for item in video_handler.commands] == ["wf-video"]
+    assert video_handler.commands[0].source_interrupt_id is None
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_passes_exact_source_interrupt_id_to_video_handler() -> None:
+    """Dispatcher 必须把已校验的来源中断 ID 原样交给视频 Handler。"""
+
+    video = _workflow("wf-video", kind=WorkflowKind.VIDEO)
+    handler = _RecordingHandler(video)
+    dispatcher = WorkflowCommandDispatcher(
+        FakeWorkflowRegistry({WorkflowKind.VIDEO: handler})
+    )
+
+    await dispatcher.dispatch(
+        {
+            "conversation_id": "conv-1",
+            "user_id": "user-conv-1",
+            "turn_id": "turn-conv-1",
+            "current_input": "恢复视频流程",
+            "source_interrupt_id": "interrupt-exact-source-1",
+            "workflows": {video.workflow_id: video},
+        },
+        _decision(
+            intent=AgentIntent.VIDEO,
+            target_workflow_id=video.workflow_id,
+        ),
+    )
+
+    assert handler.commands[0].source_interrupt_id == (
+        "interrupt-exact-source-1"
+    )
 
 
 @pytest.mark.asyncio

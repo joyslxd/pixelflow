@@ -58,6 +58,7 @@ class WorkflowCommand:
     materials: list[dict[str, Any]]
     reply_to_message_id: str | None
     artifact_refs: list[str]
+    source_interrupt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +160,10 @@ class WorkflowCommandDispatcher:
         artifact_refs = _artifact_refs_snapshot(
             state.get("artifact_refs", []),
         )
+        source_interrupt_id = _optional_text(
+            state.get("source_interrupt_id"),
+            "source_interrupt_id",
+        )
 
         command = WorkflowCommand(
             conversation_id=conversation_id,
@@ -176,6 +181,7 @@ class WorkflowCommandDispatcher:
             materials=materials,
             reply_to_message_id=reply_to_message_id,
             artifact_refs=artifact_refs,
+            source_interrupt_id=source_interrupt_id,
         )
         handler = self._registry.resolve(kind)
         raw_result = await handler.dispatch(command)

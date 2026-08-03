@@ -35,6 +35,7 @@ from .contracts import (
     AgentAction,
     AgentIntent,
     ExplicitActionSignal,
+    ExternalJobStatus,
     InterruptResponseRequest,
     TurnRecord,
     TurnStatus,
@@ -681,6 +682,7 @@ class SupervisorTurnExecutor:
         evidence = await self._load_authoritative_evidence(
             claim,
             response_value=request.value.model_dump(mode="json"),
+            responding_interrupt=interrupt,
         )
         decision_result = await self._decision_service.decide(evidence)
         decision = self._bind_interrupt_decision(
@@ -822,6 +824,7 @@ class SupervisorTurnExecutor:
         claim: TurnExecutionClaim,
         *,
         response_value: Mapping[str, Any] | None = None,
+        responding_interrupt: StoredAgentInterrupt | None = None,
     ) -> SupervisorTurnEvidence:
         user_id = claim.user_id
         conversation_id = claim.turn.conversation_id
@@ -908,6 +911,13 @@ class SupervisorTurnExecutor:
             user_id,
             conversation_id,
         )
+        quota_authorization = await self._quota_authorization_evidence(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            workflows=workflows,
+            explicit_action=explicit,
+            interrupt=responding_interrupt,
+        )
         authoritative_turn = TurnRecord.model_validate(
             claim.turn.model_dump(mode="json", serialize_as_any=True)
         )
@@ -923,9 +933,111 @@ class SupervisorTurnExecutor:
             reply_to_message_id=reply_to,
             artifact_refs=tuple(artifact_refs),
             explicit_action=explicit,
+            quota_authorization=quota_authorization,
             expected_context_version=claim.turn.expected_context_version,
             authoritative_context_version=claim.turn.expected_context_version,
         )
+
+    async def _quota_authorization_evidence(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workflows: tuple[WorkflowRecord, ...],
+        explicit_action: ExplicitActionSignal | None,
+        interrupt: StoredAgentInterrupt | None,
+    ) -> dict[str, JsonValue] | None:
+        """重新读取权威 Operation，仅为当前冻结额度响应生成一次性决策证据。"""
+
+        if (
+            interrupt is None
+            or interrupt.user_id != user_id
+            or interrupt.conversation_id != conversation_id
+            or interrupt.status != "responded"
+            or interrupt.kind != "authorization_required"
+            or interrupt.reason_code != "authorization_required"
+            or explicit_action is None
+        ):
+            return None
+        payload = self._thaw_json(interrupt.payload)
+        if type(payload) is not dict:
+            return None
+        frozen_action = payload.get("authorization_action")
+        actual_action = explicit_action.model_dump(mode="json")
+        if type(frozen_action) is not dict or frozen_action != actual_action:
+            return None
+        patch = frozen_action.get("patch")
+        workflow_id = frozen_action.get("workflow_id")
+        stage = frozen_action.get("stage")
+        if type(patch) is not dict:
+            return None
+        job_id = patch.get("job_id")
+        revision = patch.get("quota_pause_revision")
+        canonical_action = {
+            "action": "retry_failed",
+            "intent": "video",
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "artifact_ref": None,
+            "patch": {
+                "job_id": job_id,
+                "quota_pause_revision": revision,
+            },
+        }
+        canonical_payload = {
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "authorization_action": canonical_action,
+        }
+        if (
+            payload != canonical_payload
+            or interrupt.workflow_id != workflow_id
+            or type(workflow_id) is not str
+            or not workflow_id
+            or type(stage) is not str
+            or not stage
+            or type(job_id) is not str
+            or not job_id
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 1
+        ):
+            return None
+        operation = await self._repository.get_operation(user_id, job_id)
+        workflow = next(
+            (item for item in workflows if item.workflow_id == workflow_id),
+            None,
+        )
+        pending = None if workflow is None else workflow.pending_external_job
+        if (
+            operation is None
+            or operation.conversation_id != conversation_id
+            or operation.workflow_id != workflow_id
+            or operation.stage != stage
+            or operation.quota_pause_revision != revision
+            or operation.status is not ExternalJobStatus.POLLING
+            or not operation.provider_job_id
+            or operation.next_poll_at is not None
+            or operation.lease_owner is not None
+            or operation.lease_expires_at is not None
+            or pending is None
+            or pending.job_id != operation.job_id
+            or pending.provider_job_id != operation.provider_job_id
+            or pending.workflow_id != operation.workflow_id
+            or pending.stage != operation.stage
+            or pending.status is not operation.status
+            or pending.attempt != operation.attempt
+        ):
+            return None
+        return {
+            "interrupt_id": interrupt.interrupt_id,
+            "workflow_id": operation.workflow_id,
+            "stage": operation.stage,
+            "job_id": operation.job_id,
+            "provider_job_id": operation.provider_job_id,
+            "attempt": operation.attempt,
+            "quota_pause_revision": operation.quota_pause_revision,
+        }
 
     def _graph_input(self, evidence: SupervisorTurnEvidence, decision: Any) -> dict[str, Any]:
         """填满 SupervisorState 全字段，并只使用权威 active Workflow。"""
@@ -949,6 +1061,7 @@ class SupervisorTurnExecutor:
             "dispatch_workflow_id": None,
             "workflow_dispatch_result": None,
             "last_interrupt_response_id": None,
+            "source_interrupt_id": None,
         }
 
     async def _invoke_or_recover_graph(

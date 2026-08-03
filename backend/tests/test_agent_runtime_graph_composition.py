@@ -39,6 +39,7 @@ from pixelflow.agent_runtime.graph import (
     resume_graph_from_interrupt,
     supervisor_namespace,
 )
+from pixelflow.agent_runtime.graph.composition import _resume_workflow_command
 from pixelflow.agent_runtime.identity import interrupt_id
 from pixelflow.agent_runtime.persistence import (
     MemoryVideoRuntimeRepository,
@@ -261,11 +262,20 @@ class _ImmediateStartHandler:
 class _LiveInterruptingHandler:
     """用完整 live 结果打开中断，并在原 Turn 恢复后推进规划。"""
 
-    def __init__(self, turn_ids: list[str]) -> None:
+    def __init__(
+        self,
+        turn_ids: list[str],
+        source_interrupt_ids: list[str | None] | None = None,
+    ) -> None:
         self._turn_ids = turn_ids
+        self._source_interrupt_ids = source_interrupt_ids
 
     async def dispatch(self, command: WorkflowCommand) -> WorkflowDispatchResult:
         self._turn_ids.append(command.turn_id)
+        if self._source_interrupt_ids is not None:
+            self._source_interrupt_ids.append(
+                getattr(command, "source_interrupt_id", None)
+            )
         planning = VideoPlanningWorkflowService()
         state = planning.start(
             workflow_id=command.workflow_id,
@@ -794,9 +804,15 @@ async def test_live_graph_resumes_original_memory_interrupt_after_rebuild() -> N
     checkpointer = InMemorySaver()
     namespace = supervisor_namespace("conv-live-memory")
     turn_ids: list[str] = []
+    source_interrupt_ids: list[str | None] = []
     first_graph = make_agent_runtime_graph(
         registry=FakeWorkflowRegistry(
-            {WorkflowKind.VIDEO: _LiveInterruptingHandler(turn_ids)}
+            {
+                WorkflowKind.VIDEO: _LiveInterruptingHandler(
+                    turn_ids,
+                    source_interrupt_ids,
+                )
+            }
         ),
         checkpointer=checkpointer,
     )
@@ -814,7 +830,12 @@ async def test_live_graph_resumes_original_memory_interrupt_after_rebuild() -> N
 
     restarted_graph = make_agent_runtime_graph(
         registry=FakeWorkflowRegistry(
-            {WorkflowKind.VIDEO: _LiveInterruptingHandler(turn_ids)}
+            {
+                WorkflowKind.VIDEO: _LiveInterruptingHandler(
+                    turn_ids,
+                    source_interrupt_ids,
+                )
+            }
         ),
         checkpointer=checkpointer,
     )
@@ -833,6 +854,58 @@ async def test_live_graph_resumes_original_memory_interrupt_after_rebuild() -> N
     assert result["last_interrupt_response_id"] == (
         "10000000-0000-4000-8000-000000000007"
     )
+    assert source_interrupt_ids == [None, stored.interrupt_id]
+    assert result["source_interrupt_id"] is None
+
+
+def test_resume_workflow_command_rejects_forged_source_interrupt_id() -> None:
+    """伪造的来源中断 ID 必须在写入 SupervisorState 前被拒绝。"""
+
+    conversation_id = "conv-live-forged-source"
+    turn_id = f"turn-{conversation_id}"
+    planning = VideoPlanningWorkflowService()
+    state = planning.start(
+        workflow_id="wf-live-forged-source",
+        conversation_id=conversation_id,
+        intent="video",
+        intake_context={"source_prompt": "生成视频"},
+        now=NOW,
+    )
+    workflow = planning.to_workflow_record(state)
+    opened = StoredAgentInterrupt(
+        interrupt_id=interrupt_id(turn_id, "video_intake_required"),
+        conversation_id=conversation_id,
+        workflow_id=workflow.workflow_id,
+        turn_id=turn_id,
+        kind="video_intake_form",
+        reason_code="video_intake_required",
+        payload={"workflow_id": workflow.workflow_id, "stage": "intake"},
+        opened_at=NOW,
+        user_id=f"user-{conversation_id}",
+        thread_id=f"thread-{conversation_id}",
+        checkpoint_ns="root",
+    )
+    result = WorkflowDispatchResult(
+        state=encode_video_workflow_state(
+            user_id=opened.user_id,
+            state=state,
+            workflow_version=1,
+            last_turn_id=turn_id,
+            last_action_key="decision:original",
+        ),
+        workflow=workflow,
+        interrupt=opened,
+        turn_status=TurnStatus.WAITING_USER,
+    )
+    response = _live_resume_value(stored=opened)
+    response["interrupt_id"] = "interrupt-forged-source"
+
+    with pytest.raises(ValueError, match="身份不一致"):
+        _resume_workflow_command(
+            {"turn_id": turn_id},
+            result=result,
+            response=response,
+        )
 
 
 @pytest.mark.asyncio

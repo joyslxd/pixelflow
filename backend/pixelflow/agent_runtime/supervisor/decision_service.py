@@ -102,6 +102,18 @@ _WORKFLOW_ACTIONS_BY_STATUS: dict[
 }
 
 
+class QuotaAuthorizationEvidence(ContractModel):
+    """只表示当前响应仍精确指向可人工恢复的额度暂停 Operation。"""
+
+    interrupt_id: str = Field(min_length=1)
+    workflow_id: str = Field(min_length=1)
+    stage: str = Field(min_length=1)
+    job_id: str = Field(min_length=1)
+    provider_job_id: str = Field(min_length=1)
+    attempt: int = Field(ge=1)
+    quota_pause_revision: int = Field(ge=1)
+
+
 class SupervisorTurnEvidence(ContractModel):
     """保存一次 Supervisor 决策所需的权威 Turn 与投影证据。"""
 
@@ -116,6 +128,7 @@ class SupervisorTurnEvidence(ContractModel):
     reply_to_message_id: str | None = Field(default=None, min_length=1)
     artifact_refs: tuple[str, ...] = ()
     explicit_action: ExplicitActionSignal | None = None
+    quota_authorization: QuotaAuthorizationEvidence | None = None
     expected_context_version: int = Field(ge=0)
     authoritative_context_version: int = Field(ge=0)
 
@@ -208,6 +221,12 @@ class SupervisorTurnEvidence(ContractModel):
             message_owners=message_owners,
             artifact_owners=artifact_owners,
         )
+        if self.quota_authorization is not None:
+            _validate_quota_authorization(
+                self.quota_authorization,
+                explicit_action=self.explicit_action,
+                workflows=self.workflows,
+            )
         return self
 
     def to_resolver_input(self) -> DeterministicResolutionRequest:
@@ -521,12 +540,16 @@ def _resolver_candidates(
         workflow.workflow_id: workflow for workflow in evidence.workflows
     }
     for workflow in evidence.workflows:
-        candidates.append(
+        stage_targets = [workflow.current_stage]
+        if workflow.pending_external_job is not None:
+            stage_targets.append(workflow.pending_external_job.stage)
+        candidates.extend(
             ResolverCandidate(
                 workflow_id=workflow.workflow_id,
                 intent=_intent(workflow),
-                stage=workflow.current_stage,
+                stage=stage,
             )
+            for stage in dict.fromkeys(stage_targets)
         )
         candidates.extend(
             ResolverCandidate(
@@ -571,7 +594,28 @@ def _resolver_candidates(
             )
             for artifact_ref in artifact_refs
         )
-    return tuple(candidates)
+    stable_candidates: dict[
+        tuple[
+            str,
+            AgentIntent,
+            str | None,
+            str | None,
+            str | None,
+            str | None,
+        ],
+        ResolverCandidate,
+    ] = {}
+    for candidate in candidates:
+        key = (
+            candidate.workflow_id,
+            candidate.intent,
+            candidate.stage,
+            candidate.message_id,
+            candidate.artifact_ref,
+            candidate.mention_ref,
+        )
+        stable_candidates.setdefault(key, candidate)
+    return tuple(stable_candidates.values())
 
 
 def _classification_candidates(
@@ -585,7 +629,7 @@ def _classification_candidates(
             current_stage=workflow.current_stage,
             stage_version=workflow.stage_version,
             context_version=workflow.context_version,
-            allowed_actions=_allowed_workflow_actions(workflow),
+            allowed_actions=_allowed_workflow_actions(evidence, workflow),
             targets=_classification_targets(evidence, workflow),
         )
         for workflow in evidence.workflows
@@ -593,11 +637,24 @@ def _classification_candidates(
 
 
 def _allowed_workflow_actions(
+    evidence: SupervisorTurnEvidence,
     workflow: WorkflowRecord,
 ) -> tuple[AgentAction, ...]:
     """只为精确的视频交付阶段开放对应的继续与失败重试动作。"""
 
     actions = _WORKFLOW_ACTIONS_BY_STATUS[workflow.status]
+    authorization = evidence.quota_authorization
+    if (
+        workflow.status is WorkflowStatus.RUNNING
+        and authorization is not None
+        and authorization.workflow_id == workflow.workflow_id
+    ):
+        return (
+            AgentAction.ANSWER_ONLY,
+            AgentAction.RETRY_FAILED,
+            AgentAction.SWITCH_WORKFLOW,
+            AgentAction.CANCEL_WORKFLOW,
+        )
     if (
         workflow.kind is WorkflowKind.VIDEO
         and workflow.status is WorkflowStatus.AWAITING_USER
@@ -628,6 +685,52 @@ def _allowed_workflow_actions(
     return actions
 
 
+def _validate_quota_authorization(
+    authorization: QuotaAuthorizationEvidence,
+    *,
+    explicit_action: ExplicitActionSignal | None,
+    workflows: tuple[WorkflowRecord, ...],
+) -> None:
+    """拒绝不能由当前工作流投影和冻结动作共同证明的额度恢复证据。"""
+
+    workflow = next(
+        (
+            item
+            for item in workflows
+            if item.workflow_id == authorization.workflow_id
+        ),
+        None,
+    )
+    pending = None if workflow is None else workflow.pending_external_job
+    expected_patch = {
+        "job_id": authorization.job_id,
+        "quota_pause_revision": authorization.quota_pause_revision,
+    }
+    if (
+        workflow is None
+        or workflow.kind is not WorkflowKind.VIDEO
+        or workflow.status not in {
+            WorkflowStatus.PAUSED_QUOTA,
+            WorkflowStatus.RUNNING,
+        }
+        or pending is None
+        or pending.job_id != authorization.job_id
+        or pending.provider_job_id != authorization.provider_job_id
+        or pending.workflow_id != authorization.workflow_id
+        or pending.stage != authorization.stage
+        or pending.status.value != "polling"
+        or pending.attempt != authorization.attempt
+        or explicit_action is None
+        or explicit_action.action is not AgentAction.RETRY_FAILED
+        or explicit_action.intent is not AgentIntent.VIDEO
+        or explicit_action.workflow_id != authorization.workflow_id
+        or explicit_action.stage != authorization.stage
+        or explicit_action.artifact_ref is not None
+        or explicit_action.patch != expected_patch
+    ):
+        raise ValueError("额度授权证据与当前工作流、Operation 或冻结动作不一致")
+
+
 def _classification_targets(
     evidence: SupervisorTurnEvidence,
     workflow: WorkflowRecord,
@@ -638,6 +741,8 @@ def _classification_targets(
     ]
     if not target_pairs:
         target_pairs.append((workflow.current_stage, None))
+    if workflow.pending_external_job is not None:
+        target_pairs.append((workflow.pending_external_job.stage, None))
     for message in evidence.visible_messages:
         if _optional_string(message.get("workflow_id")) != workflow.workflow_id:
             continue

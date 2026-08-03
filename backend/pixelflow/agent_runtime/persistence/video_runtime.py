@@ -76,6 +76,7 @@ from .models import (
     PixelFlowAgentWorkflowRow,
 )
 from .repositories import (
+    AgentRuntimeQuotaResumeStaleError,
     AgentRuntimeRecordConflictError,
     EventDeliveryClaim,
     OperationRecord,
@@ -962,6 +963,112 @@ def _interrupt_matches_response(
         and response.get("client_response_id") == str(request.client_response_id)
         and response.get("value") == request.value.model_dump(mode="json")
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _QuotaResumeAuthority:
+    """从开放中断冻结出的额度恢复身份。"""
+
+    job_id: str
+    workflow_id: str
+    stage: str
+    quota_pause_revision: int
+
+
+def _quota_resume_authority(
+    interrupt: StoredAgentInterrupt,
+    request: InterruptResponseRequest,
+) -> _QuotaResumeAuthority | None:
+    """只对额度授权中断要求响应动作与冻结动作完全一致。"""
+
+    if (
+        interrupt.kind != "authorization_required"
+        or interrupt.reason_code != "authorization_required"
+    ):
+        return None
+    payload = _thaw_json(interrupt.payload)
+    expected_action = payload.get("authorization_action")
+    explicit_action = request.value.explicit_action
+    actual_action = (
+        None
+        if explicit_action is None
+        else explicit_action.model_dump(mode="json")
+    )
+    if type(expected_action) is not dict or actual_action != expected_action:
+        raise AgentRuntimeQuotaResumeStaleError(
+            "额度恢复响应与冻结授权动作不一致",
+        )
+    patch = expected_action.get("patch")
+    workflow_id = expected_action.get("workflow_id")
+    stage = expected_action.get("stage")
+    if type(patch) is not dict:
+        raise AgentRuntimeQuotaResumeStaleError("额度恢复授权补丁非法")
+    # 额度修订号是额度恢复授权的冻结判别标识；普通授权继续沿用既有响应流程。
+    if "quota_pause_revision" not in patch:
+        return None
+    job_id = patch.get("job_id")
+    revision = patch.get("quota_pause_revision")
+    canonical_action = {
+        "action": "retry_failed",
+        "intent": "video",
+        "workflow_id": workflow_id,
+        "stage": stage,
+        "artifact_ref": None,
+        "patch": {
+            "job_id": job_id,
+            "quota_pause_revision": revision,
+        },
+    }
+    if (
+        expected_action != canonical_action
+        or type(workflow_id) is not str
+        or not workflow_id
+        or type(stage) is not str
+        or not stage
+        or type(job_id) is not str
+        or not job_id
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+    ):
+        raise AgentRuntimeQuotaResumeStaleError("额度恢复授权身份非法")
+    return _QuotaResumeAuthority(
+        job_id=job_id,
+        workflow_id=workflow_id,
+        stage=stage,
+        quota_pause_revision=revision,
+    )
+
+
+def _validate_quota_resume_operation(
+    *,
+    user_id: str,
+    conversation_id: str,
+    authority: _QuotaResumeAuthority | None,
+    operation: OperationRecord | None,
+    operation_user_id: str | None,
+) -> None:
+    """在同一锁或事务内确认额度恢复仍指向当前可恢复 Operation。"""
+
+    if authority is None:
+        return
+    if (
+        operation is None
+        or operation_user_id != user_id
+        or operation.job_id != authority.job_id
+        or operation.conversation_id != conversation_id
+        or operation.workflow_id != authority.workflow_id
+        or operation.stage != authority.stage
+        or operation.quota_pause_revision != authority.quota_pause_revision
+        or operation.status is not ExternalJobStatus.POLLING
+        or not operation.provider_job_id
+        or operation.next_poll_at is not None
+        or operation.lease_owner is not None
+        or operation.lease_expires_at is not None
+    ):
+        raise AgentRuntimeQuotaResumeStaleError(
+            "额度恢复响应已落后于当前 Operation",
+        )
 
 
 def _response_context_version(interrupt: StoredAgentInterrupt) -> int:
@@ -2150,7 +2257,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
             "client_response_id": str(client_response_id),
             "value": _json_copy(response_value, field_name="interrupt response value"),
         }
-        async with self._compaction_write_lock:
+        async with self._compaction_write_lock, self._operation_write_lock:
             key = (owner, identity)
             existing = self._interrupts.get(key)
             if existing is None or existing.conversation_id != conversation:
@@ -2193,7 +2300,7 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
             request=normalized_request,
             message=message,
         )
-        async with self._compaction_write_lock:
+        async with self._compaction_write_lock, self._operation_write_lock:
             key = (owner, identity)
             existing = self._interrupts.get(key)
             if existing is None or existing.conversation_id != conversation:
@@ -2234,6 +2341,22 @@ class MemoryVideoRuntimeRepository(MemoryCompactionQueueRepository):
                     context_version=_response_context_version(existing),
                     created=False,
                 )
+            quota_authority = _quota_resume_authority(
+                existing,
+                normalized_request,
+            )
+            quota_operation = (
+                None
+                if quota_authority is None
+                else self._operations.get((owner, quota_authority.job_id))
+            )
+            _validate_quota_resume_operation(
+                user_id=owner,
+                conversation_id=conversation,
+                authority=quota_authority,
+                operation=quota_operation,
+                operation_user_id=(owner if quota_operation is not None else None),
+            )
             if existing.status != "open":
                 raise AgentRuntimeRecordConflictError("interrupt 状态非法")
             open_interrupts = [
@@ -4241,9 +4364,9 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                         raise AgentRuntimeRecordConflictError(
                             "interrupt 所属对话不可执行 live 视频",
                         )
-                    interrupt_turn_id = (
-                        await session.scalar(
-                            select(PixelFlowAgentInterruptRow.turn_id)
+                    interrupt_probe = (
+                        await session.scalars(
+                            select(PixelFlowAgentInterruptRow)
                             .where(
                                 PixelFlowAgentInterruptRow.user_id == owner,
                                 PixelFlowAgentInterruptRow.conversation_id
@@ -4251,11 +4374,30 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                                 PixelFlowAgentInterruptRow.interrupt_id == identity,
                             )
                         )
-                    )
-                    if interrupt_turn_id is None:
+                    ).one_or_none()
+                    if interrupt_probe is None:
                         raise AgentRuntimeRecordConflictError(
                             "interrupt 不存在或不属于当前会话",
                         )
+                    interrupt_turn_id = interrupt_probe.turn_id
+                    quota_authority: _QuotaResumeAuthority | None = None
+                    quota_operation_row: PixelFlowAgentOperationRow | None = None
+                    if interrupt_probe.status == "open":
+                        quota_authority = _quota_resume_authority(
+                            _interrupt_from_row(interrupt_probe),
+                            normalized_request,
+                        )
+                        if quota_authority is not None:
+                            quota_operation_row = (
+                                await session.scalars(
+                                    select(PixelFlowAgentOperationRow)
+                                    .where(
+                                        PixelFlowAgentOperationRow.job_id
+                                        == quota_authority.job_id,
+                                    )
+                                    .with_for_update()
+                                )
+                            ).one_or_none()
                     turn_row = (
                         await session.scalars(
                             select(PixelFlowAgentTurnRow)
@@ -4334,6 +4476,26 @@ class SQLVideoRuntimeRepository(SQLCompactionQueueRepository):
                             ),
                             created=False,
                         )
+                    locked_quota_authority = _quota_resume_authority(
+                        stored_interrupt,
+                        normalized_request,
+                    )
+                    quota_operation = (
+                        None
+                        if quota_operation_row is None
+                        else _operation_from_row(quota_operation_row)
+                    )
+                    _validate_quota_resume_operation(
+                        user_id=owner,
+                        conversation_id=conversation,
+                        authority=locked_quota_authority,
+                        operation=quota_operation,
+                        operation_user_id=(
+                            None
+                            if quota_operation_row is None
+                            else quota_operation_row.user_id
+                        ),
+                    )
                     if interrupt_row.status != "open":
                         raise AgentRuntimeRecordConflictError(
                             "interrupt 状态非法",

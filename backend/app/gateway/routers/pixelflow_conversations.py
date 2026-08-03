@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
@@ -533,8 +533,14 @@ async def respond_to_agent_interrupt(
             status_code=422,
             detail={"code": "agent_runtime_interrupt_response_invalid"},
         ) from exc
+    except AgentRuntimeInterruptConflictError as exc:
+        if exc.reason_code == "video_quota_resume_stale":
+            return JSONResponse(
+                status_code=409,
+                content={"reason_code": "video_quota_resume_stale"},
+            )
+        raise _runtime_http_exception(exc) from exc
     except (
-        AgentRuntimeInterruptConflictError,
         AgentRuntimeInterruptStateError,
         AgentRuntimeUnavailableError,
         LookupError,

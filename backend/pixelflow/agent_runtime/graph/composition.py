@@ -108,6 +108,8 @@ def build_agent_runtime_graph(
         )
         update = dict(projection.update)
         update["dispatch_workflow_id"] = None
+        # 来源中断身份只允许当前恢复动作消费一次，禁止后续普通动作复用。
+        update["source_interrupt_id"] = None
         if result.state is None:
             update["workflow_dispatch_result"] = None
             return Command(update=update, goto=END)
@@ -218,7 +220,11 @@ def _resume_workflow_command(
     if response["workflow_id"] != opened.workflow_id:
         raise ValueError("workflow interrupt 的 workflow_id 不一致")
     stage = response["stage"]
-    if stage != result.workflow.current_stage or opened.payload.get("stage") != stage:
+    pending = result.workflow.pending_external_job
+    allowed_stages = {result.workflow.current_stage}
+    if pending is not None and pending.stage:
+        allowed_stages.add(pending.stage)
+    if stage not in allowed_stages or opened.payload.get("stage") != stage:
         raise ValueError("workflow interrupt 的 stage 已过期")
 
     request = InterruptResponseRequest.model_validate(
@@ -257,6 +263,7 @@ def _resume_workflow_command(
             "dispatch_workflow_id": opened.workflow_id,
             "workflow_dispatch_result": None,
             "last_interrupt_response_id": str(request.client_response_id),
+            "source_interrupt_id": opened.interrupt_id,
         },
         goto=DISPATCH_WORKFLOW_NODE,
     )

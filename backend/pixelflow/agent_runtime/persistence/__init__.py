@@ -28,6 +28,7 @@ from .models import (
     PixelFlowAgentWorkflowRow,
 )
 from .repositories import (
+    AgentRuntimeQuotaResumeStaleError,
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
     EventDeliveryClaim,
@@ -65,6 +66,7 @@ from .video_runtime import (
 __all__ = [
     "AGENT_RUNTIME_TABLES",
     "AGENT_RUNTIME_SUPPORT_TABLES",
+    "AgentRuntimeQuotaResumeStaleError",
     "AgentRuntimeRecordConflictError",
     "AgentRuntimeRepository",
     "CompactionLeaseConflictError",

@@ -1281,14 +1281,20 @@ assert stale.json()["reason_code"] == "video_quota_resume_stale"
 ```python
 EXPECTED_REASON = {
     "status_402": "provider_quota_insufficient",
-    "timeout": "provider_job_timeout",
-    "failed": "provider_job_failed",
+    "timeout": "provider_timeout",
+    "failed": "provider_business_failed",
     "expired_404": "provider_job_expired",
-    "cross_tenant": "operation_scope_mismatch",
+    "cross_tenant": "tenant_scope_not_found",
     "model_profile_expired": "model_profile_unverified",
     "handler_missing_after_restart": "agent_runtime_unavailable",
 }
 ```
+
+人工裁定（2026-08-03）：沿用 M06 Provider Adapter 和公共 API 已冻结的
+`provider_timeout`、`provider_business_failed`、`tenant_scope_not_found` 原因码，
+只校正本计划、测试和交付报告的预期，不修改生产原因合同，也不引入兼容迁移。
+402 场景继续区分暂停故障原因 `provider_quota_insufficient` 与最终完成原因
+`provider_succeeded`。
 
 对 checkpoint 前后退出使用生产 Supervisor Graph 与 SQLite Checkpointer；进程重建后校验原 Turn/interrupt、event ID 和 Provider start 计数。
 

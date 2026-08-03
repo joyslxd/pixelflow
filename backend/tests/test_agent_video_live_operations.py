@@ -58,9 +58,11 @@ from pixelflow.agent_runtime.jobs import (
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
+    AgentRuntimeQuotaResumeStaleError,
     AgentRuntimeRecordConflictError,
     MemoryVideoRuntimeRepository,
     SQLVideoRuntimeRepository,
+    StoredAgentInterrupt,
     SupervisorProjectionMessage,
     TurnExecutionLeaseConflictError,
     VideoRuntimeRepository,
@@ -795,7 +797,33 @@ async def _paused_quota_handler_harness() -> SimpleNamespace:
         pending=pending,
         paused=paused,
         workflow=projection.workflow,
+        interrupt=projection.open_interrupt,
     )
+
+
+async def _reopened_quota_handler_harness() -> SimpleNamespace:
+    """模拟其他分镜完成后，Repository 已前进而暂停 checkpoint 保持不变。"""
+
+    harness = await _paused_quota_handler_harness()
+    paused_workflow = harness.workflow
+    envelope = await harness.repository.get_video_state(USER_ID, WORKFLOW_ID)
+    assert envelope is not None
+    state = decode_video_workflow_state(envelope)
+    state = replace(state, context_version=state.context_version + 1)
+    running_workflow = project_video_workflow_state(state)
+    advanced_envelope = encode_video_workflow_state(
+        user_id=USER_ID,
+        state=state,
+        workflow_version=envelope.workflow_version + 1,
+        last_turn_id=envelope.last_turn_id,
+        last_action_key="completion:other-scene",
+    )
+    harness.repository._video_states[(USER_ID, WORKFLOW_ID)] = advanced_envelope
+    harness.repository._workflows[(USER_ID, WORKFLOW_ID)] = running_workflow
+    harness.paused_workflow = paused_workflow
+    harness.running_workflow = running_workflow
+    harness.current_envelope = advanced_envelope
+    return harness
 
 
 def _quota_retry_command(
@@ -818,6 +846,7 @@ def _quota_retry_command(
     )
     return replace(
         command,
+        source_interrupt_id=harness.interrupt.interrupt_id,
         decision=command.decision.model_copy(
             update={"target_stage": harness.pending.stage}
         ),
@@ -2092,6 +2121,48 @@ async def test_quota_retry_consumes_new_credential_and_resumes_same_operation() 
 
 
 @pytest.mark.asyncio
+async def test_quota_retry_discards_credential_when_bridge_fails_before_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge 在消费前故障时，Handler 仍必须销毁临时授权。"""
+
+    from pixelflow.agent_workflows.video.live_capabilities import (
+        _consume_authorization_for_quota_resume_boundary,
+    )
+
+    harness = await _paused_quota_handler_harness()
+    command = _quota_retry_command(
+        harness,
+        suffix="task7-quota-bridge-pre-consume-failure",
+    )
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+
+    async def fail_before_consumption(**_kwargs: object) -> object:
+        raise RuntimeError("模拟 Bridge 在凭据消费前故障")
+
+    monkeypatch.setattr(
+        harness.operations,
+        "resume_paused_operation",
+        fail_before_consumption,
+    )
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(RuntimeError, match="消费前故障"):
+        await handler.dispatch(command)
+
+    with pytest.raises(RuntimeError, match="不可用"):
+        _consume_authorization_for_quota_resume_boundary(credential)
+
+
+@pytest.mark.asyncio
 async def test_missing_quota_credential_commits_then_new_credential_resumes() -> None:
     """缺凭据重开可真实提交，下一响应仍能恢复同一 revision。"""
 
@@ -2118,6 +2189,15 @@ async def test_missing_quota_credential_commits_then_new_credential_resumes() ->
         lease_expires_at=harness.clock.now() + timedelta(seconds=60),
     )
     assert first_claim is not None
+    competing_claim = await harness.repository.claim_interrupt_resume(
+        USER_ID,
+        CONVERSATION_ID,
+        first_response.interrupt_id,
+        lease_owner="task7-concurrent-valid-credential",
+        now=harness.clock.now(),
+        lease_expires_at=harness.clock.now() + timedelta(seconds=60),
+    )
+    assert competing_claim is None
     first_command = replace(
         _quota_retry_command(harness, suffix="task5-quota-missing-commit"),
         turn_id=first_claim.turn.turn_id,
@@ -2128,6 +2208,14 @@ async def test_missing_quota_credential_commits_then_new_credential_resumes() ->
         clock=harness.clock,
     )
     waiting = await handler.dispatch(first_command)
+    assert await harness.repository.claim_interrupt_resume(
+        USER_ID,
+        CONVERSATION_ID,
+        first_response.interrupt_id,
+        lease_owner="task7-concurrent-valid-after-handler",
+        now=harness.clock.now(),
+        lease_expires_at=harness.clock.now() + timedelta(seconds=60),
+    ) is None
     executor = object.__new__(SupervisorTurnExecutor)
     executor._clock = harness.clock.now
     waiting_commit = executor._commit_from_graph(
@@ -2186,6 +2274,7 @@ async def test_missing_quota_credential_commits_then_new_credential_resumes() ->
     )
     second_command = replace(
         second_command,
+        source_interrupt_id=reopened.interrupt_id,
         decision=second_command.decision.model_copy(
             update={"target_stage": harness.pending.stage}
         ),
@@ -2274,6 +2363,10 @@ async def test_quota_revision_or_job_mismatch_fails_closed(
     assert operation is not None
     assert operation.next_poll_at is None
     assert operation.quota_pause_revision == 1
+    assert (
+        _consume_authorization_for_quota_resume_boundary(credential)
+        == FAKE_AUTHORIZATION
+    )
     with pytest.raises(RuntimeError, match="不可用"):
         _consume_authorization_for_quota_resume_boundary(credential)
 
@@ -2312,6 +2405,169 @@ async def test_quota_retry_rejects_forged_paused_workflow_projection() -> None:
     )
     assert operation is not None
     assert operation.next_poll_at is None
+
+
+@pytest.mark.asyncio
+async def test_quota_retry_accepts_strict_pause_token_after_other_scene_reopens_workflow() -> None:
+    """其他分镜把权威状态推进为 RUNNING 后，原暂停令牌仍可恢复同一 job。"""
+
+    harness = await _reopened_quota_handler_harness()
+    command = _quota_retry_command(
+        harness,
+        suffix="task7-reopened-quota-token",
+    )
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+    start_calls_before = harness.provider.start_calls
+    assert command.workflow is not None
+    assert (
+        command.workflow.context_version
+        < harness.running_workflow.context_version
+    )
+
+    result = await handler.dispatch(command)
+
+    operation = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert operation is not None
+    assert operation.job_id == harness.pending.job_id
+    assert operation.provider_job_id == harness.paused.operation.provider_job_id
+    assert operation.next_poll_at == harness.clock.now()
+    assert result.workflow.status is WorkflowStatus.RUNNING
+    assert result.operation_event_claim is not None
+    assert harness.provider.start_calls == start_calls_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "pause_event_id",
+        "thread_version",
+        "interrupt_id",
+        "interrupt_user_id",
+        "source_interrupt_id",
+        "checkpoint_pending_job",
+        "checkpoint_context_version",
+    ],
+)
+async def test_reopened_quota_retry_rejects_tampered_pause_token_without_side_effects(
+    tamper: str,
+) -> None:
+    """暂停令牌任一身份被改写时，Operation 与临时凭据都必须保持不变。"""
+
+    from pixelflow.agent_workflows.video.live_capabilities import (
+        _consume_authorization_for_quota_resume_boundary,
+    )
+
+    harness = await _reopened_quota_handler_harness()
+    command = _quota_retry_command(
+        harness,
+        suffix=f"task7-reopened-quota-tamper-{tamper}",
+    )
+    interrupt = await harness.repository.get_open_interrupt(
+        USER_ID,
+        CONVERSATION_ID,
+    )
+    assert interrupt is not None
+    if tamper == "pause_event_id":
+        forged = interrupt.model_copy(
+            update={
+                "thread_id": (
+                    "quota-paused:evt_job_quota_forged_pause_event:v2"
+                )
+            }
+        )
+        harness.repository._interrupts[(USER_ID, interrupt.interrupt_id)] = forged
+    elif tamper == "thread_version":
+        prefix, _, _ = interrupt.thread_id.rpartition(":v")
+        forged = interrupt.model_copy(update={"thread_id": f"{prefix}:v999"})
+        harness.repository._interrupts[(USER_ID, interrupt.interrupt_id)] = forged
+    elif tamper == "interrupt_id":
+        harness.repository._interrupts.pop((USER_ID, interrupt.interrupt_id))
+        forged = interrupt.model_copy(
+            update={"interrupt_id": "interrupt-task7-forged-pause-token"}
+        )
+        harness.repository._interrupts[(USER_ID, forged.interrupt_id)] = forged
+    elif tamper == "interrupt_user_id":
+        forged = interrupt.model_copy(update={"user_id": "user-task7-forged"})
+        harness.repository._interrupts[(USER_ID, interrupt.interrupt_id)] = forged
+    elif tamper == "source_interrupt_id":
+        command = replace(
+            command,
+            source_interrupt_id="interrupt-task7-forged-source",
+        )
+    elif tamper == "checkpoint_pending_job":
+        pending = command.workflow.pending_external_job
+        assert pending is not None
+        command = replace(
+            command,
+            workflow=command.workflow.model_copy(
+                update={
+                    "pending_external_job": pending.model_copy(
+                        update={"job_id": "job-task7-forged-checkpoint"}
+                    )
+                }
+            ),
+        )
+    elif tamper == "checkpoint_context_version":
+        command = replace(
+            command,
+            workflow=command.workflow.model_copy(
+                update={
+                    "context_version": (
+                        harness.running_workflow.context_version + 1
+                    )
+                }
+            ),
+        )
+    else:  # pragma: no cover - 参数集合由测试自身固定。
+        raise AssertionError(f"未知篡改类型：{tamper}")
+
+    before = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert before is not None
+    credential = TransientTurnCredential(FAKE_AUTHORIZATION)
+    vault = TransientCredentialVault()
+    vault.put(command.turn_id, credential)
+    handler = VideoLiveWorkflowHandler(
+        repository=harness.repository,
+        capabilities=_UnusedCapabilities(),
+        credential_provider=vault,
+        operation_port=harness.operations,
+        clock=harness.clock,
+    )
+
+    with pytest.raises(
+        VideoLiveStateConflictError,
+        match="video_quota_resume_stale",
+    ):
+        await handler.dispatch(command)
+
+    after = await harness.operations.get_operation(
+        user_id=USER_ID,
+        conversation_id=CONVERSATION_ID,
+        job_id=harness.pending.job_id,
+    )
+    assert after == before
+    assert (
+        _consume_authorization_for_quota_resume_boundary(credential)
+        == FAKE_AUTHORIZATION
+    )
 
 
 @pytest.mark.asyncio
@@ -5584,6 +5840,154 @@ async def test_plan_scene_asset_authorization_resumes_current_stage_once_after_r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize("near_quota", [False, True])
+async def test_interrupt_registration_distinguishes_ordinary_and_near_quota_authorization(
+    kind: RepositoryKind,
+    near_quota: bool,
+    tmp_path: Path,
+) -> None:
+    """普通授权应继续，携带额度修订号的畸形授权必须拒绝。"""
+
+    async with _video_repository(
+        kind,
+        tmp_path / f"task7-authorization-classification-{kind}-{near_quota}.db",
+    ) as (repository, store):
+        await _seed_conversation(store)
+        state = _plan_review_state()
+        await _commit_seed_state(repository, store, state)
+        turn_id = f"turn-task7-authorization-classification-{kind}-{near_quota}"
+        turn = TurnRecord(
+            turn_id=turn_id,
+            conversation_id=CONVERSATION_ID,
+            client_input_id=UUID(
+                "00000000-0000-4000-8000-000000001329"
+                if near_quota
+                else "00000000-0000-4000-8000-000000001328"
+            ),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=WORKFLOW_ID,
+            decision=None,
+            expected_context_version=0,
+            created_at=NOW,
+        )
+        await repository.enqueue_turn_for_execution(USER_ID, turn, now=NOW)
+        claim = await repository.claim_turn(
+            USER_ID,
+            CONVERSATION_ID,
+            turn_id,
+            lease_owner=f"task7-authorization-classification-{kind}",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=30),
+        )
+        assert claim is not None
+        action = ExplicitActionSignal(
+            action=AgentAction.CONTINUE_WORKFLOW,
+            intent=AgentIntent.VIDEO,
+            workflow_id=WORKFLOW_ID,
+            stage=state.current_stage.value,
+            artifact_ref=state.active_plan_artifact_ref,
+            patch={"quota_pause_revision": 1} if near_quota else {},
+        )
+        interrupt = StoredAgentInterrupt(
+            interrupt_id=f"interrupt-task7-authorization-{kind}-{near_quota}",
+            conversation_id=CONVERSATION_ID,
+            workflow_id=WORKFLOW_ID,
+            turn_id=turn_id,
+            kind="authorization_required",
+            reason_code="authorization_required",
+            payload={
+                "workflow_id": WORKFLOW_ID,
+                "stage": state.current_stage.value,
+                "authorization_action": action.model_dump(mode="json"),
+            },
+            opened_at=NOW,
+            user_id=USER_ID,
+            thread_id=f"thread-task7-authorization-{kind}",
+            checkpoint_ns="root",
+        )
+        await repository.commit_turn(
+            claim,
+            VideoTurnCommit(
+                decision=ActionDecision(
+                    action=AgentAction.CONTINUE_WORKFLOW,
+                    intent=AgentIntent.VIDEO,
+                    target_workflow_id=WORKFLOW_ID,
+                    target_stage=state.current_stage.value,
+                    target_artifact_ref=state.active_plan_artifact_ref,
+                    confidence=1,
+                    requires_confirmation=True,
+                    patch={},
+                    reason_code="authorization_required",
+                    idempotency_key=f"task7:authorization:{kind}:{near_quota}",
+                ),
+                turn_status=TurnStatus.WAITING_USER,
+                expected_workflow_version=1,
+                open_interrupt=interrupt,
+                occurred_at=NOW,
+            ),
+        )
+        response_id = UUID(
+            "00000000-0000-4000-8000-000000001331"
+            if near_quota
+            else "00000000-0000-4000-8000-000000001330"
+        )
+        request = InterruptResponseRequest(
+            client_response_id=response_id,
+            value={
+                "content": "确认继续",
+                "materials": [],
+                "reply_to_message_id": None,
+                "artifact_refs": [state.active_plan_artifact_ref],
+                "explicit_action": action,
+            },
+        )
+        message = PixelFlowConversationMessageRecord(
+            message_id=conversation_message_id(CONVERSATION_ID, response_id),
+            conversation_id=CONVERSATION_ID,
+            user_id=USER_ID,
+            role="user",
+            content=request.value.content,
+            payload={
+                "client_message_id": str(response_id),
+                "interrupt_id": interrupt.interrupt_id,
+                "value": request.value.model_dump(mode="json"),
+                "explicit_action": action.model_dump(mode="json"),
+            },
+            created_at=NOW.isoformat(),
+        )
+
+        if near_quota:
+            with pytest.raises(AgentRuntimeQuotaResumeStaleError):
+                await repository.register_interrupt_response(
+                    USER_ID,
+                    CONVERSATION_ID,
+                    interrupt.interrupt_id,
+                    request=request,
+                    message=message,
+                    responded_at=NOW,
+                )
+            unchanged = await repository.get_interrupt(USER_ID, interrupt.interrupt_id)
+            assert unchanged is not None
+            assert unchanged.status == "open"
+            assert await store.list_conversation_messages(
+                CONVERSATION_ID,
+                user_id=USER_ID,
+            ) == []
+        else:
+            registration = await repository.register_interrupt_response(
+                USER_ID,
+                CONVERSATION_ID,
+                interrupt.interrupt_id,
+                request=request,
+                message=message,
+                responded_at=NOW,
+            )
+            assert registration.created is True
+            assert registration.interrupt.status == "responded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
 async def test_operation_completion_opens_real_graph_interrupt_and_resumes_original_turn(
     kind: RepositoryKind,
     tmp_path: Path,
@@ -6127,7 +6531,7 @@ async def test_handler_failure_keeps_claim_until_expired_worker_takeover() -> No
         owned = next(iter(operations._operation_event_claims._claims.values()))
         with pytest.raises(
             OperationConflictError,
-            match="完成事件与 Graph 幂等键不一致",
+            match="Operation 事件与 Graph 幂等键不一致",
         ):
             await completion.resume_external_job(
                 workflow_namespace(CONVERSATION_ID, WORKFLOW_ID),
@@ -6139,7 +6543,7 @@ async def test_handler_failure_keeps_claim_until_expired_worker_takeover() -> No
         clock.advance(seconds=31)
         with pytest.raises(
             OperationConflictError,
-            match="完成事件投递租约已过期",
+                match="Operation 事件投递租约已过期",
         ):
             await completion.resume_external_job(
                 workflow_namespace(CONVERSATION_ID, WORKFLOW_ID),

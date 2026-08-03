@@ -279,13 +279,13 @@ class VideoLiveWorkflowHandler:
         operations = self._live_operation_bridge()
         if operations is None:
             raise VideoLiveStateConflictError("video_quota_resume_unavailable")
+        state, operation, revision = await self._quota_resume_authority(
+            command,
+            existing_envelope=existing_envelope,
+            operations=operations,
+        )
         credential = self._credential_provider.get(command.turn_id)
         if credential is None:
-            state, operation, _ = await self._quota_resume_authority(
-                command,
-                existing_envelope=existing_envelope,
-                operations=operations,
-            )
             return self._wait_for_authorization(
                 command,
                 state,
@@ -293,11 +293,6 @@ class VideoLiveWorkflowHandler:
                 authorization_stage=operation.stage,
             )
         try:
-            state, operation, revision = await self._quota_resume_authority(
-                command,
-                existing_envelope=existing_envelope,
-                operations=operations,
-            )
             try:
                 authorized = await operations.resume_paused_operation(
                     user_id=command.user_id,
@@ -312,22 +307,22 @@ class VideoLiveWorkflowHandler:
                 raise VideoLiveStateConflictError(
                     "video_quota_resume_stale"
                 ) from exc
-            from .live_quota import VideoOperationQuotaProjectionService
+        finally:
+            credential.discard()
+        from .live_quota import VideoOperationQuotaProjectionService
 
-            projection = VideoOperationQuotaProjectionService().build(
+        projection = VideoOperationQuotaProjectionService().build(
                 user_id=command.user_id,
                 envelope=existing_envelope,
                 operation=authorized.operation,
                 quota_event=authorized.claim.event,
-            )
-            return WorkflowDispatchResult(
-                state=projection.workflow_state,
-                workflow=projection.workflow,
-                turn_status=TurnStatus.COMPLETED,
-                operation_event_claim=authorized.claim,
-            )
-        finally:
-            credential.discard()
+        )
+        return WorkflowDispatchResult(
+            state=projection.workflow_state,
+            workflow=projection.workflow,
+            turn_status=TurnStatus.COMPLETED,
+            operation_event_claim=authorized.claim,
+        )
 
     async def _quota_resume_authority(
         self,
@@ -384,7 +379,7 @@ class VideoLiveWorkflowHandler:
             and stored_workflow.status is WorkflowStatus.PAUSED_QUOTA
             and paused_projection_document == stored_document
         )
-        valid_reopened_wait = (
+        valid_current_wait = (
             stored_workflow is not None
             and stored_workflow.status is WorkflowStatus.RUNNING
             and domain_workflow.status is WorkflowStatus.RUNNING
@@ -392,12 +387,38 @@ class VideoLiveWorkflowHandler:
         )
         if (
             stored_workflow is None
-            or not (valid_initial_pause or valid_reopened_wait)
-            or command.workflow is None
-            or command.workflow.model_dump(mode="json")
-            != stored_document
+            or not (valid_initial_pause or valid_current_wait)
         ):
             raise VideoLiveStateConflictError("video_workflow_projection_stale")
+        checkpoint_workflow = command.workflow
+        if checkpoint_workflow is None:
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        checkpoint_document = checkpoint_workflow.model_dump(mode="json")
+        current_checkpoint = checkpoint_document == stored_document
+        # 其他分镜完成后只允许当前权威上下文向前推进；历史暂停快照绝不能领先。
+        historical_pause_checkpoint = (
+            valid_current_wait
+            and checkpoint_workflow.status is WorkflowStatus.PAUSED_QUOTA
+            and checkpoint_workflow.workflow_id == stored_workflow.workflow_id
+            and checkpoint_workflow.conversation_id
+            == stored_workflow.conversation_id
+            and checkpoint_workflow.kind is stored_workflow.kind
+            and checkpoint_workflow.current_stage
+            == stored_workflow.current_stage
+            and checkpoint_workflow.stage_version
+            == stored_workflow.stage_version
+            and checkpoint_workflow.created_at == stored_workflow.created_at
+            and checkpoint_workflow.context_version
+            <= stored_workflow.context_version
+        )
+        if valid_initial_pause and not current_checkpoint:
+            raise VideoLiveStateConflictError("video_workflow_projection_stale")
+        if not (
+            (valid_initial_pause and current_checkpoint)
+            or (valid_current_wait and current_checkpoint)
+            or historical_pause_checkpoint
+        ):
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
         if command.decision.target_artifact_ref is not None:
             raise VideoLiveStateConflictError("video_target_artifact_stale")
         operation = await operations.get_operation(
@@ -425,24 +446,19 @@ class VideoLiveWorkflowHandler:
         matches = [item for item in pending_items if item.job_id == operation.job_id]
         if (
             len(matches) != 1
-            or matches[0].workflow_id != operation.workflow_id
-            or matches[0].stage != operation.stage
-            or matches[0].attempt != operation.attempt
+            or not _quota_pending_matches_operation(matches[0], operation)
             or getattr(state, "workflow_id", None) != operation.workflow_id
             or getattr(state, "conversation_id", None) != operation.conversation_id
             or getattr(state, "stage_version", None) != operation.stage_version
         ):
             raise VideoLiveStateConflictError("video_quota_resume_stale")
-        interrupt_id_value = self._interrupt_occurrence_id(
-            turn_id=existing_envelope.last_turn_id,
-            reason_code="authorization_required",
-            workflow=stored_workflow,
-            workflow_version=existing_envelope.workflow_version,
-        )
-        interrupt = await self._repository.get_interrupt(
-            command.user_id,
-            interrupt_id_value,
-        )
+        checkpoint_pending = checkpoint_workflow.pending_external_job
+        if (
+            checkpoint_workflow.stage_version != operation.stage_version
+            or checkpoint_pending is None
+            or not _quota_pending_matches_operation(checkpoint_pending, operation)
+        ):
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
         expected_patch = {
             "job_id": operation.job_id,
             "quota_pause_revision": revision,
@@ -477,33 +493,70 @@ class VideoLiveWorkflowHandler:
             command.conversation_id,
             command.workflow_id,
         )
-        valid_interrupt_location = (
-            valid_initial_pause
-            and interrupt is not None
+        require_pause_thread = bool(
+            valid_initial_pause or historical_pause_checkpoint
+        )
+        source_interrupt_id = command.source_interrupt_id
+        if source_interrupt_id is None:
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        interrupt = await self._repository.get_interrupt(
+            command.user_id,
+            source_interrupt_id,
+        )
+        if interrupt is None:
+            raise VideoLiveStateConflictError("video_quota_resume_stale")
+        parsed_pause_thread = _parse_quota_pause_thread_id(
+            interrupt.thread_id
+        )
+        if require_pause_thread:
+            if parsed_pause_thread is None:
+                raise VideoLiveStateConflictError("video_quota_resume_stale")
+            parsed_event_id, pause_version = parsed_pause_thread
+            valid_version = (
+                pause_version == existing_envelope.workflow_version
+                if valid_initial_pause
+                else pause_version < existing_envelope.workflow_version
+            )
+            if not valid_version or parsed_event_id != pause_event_id:
+                raise VideoLiveStateConflictError("video_quota_resume_stale")
+        else:
+            pause_version = existing_envelope.workflow_version
+        interrupt_id_value = self._interrupt_occurrence_id(
+            turn_id=existing_envelope.last_turn_id,
+            reason_code="authorization_required",
+            workflow=checkpoint_workflow,
+            workflow_version=pause_version,
+        )
+        valid_location = (
+            require_pause_thread
             and interrupt.thread_id
             == quota_checkpoint_thread_id(
                 event_id=pause_event_id,
-                workflow_version=existing_envelope.workflow_version,
+                workflow_version=pause_version,
                 paused=True,
             )
-            and interrupt.checkpoint_ns == "root"
         ) or (
-            valid_reopened_wait
-            and interrupt is not None
+            not require_pause_thread
             and command.namespace == canonical_namespace
             and interrupt.thread_id == canonical_namespace.thread_id
-            and interrupt.checkpoint_ns == "root"
         )
         if (
-            interrupt is None
-            or not valid_interrupt_location
+            source_interrupt_id != interrupt_id_value
+            or interrupt.interrupt_id != source_interrupt_id
+            or not valid_location
+            or interrupt.checkpoint_ns != "root"
             or interrupt.status not in {"open", "responded"}
             or interrupt.kind != "authorization_required"
             or interrupt.reason_code != "authorization_required"
+            or interrupt.user_id != command.user_id
             or interrupt.workflow_id != command.workflow_id
             or interrupt.conversation_id != command.conversation_id
             or interrupt.turn_id != existing_envelope.last_turn_id
             or interrupt.payload != expected_interrupt_payload
+            or (
+                require_pause_thread
+                and interrupt.opened_at != checkpoint_workflow.updated_at
+            )
         ):
             raise VideoLiveStateConflictError("video_quota_resume_stale")
         return state, operation, revision
@@ -2128,6 +2181,39 @@ class VideoLiveWorkflowHandler:
             raise VideoLiveStateConflictError("video_target_workflow_mismatch")
         if command.conversation_id == "" or command.user_id == "" or command.turn_id == "":
             raise VideoLiveStateConflictError("video_command_identity_required")
+
+
+def _quota_pending_matches_operation(pending: Any, operation: Any) -> bool:
+    """只比较跨 M11/M06 合同共有的稳定 Operation 身份字段。"""
+
+    return (
+        pending.job_id == operation.job_id
+        and pending.provider_job_id == operation.provider_job_id
+        and pending.workflow_id == operation.workflow_id
+        and pending.stage == operation.stage
+        and pending.status is operation.status
+        and pending.attempt == operation.attempt
+    )
+
+
+def _parse_quota_pause_thread_id(value: str) -> tuple[str, int] | None:
+    """严格解析不可变的 quota 暂停 checkpoint thread 身份。"""
+
+    prefix = "quota-paused:"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    event_id, separator, version_text = value[len(prefix) :].rpartition(":v")
+    if (
+        separator != ":v"
+        or not event_id
+        or not version_text.isascii()
+        or not version_text.isdecimal()
+    ):
+        return None
+    version = int(version_text)
+    if version < 1 or str(version) != version_text:
+        return None
+    return event_id, version
 
 
 def video_interrupt_occurrence_id(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import subprocess
 import sys
@@ -36,6 +37,8 @@ from pixelflow.agent_runtime.contracts import (
     ActionDecision,
     AgentAction,
     AgentIntent,
+    ContextBudgetReport,
+    ContextEnvelope,
     ExplicitActionSignal,
     ExternalJobRef,
     ExternalJobStatus,
@@ -43,33 +46,44 @@ from pixelflow.agent_runtime.contracts import (
     TurnRecord,
     TurnStatus,
     WorkflowKind,
+    WorkflowRecord,
     WorkflowStatus,
 )
+from pixelflow.agent_runtime.fakes import FakeContextPort
 from pixelflow.agent_runtime.graph import (
     FakeWorkflowRegistry,
     make_agent_runtime_graph,
+)
+from pixelflow.agent_runtime.graph.composition import (
+    DISPATCH_WORKFLOW_NODE,
+    _resume_workflow_command,
 )
 from pixelflow.agent_runtime.identity import conversation_message_id
 from pixelflow.agent_runtime.jobs.providers import ProviderJobOutcome
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
+    AgentRuntimeRecordConflictError,
     MemoryTurnRegistrationStore,
     MemoryVideoRuntimeRepository,
+    OperationRecord,
     SQLTurnRegistrationStore,
     SQLVideoRuntimeRepository,
     StoredAgentInterrupt,
+    VideoTurnCommit,
 )
 from pixelflow.agent_runtime.supervisor import (
     ActionClassificationCandidate,
     ActionClassificationRequest,
     ActionClassificationTarget,
+    DecisionValidationError,
     DecisionValidationRequest,
     DecisionValidator,
     DeterministicResolution,
     DeterministicResolutionStatus,
     DeterministicTargetResolver,
     SupervisorDecisionService,
+    SupervisorTurnEvidence,
 )
 from pixelflow.agent_workflows.video import (
     VideoPlanningWorkflowService,
@@ -679,6 +693,234 @@ async def _sql_clarification_runtime(
         await engine.dispose()
 
 
+@asynccontextmanager
+async def _quota_response_runtime(
+    kind: str,
+    database_path: Path,
+) -> AsyncIterator[
+    tuple[
+        RuntimeHarness,
+        MemoryTurnRegistrationStore | SQLTurnRegistrationStore,
+    ]
+]:
+    """为 Memory/SQL 提供同一套 quota 响应原子登记环境。"""
+
+    if kind == "memory":
+        runtime = await _runtime()
+        registration_store = MemoryTurnRegistrationStore(
+            repository=runtime.repository,
+            task_store=runtime.task_store,
+            video_repository=runtime.repository,
+        )
+        try:
+            yield runtime, registration_store
+        finally:
+            await runtime.executor.aclose()
+        return
+    async with _sql_clarification_runtime(database_path) as values:
+        yield values
+
+
+async def _seed_quota_response_runtime(
+    runtime: RuntimeHarness,
+) -> SimpleNamespace:
+    """建立 revision 2 的权威 Operation、暂停投影与开放授权中断。"""
+
+    await _seed_conversation(runtime.task_store, context_version=0)
+    workflow_id = "workflow-quota-response"
+    turn_id = "turn-quota-response"
+    operation = OperationRecord(
+        job_id="job-quota-response",
+        provider_job_id="provider-quota-response",
+        workflow_id=workflow_id,
+        conversation_id="conversation-1",
+        stage="generate_scene_video:scene-1",
+        stage_version=7,
+        status=ExternalJobStatus.POLLING,
+        attempt=1,
+        request_hash="sha256:quota-response",
+        idempotency_key="operation:quota-response",
+        quota_pause_revision=2,
+        next_poll_at=None,
+        lease_owner=None,
+        lease_expires_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    await runtime.repository.create_operation("user-1", operation)
+    turn = await runtime.repository.enqueue_turn_for_execution(
+        "user-1",
+        TurnRecord(
+            turn_id=turn_id,
+            conversation_id="conversation-1",
+            client_input_id=UUID("50000000-0000-4000-8000-000000000020"),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=workflow_id,
+            expected_context_version=0,
+            created_at=NOW,
+        ),
+        now=NOW,
+    )
+    claim = await runtime.repository.claim_turn(
+        "user-1",
+        "conversation-1",
+        turn.turn_id,
+        lease_owner="quota-response-seed",
+        now=NOW,
+        lease_expires_at=LEASE_EXPIRY,
+    )
+    assert claim is not None
+    planning = VideoPlanningWorkflowService().start(
+        workflow_id=workflow_id,
+        conversation_id="conversation-1",
+        intent="video",
+        intake_context={"source": "quota-response-test"},
+        now=NOW,
+    )
+    workflow = project_video_workflow_state(planning)
+    authorization_action = {
+        "action": "retry_failed",
+        "intent": "video",
+        "workflow_id": workflow_id,
+        "stage": operation.stage,
+        "artifact_ref": None,
+        "patch": {
+            "job_id": operation.job_id,
+            "quota_pause_revision": operation.quota_pause_revision,
+        },
+    }
+    interrupt = StoredAgentInterrupt(
+        interrupt_id="interrupt-quota-response",
+        conversation_id="conversation-1",
+        workflow_id=workflow_id,
+        turn_id=turn_id,
+        kind="authorization_required",
+        reason_code="authorization_required",
+        payload={
+            "workflow_id": workflow_id,
+            "stage": operation.stage,
+            "authorization_action": authorization_action,
+        },
+        opened_at=NOW,
+        user_id="user-1",
+        thread_id="quota-paused:event-response:2",
+        checkpoint_ns="root",
+    )
+    decision = ActionDecision(
+        action=AgentAction.RETRY_FAILED,
+        intent=AgentIntent.VIDEO,
+        target_workflow_id=workflow_id,
+        target_stage=operation.stage,
+        confidence=1,
+        patch={
+            "job_id": operation.job_id,
+            "quota_pause_revision": operation.quota_pause_revision,
+        },
+        reason_code="operation_quota_state",
+        idempotency_key="decision:quota-response-seed",
+    )
+    committed = await runtime.repository.commit_turn(
+        claim,
+        VideoTurnCommit(
+            decision=decision,
+            turn_status=TurnStatus.WAITING_USER,
+            workflow_state=encode_video_workflow_state(
+                user_id="user-1",
+                state=planning,
+                workflow_version=1,
+                last_turn_id=turn_id,
+                last_action_key="decision:quota-response-seed",
+            ),
+            workflow=workflow,
+            expected_workflow_version=0,
+            open_interrupt=interrupt,
+            update_active_workflow=True,
+            active_workflow_id=workflow_id,
+            occurred_at=NOW,
+        ),
+    )
+    assert committed.status is TurnStatus.WAITING_USER
+    return SimpleNamespace(
+        workflow_id=workflow_id,
+        turn_id=turn_id,
+        operation=operation,
+        interrupt=interrupt,
+        authorization_action=authorization_action,
+    )
+
+
+def _quota_response_request(
+    seeded: SimpleNamespace,
+    *,
+    response_number: int,
+    action_updates: dict[str, object] | None = None,
+    include_action: bool = True,
+) -> InterruptResponseRequest:
+    """基于冻结动作构造当前或对抗性 quota 响应。"""
+
+    action = copy.deepcopy(seeded.authorization_action)
+    if action_updates is not None:
+        for key, value in action_updates.items():
+            if key.startswith("patch."):
+                action["patch"][key.removeprefix("patch.")] = value
+            else:
+                action[key] = value
+    return InterruptResponseRequest(
+        client_response_id=UUID(
+            f"50000000-0000-4000-8000-{response_number:012d}"
+        ),
+        value={
+            "content": "已补充授权，恢复原任务",
+            "materials": [],
+            "reply_to_message_id": None,
+            "artifact_refs": [],
+            "explicit_action": action if include_action else None,
+        },
+    )
+
+
+async def _quota_response_snapshot(runtime: RuntimeHarness) -> dict[str, object]:
+    """复制拒绝前后的全部公开与权威状态，验证零副作用。"""
+
+    conversation = await runtime.task_store.get_conversation(
+        "conversation-1",
+        user_id="user-1",
+    )
+    assert conversation is not None
+    return {
+        "turn": (
+            await runtime.repository.get_turn("user-1", "turn-quota-response")
+        ).model_dump(mode="json"),
+        "interrupt": (
+            await runtime.repository.get_interrupt(
+                "user-1",
+                "interrupt-quota-response",
+            )
+        ).model_dump(mode="json"),
+        "operation": (
+            await runtime.repository.get_operation(
+                "user-1",
+                "job-quota-response",
+            )
+        ).model_dump(mode="json"),
+        "messages": [
+            item.model_dump(mode="json")
+            for item in await runtime.task_store.list_conversation_messages(
+                "conversation-1",
+                user_id="user-1",
+            )
+        ],
+        "context": copy.deepcopy(conversation.context),
+        "events": [
+            item.model_dump(mode="json")
+            for item in await runtime.repository.list_events(
+                "user-1",
+                "conversation-1",
+            )
+        ],
+    }
+
+
 async def _register_clarification_turn(
     registration_store: MemoryTurnRegistrationStore | SQLTurnRegistrationStore,
     *,
@@ -928,6 +1170,578 @@ async def test_registered_turn_uses_its_pre_input_context_snapshot_version() -> 
     assert result.validation_request.expected_context_version == 0
     assert result.validation_request.current_context_version == 0
     await runtime.executor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_supervisor_accepts_only_authoritative_pending_operation_stage() -> None:
+    """402 恢复可定位权威 Operation 阶段，但伪造阶段仍被最终校验拒绝。"""
+
+    pending = ExternalJobRef(
+        job_id="job-scene-1",
+        provider_job_id="provider-scene-1",
+        workflow_id="workflow-video-1",
+        stage="generate_scene_video:scene-1",
+        status=ExternalJobStatus.POLLING,
+        attempt=1,
+        idempotency_key="operation-scene-1",
+    )
+    workflow = WorkflowRecord(
+        workflow_id="workflow-video-1",
+        conversation_id="conversation-1",
+        kind=WorkflowKind.VIDEO,
+        status=WorkflowStatus.PAUSED_QUOTA,
+        current_stage="generate_scene_videos",
+        stage_version=7,
+        pending_external_job=pending,
+        context_version=3,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    evidence = SupervisorTurnEvidence(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        turn=TurnRecord(
+            turn_id="turn-quota-resume-1",
+            conversation_id="conversation-1",
+            client_input_id=UUID("50000000-0000-4000-8000-000000000001"),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=workflow.workflow_id,
+            expected_context_version=3,
+            created_at=NOW,
+        ),
+        content="已补充授权，请恢复原任务",
+        visible_messages=(),
+        workflows=(workflow,),
+        active_workflow_id=workflow.workflow_id,
+        explicit_action=ExplicitActionSignal(
+            action=AgentAction.RETRY_FAILED,
+            intent=AgentIntent.VIDEO,
+            workflow_id=workflow.workflow_id,
+            stage=pending.stage,
+            patch={
+                "job_id": pending.job_id,
+                "quota_pause_revision": 1,
+            },
+        ),
+        expected_context_version=3,
+        authoritative_context_version=3,
+    )
+    context = ContextEnvelope(
+        current_input=evidence.content,
+        validated_context_version=3,
+        active_or_target_workflow=workflow,
+        budget_report=ContextBudgetReport(
+            estimated_input_tokens=8,
+            effective_context_tokens=100,
+            usable_input_tokens=80,
+            max_output_tokens=10,
+            safety_reserve_tokens=10,
+            utilization=0.1,
+        ),
+    )
+    decision_service = SupervisorDecisionService(
+        resolver=DeterministicTargetResolver(),
+        classifier=None,
+        validator=DecisionValidator(),
+        context_assembler=FakeContextPort(
+            {("user-1", "conversation-1"): context}
+        ),
+    )
+
+    accepted = await decision_service.decide(evidence)
+
+    assert accepted.decision.target_stage == pending.stage
+    forged = evidence.model_copy(
+        update={
+            "explicit_action": evidence.explicit_action.model_copy(
+                update={"stage": "generate_scene_video:scene-forged"}
+            )
+        },
+        deep=True,
+    )
+    with pytest.raises(DecisionValidationError) as exc_info:
+        await decision_service.decide(forged)
+    assert exc_info.value.reason_code == "target_reference_stale"
+
+
+@pytest.mark.asyncio
+async def test_real_supervisor_selectively_allows_authorized_reopened_quota_wait() -> None:
+    """多分镜完成重开 RUNNING 后，仅原额度授权响应可以恢复等待中的 Operation。"""
+
+    pending = ExternalJobRef(
+        job_id="job-reopened-quota-1",
+        provider_job_id="provider-reopened-quota-1",
+        workflow_id="workflow-reopened-quota-1",
+        stage="generate_scene_video:scene-1",
+        status=ExternalJobStatus.POLLING,
+        attempt=1,
+        idempotency_key="operation-reopened-quota-1",
+    )
+    workflow = WorkflowRecord(
+        workflow_id=pending.workflow_id,
+        conversation_id="conversation-1",
+        kind=WorkflowKind.VIDEO,
+        status=WorkflowStatus.RUNNING,
+        current_stage="generate_scene_videos",
+        stage_version=9,
+        pending_external_job=pending,
+        context_version=6,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    evidence = SupervisorTurnEvidence(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        turn=TurnRecord(
+            turn_id="turn-reopened-quota-1",
+            conversation_id="conversation-1",
+            client_input_id=UUID("50000000-0000-4000-8000-000000000003"),
+            status=TurnStatus.ACCEPTED,
+            target_workflow_id=workflow.workflow_id,
+            expected_context_version=6,
+            created_at=NOW,
+        ),
+        content="已补充授权，请恢复原任务",
+        visible_messages=(),
+        workflows=(workflow,),
+        active_workflow_id=workflow.workflow_id,
+        explicit_action=ExplicitActionSignal(
+            action=AgentAction.RETRY_FAILED,
+            intent=AgentIntent.VIDEO,
+            workflow_id=workflow.workflow_id,
+            stage=pending.stage,
+            patch={
+                "job_id": pending.job_id,
+                "quota_pause_revision": 1,
+            },
+        ),
+        expected_context_version=6,
+        authoritative_context_version=6,
+    )
+    context = ContextEnvelope(
+        current_input=evidence.content,
+        validated_context_version=6,
+        active_or_target_workflow=workflow,
+        budget_report=ContextBudgetReport(
+            estimated_input_tokens=8,
+            effective_context_tokens=100,
+            usable_input_tokens=80,
+            max_output_tokens=10,
+            safety_reserve_tokens=10,
+            utilization=0.1,
+        ),
+    )
+    decision_service = SupervisorDecisionService(
+        resolver=DeterministicTargetResolver(),
+        classifier=None,
+        validator=DecisionValidator(),
+        context_assembler=FakeContextPort(
+            {("user-1", "conversation-1"): context}
+        ),
+    )
+
+    with pytest.raises(DecisionValidationError) as ordinary_exc:
+        await decision_service.decide(evidence)
+    assert ordinary_exc.value.reason_code == "action_not_allowed"
+
+    authorized = SupervisorTurnEvidence.model_validate(
+        evidence.model_dump(mode="python")
+        | {
+            "quota_authorization": {
+                "interrupt_id": "interrupt-reopened-quota-1",
+                "workflow_id": workflow.workflow_id,
+                "stage": pending.stage,
+                "job_id": pending.job_id,
+                "provider_job_id": pending.provider_job_id,
+                "attempt": pending.attempt,
+                "quota_pause_revision": 1,
+            }
+        }
+    )
+
+    accepted = await decision_service.decide(authorized)
+
+    assert accepted.decision.action is AgentAction.RETRY_FAILED
+    assert accepted.decision.target_workflow_id == workflow.workflow_id
+    assert accepted.decision.target_stage == pending.stage
+
+
+def test_graph_resume_accepts_only_authoritative_pending_operation_stage() -> None:
+    """Graph 只允许当前阶段或权威 pending Operation 阶段恢复。"""
+
+    turn_id = "turn-quota-graph-1"
+    workflow_id = "workflow-quota-graph-1"
+    pending = ExternalJobRef(
+        job_id="job-quota-graph-1",
+        provider_job_id="provider-quota-graph-1",
+        workflow_id=workflow_id,
+        stage="generate_scene_video:scene-1",
+        status=ExternalJobStatus.POLLING,
+        attempt=1,
+        idempotency_key="operation-quota-graph-1",
+    )
+    state = VideoPlanningWorkflowService().start(
+        workflow_id=workflow_id,
+        conversation_id="conversation-1",
+        intent="video",
+        intake_context={"source": "graph-quota-test"},
+        now=NOW,
+    )
+    workflow = project_video_workflow_state(state).model_copy(
+        update={
+            "status": WorkflowStatus.PAUSED_QUOTA,
+            "current_stage": "generate_scene_videos",
+            "pending_external_job": pending,
+        }
+    )
+    opened = StoredAgentInterrupt(
+        interrupt_id="interrupt-quota-graph-1",
+        conversation_id="conversation-1",
+        workflow_id=workflow_id,
+        turn_id=turn_id,
+        kind="authorization_required",
+        reason_code="authorization_required",
+        payload={"workflow_id": workflow_id, "stage": pending.stage},
+        opened_at=NOW,
+        user_id="user-1",
+        thread_id="quota-paused:event-1:1",
+        checkpoint_ns="root",
+    )
+    result = WorkflowDispatchResult(
+        state=encode_video_workflow_state(
+            user_id="user-1",
+            state=state,
+            workflow_version=1,
+            last_turn_id=turn_id,
+            last_action_key="pause-event-1",
+        ),
+        workflow=workflow,
+        interrupt=opened,
+        turn_status=TurnStatus.WAITING_USER,
+    )
+    response_id = UUID("50000000-0000-4000-8000-000000000002")
+
+    def response_for(stage: str) -> dict[str, object]:
+        decision = ActionDecision(
+            action=AgentAction.RETRY_FAILED,
+            intent=AgentIntent.VIDEO,
+            target_workflow_id=workflow_id,
+            target_stage=stage,
+            confidence=1,
+            patch={
+                "job_id": pending.job_id,
+                "quota_pause_revision": 1,
+            },
+            reason_code="explicit_action_target",
+            idempotency_key=f"decision:{response_id}",
+        )
+        return {
+            "client_response_id": str(response_id),
+            "interrupt_id": opened.interrupt_id,
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "decision": decision.model_dump(mode="json"),
+            "value": {
+                "content": "已授权，恢复原任务",
+                "materials": [],
+                "reply_to_message_id": None,
+                "artifact_refs": [],
+                "explicit_action": {
+                    "action": "retry_failed",
+                    "intent": "video",
+                    "workflow_id": workflow_id,
+                    "stage": stage,
+                    "artifact_ref": None,
+                    "patch": {
+                        "job_id": pending.job_id,
+                        "quota_pause_revision": 1,
+                    },
+                },
+            },
+        }
+
+    command = _resume_workflow_command(
+        {"turn_id": turn_id},
+        result=result,
+        response=response_for(pending.stage),
+    )
+    assert command.goto == DISPATCH_WORKFLOW_NODE
+
+    forged_stage = "generate_scene_video:scene-forged"
+    forged_document = result.model_dump(mode="json", serialize_as_any=True)
+    assert forged_document["interrupt"] is not None
+    forged_document["interrupt"]["payload"] = {
+        "workflow_id": workflow_id,
+        "stage": forged_stage,
+    }
+    forged_result = WorkflowDispatchResult.model_validate(
+        forged_document
+    )
+    with pytest.raises(ValueError, match="stage 已过期"):
+        _resume_workflow_command(
+            {"turn_id": turn_id},
+            result=forged_result,
+            response=response_for(forged_stage),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.parametrize(
+    ("action_updates", "include_action"),
+    [
+        ({"patch.quota_pause_revision": 1}, True),
+        ({"patch.job_id": "job-forged"}, True),
+        ({"workflow_id": "workflow-forged"}, True),
+        ({"stage": "generate_scene_video:scene-forged"}, True),
+        (None, False),
+    ],
+    ids=(
+        "old-revision",
+        "forged-job",
+        "forged-workflow",
+        "forged-stage",
+        "missing-action",
+    ),
+)
+async def test_quota_response_authority_rejects_without_any_side_effect(
+    kind: str,
+    action_updates: dict[str, object] | None,
+    include_action: bool,
+    tmp_path: Path,
+) -> None:
+    """Memory/SQL 必须在登记前拒绝旧代次与伪造 quota 身份。"""
+
+    async with _quota_response_runtime(
+        kind,
+        tmp_path / f"quota-response-{kind}.db",
+    ) as (runtime, registration_store):
+        seeded = await _seed_quota_response_runtime(runtime)
+        credential = TransientTurnCredential("Bearer quota-repository-marker")
+        runtime.vault.put(seeded.turn_id, credential)
+        before = await _quota_response_snapshot(runtime)
+        handler_calls = tuple(runtime.handler.turn_ids)
+        request = _quota_response_request(
+            seeded,
+            response_number=21,
+            action_updates=action_updates,
+            include_action=include_action,
+        )
+
+        with pytest.raises(AgentRuntimeRecordConflictError):
+            await registration_store.register_interrupt_response(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                interrupt_id=seeded.interrupt.interrupt_id,
+                request=request,
+                occurred_at=NOW + timedelta(seconds=1),
+            )
+
+        assert await _quota_response_snapshot(runtime) == before
+        assert runtime.vault.get(seeded.turn_id) is credential
+        assert tuple(runtime.handler.turn_ids) == handler_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_quota_response_current_revision_wins_concurrent_stale_request(
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """旧代次先到也必须零写失败，当前代次随后唯一登记成功。"""
+
+    async with _quota_response_runtime(
+        kind,
+        tmp_path / f"quota-response-race-{kind}.db",
+    ) as (runtime, registration_store):
+        seeded = await _seed_quota_response_runtime(runtime)
+        stale_request = _quota_response_request(
+            seeded,
+            response_number=31,
+            action_updates={"patch.quota_pause_revision": 1},
+        )
+        current_request = _quota_response_request(
+            seeded,
+            response_number=32,
+        )
+
+        stale_task = asyncio.create_task(
+            registration_store.register_interrupt_response(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                interrupt_id=seeded.interrupt.interrupt_id,
+                request=stale_request,
+                occurred_at=NOW + timedelta(seconds=1),
+            )
+        )
+        await asyncio.sleep(0)
+        current_task = asyncio.create_task(
+            registration_store.register_interrupt_response(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                interrupt_id=seeded.interrupt.interrupt_id,
+                request=current_request,
+                occurred_at=NOW + timedelta(seconds=2),
+            )
+        )
+        stale_result, current_result = await asyncio.gather(
+            stale_task,
+            current_task,
+            return_exceptions=True,
+        )
+
+        assert isinstance(stale_result, AgentRuntimeRecordConflictError)
+        assert not isinstance(current_result, BaseException)
+        stored = await runtime.repository.get_interrupt(
+            "user-1",
+            seeded.interrupt.interrupt_id,
+        )
+        assert stored is not None and stored.status == "responded"
+        assert stored.response_id == current_request.client_response_id
+        assert stored.response is not None
+        assert stored.response["value"]["explicit_action"] == (
+            seeded.authorization_action
+        )
+        messages = await runtime.task_store.list_conversation_messages(
+            "conversation-1",
+            user_id="user-1",
+        )
+        assert len(messages) == 1
+        assert runtime.handler.turn_ids == []
+
+
+@pytest.mark.asyncio
+async def test_memory_quota_response_holds_operation_lock_through_write_unit(
+    tmp_path: Path,
+) -> None:
+    """响应校验后到写入完成前，Operation 推进必须等待同一临界区。"""
+
+    async with _quota_response_runtime(
+        "memory",
+        tmp_path / "unused-memory-quota-barrier.db",
+    ) as (runtime, registration_store):
+        seeded = await _seed_quota_response_runtime(runtime)
+        entered_write_unit = asyncio.Event()
+        release_write_unit = asyncio.Event()
+        original_write_unit = (
+            runtime.task_store.agent_runtime_interrupt_response_write
+        )
+
+        @asynccontextmanager
+        async def blocked_write_unit(**kwargs: object):
+            entered_write_unit.set()
+            await release_write_unit.wait()
+            async with original_write_unit(**kwargs) as write:
+                yield write
+
+        runtime.task_store.agent_runtime_interrupt_response_write = (
+            blocked_write_unit
+        )
+        response_task = asyncio.create_task(
+            registration_store.register_interrupt_response(
+                user_id="user-1",
+                conversation_id="conversation-1",
+                interrupt_id=seeded.interrupt.interrupt_id,
+                request=_quota_response_request(
+                    seeded,
+                    response_number=41,
+                ),
+                occurred_at=NOW + timedelta(seconds=1),
+            )
+        )
+        await entered_write_unit.wait()
+        operation_task = asyncio.create_task(
+            runtime.repository.resume_operation_poll(
+                "user-1",
+                "conversation-1",
+                seeded.operation.job_id,
+                now=NOW + timedelta(seconds=2),
+            )
+        )
+        await asyncio.sleep(0)
+        operation_was_blocked = not operation_task.done()
+        release_write_unit.set()
+        registration, resumed_operation = await asyncio.gather(
+            response_task,
+            operation_task,
+        )
+
+        assert operation_was_blocked
+        assert registration.created is True
+        assert resumed_operation is not None
+        assert resumed_operation.next_poll_at == NOW + timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_sql_quota_response_locks_operation_before_turn_and_interrupt(
+    tmp_path: Path,
+) -> None:
+    """SQL 真实登记必须按 Operation→Turn→Interrupt 获取行锁。"""
+
+    async with _quota_response_runtime(
+        "sql",
+        tmp_path / "quota-lock-order.db",
+    ) as (runtime, registration_store):
+        seeded = await _seed_quota_response_runtime(runtime)
+        original_factory = runtime.repository._session_factory
+        locked_entities: list[str] = []
+
+        class TrackingSession:
+            """透明转发真实 Session，并记录语句声明的行锁实体。"""
+
+            def __init__(self, session: object) -> None:
+                self._session = session
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._session, name)
+
+            async def scalars(self, statement: object):
+                if getattr(statement, "_for_update_arg", None) is not None:
+                    descriptions = getattr(statement, "column_descriptions", ())
+                    entity = (
+                        None
+                        if not descriptions
+                        else descriptions[0].get("entity")
+                    )
+                    if entity is not None:
+                        locked_entities.append(entity.__name__)
+                return await self._session.scalars(statement)
+
+        @asynccontextmanager
+        async def tracking_factory():
+            async with original_factory() as session:
+                yield TrackingSession(session)
+
+        runtime.repository._session_factory = tracking_factory
+        registration = await registration_store.register_interrupt_response(
+            user_id="user-1",
+            conversation_id="conversation-1",
+            interrupt_id=seeded.interrupt.interrupt_id,
+            request=_quota_response_request(
+                seeded,
+                response_number=42,
+            ),
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+        assert registration.created is True
+        relevant = [
+            name
+            for name in locked_entities
+            if name
+            in {
+                "PixelFlowConversationRow",
+                "PixelFlowAgentOperationRow",
+                "PixelFlowAgentTurnRow",
+                "PixelFlowAgentInterruptRow",
+            }
+        ]
+        assert relevant[:4] == [
+            "PixelFlowConversationRow",
+            "PixelFlowAgentOperationRow",
+            "PixelFlowAgentTurnRow",
+            "PixelFlowAgentInterruptRow",
+        ]
 
 
 @pytest.mark.asyncio

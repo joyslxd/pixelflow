@@ -43,6 +43,12 @@ class AgentRuntimeRecordConflictError(RuntimeError):
     """记录主键或唯一业务键已经被占用。"""
 
 
+class AgentRuntimeQuotaResumeStaleError(AgentRuntimeRecordConflictError):
+    """额度恢复响应已落后于当前权威 Operation，不得登记任何副作用。"""
+
+    reason_code = "video_quota_resume_stale"
+
+
 class OperationRecord(ContractModel):
     """外部任务 Operation 的可查询持久化投影。"""
 

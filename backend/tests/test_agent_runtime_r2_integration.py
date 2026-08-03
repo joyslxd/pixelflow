@@ -39,9 +39,6 @@ from pixelflow.agent_runtime.graph import (
     compose_agent_runtime_graph,
 )
 from pixelflow.agent_runtime.jobs import (
-    MappingProviderJobAdapterResolver,
-    OperationManualRecoveryAction,
-    OperationRecoveryRuntime,
     OperationStartCoordinator,
     ProviderJobAdapter,
     build_operation_request,
@@ -77,6 +74,7 @@ CONVERSATION_ID = "conversation-m13-r2"
 CLIENT_INPUT_ID = UUID("22222222-2222-4222-8222-222222222222")
 MODEL_NAME = "deepseek-v4-pro"
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+MATRIX_QUOTA_RECOVERY_AUTHORIZATION = "Bearer matrix-secret-quota-recovery"
 
 
 def _config(mode: str = "primary") -> AgentRuntimeConfig:
@@ -881,8 +879,8 @@ async def test_replay_fails_closed_without_verified_deepseek_profile() -> None:
 class _FaultResult:
     """统一呈现每个故障点的权威恢复与隔离证据。"""
 
-    safe_reason_code: str
-    expected_reason_code: str
+    fault_reason_code: str
+    expected_fault_reason_code: str
     expected_attempt: int | None
     actual_attempt: int | None
     expected_provider_job_id: str | None
@@ -899,8 +897,8 @@ class _FaultResult:
     persistent_checkpoint_verified: bool = False
     production_graph_verified: bool = False
     credential_recovery_entrypoint: str | None = None
-    initial_credential_marker_deliveries: int = 0
-    public_credential_marker_deliveries: int = 0
+    provider_starts_before_resume: int = 0
+    quota_recovery_credential_consumptions: int = 0
     credential_destroyed: bool = False
     paused_provider_job_id: str | None = None
     resumed_provider_job_id: str | None = None
@@ -912,13 +910,17 @@ class _FaultResult:
     cross_tenant_objects: tuple[object, ...] = ()
     graph_calls: int = 0
     provider_calls: int = 0
+    response_turn_id: str | None = None
+    notification_tasks_after_response: int | None = None
+    final_reason_code: str | None = None
+    expected_final_reason_code: str | None = None
 
 
 _FAULT_REASON_CODES = {
     "checkpoint_before_commit": "provider_succeeded",
     "checkpoint_after_commit": "provider_succeeded",
     "provider_started_before_event": "provider_succeeded",
-    "quota_402": "provider_succeeded",
+    "quota_402": "provider_quota_insufficient",
     "provider_timeout": "provider_timeout",
     "provider_failed": "provider_business_failed",
     "provider_expired_404": "provider_job_expired",
@@ -929,91 +931,12 @@ _FAULT_REASON_CODES = {
 }
 
 
-class _FaultClock:
-    """为租约、轮询和重启边界提供确定性时钟。"""
-
-    def __init__(self) -> None:
-        self.value = NOW
-
-    def now(self) -> datetime:
-        return self.value
-
-    def advance(self, seconds: int) -> None:
-        self.value += timedelta(seconds=seconds)
-
-
 class _HttpStatusError(RuntimeError):
     """只向 Provider Adapter 暴露 HTTP 状态码。"""
 
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
         super().__init__("供应商敏感错误正文不得持久化")
-
-
-class _FaultProviderService:
-    """按 provider job ID 返回脚本状态，且不保存临时凭据。"""
-
-    def __init__(self) -> None:
-        self.start_calls = 0
-        self.initial_credential_marker_deliveries = 0
-        self.status_calls: list[str] = []
-        self.status_scripts: dict[str, list[object]] = {}
-
-    async def start(
-        self,
-        request: Mapping[str, object],
-        *,
-        authorization: str,
-        idempotency_key: str,
-    ) -> object:
-        assert request
-        assert authorization.startswith("Bearer ")
-        if authorization == "Bearer matrix-secret-1":
-            self.initial_credential_marker_deliveries += 1
-        assert idempotency_key.startswith("operation:v1:sha256:")
-        self.start_calls += 1
-        return {
-            "job_id": f"provider-matrix-{self.start_calls}",
-            "status": "running",
-            "result": {"progress": 0},
-        }
-
-    async def status(self, provider_job_id: str) -> object:
-        self.status_calls.append(provider_job_id)
-        script = self.status_scripts.get(provider_job_id)
-        if not script:
-            raise AssertionError("故障矩阵未配置 Provider status")
-        result = script.pop(0)
-        if isinstance(result, BaseException):
-            raise result
-        return result
-
-
-class _FaultGraphResumer:
-    """模拟 checkpoint 前后各退出一次，并以 event ID 去重。"""
-
-    def __init__(self, mode: str = "normal") -> None:
-        self.mode = mode
-        self.failed_once = False
-        self.calls: list[AgentEvent] = []
-        self.checkpointed_ids: set[str] = set()
-
-    async def resume_external_job(
-        self,
-        namespace: object,
-        *,
-        completion_event: AgentEvent,
-        idempotency_key: str,
-    ) -> None:
-        del namespace
-        self.calls.append(completion_event)
-        if self.mode == "before" and not self.failed_once:
-            self.failed_once = True
-            raise RuntimeError("模拟 Graph checkpoint 前退出")
-        self.checkpointed_ids.add(idempotency_key)
-        if self.mode == "after" and not self.failed_once:
-            self.failed_once = True
-            raise RuntimeError("模拟 Graph checkpoint 后退出")
 
 
 class _CheckpointCrashGraph:
@@ -1066,21 +989,27 @@ class _CheckpointCrashGraph:
 class _LiveVideoFaultScenario:
     """通过生产 Runtime/M06 公开对象执行 Task 14 故障矩阵。"""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         self._tmp_path = tmp_path
+        self._monkeypatch = monkeypatch
 
     async def run(self, fault: str) -> _FaultResult:
         if fault in {"checkpoint_before_commit", "checkpoint_after_commit"}:
             return await self._run_real_checkpoint_fault(fault)
+        if fault == "quota_402":
+            return await self._run_real_quota_fault()
         if fault in {
             "provider_started_before_event",
-            "quota_402",
             "provider_timeout",
             "provider_failed",
             "provider_expired_404",
             "partial_scene_failure",
         }:
-            return await self._run_operation_fault(fault)
+            return await self._run_real_completion_fault(fault)
         if fault == "cross_tenant_reference":
             return await self._run_cross_tenant_reference()
         if fault == "invalid_model_profile":
@@ -1088,6 +1017,668 @@ class _LiveVideoFaultScenario:
         if fault == "handler_missing_after_restart":
             return await self._run_handler_missing_after_restart()
         raise AssertionError(f"未知故障场景：{fault}")
+
+    async def _run_real_quota_fault(self) -> _FaultResult:
+        """经公开响应入口和真实 Graph 恢复同一个 402 Provider job。"""
+
+        from test_agent_runtime_video_live_e2e import (
+            AUTHORIZATION,
+            LIVE_VIDEO_FORM,
+            MATERIAL,
+            _advance_external_jobs,
+            _live_client,
+            _read_sse_until_cursor,
+            _respond,
+            _respond_to_authorization,
+            _wait_for_interrupt,
+            _wait_for_snapshot,
+            _wait_for_turn_completed,
+        )
+        from test_agent_runtime_video_live_e2e import (
+            USER_ID as E2E_USER_ID,
+        )
+
+        from pixelflow.agent_workflows.video import live_operations
+
+        consume_authorization = (
+            live_operations._consume_authorization_for_quota_resume_boundary
+        )
+        consumed_authorizations: list[str] = []
+
+        def record_quota_authorization_consumption(credential: object) -> str:
+            """调用真实消费边界后，记录本次实际取出的临时授权值。"""
+
+            authorization = consume_authorization(credential)  # type: ignore[arg-type]
+            consumed_authorizations.append(authorization)
+            return authorization
+
+        self._monkeypatch.setattr(
+            live_operations,
+            "_consume_authorization_for_quota_resume_boundary",
+            record_quota_authorization_consumption,
+        )
+
+        async with _live_client() as (
+            client,
+            live_runtime,
+            providers,
+            clock,
+            app,
+        ):
+            assert live_runtime.operation_recovery is not None
+            await live_runtime.operation_recovery.aclose()
+            created = await client.post(
+                "/agent/conversations",
+                json={"title": "Task14 额度故障矩阵", "initial_intent": "video"},
+            )
+            assert created.status_code == 200
+            conversation_id = created.json()["conversation_id"]
+            started = await client.post(
+                f"/agent/conversations/{conversation_id}/turns/start",
+                headers={"Authorization": AUTHORIZATION},
+                json={
+                    "client_input_id": "33333333-3333-4333-8333-333333331402",
+                    "content": "使用商品参考图制作一条 30 秒竖屏新品视频",
+                    "materials": [MATERIAL],
+                    "expected_context_version": 0,
+                    "explicit_action": {
+                        "action": "start_workflow",
+                        "intent": "video",
+                        "workflow_id": None,
+                        "stage": None,
+                        "artifact_ref": None,
+                        "patch": {},
+                    },
+                },
+            )
+            assert started.status_code == 200
+            run_id = started.json()["run_id"]
+            intake = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_intake_form",
+                run_id=run_id,
+            )
+            await _respond(
+                client,
+                conversation_id,
+                intake,
+                sequence=14021,
+                action="continue_workflow",
+                patch={"form_values": LIVE_VIDEO_FORM},
+                content="确认视频需求",
+            )
+            directions = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_direction_review",
+                run_id=run_id,
+            )
+            direction_id = directions["interrupt"]["payload"]["directions"][0][
+                "direction_id"
+            ]
+            await _respond(
+                client,
+                conversation_id,
+                directions,
+                sequence=14022,
+                action="continue_workflow",
+                patch={"direction_id": direction_id},
+                content="选择第一条创意方向",
+            )
+            plan = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_plan_review",
+                run_id=run_id,
+            )
+            await _respond(
+                client,
+                conversation_id,
+                plan,
+                sequence=14023,
+                action="continue_workflow",
+                patch={},
+                content="同意创作方案",
+            )
+            packages = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_scene_package_review",
+                run_id=run_id,
+            )
+            await _respond(
+                client,
+                conversation_id,
+                packages,
+                sequence=14024,
+                action="continue_workflow",
+                patch={},
+                content="确认分镜和素材",
+            )
+            generating = await _wait_for_snapshot(
+                client,
+                conversation_id,
+                lambda value: value["workflows"]
+                and value["workflows"][0]["current_stage"]
+                == "generate_scene_videos",
+                live_runtime=live_runtime,
+            )
+            pending = generating["workflows"][0]["pending_external_job"]
+            assert pending is not None
+            job_id = pending["job_id"]
+            provider_job_id = pending["provider_job_id"]
+            attempt = pending["attempt"]
+            starts_before_resume = providers[0].start_calls
+            providers[0].script_status(
+                provider_job_id,
+                "quota_paused",
+                "succeeded",
+            )
+            other_provider_job_ids = tuple(
+                item
+                for item in providers[0].requests_by_job
+                if item != provider_job_id
+            )
+            assert other_provider_job_ids
+            for other_provider_job_id in other_provider_job_ids:
+                providers[0].script_status(
+                    other_provider_job_id,
+                    {
+                        "job_id": other_provider_job_id,
+                        "status": "running",
+                        "result": {"progress": 50},
+                    },
+                    "succeeded",
+                )
+
+            await _advance_external_jobs(live_runtime, clock)
+            await live_runtime.operation_recovery.run_once()
+            paused = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="authorization_required",
+                run_id=run_id,
+            )
+            quota_interrupt_id = paused["interrupt"]["interrupt_id"]
+            await _advance_external_jobs(live_runtime, clock)
+            await live_runtime.operation_recovery.run_once()
+            reopened = await _wait_for_snapshot(
+                client,
+                conversation_id,
+                lambda value: value["interrupt"] is not None
+                and value["interrupt"]["interrupt_id"] == quota_interrupt_id
+                and value["workflows"]
+                and value["workflows"][0]["status"] == "running",
+                live_runtime=live_runtime,
+            )
+            repository = live_runtime.repository
+            assert repository is not None
+            owner = str(E2E_USER_ID)
+            paused_workflows = await repository.list_workflows(
+                owner,
+                conversation_id,
+            )
+            assert len(paused_workflows) == 1
+            pause_timeline = [
+                {
+                    "sequence": item.sequence,
+                    "type": item.type.value,
+                    "job_id": item.payload.get("job_id"),
+                    "stage": item.payload.get("stage"),
+                    "status": item.payload.get("status"),
+                    "quota_state": item.payload.get("quota_state"),
+                    "reason_code": item.payload.get("reason_code"),
+                    "workflow_status": (
+                        item.payload.get("workflow", {}).get("status")
+                        if isinstance(item.payload.get("workflow"), Mapping)
+                        else None
+                    ),
+                }
+                for item in await repository.list_events(
+                    owner,
+                    conversation_id,
+                )
+                if item.type.value
+                in {
+                    "external_job.quota_state_changed",
+                    "external_job.state_changed",
+                    "workflow.progressed",
+                }
+            ]
+            paused_fault = next(
+                item
+                for item in pause_timeline
+                if item["quota_state"] == "paused"
+            )
+            paused_sequence = paused_fault["sequence"]
+            pause_reason = paused_fault["reason_code"]
+            assert isinstance(pause_reason, str)
+            later_scene_success = next(
+                item
+                for item in pause_timeline
+                if item["sequence"] > paused_sequence
+                and item["type"] == "external_job.state_changed"
+                and item["job_id"] != job_id
+                and item["status"] == "succeeded"
+            )
+            later_running = next(
+                item
+                for item in pause_timeline
+                if item["sequence"] > later_scene_success["sequence"]
+                and item["workflow_status"] == "running"
+            )
+            assert (
+                reopened["workflows"][0]["status"],
+                paused_workflows[0].status.value,
+            ) == ("running", "running")
+            assert paused_workflows[0].status.value == "running"
+            assert later_running["sequence"] > later_scene_success["sequence"]
+            stored_quota = await repository.get_interrupt(
+                owner,
+                quota_interrupt_id,
+            )
+            assert stored_quota is not None
+            assert stored_quota.thread_id.startswith("quota-paused:")
+            assert live_runtime.graph_runtime is not None
+            quota_checkpoint = await live_runtime.graph_runtime.graph.aget_state(
+                {
+                    "configurable": {
+                        "thread_id": stored_quota.thread_id,
+                        "checkpoint_ns": "",
+                    }
+                }
+            )
+            assert len(quota_checkpoint.interrupts) == 1
+            assert (
+                quota_checkpoint.interrupts[0].value["interrupt_id"]
+                == quota_interrupt_id
+            )
+            assert quota_checkpoint.values["workflow_dispatch_result"][
+                "workflow"
+            ]["status"] == "paused_quota"
+            quota_pause_graph_checkpoint = {
+                "values": quota_checkpoint.values,
+                "interrupts": [
+                    item.value for item in quota_checkpoint.interrupts
+                ],
+            }
+
+            response = await _respond_to_authorization(
+                client,
+                conversation_id,
+                reopened,
+                sequence=14025,
+                authorization=MATRIX_QUOTA_RECOVERY_AUTHORIZATION,
+            )
+            assert response.status_code == 200, response.text
+            response_document = response.json()
+            assert response_document["turn_id"] == run_id
+            runtime_service = app.state.pixelflow_agent_runtime_service
+            notification_tasks_after_response = len(
+                runtime_service._executor_notification_tasks
+            )
+            assert live_runtime.executor is not None
+            completed_turn = await _wait_for_turn_completed(
+                client,
+                conversation_id,
+                run_id,
+            )
+            assert completed_turn["turn_id"] == run_id
+            resumed = await _wait_for_snapshot(
+                client,
+                conversation_id,
+                lambda value: value["interrupt"] is None
+                and value["workflows"]
+                and value["workflows"][0]["status"] == "running",
+                live_runtime=live_runtime,
+            )
+            resumed_pending = resumed["workflows"][0]["pending_external_job"]
+            assert resumed_pending is not None
+            assert resumed_pending["job_id"] == job_id
+            assert resumed_pending["provider_job_id"] == provider_job_id
+            assert resumed_pending["attempt"] == attempt
+            assert providers[0].start_calls == starts_before_resume
+            quota_resume_checkpoint = (
+                await live_runtime.graph_runtime.graph.aget_state(
+                    {
+                        "configurable": {
+                            "thread_id": stored_quota.thread_id,
+                            "checkpoint_ns": "",
+                        }
+                    }
+                )
+            )
+            assert quota_resume_checkpoint.interrupts == ()
+            quota_resume_graph_checkpoint = {
+                "values": quota_resume_checkpoint.values,
+                "interrupts": [
+                    item.value for item in quota_resume_checkpoint.interrupts
+                ],
+            }
+            credential_destroyed = (
+                live_runtime.executor._credential_vault.get(run_id) is None
+            )
+
+            await _advance_external_jobs(live_runtime, clock)
+            final_snapshot = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_scene_video_review",
+                run_id=run_id,
+            )
+            operation = await repository.get_operation(owner, job_id)
+            stored_turn = await repository.get_turn(owner, run_id)
+            closed_quota = await repository.get_interrupt(
+                owner,
+                quota_interrupt_id,
+            )
+            assert operation is not None
+            assert stored_turn is not None
+            assert closed_quota is not None and closed_quota.status == "closed"
+            events = await repository.list_events(owner, conversation_id)
+            turns = await repository.list_turns(owner, conversation_id)
+            projection_messages = await repository.list_projection_messages(
+                owner,
+                conversation_id,
+            )
+            quota_sse_segments = await _read_sse_until_cursor(
+                app,
+                conversation_id,
+                after_cursor=generating["resume"]["cursor"],
+                target_cursor=final_snapshot["resume"]["cursor"],
+            )
+            assert quota_sse_segments
+            completion_events = [
+                event
+                for event in events
+                if event.type.value == "external_job.state_changed"
+                and event.payload.get("job_id") == job_id
+            ]
+            assert completion_events
+            safe_reason = completion_events[-1].payload["reason_code"]
+            assert isinstance(safe_reason, str)
+            return _FaultResult(
+                fault_reason_code=pause_reason,
+                expected_fault_reason_code=_FAULT_REASON_CODES["quota_402"],
+                expected_attempt=attempt,
+                actual_attempt=operation.attempt,
+                expected_provider_job_id=provider_job_id,
+                actual_provider_job_id=operation.provider_job_id,
+                expected_operation_status=ExternalJobStatus.SUCCEEDED,
+                actual_operation_status=operation.status,
+                expected_turn_status=TurnStatus.WAITING_USER,
+                actual_turn_status=stored_turn.status,
+                expected_turn_id=run_id,
+                actual_turn_id=stored_turn.turn_id,
+                credential_recovery_entrypoint=(
+                    "公开 interrupt response->Supervisor Graph"
+                ),
+                provider_starts_before_resume=starts_before_resume,
+                quota_recovery_credential_consumptions=(
+                    consumed_authorizations.count(
+                        MATRIX_QUOTA_RECOVERY_AUTHORIZATION
+                    )
+                ),
+                credential_destroyed=credential_destroyed,
+                paused_provider_job_id=provider_job_id,
+                resumed_provider_job_id=operation.provider_job_id,
+                paused_attempt=attempt,
+                resumed_attempt=operation.attempt,
+                repository_interrupt_id=quota_interrupt_id,
+                checkpoint_interrupt_id=quota_interrupt_id,
+                production_graph_verified=True,
+                leak_boundaries_scanned=(
+                    "turns",
+                    "operation",
+                    "quota_completion_projection_events",
+                    "quota_pause_graph_checkpoint",
+                    "quota_resume_graph_checkpoint",
+                    "paused_snapshot",
+                    "reopened_snapshot",
+                    "resumed_snapshot",
+                    "final_snapshot",
+                    "quota_sse_segments",
+                    "projection_messages",
+                    "safety_logs",
+                ),
+                leaked_sensitive_values=self._leaks(
+                    [turn.model_dump(mode="json") for turn in turns],
+                    operation.model_dump(mode="json"),
+                    [event.model_dump(mode="json") for event in events],
+                    quota_pause_graph_checkpoint,
+                    quota_resume_graph_checkpoint,
+                    paused,
+                    reopened,
+                    resumed,
+                    final_snapshot,
+                    quota_sse_segments,
+                    [
+                        message.model_dump(mode="json")
+                        for message in projection_messages
+                    ],
+                ),
+                duplicate_provider_starts=(
+                    providers[0].start_calls - starts_before_resume
+                ),
+                provider_calls=providers[0].start_calls,
+                response_turn_id=response_document["turn_id"],
+                notification_tasks_after_response=(
+                    notification_tasks_after_response
+                ),
+                final_reason_code=safe_reason,
+                expected_final_reason_code="provider_succeeded",
+            )
+
+    async def _run_real_completion_fault(self, fault: str) -> _FaultResult:
+        """让 Provider 终态只经 Completion Outbox 和真实 Graph 投影。"""
+
+        from test_agent_runtime_video_live_e2e import (
+            USER_ID as E2E_USER_ID,
+        )
+        from test_agent_runtime_video_live_e2e import (
+            _advance_external_jobs,
+            _live_client,
+            _respond,
+            _start_scene_generation,
+            _wait_for_interrupt,
+            _wait_for_snapshot,
+        )
+
+        fault_ids = {
+            "provider_started_before_event": 14031,
+            "provider_timeout": 14032,
+            "provider_failed": 14033,
+            "provider_expired_404": 14034,
+            "partial_scene_failure": 14035,
+        }
+        scenario_id = fault_ids[fault]
+        async with _live_client() as (
+            client,
+            live_runtime,
+            providers,
+            clock,
+            _app,
+        ):
+            assert live_runtime.operation_recovery is not None
+            await live_runtime.operation_recovery.aclose()
+            conversation_id, run_id, generating = (
+                await _start_scene_generation(
+                    client,
+                    live_runtime,
+                    client_input_id=(
+                        f"44444444-4444-4444-8444-{scenario_id:012d}"
+                    ),
+                    response_sequence_base=scenario_id * 10,
+                    title=f"Task14 Completion 故障矩阵 {fault}",
+                )
+            )
+            pending = generating["workflows"][0]["pending_external_job"]
+            assert pending is not None
+            original_job_id = pending["job_id"]
+            original_provider_job_id = pending["provider_job_id"]
+            original_attempt = pending["attempt"]
+            provider = providers[0]
+            initial_starts = provider.start_calls
+            if fault == "provider_started_before_event":
+                provider.script_status(original_provider_job_id, "succeeded")
+            elif fault in {"provider_timeout", "partial_scene_failure"}:
+                provider.script_status(
+                    original_provider_job_id,
+                    TimeoutError("不得持久化的超时正文"),
+                )
+            elif fault == "provider_failed":
+                provider.script_status(
+                    original_provider_job_id,
+                    {
+                        "job_id": original_provider_job_id,
+                        "status": "failed",
+                        "error": "不得持久化的失败正文",
+                    },
+                )
+            else:
+                provider.script_status(
+                    original_provider_job_id,
+                    _HttpStatusError(404),
+                )
+
+            repository = live_runtime.repository
+            assert repository is not None
+            owner = str(E2E_USER_ID)
+            if fault == "provider_started_before_event":
+                before_events = await repository.list_events(
+                    owner,
+                    conversation_id,
+                )
+                assert not any(
+                    event.type.value == "external_job.state_changed"
+                    and event.payload.get("job_id") == original_job_id
+                    for event in before_events
+                )
+
+            await _advance_external_jobs(live_runtime, clock)
+            reviewed = await _wait_for_interrupt(
+                client,
+                live_runtime,
+                conversation_id,
+                kind="video_scene_video_review",
+                run_id=run_id,
+            )
+            original = await repository.get_operation(owner, original_job_id)
+            assert original is not None
+            events = await repository.list_events(owner, conversation_id)
+            completion_events = [
+                event
+                for event in events
+                if event.type.value == "external_job.state_changed"
+                and event.payload.get("job_id") == original_job_id
+            ]
+            assert len(completion_events) == 1
+            safe_reason = completion_events[0].payload["reason_code"]
+            assert isinstance(safe_reason, str)
+
+            if fault == "provider_started_before_event":
+                actual = original
+                expected_attempt = original_attempt
+                expected_provider_job_id = original_provider_job_id
+                expected_status = ExternalJobStatus.SUCCEEDED
+                expected_starts = initial_starts
+            else:
+                scene_id = provider.requests_by_job[original_provider_job_id][
+                    "scene_id"
+                ]
+                await _respond(
+                    client,
+                    conversation_id,
+                    reviewed,
+                    sequence=scenario_id * 10 + 5,
+                    action="modify_workflow",
+                    patch={
+                        "scene_id": scene_id,
+                        "scene_patch": {"storyline": "修订失败分镜后重试"},
+                    },
+                    content="修改失败分镜并准备重新生成",
+                )
+                modified = await _wait_for_interrupt(
+                    client,
+                    live_runtime,
+                    conversation_id,
+                    kind="video_scene_video_review",
+                    run_id=run_id,
+                )
+                await _respond(
+                    client,
+                    conversation_id,
+                    modified,
+                    sequence=scenario_id * 10 + 6,
+                    action="regenerate_stage",
+                    patch={},
+                    content="重新生成已修改分镜并创建新 attempt",
+                )
+                retrying = await _wait_for_snapshot(
+                    client,
+                    conversation_id,
+                    lambda value: value["workflows"]
+                    and value["workflows"][0]["current_stage"]
+                    == "generate_scene_videos",
+                    live_runtime=live_runtime,
+                )
+                retry_pending = retrying["workflows"][0][
+                    "pending_external_job"
+                ]
+                assert retry_pending is not None
+                actual = await repository.get_operation(
+                    owner,
+                    retry_pending["job_id"],
+                )
+                assert actual is not None
+                expected_attempt = original_attempt + 1
+                expected_provider_job_id = retry_pending["provider_job_id"]
+                expected_status = ExternalJobStatus.POLLING
+                expected_starts = initial_starts + 1
+                assert actual.job_id != original_job_id
+                assert actual.attempt == expected_attempt
+                assert provider.start_calls == expected_starts
+
+            stored_turn = await repository.get_turn(owner, run_id)
+            assert stored_turn is not None
+            return _FaultResult(
+                fault_reason_code=safe_reason,
+                expected_fault_reason_code=_FAULT_REASON_CODES[fault],
+                expected_attempt=expected_attempt,
+                actual_attempt=actual.attempt,
+                expected_provider_job_id=expected_provider_job_id,
+                actual_provider_job_id=actual.provider_job_id,
+                expected_operation_status=expected_status,
+                actual_operation_status=actual.status,
+                expected_turn_status=stored_turn.status,
+                actual_turn_status=stored_turn.status,
+                expected_turn_id=run_id,
+                actual_turn_id=stored_turn.turn_id,
+                production_graph_verified=True,
+                leak_boundaries_scanned=(
+                    "operations",
+                    "completion_events",
+                    "snapshot",
+                    "safety_logs",
+                ),
+                leaked_sensitive_values=self._leaks(
+                    original.model_dump(mode="json"),
+                    actual.model_dump(mode="json"),
+                    [event.model_dump(mode="json") for event in events],
+                    reviewed,
+                ),
+                duplicate_provider_starts=(
+                    provider.start_calls - expected_starts
+                ),
+                provider_calls=provider.start_calls,
+            )
 
     async def _run_real_checkpoint_fault(self, fault: str) -> _FaultResult:
         """SQLite checkpoint 重开后只重放完成事件，不重启 Provider。"""
@@ -1419,8 +2010,8 @@ class _LiveVideoFaultScenario:
             ],
         }
         return _FaultResult(
-            safe_reason_code="provider_succeeded",
-            expected_reason_code=_FAULT_REASON_CODES[fault],
+            fault_reason_code="provider_succeeded",
+            expected_fault_reason_code=_FAULT_REASON_CODES[fault],
             expected_attempt=1,
             actual_attempt=target_operation["attempt"],
             expected_provider_job_id="provider-scripted-3",
@@ -1458,33 +2049,6 @@ class _LiveVideoFaultScenario:
         )
 
     @staticmethod
-    def _success(provider_job_id: str, suffix: str = "result") -> dict:
-        return {
-            "job_id": provider_job_id,
-            "status": "succeeded",
-            "result": {
-                "artifact_refs": [f"artifact:matrix:{suffix}"],
-                "raw": {},
-            },
-        }
-
-    @staticmethod
-    def _reason(resumer: _FaultGraphResumer, *, job_id: str | None = None) -> str:
-        events = (
-            resumer.calls
-            if job_id is None
-            else [
-                event
-                for event in resumer.calls
-                if event.payload.get("job_id") == job_id
-            ]
-        )
-        assert events
-        reason = events[-1].payload.get("reason_code")
-        assert isinstance(reason, str)
-        return reason
-
-    @staticmethod
     def _leaks(*documents: object) -> tuple[str, ...]:
         serialized = json.dumps(
             documents,
@@ -1499,332 +2063,6 @@ class _LiveVideoFaultScenario:
             "不得持久化的超时正文",
         )
         return tuple(marker for marker in markers if marker.lower() in serialized)
-
-    async def _run_operation_fault(self, fault: str) -> _FaultResult:
-        from pixelflow.agent_workflows.video.live_capabilities import (
-            TransientTurnCredential,
-        )
-        from pixelflow.agent_workflows.video.live_operations import (
-            TransientCredentialVault,
-            VideoLiveOperationBridge,
-            VideoOperationAdapterResolver,
-            VideoOperationStartRequest,
-        )
-
-        repository = MemoryCompactionQueueRepository()
-        provider = _FaultProviderService()
-        adapter = ProviderJobAdapter(provider)
-        clock = _FaultClock()
-        user_id = "user-task14-matrix"
-        conversation_id = "conversation-task14-matrix"
-        turn_id = f"turn-{fault}"
-        await repository.create_turn(
-            user_id,
-            TurnRecord(
-                turn_id=turn_id,
-                conversation_id=conversation_id,
-                client_input_id=UUID("00000000-0000-4000-8000-000000001499"),
-                status=TurnStatus.WAITING_USER,
-                target_workflow_id="workflow-task14-matrix",
-                decision=None,
-                expected_context_version=0,
-                created_at=clock.now(),
-            ),
-        )
-        operations: list[object] = []
-        credential_recovery_entrypoint = None
-        public_credential_marker_deliveries = 0
-        credential_destroyed = False
-        paused_provider_job_id = None
-        paused_attempt = None
-
-        async def start_operation(stage: str, attempt: int):
-            provider_request = {
-                "scene_id": stage.rsplit(":", 1)[-1],
-                "prompt": "Task 14 本地 fake 请求",
-            }
-            request = build_operation_request(
-                workflow_id="workflow-task14-matrix",
-                stage=stage,
-                stage_version=1,
-                attempt=attempt,
-                provider_request=provider_request,
-            )
-            coordinator = OperationStartCoordinator(
-                repository,
-                adapter=adapter,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                clock=clock.now,
-                job_id_factory=lambda: f"job-{len(operations) + 1}-{attempt}",
-            )
-            started = await coordinator.start(
-                request,
-                provider_request=provider_request,
-                authorization=f"Bearer matrix-secret-{attempt}",
-                lease_owner=f"starter-{len(operations) + 1}-{attempt}",
-            )
-            replayed = await coordinator.start(
-                request,
-                provider_request=provider_request,
-                authorization=f"Bearer matrix-secret-replay-{attempt}",
-                lease_owner=f"starter-replay-{len(operations) + 1}-{attempt}",
-            )
-            assert replayed.job_id == started.job_id
-            operations.append(started)
-            return started
-
-        first = await start_operation("generate_scene_video:scene-1", 1)
-        expected_unique_starts = 1
-        resumer = _FaultGraphResumer(
-            "before"
-            if fault == "checkpoint_before_commit"
-            else "after"
-            if fault == "checkpoint_after_commit"
-            else "normal"
-        )
-
-        def make_runtime(worker: str, stages: tuple[str, ...]):
-            return OperationRecoveryRuntime(
-                repository,
-                resolver=MappingProviderJobAdapterResolver(
-                    {stage: adapter for stage in stages}
-                ),
-                resumer=resumer,
-                worker_id=worker,
-                clock=clock.now,
-            )
-
-        stage_names = ("generate_scene_video:scene-1",)
-        if fault == "partial_scene_failure":
-            second = await start_operation("generate_scene_video:scene-2", 1)
-            third = await start_operation("generate_scene_video:scene-3", 1)
-            expected_unique_starts = 3
-            stage_names = (
-                "generate_scene_video:scene-1",
-                "generate_scene_video:scene-2",
-                "generate_scene_video:scene-3",
-            )
-            provider.status_scripts[first.provider_job_id] = [
-                self._success(first.provider_job_id, "scene-1")
-            ]
-            provider.status_scripts[second.provider_job_id] = [
-                TimeoutError("不得持久化的超时正文")
-            ]
-            provider.status_scripts[third.provider_job_id] = [
-                self._success(third.provider_job_id, "scene-3")
-            ]
-        elif fault == "quota_402":
-            provider.status_scripts[first.provider_job_id] = [
-                _HttpStatusError(402),
-                self._success(first.provider_job_id, "quota-recovered"),
-            ]
-        elif fault == "provider_timeout":
-            provider.status_scripts[first.provider_job_id] = [
-                TimeoutError("不得持久化的超时正文")
-            ]
-        elif fault == "provider_failed":
-            provider.status_scripts[first.provider_job_id] = [
-                {
-                    "job_id": first.provider_job_id,
-                    "status": "failed",
-                    "error": "不得持久化的失败正文",
-                }
-            ]
-        elif fault == "provider_expired_404":
-            provider.status_scripts[first.provider_job_id] = [
-                _HttpStatusError(404)
-            ]
-        else:
-            provider.status_scripts[first.provider_job_id] = [
-                self._success(first.provider_job_id, fault)
-            ]
-
-        if fault == "provider_started_before_event":
-            assert await repository.list_events(user_id, conversation_id) == []
-
-        clock.advance(3)
-        runtime = make_runtime(f"worker-{fault}", stage_names)
-        await runtime.run_once()
-
-        if fault in {"checkpoint_before_commit", "checkpoint_after_commit"}:
-            clock.advance(31)
-            restarted = make_runtime(f"worker-restarted-{fault}", stage_names)
-            await restarted.run_once()
-            assert len(resumer.checkpointed_ids) == 1
-            actual = await repository.get_operation(user_id, first.job_id)
-            assert actual is not None
-            expected_provider_job_id = first.provider_job_id
-            expected_attempt = 1
-            safe_reason = self._reason(resumer, job_id=first.job_id)
-        elif fault == "quota_402":
-            paused = await repository.get_operation(user_id, first.job_id)
-            assert paused is not None
-            assert paused.status is ExternalJobStatus.POLLING
-            assert paused.next_poll_at is None
-            paused_provider_job_id = paused.provider_job_id
-            paused_attempt = paused.attempt
-            recovered = await runtime.recover_manually(
-                user_id,
-                conversation_id,
-                first.job_id,
-            )
-            assert (
-                recovered.action
-                is OperationManualRecoveryAction.RESUMED_ORIGINAL_JOB
-            )
-            recovery_marker = "Bearer matrix-secret-quota-recovery"
-            recovery_credential = TransientTurnCredential(recovery_marker)
-            credential_vault = TransientCredentialVault()
-            credential_vault.put(turn_id, recovery_credential)
-            public_credential = credential_vault.get(turn_id)
-            assert public_credential is recovery_credential
-            provider_request = {
-                "scene_id": "scene-1",
-                "prompt": "Task 14 本地 fake 请求",
-            }
-            operation_request = build_operation_request(
-                workflow_id="workflow-task14-matrix",
-                stage="generate_scene_video:scene-1",
-                stage_version=1,
-                attempt=1,
-                provider_request=provider_request,
-            )
-            operation_bridge = VideoLiveOperationBridge(
-                repository=repository,
-                resolver=VideoOperationAdapterResolver(
-                    {"generate_scene_video": adapter}
-                ),
-                lease_owner="task14-quota-public-recovery",
-                clock=clock.now,
-                job_id_factory=lambda: "不得创建新的内部任务",
-            )
-            public_recovered = await operation_bridge.start(
-                VideoOperationStartRequest(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    operation_request=operation_request,
-                    provider_request=provider_request,
-                ),
-                credential=public_credential,
-            )
-            public_credential_marker_deliveries += 1
-            assert public_recovered.job_id == first.job_id
-            assert public_recovered.provider_job_id == paused_provider_job_id
-            assert public_recovered.attempt == paused_attempt
-            credential_vault.pop(turn_id)
-            assert credential_vault.get(turn_id) is None
-            with pytest.raises(RuntimeError, match="临时凭据不可用"):
-                await operation_bridge.start(
-                    VideoOperationStartRequest(
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                        operation_request=operation_request,
-                        provider_request=provider_request,
-                    ),
-                    credential=recovery_credential,
-                )
-            credential_destroyed = True
-            credential_recovery_entrypoint = (
-                "TransientCredentialVault->VideoLiveOperationBridge.start"
-            )
-            clock.advance(3)
-            await runtime.run_once()
-            actual = await repository.get_operation(user_id, first.job_id)
-            assert actual is not None
-            assert provider.status_calls == [
-                first.provider_job_id,
-                first.provider_job_id,
-            ]
-            expected_provider_job_id = first.provider_job_id
-            expected_attempt = 1
-            safe_reason = self._reason(resumer, job_id=first.job_id)
-        elif fault in {
-            "provider_timeout",
-            "provider_failed",
-            "provider_expired_404",
-        }:
-            terminal = await repository.get_operation(user_id, first.job_id)
-            assert terminal is not None
-            recovery = await runtime.recover_manually(
-                user_id,
-                conversation_id,
-                first.job_id,
-            )
-            assert recovery.action is OperationManualRecoveryAction.NEW_ATTEMPT_REQUIRED
-            actual = await start_operation("generate_scene_video:scene-1", 2)
-            expected_unique_starts = 2
-            expected_provider_job_id = "provider-matrix-2"
-            expected_attempt = 2
-            safe_reason = self._reason(resumer, job_id=first.job_id)
-        elif fault == "partial_scene_failure":
-            failed = await repository.get_operation(user_id, second.job_id)
-            assert failed is not None
-            assert failed.status is ExternalJobStatus.TIMEOUT
-            actual = await start_operation("generate_scene_video:scene-2", 2)
-            expected_unique_starts = 4
-            expected_provider_job_id = "provider-matrix-4"
-            expected_attempt = 2
-            safe_reason = self._reason(resumer, job_id=second.job_id)
-        else:
-            actual = await repository.get_operation(user_id, first.job_id)
-            assert actual is not None
-            expected_provider_job_id = first.provider_job_id
-            expected_attempt = 1
-            safe_reason = self._reason(resumer, job_id=first.job_id)
-
-        stored_turn = await repository.get_turn(user_id, turn_id)
-        assert stored_turn is not None
-        stored_events = await repository.list_events(user_id, conversation_id)
-        persisted_operations = [
-            item.model_dump(mode="json")
-            for item in [
-                await repository.get_operation(user_id, operation.job_id)
-                for operation in operations
-            ]
-            if item is not None
-        ]
-        return _FaultResult(
-            safe_reason_code=safe_reason,
-            expected_reason_code=_FAULT_REASON_CODES[fault],
-            expected_attempt=expected_attempt,
-            actual_attempt=actual.attempt,
-            expected_provider_job_id=expected_provider_job_id,
-            actual_provider_job_id=actual.provider_job_id,
-            expected_operation_status=(
-                ExternalJobStatus.SUCCEEDED
-                if fault in {"provider_started_before_event", "quota_402"}
-                else ExternalJobStatus.POLLING
-            ),
-            actual_operation_status=actual.status,
-            expected_turn_status=TurnStatus.WAITING_USER,
-            actual_turn_status=stored_turn.status,
-            expected_turn_id=turn_id,
-            actual_turn_id=stored_turn.turn_id,
-            credential_recovery_entrypoint=credential_recovery_entrypoint,
-            initial_credential_marker_deliveries=(
-                provider.initial_credential_marker_deliveries
-                if fault == "quota_402"
-                else 0
-            ),
-            public_credential_marker_deliveries=public_credential_marker_deliveries,
-            credential_destroyed=credential_destroyed,
-            paused_provider_job_id=paused_provider_job_id,
-            resumed_provider_job_id=(
-                actual.provider_job_id if fault == "quota_402" else None
-            ),
-            paused_attempt=paused_attempt,
-            resumed_attempt=(actual.attempt if fault == "quota_402" else None),
-            leaked_sensitive_values=self._leaks(
-                persisted_operations,
-                [event.model_dump(mode="json") for event in stored_events],
-                [event.model_dump(mode="json") for event in resumer.calls],
-            ),
-            duplicate_provider_starts=(
-                provider.start_calls - expected_unique_starts
-            ),
-            provider_calls=provider.start_calls,
-        )
 
     async def _run_cross_tenant_reference(self) -> _FaultResult:
         repository = MemoryCompactionQueueRepository()
@@ -1879,8 +2117,8 @@ class _LiveVideoFaultScenario:
         visible.extend(await repository.list_workflows(attacker, conversation_id))
         visible.extend(await repository.list_events(attacker, conversation_id))
         return _FaultResult(
-            safe_reason_code=safe_reason,
-            expected_reason_code=_FAULT_REASON_CODES["cross_tenant_reference"],
+            fault_reason_code=safe_reason,
+            expected_fault_reason_code=_FAULT_REASON_CODES["cross_tenant_reference"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1909,8 +2147,8 @@ class _LiveVideoFaultScenario:
         else:
             raise AssertionError("未验证模型档案必须 fail-closed")
         return _FaultResult(
-            safe_reason_code=safe_reason,
-            expected_reason_code=_FAULT_REASON_CODES["invalid_model_profile"],
+            fault_reason_code=safe_reason,
+            expected_fault_reason_code=_FAULT_REASON_CODES["invalid_model_profile"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1980,8 +2218,8 @@ class _LiveVideoFaultScenario:
         assert frozen.orchestration_mode == "supervisor_v1"
         turns = await repository.list_turns(owner, conversation_id)
         return _FaultResult(
-            safe_reason_code=safe_reason,
-            expected_reason_code=_FAULT_REASON_CODES["handler_missing_after_restart"],
+            fault_reason_code=safe_reason,
+            expected_fault_reason_code=_FAULT_REASON_CODES["handler_missing_after_restart"],
             expected_attempt=None,
             actual_attempt=None,
             expected_provider_job_id=None,
@@ -1992,8 +2230,11 @@ class _LiveVideoFaultScenario:
 
 
 @pytest.fixture
-def live_video_fault_scenario(tmp_path: Path) -> _LiveVideoFaultScenario:
-    return _LiveVideoFaultScenario(tmp_path)
+def live_video_fault_scenario(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _LiveVideoFaultScenario:
+    return _LiveVideoFaultScenario(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
@@ -2020,7 +2261,7 @@ async def test_video_live_fault_matrix_is_recoverable_and_isolated(
 ) -> None:
     result = await live_video_fault_scenario.run(fault)
 
-    assert result.safe_reason_code == result.expected_reason_code
+    assert result.fault_reason_code == result.expected_fault_reason_code
     assert result.actual_attempt == result.expected_attempt
     assert result.actual_provider_job_id == result.expected_provider_job_id
     assert result.actual_operation_status is result.expected_operation_status
@@ -2046,16 +2287,45 @@ async def test_video_live_fault_matrix_is_recoverable_and_isolated(
             [record.getMessage() for record in caplog.records]
         ) == ()
     if fault == "quota_402":
+        assert result.final_reason_code == result.expected_final_reason_code
         assert result.credential_recovery_entrypoint == (
-            "TransientCredentialVault->VideoLiveOperationBridge.start"
+            "公开 interrupt response->Supervisor Graph"
         )
-        assert result.initial_credential_marker_deliveries == 1
-        assert result.public_credential_marker_deliveries == 1
+        assert result.quota_recovery_credential_consumptions == 1
+        assert result.provider_starts_before_resume > 0
         assert result.credential_destroyed is True
+        assert result.production_graph_verified is True
+        assert result.repository_interrupt_id == result.checkpoint_interrupt_id
         assert result.paused_provider_job_id == result.resumed_provider_job_id
         assert result.paused_provider_job_id == result.expected_provider_job_id
         assert result.paused_attempt == result.resumed_attempt
         assert result.paused_attempt == result.expected_attempt
+        assert result.response_turn_id == result.expected_turn_id
+        assert result.notification_tasks_after_response is not None
+        assert {
+            "turns",
+            "operation",
+            "quota_completion_projection_events",
+            "quota_pause_graph_checkpoint",
+            "quota_resume_graph_checkpoint",
+            "paused_snapshot",
+            "reopened_snapshot",
+            "resumed_snapshot",
+            "final_snapshot",
+            "quota_sse_segments",
+            "projection_messages",
+            "safety_logs",
+        }.issubset(result.leak_boundaries_scanned)
+    if fault in {
+        "quota_402",
+        "provider_timeout",
+        "provider_failed",
+        "provider_expired_404",
+    }:
+        assert "safety_logs" in result.leak_boundaries_scanned
+        assert live_video_fault_scenario._leaks(
+            [record.getMessage() for record in caplog.records]
+        ) == ()
     if fault == "invalid_model_profile":
         assert result.graph_calls == 0
         assert result.provider_calls == 0
@@ -2065,7 +2335,7 @@ async def test_video_live_fault_matrix_is_recoverable_and_isolated(
 async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """对抗子类只能触发安全拒绝，不能把新增字段带入上下文或完成投影。"""
+    """对抗子类只能被拒绝或收敛，不能把新增字段带入上下文或完成投影。"""
 
     from pydantic import ValidationError
 
@@ -2075,6 +2345,17 @@ async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
         ContextAssemblySnapshot,
     )
     from pixelflow.agent_runtime.contracts import ContextRequest
+    from pixelflow.agent_runtime.graph import workflow_namespace
+    from pixelflow.agent_runtime.persistence.repositories import (
+        EventDeliveryClaim,
+    )
+    from pixelflow.agent_runtime.ports import OperationConflictError
+    from pixelflow.agent_workflows.video.live_operations import (
+        VideoOperationCompletionHandler,
+        VideoOperationQuotaStateHandler,
+        _completion_projection_message,
+        _OperationEventClaimRegistry,
+    )
 
     secret_marker = "task14-secret-only-subclass-marker"
 
@@ -2085,6 +2366,9 @@ async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
         secret_only: str
 
     class SecretOnlyCompletionEvent(AgentEvent):
+        secret_only: str
+
+    class SecretOnlyQuotaEvent(AgentEvent):
         secret_only: str
 
     turn = SecretOnlyTurn(
@@ -2102,6 +2386,49 @@ async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
     assert turn_document["secret_only"] == secret_marker
     with pytest.raises(ValidationError):
         TurnRecord.model_validate(turn_document)
+
+    from test_agent_runtime_turn_executor import (
+        _runtime as build_executor_runtime,
+    )
+    from test_agent_runtime_turn_executor import (
+        _seed_conversation as seed_executor_conversation,
+    )
+    from test_agent_runtime_turn_executor import (
+        _seed_turn as seed_executor_turn,
+    )
+
+    executor_runtime = await build_executor_runtime()
+    try:
+        await seed_executor_conversation(executor_runtime.task_store)
+        stored_turn = await seed_executor_turn(
+            executor_runtime.repository,
+            executor_runtime.task_store,
+            index=1,
+        )
+        claim = await executor_runtime.repository.claim_turn(
+            "user-1",
+            "conversation-1",
+            stored_turn.turn_id,
+            lease_owner="task14-secret-only-executor",
+            now=executor_runtime.clock(),
+            lease_expires_at=(
+                executor_runtime.clock() + timedelta(seconds=30)
+            ),
+        )
+        assert claim is not None
+        secret_claim_turn = SecretOnlyTurn(
+            **claim.turn.model_dump(mode="python"),
+            secret_only=secret_marker,
+        )
+        secret_claim = claim.model_copy(
+            update={"turn": secret_claim_turn}
+        )
+        with pytest.raises(ValidationError):
+            await executor_runtime.executor._load_authoritative_evidence(
+                secret_claim
+            )
+    finally:
+        await executor_runtime.executor.aclose()
 
     snapshot = SecretOnlyContextSnapshot(
         user_id="user-task14-secret-subclass",
@@ -2162,6 +2489,119 @@ async def test_serialize_as_any_boundaries_reject_secret_only_subclasses(
         completion_document["payload"],
         ensure_ascii=False,
     )
+    projected_message = _completion_projection_message(
+        workflow=WorkflowRecord(
+            workflow_id="workflow-task14-secret-subclass",
+            conversation_id=snapshot.conversation_id,
+            kind=WorkflowKind.VIDEO,
+            status="running",
+            current_stage="generate_scene_videos",
+            stage_version=1,
+            latest_artifact_refs=["artifact:task14:secret-subclass"],
+            context_version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        completion_event=completion,
+        artifact={
+            "type": "video_result",
+            "description": "安全失败摘要",
+            "generatedSceneVideos": {"ok": False},
+        },
+    )
+    projected_document = projected_message.model_dump(mode="json")
+    assert secret_marker not in json.dumps(
+        projected_document,
+        ensure_ascii=False,
+    )
+
+    base_completion = AgentEvent.model_validate(
+        completion.model_dump(mode="json", exclude={"secret_only"})
+    )
+    completion_claim = EventDeliveryClaim(
+        event=base_completion,
+        delivery_attempts=1,
+        lease_owner="task14-secret-only-completion",
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
+    claim_registry = _OperationEventClaimRegistry()
+    claim_registry.remember(
+        user_id=snapshot.user_id,
+        conversation_id=snapshot.conversation_id,
+        job_id="job-task14-secret-only-completion",
+        claim=completion_claim,
+        now=NOW,
+    )
+
+    class CompletionClaimBoundary:
+        def _require_completion_claim(
+            self,
+            event: AgentEvent,
+            *,
+            idempotency_key: str,
+        ) -> object:
+            return claim_registry.require(
+                event,
+                idempotency_key=idempotency_key,
+                now=NOW,
+            )
+
+    completion_handler = VideoOperationCompletionHandler(
+        repository=object(),
+        operations=CompletionClaimBoundary(),
+        clock=lambda: NOW,
+    )
+    with pytest.raises(OperationConflictError):
+        await completion_handler.resume_external_job(
+            workflow_namespace(
+                snapshot.conversation_id,
+                "workflow-task14-secret-subclass",
+            ),
+            completion_event=completion,
+            idempotency_key=completion.event_id,
+        )
+
+    quota_event = SecretOnlyQuotaEvent(
+        event_id="event-task14-secret-only-quota",
+        sequence=2,
+        cursor="cursor-task14-secret-only-quota",
+        conversation_id=snapshot.conversation_id,
+        run_id=turn.turn_id,
+        occurred_at=NOW,
+        type="external_job.quota_state_changed",
+        payload={
+            "job_id": "job-task14-secret-only-quota",
+            "workflow_id": "workflow-task14-secret-subclass",
+            "stage": "generate_scene_video:scene-1",
+            "stage_version": 1,
+            "attempt": 1,
+            "quota_pause_revision": 1,
+            "quota_state": "paused",
+            "reason_code": "provider_quota_insufficient",
+        },
+        secret_only=secret_marker,
+    )
+
+    class UnreachableQuotaBoundary:
+        def _require_quota_claim(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("非法子类不应越过 quota Event 合同边界")
+
+    quota_handler = VideoOperationQuotaStateHandler(
+        repository=object(),
+        operations=UnreachableQuotaBoundary(),
+        clock=lambda: NOW,
+        graph=object(),
+    )
+    with pytest.raises(OperationConflictError):
+        await quota_handler.resume_external_job_quota(
+            workflow_namespace(
+                snapshot.conversation_id,
+                "workflow-task14-secret-subclass",
+            ),
+            quota_event=quota_event,
+            idempotency_key=quota_event.event_id,
+        )
+
     assert secret_marker not in "\n".join(
         record.getMessage() for record in caplog.records
     )
