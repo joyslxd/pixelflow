@@ -65,7 +65,7 @@ web/src/
 ### In Progress
 
 - [ ] **Transactional outbox publication**: wire persisted V2 step transitions to the existing event outbox in the same transaction.
-- [ ] **Unified VideoAgent entry**: route video turns to the V2 executor and create the first persisted workspace/plan from one user input.
+- [ ] **Unified VideoAgent entry**: the deterministic `VideoAgentEntrypoint` now creates/replays the first persisted workspace, plan, and `agent.plan.created` event from one registered Turn (`e837720`); Gateway `start_turn` routing to this entry remains pending.
 - [ ] **V2 workbench UI**: connect the timeline reducer to `VideoAgentWorkspace` and replace the old page shell during P0 Day 5.
 
 ## Task 1: Replace the Old Workspace Page With a V2 Feature Shell
