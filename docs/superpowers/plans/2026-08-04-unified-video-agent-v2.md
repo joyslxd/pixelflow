@@ -20,6 +20,7 @@
 - Delete the V1 video workflow, V1 video Supervisor action path, and old Workspace implementation after their V2 replacements pass acceptance tests. `WorkspacePage.tsx` must end as a 100-200 line V2 route/layout shell.
 - Persisted step timestamps are the source for displayed duration. Do not expose model chain-of-thought.
 - There is one active video mode: `VIDEO_AGENT`. Existing V1 video conversations are archived as historical records and return `video_workflow_retired`; they never resume or migrate in place.
+- Migration `20260804_08_video_agent_runtime.py` is additive only: create V2 tables and indexes; never drop, rename, backfill, or mutate V1 rows. Take a production SQLite snapshot and pause writes while applying schema DDL.
 
 ---
 
