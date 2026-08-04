@@ -153,6 +153,12 @@ def test_contract_enums_match_the_frozen_wire_values() -> None:
         "interrupt.closed",
         "external_job.state_changed",
         "external_job.quota_state_changed",
+        "agent.plan.created",
+        "agent.step.started",
+        "agent.step.progressed",
+        "agent.step.completed",
+        "agent.step.failed",
+        "agent.confirmation.requested",
         "error.raised",
     }
     assert {item.value for item in AgentIntent} == {

@@ -468,6 +468,82 @@ class PixelFlowAgentConversationStateRow(Base):
     )
 
 
+class PixelFlowVideoAgentWorkspaceRow(Base):
+    """VideoAgent 项目的持久化黑板。"""
+
+    __tablename__ = "pixelflow_video_agent_workspaces"
+
+    workspace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_pf_video_agent_workspaces_revision"),
+        Index(
+            "ix_pf_video_agent_workspaces_owner_conversation",
+            "user_id",
+            "conversation_id",
+        ),
+    )
+
+
+class PixelFlowVideoAgentPlanRow(Base):
+    """VideoAgent 面向用户的短计划投影。"""
+
+    __tablename__ = "pixelflow_video_agent_plans"
+
+    plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    public_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_pf_video_agent_plans_owner_workspace",
+            "user_id",
+            "workspace_id",
+            "updated_at",
+        ),
+    )
+
+
+class PixelFlowVideoAgentPlanStepRow(Base):
+    """VideoAgent 计划步骤与可恢复公开执行结果。"""
+
+    __tablename__ = "pixelflow_video_agent_plan_steps"
+
+    plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    step_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    public_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_refs_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    started_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("plan_id", "sequence", name="uq_pf_video_agent_plan_steps_sequence"),
+        CheckConstraint("sequence >= 1", name="ck_pf_video_agent_plan_steps_sequence"),
+        Index(
+            "ix_pf_video_agent_plan_steps_owner_plan",
+            "user_id",
+            "plan_id",
+            "sequence",
+        ),
+    )
+
+
 AGENT_RUNTIME_TABLES = (
     PixelFlowAgentWorkflowRow.__table__,
     PixelFlowAgentTurnRow.__table__,
@@ -485,4 +561,7 @@ AGENT_RUNTIME_SUPPORT_TABLES = (
     PixelFlowAgentProjectionMessageRow.__table__,
     PixelFlowAgentInterruptRow.__table__,
     PixelFlowAgentConversationStateRow.__table__,
+    PixelFlowVideoAgentWorkspaceRow.__table__,
+    PixelFlowVideoAgentPlanRow.__table__,
+    PixelFlowVideoAgentPlanStepRow.__table__,
 )
