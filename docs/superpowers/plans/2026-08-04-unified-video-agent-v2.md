@@ -4,9 +4,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace and retire the video-specific V1 fixed workflow with a DeepSeek-powered, tool-using VideoAgent that persists its workspace and visible execution timeline.
+**Goal:** Deliver a five-day P0 unified VideoAgent that supports script, idea, and reference-video starts plus scoped repair; complete V1 physical retirement and production hardening in P1.
 
-**Architecture:** A thin cross-domain router assigns video turns to `VideoAgent`. `VideoAgent` reads a persistent `VideoWorkspace`, selects registered Skill guidance and controlled tools, stores `AgentPlan` / `AgentPlanStep`, and delegates async work to the existing Agent Runtime operation coordinator. Reusable lower-level video capabilities are called through V2 adapters; the V1 video handler state machine and its UI are removed.
+**Architecture:** A thin cross-domain router assigns video turns to `VideoAgent`. `VideoAgent` reads a persistent `VideoWorkspace`, selects registered Skill guidance and controlled tools, stores `AgentPlan` / `AgentPlanStep`, and delegates async work to the existing Agent Runtime operation coordinator. During P0, V2 adapters may call reusable lower-level V1 provider services, but no V1 stage machine or UI is user-accessible; P1 removes those remaining implementation dependencies.
 
 **Tech Stack:** Python 3.12, FastAPI, Pydantic, SQLAlchemy/Alembic, LangGraph/LangChain, DeepSeek via `ChatOpenAI`, React 19, TypeScript, Vite, Node test runner.
 
@@ -17,9 +17,9 @@
 - The model may choose only server-registered tools; it never receives direct provider, database, FFmpeg, or shell tools.
 - `Plan.md` is an optional script artifact, never a mandatory entry gate.
 - New V2 feature code must not be added to `backend/pixelflow/agent_workflows/video/` or `web/src/pages/WorkspacePage.tsx`.
-- Delete the V1 video workflow, V1 video Supervisor action path, and old Workspace implementation after their V2 replacements pass acceptance tests. `WorkspacePage.tsx` must end as a 100-200 line V2 route/layout shell.
+- P0 replaces the user-visible V1 entry and old Workspace implementation; P1 deletes V1 video workflow code, the V1 video Supervisor action path, and residual imports after the P0 acceptance suite passes. `WorkspacePage.tsx` must end as a 100-200 line V2 route/layout shell by the end of P0.
 - Persisted step timestamps are the source for displayed duration. Do not expose model chain-of-thought.
-- There is one active video mode: `VIDEO_AGENT`. Existing V1 video conversations are archived as historical records and return `video_workflow_retired`; they never resume or migrate in place.
+- P0 exposes one active video mode, `VIDEO_AGENT`. Existing V1 conversations are hidden from normal entry; P1 makes them read-only historical records returning `video_workflow_retired`.
 - Migration `20260804_08_video_agent_runtime.py` is additive only: create V2 tables and indexes; never drop, rename, backfill, or mutate V1 rows. Take a production SQLite snapshot and pause writes while applying schema DDL.
 
 ---
@@ -619,30 +619,30 @@ git commit -m "refactor: retire v1 video workflow"
 
 ## Business Milestone Schedule
 
-**Assumption:** One full-time engineer, existing video-generation/QC/composition services remain reusable, and no provider API change blocks integration. The dates below start on 2026-08-04; QA findings and production-release approval are not compressed into feature development.
+**Assumption:** One full-time engineer, existing video-generation/QC/composition services remain reusable, no provider API change blocks integration, and P0 is evaluated as an internal usable build rather than a production release. Day 1 is the next implementation workday.
 
-| Window | Tasks | Business outcome | Release status |
-| --- | --- | --- | --- |
-| 2026-08-04 to 2026-08-07 | 1-4 | The new workspace has a stable shell, durable workspace/plan/step records, and a public progress timeline with elapsed time. Users cannot yet complete video work in V2. | Internal foundation only. |
-| 2026-08-10 to 2026-08-14 | 5-6 | A single natural-language video entry understands an intent, picks only approved tools, displays a short execution plan, and stops for cost confirmation before billable generation. | Internal agent-loop demo. |
-| 2026-08-17 to 2026-08-21 | 7 | Users can supply a mature script, brainstorm an idea into a versioned script, or submit a reference video and receive storyboard/asset evidence. | Alpha: planning and reference-analysis journeys. |
-| 2026-08-24 to 2026-08-28 | 8 | Users can replace a product/person/background, inspect a specific bad scene, apply a scoped repair, and generate 3-5 variants only for affected scenes. | Alpha: core remake and repair journey. |
-| 2026-08-31 to 2026-09-04 | 9-10 | Users see every agent step and duration, review scene evidence, explicitly approve spend, compose approved variants, and export MP4 or a Jianying package. | Internal beta: complete end-to-end workflow. |
-| 2026-09-07 to 2026-09-11 | 11 + final verification | V2 becomes the only video entry; V1 is retired to read-only history. Restart, duplicate-submit, quotas, event recovery, and 30-50 golden cases are verified. | Production-release candidate. |
+### P0: Five-Day Unified Agent Build
 
-**Task-to-business mapping:**
+| Day | Tasks advanced | User-visible result and acceptance |
+| --- | --- | --- |
+| Day 1 | 2, 3, 4, 5 | One VideoAgent entry replaces the video Supervisor path. It creates a persistent workspace and visible plan steps; every running/completed step has elapsed duration. The tool registry initially exposes only safe read/analysis actions. |
+| Day 2 | 6, 7 | The same chat accepts a mature script, an idea, or a reference video. It chooses `import_script`, `brainstorm_script`, or `analyze_reference_video`, creates a concise public plan, and persists its script/storyboard/asset result. |
+| Day 3 | 7, 8 | A user can provide product/person/background assets and ask for replacement. The agent identifies affected scenes, shows scope and cost, waits for confirmation, then submits 3 variants per affected scene through the existing generation service. |
+| Day 4 | 8, 9 | A user can say “检查第 3 镜并重做”. The agent returns visual/QC evidence and a repair suggestion, regenerates only that scene after confirmation, lets the user select a variant, and exports an MP4. Jianying export is enabled only if the existing adapter passes its smoke test. |
+| Day 5 | 1, 10, 11 (entry switch only) | `WorkspacePage.tsx` is a V2 shell and the V2 workbench is the only normal video entry. Verify 10 core cases: three starts, asset replacement, cost confirmation, variant generation, scene inspection, local repair, reconnect, duplicate submit, and MP4 export. |
 
-1. V2 workspace shell: eliminate the oversized legacy page and establish the new video work surface.
-2. Contracts: make workspace, plan, step, cost confirmation, and duration reliable across API and UI.
-3. Persistence: make a user leave/reopen the page without losing project context or execution status.
-4. Durable events: let the UI show where the agent is, what finished, what failed, and how long each step took.
-5. Skill/tool registry: prevent the model from inventing actions or directly invoking providers; make its available video abilities auditable.
-6. DeepSeek loop: turn one input into a flexible plan-tool-observe-replan loop rather than a rigid stage machine.
-7. Script/reference tools: support the three primary starting points: mature script, creative idea, and reference video.
-8. Scene tools: deliver product/character/background replacement, per-scene visual inspection, local repair, and multi-variant generation.
-9. Delivery tools: turn approved scene variants into an MP4 or Jianying package.
-10. V2 UI: expose public agent progress, live/finished duration, visual evidence, scoped repair, and confirmation to the user.
-11. V1 retirement: remove the old fixed workflow and make V2 the sole production path while preserving history as read-only.
+**P0 done means:** a user can complete all three starting journeys in one agent conversation, see public step progress and duration, and finish a reference remake or local scene repair without entering a V1 stage workflow. P0 deliberately defers full source deletion, 30-50 golden cases, deep schema normalization, and Jianying compatibility work when it is not already passing.
+
+### P1: Hardening and Physical V1 Retirement (5-7 Working Days After P0)
+
+| Work | Tasks completed | Business outcome |
+| --- | --- | --- |
+| Expand persistence and event coverage | 2-4 | V2 workspace/plan schema is complete, reconnect/restart behavior is deterministic, and production migration rehearsal has passed. |
+| Complete tools and delivery | 7-10 | Jianying export, fuller asset packages, richer evidence display, and all planned variant/review cases are production-ready. |
+| Remove V1 | 1, 11 | Delete V1 workflow/Supervisor/UI implementation, archive historical V1 records as read-only, and eliminate V1 imports. |
+| Production confidence | Final verification | Pass 30-50 golden cases, quota/duplicate/restart tests, migration backup rehearsal, and release review. |
+
+**Task-to-business mapping:** Tasks 1-11 retain their technical definitions above. P0 prioritizes the smallest cross-cutting portion of each task that enables a real unified-agent journey; P1 completes all deferred cleanup and production hardening before the V1 code is physically removed.
 
 ## Final Verification
 
