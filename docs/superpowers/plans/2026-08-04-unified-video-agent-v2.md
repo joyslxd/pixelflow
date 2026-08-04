@@ -1,23 +1,25 @@
+
+
 # Unified Video Agent V2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the video-specific fixed workflow entry with a DeepSeek-powered, tool-using VideoAgent that persists its workspace and visible execution timeline while keeping V1 safely runnable.
+**Goal:** Replace and retire the video-specific V1 fixed workflow with a DeepSeek-powered, tool-using VideoAgent that persists its workspace and visible execution timeline.
 
-**Architecture:** A thin cross-domain router assigns video turns to `VideoAgent`. `VideoAgent` reads a persistent `VideoWorkspace`, selects registered Skill guidance and controlled tools, stores `AgentPlan` / `AgentPlanStep`, and delegates async work to the existing Agent Runtime operation coordinator. V1 handler state machines remain compatibility-only; V2 wraps reusable video capabilities through adapters.
+**Architecture:** A thin cross-domain router assigns video turns to `VideoAgent`. `VideoAgent` reads a persistent `VideoWorkspace`, selects registered Skill guidance and controlled tools, stores `AgentPlan` / `AgentPlanStep`, and delegates async work to the existing Agent Runtime operation coordinator. Reusable lower-level video capabilities are called through V2 adapters; the V1 video handler state machine and its UI are removed.
 
 **Tech Stack:** Python 3.12, FastAPI, Pydantic, SQLAlchemy/Alembic, LangGraph/LangChain, DeepSeek via `ChatOpenAI`, React 19, TypeScript, Vite, Node test runner.
 
 ## Global Constraints
 
-- V1 default model remains `deepseek-v4-pro`; Kimi K3 is not part of this implementation.
+- The V2 default model is `deepseek-v4-pro`; Kimi K3 is not part of this implementation.
 - Preserve existing user isolation, event outbox ordering, operation idempotency, lease recovery, and quota authorization.
 - The model may choose only server-registered tools; it never receives direct provider, database, FFmpeg, or shell tools.
 - `Plan.md` is an optional script artifact, never a mandatory entry gate.
 - New V2 feature code must not be added to `backend/pixelflow/agent_workflows/video/` or `web/src/pages/WorkspacePage.tsx`.
-- `WorkspacePage.tsx` must end as a 100-200 line route/layout shell; legacy behavior moves under `web/src/features/legacy-workspace/`.
+- Delete the V1 video workflow, V1 video Supervisor action path, and old Workspace implementation after their V2 replacements pass acceptance tests. `WorkspacePage.tsx` must end as a 100-200 line V2 route/layout shell.
 - Persisted step timestamps are the source for displayed duration. Do not expose model chain-of-thought.
-- Use `VIDEO_AGENT_V2` only for new, allowlisted or percentage-routed conversations. Never migrate a running V1 workflow in place.
+- There is one active video mode: `VIDEO_AGENT`. Existing V1 video conversations are archived as historical records and return `video_workflow_retired`; they never resume or migrate in place.
 
 ---
 
@@ -44,24 +46,23 @@ backend/packages/harness/deerflow/persistence/migrations/versions/
   20260804_08_video_agent_runtime.py
 
 web/src/
-  features/legacy-workspace/LegacyWorkspace.tsx
   features/video-agent/{VideoAgentWorkspace.tsx,AgentPlanTimeline.tsx,AgentConfirmationCard.tsx,SceneEvidencePanel.tsx}
   features/video-agent/hooks/useVideoAgent.ts
   features/video-agent/state/{contracts.ts,reducer.ts}
   pages/WorkspacePage.tsx
-  lib/supervisor/{contracts.ts,reducer.ts,workspaceProjection.ts}
 ```
 
-## Task 1: Extract Legacy Workspace Without Behavioral Change
+## Task 1: Replace the Old Workspace Page With a V2 Feature Shell
 
 **Files:**
-- Create: `web/src/features/legacy-workspace/LegacyWorkspace.tsx`
+- Create: `web/src/features/video-agent/VideoAgentWorkspace.tsx`
 - Modify: `web/src/pages/WorkspacePage.tsx`
-- Test: `web/tests/legacyWorkspaceShell.test.mjs`
+- Delete: `web/src/features/legacy-workspace/LegacyWorkspace.tsx` if it exists from an earlier local refactor
+- Test: `web/tests/videoAgentWorkspaceShell.test.mjs`
 
 **Interfaces:**
-- Consumes: the existing default `WorkspacePage` props and all legacy imports.
-- Produces: `export function LegacyWorkspace(): JSX.Element` and a default page shell that selects a feature component.
+- Consumes: the existing workspace route props and V2 workspace snapshot API.
+- Produces: `export function VideoAgentWorkspace(): JSX.Element` and a default page shell that renders only the V2 feature.
 
 - [ ] **Step 1: Write the failing shell-size and export test**
 
@@ -70,40 +71,40 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const page = readFileSync(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
-assert.match(page, /LegacyWorkspace/);
+assert.match(page, /VideoAgentWorkspace/);
 assert.ok(page.split("\n").length <= 200);
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd web && node --test tests/legacyWorkspaceShell.test.mjs`
+Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs`
 
-Expected: FAIL because the legacy feature module does not exist and `WorkspacePage.tsx` exceeds 200 lines.
+Expected: FAIL because the V2 feature shell does not exist and `WorkspacePage.tsx` exceeds 200 lines.
 
-- [ ] **Step 3: Move the existing component body verbatim**
+- [ ] **Step 3: Replace the legacy page body with the V2 feature shell**
 
-Move all current imports, helper declarations, types, component state, effects, handlers, and JSX from `WorkspacePage.tsx` into `LegacyWorkspace.tsx`. Keep the existing component's rendered behavior, export it by name, and do not introduce V2 state in the legacy module.
+Delete the old page-local state, effects, handlers, and V1 workflow UI. Keep only route/layout concerns in `WorkspacePage.tsx`; place V2 workspace state and UI in `VideoAgentWorkspace.tsx`. Do not preserve an old-workspace fallback.
 
 ```tsx
 // web/src/pages/WorkspacePage.tsx
-import { LegacyWorkspace } from "@/features/legacy-workspace/LegacyWorkspace";
+import { VideoAgentWorkspace } from "@/features/video-agent/VideoAgentWorkspace";
 
 export default function WorkspacePage() {
-  return <LegacyWorkspace />;
+  return <VideoAgentWorkspace />;
 }
 ```
 
-- [ ] **Step 4: Run legacy frontend tests and type checking**
+- [ ] **Step 4: Run V2 shell tests and type checking**
 
-Run: `cd web && npm test -- --filter supervisor && npm run lint`
+Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs && npm run lint`
 
-Expected: PASS; existing Supervisor tests and TypeScript compile without changed snapshots.
+Expected: PASS; the V2 workspace shell compiles and no legacy workspace import remains.
 
 - [ ] **Step 5: Commit the extraction**
 
 ```bash
-git add web/src/features/legacy-workspace/LegacyWorkspace.tsx web/src/pages/WorkspacePage.tsx web/tests/legacyWorkspaceShell.test.mjs
-git commit -m "refactor: extract legacy workspace feature"
+git add -A web/src/pages/WorkspacePage.tsx web/src/features/video-agent web/tests/videoAgentWorkspaceShell.test.mjs
+git commit -m "refactor: replace legacy workspace shell"
 ```
 
 ## Task 2: Add V2 Wire Contracts and Event Types
@@ -112,11 +113,11 @@ git commit -m "refactor: extract legacy workspace feature"
 - Create: `backend/pixelflow/video_agent/contracts/{plan.py,workspace.py,tools.py,__init__.py}`
 - Modify: `backend/pixelflow/agent_runtime/contracts/{enums.py,events.py,api.py,__init__.py}`
 - Create: `backend/tests/test_video_agent_contracts.py`
-- Modify: `web/src/lib/supervisor/{contracts.ts,reducer.ts,workspaceProjection.ts}`
+- Create: `web/src/features/video-agent/state/{contracts.ts,reducer.ts,workspaceProjection.ts}`
 - Create: `web/tests/videoAgentContracts.test.mjs`
 
 **Interfaces:**
-- Produces: `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, `VideoToolCall`, `VideoToolResult`, `AgentPlanStatus`, `PlanStepStatus`, and `OrchestrationMode.VIDEO_AGENT_V2`.
+- Produces: `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, `VideoToolCall`, `VideoToolResult`, `AgentPlanStatus`, `PlanStepStatus`, and the sole `OrchestrationMode.VIDEO_AGENT` value.
 - Produces event values `agent.plan.created`, `agent.step.started`, `agent.step.progressed`, `agent.step.completed`, `agent.step.failed`, and `agent.confirmation.requested`.
 
 - [ ] **Step 1: Write failing Python contract tests**
@@ -256,7 +257,7 @@ Construct agent events only after the corresponding workspace/plan/step write su
 
 - [ ] **Step 4: Implement frontend event projection**
 
-Parse the six V2 event values without changing V1 event behavior. Derive elapsed time from `startedAt` in the renderer for running steps; store completed duration from the backend event to keep reconnect behavior deterministic.
+Parse the six V2 event values in the V2 feature state module. Derive elapsed time from `startedAt` in the renderer for running steps; store completed duration from the backend event to keep reconnect behavior deterministic.
 
 - [ ] **Step 5: Run event suites**
 
@@ -269,7 +270,7 @@ Expected: PASS and monotonic event order preserved.
 - [ ] **Step 6: Commit event timeline foundation**
 
 ```bash
-git add backend/pixelflow/agent_runtime/persistence/repositories.py backend/pixelflow/video_agent/executor/events.py backend/tests/test_video_agent_plan_events.py web/src/lib/supervisor web/src/features/video-agent/state web/tests/videoAgentTimelineReducer.test.mjs
+git add backend/pixelflow/agent_runtime/persistence/repositories.py backend/pixelflow/video_agent/executor/events.py backend/tests/test_video_agent_plan_events.py web/src/features/video-agent/state web/tests/videoAgentTimelineReducer.test.mjs
 git commit -m "feat: publish video agent step timeline"
 ```
 
@@ -399,7 +400,7 @@ async def test_reference_analysis_persists_scenes_and_assets(tool_context, fake_
 
 - [ ] **Step 3: Implement adapters without importing V1 handlers**
 
-`ImportScriptTool` normalizes a user script into the workspace script artifact and returns missing requirements as a public summary. `BrainstormScriptTool` creates a versioned draft only. `AnalyzeReferenceVideoTool` starts/reuses a durable operation through the existing coordinator, then persists normalized storyboard and asset evidence when complete. Do not call `live_handler.py` or require a V1 Plan-review interrupt.
+`ImportScriptTool` normalizes a user script into the workspace script artifact and returns missing requirements as a public summary. `BrainstormScriptTool` creates a versioned draft only. `AnalyzeReferenceVideoTool` starts/reuses a durable operation through the existing coordinator, then persists normalized storyboard and asset evidence when complete. It must call only V2 adapters, never the retired V1 handler or Plan-review interrupt.
 
 - [ ] **Step 4: Run script and reference tests**
 
@@ -450,9 +451,9 @@ Normalize VLM/QC output to `{scene_id, issues, evidence_refs, repair_suggestion,
 
 - [ ] **Step 4: Run focused regression suites**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_scene_tools.py tests/test_video_quality_review.py tests/test_agent_video_workflow_generation.py tests/test_agent_video_workflow_postproduction.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_scene_tools.py tests/test_video_quality_review.py -v`
 
-Expected: PASS; V2 scoping works and V1 generation/QC behavior remains unchanged.
+Expected: PASS; V2 scoping works and no retired V1 video module is imported.
 
 - [ ] **Step 5: Commit scene tools**
 
@@ -485,9 +486,9 @@ Require all selected scenes to have an approved variant and no unresolved QC/dir
 
 - [ ] **Step 3: Run delivery tests**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_delivery_tools.py tests/test_agent_video_workflow_delivery.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_delivery_tools.py -v`
 
-Expected: PASS; V2 does not export an inconsistent project and V1 delivery tests remain green.
+Expected: PASS; V2 does not export an inconsistent project and no V1 delivery path remains.
 
 - [ ] **Step 4: Commit delivery tools**
 
@@ -524,14 +525,12 @@ Render pending, running, waiting-confirmation, completed, failed, and skipped st
 
 `SceneEvidencePanel` displays selected scene media, QC issues, repair suggestion, and related artifact links. `AgentConfirmationCard` displays the public cost summary, affected scenes, and explicit confirm/cancel controls. Its submit action sends the persisted plan-step confirmation ID, not a free-form workflow action.
 
-- [ ] **Step 4: Select V2 from the thin page shell**
+- [ ] **Step 4: Render V2 from the thin page shell**
 
-Add only orchestration-mode selection to `WorkspacePage.tsx`:
+Keep only the V2 feature import and layout in `WorkspacePage.tsx`; no mode selection or legacy fallback remains:
 
 ```tsx
-return resolveWorkspaceAgentRuntimeMode(currentConversation) === "video_agent_v2"
-  ? <VideoAgentWorkspace />
-  : <LegacyWorkspace />;
+return <VideoAgentWorkspace />;
 ```
 
 - [ ] **Step 5: Run frontend tests and build**
@@ -547,32 +546,30 @@ git add web/src/features/video-agent web/src/pages/WorkspacePage.tsx web/tests/v
 git commit -m "feat: add video agent workspace"
 ```
 
-## Task 11: Route New Video Conversations to V2 and Verify End-to-End Recovery
+## Task 11: Make V2 the Only Video Entry and Retire V1
 
 **Files:**
 - Modify: `backend/pixelflow/agent_runtime/{config.py,service.py,executor.py}`
-- Modify: `backend/pixelflow/agent_runtime/contracts/enums.py`
-- Create: `backend/tests/test_video_agent_routing.py`
-- Create: `backend/tests/test_video_agent_e2e.py`
-- Modify: `web/tests/workspaceOrchestrationMode.test.mjs`
+- Create: `backend/pixelflow/agent_runtime/video_router.py`
+- Delete: `backend/pixelflow/agent_workflows/video/`
+- Delete: the V1 video decision/action modules under `backend/pixelflow/agent_runtime/supervisor/`
+- Delete: V1 video workflow tests under `backend/tests/test_agent_video_workflow_*.py` and superseded Supervisor-routing tests
+- Create: `backend/tests/{test_video_agent_entry.py,test_video_agent_e2e.py,test_video_agent_retirement.py}`
 
 **Interfaces:**
-- Produces new-conversation routing to `OrchestrationMode.VIDEO_AGENT_V2` only when V2 config and rollout policy allow it.
-- V1 `SUPERVISOR_V1` remains the fallback and existing conversations retain their stored mode.
+- Produces one active entry, `VideoAgentEntrypoint.submit_turn`, for every video conversation.
+- Produces `video_workflow_retired` for a historical V1 workflow ID; the caller can inspect its records but cannot resume or mutate it.
 
-- [ ] **Step 1: Write failing routing tests**
-
-```python
-def test_new_allowlisted_video_conversation_uses_v2(config, router):
-    assert router.select_mode(user_id="allowlisted", intent="video") is OrchestrationMode.VIDEO_AGENT_V2
-
-def test_existing_v1_conversation_never_migrates(router):
-    assert router.resume_mode("conversation-v1") is OrchestrationMode.SUPERVISOR_V1
-```
-
-- [ ] **Step 2: Write failing end-to-end recovery test**
+- [ ] **Step 1: Write failing entry, retirement, and recovery tests**
 
 ```python
+def test_every_new_video_turn_uses_video_agent_entrypoint(app):
+    assert app.video_router.resolve("video") is app.video_agent_entrypoint
+
+async def test_historical_v1_workflow_is_read_only(runtime):
+    result = await runtime.resume_workflow("old-v1-workflow")
+    assert result.code == "video_workflow_retired"
+
 async def test_reference_remix_resumes_after_generation_operation_restart(runtime):
     plan = await runtime.submit("u1", "参考这个视频，把商品换成我的", [reference, product])
     await runtime.confirm_step("u1", plan.plan_id, plan.pending_confirmation_step_id)
@@ -580,41 +577,49 @@ async def test_reference_remix_resumes_after_generation_operation_restart(runtim
     assert restored.steps[-1].status in {PlanStepStatus.RUNNING, PlanStepStatus.COMPLETED}
 ```
 
-- [ ] **Step 3: Implement immutable conversation-mode routing**
+- [ ] **Step 2: Replace V1 routing with the single video entrypoint**
 
-Add `video_agent_v2` as a stored orchestration mode. Route only new conversations based on explicit config: enabled mode, video intent, allowlist/percentage rollout. Use the existing conversation orchestration snapshot to prevent subsequent mode mutation. Initialize V2 execution through `VideoAgentExecutor`; do not enter `SupervisorActionRouter` for V2 video turns.
+Remove `SUPERVISOR_V1`, `VIDEO_AGENT_V2`, rollout flags, and mode-selection branches. `VideoAgentEntrypoint` resolves every video turn to `VideoAgentExecutor`; non-video routing remains outside this change. Preserve the existing generic runtime operation coordinator, event outbox, quota checks, and ownership checks.
 
-- [ ] **Step 4: Implement V2 snapshot/SSE restoration**
+- [ ] **Step 3: Implement historical V1 read-only retirement**
+
+Add a retirement lookup that recognizes existing V1 workflow rows and returns a stable public `video_workflow_retired` result containing only workflow ID, creation time, and historical artifact links. Do not migrate the V1 state payload into V2, restart any V1 job, or issue new provider calls. Existing database rows remain for audit and can be removed later by an explicit data-retention job.
+
+- [ ] **Step 4: Delete V1 implementation and tests**
+
+Remove `backend/pixelflow/agent_workflows/video/`, the V1 video Supervisor action/decision path, its HTTP handlers, and all tests that assert V1 video workflow stages. Remove the legacy Workspace feature and client Supervisor mode reducer. Update imports so reusable planning, scene generation, QC, composition, and Jianying services are reachable only through V2 adapters.
+
+- [ ] **Step 5: Implement V2 snapshot/SSE restoration**
 
 Expose current workspace, active plan, plan steps, open confirmation, and event cursor in the V2 conversation snapshot. Rehydrate frontend state from snapshot before applying live SSE events. Resume pending operations through the existing coordinator and write a new step-progress event instead of recreating the plan.
 
-- [ ] **Step 5: Run focused and full verification**
+- [ ] **Step 6: Run focused retirement and full verification**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_routing.py tests/test_video_agent_e2e.py tests/test_agent_runtime_operation_recovery.py tests/test_agent_runtime_event_outbox.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_entry.py tests/test_video_agent_retirement.py tests/test_video_agent_e2e.py tests/test_agent_runtime_operation_recovery.py tests/test_agent_runtime_event_outbox.py -v`
 
-Run: `cd web && node --test tests/workspaceOrchestrationMode.test.mjs tests/videoAgentWorkspace.test.mjs && npm run lint`
+Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs tests/videoAgentWorkspace.test.mjs && npm run lint`
 
-Expected: PASS; V2 can recover without duplicate billable operations and V1 mode remains unchanged.
+Expected: PASS; every video turn takes the V2 entry, retired V1 work cannot execute, and V2 can recover without duplicate billable operations.
 
-- [ ] **Step 6: Run the golden-case evaluation suite before rollout**
+- [ ] **Step 7: Run the golden-case evaluation suite**
 
-Create 30-50 fixture-driven cases covering mature scripts, creative ideas, reference remix, scene repair, ambiguous targets, quota confirmation, duplicate submit, and restart recovery. Record expected first tool, allowed confirmation boundary, scoped scene IDs, and terminal outcome. Fail the suite when the DeepSeek planner selects an unregistered tool or starts a billable step before confirmation.
+Create 30-50 fixture-driven cases covering mature scripts, creative ideas, reference remix, scene repair, ambiguous targets, quota confirmation, duplicate submit, and restart recovery. Record expected first tool, confirmation boundary, scoped scene IDs, and terminal outcome. Fail the suite when the DeepSeek planner selects an unregistered tool or starts a billable step before confirmation.
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_evaluation.py -v`
 
-Expected: PASS with the recorded baseline before setting any non-zero V2 rollout percentage.
+Expected: PASS with the recorded baseline before deleting V1 production paths.
 
-- [ ] **Step 7: Commit routing and release gate**
+- [ ] **Step 8: Commit V1 retirement and V2 entry**
 
 ```bash
-git add backend/pixelflow/agent_runtime backend/tests/test_video_agent_routing.py backend/tests/test_video_agent_e2e.py backend/tests/test_video_agent_evaluation.py web/tests/workspaceOrchestrationMode.test.mjs
-git commit -m "feat: route video conversations to v2 agent"
+git add -A backend/pixelflow/agent_runtime backend/pixelflow/agent_workflows backend/tests web/src/features web/src/lib/supervisor web/tests
+git commit -m "refactor: retire v1 video workflow"
 ```
 
 ## Final Verification
 
 - [ ] Run `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_*.py -v`.
-- [ ] Run `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_runtime_* tests/test_agent_video_* -v`.
+- [ ] Run `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_runtime_* -v`.
 - [ ] Run `cd web && npm test && npm run lint && npm run build-dev`.
-- [ ] Confirm `wc -l web/src/pages/WorkspacePage.tsx` is between 100 and 200 after V2 mode selection is added.
-- [ ] Confirm `git diff --check` is clean and no source file outside the planned V1 compatibility boundaries gained V2 behavior.
+- [ ] Confirm `wc -l web/src/pages/WorkspacePage.tsx` is between 100 and 200 with only the V2 feature shell.
+- [ ] Confirm `git diff --check` is clean and `rg -n 'agent_workflows.video|SUPERVISOR_V1|VIDEO_AGENT_V2|LegacyWorkspace' backend web` has no production-code matches.
