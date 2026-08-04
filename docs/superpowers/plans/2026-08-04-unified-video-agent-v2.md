@@ -53,6 +53,21 @@ web/src/
   pages/WorkspacePage.tsx
 ```
 
+## P0 Progress Tracking
+
+### Completed
+
+- [x] **V2 contracts and public event names**: added `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, tool contracts, persisted duration calculation, and the six `agent.*` public event types. Verified by `tests/test_agent_runtime_contracts.py` and `tests/test_video_agent_contracts.py`. Commit: `c9e18f8`.
+- [x] **Workspace, plan, and step persistence**: added memory/SQLite repositories, owner isolation, idempotent completed-step writes, SQLite UTC restoration, and the additive `20260804_08` migration. Verified by `tests/test_video_agent_repository.py` and `tests/test_video_agent_migration.py`. Commit: `c9e18f8`.
+- [x] **Public event payload builders**: added safe plan-created and step-completed event projections without tool arguments or model reasoning. Verified by `tests/test_video_agent_plan_events.py`. Commit: `0f9ee32`.
+- [x] **Frontend timeline state projection**: added the isolated V2 timeline contracts and reducer for public step status, result summaries, asset references, and persisted duration. Verified by `web/tests/videoAgentTimelineReducer.test.mjs`. Commit: `b6310c3`.
+
+### In Progress
+
+- [ ] **Transactional outbox publication**: wire persisted V2 step transitions to the existing event outbox in the same transaction.
+- [ ] **Unified VideoAgent entry**: route video turns to the V2 executor and create the first persisted workspace/plan from one user input.
+- [ ] **V2 workbench UI**: connect the timeline reducer to `VideoAgentWorkspace` and replace the old page shell during P0 Day 5.
+
 ## Task 1: Replace the Old Workspace Page With a V2 Feature Shell
 
 **Files:**
@@ -121,7 +136,7 @@ git commit -m "refactor: replace legacy workspace shell"
 - Produces: `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, `VideoToolCall`, `VideoToolResult`, `AgentPlanStatus`, `PlanStepStatus`, and the sole `OrchestrationMode.VIDEO_AGENT` value.
 - Produces event values `agent.plan.created`, `agent.step.started`, `agent.step.progressed`, `agent.step.completed`, `agent.step.failed`, and `agent.confirmation.requested`.
 
-- [ ] **Step 1: Write failing Python contract tests**
+- [x] **Step 1: Write failing Python contract tests**
 
 ```python
 def test_completed_step_requires_timestamps_and_duration_source():
@@ -181,7 +196,7 @@ git commit -m "feat: add video agent contracts"
 - Produces repository methods `create_workspace`, `get_workspace`, `save_plan`, `start_step`, `complete_step`, `fail_step`, and `list_plan_steps`.
 - All methods take `user_id` and reject cross-user access.
 
-- [ ] **Step 1: Write failing repository tests for ownership, idempotency, and duration**
+- [x] **Step 1: Write failing repository tests for ownership, idempotency, and duration**
 
 ```python
 async def test_complete_step_persists_timestamps_and_rejects_other_user(repository):
@@ -193,13 +208,13 @@ async def test_complete_step_persists_timestamps_and_rejects_other_user(reposito
     assert await repository.get_workspace("u2", workspace.workspace_id) is None
 ```
 
-- [ ] **Step 2: Run the repository test to verify it fails**
+- [x] **Step 2: Run the repository test to verify it fails**
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_repository.py -v`
 
 Expected: FAIL because V2 rows and repository methods do not exist.
 
-- [ ] **Step 3: Add rows and migration**
+- [x] **Step 3: Add rows and migration**
 
 Create `pixelflow_video_agent_workspaces`, `pixelflow_video_agent_plans`, and `pixelflow_video_agent_plan_steps`. Store typed business payloads as JSON snapshots, use `(user_id, workspace_id)` and `(plan_id, sequence)` indexes, and use a unique `(plan_id, step_id)` identity. The migration must include upgrade and downgrade operations and follow the naming style in `20260802_07_operation_quota_revision.py`.
 
@@ -213,7 +228,7 @@ Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_agent_runtime_migratio
 
 Expected: PASS for SQLite and existing migration compatibility fixtures.
 
-- [ ] **Step 6: Commit persistence**
+- [x] **Step 6: Commit persistence**
 
 ```bash
 git add backend/packages/harness/deerflow/persistence/migrations/versions/20260804_08_video_agent_runtime.py backend/pixelflow/agent_runtime/persistence backend/pixelflow/video_agent/workspace backend/tests/test_video_agent_repository.py
@@ -244,7 +259,7 @@ async def test_step_completion_writes_ordered_outbox_event(repository):
     assert events[-1].payload["duration_ms"] == 3000
 ```
 
-- [ ] **Step 2: Write failing reducer tests**
+- [x] **Step 2: Write failing reducer tests**
 
 ```js
 const next = reduceVideoAgentEvent(initial, completedEvent);
@@ -256,7 +271,7 @@ assert.equal(next.plans["plan-1"].steps["step-1"].durationMs, 3000);
 
 Construct agent events only after the corresponding workspace/plan/step write succeeds in the same repository transaction. Event payloads contain IDs, title, status, result summary, artifact references, `started_at`, `completed_at`, and `duration_ms`; they never contain prompt internals or model reasoning.
 
-- [ ] **Step 4: Implement frontend event projection**
+- [x] **Step 4: Implement frontend event projection**
 
 Parse the six V2 event values in the V2 feature state module. Derive elapsed time from `startedAt` in the renderer for running steps; store completed duration from the backend event to keep reconnect behavior deterministic.
 
@@ -268,7 +283,7 @@ Run: `cd web && node --test tests/videoAgentTimelineReducer.test.mjs tests/super
 
 Expected: PASS and monotonic event order preserved.
 
-- [ ] **Step 6: Commit event timeline foundation**
+- [x] **Step 6: Commit event timeline foundation**
 
 ```bash
 git add backend/pixelflow/agent_runtime/persistence/repositories.py backend/pixelflow/video_agent/executor/events.py backend/tests/test_video_agent_plan_events.py web/src/features/video-agent/state web/tests/videoAgentTimelineReducer.test.mjs
