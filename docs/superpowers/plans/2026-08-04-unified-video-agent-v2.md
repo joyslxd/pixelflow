@@ -617,6 +617,33 @@ git add -A backend/pixelflow/agent_runtime backend/pixelflow/agent_workflows bac
 git commit -m "refactor: retire v1 video workflow"
 ```
 
+## Business Milestone Schedule
+
+**Assumption:** One full-time engineer, existing video-generation/QC/composition services remain reusable, and no provider API change blocks integration. The dates below start on 2026-08-04; QA findings and production-release approval are not compressed into feature development.
+
+| Window | Tasks | Business outcome | Release status |
+| --- | --- | --- | --- |
+| 2026-08-04 to 2026-08-07 | 1-4 | The new workspace has a stable shell, durable workspace/plan/step records, and a public progress timeline with elapsed time. Users cannot yet complete video work in V2. | Internal foundation only. |
+| 2026-08-10 to 2026-08-14 | 5-6 | A single natural-language video entry understands an intent, picks only approved tools, displays a short execution plan, and stops for cost confirmation before billable generation. | Internal agent-loop demo. |
+| 2026-08-17 to 2026-08-21 | 7 | Users can supply a mature script, brainstorm an idea into a versioned script, or submit a reference video and receive storyboard/asset evidence. | Alpha: planning and reference-analysis journeys. |
+| 2026-08-24 to 2026-08-28 | 8 | Users can replace a product/person/background, inspect a specific bad scene, apply a scoped repair, and generate 3-5 variants only for affected scenes. | Alpha: core remake and repair journey. |
+| 2026-08-31 to 2026-09-04 | 9-10 | Users see every agent step and duration, review scene evidence, explicitly approve spend, compose approved variants, and export MP4 or a Jianying package. | Internal beta: complete end-to-end workflow. |
+| 2026-09-07 to 2026-09-11 | 11 + final verification | V2 becomes the only video entry; V1 is retired to read-only history. Restart, duplicate-submit, quotas, event recovery, and 30-50 golden cases are verified. | Production-release candidate. |
+
+**Task-to-business mapping:**
+
+1. V2 workspace shell: eliminate the oversized legacy page and establish the new video work surface.
+2. Contracts: make workspace, plan, step, cost confirmation, and duration reliable across API and UI.
+3. Persistence: make a user leave/reopen the page without losing project context or execution status.
+4. Durable events: let the UI show where the agent is, what finished, what failed, and how long each step took.
+5. Skill/tool registry: prevent the model from inventing actions or directly invoking providers; make its available video abilities auditable.
+6. DeepSeek loop: turn one input into a flexible plan-tool-observe-replan loop rather than a rigid stage machine.
+7. Script/reference tools: support the three primary starting points: mature script, creative idea, and reference video.
+8. Scene tools: deliver product/character/background replacement, per-scene visual inspection, local repair, and multi-variant generation.
+9. Delivery tools: turn approved scene variants into an MP4 or Jianying package.
+10. V2 UI: expose public agent progress, live/finished duration, visual evidence, scoped repair, and confirmation to the user.
+11. V1 retirement: remove the old fixed workflow and make V2 the sole production path while preserving history as read-only.
+
 ## Final Verification
 
 - [ ] Run `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_*.py -v`.
