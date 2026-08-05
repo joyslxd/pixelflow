@@ -19,6 +19,8 @@
 - New V2 feature code must not be added to `backend/pixelflow/agent_workflows/video/` or `web/src/pages/WorkspacePage.tsx`.
 - P0 replaces the user-visible V1 entry and old Workspace implementation; P1 deletes V1 video workflow code, the V1 video Supervisor action path, and residual imports after the P0 acceptance suite passes. `WorkspacePage.tsx` must end as a 100-200 line V2 route/layout shell by the end of P0.
 - Persisted step timestamps are the source for displayed duration. Do not expose model chain-of-thought.
+- Preserve the existing **video scene package** as the primary workspace view for scene videos, assets, variants, and selection. V2 may migrate its implementation, but must not remove or degrade its existing inspection workflow.
+- A user may modify one scene directly from the video scene package. The resulting plan must be scoped to that scene only; once its regenerated video is ready, the same scene card must show a visible `重新生成完成` mark with the new version and completion time, while retaining prior variants for comparison and selection.
 - P0 exposes one active video mode, `VIDEO_AGENT`. Existing V1 conversations are hidden from normal entry; P1 makes them read-only historical records returning `video_workflow_retired`.
 - Migration `20260804_08_video_agent_runtime.py` is additive only: create V2 tables and indexes; never drop, rename, backfill, or mutate V1 rows. Take a production SQLite snapshot and pause writes while applying schema DDL.
 
@@ -67,6 +69,7 @@ web/src/
 ### In Progress
 
 - [ ] **V2 workbench UI**: connect the timeline reducer to `VideoAgentWorkspace` and replace the old page shell during P0 Day 5.
+- [ ] **Scene package preservation and local regeneration**: migrate the existing video scene package into the V2 workbench without losing its scene/variant inspection flow; add a per-scene edit entry that creates a scoped regeneration plan and marks that scene `重新生成完成` after its replacement video is ready.
 
 ## Task 1: Replace the Old Workspace Page With a V2 Feature Shell
 
@@ -463,7 +466,7 @@ Expected: FAIL because V2 scene tools and scene-level evidence contracts do not 
 
 - [ ] **Step 3: Implement scene evidence and patch flow**
 
-Normalize VLM/QC output to `{scene_id, issues, evidence_refs, repair_suggestion, affected_assets}`. `PatchSceneTool` changes only declared mutable scene fields and writes a new workspace revision. `GenerateScenesTool` validates IDs against the workspace, creates one operation per scene/variant after confirmation, and records job IDs in the corresponding plan steps. `ReviewGeneratedScenesTool` selects or rejects variants without silently changing unrelated scenes.
+Normalize VLM/QC output to `{scene_id, issues, evidence_refs, repair_suggestion, affected_assets}`. `PatchSceneTool` changes only declared mutable scene fields and writes a new workspace revision. `GenerateScenesTool` validates IDs against the workspace, creates one operation per scene/variant after confirmation, and records job IDs in the corresponding plan steps. `ReviewGeneratedScenesTool` selects or rejects variants without silently changing unrelated scenes. A scene-package initiated edit preserves all unaffected scene cards and prior variants, creates a plan scoped to the selected `scene_id`, and, once the replacement video is ready, records the new variant plus a public `重新生成完成` marker and completion timestamp.
 
 - [ ] **Step 4: Run focused regression suites**
 
@@ -539,7 +542,7 @@ Render pending, running, waiting-confirmation, completed, failed, and skipped st
 
 - [ ] **Step 3: Implement project evidence and confirmation UI**
 
-`SceneEvidencePanel` displays selected scene media, QC issues, repair suggestion, and related artifact links. `AgentConfirmationCard` displays the public cost summary, affected scenes, and explicit confirm/cancel controls. Its submit action sends the persisted plan-step confirmation ID, not a free-form workflow action.
+`SceneEvidencePanel` displays selected scene media, QC issues, repair suggestion, and related artifact links. `AgentConfirmationCard` displays the public cost summary, affected scenes, and explicit confirm/cancel controls. Its submit action sends the persisted plan-step confirmation ID, not a free-form workflow action. `VideoAgentWorkspace` keeps the existing video scene package as the primary scene surface: every scene card exposes a single-scene edit action, retains historical/generated variants, and displays `重新生成完成` with the replacement version and timestamp when the scoped regeneration completes.
 
 - [ ] **Step 4: Render V2 from the thin page shell**
 
@@ -643,7 +646,7 @@ git commit -m "refactor: retire v1 video workflow"
 | Day 1 | 2, 3, 4, 5 | One VideoAgent entry replaces the video Supervisor path. It creates a persistent workspace and visible plan steps; every running/completed step has elapsed duration. The tool registry initially exposes only safe read/analysis actions. |
 | Day 2 | 6, 7 | The same chat accepts a mature script, an idea, or a reference video. It chooses `import_script`, `brainstorm_script`, or `analyze_reference_video`, creates a concise public plan, and persists its script/storyboard/asset result. |
 | Day 3 | 7, 8 | A user can provide product/person/background assets and ask for replacement. The agent identifies affected scenes, shows scope and cost, waits for confirmation, then submits 3 variants per affected scene through the existing generation service. |
-| Day 4 | 8, 9 | A user can say “检查第 3 镜并重做”. The agent returns visual/QC evidence and a repair suggestion, regenerates only that scene after confirmation, lets the user select a variant, and exports an MP4. Jianying export is enabled only if the existing adapter passes its smoke test. |
+| Day 4 | 8, 9 | A user can say “检查第 3 镜并重做” or initiate an edit from that scene's video scene package card. The agent returns visual/QC evidence and a repair suggestion, regenerates only that scene after confirmation, retains its prior variants, marks the card `重新生成完成` when ready, lets the user select a variant, and exports an MP4. Jianying export is enabled only if the existing adapter passes its smoke test. |
 | Day 5 | 1, 10, 11 (entry switch only) | `WorkspacePage.tsx` is a V2 shell and the V2 workbench is the only normal video entry. Verify 10 core cases: three starts, asset replacement, cost confirmation, variant generation, scene inspection, local repair, reconnect, duplicate submit, and MP4 export. |
 
 **P0 done means:** a user can complete all three starting journeys in one agent conversation, see public step progress and duration, and finish a reference remake or local scene repair without entering a V1 stage workflow. P0 deliberately defers full source deletion, 30-50 golden cases, deep schema normalization, and Jianying compatibility work when it is not already passing.
