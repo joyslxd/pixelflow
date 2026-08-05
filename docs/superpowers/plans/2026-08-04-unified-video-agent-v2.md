@@ -606,6 +606,7 @@ web/src/
 ### In Progress
 
 - [ ] **V2 workbench UI**: connect the timeline reducer to `VideoAgentWorkspace` and replace the old page shell during P0 Day 5.
+- [ ] **Skill catalog and controlled tools**: the strict `VideoToolRegistry` and safe `inspect_video_workspace` tool are implemented; DeerFlow `SKILL.md` discovery and scenario matching remain pending.
 - [ ] **Scene package preservation and local regeneration**: migrate the existing video scene package into the V2 workbench without losing its scene/variant inspection flow; add a per-scene edit entry that creates a scoped regeneration plan and marks that scene `重新生成完成` after its replacement video is ready.
 
 ## Task 1: Replace the Old Workspace Page With a V2 Feature Shell
