@@ -185,6 +185,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             build_agent_context_compactor,
         )
         from pixelflow.agent_runtime.service import AgentRuntimeService
+        from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+        from pixelflow.video_agent.workspace import (
+            MemoryVideoAgentRepository,
+            SQLVideoAgentRepository,
+        )
 
         task_store = app.state.pixelflow_task_store
         if isinstance(task_store, SQLPixelFlowTaskStore):
@@ -193,15 +198,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 task_store=task_store,
             )
             video_runtime_repository = agent_runtime_repository
+            video_agent_repository = SQLVideoAgentRepository(
+                task_store.session_factory,
+            )
         elif isinstance(task_store, MemoryPixelFlowTaskStore):
             agent_runtime_repository = MemoryVideoRuntimeRepository(
                 task_store=task_store,
             )
             video_runtime_repository = agent_runtime_repository
+            video_agent_repository = MemoryVideoAgentRepository()
         else:
             # MySQL 对话 Store 尚无同事务 VideoRuntimeRepository，保持 R1 压缩并固定关闭 live。
             agent_runtime_repository = MemoryCompactionQueueRepository()
             video_runtime_repository = None
+            video_agent_repository = None
+        video_agent_entrypoint = (
+            VideoAgentEntrypoint(
+                runtime_repository=agent_runtime_repository,
+                video_repository=video_agent_repository,
+            )
+            if video_agent_repository is not None
+            else None
+        )
         context_compactor = (
             build_agent_context_compactor(
                 task_store=task_store,
@@ -292,8 +310,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 context_compactor=context_compactor,
                 turn_executor=live_runtime.executor,
                 video_repository=video_runtime_repository,
+                video_agent_entrypoint=video_agent_entrypoint,
                 primary_execution_intents=(
-                    live_runtime.primary_execution_intents
+                    ("video",)
+                    if video_agent_entrypoint is not None
+                    and "video" in agent_runtime_config.enabled_intents
+                    else live_runtime.primary_execution_intents
                 ),
             )
         except BaseException:

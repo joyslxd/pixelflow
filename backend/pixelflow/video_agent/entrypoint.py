@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Callable
 from uuid import NAMESPACE_URL, uuid5
 
 from pixelflow.agent_runtime.persistence.repositories import AgentRuntimeRepository

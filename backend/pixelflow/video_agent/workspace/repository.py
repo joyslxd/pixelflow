@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pixelflow.agent_runtime.persistence.models import (

@@ -57,6 +57,7 @@ web/src/
 
 ### Completed
 
+- [x] **Unified VideoAgent entry**: `POST /turns/start` now routes a primary video Turn to the deterministic `VideoAgentEntrypoint`, which persists/replays its workspace and initial plan and emits `agent.plan.created`; this path no longer wakes the legacy live executor (`P0`, 2026-08-05).
 - [x] **V2 contracts and public event names**: added `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, tool contracts, persisted duration calculation, and the six `agent.*` public event types. Verified by `tests/test_agent_runtime_contracts.py` and `tests/test_video_agent_contracts.py`. Commit: `c9e18f8`.
 - [x] **Workspace, plan, and step persistence**: added memory/SQLite repositories, owner isolation, idempotent completed-step writes, SQLite UTC restoration, and the additive `20260804_08` migration. Verified by `tests/test_video_agent_repository.py` and `tests/test_video_agent_migration.py`. Commit: `c9e18f8`.
 - [x] **Public event payload builders**: added safe plan-created and step-completed event projections without tool arguments or model reasoning. Verified by `tests/test_video_agent_plan_events.py`. Commit: `0f9ee32`.
@@ -65,7 +66,6 @@ web/src/
 ### In Progress
 
 - [ ] **Transactional outbox publication**: wire persisted V2 step transitions to the existing event outbox in the same transaction.
-- [ ] **Unified VideoAgent entry**: the deterministic `VideoAgentEntrypoint` now creates/replays the first persisted workspace, plan, and `agent.plan.created` event from one registered Turn (`e837720`); Gateway `start_turn` routing to this entry remains pending.
 - [ ] **V2 workbench UI**: connect the timeline reducer to `VideoAgentWorkspace` and replace the old page shell during P0 Day 5.
 
 ## Task 1: Replace the Old Workspace Page With a V2 Feature Shell

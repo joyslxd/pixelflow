@@ -23,6 +23,7 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
+from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
 
 from .config import AgentRuntimeConfig
 from .context import RepositoryCompactionEventOutbox
@@ -270,6 +271,7 @@ class AgentRuntimeService:
         context_compactor: AgentContextCompactor | None = None,
         turn_executor: SupervisorTurnExecutor | None = None,
         video_repository: VideoRuntimeRepository | None = None,
+        video_agent_entrypoint: VideoAgentEntrypoint | None = None,
         primary_execution_intents: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -293,6 +295,7 @@ class AgentRuntimeService:
         self.task_store = task_store
         self._turn_executor = turn_executor
         self._video_repository = video_repository
+        self._video_agent_entrypoint = video_agent_entrypoint
         self._context_compactor = context_compactor
         self._clock = clock or (lambda: datetime.now(UTC))
         self._turn_registration_store = make_turn_registration_store(
@@ -392,7 +395,11 @@ class AgentRuntimeService:
         if conversation is None:
             raise LookupError("Conversation not found")
         live_video_execution_ready = _live_video_execution_ready(conversation)
-        if live_video_execution_ready and self._turn_executor is None:
+        if (
+            live_video_execution_ready
+            and self._turn_executor is None
+            and self._video_agent_entrypoint is None
+        ):
             raise AgentRuntimeUnavailableError("视频 live Handler 当前不可用")
         try:
             registration = await self._turn_registration_store.register(
@@ -446,9 +453,18 @@ class AgentRuntimeService:
                 raise LookupError("Conversation not found") from exc
             raise AgentRuntimeUnavailableError(str(exc)) from exc
         response_turn = registration.turn
+        if live_video_execution_ready and self._video_agent_entrypoint is not None:
+            await self._video_agent_entrypoint.submit_turn(
+                user_id=owner,
+                conversation_id=conversation_id,
+                turn_id=registration.turn.turn_id,
+                content=body.content,
+                artifact_refs=tuple(body.artifact_refs),
+            )
         if (
             registration.created
             and live_video_execution_ready
+            and self._video_agent_entrypoint is None
             and self._turn_executor is not None
         ):
             self._pending_registered_turns[registration.turn.turn_id] = (

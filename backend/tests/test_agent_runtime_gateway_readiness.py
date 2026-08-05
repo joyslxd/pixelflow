@@ -456,10 +456,10 @@ async def test_gateway_fails_closed_without_half_handler_or_empty_graph(
 
 
 @pytest.mark.asyncio
-async def test_real_gateway_lifespan_keeps_video_on_frontend_v2_without_providers(
+async def test_real_gateway_lifespan_routes_video_to_v2_entrypoint_without_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 lifespan 默认缺 Provider 时不得挂半图或冻结 Supervisor owner。"""
+    """P0 首计划不依赖 Provider，缺 Provider 时仍可进入 V2 VideoAgent。"""
 
     from app.gateway import app as gateway_app
 
@@ -512,11 +512,11 @@ async def test_real_gateway_lifespan_keeps_video_on_frontend_v2_without_provider
         assert live_runtime.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
         assert live_runtime.graph_runtime is None
         assert not hasattr(application.state, "pixelflow_agent_graph_runtime")
-        assert service.primary_execution_intents == frozenset()
-        assert assignment.orchestration_mode.value == "frontend_v2"
+        assert service.primary_execution_intents == frozenset({"video"})
+        assert assignment.orchestration_mode.value == "supervisor_v1"
         assert assignment.context["__agent_runtime"][
             "primary_execution_ready"
-        ] is False
+        ] is True
 
 
 @pytest.mark.asyncio
