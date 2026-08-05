@@ -35,8 +35,9 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 ## 非设计目标（不实现功能）
 1. 不向大模型暴露底层厂商原始接口，不允许任意Shell脚本执行；
 2. 不把每一条用户请求硬编码为独立流程状态；
-3. 首版迭代不删除V1原有工作流，不迁移正在运行的V1任务；
-4. 不在 `WorkspacePage.tsx`、V1智能体流程编排层新增业务功能。
+3. 能力未就绪前不删除V1原有工作流，不迁移正在运行的V1任务；就绪后按「统一切换与下线」一次切走，不做会话级灰度分流；
+4. 不在 `WorkspacePage.tsx`、V1智能体流程编排层新增业务功能；
+5. 不实现用户白名单、流量百分比 canary，或长期 `video_agent_v2` / `supervisor_v1` 双轨路由。
 
 ## 目标整体架构
 ```
@@ -157,6 +158,76 @@ backend/pixelflow/video_agent/
 ## 前端事件时间线与页面改造
 前端仅展示执行过程叙事，隐藏模型内部推理内容。每条时间线条目包含简洁标题、可见输入、结果摘要、关联素材、状态、时间戳、耗时；示例文案：「识别6个镜头」「镜头3需重新生成」。
 
+### 信息架构（布局约定）
+采用 **对话流内嵌执行叙事**（类似 Codex / Cursor Agent 的交互），**不**把时间线做成独立中栏看板：
+
+1. **主栏 = 对话流**：用户消息、助手结论（`message.upserted`）、执行方案卡片、逐步工具/步骤块、确认卡，按时间顺序混排在同一滚动列表中；
+2. **步骤块就地展开**：`agent.step.*` 渲染为对话流里的紧凑步骤条目（标题 + 状态 + 摘要 + 耗时），点击可展开可见输入与关联素材；进行中步骤显示已运行时长；
+3. **确认卡内联**：`agent.confirmation.requested` 直接插在对应步骤之后，用户在对话流内确认/拒绝，不另开中栏；
+4. **右侧（或可折叠侧栏）= 证据面板**：`SceneEvidencePanel` 展示当前选中步骤/镜头的素材预览，服务「看图」而非「看流程」；窄屏可改为底部抽屉；
+5. **禁止**：单独占满一列的步骤看板、与对话脱节的第二套进度条、展示模型推理链或原始 tool JSON。
+
+`AgentPlanTimeline` 是对话流内的步骤序列组件，不是页面级中栏容器。
+
+### 页面示意图（参考视频改编场景）
+以下为 `VideoAgentWorkspace` 目标态线框。主栏是对话流；右侧仅证据预览。滚动顺序：用户消息 → 方案卡 → 步骤块 → 确认卡 → 助手结论。
+
+```text
+┌──────────────────────────────── VideoAgentWorkspace ────────────────────────────────┐
+│  参考视频改编 · 方案进行中                                                            │
+├──────────────────────────────────────────────┬──────────────────────────────────────┤
+│  主栏：对话流（同一滚动列表）                    │  侧栏：SceneEvidencePanel（可折叠）   │
+│                                              │                                      │
+│  ┌─ 用户消息 ─────────────────────────────┐  │  选中步骤：1. 分析参考视频             │
+│  │ 用参考片把产品换成新瓶身，能直接做完最好。 │  │  ┌──────────────────────────────┐  │
+│  └────────────────────────────────────────┘  │  │  参考片帧 / 镜头预览占位         │  │
+│                                              │  └──────────────────────────────┘  │
+│  ┌─ agent.plan.created ───────────────────┐  │  关联素材：分镜清单 · 新产品瓶身     │
+│  │ 执行方案 · 参考视频改编 · 8 步 · 进行中  │  │                                      │
+│  │ 目标：替换产品并出成片                   │  │  侧栏只服务「看图」，不展示流程进度。 │
+│  └────────────────────────────────────────┘  │                                      │
+│                                              │                                      │
+│  ┌─ AgentPlanTimeline（流内步骤）─────────┐  │                                      │
+│  │ ● 1. 分析参考视频            完成 · 48秒│  │                                      │
+│  │   识别 6 个镜头，提取产品出镜段          │  │                                      │
+│  │   ▸ 展开：输入摘要 · [参考片帧][分镜清单]│  │                                      │
+│  │ ● 2. 提取分镜与素材清单      完成 · 21秒│  │                                      │
+│  │   镜头3、5 含原产品瓶身                  │  │                                      │
+│  │ ● 3. 替换产品素材             完成 · 9秒│  │                                      │
+│  │   已定位受影响镜头 3、5                  │  │                                      │
+│  │ ● 4. 生成镜头修复补丁        完成 · 18秒│  │                                      │
+│  │   镜头3需重新生成；镜头5可局部修补       │  │                                      │
+│  │ ● 5. 确认生成消耗额度            待确认 │  │                                      │
+│  │   重绘镜头 3、5 · 预估 12 点             │  │                                      │
+│  │   ┌ AgentConfirmationCard ───────────┐ │  │                                      │
+│  │   │ 确认前不扣费、不启动厂商任务        │ │  │                                      │
+│  │   │ [确认并继续]  [先不生成]            │ │  │                                      │
+│  │   └──────────────────────────────────┘ │  │                                      │
+│  │ ○ 6. 重绘受影响镜头                排队 │  │                                      │
+│  │ ○ 7. 校验成片画面质量              排队 │  │                                      │
+│  │ ○ 8. 合成完整视频                  排队 │  │                                      │
+│  └────────────────────────────────────────┘  │                                      │
+│                                              │                                      │
+│  ┌─ message.upserted ─────────────────────┐  │                                      │
+│  │ 已拆解参考片，定位镜头 3、5。确认后继续 │  │                                      │
+│  │ 生成（预计 12 点）。                     │  │                                      │
+│  └────────────────────────────────────────┘  │                                      │
+│                                              │                                      │
+│  [ 输入消息… ]                               │                                      │
+└──────────────────────────────────────────────┴──────────────────────────────────────┘
+```
+
+单条步骤块字段（展开后）：
+
+```text
+● {sequence}. {title}                         {status} · {duration}
+  {publicSummary / 结果摘要}          例：「识别 6 个镜头」「镜头3需重新生成」
+  ▸ 输入：{可见输入摘要}              不是原始 tool JSON
+  ▸ 素材：{artifactRefs}              点击同步到右侧证据面板
+```
+
+刻意不展示：模型思考链、完整 tool 参数、厂商原始响应、内部 prompt。
+
 新增持久化事件类型：
 - `agent.plan.created` 执行方案创建
 - `agent.step.started` 步骤开始执行
@@ -165,17 +236,17 @@ backend/pixelflow/video_agent/
 - `agent.step.failed` 步骤执行失败
 - `agent.confirmation.requested` 等待用户确认
 
-复用原有事件输出队列、有序SSE消息流。`message.upserted` 作为展示给用户的最终消息，新增事件用于渲染步骤时间线。
+复用原有事件输出队列、有序SSE消息流。`message.upserted` 作为展示给用户的最终消息，新增事件用于在对话流内投影步骤叙事。
 
 现有 `WorkspacePage.tsx` 混杂老旧状态、V1调度逻辑、任务轮询、页面交互。**禁止在此文件新增V2功能**。
 首期迁移将原有页面逻辑拆分迁移至：
 ```
 web/src/features/legacy-workspace/LegacyWorkspace.tsx
 web/src/features/video-agent/
-  VideoAgentWorkspace.tsx      V2智能体项目主页面
-  AgentPlanTimeline.tsx        执行步骤时间线组件
-  AgentConfirmationCard.tsx    用户确认弹窗组件
-  SceneEvidencePanel.tsx       镜头素材展示面板
+  VideoAgentWorkspace.tsx      V2智能体项目主页面（对话流 + 可选证据侧栏）
+  AgentPlanTimeline.tsx        对话流内嵌的执行步骤序列
+  AgentConfirmationCard.tsx    对话流内用户确认卡
+  SceneEvidencePanel.tsx       镜头素材展示面板（侧栏/抽屉）
   hooks/useVideoAgent.ts       智能体通用逻辑钩子
   state/reducer.ts             页面状态管理
 ```
@@ -187,8 +258,15 @@ V2首期沿用现有 `deepseek-v4-pro` 配置。智能体执行链路依赖统�
 首期不依赖Kimi K3；后续完善厂商回读能力、完成标准用例评测后，可注册为高复杂度流程规划备选模型。
 视频画面拆解、视觉质检仍使用专用视觉大模型，不依赖流程规划大模型。
 
-## 灰度上线策略
-新增流程标识 `video_agent_v2`。新对话可通过白名单或流量百分比路由至V2；未白名单、存量对话仍走 `supervisor_v1`。正在运行的V1任务不会迁移至新流程。若V2出现故障，可切回全量V1实现快速回滚。
+## 统一切换与下线策略
+**不做**白名单、流量百分比或其他会话级灰度分流；不引入长期并存的 `video_agent_v2` / `supervisor_v1` 双轨路由。
+
+迁移期约定：
+1. 开发与联调阶段可继续沿用现有 `supervisor_v1` 持久化编排标记作为兼容合同，但视频 Turn 已由 `VideoAgentEntrypoint` 统一接管；
+2. V2 能力、契约、观测与验收就绪后，执行**一次统一切换**：所有新视频对话进入 VideoAgent 统一入口；
+3. 切换同时启动 V1 物理下线：移除 `supervisor_v1` 兼容标记与 V1 视频编排分支，删除灰度/模式选择相关开关；
+4. 正在运行的 V1 任务**不原地迁移**到新流程；历史 V1 会话仅保留只读归档与审计，不再唤醒旧 live executor；
+5. 回滚手段是发布门禁与版本回退（整包回退到切换前发布），而不是运行时按用户或百分比切流。
 
 ## 迭代里程碑
 1. 拆分前端旧页面逻辑，`WorkspacePage.tsx` 简化为路由外壳，保障原有功能测试全量通过；
@@ -196,7 +274,7 @@ V2首期沿用现有 `deepseek-v4-pro` 配置。智能体执行链路依赖统�
 3. 完成视频智能体规划器、能力清单、工具注册、DeepSeek模型适配、可视化执行时间线；
 4. 首批统一入口工具落地：脚本导入、创意头脑风暴、参考视频解析；
 5. 完成镜头质检、镜头修复、定向重绘、质检、合成、导出全工具适配；
-6. 新增V2路由分发、灰度放量、观测指标、回滚控制能力。
+6. 统一切换到 VideoAgent 入口，下线 V1 视频编排与兼容标记，补齐观测指标与发布门禁。
 
 ## 验收验证标准
 1. 用户上传完整脚本，无需强制创意评审即可直接生成视频；
@@ -244,8 +322,9 @@ The new system must use one conversational entry point. It infers the user's vid
 
 - Do not expose raw provider APIs or arbitrary shell execution to the model.
 - Do not turn every user request into a newly hardcoded workflow state.
-- Do not delete V1 workflows or migrate running V1 tasks during the first release.
+- Do not delete V1 workflows or migrate running V1 tasks before cutover readiness; after readiness, retire them in one unified cutover rather than session-level canary routing.
 - Do not add new feature logic to `WorkspacePage.tsx` or the V1 `agent_workflows` orchestration layer.
+- Do not implement user allowlists, traffic-percentage canaries, or a long-lived dual-track of `video_agent_v2` versus `supervisor_v1`.
 
 ## Target Architecture
 
@@ -387,6 +466,50 @@ backend/pixelflow/video_agent/
 
 The frontend shows an execution narrative, not model chain-of-thought. Each timeline item contains a plain title, visible inputs and result summary, linked artifacts, status, timestamp, and duration. It may display examples such as "Identified 6 scenes" or "Scene 3 needs regeneration". It must never display hidden reasoning.
 
+### Information architecture (layout)
+
+Use a **chat-inline execution narrative** (Codex / Cursor Agent style). Do **not** put the timeline in a separate middle-column board:
+
+1. **Primary column = conversation stream**: user messages, assistant conclusions (`message.upserted`), plan cards, step blocks, and confirmation cards interleave in one scrollable list.
+2. **Steps expand in place**: `agent.step.*` renders as compact in-stream step rows (title, status, summary, duration); click to expand visible inputs and linked artifacts; running steps show elapsed time.
+3. **Confirmations are inline**: `agent.confirmation.requested` appears immediately after the relevant step; the user confirms or declines in the stream.
+4. **Right rail (or collapsible drawer) = evidence**: `SceneEvidencePanel` previews the selected step/scene artifacts. On narrow viewports use a bottom drawer. This pane is for "seeing media", not for "watching progress".
+5. **Forbidden**: a full-column step kanban disconnected from chat, a second progress UI that duplicates the stream, or any display of model chain-of-thought / raw tool JSON.
+
+`AgentPlanTimeline` is the in-stream step sequence component, not a page-level middle-column container.
+
+### Page wireframe (reference-video remix)
+
+Target layout for `VideoAgentWorkspace`. Primary column is the conversation stream; the right rail is evidence only. Scroll order: user message → plan card → step blocks → confirmation card → assistant conclusion.
+
+```text
+┌──────────────────────────────── VideoAgentWorkspace ────────────────────────────────┐
+│  Reference remix · plan running                                                       │
+├──────────────────────────────────────────────┬──────────────────────────────────────┤
+│  Primary: conversation stream (one scroller) │  Rail: SceneEvidencePanel (foldable) │
+│                                              │                                      │
+│  [User] Replace product in my reference…     │  Selected: 1. Analyze reference      │
+│                                              │  [ frame / scene preview ]           │
+│  [plan.created] Reference remix · 8 steps    │  Artifacts: storyboard · new bottle  │
+│                                              │  Rail is for media, not progress.    │
+│  [steps in stream]                           │                                      │
+│   ● 1. Analyze reference     done · 48s      │                                      │
+│     Identified 6 scenes                      │                                      │
+│   ● 2. Extract storyboard    done · 21s      │                                      │
+│   ● 3. Replace assets        done · 9s       │                                      │
+│   ● 4. Build scene patch     done · 18s      │                                      │
+│     Scene 3 needs regeneration               │                                      │
+│   ● 5. Confirm generation cost   awaiting    │                                      │
+│     [Confirm] [Not now]                      │                                      │
+│   ○ 6–8. generate / QC / compose   queued    │                                      │
+│                                              │                                      │
+│  [message.upserted] Confirm to continue…     │                                      │
+│  [ composer ]                                │                                      │
+└──────────────────────────────────────────────┴──────────────────────────────────────┘
+```
+
+A step row (expanded) shows: sequence, title, status, duration, public summary, visible input summary, and artifact refs. Never show chain-of-thought, raw tool JSON, provider payloads, or internal prompts.
+
 New persisted event types:
 
 - `agent.plan.created`
@@ -396,17 +519,17 @@ New persisted event types:
 - `agent.step.failed`
 - `agent.confirmation.requested`
 
-The existing event outbox and monotonic SSE sequence are reused. `message.upserted` remains the user-facing conclusion, while the new events project the step timeline.
+The existing event outbox and monotonic SSE sequence are reused. `message.upserted` remains the user-facing conclusion, while the new events project the step narrative inside the conversation stream.
 
 `WorkspacePage.tsx` currently contains legacy state, V1 supervisor behavior, task polling, and UI behavior. New functionality must not be added there. The first migration milestone moves its existing body to:
 
 ```text
 web/src/features/legacy-workspace/LegacyWorkspace.tsx
 web/src/features/video-agent/
-  VideoAgentWorkspace.tsx
-  AgentPlanTimeline.tsx
-  AgentConfirmationCard.tsx
-  SceneEvidencePanel.tsx
+  VideoAgentWorkspace.tsx      # chat stream + optional evidence rail
+  AgentPlanTimeline.tsx        # in-stream step sequence
+  AgentConfirmationCard.tsx    # in-stream confirmation card
+  SceneEvidencePanel.tsx       # evidence rail / drawer
   hooks/useVideoAgent.ts
   state/reducer.ts
 ```
@@ -419,9 +542,17 @@ V1 uses the existing `deepseek-v4-pro` configuration. The agent loop must depend
 
 Kimi K3 is not a V1 dependency. It may later be registered as a controlled, high-complexity planner after provider-specific replay support and golden-case evaluation. Video decomposition and visual QC remain dedicated VLM capabilities rather than depending on a planning model.
 
-## Rollout
+## Cutover and Retirement
 
-Add a `video_agent_v2` orchestration mode. New conversations can be allowlisted or percentage-routed to V2. Existing and non-allowlisted conversations remain `supervisor_v1`. Running V1 workflows are never migrated in place. A V2 failure can be rolled back by routing subsequent new conversations to V1.
+Do **not** implement allowlists, traffic-percentage canaries, or a long-lived dual-track of `video_agent_v2` versus `supervisor_v1`.
+
+Migration rules:
+
+1. During development and integration, the existing `supervisor_v1` orchestration marker may remain as a compatibility contract, while video Turns are already owned by `VideoAgentEntrypoint`.
+2. After V2 capabilities, contracts, observability, and acceptance are ready, perform **one unified cutover**: every new video conversation enters the VideoAgent entrypoint.
+3. At the same cutover, physically retire V1 video orchestration: remove the `supervisor_v1` compatibility marker, V1 video orchestration branches, and any rollout/mode-selection switches.
+4. Running V1 tasks are never migrated in place. Historical V1 conversations stay read-only for audit and must not wake the legacy live executor.
+5. Rollback is release gating and version rollback to the pre-cutover build, not runtime user- or percentage-based traffic switching.
 
 ## Milestones
 
@@ -430,7 +561,7 @@ Add a `video_agent_v2` orchestration mode. New conversations can be allowlisted 
 3. Add the VideoAgent planner, Skill catalog, tool registry, DeepSeek provider boundary, and visible plan/step timeline.
 4. Adapt script import, creative discussion, and reference-video analysis as the first unified-entry tools.
 5. Adapt scene inspection, patching, selective regeneration, QC, composition, and export tools.
-6. Add `video_agent_v2` routing, canary rollout, observability, and rollback controls.
+6. Cut over to the VideoAgent entrypoint, retire V1 video orchestration and compatibility markers, and add observability plus release gates.
 
 ## Verification and Acceptance
 
