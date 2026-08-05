@@ -57,17 +57,70 @@ def _restore_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
+_PLAN_STATUS_TRANSITIONS: dict[AgentPlanStatus, frozenset[AgentPlanStatus]] = {
+    AgentPlanStatus.PLANNING: frozenset(
+        {
+            AgentPlanStatus.RUNNING,
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            AgentPlanStatus.FAILED,
+            AgentPlanStatus.CANCELLED,
+        }
+    ),
+    AgentPlanStatus.RUNNING: frozenset(
+        {
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            AgentPlanStatus.COMPLETED,
+            AgentPlanStatus.FAILED,
+            AgentPlanStatus.CANCELLED,
+        }
+    ),
+    AgentPlanStatus.AWAITING_CONFIRMATION: frozenset(
+        {
+            AgentPlanStatus.RUNNING,
+            AgentPlanStatus.FAILED,
+            AgentPlanStatus.CANCELLED,
+        }
+    ),
+    AgentPlanStatus.COMPLETED: frozenset(),
+    AgentPlanStatus.FAILED: frozenset(),
+    AgentPlanStatus.CANCELLED: frozenset(),
+}
+
+
+def _assert_plan_transition(
+    current: AgentPlanStatus,
+    target: AgentPlanStatus,
+) -> None:
+    if target is current:
+        return
+    if target not in _PLAN_STATUS_TRANSITIONS[current]:
+        raise AgentRuntimeRecordConflictError(
+            f"VideoAgent plan 状态不能从 {current.value} 变更为 {target.value}"
+        )
+
+
 @runtime_checkable
 class VideoAgentRepository(Protocol):
     async def create_workspace(self, user_id: str, workspace: VideoWorkspace) -> VideoWorkspace: ...
 
     async def get_workspace(self, user_id: str, workspace_id: str) -> VideoWorkspace | None: ...
 
+    async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None: ...
+
     async def save_plan(
         self,
         user_id: str,
         plan: AgentPlan,
         steps: list[AgentPlanStep],
+    ) -> AgentPlan: ...
+
+    async def update_plan_status(
+        self,
+        user_id: str,
+        plan_id: str,
+        status: AgentPlanStatus,
+        *,
+        now: datetime,
     ) -> AgentPlan: ...
 
     async def start_step(
@@ -85,6 +138,22 @@ class VideoAgentRepository(Protocol):
         plan_id: str,
         step_id: str,
         result: VideoToolResult,
+        *,
+        now: datetime,
+    ) -> AgentPlanStep: ...
+
+    async def request_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+    ) -> AgentPlanStep: ...
+
+    async def confirm_step(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
         *,
         now: datetime,
     ) -> AgentPlanStep: ...
@@ -148,6 +217,14 @@ class MemoryVideoAgentRepository:
         record = self._workspace_by_owner.get((_owner(user_id), workspace_id))
         return None if record is None else _clone(record)
 
+    async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None:
+        owner = _owner(user_id)
+        plan = self._plan_by_owner.get((owner, plan_id))
+        if plan is None:
+            return None
+        steps = await self.list_plan_steps(owner, plan_id)
+        return _clone(plan.model_copy(update={"steps": tuple(steps)}))
+
     async def save_plan(
         self,
         user_id: str,
@@ -165,13 +242,38 @@ class MemoryVideoAgentRepository:
         if {step.plan_id for step in steps} != {plan.plan_id} or len({step.sequence for step in steps}) != len(steps):
             raise AgentRuntimeRecordConflictError("VideoAgent plan steps 不符合当前 plan 或 sequence 唯一约束")
         stored = plan.model_copy(
-            update={"created_at": _stored_time(plan.created_at), "updated_at": _stored_time(plan.updated_at)}
+            update={
+                "steps": tuple(steps),
+                "created_at": _stored_time(plan.created_at),
+                "updated_at": _stored_time(plan.updated_at),
+            }
         )
         self._plan_owner_by_id[stored.plan_id] = owner
         self._plan_by_owner[(owner, stored.plan_id)] = _clone(stored)
         for step in steps:
             self._steps_by_owner[(owner, stored.plan_id, step.step_id)] = _clone(step)
         return _clone(stored)
+
+    async def update_plan_status(
+        self,
+        user_id: str,
+        plan_id: str,
+        status: AgentPlanStatus,
+        *,
+        now: datetime,
+    ) -> AgentPlan:
+        owner = _owner(user_id)
+        key = (owner, plan_id)
+        plan = self._plan_by_owner.get(key)
+        if plan is None:
+            raise AgentRuntimeRecordConflictError("VideoAgent plan 不存在或不属于当前用户")
+        _assert_plan_transition(plan.status, status)
+        steps = await self.list_plan_steps(owner, plan_id)
+        updated = plan.model_copy(
+            update={"status": status, "steps": tuple(steps), "updated_at": now}
+        )
+        self._plan_by_owner[key] = _clone(updated)
+        return _clone(updated)
 
     async def start_step(
         self, user_id: str, plan_id: str, step_id: str, *, now: datetime
@@ -184,6 +286,8 @@ class MemoryVideoAgentRepository:
             return _clone(step)
         if step.status is not PlanStepStatus.PENDING:
             raise AgentRuntimeRecordConflictError("VideoAgent step 不能开始")
+        if step.confirmation_required:
+            raise AgentRuntimeRecordConflictError("VideoAgent step 需先确认才能开始")
         started = step.model_copy(update={"status": PlanStepStatus.RUNNING, "started_at": now})
         self._steps_by_owner[key] = _clone(started)
         return _clone(started)
@@ -219,6 +323,46 @@ class MemoryVideoAgentRepository:
         )
         self._steps_by_owner[key] = _clone(completed)
         return _clone(completed)
+
+    async def request_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+    ) -> AgentPlanStep:
+        key = (_owner(user_id), plan_id, step_id)
+        step = self._steps_by_owner.get(key)
+        if step is None:
+            raise AgentRuntimeRecordConflictError("VideoAgent step 不存在或不属于当前用户")
+        if step.status is PlanStepStatus.AWAITING_CONFIRMATION:
+            return _clone(step)
+        if step.status is not PlanStepStatus.PENDING or not step.confirmation_required:
+            raise AgentRuntimeRecordConflictError("VideoAgent step 不能请求确认")
+        waiting = step.model_copy(update={"status": PlanStepStatus.AWAITING_CONFIRMATION})
+        self._steps_by_owner[key] = _clone(waiting)
+        return _clone(waiting)
+
+    async def confirm_step(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        now: datetime,
+    ) -> AgentPlanStep:
+        key = (_owner(user_id), plan_id, step_id)
+        step = self._steps_by_owner.get(key)
+        if step is None:
+            raise AgentRuntimeRecordConflictError("VideoAgent step 不存在或不属于当前用户")
+        if step.status is PlanStepStatus.RUNNING:
+            return _clone(step)
+        if step.status is not PlanStepStatus.AWAITING_CONFIRMATION:
+            raise AgentRuntimeRecordConflictError("VideoAgent step 当前不等待确认")
+        running = step.model_copy(
+            update={"status": PlanStepStatus.RUNNING, "started_at": now}
+        )
+        self._steps_by_owner[key] = _clone(running)
+        return _clone(running)
 
     async def start_step_with_event(
         self,
@@ -363,6 +507,19 @@ class SQLVideoAgentRepository:
             row = (await session.scalars(statement)).one_or_none()
         return None if row is None else _workspace_from_row(row)
 
+    async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None:
+        owner = _owner(user_id)
+        statement = select(PixelFlowVideoAgentPlanRow).where(
+            PixelFlowVideoAgentPlanRow.user_id == owner,
+            PixelFlowVideoAgentPlanRow.plan_id == plan_id,
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+        if row is None:
+            return None
+        steps = await self.list_plan_steps(owner, plan_id)
+        return _plan_from_row(row).model_copy(update={"steps": tuple(steps)})
+
     async def save_plan(
         self,
         user_id: str,
@@ -383,7 +540,11 @@ class SQLVideoAgentRepository:
                         raise AgentRuntimeRecordConflictError("VideoAgent plan 已属于其他用户")
                     return _plan_from_row(existing)
                 stored = plan.model_copy(
-                    update={"created_at": _stored_time(plan.created_at), "updated_at": _stored_time(plan.updated_at)}
+                    update={
+                        "steps": tuple(steps),
+                        "created_at": _stored_time(plan.created_at),
+                        "updated_at": _stored_time(plan.updated_at),
+                    }
                 )
                 session.add(
                     PixelFlowVideoAgentPlanRow(
@@ -407,6 +568,8 @@ class SQLVideoAgentRepository:
                             tool_name=step.tool_name,
                             title=step.title,
                             status=step.status.value,
+                            arguments_json=step.arguments,
+                            confirmation_required=step.confirmation_required,
                             public_summary=step.public_summary,
                             artifact_refs_json=list(step.artifact_refs),
                             started_at=step.started_at,
@@ -414,6 +577,38 @@ class SQLVideoAgentRepository:
                         )
                     )
         return stored
+
+    async def update_plan_status(
+        self,
+        user_id: str,
+        plan_id: str,
+        status: AgentPlanStatus,
+        *,
+        now: datetime,
+    ) -> AgentPlan:
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                statement = (
+                    select(PixelFlowVideoAgentPlanRow)
+                    .where(
+                        PixelFlowVideoAgentPlanRow.user_id == owner,
+                        PixelFlowVideoAgentPlanRow.plan_id == plan_id,
+                    )
+                    .with_for_update()
+                )
+                row = (await session.scalars(statement)).one_or_none()
+                if row is None:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent plan 不存在或不属于当前用户"
+                    )
+                _assert_plan_transition(AgentPlanStatus(row.status), status)
+                row.status = status.value
+                row.updated_at = now
+                await session.flush()
+                plan = _plan_from_row(row)
+        steps = await self.list_plan_steps(owner, plan_id)
+        return plan.model_copy(update={"steps": tuple(steps)})
 
     async def start_step(
         self, user_id: str, plan_id: str, step_id: str, *, now: datetime
@@ -427,6 +622,56 @@ class SQLVideoAgentRepository:
                     return step
                 if step.status is not PlanStepStatus.PENDING:
                     raise AgentRuntimeRecordConflictError("VideoAgent step 不能开始")
+                if step.confirmation_required:
+                    raise AgentRuntimeRecordConflictError("VideoAgent step 需先确认才能开始")
+                row.status = PlanStepStatus.RUNNING.value
+                row.started_at = now
+                await session.flush()
+                return _step_from_row(row)
+
+    async def request_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+    ) -> AgentPlanStep:
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._locked_step(session, owner, plan_id, step_id)
+                step = _step_from_row(row)
+                if step.status is PlanStepStatus.AWAITING_CONFIRMATION:
+                    return step
+                if (
+                    step.status is not PlanStepStatus.PENDING
+                    or not step.confirmation_required
+                ):
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent step 不能请求确认"
+                    )
+                row.status = PlanStepStatus.AWAITING_CONFIRMATION.value
+                await session.flush()
+                return _step_from_row(row)
+
+    async def confirm_step(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        now: datetime,
+    ) -> AgentPlanStep:
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._locked_step(session, owner, plan_id, step_id)
+                step = _step_from_row(row)
+                if step.status is PlanStepStatus.RUNNING:
+                    return step
+                if step.status is not PlanStepStatus.AWAITING_CONFIRMATION:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent step 当前不等待确认"
+                    )
                 row.status = PlanStepStatus.RUNNING.value
                 row.started_at = now
                 await session.flush()
@@ -738,6 +983,8 @@ def _step_from_row(row: PixelFlowVideoAgentPlanStepRow) -> AgentPlanStep:
         tool_name=row.tool_name,
         title=row.title,
         status=PlanStepStatus(row.status),
+        arguments=row.arguments_json,
+        confirmation_required=row.confirmation_required,
         public_summary=row.public_summary,
         artifact_refs=tuple(row.artifact_refs_json),
         started_at=_restore_utc(row.started_at),

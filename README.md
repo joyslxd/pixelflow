@@ -15,6 +15,7 @@ PixelFlow 是一个面向电商内容创作的 AI Agent 工作台，支持从自
 | --- | --- | --- |
 | 对话工作台 | 可用 | 支持新建对话、历史对话、分页加载、恢复上下文 |
 | 统一会话 Runtime | R2 live handler 开发候选 / R1 已发布 | Task 13 已在隔离开发分支补齐视频 live handler 的九动作消费、权威 Artifact/interrupt 投影和 React 结构化动作接线；Gateway 注册与 `primary_execution_intents=[video]` 仍留给独立 Task 14，因此当前可部署基线继续安全使用 `frontend_v2 + R1 Turn/Snapshot/SSE/压缩队列`，不能据此切换 R2。所有 Agent 共用 896K 有效窗口、32K 输出和 32K 安全预留，DeepSeek V4 Pro 严格使用 1,000,000 tokens 已验证档案。生产仍保持已批准的 R1 `assist + [] + 100%`，R2 尚未发布 |
+| 统一 VideoAgent V2 | P0 本地开发候选 | 新视频 Turn 已有独立 `VideoWorkspace`、`AgentPlan/Step`、事务性 Outbox 和受控工具注册表；`SkillCatalog` 只读取启用的 Skill 元数据，工具入参先过 DTO 校验，首个 `inspect_video_workspace` 只返回安全统计和内部 Artifact 引用。Task 6 已补齐 `deepseek-v4-pro` 结构化计划、八步上限、两次修复、计费确认闸门和运行步骤恢复；真实业务工具、Gateway 旅程接线和 V2 工作台仍未完成，不能作为生产发布依据 |
 | 持久化 External Job Coordinator | M06 已进入 Agent | 已建立 operation 幂等身份、start/轮询数据库租约、现有 start/status Service 的六态防腐适配、事务性完成 Outbox 和可关闭恢复 Runtime。并发请求只启动一次供应商任务；进程关闭后由新 worker 在租约过期时继续查询原 job；status 402 暂停后由用户动作恢复原 job，start 402 返回固定可重试提示；404 安全落为 `expired` 并要求新 attempt。Authorization 和原请求不落库；M06 已通过 Final 单槽集成，生产仍保持 R1 `assist`，R2 Workflow 接线和发布继续受独立门禁约束 |
 | 视频 Workflow Adapter | M11 已进入 Agent / R2 候选接线 | 已冻结 intake、方向、Plan、场景包、分镜生成、后处理、人工结束和剪映交付权威状态；M13.2 候选把标准 Turn/附件 DTO 接入 Supervisor replay 与 M06 非付费幂等门禁。生产仍为 R1，真实付费 Provider 和 R2 发布必须另行批准 |
 | 采集 Agent | 可用 | 使用 `deepseek-v4-pro` 识别图片/视频/PPT/视频分析意图；视频额外抽取总时长、画幅、视频模型、图片模型、用途和风格建议值 |
@@ -61,6 +62,7 @@ pixelflow/
 │   │   ├── jianying_draft/          # 剪映草稿 DTO、Skill 协议与异步幂等 Service
 │   │   ├── memory/                  # PowerMemService、语义记忆上下文注入
 │   │   ├── agent_runtime/           # Turn、Snapshot/SSE、上下文预算、摘要压缩、排队与 operation/Provider Job 协调
+│   │   ├── video_agent/             # 统一 VideoAgent 的工作区、计划、Skill 目录和受控工具
 │   │   ├── skills/                  # Skill Protocol + Borgrise/FFmpeg/剪映适配
 │   │   ├── tasks/                   # 任务、会话、消息、资产持久化
 │   │   └── preferences/             # 用户偏好
@@ -68,7 +70,9 @@ pixelflow/
 │   ├── skills/public/               # Borgrise creative assistant、图片/视频 Plan 模板与 Seedance Prompt Skill
 │   └── tests/                       # 后端测试
 ├── web/
-│   ├── src/pages/WorkspacePage.tsx  # 前端主流程编排
+│   ├── src/pages/WorkspacePage.tsx  # VideoAgent 的薄路由壳
+│   ├── src/features/video-agent/    # V2 工作台、时间线状态和迁移边界
+│   ├── src/features/legacy-workspace/ # P0 期间保留的旧工作台实现
 │   ├── src/lib/api.ts               # /agent API client
 │   └── src/components/canvas/       # plan、图片结果、视频分镜、结果展示
 ├── docs/

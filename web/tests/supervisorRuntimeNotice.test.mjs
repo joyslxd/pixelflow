@@ -166,7 +166,7 @@ test("Notice 位于 Composer 上方并提供状态与进度可访问语义", () 
     "utf8",
   );
   const workspaceSource = readFileSync(
-    new URL("../src/pages/WorkspacePage.tsx", import.meta.url),
+    new URL("../src/features/legacy-workspace/LegacyWorkspace.tsx", import.meta.url),
     "utf8",
   );
 

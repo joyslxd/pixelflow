@@ -188,7 +188,11 @@ EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS = {
 
 EXPECTED_RUNTIME_SUPPORT_TABLE_NAMES = {"pixelflow_agent_context_payloads"} | set(
     EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS
-)
+) | {
+    "pixelflow_video_agent_workspaces",
+    "pixelflow_video_agent_plans",
+    "pixelflow_video_agent_plan_steps",
+}
 
 EXPECTED_MIGRATION_TABLE_COLUMNS = dict(EXPECTED_TABLE_COLUMNS)
 EXPECTED_MIGRATION_TABLE_COLUMNS.update(EXPECTED_VIDEO_LIVE_SUPPORT_COLUMNS)
@@ -929,7 +933,9 @@ def test_operation_quota_revision_migration_accepts_equivalent_reflected_check(
     engine = create_engine(_sync_database_url(database_path))
     try:
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20260802_07"
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "20260805_09"
     finally:
         engine.dispose()
 

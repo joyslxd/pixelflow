@@ -1146,13 +1146,15 @@ corepack pnpm build
 
 ## 16. 当前实现边界
 
-- v2 前端主流程由 `WorkspacePage.tsx` 编排，后端提供分段接口，不是完全由后端 LangGraph 自动推进。
+- P0 抽取后 `WorkspacePage.tsx` 只保留 `VideoAgentWorkspace` 薄路由壳；旧 v2 前端编排暂存于 `features/legacy-workspace/LegacyWorkspace.tsx`，由 V2 迁移边界转发，后端仍提供分段接口。
 - 旧 `/agent/flows` LangGraph 任务流仍保留，主要用于任务 API、SSE、资产和旧流程兼容。
 - 直接视频生成接口 `/agent/flows/video/generate-direct/start` 存在，但业务主流程仍要求先走 plan.md 和视频场景包。
 - `ScenePackageSkill` 会先尝试 LLM，失败后用规则版兜底，保证流程可继续。
 - `content-app/Borgrise` 的真实接口参数应以同级 `content-app` Controller 和当前 `run_generation.py` 为准；发现 PixelFlow 需要但 content-app 不存在的接口，应先在 content-app 新增或向用户确认业务逻辑。
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
+
+2026-08-05 的统一 VideoAgent V2 P0 候选已在 `backend/pixelflow/video_agent/` 建立独立 Turn 入口、`VideoWorkspace`、`AgentPlan/AgentPlanStep` Repository、事务性公开步骤事件和前端 timeline reducer。Task 5 进一步增加受控工具注册中心：`SkillCatalog` 只通过 DeerFlow `SkillStorage` 读取已启用的 `SKILL.md` 元数据；`VideoToolRegistry` 只解析服务端显式注册工具，统一执行 Pydantic DTO 校验，并把用户可修正的参数错误收敛为固定安全结果；首个 `inspect_video_workspace` 只返回脚本、参考视频、素材、分镜和输出数量以及内部 `artifact:` 引用，不回显完整脚本、Provider 凭据或 URL。Task 6 核心通过 `deepseek-v4-pro.with_structured_output()` 生成最多八步的短计划，未知工具、非法 DTO 或超长计划最多携带固定反馈修复两次；工具参数和确认要求进入 V2 Step Repository，计费步骤先持久化 `awaiting_confirmation`，确认后才转为 `running` 并执行，重启恢复运行步骤时复用原 started 事件。当前真实视频工具、工具结果工作区补丁、Gateway 旅程接线、V2 Snapshot/SSE 工作台和单镜局部重生成尚未完成，因此该候选不能作为生产切换依据。
 
 当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 已通过阶段单槽进入 Agent，dev profile 声明为 `primary / enabled_intents=[video] / 100% / true`；这个配置只代表允许接管的上限，不能单独证明业务执行链已安装。创建 Controller 接收保守的首轮 intent 提示后，`AgentRuntimeService` 还必须同时命中进程启动时注册的 `primary_execution_intents`，才允许把新对话冻结为 `supervisor_v1`。Task 13 隔离候选补齐了视频 live Graph Handler 的 Turn 消费、五类人工 interrupt、九动作分发、权威 Workflow/Artifact 投影和 Web 结构化 action 接线；Task 14 隔离候选进一步完成 Gateway 全有或全无装配、status 402 持久化暂停/恢复和 fake 公共全链路门禁，当前实现检查点为 `d32adf4`，状态为 `review_fix_local_verified:Task14 / awaiting_independent_slot_integration`。该候选尚未进入 Agent 长期分支，因此当前可部署 Agent 基线仍没有 live Handler，就绪集合为空，视频新对话安全保持 `frontend_v2`，但仍完整经过 R1 Turn、Snapshot/SSE、压缩和输入队列，再由既有 v2 视频 Service 推进。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
 

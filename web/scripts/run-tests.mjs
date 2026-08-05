@@ -17,6 +17,7 @@ const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-")
 const typeTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-contract-types-"));
 const hookTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-hook-tests-"));
 const moduleDirectory = path.join(temporaryRoot, "modules");
+const videoAgentModuleDirectory = path.join(temporaryRoot, "video-agent");
 const apiDirectory = path.join(temporaryRoot, "api");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
 const agentRuntimeContractFixture = path.resolve(
@@ -65,6 +66,26 @@ function compileStandaloneModules(sourceFiles) {
     "bundler",
     "--outDir",
     moduleDirectory,
+    "--skipLibCheck",
+    "--strict",
+  ]);
+}
+
+function compileVideoAgentModules() {
+  run(process.execPath, [
+    tscEntry,
+    "src/features/video-agent/state/contracts.ts",
+    "src/features/video-agent/state/reducer.ts",
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--rootDir",
+    "src/features/video-agent/state",
+    "--outDir",
+    videoAgentModuleDirectory,
     "--skipLibCheck",
     "--strict",
   ]);
@@ -230,6 +251,7 @@ try {
     ]);
     compileApiModule();
     compileHookModule();
+    compileVideoAgentModules();
   }
 
   const testFiles = contractOnly
@@ -282,6 +304,7 @@ try {
         "supervisor/workspaceProjection.js",
       ),
       TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
+      VIDEO_AGENT_TIMELINE_REDUCER_TEST_MODULE: moduleUrl(videoAgentModuleDirectory, "reducer.js"),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),
       WORKFLOW_TASK_BOARD_TEST_MODULE: moduleUrl(moduleDirectory, "workflowTaskBoard.js"),
     },

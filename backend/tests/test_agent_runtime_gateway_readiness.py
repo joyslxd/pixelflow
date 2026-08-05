@@ -498,6 +498,7 @@ async def test_real_gateway_lifespan_routes_video_to_v2_entrypoint_without_provi
     )
     monkeypatch.setenv("PIXELFLOW_SEMANTIC_MEMORY_ENABLED", "false")
     monkeypatch.setenv("PIXELFLOW_JIANYING_DRAFT_ENABLED", "false")
+    monkeypatch.delenv("PIXELFLOW_MYSQL_URL", raising=False)
     application = gateway_app.create_app()
 
     async with application.router.lifespan_context(application):
@@ -547,6 +548,7 @@ async def test_real_gateway_lifespan_keeps_r1_v2_available_without_models(
     )
     monkeypatch.setenv("PIXELFLOW_SEMANTIC_MEMORY_ENABLED", "false")
     monkeypatch.setenv("PIXELFLOW_JIANYING_DRAFT_ENABLED", "false")
+    monkeypatch.delenv("PIXELFLOW_MYSQL_URL", raising=False)
     application = gateway_app.create_app()
 
     async with application.router.lifespan_context(application):

@@ -13,7 +13,7 @@ if (!moduleUrl || !contractsModuleUrl || !fixturePath) {
 const { buildSupervisorSubmission } = await import(moduleUrl);
 const { parseInterruptResponseRequest, parseTurnStartRequest } = await import(contractsModuleUrl);
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
-const workspaceSource = await readFile(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
+const workspaceSource = await readFile(new URL("../src/features/legacy-workspace/LegacyWorkspace.tsx", import.meta.url), "utf8");
 
 test("目标定位 fixture 的 reply 与 Artifact 引用完整进入 Turn", () => {
   const canonical = fixture.turn_start_request;

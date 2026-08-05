@@ -254,3 +254,68 @@ async def test_step_transition_event_is_idempotent(kind: RepositoryKind) -> None
         assert replay == first
         assert completed_replay == completed
         assert len(await event_repository.list_events("user-a", "conversation-1")) == 2
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_plan_read_and_status_update_use_authoritative_steps(kind: RepositoryKind) -> None:
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [pending_step()])
+
+        running = await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.RUNNING,
+            now=T0,
+        )
+        restored = await store.get_plan("user-a", "plan-1")
+
+        assert running.status is AgentPlanStatus.RUNNING
+        assert restored is not None
+        assert restored.status is AgentPlanStatus.RUNNING
+        assert restored.steps == (pending_step(),)
+        assert await store.get_plan("user-b", "plan-1") is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_confirmation_required_step_cannot_start_without_persisted_approval(
+    kind: RepositoryKind,
+) -> None:
+    step = AgentPlanStep(
+        step_id="step-confirm",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成分镜",
+        status=PlanStepStatus.PENDING,
+        arguments={"scene_ids": ["scene-3"], "variant_count": 3},
+        confirmation_required=True,
+    )
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [step])
+
+        with pytest.raises(AgentRuntimeRecordConflictError, match="确认"):
+            await store.start_step("user-a", "plan-1", "step-confirm", now=T0)
+
+        waiting = await store.request_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirm",
+        )
+        running = await store.confirm_step(
+            "user-a",
+            "plan-1",
+            "step-confirm",
+            now=T3,
+        )
+        restored = (await store.list_plan_steps("user-a", "plan-1"))[0]
+
+        assert waiting.status is PlanStepStatus.AWAITING_CONFIRMATION
+        assert waiting.started_at is None
+        assert running.status is PlanStepStatus.RUNNING
+        assert running.started_at == T3
+        assert restored.arguments == {"scene_ids": ["scene-3"], "variant_count": 3}
+        assert restored.confirmation_required is True

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const adapterModuleUrl = process.env.SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE;
-const workspaceSource = readFileSync(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
+const workspaceSource = readFileSync(new URL("../src/features/legacy-workspace/LegacyWorkspace.tsx", import.meta.url), "utf8");
 
 function extractFunctionBody(source, functionName) {
   const declarationPatterns = [

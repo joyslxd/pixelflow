@@ -602,6 +602,9 @@ web/src/
 - [x] **Workspace, plan, and step persistence**: added memory/SQLite repositories, owner isolation, idempotent completed-step writes, SQLite UTC restoration, and the additive `20260804_08` migration. Verified by `tests/test_video_agent_repository.py` and `tests/test_video_agent_migration.py`. Commit: `c9e18f8`.
 - [x] **Public event payload builders**: added safe plan-created and step-completed event projections without tool arguments or model reasoning. Verified by `tests/test_video_agent_plan_events.py`. Commit: `0f9ee32`.
 - [x] **Frontend timeline state projection**: added the isolated V2 timeline contracts and reducer for public step status, result summaries, asset references, and persisted duration. Verified by `web/tests/videoAgentTimelineReducer.test.mjs`. Commit: `b6310c3`.
+- [x] **P0 基线收口**：工作台抽取后的旧流程合同测试已改为读取 `LegacyWorkspace.tsx`，VideoAgent reducer 已接入统一前端测试运行器，Gateway 生命周期测试不再继承外部 MySQL 环境变量；前端 413 条测试和后端 35 条聚焦测试通过（本地验证，2026-08-05）。
+- [x] **受控工具注册表**：已增加只加载启用元数据的 `SkillCatalog`、声明成本/确认/幂等/恢复策略的 `VideoToolSpec`、参数失败安全收敛的 `VideoToolRegistry`，以及不回显隐藏工作区内容的 `inspect_video_workspace`（本地验证，2026-08-05）。
+- [x] **DeepSeek 结构化规划与确认闸门核心**：新增最多八步、最多两次修复的结构化规划边界，计划工具参数和确认要求可由 Memory/SQLite Repository 恢复；执行器在计费步骤前持久化等待确认，确认后继续原步骤，运行中步骤重启恢复不重复创建 started 事件。Gateway 真实旅程接线留给后续任务（本地验证，2026-08-05）。
 
 ### In Progress
 
@@ -651,7 +654,7 @@ export default function WorkspacePage() {
 }
 ```
 
-- [ ] **Step 4: Run V2 shell tests and type checking**
+- [x] **Step 4: Run V2 shell tests and type checking**
 
 Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs && npm run lint`
 
@@ -816,7 +819,7 @@ Construct agent events only after the corresponding workspace/plan/step write su
 
 Parse the six V2 event values in the V2 feature state module. Derive elapsed time from `startedAt` in the renderer for running steps; store completed duration from the backend event to keep reconnect behavior deterministic.
 
-- [ ] **Step 5: Run event suites**
+- [x] **Step 5: Run event suites**
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_plan_events.py -v`
 
@@ -842,7 +845,7 @@ git commit -m "feat: publish video agent step timeline"
 - Produces `VideoToolSpec`, `VideoToolRegistry`, and `VideoTool.execute(context, arguments) -> VideoToolResult`.
 - Initial registered tool: `inspect_video_workspace`.
 
-- [ ] **Step 1: Write failing registry tests**
+- [x] **Step 1: Write failing registry tests**
 
 ```python
 def test_registry_exposes_only_declared_tools():
@@ -851,17 +854,17 @@ def test_registry_exposes_only_declared_tools():
     assert registry.resolve("delete_database") is None
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_tool_registry.py -v`
 
 Expected: FAIL because the registry does not exist.
 
-- [ ] **Step 3: Implement metadata-first Skill selection and tool validation**
+- [x] **Step 3: Implement metadata-first Skill selection and tool validation**
 
 `SkillCatalog` loads enabled `SKILL.md` metadata through the existing DeerFlow storage API and returns only applicable manifests. `VideoToolSpec` contains `name`, `description`, JSON-schema-compatible input model, `cost_level`, `confirmation_required`, `idempotency_mode`, and `recovery_mode`. Define `VideoToolValidationError(ValueError)` for user-correctable missing or invalid input and map it to a structured tool result rather than an unhandled runtime failure. `InspectVideoWorkspaceTool` returns a compact evidence summary and artifact refs, never raw provider credentials or full hidden payloads.
 
-- [ ] **Step 4: Run registry tests**
+- [x] **Step 4: Run registry tests**
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_tool_registry.py -v`
 
@@ -886,7 +889,7 @@ git commit -m "feat: add video agent tool registry"
 - Produces `VideoAgentPlanner.plan_turn(context) -> AgentPlan`, `VideoAgentExecutor.run_plan(user_id, plan_id) -> AgentPlan`, `confirm_step(user_id, plan_id, step_id) -> AgentPlan`, and `resume_plan(user_id, plan_id) -> AgentPlan`.
 - Consumes `VideoToolRegistry`, `VideoWorkspaceRepository`, and the existing `create_chat_model(name="deepseek-v4-pro")` factory.
 
-- [ ] **Step 1: Write failing planner tests with a fake structured model**
+- [x] **Step 1: Write failing planner tests with a fake structured model**
 
 ```python
 async def test_planner_turn_for_reference_video_starts_with_analysis(fake_model, executor):
@@ -896,7 +899,7 @@ async def test_planner_turn_for_reference_video_starts_with_analysis(fake_model,
     ]
 ```
 
-- [ ] **Step 2: Write failing loop stop-condition tests**
+- [x] **Step 2: Write failing loop stop-condition tests**
 
 ```python
 async def test_executor_stops_before_billable_tool_until_confirmation(executor):
@@ -905,15 +908,15 @@ async def test_executor_stops_before_billable_tool_until_confirmation(executor):
     assert plan.steps[-1].tool_name == "generate_scenes"
 ```
 
-- [ ] **Step 3: Implement a typed model boundary**
+- [x] **Step 3: Implement a typed model boundary**
 
 Use `with_structured_output` for a plan proposal schema. The proposal may contain only registered tool names. Limit one turn to eight tool calls and two model repair attempts. Tool output is appended as a typed, compact result record before the next model call. Do not persist hidden reasoning; persist the plan and public tool summaries only.
 
-- [ ] **Step 4: Implement plan execution and confirmation gate**
+- [x] **Step 4: Implement plan execution and confirmation gate**
 
 For each step, persist `running`, publish the start event, execute one tool, persist/publish terminal result, then continue. Stop and open a confirmation request before any tool whose spec requires confirmation. `confirm_step` records a valid approval against the persisted step and re-enters the plan; `resume_plan` recovers a persisted plan after reconnect/restart and reclaims only eligible work through existing leases and idempotency keys.
 
-- [ ] **Step 5: Run planner and executor tests**
+- [x] **Step 5: Run planner and executor tests**
 
 Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_planner.py tests/test_video_agent_executor.py -v`
 

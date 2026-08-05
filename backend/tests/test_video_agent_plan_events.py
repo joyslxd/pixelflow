@@ -6,7 +6,6 @@ from pixelflow.agent_runtime.contracts import AgentEventType
 from pixelflow.video_agent.contracts import AgentPlan, AgentPlanStatus, AgentPlanStep, PlanStepStatus
 from pixelflow.video_agent.executor.events import build_plan_created_event, build_step_completed_event
 
-
 NOW = datetime(2026, 8, 4, tzinfo=UTC)
 
 

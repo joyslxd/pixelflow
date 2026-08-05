@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from pixelflow.agent_runtime.contracts import AgentEventType
 from pixelflow.video_agent.contracts import (
     AgentPlan,
     AgentPlanStatus,
@@ -12,7 +13,6 @@ from pixelflow.video_agent.contracts import (
     PlanStepStatus,
     VideoToolCall,
 )
-from pixelflow.agent_runtime.contracts import AgentEventType
 
 
 def test_completed_step_calculates_duration_from_persisted_timestamps() -> None:
