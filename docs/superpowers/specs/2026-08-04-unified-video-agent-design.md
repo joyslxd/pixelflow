@@ -9,8 +9,9 @@
 - `agent.plan.created`、`agent.step.*`、`agent.confirmation.requested` 公开事件契约，以及前端时间线状态投影；
 - `VideoAgentEntrypoint`：primary 视频 Turn 在 `/turns/start` 登记后创建或幂等复用工作区与首个计划，写入 `agent.plan.created`，且不再唤醒旧 live executor；
 - Gateway 在 SQL/内存任务存储下均装配该入口；Provider 未就绪不会阻止首个 VideoAgent 计划落库。
+- `start_step_with_event` 与 `complete_step_with_event`：在 SQL 中以同一事务更新步骤和写入现有 Outbox，内存实现提供等价的回滚与幂等语义；`agent.step.started` 和 `agent.step.completed` 已可按连续 sequence 投递。
 
-本阶段尚未完成工具循环、真实 Skill 匹配、计费确认、异步 Job DAG 编排、步骤状态与事件 Outbox 的同事务写入，以及 V2 工作台页面接入。为兼容已有会话归属合同，当前 primary 视频会话仍沿用 `supervisor_v1` 作为持久化编排标记；其视频 Turn 已由 V2 `VideoAgentEntrypoint` 接管。该兼容标记将在 V1 物理下线阶段移除。
+本阶段尚未完成工具循环、真实 Skill 匹配、计费确认、异步 Job DAG 编排，以及 V2 工作台页面接入。步骤事件 transition API 已完成，但会由后续工具执行器接入。为兼容已有会话归属合同，当前 primary 视频会话仍沿用 `supervisor_v1` 作为持久化编排标记；其视频 Turn 已由 V2 `VideoAgentEntrypoint` 接管。该兼容标记将在 V1 物理下线阶段移除。
 
 ## 现存问题
 PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视频拆解、素材替换、生成、质检、合成、剪映导出。但当前产品流程以固定工作流驱动，存在诸多痛点：

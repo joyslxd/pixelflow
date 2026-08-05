@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from pixelflow.agent_runtime.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_runtime.persistence.models import (
+    PixelFlowAgentEventRow,
     PixelFlowVideoAgentPlanRow,
     PixelFlowVideoAgentPlanStepRow,
     PixelFlowVideoAgentWorkspaceRow,
 )
-from pixelflow.agent_runtime.persistence.repositories import AgentRuntimeRecordConflictError
+from pixelflow.agent_runtime.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
+    AgentRuntimeRepository,
+)
 from pixelflow.video_agent.contracts import (
     AgentPlan,
     AgentPlanStatus,
@@ -22,6 +30,10 @@ from pixelflow.video_agent.contracts import (
     PlanStepStatus,
     VideoToolResult,
     VideoWorkspace,
+)
+from pixelflow.video_agent.executor.events import (
+    build_step_completed_event,
+    build_step_started_event,
 )
 
 
@@ -77,16 +89,43 @@ class VideoAgentRepository(Protocol):
         now: datetime,
     ) -> AgentPlanStep: ...
 
+    async def start_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]: ...
+
+    async def complete_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        result: VideoToolResult,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]: ...
+
     async def list_plan_steps(self, user_id: str, plan_id: str) -> list[AgentPlanStep]: ...
 
 
 class MemoryVideoAgentRepository:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        event_repository: AgentRuntimeRepository | None = None,
+    ) -> None:
         self._workspace_by_owner: dict[tuple[str, str], VideoWorkspace] = {}
         self._workspace_owner_by_id: dict[str, str] = {}
         self._plan_by_owner: dict[tuple[str, str], AgentPlan] = {}
         self._plan_owner_by_id: dict[str, str] = {}
         self._steps_by_owner: dict[tuple[str, str, str], AgentPlanStep] = {}
+        self._event_repository = event_repository
+        self._transition_lock = asyncio.Lock()
 
     async def create_workspace(self, user_id: str, workspace: VideoWorkspace) -> VideoWorkspace:
         owner = _owner(user_id)
@@ -181,6 +220,67 @@ class MemoryVideoAgentRepository:
         self._steps_by_owner[key] = _clone(completed)
         return _clone(completed)
 
+    async def start_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            key = (owner, plan_id, step_id)
+            before = self._steps_by_owner.get(key)
+            if before is None:
+                raise AgentRuntimeRecordConflictError("VideoAgent step 不存在或不属于当前用户")
+            step = await self.start_step(owner, plan_id, step_id, now=now)
+            try:
+                event = await self._persist_memory_event(
+                    owner,
+                    plan_id,
+                    step,
+                    run_id=run_id,
+                    now=now,
+                    completed=False,
+                )
+            except Exception:
+                self._steps_by_owner[key] = before
+                raise
+            return step, event
+
+    async def complete_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        result: VideoToolResult,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            key = (owner, plan_id, step_id)
+            before = self._steps_by_owner.get(key)
+            if before is None:
+                raise AgentRuntimeRecordConflictError("VideoAgent step 不存在或不属于当前用户")
+            step = await self.complete_step(owner, plan_id, step_id, result, now=now)
+            try:
+                event = await self._persist_memory_event(
+                    owner,
+                    plan_id,
+                    step,
+                    run_id=run_id,
+                    now=now,
+                    completed=True,
+                )
+            except Exception:
+                self._steps_by_owner[key] = before
+                raise
+            return step, event
+
     async def list_plan_steps(self, user_id: str, plan_id: str) -> list[AgentPlanStep]:
         owner = _owner(user_id)
         steps = [
@@ -189,6 +289,37 @@ class MemoryVideoAgentRepository:
             if step_owner == owner and stored_plan_id == plan_id
         ]
         return [_clone(step) for step in sorted(steps, key=lambda item: item.sequence)]
+
+    async def _persist_memory_event(
+        self,
+        owner: str,
+        plan_id: str,
+        step: AgentPlanStep,
+        *,
+        run_id: str,
+        now: datetime,
+        completed: bool,
+    ) -> AgentEvent:
+        if self._event_repository is None:
+            raise RuntimeError("VideoAgent step event repository 未配置")
+        plan = self._plan_by_owner.get((owner, plan_id))
+        if plan is None:
+            raise AgentRuntimeRecordConflictError("VideoAgent plan 不存在或不属于当前用户")
+        event_id = _step_event_id(step, completed=completed)
+        existing = await self._event_repository.get_event(owner, event_id)
+        if existing is not None:
+            return existing
+        events = await self._event_repository.list_events(owner, plan.conversation_id)
+        event = _build_step_event(
+            step,
+            completed=completed,
+            event_id=event_id,
+            sequence=1 if not events else events[-1].sequence + 1,
+            conversation_id=plan.conversation_id,
+            run_id=run_id,
+            occurred_at=now,
+        )
+        return await self._event_repository.create_event(owner, event)
 
 
 class SQLVideoAgentRepository:
@@ -301,6 +432,43 @@ class SQLVideoAgentRepository:
                 await session.flush()
                 return _step_from_row(row)
 
+    async def start_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        return await self._transition_step_with_event(
+            user_id,
+            plan_id,
+            step_id,
+            run_id=run_id,
+            now=now,
+            result=None,
+        )
+
+    async def complete_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        result: VideoToolResult,
+        *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        return await self._transition_step_with_event(
+            user_id,
+            plan_id,
+            step_id,
+            run_id=run_id,
+            now=now,
+            result=result,
+        )
+
     async def complete_step(
         self,
         user_id: str,
@@ -343,6 +511,108 @@ class SQLVideoAgentRepository:
             rows = (await session.scalars(statement)).all()
         return [_step_from_row(row) for row in rows]
 
+    async def _transition_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        run_id: str,
+        now: datetime,
+        result: VideoToolResult | None,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        owner = _owner(user_id)
+        completed = result is not None
+        event_id = _step_event_id_from_parts(
+            plan_id,
+            step_id,
+            completed=completed,
+        )
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    row = await self._locked_step(session, owner, plan_id, step_id)
+                    plan_row = await session.get(PixelFlowVideoAgentPlanRow, plan_id)
+                    if plan_row is None or plan_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("VideoAgent plan 不存在或不属于当前用户")
+                    existing_event = (
+                        await session.scalars(
+                            select(PixelFlowAgentEventRow).where(
+                                PixelFlowAgentEventRow.event_id == event_id,
+                            )
+                        )
+                    ).one_or_none()
+                    if completed:
+                        if result is None or row.tool_name != result.tool_name:
+                            raise AgentRuntimeRecordConflictError("VideoAgent 工具结果与 step 不匹配")
+                        if row.status == PlanStepStatus.COMPLETED.value:
+                            step = _step_from_row(row)
+                            if step.public_summary != result.public_summary or step.artifact_refs != result.artifact_refs:
+                                raise AgentRuntimeRecordConflictError("VideoAgent step 已用不同结果完成")
+                        elif row.status == PlanStepStatus.RUNNING.value:
+                            row.status = PlanStepStatus.COMPLETED.value
+                            row.public_summary = result.public_summary
+                            row.artifact_refs_json = list(result.artifact_refs)
+                            row.completed_at = now
+                            await session.flush()
+                            step = _step_from_row(row)
+                        else:
+                            raise AgentRuntimeRecordConflictError("VideoAgent step 不能完成")
+                    else:
+                        if row.status == PlanStepStatus.RUNNING.value:
+                            step = _step_from_row(row)
+                        elif row.status == PlanStepStatus.PENDING.value:
+                            row.status = PlanStepStatus.RUNNING.value
+                            row.started_at = now
+                            await session.flush()
+                            step = _step_from_row(row)
+                        else:
+                            raise AgentRuntimeRecordConflictError("VideoAgent step 不能开始")
+                    if existing_event is not None:
+                        if existing_event.user_id != owner:
+                            raise AgentRuntimeRecordConflictError("VideoAgent event 已属于其他用户")
+                        return step, _event_from_row(existing_event)
+                    last_event = (
+                        await session.scalars(
+                            select(PixelFlowAgentEventRow)
+                            .where(PixelFlowAgentEventRow.conversation_id == plan_row.conversation_id)
+                            .order_by(PixelFlowAgentEventRow.sequence.desc())
+                            .limit(1)
+                            .with_for_update()
+                        )
+                    ).first()
+                    if last_event is not None and last_event.user_id != owner:
+                        raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
+                    event = _build_step_event(
+                        step,
+                        completed=completed,
+                        event_id=event_id,
+                        sequence=1 if last_event is None else last_event.sequence + 1,
+                        conversation_id=plan_row.conversation_id,
+                        run_id=run_id,
+                        occurred_at=now,
+                    )
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=event.schema_version,
+                            event_id=event.event_id,
+                            sequence=event.sequence,
+                            cursor=event.cursor,
+                            conversation_id=event.conversation_id,
+                            user_id=owner,
+                            run_id=event.run_id,
+                            occurred_at=event.occurred_at,
+                            event_type=event.type.value,
+                            payload_json=event.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+                    await session.flush()
+                    return step, event
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError("VideoAgent step event 已存在或 sequence 冲突") from None
+
     async def _locked_step(
         self,
         session: AsyncSession,
@@ -370,6 +640,71 @@ def _owner(user_id: str) -> str:
     if not owner:
         raise ValueError("user_id 不能为空")
     return owner
+
+
+def _step_event_id_from_parts(
+    plan_id: str,
+    step_id: str,
+    *,
+    completed: bool,
+) -> str:
+    phase = "completed" if completed else "started"
+    value = f"pixelflow-video-agent:step-event:{plan_id}:{step_id}:{phase}"
+    return f"evt_{uuid5(NAMESPACE_URL, value).hex}"
+
+
+def _step_event_id(step: AgentPlanStep, *, completed: bool) -> str:
+    return _step_event_id_from_parts(
+        step.plan_id,
+        step.step_id,
+        completed=completed,
+    )
+
+
+def _build_step_event(
+    step: AgentPlanStep,
+    *,
+    completed: bool,
+    event_id: str,
+    sequence: int,
+    conversation_id: str,
+    run_id: str,
+    occurred_at: datetime,
+) -> AgentEvent:
+    cursor = f"cursor_{event_id[4:]}"
+    if completed:
+        return build_step_completed_event(
+            event_id=event_id,
+            cursor=cursor,
+            sequence=sequence,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            occurred_at=occurred_at,
+            step=step,
+        )
+    return build_step_started_event(
+        event_id=event_id,
+        cursor=cursor,
+        sequence=sequence,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        occurred_at=occurred_at,
+        step=step,
+    )
+
+
+def _event_from_row(row: PixelFlowAgentEventRow) -> AgentEvent:
+    return AgentEvent(
+        schema_version=row.schema_version,
+        event_id=row.event_id,
+        sequence=row.sequence,
+        cursor=row.cursor,
+        conversation_id=row.conversation_id,
+        run_id=row.run_id,
+        occurred_at=_restore_utc(row.occurred_at),
+        type=AgentEventType(row.event_type),
+        payload=row.payload_json,
+    )
 
 
 def _workspace_from_row(row: PixelFlowVideoAgentWorkspaceRow) -> VideoWorkspace:

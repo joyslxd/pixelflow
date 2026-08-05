@@ -206,7 +206,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 task_store=task_store,
             )
             video_runtime_repository = agent_runtime_repository
-            video_agent_repository = MemoryVideoAgentRepository()
+            video_agent_repository = MemoryVideoAgentRepository(
+                event_repository=agent_runtime_repository,
+            )
         else:
             # MySQL 对话 Store 尚无同事务 VideoRuntimeRepository，保持 R1 压缩并固定关闭 live。
             agent_runtime_repository = MemoryCompactionQueueRepository()

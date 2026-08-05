@@ -39,6 +39,37 @@ def build_plan_created_event(
     )
 
 
+def build_step_started_event(
+    *,
+    event_id: str,
+    cursor: str,
+    sequence: int,
+    conversation_id: str,
+    run_id: str,
+    occurred_at: datetime,
+    step: AgentPlanStep,
+) -> AgentEvent:
+    if step.started_at is None:
+        raise ValueError("started step event requires persisted start timestamp")
+    return AgentEvent(
+        event_id=event_id,
+        sequence=sequence,
+        cursor=cursor,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        occurred_at=occurred_at,
+        type=AgentEventType.AGENT_STEP_STARTED,
+        payload={
+            "plan_id": step.plan_id,
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "title": step.title,
+            "status": step.status.value,
+            "started_at": _iso(step.started_at),
+        },
+    )
+
+
 def build_step_completed_event(
     *,
     event_id: str,
