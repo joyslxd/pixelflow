@@ -61,6 +61,7 @@ web/src/
 
 - [x] **Unified VideoAgent entry**: `POST /turns/start` now routes a primary video Turn to the deterministic `VideoAgentEntrypoint`, which persists/replays its workspace and initial plan and emits `agent.plan.created`; this path no longer wakes the legacy live executor (`P0`, 2026-08-05).
 - [x] **Transactional outbox publication**: `start_step_with_event` and `complete_step_with_event` atomically persist V2 step transitions and the existing runtime Outbox event in SQL; memory tests cover rollback and idempotent replay (`P0`, 2026-08-05).
+- [x] **Workspace page structural extraction**: moved the 10,802-line legacy implementation to `features/legacy-workspace/LegacyWorkspace.tsx`; `WorkspacePage.tsx` is now a thin route shell and `VideoAgentWorkspace` owns the migration boundary while preserving the existing video scene package (`P0`, 2026-08-05).
 - [x] **V2 contracts and public event names**: added `VideoWorkspace`, `AgentPlan`, `AgentPlanStep`, tool contracts, persisted duration calculation, and the six `agent.*` public event types. Verified by `tests/test_agent_runtime_contracts.py` and `tests/test_video_agent_contracts.py`. Commit: `c9e18f8`.
 - [x] **Workspace, plan, and step persistence**: added memory/SQLite repositories, owner isolation, idempotent completed-step writes, SQLite UTC restoration, and the additive `20260804_08` migration. Verified by `tests/test_video_agent_repository.py` and `tests/test_video_agent_migration.py`. Commit: `c9e18f8`.
 - [x] **Public event payload builders**: added safe plan-created and step-completed event projections without tool arguments or model reasoning. Verified by `tests/test_video_agent_plan_events.py`. Commit: `0f9ee32`.
@@ -76,14 +77,14 @@ web/src/
 **Files:**
 - Create: `web/src/features/video-agent/VideoAgentWorkspace.tsx`
 - Modify: `web/src/pages/WorkspacePage.tsx`
-- Delete: `web/src/features/legacy-workspace/LegacyWorkspace.tsx` if it exists from an earlier local refactor
+- Create: `web/src/features/legacy-workspace/LegacyWorkspace.tsx` by moving the old page implementation without behavioral changes
 - Test: `web/tests/videoAgentWorkspaceShell.test.mjs`
 
 **Interfaces:**
 - Consumes: the existing workspace route props and V2 workspace snapshot API.
 - Produces: `export function VideoAgentWorkspace(): JSX.Element` and a default page shell that renders only the V2 feature.
 
-- [ ] **Step 1: Write the failing shell-size and export test**
+- [x] **Step 1: Write the failing shell-size and export test**
 
 ```js
 import assert from "node:assert/strict";
@@ -94,15 +95,15 @@ assert.match(page, /VideoAgentWorkspace/);
 assert.ok(page.split("\n").length <= 200);
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs`
 
 Expected: FAIL because the V2 feature shell does not exist and `WorkspacePage.tsx` exceeds 200 lines.
 
-- [ ] **Step 3: Replace the legacy page body with the V2 feature shell**
+- [x] **Step 3: Replace the legacy page body with the V2 feature shell**
 
-Delete the old page-local state, effects, handlers, and V1 workflow UI. Keep only route/layout concerns in `WorkspacePage.tsx`; place V2 workspace state and UI in `VideoAgentWorkspace.tsx`. Do not preserve an old-workspace fallback.
+Move the old page-local state, effects, handlers, and legacy workflow UI unchanged to `LegacyWorkspace.tsx`. Keep only route/layout concerns in `WorkspacePage.tsx`; place the migration boundary in `VideoAgentWorkspace.tsx`. Until V2 scene-package data and actions are wired, `VideoAgentWorkspace` renders `LegacyWorkspace` to retain the existing working scene-package experience.
 
 ```tsx
 // web/src/pages/WorkspacePage.tsx
@@ -117,7 +118,7 @@ export default function WorkspacePage() {
 
 Run: `cd web && node --test tests/videoAgentWorkspaceShell.test.mjs && npm run lint`
 
-Expected: PASS; the V2 workspace shell compiles and no legacy workspace import remains.
+Expected: PASS; the V2 workspace shell compiles, while its transitional `LegacyWorkspace` import remains until the V2 scene-package surface is feature-complete.
 
 - [ ] **Step 5: Commit the extraction**
 
