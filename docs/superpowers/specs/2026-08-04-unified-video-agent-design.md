@@ -1,10 +1,14 @@
 # 统一视频智能体架构设计方案
+
 ## 文档状态
+
 本设计基线已通过审批，对应分支：`feature/agent_0.8.5_boguan_joyce`
 本文档是**统一视频智能体迁移改造**的唯一权威基准文档。后续若需对架构进行实质性改动，必须先更新本文档。
 
 ### P0 已实现基线（2026-08-05）
+
 当前代码已经建立了统一入口的可恢复骨架：
+
 - `VideoWorkspace`、`AgentPlan`、`AgentPlanStep` 及其 SQL 迁移和用户隔离仓储；
 - `agent.plan.created`、`agent.step.*`、`agent.confirmation.requested` 公开事件契约，以及前端时间线状态投影；
 - `VideoAgentEntrypoint`：primary 视频 Turn 在 `/turns/start` 登记后创建或幂等复用工作区与首个计划，写入 `agent.plan.created`，且不再唤醒旧 live executor；
@@ -14,7 +18,9 @@
 本阶段尚未完成工具循环、真实 Skill 匹配、计费确认、异步 Job DAG 编排，以及 V2 工作台页面接入。步骤事件 transition API 已完成，但会由后续工具执行器接入。为兼容已有会话归属合同，当前 primary 视频会话仍沿用 `supervisor_v1` 作为持久化编排标记；其视频 Turn 已由 V2 `VideoAgentEntrypoint` 接管。该兼容标记将在 V1 物理下线阶段移除。
 
 ## 现存问题
+
 PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视频拆解、素材替换、生成、质检、合成、剪映导出。但当前产品流程以固定工作流驱动，存在诸多痛点：
+
 1. 用户已有完整脚本，仍必须强制走方案评审流程；
 2. 用户仅有创意想法时，无法在生成前自然发散、探索创作方向；
 3. 用户上传参考视频后，无法以「替换产品」作为单一目标一键完成全流程；
@@ -24,6 +30,7 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 新版系统要求：**单一对话式统一入口**。智能体自动识别用户视频创作目标，加载对应能力指引、调用受控工具、生成简短可执行方案，每轮工具执行完成后持续推进流程；同时针对成本高昂的异步视频任务做好安全管控。
 
 ## 设计目标
+
 1. 统一视频创作入口，覆盖脚本成片、创意头脑风暴、参考视频二次改编、成片审核、镜头修复、视频合成、导出全场景；
 2. 由智能体自主匹配创作能力与受控工具，废除强制 `Plan.md` 固定流程；
 3. 持久化项目工作区，存储脚本、参考素材、资产文件、镜头、多版成片、质检报告、生成结果；
@@ -32,14 +39,20 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 6. 默认沿用V1版本现有DeepSeek模型，架构预留模型切换、A/B实验能力；
 7. 保留原有能力：用户数据隔离、幂等执行、额度校验、外部任务故障恢复、SSE消息推送、全链路审计。
 
+
+
 ## 非设计目标（不实现功能）
+
 1. 不向大模型暴露底层厂商原始接口，不允许任意Shell脚本执行；
 2. 不把每一条用户请求硬编码为独立流程状态；
 3. 能力未就绪前不删除V1原有工作流，不迁移正在运行的V1任务；就绪后按「统一切换与下线」一次切走，不做会话级灰度分流；
 4. 不在 `WorkspacePage.tsx`、V1智能体流程编排层新增业务功能；
 5. 不实现用户白名单、流量百分比 canary，或长期 `video_agent_v2` / `supervisor_v1` 双轨路由。
 
+
+
 ## 目标整体架构
+
 ```
 统一对话输入
   → 轻量化对话路由分发器
@@ -53,12 +66,17 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
   → 现有视频业务底层能力与厂商服务
 ```
 
+
+
 ### 轻量化路由分发器
+
 原有调度器 Supervisor 简化为跨场景分发模块：识别请求属于视频/图片/PPT/普通对话，统一鉴权、全局并发限制、基础安全校验；随后将原始用户输入、附件、项目标识完整转发至对应智能体。
 路由层禁止将视频需求翻译成固定动作（如修改流程、重绘镜头、重试失败任务）。视频相关意图统一由 `VideoAgent` 全权处理。
 
 ### 视频智能体 VideoAgent
+
 `VideoAgent` 是视频领域唯一负责流程规划、工具选择的核心模块，每一轮交互执行逻辑：
+
 1. 仅加载当前项目相关数据；
 2. 匹配适用的创作能力说明；
 3. 生成结构化精简执行方案，信息不足时主动向用户精准提问；
@@ -66,7 +84,10 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 5. 持久化每一步输出结果，工具返回数据发生变化时自动修正剩余执行方案；
 6. 涉及计费、批量任务、破坏性操作前，必须向用户发起确认。
 
+
+
 #### 参考：参考视频改编完整执行方案示例
+
 ```
 分析参考视频
 → 提取分镜与素材清单
@@ -78,9 +99,16 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 → 合成完整视频
 ```
 
+
+
 ## 项目与执行数据存储设计
+
+
+
 ### 视频工作区 VideoWorkspace
+
 项目持久化黑板，支持版本管理，存储内容包含：
+
 - 产品素材、物料资源；
 - 原生脚本、导入脚本、对话生成的脚本草稿；
 - 参考视频及拆解结果；
@@ -92,6 +120,7 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 `Plan.md` 改为可选附属文件：用户上传成熟脚本可直接使用；仅提供创意则只生成草稿；上传参考视频会自动提取画面约束与素材信息。
 
 ### 执行方案与单步任务 AgentPlan / AgentPlanStep
+
 每一轮交互生成一份持久化执行方案，每个执行步骤记录字段：
 步骤ID、方案ID、执行序号
 能力ID、工具名称
@@ -103,13 +132,16 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 数据恢复仅依赖持久化步骤记录，而非SSE消息流。步骤耗时通过时间戳计算：运行中步骤展示已运行时长；页面刷新/重连后，已完成步骤展示总耗时。
 
 ### 任务有向无环图 Job DAG
+
 仅存放异步、计费类任务：参考视频拆解、镜头生成、质检、视频合成、导出。复用智能体运行时能力：任务唯一标识、幂等保障、租约锁、厂商轮询、额度鉴权、故障恢复。
 
 ## 能力与工具体系
+
 能力（Skill）仅提供指引，无执行权限：描述适用场景、入参出参、约束条件、示例、推荐执行顺序。
 工具（Tool）是服务端注册的强类型代码接口，所有入参强制校验。
 
 首期工具清单（精简可控）：
+
 - `inspect_video_workspace` 查看项目工作区
 - `import_script` 导入脚本
 - `brainstorm_script` 脚本创意生成
@@ -124,15 +156,23 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 每款工具明确定义：入参出参规范、消耗等级、是否需要用户确认、幂等策略、故障恢复逻辑、允许修改的项目数据范围。大模型禁止直接调用底层渲染、FFmpeg、剪映、数据库、厂商接口。
 
 ## 原有代码边界划分
+
+
+
 ### 保留不动模块
+
 - `backend/pixelflow/agent_runtime/jobs/`：任务标识、租约、轮询、故障恢复、额度校验；
 - `backend/pixelflow/agent_runtime/persistence/`：数据仓储、事件队列、用户隔离、持久状态；
 - `backend/pixelflow/agent_runtime/context/`：上下文内存管控与压缩，新增镜头素材数据包；
 - `原有视频业务底层能力：agent_workflows/video、generate、qc、skills`；
 - 现有智能体事件SSE推送框架、前端调度事件映射逻辑（用于迁移对照）。
 
+
+
 ### 冻结、仅适配兼容的模块
+
 V1流程编排文件仅做兼容兜底，**不再新增V2功能**：
+
 - `agent_workflows/video/live_handler.py`
 - `agent_workflows/video/live_operations.py`
 - `agent_workflows/video/live_quota.py`
@@ -141,6 +181,7 @@ V1流程编排文件仅做兼容兜底，**不再新增V2功能**：
 V2通过适配器封装复用底层可复用逻辑（规划、镜头包、视频生成、后期制作、交付模块）。稳定后底层代码可迁移至 `video_domain/`，首期上线无需迁移。
 
 ### 后端新增代码目录
+
 ```
 backend/pixelflow/video_agent/
   contracts/       方案、步骤、工作区、工具调用/返回数据结构定义
@@ -156,9 +197,11 @@ backend/pixelflow/video_agent/
 `agent_runtime/supervisor/` 仅保留V1调度逻辑，V2仅用作轻量化路由分发。
 
 ## 前端事件时间线与页面改造
+
 前端仅展示执行过程叙事，隐藏模型内部推理内容。每条时间线条目包含简洁标题、可见输入、结果摘要、关联素材、状态、时间戳、耗时；示例文案：「识别6个镜头」「镜头3需重新生成」。
 
 ### 信息架构（布局约定）
+
 采用 **对话流内嵌执行叙事**（类似 Codex / Cursor Agent 的交互），**不**把时间线做成独立中栏看板：
 
 1. **主栏 = 对话流**：用户消息、助手结论（`message.upserted`）、执行方案卡片、逐步工具/步骤块、确认卡，按时间顺序混排在同一滚动列表中；
@@ -170,6 +213,7 @@ backend/pixelflow/video_agent/
 `AgentPlanTimeline` 是对话流内的步骤序列组件，不是页面级中栏容器。
 
 ### 页面示意图（参考视频改编场景）
+
 以下为 `VideoAgentWorkspace` 目标态线框。主栏是对话流；右侧仅证据预览。滚动顺序：用户消息 → 方案卡 → 步骤块 → 确认卡 → 助手结论。
 
 ```text
@@ -229,6 +273,7 @@ backend/pixelflow/video_agent/
 刻意不展示：模型思考链、完整 tool 参数、厂商原始响应、内部 prompt。
 
 新增持久化事件类型：
+
 - `agent.plan.created` 执行方案创建
 - `agent.step.started` 步骤开始执行
 - `agent.step.progressed` 步骤进度更新
@@ -240,6 +285,7 @@ backend/pixelflow/video_agent/
 
 现有 `WorkspacePage.tsx` 混杂老旧状态、V1调度逻辑、任务轮询、页面交互。**禁止在此文件新增V2功能**。
 首期迁移将原有页面逻辑拆分迁移至：
+
 ```
 web/src/features/legacy-workspace/LegacyWorkspace.tsx
 web/src/features/video-agent/
@@ -254,21 +300,27 @@ web/src/features/video-agent/
 最终 `web/src/pages/WorkspacePage.tsx` 仅作为路由布局外壳（代码量100–200行），根据流程模式渲染旧版页面或V2智能体工作区。
 
 ## 大模型选型策略
+
 V2首期沿用现有 `deepseek-v4-pro` 配置。智能体执行链路依赖统一模型厂商接口，支持结构化输出、工具调用、工具结果回读、图片素材输入、能力分级。
 首期不依赖Kimi K3；后续完善厂商回读能力、完成标准用例评测后，可注册为高复杂度流程规划备选模型。
 视频画面拆解、视觉质检仍使用专用视觉大模型，不依赖流程规划大模型。
 
 ## 统一切换与下线策略
+
 **不做**白名单、流量百分比或其他会话级灰度分流；不引入长期并存的 `video_agent_v2` / `supervisor_v1` 双轨路由。
 
 迁移期约定：
+
 1. 开发与联调阶段可继续沿用现有 `supervisor_v1` 持久化编排标记作为兼容合同，但视频 Turn 已由 `VideoAgentEntrypoint` 统一接管；
 2. V2 能力、契约、观测与验收就绪后，执行**一次统一切换**：所有新视频对话进入 VideoAgent 统一入口；
 3. 切换同时启动 V1 物理下线：移除 `supervisor_v1` 兼容标记与 V1 视频编排分支，删除灰度/模式选择相关开关；
 4. 正在运行的 V1 任务**不原地迁移**到新流程；历史 V1 会话仅保留只读归档与审计，不再唤醒旧 live executor；
 5. 回滚手段是发布门禁与版本回退（整包回退到切换前发布），而不是运行时按用户或百分比切流。
 
+
+
 ## 迭代里程碑
+
 1. 拆分前端旧页面逻辑，`WorkspacePage.tsx` 简化为路由外壳，保障原有功能测试全量通过；
 2. 实现工作区、执行方案、步骤持久化，配套数据迁移脚本、仓储、事件规范、故障恢复用例；
 3. 完成视频智能体规划器、能力清单、工具注册、DeepSeek模型适配、可视化执行时间线；
@@ -276,7 +328,10 @@ V2首期沿用现有 `deepseek-v4-pro` 配置。智能体执行链路依赖统�
 5. 完成镜头质检、镜头修复、定向重绘、质检、合成、导出全工具适配；
 6. 统一切换到 VideoAgent 入口，下线 V1 视频编排与兼容标记，补齐观测指标与发布门禁。
 
+
+
 ## 验收验证标准
+
 1. 用户上传完整脚本，无需强制创意评审即可直接生成视频；
 2. 用户仅提供创意想法时，支持多轮发散沟通，用户确认后才发起计费生成任务；
 3. 上传参考视频自动拆解，素材替换精准定位受影响镜头，计费确认后才执行生成；
@@ -285,10 +340,15 @@ V2首期沿用现有 `deepseek-v4-pro` 配置。智能体执行链路依赖统�
 6. V1原有回归测试全部通过；V2新增接口契约、规划器、工具、仓储、SSE、端到端全量测试；
 7. 标准测试用例覆盖30–50种真实创作场景，校验意图识别、工具选择、澄清提问、镜头定位、多步骤闭环、生成失败、重复计费、响应耗时、资源消耗等指标。
 
+
+
 ## 改造工作量预估
+
 V2整体迁移预计新增/大幅修改文件45–65个，前后端、数据库迁移、测试代码合计新增代码7000–11000行。各里程碑可独立分批上线，无需一次性全量重构。
 
 # Unified Video Agent Design
+
+
 
 ## Status
 
@@ -318,6 +378,8 @@ The new system must use one conversational entry point. It infers the user's vid
 - Default to the existing DeepSeek model in V1. The architecture must allow a later model switch or A/B evaluation.
 - Preserve user isolation, idempotency, quota confirmation, external-job recovery, SSE delivery, and auditability.
 
+
+
 ## Non-goals
 
 - Do not expose raw provider APIs or arbitrary shell execution to the model.
@@ -325,6 +387,8 @@ The new system must use one conversational entry point. It infers the user's vid
 - Do not delete V1 workflows or migrate running V1 tasks before cutover readiness; after readiness, retire them in one unified cutover rather than session-level canary routing.
 - Do not add new feature logic to `WorkspacePage.tsx` or the V1 `agent_workflows` orchestration layer.
 - Do not implement user allowlists, traffic-percentage canaries, or a long-lived dual-track of `video_agent_v2` versus `supervisor_v1`.
+
+
 
 ## Target Architecture
 
@@ -340,6 +404,8 @@ Unified chat input
        -> persistence, idempotency, leases, polling, quota, interrupt, SSE
   -> existing domain capabilities and provider skills
 ```
+
+
 
 ### Thin Router
 
@@ -371,7 +437,11 @@ analyze_reference_video
 -> compose_video
 ```
 
+
+
 ## Project and Execution Data
+
+
 
 ### VideoWorkspace
 
@@ -427,6 +497,8 @@ Every tool declares input and output schemas, cost level, confirmation policy, i
 
 ## Existing Code Boundaries
 
+
+
 ### Keep
 
 - `backend/pixelflow/agent_runtime/jobs/`: operation identity, leases, polling, recovery, quota.
@@ -434,6 +506,8 @@ Every tool declares input and output schemas, cost level, confirmation policy, i
 - `backend/pixelflow/agent_runtime/context/`: context budgeting and compaction, extended with scene evidence packs.
 - Existing video domain capabilities in `agent_workflows/video`, `generate`, `qc`, and `skills`.
 - Existing AgentEvent SSE infrastructure and frontend Supervisor event projections as migration references.
+
+
 
 ### Freeze and Adapt
 
@@ -554,6 +628,8 @@ Migration rules:
 4. Running V1 tasks are never migrated in place. Historical V1 conversations stay read-only for audit and must not wake the legacy live executor.
 5. Rollback is release gating and version rollback to the pre-cutover build, not runtime user- or percentage-based traffic switching.
 
+
+
 ## Milestones
 
 1. Extract the legacy frontend feature and reduce `WorkspacePage.tsx` to a shell with behavior-preserving tests.
@@ -562,6 +638,8 @@ Migration rules:
 4. Adapt script import, creative discussion, and reference-video analysis as the first unified-entry tools.
 5. Adapt scene inspection, patching, selective regeneration, QC, composition, and export tools.
 6. Cut over to the VideoAgent entrypoint, retire V1 video orchestration and compatibility markers, and add observability plus release gates.
+
+
 
 ## Verification and Acceptance
 
@@ -572,6 +650,8 @@ Migration rules:
 - Reload, reconnect, retry, duplicate submission, and worker restart preserve plan steps, durations, external jobs, and cost safety.
 - V1 regression tests remain green; V2 adds contract, planner, tool, repository, SSE/reducer, and end-to-end tests.
 - Golden cases cover 30-50 realistic requests and measure intent/tool selection correctness, clarification correctness, scene targeting, multi-step completion, erroneous generation, duplicate billing, latency, and cost.
+
+
 
 ## Size Estimate
 
