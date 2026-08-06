@@ -7,6 +7,7 @@ import {
   PauseCircle,
   SkipForward,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { VideoAgentPlanState, VideoAgentStepState } from "./state/contracts";
 
 interface AgentPlanTimelineProps {
@@ -48,10 +49,19 @@ function displayedDuration(step: VideoAgentStepState, now: number): string | nul
   return Number.isNaN(startedAt) ? null : formatAgentStepDuration(Math.max(0, now - startedAt));
 }
 
-export function AgentPlanTimeline({ plan, now = Date.now() }: AgentPlanTimelineProps) {
+export function AgentPlanTimeline({ plan, now }: AgentPlanTimelineProps) {
+  const [liveNow, setLiveNow] = useState(() => now ?? Date.now());
+  const hasRunningStep = plan !== null
+    && Object.values(plan.steps).some((step) => step.status === "running");
+  useEffect(() => {
+    if (now !== undefined || !hasRunningStep) return undefined;
+    const timer = window.setInterval(() => setLiveNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasRunningStep, now]);
   if (plan === null) return null;
   const steps = Object.values(plan.steps).sort((left, right) => left.sequence - right.sequence);
   if (steps.length === 0) return null;
+  const displayNow = now ?? liveNow;
 
   return (
     <section aria-label="执行步骤" className="border-b border-slate-200 bg-white px-4 py-3">
@@ -59,7 +69,7 @@ export function AgentPlanTimeline({ plan, now = Date.now() }: AgentPlanTimelineP
         {plan.publicGoal ? <p className="mb-2 text-sm font-medium text-slate-800">{plan.publicGoal}</p> : null}
         <ol className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {steps.map((step) => {
-            const duration = displayedDuration(step, now);
+            const duration = displayedDuration(step, displayNow);
             return (
               <li key={step.stepId} className="min-w-0 border-l-2 border-slate-200 pl-3">
                 <div className="flex items-center gap-2 text-sm text-slate-700">

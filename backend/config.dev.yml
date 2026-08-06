@@ -106,6 +106,9 @@ pixelflow:
   caption_font: "../caption"  # 用途：设置字幕字体目录；影响：烧录字幕时从该路径查找字体。
   # 第三方剪映草稿 Provider；测试与生产当前使用同一服务地址。
   jianying_draft_enabled: true  # 用途：启用剪映草稿 Provider；影响：最终视频可创建第三方草稿任务。
+  # 用途：声明content-app已部署服务凭据代表target_user_id的幂等内部上传接口；布尔值，默认false，修改后需重启。
+  # 影响：true时R2剪映恢复Worker可把ZIP归属到原用户并允许四类live Provider就绪；接口未部署时必须保持false，回滚恢复false；非敏感值。
+  content_app_internal_upload_enabled: false
   jianying_draft_base_url: "https://s4b29nq5dvu0jtq75uj1h.apigateway-cn-shanghai.volceapi.com"  # 用途：配置草稿服务地址；影响：创建和查询请求发送到该网关。
   # 第三方剪映草稿接口固定鉴权 token，会写入请求 Header 的 token 字段。
   jianying_draft_token: "79ddb1ca49342b32a1eba57057672129"  # 用途：鉴权草稿服务；影响：错误值会拒绝请求；敏感值由 Provider 管理员提供。

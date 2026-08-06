@@ -159,6 +159,7 @@ def test_contract_enums_match_the_frozen_wire_values() -> None:
         "agent.step.completed",
         "agent.step.failed",
         "agent.confirmation.requested",
+        "agent.route.decided",
         "error.raised",
     }
     assert {item.value for item in AgentIntent} == {

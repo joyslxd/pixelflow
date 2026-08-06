@@ -101,6 +101,9 @@ pixelflow:
   caption_font: "../aption"
   # 用途：控制第三方剪映草稿 Provider；布尔值，生产默认 true，修改后需重启；影响：false 会返回能力未配置，回滚恢复 true。
   jianying_draft_enabled: true
+  # 用途：声明content-app已部署服务凭据代表target_user_id的幂等内部上传接口；布尔值，生产默认false，修改后需重启。
+  # 影响：true时R2剪映恢复Worker可把ZIP归属到原用户并允许四类live Provider就绪；上线前必须验证接口，回滚恢复false；非敏感值。
+  content_app_internal_upload_enabled: false
   # 用途：配置剪映草稿 Provider 地址；HTTPS URL，修改后需重启；影响：创建和查询请求改投该地址，回滚恢复发布前地址。
   jianying_draft_base_url: "https://s4b29nq5dvu0jtq75uj1h.apigateway-cn-shanghai.volceapi.com"
   # 用途：配置剪映草稿 Provider 固定鉴权 token；敏感字符串，修改后需重启；影响：不匹配会使任务创建失败，回滚恢复服务器备份值；值由 Provider 管理员提供。

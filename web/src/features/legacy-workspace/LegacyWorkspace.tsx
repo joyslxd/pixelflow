@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CanvasPanel } from "@/components/canvas/CanvasPanel";
-import { StoryboardPanel } from "@/components/canvas/StoryboardPanel";
 import { GenParamsDialog, type CreationIntent, type GenParamsForm } from "@/components/composer/GenParamsDialog";
 import { PlanRevisionDialog, type PlanRevisionMode } from "@/components/composer/PlanRevisionDialog";
 import {
@@ -76,6 +75,11 @@ import {
   shouldApplyVisibleConversationSideEffect,
 } from "@/lib/conversationRouting";
 import { useSupervisorConversation } from "@/hooks/useSupervisorConversation";
+import { AgentPlanTimeline } from "@/features/video-agent/AgentPlanTimeline";
+import { AgentConfirmationCard } from "@/features/video-agent/AgentConfirmationCard";
+import { SceneEvidencePanel } from "@/features/video-agent/SceneEvidencePanel";
+import { VideoAgentStoryboardSurface } from "@/features/video-agent/VideoAgentStoryboardSurface";
+import { useVideoAgent } from "@/features/video-agent/hooks/useVideoAgent";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
@@ -135,7 +139,6 @@ import {
   resolveWorkspacePrimaryExecutionReady,
   resolveWorkspaceInteractionPolicy,
   resolveWorkspaceRuntimePolicy,
-  inferInitialRuntimeIntent,
   type WorkspaceAgentRuntimeMode,
 } from "@/lib/supervisor/legacyAdapter";
 import { resolveSupervisorRuntimeNotice } from "@/lib/supervisor/runtimeNotice";
@@ -196,6 +199,8 @@ interface SupervisorVideoTarget {
 interface RegisteredSupervisorTurn {
   runId: string;
   status: "accepted" | "queued";
+  orchestrationMode: OrchestrationMode;
+  routeIntent: "video" | "image" | "ppt" | "video_analysis" | "unknown" | null;
 }
 
 interface DeferredOwnershipInput {
@@ -373,14 +378,21 @@ const parseRegisteredSupervisorTurn = (
   }
   const runId = value.run_id;
   const status = value.status;
+  const orchestrationMode = value.orchestration_mode;
+  const routeDecision = value.route_decision;
+  const routeIntent = isJsonObject(routeDecision)
+    && ["video", "image", "ppt", "video_analysis", "unknown"].includes(String(routeDecision.intent))
+    ? routeDecision.intent as RegisteredSupervisorTurn["routeIntent"]
+    : null;
   if (
     typeof runId !== "string"
     || !runId
     || (status !== "accepted" && status !== "queued")
+    || (orchestrationMode !== "frontend_v2" && orchestrationMode !== "supervisor_v1")
   ) {
     throw new TypeError("Agent Turn 返回格式不合法");
   }
-  return { runId, status };
+  return { runId, status, orchestrationMode, routeIntent };
 };
 
 const isCreationIntent = (value: unknown): value is CreationIntent => value === "video" || value === "image" || value === "ppt";
@@ -2116,6 +2128,9 @@ export function WorkspacePage() {
   const restoredSupervisorUi = useMemo(
     () => restoreSupervisorVideoUi(supervisorRuntime.state.interrupt?.payload),
     [supervisorRuntime.state.interrupt?.payload],
+  );
+  const videoAgentView = useVideoAgent(
+    supervisorRuntime.state.videoAgentWorkspace,
   );
   const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
     if (
@@ -7553,7 +7568,6 @@ export function WorkspacePage() {
       last_phase: String(canvas.phase || "idle"),
       current_task_id: currentTaskId || null,
       context: makeSnapshot() as unknown as Record<string, unknown>,
-      initial_intent: inferInitialRuntimeIntent(title),
     });
     const createdMode = resolveWorkspaceOrchestrationMode(created);
     const createdAgentRuntimeMode = resolveWorkspaceAgentRuntimeMode(created);
@@ -7680,6 +7694,15 @@ export function WorkspacePage() {
       const started = parseRegisteredSupervisorTurn(
         await supervisorRuntime.startTurn(request),
       );
+      setResolvedOrchestrationMode(started.orchestrationMode);
+      primaryExecutionReadyRef.current = started.orchestrationMode === "supervisor_v1";
+      if (started.routeIntent === "unknown") {
+        await appendPersistedSupervisorNotice(
+          "我还不能确定你要创建视频、图片、PPT，还是分析参考视频。请补充说明目标。",
+          targetConversationId,
+          `agent-route-clarification:${targetConversationId}:${pendingTurn.clientInputId}:v1`,
+        );
+      }
       // Turn 已接受后刷新一次，让紧随其后的排队输入看到服务端最新版本。
       try {
         await supervisorRuntime.refreshSnapshot();
@@ -7882,6 +7905,9 @@ export function WorkspacePage() {
         if (!registered) return;
         const registeredTurn: PendingSupervisorTurn = {
           ...pendingTurn,
+          continueLegacy: registered.routeIntent === "unknown"
+            ? false
+            : pendingTurn.continueLegacy,
           registrationStatus: "registered",
           runId: registered.runId,
         };
@@ -10550,7 +10576,24 @@ export function WorkspacePage() {
     : null;
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      <AgentPlanTimeline plan={supervisorRuntime.state.videoAgentPlan} />
+      {supervisorRuntime.state.videoAgentConfirmation ? (
+        <div className="border-b border-slate-200 bg-white px-4 py-3">
+          <div className="mx-auto max-w-6xl">
+            <AgentConfirmationCard
+              confirmationId={supervisorRuntime.state.videoAgentConfirmation.confirmationId}
+              stepId={supervisorRuntime.state.videoAgentConfirmation.stepId}
+              title={supervisorRuntime.state.videoAgentConfirmation.title}
+              costSummary={supervisorRuntime.state.videoAgentConfirmation.costSummary}
+              affectedSceneIds={supervisorRuntime.state.videoAgentConfirmation.affectedSceneIds}
+              actionAvailable={supervisorRuntime.state.videoAgentConfirmation.submittable}
+              unavailableReason={supervisorRuntime.state.videoAgentConfirmation.unavailableReason}
+            />
+          </div>
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1">
       <ChatPanel
         messages={messages}
         onSubmit={handleSend}
@@ -10654,7 +10697,7 @@ export function WorkspacePage() {
           />
         </Suspense>
       ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
-        <StoryboardPanel
+        <VideoAgentStoryboardSurface
           msg={selectedStoryboardMessage}
           deferSceneUpdates={Boolean(supervisorVideoArtifact)}
           onUpdateVideoScenePackage={legacyArtifactActionsEnabled
@@ -10700,6 +10743,24 @@ export function WorkspacePage() {
           briefConfirmed={briefConfirmed}
         />
       )}
+      {!canvasOpen && videoAgentView.selectedEvidence ? (
+        <SceneEvidencePanel
+          revision={videoAgentView.selectedEvidence.revision}
+          scene={videoAgentView.selectedEvidence.scene}
+          scenes={videoAgentView.workspace?.scenes}
+          selectedSceneId={videoAgentView.selectedSceneId}
+          onSelectScene={videoAgentView.selectScene}
+          onEditScene={(sceneId) => {
+            const selected = videoAgentView.workspace?.scenes.find(
+              (scene) => scene.sceneId === sceneId,
+            );
+            setComposerPrefillRequest({
+              id: uid(),
+              content: `请修改分镜 ${selected?.sceneIndex ?? sceneId}：`,
+            });
+          }}
+        />
+      ) : null}
       {legacyArtifactActionsEnabled && dialogOpen && (
         <GenParamsDialog
           key={`${pendingIntent}:${pendingCore}`}
@@ -10797,6 +10858,7 @@ export function WorkspacePage() {
         onConfirm={(mode) => void handleConfirmPlanRevisionMode(mode)}
         onCancel={handleCancelPlanRevisionMode}
       />
+      </div>
     </div>
   );
 }

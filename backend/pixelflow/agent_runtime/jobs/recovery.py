@@ -224,6 +224,25 @@ class OperationStartCoordinator:
                 )
             raise OperationConflictError("Provider start 结果不确定，保留租约以避免重复启动")
 
+        if snapshot.outcome in {
+            ProviderJobOutcome.SUCCEEDED,
+            ProviderJobOutcome.FAILED,
+            ProviderJobOutcome.TIMEOUT,
+            ProviderJobOutcome.EXPIRED,
+        }:
+            completed_at = self._clock()
+            completion = await OperationCompletionCoordinator(
+                self._repository,
+                user_id=self._user_id,
+                conversation_id=self._conversation_id,
+            ).record_start_terminal(
+                operation.job_id,
+                snapshot,
+                lease_owner=worker,
+                now=completed_at,
+            )
+            return completion.operation
+
         started_at = self._clock()
         started = await self._repository.complete_operation_start(
             self._user_id,
@@ -373,7 +392,11 @@ class OperationRecoveryRuntime:
         if provider_job_id is None:
             raise OperationConflictError("已领取 Operation 缺少 provider job ID")
         try:
-            snapshot = await adapter.status(provider_job_id)
+            snapshot = await adapter.status(
+                provider_job_id,
+                user_id=user_id,
+                conversation_id=operation.conversation_id,
+            )
         except (ProviderJobCallError, ProviderJobMappingError):
             observed_at = self._clock()
             scheduled = await self._repository.schedule_operation_poll(

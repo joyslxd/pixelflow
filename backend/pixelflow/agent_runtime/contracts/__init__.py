@@ -21,6 +21,13 @@ from .live import (
     InterruptResponseValue,
 )
 from .records import ExternalJobRef, TurnRecord, WorkflowRecord
+from .routing import (
+    RouteDecision,
+    RouteDecisionSource,
+    RouteIntent,
+    RouteMaterial,
+    RouteRequest,
+)
 
 __all__ = [
     "ActionDecision",
@@ -41,6 +48,11 @@ __all__ = [
     "InterruptResponseValue",
     "OperationRequest",
     "OrchestrationMode",
+    "RouteDecision",
+    "RouteDecisionSource",
+    "RouteIntent",
+    "RouteMaterial",
+    "RouteRequest",
     "TurnRecord",
     "TurnStartRequest",
     "TurnStatus",

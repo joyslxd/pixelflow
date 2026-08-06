@@ -35,6 +35,10 @@ class VideoToolValidationError(ValueError):
     """表示用户或规划器可以通过修正参数恢复的工具调用错误。"""
 
 
+class VideoToolExecutionError(RuntimeError):
+    """表示工具执行失败且必须收敛为固定公开摘要。"""
+
+
 @dataclass(frozen=True)
 class VideoToolSpec:
     name: str
@@ -56,10 +60,18 @@ class VideoToolSpec:
 class VideoToolContext:
     user_id: str
     workspace: VideoWorkspace
+    plan_id: str | None = None
+    step_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.user_id.strip():
             raise ValueError("工具上下文必须包含用户标识")
+        if (self.plan_id is None) != (self.step_id is None):
+            raise ValueError("工具上下文的 plan_id 与 step_id 必须同时提供")
+        if self.plan_id is not None and (
+            not self.plan_id.strip() or not self.step_id or not self.step_id.strip()
+        ):
+            raise ValueError("工具上下文的计划与步骤标识不能为空")
 
 
 class VideoTool(Protocol):
@@ -113,7 +125,7 @@ class VideoToolRegistry:
                 public_summary="工具参数无效，请修正后重试",
             )
         try:
-            return await tool.execute(
+            result = await tool.execute(
                 context,
                 validated.model_dump(mode="json"),
             )
@@ -122,3 +134,21 @@ class VideoToolRegistry:
                 tool_name=tool.spec.name,
                 public_summary="工具参数无效，请修正后重试",
             )
+        except VideoToolExecutionError:
+            return VideoToolResult(
+                tool_name=tool.spec.name,
+                public_summary="工具执行失败，请稍后重试",
+            )
+        allowed_roots = {
+            mutation.split(".", maxsplit=1)[0]
+            for mutation in tool.spec.workspace_mutations
+        }
+        if (
+            result.tool_name != tool.spec.name
+            or not set(result.workspace_patch).issubset(allowed_roots)
+        ):
+            return VideoToolResult(
+                tool_name=tool.spec.name,
+                public_summary="工具结果无效，请稍后重试",
+            )
+        return result

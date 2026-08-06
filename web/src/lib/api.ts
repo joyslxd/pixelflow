@@ -1691,7 +1691,6 @@ export const api = {
     current_task_id?: string | null;
     last_phase?: string;
     context?: Record<string, unknown>;
-    initial_intent?: "image" | "video" | "ppt" | "video_analysis" | null;
   } = {}) =>
     req<ConversationSummaryResponse>("/conversations", { method: "POST", body: JSON.stringify(body) }),
 

@@ -56,6 +56,69 @@ class BillableTool:
         )
 
 
+class WorkspacePatchTool:
+    spec = VideoToolSpec(
+        name="import_script",
+        description="测试工作区补丁",
+        input_model=EmptyInput,
+        cost_level=VideoToolCostLevel.NONE,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("script",),
+    )
+
+    async def execute(self, context: VideoToolContext, arguments):
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="脚本已导入",
+            workspace_patch={
+                "script": {
+                    "source": "user_import",
+                    "version": 1,
+                    "content": "展示商品",
+                }
+            },
+        )
+
+
+class PendingOperationTool:
+    spec = VideoToolSpec(
+        name="analyze_reference_video",
+        description="测试可恢复外部任务",
+        input_model=EmptyInput,
+        cost_level=VideoToolCostLevel.EXTERNAL_READ,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
+        recovery_mode=VideoToolRecoveryMode.OPERATION,
+        workspace_mutations=("reference_videos",),
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, context: VideoToolContext, arguments):
+        del arguments
+        assert context.plan_id == "plan-1"
+        assert context.step_id == "step-1"
+        self.calls += 1
+        if self.calls == 1:
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="参考视频解析任务已启动",
+                workspace_patch={
+                    "reference_videos": [
+                        {"job_id": "operation-reference-1", "status": "polling"}
+                    ]
+                },
+                pending_operation_job_ids=("operation-reference-1",),
+            )
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="参考视频解析完成",
+        )
+
+
 async def make_executor(tool, *, confirmation_required: bool):
     event_repository = MemoryAgentRuntimeRepository()
     repository = MemoryVideoAgentRepository(event_repository=event_repository)
@@ -153,3 +216,46 @@ async def test_executor_resumes_persisted_running_step_without_restarting_it() -
 
     assert completed.status is AgentPlanStatus.COMPLETED
     assert len(await event_repository.list_events("user-1", "conversation-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_executor_persists_declared_workspace_patch_before_completion() -> None:
+    executor, repository, _ = await make_executor(
+        WorkspacePatchTool(),
+        confirmation_required=False,
+    )
+
+    completed = await executor.run_plan("user-1", "plan-1")
+    workspace = await repository.get_workspace("user-1", "workspace-1")
+
+    assert completed.status is AgentPlanStatus.COMPLETED
+    assert workspace is not None
+    assert workspace.revision == 2
+    assert workspace.payload["script"]["source"] == "user_import"
+
+
+@pytest.mark.asyncio
+async def test_executor_keeps_step_running_until_operation_result_is_replayed() -> None:
+    tool = PendingOperationTool()
+    executor, repository, event_repository = await make_executor(
+        tool,
+        confirmation_required=False,
+    )
+
+    running = await executor.run_plan("user-1", "plan-1")
+    workspace = await repository.get_workspace("user-1", "workspace-1")
+
+    assert running.status is AgentPlanStatus.RUNNING
+    assert running.steps[0].status is PlanStepStatus.RUNNING
+    assert workspace is not None
+    assert workspace.payload["reference_videos"][0]["status"] == "polling"
+    assert [
+        event.type.value
+        for event in await event_repository.list_events("user-1", "conversation-1")
+    ] == ["agent.step.started"]
+
+    completed = await executor.resume_plan("user-1", "plan-1")
+
+    assert completed.status is AgentPlanStatus.COMPLETED
+    assert completed.steps[0].status is PlanStepStatus.COMPLETED
+    assert tool.calls == 2

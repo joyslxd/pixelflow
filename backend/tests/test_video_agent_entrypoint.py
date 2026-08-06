@@ -6,9 +6,11 @@ import pytest
 
 from pixelflow.agent_runtime.config import AgentRuntimeConfig
 from pixelflow.agent_runtime.contracts import AgentEventType
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.agent_runtime.persistence import MemoryCompactionQueueRepository
 from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
 from pixelflow.agent_runtime.service import AgentRuntimeService
+from pixelflow.intake.llm import IntentRecognitionResult
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
 from pixelflow.video_agent.workspace.repository import MemoryVideoAgentRepository
@@ -93,10 +95,11 @@ async def test_runtime_routes_primary_video_turn_to_v2_entrypoint_without_live_e
         repository=runtime_repository,
         task_store=task_store,
         video_agent_entrypoint=entrypoint,
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
         clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
     )
-    assignment = service.assignment_for_new_conversation({}, initial_intent="video")
+    assignment = service.assignment_for_new_conversation({})
     await task_store.create_conversation(
         PixelFlowConversationRecord(
             conversation_id="conversation-v2-entry",
@@ -126,7 +129,152 @@ async def test_runtime_routes_primary_video_turn_to_v2_entrypoint_without_live_e
         plan_event.payload["workspace_id"],
     )
     assert started.status == "accepted"
+    assert started.orchestration_mode.value == "supervisor_v1"
+    assert started.route_decision is not None
+    assert started.route_decision.intent.value == "video"
     assert workspace.payload == {
         "latest_input": "根据护肤品脚本生成视频",
         "artifact_refs": ["artifact:product-1"],
     }
+
+
+@pytest.mark.asyncio
+async def test_first_turn_replay_reuses_atomic_route_without_reclassifying() -> None:
+    """相同客户端输入重试只能回读同一路由事件，不能再次调用模型。"""
+
+    calls = 0
+
+    async def classify(
+        _content: str,
+        _materials: list[dict[str, object]],
+    ) -> IntentRecognitionResult:
+        nonlocal calls
+        calls += 1
+        return IntentRecognitionResult(
+            intent="video",
+            confidence=0.9,
+            llm_used=True,
+        )
+
+    task_store = MemoryPixelFlowTaskStore()
+    runtime_repository = MemoryCompactionQueueRepository()
+    video_repository = MemoryVideoAgentRepository()
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("video",),
+            new_conversation_rollout_percent=100,
+        ),
+        repository=runtime_repository,
+        task_store=task_store,
+        video_agent_entrypoint=VideoAgentEntrypoint(
+            runtime_repository=runtime_repository,
+            video_repository=video_repository,
+        ),
+        conversation_router=ConversationRouteService(
+            llm_classifier=classify,
+        ),
+        primary_execution_intents=("video",),
+    )
+    assignment = service.assignment_for_new_conversation({})
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="conversation-route-replay",
+            user_id="user-1",
+            orchestration_mode=assignment.orchestration_mode.value,
+            orchestration_version=assignment.orchestration_version,
+            context=assignment.context,
+        ),
+    )
+    request = {
+        "client_input_id": "22222222-2222-4222-8222-222222222222",
+        "content": "照这个做一版",
+        "materials": [{"artifact_ref": "artifact:reference-1"}],
+        "expected_context_version": 0,
+    }
+
+    first = await service.start_turn(
+        user_id="user-1",
+        conversation_id="conversation-route-replay",
+        request=request,
+    )
+    replay = await service.start_turn(
+        user_id="user-1",
+        conversation_id="conversation-route-replay",
+        request=request,
+    )
+
+    events = await runtime_repository.list_events(
+        "user-1",
+        "conversation-route-replay",
+    )
+    assert replay == first
+    assert calls == 1
+    assert [
+        event.type for event in events
+    ].count(AgentEventType.AGENT_ROUTE_DECIDED) == 1
+    assert [
+        event.type for event in events
+    ].count(AgentEventType.AGENT_PLAN_CREATED) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_route_persists_turn_without_creating_video_plan() -> None:
+    """路由失败只登记可恢复输入和澄清决定，不得创建视频业务方案。"""
+
+    async def unavailable_classifier(
+        _content: str,
+        _materials: list[dict[str, object]],
+    ) -> IntentRecognitionResult:
+        raise RuntimeError("分类服务不可用")
+
+    task_store = MemoryPixelFlowTaskStore()
+    runtime_repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("video",),
+            new_conversation_rollout_percent=100,
+        ),
+        repository=runtime_repository,
+        task_store=task_store,
+        video_agent_entrypoint=VideoAgentEntrypoint(
+            runtime_repository=runtime_repository,
+            video_repository=MemoryVideoAgentRepository(),
+        ),
+        conversation_router=ConversationRouteService(
+            llm_classifier=unavailable_classifier,
+        ),
+        primary_execution_intents=("video",),
+    )
+    assignment = service.assignment_for_new_conversation({})
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id="conversation-route-unknown",
+            user_id="user-1",
+            orchestration_mode=assignment.orchestration_mode.value,
+            orchestration_version=assignment.orchestration_version,
+            context=assignment.context,
+        ),
+    )
+
+    started = await service.start_turn(
+        user_id="user-1",
+        conversation_id="conversation-route-unknown",
+        request={
+            "client_input_id": "44444444-4444-4444-8444-444444444444",
+            "content": "照这个做一版",
+            "materials": [{"artifact_ref": "artifact:reference-1"}],
+            "expected_context_version": 0,
+        },
+    )
+
+    events = await runtime_repository.list_events(
+        "user-1",
+        "conversation-route-unknown",
+    )
+    assert started.orchestration_mode.value == "frontend_v2"
+    assert started.route_decision is not None
+    assert started.route_decision.intent.value == "unknown"
+    assert AgentEventType.AGENT_ROUTE_DECIDED in {event.type for event in events}
+    assert AgentEventType.AGENT_PLAN_CREATED not in {event.type for event in events}

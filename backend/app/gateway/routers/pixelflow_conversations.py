@@ -54,11 +54,12 @@ _MAX_CONVERSATION_MESSAGE_JOBS = 300
 
 
 class ConversationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = ""
     current_task_id: str | None = None
     last_phase: str = "idle"
     context: dict[str, Any] = Field(default_factory=dict)
-    initial_intent: Literal["image", "video", "ppt", "video_analysis"] | None = None
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -334,7 +335,6 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
     else:
         assignment = service.assignment_for_new_conversation(
             body.context,
-            initial_intent=body.initial_intent,
         )
         context = assignment.context
         orchestration_mode = assignment.orchestration_mode.value

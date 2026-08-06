@@ -33,6 +33,7 @@ from pixelflow.agent_runtime.contracts import (
     WorkflowKind,
     WorkflowRecord,
 )
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.agent_runtime.graph import (
     FakeWorkflowRegistry,
     WorkflowCommand,
@@ -290,37 +291,32 @@ def test_r2_dev_profile_is_primary_video_100_percent_without_changing_prod() -> 
         assert profile["compaction_retry_backoff_seconds"] == 30
 
 
-@pytest.mark.parametrize("legacy_intent", ["image", "ppt", "video_analysis", None])
-def test_primary_assignment_only_gives_enabled_video_new_conversations_to_supervisor(
-    legacy_intent: str | None,
-) -> None:
+def test_primary_assignment_creates_routing_pending_shell_for_every_new_conversation() -> None:
+    """创建 Controller 不接收客户端意图，全部新会话等待首个 Turn 冻结归属。"""
+
     service = AgentRuntimeService(
         config=_config(),
         repository=MemoryCompactionQueueRepository(),
         task_store=MemoryPixelFlowTaskStore(),
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
     )
 
-    video_assignments = [
-        service.assignment_for_new_conversation(
-            {"business_field": "保留"},
-            initial_intent="video",
-        )
+    assignments = [
+        service.assignment_for_new_conversation({"business_field": "保留"})
         for _ in range(32)
     ]
-    legacy_assignment = service.assignment_for_new_conversation(
-        {},
-        initial_intent=legacy_intent,
-    )
 
-    assert {item.orchestration_mode.value for item in video_assignments} == {
-        "supervisor_v1",
+    assert {item.orchestration_mode.value for item in assignments} == {
+        "frontend_v2",
     }
-    assert legacy_assignment.orchestration_mode.value == "frontend_v2"
     assert all(
         item.context[AGENT_RUNTIME_CONTEXT_KEY]["mode"] == "primary"
         and item.context[AGENT_RUNTIME_CONTEXT_KEY]["enabled_intents"] == ["video"]
-        for item in [*video_assignments, legacy_assignment]
+        and item.context[AGENT_RUNTIME_CONTEXT_KEY]["routing_status"] == "pending"
+        and item.context[AGENT_RUNTIME_CONTEXT_KEY]["primary_execution_ready"]
+        is False
+        for item in assignments
     )
 
 
@@ -355,7 +351,7 @@ def test_frontend_v2_turn_is_persisted_without_notifying_supervisor_executor() -
     with TestClient(app) as client:
         created = client.post(
             "/agent/conversations",
-            json={"title": "既有图片对话", "initial_intent": "image"},
+            json={"title": "既有图片对话"},
         )
         assert created.status_code == 200
         conversation_id = created.json()["conversation_id"]
@@ -402,20 +398,34 @@ def test_missing_handler_restart_rejects_frozen_supervisor_before_turn_registrat
         app.include_router(pixelflow_conversations.router)
         return app
 
+    executor = _RecordingExecutor()
     ready_service = AgentRuntimeService(
         config=_config(),
         repository=repository,
         task_store=task_store,
+        turn_executor=executor,  # type: ignore[arg-type]
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
     )
     with TestClient(make_app(ready_service)) as client:
         frozen = client.post(
             "/agent/conversations",
-            json={"title": "已冻结视频对话", "initial_intent": "video"},
+            json={"title": "已冻结视频对话"},
         )
-    assert frozen.status_code == 200
-    frozen_id = frozen.json()["conversation_id"]
-    assert frozen.json()["orchestration_mode"] == "supervisor_v1"
+        assert frozen.status_code == 200
+        frozen_id = frozen.json()["conversation_id"]
+        routed = client.post(
+            f"/agent/conversations/{frozen_id}/turns/start",
+            json={
+                "client_input_id": "00000000-0000-4000-8000-000000001406",
+                "content": "制作一条商品视频",
+                "materials": [],
+                "expected_context_version": 0,
+            },
+        )
+    assert frozen.json()["orchestration_mode"] == "frontend_v2"
+    assert routed.status_code == 200
+    assert routed.json()["orchestration_mode"] == "supervisor_v1"
 
     restarted_service = AgentRuntimeService(
         config=_config(),
@@ -425,7 +435,7 @@ def test_missing_handler_restart_rejects_frozen_supervisor_before_turn_registrat
     with TestClient(make_app(restarted_service)) as client:
         new_video = client.post(
             "/agent/conversations",
-            json={"title": "重启后新视频对话", "initial_intent": "video"},
+            json={"title": "重启后新视频对话"},
         )
         rejected = client.post(
             f"/agent/conversations/{frozen_id}/turns/start",
@@ -433,7 +443,7 @@ def test_missing_handler_restart_rejects_frozen_supervisor_before_turn_registrat
                 "client_input_id": "00000000-0000-4000-8000-000000001403",
                 "content": "继续原视频流程",
                 "materials": [],
-                "expected_context_version": 0,
+                "expected_context_version": 1,
             },
         )
         frozen_after_restart = client.get(
@@ -452,7 +462,7 @@ def test_missing_handler_restart_rejects_frozen_supervisor_before_turn_registrat
     )
     assert frozen_record is not None
     assert frozen_record.orchestration_mode == "supervisor_v1"
-    assert list(asyncio.run(repository.list_turns(str(user_id), frozen_id))) == []
+    assert len(asyncio.run(repository.list_turns(str(user_id), frozen_id))) == 1
 
 
 def test_cross_tenant_public_runtime_references_are_rejected_at_conversation_boundary() -> None:
@@ -488,7 +498,7 @@ def test_cross_tenant_public_runtime_references_are_rejected_at_conversation_bou
     with TestClient(make_app(owner_id, "task14-owner@example.com")) as client:
         created = client.post(
             "/agent/conversations",
-            json={"title": "用户 A 视频对话", "initial_intent": "video"},
+            json={"title": "用户 A 视频对话"},
         )
     conversation_id = created.json()["conversation_id"]
     malicious_action = {
@@ -539,52 +549,103 @@ def test_cross_tenant_public_runtime_references_are_rejected_at_conversation_bou
 def test_primary_video_without_live_handler_keeps_v2_owner_and_r1_runtime() -> None:
     """配置获批但进程没有真实 Handler 时，业务继续由 v2 安全推进。"""
 
+    task_store = MemoryPixelFlowTaskStore()
     service = AgentRuntimeService(
         config=_config(),
         repository=MemoryCompactionQueueRepository(),
-        task_store=MemoryPixelFlowTaskStore(),
+        task_store=task_store,
+        conversation_router=ConversationRouteService(),
     )
 
-    assignment = service.assignment_for_new_conversation(
-        {},
-        initial_intent="video",
+    assignment = service.assignment_for_new_conversation({})
+    asyncio.run(
+        task_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="conversation-no-live-handler",
+                user_id=USER_ID,
+                orchestration_mode=assignment.orchestration_mode.value,
+                orchestration_version=assignment.orchestration_version,
+                context=assignment.context,
+            )
+        )
+    )
+    started = asyncio.run(
+        service.start_turn(
+            user_id=USER_ID,
+            conversation_id="conversation-no-live-handler",
+            request=TurnStartRequest(
+                client_input_id=UUID(
+                    "00000000-0000-4000-8000-000000001407",
+                ),
+                content="制作一条商品视频",
+                materials=[],
+                expected_context_version=0,
+            ),
+        )
     )
 
-    assert assignment.orchestration_mode.value == "frontend_v2"
-    assert assignment.context[AGENT_RUNTIME_CONTEXT_KEY]["mode"] == "primary"
-    assert assignment.context[AGENT_RUNTIME_CONTEXT_KEY]["enabled_intents"] == [
-        "video",
-    ]
-    assert (
-        assignment.context[AGENT_RUNTIME_CONTEXT_KEY][
-            "primary_execution_ready"
-        ]
-        is False
+    assert started.orchestration_mode.value == "frontend_v2"
+    assert started.route_decision is not None
+    assert started.route_decision.intent.value == "video"
+    stored = asyncio.run(
+        task_store.get_conversation(
+            "conversation-no-live-handler",
+            user_id=USER_ID,
+        )
     )
+    assert stored is not None
+    assert stored.context[AGENT_RUNTIME_CONTEXT_KEY]["primary_execution_ready"] is False
 
 
 def test_primary_assignment_records_live_handler_readiness() -> None:
     """Supervisor 归属必须把本会话的 live Handler 就绪事实冻结到命名空间。"""
 
+    task_store = MemoryPixelFlowTaskStore()
     service = AgentRuntimeService(
         config=_config(),
         repository=MemoryCompactionQueueRepository(),
-        task_store=MemoryPixelFlowTaskStore(),
+        task_store=task_store,
+        turn_executor=_RecordingExecutor(),  # type: ignore[arg-type]
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
     )
 
-    assignment = service.assignment_for_new_conversation(
-        {},
-        initial_intent="video",
+    assignment = service.assignment_for_new_conversation({})
+    asyncio.run(
+        task_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id="conversation-live-handler-ready",
+                user_id=USER_ID,
+                orchestration_mode=assignment.orchestration_mode.value,
+                orchestration_version=assignment.orchestration_version,
+                context=assignment.context,
+            )
+        )
+    )
+    started = asyncio.run(
+        service.start_turn(
+            user_id=USER_ID,
+            conversation_id="conversation-live-handler-ready",
+            request=TurnStartRequest(
+                client_input_id=UUID(
+                    "00000000-0000-4000-8000-000000001408",
+                ),
+                content="制作一条商品视频",
+                materials=[],
+                expected_context_version=0,
+            ),
+        )
     )
 
-    assert assignment.orchestration_mode.value == "supervisor_v1"
-    assert (
-        assignment.context[AGENT_RUNTIME_CONTEXT_KEY][
-            "primary_execution_ready"
-        ]
-        is True
+    assert started.orchestration_mode.value == "supervisor_v1"
+    stored = asyncio.run(
+        task_store.get_conversation(
+            "conversation-live-handler-ready",
+            user_id=USER_ID,
+        )
     )
+    assert stored is not None
+    assert stored.context[AGENT_RUNTIME_CONTEXT_KEY]["primary_execution_ready"] is True
 
 
 def test_conversation_router_freezes_only_video_hint_as_supervisor_owner() -> None:
@@ -607,29 +668,71 @@ def test_conversation_router_freezes_only_video_hint_as_supervisor_owner() -> No
         config=_config(),
         repository=repository,
         task_store=task_store,
+        turn_executor=_RecordingExecutor(),  # type: ignore[arg-type]
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
     )
     app.include_router(pixelflow_conversations.router)
 
     with TestClient(app) as client:
+        rejected_hint = client.post(
+            "/agent/conversations",
+            json={"title": "客户端提示已删除", "initial_intent": "video"},
+        )
         video = client.post(
             "/agent/conversations",
-            json={"title": "视频", "initial_intent": "video"},
+            json={"title": "视频"},
         )
         image = client.post(
             "/agent/conversations",
-            json={"title": "图片", "initial_intent": "image"},
+            json={"title": "图片"},
+        )
+        video_started = client.post(
+            f"/agent/conversations/{video.json()['conversation_id']}/turns/start",
+            json={
+                "client_input_id": "00000000-0000-4000-8000-000000001409",
+                "content": "制作一条商品视频",
+                "materials": [],
+                "expected_context_version": 0,
+            },
+        )
+        image_started = client.post(
+            f"/agent/conversations/{image.json()['conversation_id']}/turns/start",
+            json={
+                "client_input_id": "00000000-0000-4000-8000-000000001410",
+                "content": "生成一张商品主图",
+                "materials": [],
+                "expected_context_version": 0,
+            },
         )
 
+    assert rejected_hint.status_code == 422
     assert video.status_code == image.status_code == 200
-    assert video.json()["orchestration_mode"] == "supervisor_v1"
+    assert video.json()["orchestration_mode"] == "frontend_v2"
     assert image.json()["orchestration_mode"] == "frontend_v2"
-    assert video.json()["context"][AGENT_RUNTIME_CONTEXT_KEY] == {
+    assert video_started.json()["orchestration_mode"] == "supervisor_v1"
+    assert image_started.json()["orchestration_mode"] == "frontend_v2"
+    video_record = asyncio.run(
+        task_store.get_conversation(
+            video.json()["conversation_id"],
+            user_id="00000000-0000-0000-0000-000000000132",
+        )
+    )
+    assert video_record is not None
+    assert video_record.context[AGENT_RUNTIME_CONTEXT_KEY] == {
         "mode": "primary",
         "enabled_intents": ["video"],
         "primary_execution_ready": True,
         "context_compaction_enabled": True,
-        "context_version": 0,
+        "context_version": 1,
+        "routing_status": "decided",
+        "route_decision": {
+            "intent": "video",
+            "confidence": 1.0,
+            "decision_source": "rule",
+            "reason_code": "explicit_video_request",
+            "requires_clarification": False,
+        },
     }
 
 
@@ -772,10 +875,7 @@ async def test_primary_video_turn_queues_during_compaction_and_recovers_with_sam
         task_store=task_store,
         clock=lambda: NOW,
     )
-    assignment = service.assignment_for_new_conversation(
-        {},
-        initial_intent="video",
-    )
+    assignment = service.assignment_for_new_conversation({})
     await task_store.create_conversation(
         PixelFlowConversationRecord(
             conversation_id=CONVERSATION_ID,
@@ -1069,7 +1169,7 @@ class _LiveVideoFaultScenario:
             await live_runtime.operation_recovery.aclose()
             created = await client.post(
                 "/agent/conversations",
-                json={"title": "Task14 额度故障矩阵", "initial_intent": "video"},
+                json={"title": "Task14 额度故障矩阵"},
             )
             assert created.status_code == 200
             conversation_id = created.json()["conversation_id"]
@@ -2076,10 +2176,7 @@ class _LiveVideoFaultScenario:
             task_store=task_store,
             primary_execution_intents=("video",),
         )
-        assignment = service.assignment_for_new_conversation(
-            {},
-            initial_intent="video",
-        )
+        assignment = service.assignment_for_new_conversation({})
         await task_store.create_conversation(
             PixelFlowConversationRecord(
                 conversation_id=conversation_id,
@@ -2170,15 +2267,15 @@ class _LiveVideoFaultScenario:
             task_store=task_store,
             primary_execution_intents=("video",),
         )
-        assignment = ready_service.assignment_for_new_conversation(
-            {},
-            initial_intent="video",
-        )
+        assignment = ready_service.assignment_for_new_conversation({})
+        assignment.context[AGENT_RUNTIME_CONTEXT_KEY][
+            "primary_execution_ready"
+        ] = True
         await task_store.create_conversation(
             PixelFlowConversationRecord(
                 conversation_id=conversation_id,
                 user_id=owner,
-                orchestration_mode=assignment.orchestration_mode.value,
+                orchestration_mode="supervisor_v1",
                 orchestration_version=assignment.orchestration_version,
                 context=assignment.context,
             )
@@ -2188,10 +2285,7 @@ class _LiveVideoFaultScenario:
             repository=repository,
             task_store=task_store,
         )
-        new_assignment = restarted.assignment_for_new_conversation(
-            {},
-            initial_intent="video",
-        )
+        new_assignment = restarted.assignment_for_new_conversation({})
         assert new_assignment.orchestration_mode.value == "frontend_v2"
         try:
             await restarted.start_turn(

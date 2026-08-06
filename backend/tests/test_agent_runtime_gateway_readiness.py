@@ -28,7 +28,8 @@ from deerflow.config.app_config import AppConfig
 from deerflow.persistence.base import Base
 from pixelflow.agent_runtime.config import AgentRuntimeConfig
 from pixelflow.agent_runtime.context import ModelContextProfile
-from pixelflow.agent_runtime.contracts import WorkflowKind
+from pixelflow.agent_runtime.contracts import AgentEventType, WorkflowKind
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.agent_runtime.jobs import ProviderJobOutcome
 from pixelflow.agent_runtime.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
@@ -40,6 +41,7 @@ from pixelflow.agent_runtime.persistence import (
 from pixelflow.agent_runtime.service import AgentRuntimeService
 from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
+    PixelFlowConversationRecord,
     PixelFlowTaskStore,
     SQLPixelFlowTaskStore,
 )
@@ -155,6 +157,68 @@ def _profiles() -> dict[str, ModelContextProfile]:
             source="Gateway readiness 测试档案",
         )
     }
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_first_turn_atomically_freezes_route_for_both_repositories(
+    kind: RepositoryKind,
+) -> None:
+    """Memory 与 SQL 都必须把首条消息、Turn、归属和路由事件一起落库。"""
+
+    async with _repository(kind) as (repository, task_store):
+        service = AgentRuntimeService(
+            config=_config("video"),
+            repository=repository,
+            task_store=task_store,
+            turn_executor=object(),  # type: ignore[arg-type]
+            video_repository=repository,
+            conversation_router=ConversationRouteService(),
+            primary_execution_intents=("video",),
+            clock=lambda: NOW,
+        )
+        assignment = service.assignment_for_new_conversation({})
+        conversation_id = f"conversation-route-{kind}"
+        user_id = f"user-route-{kind}"
+        await task_store.create_conversation(
+            PixelFlowConversationRecord(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                orchestration_mode=assignment.orchestration_mode.value,
+                orchestration_version=assignment.orchestration_version,
+                context=assignment.context,
+            )
+        )
+        request = {
+            "client_input_id": "33333333-3333-4333-8333-333333333333",
+            "content": "制作一条商品视频",
+            "materials": [],
+            "expected_context_version": 0,
+        }
+
+        first = await service.start_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request=request,
+        )
+        replay = await service.start_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request=request,
+        )
+
+        stored = await task_store.get_conversation(
+            conversation_id,
+            user_id=user_id,
+        )
+        events = await repository.list_events(user_id, conversation_id)
+        assert replay == first
+        assert stored is not None
+        assert stored.orchestration_mode == "supervisor_v1"
+        assert stored.context["__agent_runtime"]["context_version"] == 1
+        assert [event.type for event in events].count(
+            AgentEventType.AGENT_ROUTE_DECIDED,
+        ) == 1
 
 
 def _capabilities() -> Any:
@@ -504,20 +568,18 @@ async def test_real_gateway_lifespan_routes_video_to_v2_entrypoint_without_provi
     async with application.router.lifespan_context(application):
         live_runtime = application.state.pixelflow_agent_live_runtime
         service = application.state.pixelflow_agent_runtime_service
-        assignment = service.assignment_for_new_conversation(
-            {},
-            initial_intent="video",
-        )
+        assignment = service.assignment_for_new_conversation({})
 
         assert live_runtime.ready is False
         assert live_runtime.reason_code == VIDEO_LIVE_HANDLER_NOT_READY
         assert live_runtime.graph_runtime is None
         assert not hasattr(application.state, "pixelflow_agent_graph_runtime")
         assert service.primary_execution_intents == frozenset({"video"})
-        assert assignment.orchestration_mode.value == "supervisor_v1"
+        assert assignment.orchestration_mode.value == "frontend_v2"
         assert assignment.context["__agent_runtime"][
             "primary_execution_ready"
-        ] is True
+        ] is False
+        assert assignment.context["__agent_runtime"]["routing_status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -554,10 +616,7 @@ async def test_real_gateway_lifespan_keeps_r1_v2_available_without_models(
     async with application.router.lifespan_context(application):
         live_runtime = application.state.pixelflow_agent_live_runtime
         service = application.state.pixelflow_agent_runtime_service
-        assignment = service.assignment_for_new_conversation(
-            {},
-            initial_intent="video",
-        )
+        assignment = service.assignment_for_new_conversation({})
 
         assert live_runtime.ready is False
         assert live_runtime.reason_code == VIDEO_LIVE_HANDLER_NOT_READY

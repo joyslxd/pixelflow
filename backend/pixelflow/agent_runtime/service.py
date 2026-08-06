@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -23,7 +23,9 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
+from pixelflow.video_agent.contracts import AgentPlanStatus, PlanStepStatus
 from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+from pixelflow.video_agent.workspace.repository import VideoAgentRepository
 
 from .config import AgentRuntimeConfig
 from .context import RepositoryCompactionEventOutbox
@@ -33,10 +35,13 @@ from .contracts import (
     AgentInterruptProjection,
     InterruptResponseRequest,
     OrchestrationMode,
+    RouteDecision,
+    RouteIntent,
     TurnRecord,
     TurnStartRequest,
     TurnStatus,
 )
+from .conversation_router import ConversationRouteService
 from .executor import SupervisorTurnExecutor, SupervisorTurnScope
 from .identity import conversation_message_id, turn_id
 from .persistence import (
@@ -45,13 +50,16 @@ from .persistence import (
     CompactionQueueRepository,
     ConversationCompactionLease,
     TurnRegistrationContextConflictError,
+    TurnRegistrationResult,
     TurnRegistrationUnavailableError,
+    TurnRouteAssignment,
     make_turn_registration_store,
 )
 from .persistence.video_runtime import StoredAgentInterrupt, VideoRuntimeRepository
 from .runtime_compaction import AgentContextCompactor
 
 logger = logging.getLogger(__name__)
+_ROUTING_LOCKS = tuple(asyncio.Lock() for _ in range(64))
 
 RuntimeRunStatus = Literal[
     "idle",
@@ -127,6 +135,8 @@ class AgentTurnStartResponse(_RuntimeResponseModel):
     run_id: str
     status: Literal["accepted", "queued"]
     context_version: int = Field(ge=0)
+    orchestration_mode: OrchestrationMode
+    route_decision: RouteDecision | None = None
 
 
 class AgentTurnJobResponse(_RuntimeResponseModel):
@@ -188,6 +198,44 @@ class RuntimeResumeProjection(_RuntimeResponseModel):
     sequence: int = Field(ge=0)
 
 
+class RuntimeVideoAgentStepProjection(_RuntimeResponseModel):
+    """只公开时间线和确认界面需要的步骤字段。"""
+
+    step_id: str
+    plan_id: str
+    sequence: int = Field(ge=1)
+    title: str
+    status: PlanStepStatus
+    confirmation_required: bool = False
+    public_summary: str | None = None
+    artifact_refs: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class RuntimeVideoAgentConfirmationProjection(_RuntimeResponseModel):
+    """计费步骤的安全恢复卡片，不包含工具原始参数。"""
+
+    confirmation_id: str
+    plan_id: str
+    step_id: str
+    title: str
+    cost_summary: str
+    affected_scene_ids: list[str] = Field(default_factory=list)
+    submittable: bool = False
+    unavailable_reason: str | None = None
+
+
+class RuntimeVideoAgentProjection(_RuntimeResponseModel):
+    """右侧面板和执行时间线共享的 VideoAgent 权威投影。"""
+
+    workspace: dict[str, Any]
+    plan: dict[str, Any] | None = None
+    steps: list[RuntimeVideoAgentStepProjection] = Field(default_factory=list)
+    confirmation: RuntimeVideoAgentConfirmationProjection | None = None
+
+
 class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
     """前端 Reducer 可直接恢复的 R1 Snapshot。"""
 
@@ -201,6 +249,10 @@ class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     workflows: list[dict[str, Any]] = Field(default_factory=list)
     interrupt: AgentInterruptProjection | None = None
+    video_agent: RuntimeVideoAgentProjection | None = Field(
+        default=None,
+        serialization_alias="videoAgent",
+    )
     resume: RuntimeResumeProjection
     context_version: int = Field(ge=0)
 
@@ -208,6 +260,48 @@ class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
 def _runtime_context(context: dict[str, Any]) -> dict[str, Any] | None:
     value = context.get(AGENT_RUNTIME_CONTEXT_KEY)
     return value if isinstance(value, dict) else None
+
+
+def _video_confirmation_id(plan_id: str, step_id: str) -> str:
+    identity = f"pixelflow-video-confirmation:{plan_id}:{step_id}"
+    return f"video_confirmation_{uuid5(NAMESPACE_URL, identity).hex}"
+
+
+def _safe_affected_scene_ids(
+    arguments: dict[str, Any],
+    workspace_payload: dict[str, Any],
+) -> list[str]:
+    candidates: list[object] = []
+    for value in (
+        arguments.get("scene_ids"),
+        arguments.get("affected_scene_ids"),
+        workspace_payload.get("dirty_scene_ids"),
+    ):
+        if isinstance(value, list):
+            candidates.extend(value)
+    result: list[str] = []
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        scene_id = value.strip()
+        if (
+            not scene_id
+            or len(scene_id) > 128
+            or any(not (character.isalnum() or character in "._:-") for character in scene_id)
+            or scene_id in result
+        ):
+            continue
+        result.append(scene_id)
+    return result
+
+
+def _confirmation_cost_summary(tool_name: str, affected_count: int) -> str:
+    if tool_name == "generate_scenes":
+        target = f"{affected_count}个镜头" if affected_count else "所选镜头"
+        return f"将生成{target}的新视频版本，执行后可能产生模型调用费用。"
+    if tool_name == "compose_or_export_video":
+        return "将生成视频交付产物，执行后可能产生合成、存储或导出费用。"
+    return "该步骤会修改项目或调用计费能力，请确认后继续。"
 
 
 def _context_version(context: dict[str, Any]) -> int:
@@ -271,7 +365,9 @@ class AgentRuntimeService:
         context_compactor: AgentContextCompactor | None = None,
         turn_executor: SupervisorTurnExecutor | None = None,
         video_repository: VideoRuntimeRepository | None = None,
+        video_agent_repository: VideoAgentRepository | None = None,
         video_agent_entrypoint: VideoAgentEntrypoint | None = None,
+        conversation_router: ConversationRouteService | None = None,
         primary_execution_intents: Iterable[str] = (),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -295,7 +391,9 @@ class AgentRuntimeService:
         self.task_store = task_store
         self._turn_executor = turn_executor
         self._video_repository = video_repository
+        self._video_agent_repository = video_agent_repository
         self._video_agent_entrypoint = video_agent_entrypoint
+        self._conversation_router = conversation_router
         self._context_compactor = context_compactor
         self._clock = clock or (lambda: datetime.now(UTC))
         self._turn_registration_store = make_turn_registration_store(
@@ -317,38 +415,24 @@ class AgentRuntimeService:
     def assignment_for_new_conversation(
         self,
         client_context: dict[str, Any] | None,
-        *,
-        initial_intent: str | None = None,
     ) -> AgentRuntimeConversationAssignment:
-        """按启动快照和首轮意图提示冻结新对话的业务 owner。"""
+        """创建等待首个 Turn 服务端路由的新对话快照。"""
 
         context = sanitize_client_conversation_context(client_context)
         enabled = self.config.mode != "off" and self.config.new_conversation_rollout_percent == 100
-        normalized_intent = (
-            initial_intent.strip()
-            if isinstance(initial_intent, str) and initial_intent.strip()
-            else None
-        )
-        primary_intent_enabled = (
-            enabled
-            and self.config.mode == "primary"
-            and normalized_intent in self.config.enabled_intents
-            and normalized_intent in self.primary_execution_intents
-        )
         if enabled:
-            context[AGENT_RUNTIME_CONTEXT_KEY] = {
+            runtime_context: dict[str, Any] = {
                 "mode": self.config.mode,
                 "enabled_intents": list(self.config.enabled_intents),
-                "primary_execution_ready": primary_intent_enabled,
+                "primary_execution_ready": False,
                 "context_compaction_enabled": self.config.context_compaction_enabled,
                 "context_version": 0,
             }
+            if self._conversation_router is not None:
+                runtime_context["routing_status"] = "pending"
+            context[AGENT_RUNTIME_CONTEXT_KEY] = runtime_context
         return AgentRuntimeConversationAssignment(
-            orchestration_mode=(
-                OrchestrationMode.SUPERVISOR_V1
-                if primary_intent_enabled
-                else OrchestrationMode.FRONTEND_V2
-            ),
+            orchestration_mode=OrchestrationMode.FRONTEND_V2,
             orchestration_version=1,
             context=context,
         )
@@ -394,64 +478,77 @@ class AgentRuntimeService:
         )
         if conversation is None:
             raise LookupError("Conversation not found")
-        live_video_execution_ready = _live_video_execution_ready(conversation)
-        if (
-            live_video_execution_ready
-            and self._turn_executor is None
-            and self._video_agent_entrypoint is None
-        ):
-            raise AgentRuntimeUnavailableError("视频 live Handler 当前不可用")
-        try:
-            registration = await self._turn_registration_store.register(
+        if self._conversation_router is None:
+            live_video_execution_ready = _live_video_execution_ready(conversation)
+            self._require_live_handler(live_video_execution_ready)
+            registration = await self._register_turn(
                 user_id=owner,
                 conversation_id=conversation_id,
-                message=PixelFlowConversationMessageRecord(
-                    message_id=conversation_message_id(
-                        conversation_id,
-                        body.client_input_id,
-                    ),
-                    conversation_id=conversation_id,
-                    user_id=owner,
-                    role="user",
-                    content=body.content,
-                    payload={
-                        "client_message_id": str(body.client_input_id),
-                        "materials": body.materials,
-                        "reply_to_message_id": body.reply_to_message_id,
-                        "artifact_refs": body.artifact_refs,
-                        "explicit_action": (
-                            body.explicit_action.model_dump(mode="json")
-                            if body.explicit_action is not None
-                            else None
-                        ),
-                    },
-                    created_at=occurred_at.isoformat(),
-                ),
-                turn=TurnRecord(
-                    turn_id=turn_id(
-                        conversation_id,
-                        body.client_input_id,
-                    ),
-                    conversation_id=conversation_id,
-                    client_input_id=body.client_input_id,
-                    status=TurnStatus.ACCEPTED,
-                    target_workflow_id=None,
-                    decision=None,
-                    expected_context_version=body.expected_context_version,
-                    created_at=occurred_at,
-                ),
-                expected_context_version=body.expected_context_version,
+                body=body,
                 occurred_at=occurred_at,
             )
-        except TurnRegistrationContextConflictError as exc:
-            raise AgentRuntimeContextConflictError(
-                exc.expected_context_version,
-                exc.current_context_version,
-            ) from exc
-        except TurnRegistrationUnavailableError as exc:
-            if str(exc) == "Conversation not found":
-                raise LookupError("Conversation not found") from exc
-            raise AgentRuntimeUnavailableError(str(exc)) from exc
+        else:
+            lock = _ROUTING_LOCKS[
+                hash((owner, conversation_id)) % len(_ROUTING_LOCKS)
+            ]
+            async with lock:
+                conversation = await self.require_conversation(
+                    user_id=owner,
+                    conversation_id=conversation_id,
+                )
+                if conversation is None:
+                    raise LookupError("Conversation not found")
+                runtime = _runtime_context(conversation.context)
+                stored_decision = (
+                    runtime.get("route_decision") if runtime else None
+                )
+                route_assignment: TurnRouteAssignment | None = None
+                if isinstance(stored_decision, dict):
+                    route_decision = RouteDecision.model_validate(
+                        stored_decision,
+                    )
+                else:
+                    route_decision = await self._conversation_router.route(
+                        content=body.content,
+                        materials=body.materials,
+                    )
+                    primary_ready = (
+                        self.config.mode == "primary"
+                        and route_decision.intent is RouteIntent.VIDEO
+                        and "video" in self.config.enabled_intents
+                        and "video" in self.primary_execution_intents
+                        and (
+                            self._video_agent_entrypoint is not None
+                            or self._turn_executor is not None
+                        )
+                    )
+                    route_assignment = TurnRouteAssignment(
+                        decision=route_decision,
+                        orchestration_mode=(
+                            OrchestrationMode.SUPERVISOR_V1
+                            if primary_ready
+                            else OrchestrationMode.FRONTEND_V2
+                        ),
+                        primary_execution_ready=primary_ready,
+                    )
+                live_video_execution_ready = (
+                    _live_video_execution_ready(conversation)
+                    if route_assignment is None
+                    else route_assignment.primary_execution_ready
+                )
+                self._require_live_handler(live_video_execution_ready)
+                registration = await self._register_turn(
+                    user_id=owner,
+                    conversation_id=conversation_id,
+                    body=body,
+                    occurred_at=occurred_at,
+                    route_assignment=route_assignment,
+                )
+                route_decision = registration.route_decision
+                live_video_execution_ready = (
+                    registration.orchestration_mode
+                    is OrchestrationMode.SUPERVISOR_V1
+                )
         response_turn = registration.turn
         if live_video_execution_ready and self._video_agent_entrypoint is not None:
             await self._video_agent_entrypoint.submit_turn(
@@ -500,7 +597,79 @@ class AgentRuntimeService:
             run_id=response_turn.turn_id,
             status=_turn_status_for_response(response_turn.status),
             context_version=registration.context_version,
+            orchestration_mode=registration.orchestration_mode,
+            route_decision=registration.route_decision,
         )
+
+    def _require_live_handler(self, live_video_execution_ready: bool) -> None:
+        if (
+            live_video_execution_ready
+            and self._turn_executor is None
+            and self._video_agent_entrypoint is None
+        ):
+            raise AgentRuntimeUnavailableError("视频 live Handler 当前不可用")
+
+    async def _register_turn(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        body: TurnStartRequest,
+        occurred_at: datetime,
+        route_assignment: TurnRouteAssignment | None = None,
+    ) -> TurnRegistrationResult:
+        try:
+            return await self._turn_registration_store.register(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message=PixelFlowConversationMessageRecord(
+                    message_id=conversation_message_id(
+                        conversation_id,
+                        body.client_input_id,
+                    ),
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    role="user",
+                    content=body.content,
+                    payload={
+                        "client_message_id": str(body.client_input_id),
+                        "materials": body.materials,
+                        "reply_to_message_id": body.reply_to_message_id,
+                        "artifact_refs": body.artifact_refs,
+                        "explicit_action": (
+                            body.explicit_action.model_dump(mode="json")
+                            if body.explicit_action is not None
+                            else None
+                        ),
+                    },
+                    created_at=occurred_at.isoformat(),
+                ),
+                turn=TurnRecord(
+                    turn_id=turn_id(
+                        conversation_id,
+                        body.client_input_id,
+                    ),
+                    conversation_id=conversation_id,
+                    client_input_id=body.client_input_id,
+                    status=TurnStatus.ACCEPTED,
+                    target_workflow_id=None,
+                    decision=None,
+                    expected_context_version=body.expected_context_version,
+                    created_at=occurred_at,
+                ),
+                expected_context_version=body.expected_context_version,
+                occurred_at=occurred_at,
+                route_assignment=route_assignment,
+            )
+        except TurnRegistrationContextConflictError as exc:
+            raise AgentRuntimeContextConflictError(
+                exc.expected_context_version,
+                exc.current_context_version,
+            ) from exc
+        except TurnRegistrationUnavailableError as exc:
+            if str(exc) == "Conversation not found":
+                raise LookupError("Conversation not found") from exc
+            raise AgentRuntimeUnavailableError(str(exc)) from exc
 
     async def preflight_interrupt_response(
         self,
@@ -841,6 +1010,98 @@ class AgentRuntimeService:
                 last_outcome = "completed"
 
         latest_event = events[-1] if events else None
+        video_agent: RuntimeVideoAgentProjection | None = None
+        if self._video_agent_repository is not None:
+            try:
+                video_state = await self._video_agent_repository.load_conversation_state(
+                    owner,
+                    conversation_id,
+                )
+            except (AgentRuntimeRecordConflictError, ValidationError, ValueError) as exc:
+                raise AgentRuntimeInterruptStateError(
+                    "VideoAgent Snapshot 投影状态非法",
+                ) from exc
+            if video_state is not None:
+                workspace, plan = video_state
+                if workspace.conversation_id != conversation_id or (
+                    plan is not None
+                    and (
+                        plan.conversation_id != conversation_id
+                        or plan.workspace_id != workspace.workspace_id
+                    )
+                ):
+                    raise AgentRuntimeInterruptStateError(
+                        "VideoAgent Snapshot 投影身份非法",
+                    )
+                plan_payload = (
+                    None
+                    if plan is None
+                    else plan.model_dump(mode="json", exclude={"steps"})
+                )
+                confirmation: RuntimeVideoAgentConfirmationProjection | None = None
+                if plan is not None:
+                    waiting_steps = [
+                        step
+                        for step in plan.steps
+                        if step.status is PlanStepStatus.AWAITING_CONFIRMATION
+                    ]
+                    if (
+                        plan.status is AgentPlanStatus.AWAITING_CONFIRMATION
+                        and len(waiting_steps) != 1
+                    ) or (
+                        plan.status is not AgentPlanStatus.AWAITING_CONFIRMATION
+                        and waiting_steps
+                    ):
+                        raise AgentRuntimeInterruptStateError(
+                            "VideoAgent 确认投影状态非法",
+                        )
+                    if waiting_steps:
+                        waiting_step = waiting_steps[0]
+                        affected_scene_ids = _safe_affected_scene_ids(
+                            waiting_step.arguments,
+                            workspace.payload,
+                        )
+                        confirmation = RuntimeVideoAgentConfirmationProjection(
+                            confirmation_id=_video_confirmation_id(
+                                plan.plan_id,
+                                waiting_step.step_id,
+                            ),
+                            plan_id=plan.plan_id,
+                            step_id=waiting_step.step_id,
+                            title=waiting_step.title,
+                            cost_summary=_confirmation_cost_summary(
+                                waiting_step.tool_name,
+                                len(affected_scene_ids),
+                            ),
+                            affected_scene_ids=affected_scene_ids,
+                            submittable=False,
+                            unavailable_reason="确认执行入口将在统一VideoAgent入口装配后开放。",
+                        )
+                video_agent = RuntimeVideoAgentProjection(
+                    workspace=workspace.model_dump(mode="json"),
+                    plan=plan_payload,
+                    steps=(
+                        []
+                        if plan is None
+                        else [
+                            RuntimeVideoAgentStepProjection(
+                                step_id=step.step_id,
+                                plan_id=step.plan_id,
+                                sequence=step.sequence,
+                                title=step.title,
+                                status=step.status,
+                                confirmation_required=step.confirmation_required,
+                                public_summary=step.public_summary,
+                                artifact_refs=list(step.artifact_refs),
+                                started_at=step.started_at,
+                                completed_at=step.completed_at,
+                                duration_ms=step.duration_ms,
+                            )
+                            for step in plan.steps
+                        ]
+                    ),
+                    confirmation=confirmation,
+                )
         return AgentRuntimeSnapshotResponse(
             conversation_id=conversation_id,
             run=RuntimeRunProjection(
@@ -859,6 +1120,7 @@ class AgentRuntimeService:
             messages=messages,
             workflows=[workflow.model_dump(mode="json") for workflow in workflows],
             interrupt=public_interrupt,
+            video_agent=video_agent,
             resume=RuntimeResumeProjection(
                 cursor=None if latest_event is None else latest_event.cursor,
                 sequence=0 if latest_event is None else latest_event.sequence,

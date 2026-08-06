@@ -137,6 +137,62 @@ test("Snapshot 原子恢复消息、artifact、工作流和当前 interrupt", ()
   assert.equal(state.interrupt.interruptId, "interrupt-review-1");
 });
 
+test("Snapshot 原子恢复 VideoAgent workspace revision、计划和步骤", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    videoAgent: {
+      workspace: {
+        workspace_id: "workspace-video-1",
+        conversation_id: "conv-1",
+        revision: 5,
+        payload: {
+          scenes: [{
+            scene_id: "scene-1",
+            scene_index: 1,
+            title: "第五版商品镜头",
+          }],
+          assets: [],
+        },
+      },
+      plan: {
+        plan_id: "plan-video-1",
+        workspace_id: "workspace-video-1",
+        status: "awaiting_confirmation",
+        public_goal: "修改商品镜头",
+      },
+      steps: [{
+        step_id: "step-video-1",
+        plan_id: "plan-video-1",
+        sequence: 1,
+        title: "更新第一条分镜",
+        status: "awaiting_confirmation",
+        public_summary: null,
+        artifact_refs: [],
+        started_at: null,
+        completed_at: null,
+        duration_ms: null,
+      }],
+      confirmation: {
+        confirmation_id: "video_confirmation_1",
+        plan_id: "plan-video-1",
+        step_id: "step-video-1",
+        title: "更新第一条分镜",
+        cost_summary: "将生成1个镜头的新视频版本，执行后可能产生模型调用费用。",
+        affected_scene_ids: ["scene-1"],
+        submittable: false,
+        unavailable_reason: "确认执行入口尚未开放。",
+      },
+    },
+  }), "conv-1");
+
+  assert.equal(projection.videoAgentWorkspace.current.revision, 5);
+  assert.equal(projection.videoAgentWorkspace.current.scenes[0].title, "第五版商品镜头");
+  assert.equal(projection.videoAgentPlan.planId, "plan-video-1");
+  assert.equal(projection.videoAgentPlan.steps["step-video-1"].status, "awaiting_confirmation");
+  assert.equal(projection.videoAgentConfirmation.confirmationId, "video_confirmation_1");
+  assert.deepEqual(projection.videoAgentConfirmation.affectedSceneIds, ["scene-1"]);
+  assert.equal(projection.videoAgentConfirmation.submittable, false);
+});
+
 test("双视频 Workflow 按权威 run 和 artifact 身份选择当前卡片", () => {
   const first = message({
     message_id: "assistant-wf-1",

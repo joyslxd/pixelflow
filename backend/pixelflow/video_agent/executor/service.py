@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
 from pixelflow.video_agent.contracts import AgentPlan, AgentPlanStatus, PlanStepStatus
 from pixelflow.video_agent.tools import VideoToolContext, VideoToolRegistry
-from pixelflow.video_agent.workspace import VideoAgentRepository
+
+if TYPE_CHECKING:
+    from pixelflow.video_agent.workspace import VideoAgentRepository
 
 
 class VideoAgentExecutor:
@@ -123,14 +126,25 @@ class VideoAgentExecutor:
                     now=step.started_at or self._clock(),
                 )
             result = await self._registry.execute(
-                VideoToolContext(user_id=user_id, workspace=workspace),
+                VideoToolContext(
+                    user_id=user_id,
+                    workspace=workspace,
+                    plan_id=plan.plan_id,
+                    step_id=step.step_id,
+                ),
                 step.tool_name,
                 step.arguments,
             )
             if result.workspace_patch:
-                raise AgentRuntimeRecordConflictError(
-                    "VideoAgent 工作区补丁尚未接入权威 Repository"
+                workspace = await self._repository.apply_workspace_patch(
+                    user_id,
+                    workspace.workspace_id,
+                    result.workspace_patch,
+                    expected_revision=workspace.revision,
+                    now=self._clock(),
                 )
+            if result.pending_operation_job_ids:
+                return await self._required_plan(user_id, plan.plan_id)
             await self._repository.complete_step_with_event(
                 user_id,
                 plan.plan_id,

@@ -139,6 +139,29 @@ async def test_start_forwards_transient_credentials_and_maps_polling(
 
 
 @pytest.mark.asyncio
+async def test_start_allows_transient_https_signed_material_url() -> None:
+    service = _FakeExistingJobService(
+        start_response=_StartResponse(
+            ok=True,
+            job_id=PROVIDER_JOB_ID,
+            status="polling",
+        )
+    )
+    adapter = ProviderJobAdapter(service)
+    signed_url = "https://example.invalid/reference.mp4?signature=temporary"
+
+    snapshot = await adapter.start(
+        {"video_url": signed_url},
+        authorization=AUTHORIZATION,
+        idempotency_key=IDEMPOTENCY_KEY,
+    )
+
+    assert service.start_calls[0]["request"] == {"video_url": signed_url}
+    assert snapshot.outcome is ProviderJobOutcome.POLLING
+    assert signed_url not in snapshot.model_dump_json()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "provider_status",
     ["succeeded", "success", "completed", "done"],

@@ -36,6 +36,7 @@ from pixelflow.agent_runtime.config import AgentRuntimeConfig
 from pixelflow.agent_runtime.context import ModelContextProfile
 from pixelflow.agent_runtime.persistence import MemoryVideoRuntimeRepository
 from pixelflow.agent_runtime.service import AgentRuntimeService
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.tasks import MemoryPixelFlowTaskStore
 from tests._router_auth_helpers import make_authed_test_app
@@ -345,6 +346,7 @@ async def _live_client() -> AsyncIterator[
             task_store=task_store,
             turn_executor=live_runtime.executor,
             video_repository=repository,
+            conversation_router=ConversationRouteService(),
             primary_execution_intents=live_runtime.primary_execution_intents,
             clock=clock.now,
         )
@@ -546,7 +548,7 @@ async def _start_scene_generation(
 
     created = await client.post(
         "/agent/conversations",
-        json={"title": title, "initial_intent": "video"},
+        json={"title": title},
     )
     assert created.status_code == 200
     conversation_id = created.json()["conversation_id"]
@@ -896,11 +898,11 @@ async def test_video_live_public_entry_opens_intake_with_complete_attachment() -
     async with _live_client() as (client, live_runtime, providers, _clock, _app):
         created = await client.post(
             "/agent/conversations",
-            json={"title": "Task 14 视频链路", "initial_intent": "video"},
+            json={"title": "Task 14 视频链路"},
         )
         assert created.status_code == 200
         conversation = created.json()
-        assert conversation["orchestration_mode"] == "supervisor_v1"
+        assert conversation["orchestration_mode"] == "frontend_v2"
         assert live_runtime.ready is True
 
         started = await client.post(
@@ -922,6 +924,7 @@ async def test_video_live_public_entry_opens_intake_with_complete_attachment() -
             },
         )
         assert started.status_code == 200
+        assert started.json()["orchestration_mode"] == "supervisor_v1"
         snapshot = await _wait_for_interrupt(
             client,
             live_runtime,
@@ -950,12 +953,12 @@ async def test_video_live_flow_from_zero_to_delivery(
         await live_runtime.operation_recovery.aclose()
         created = await client.post(
             "/agent/conversations",
-            json={"title": "Task 14 完整视频链路", "initial_intent": "video"},
+            json={"title": "Task 14 完整视频链路"},
         )
         assert created.status_code == 200
         conversation = created.json()
         conversation_id = conversation["conversation_id"]
-        assert conversation["orchestration_mode"] == "supervisor_v1"
+        assert conversation["orchestration_mode"] == "frontend_v2"
 
         started = await client.post(
             f"/agent/conversations/{conversation_id}/turns/start",
@@ -976,6 +979,7 @@ async def test_video_live_flow_from_zero_to_delivery(
             },
         )
         assert started.status_code == 200
+        assert started.json()["orchestration_mode"] == "supervisor_v1"
         run_id = started.json()["run_id"]
         intake = await _wait_for_interrupt(
             client,

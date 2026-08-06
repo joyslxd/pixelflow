@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -57,6 +59,52 @@ def _restore_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
+def _sortable_time(value: datetime | None) -> datetime:
+    return _restore_utc(value) or datetime.min.replace(tzinfo=UTC)
+
+
+def _workspace_patch(patch: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    normalized = deepcopy(dict(patch))
+    for key in normalized:
+        if not isinstance(key, str) or not key.strip() or len(key) > 128:
+            raise AgentRuntimeRecordConflictError("VideoAgent workspace patch 键无效")
+    return normalized
+
+
+def _is_workspace_patch_replay(
+    workspace: VideoWorkspace,
+    patch: Mapping[str, JsonValue],
+    *,
+    expected_revision: int,
+) -> bool:
+    return workspace.revision == expected_revision + 1 and all(
+        workspace.payload.get(key) == value for key, value in patch.items()
+    )
+
+
+def _assert_expected_revision(expected_revision: int) -> None:
+    if isinstance(expected_revision, bool) or expected_revision < 1:
+        raise AgentRuntimeRecordConflictError(
+            "VideoAgent workspace expected_revision 必须是正整数"
+        )
+
+
+def _updated_workspace(
+    workspace: VideoWorkspace,
+    patch: Mapping[str, JsonValue],
+    *,
+    now: datetime,
+) -> VideoWorkspace:
+    return VideoWorkspace.model_validate(
+        {
+            **workspace.model_dump(mode="python"),
+            "revision": workspace.revision + 1,
+            "payload": {**workspace.payload, **patch},
+            "updated_at": now,
+        }
+    )
+
+
 _PLAN_STATUS_TRANSITIONS: dict[AgentPlanStatus, frozenset[AgentPlanStatus]] = {
     AgentPlanStatus.PLANNING: frozenset(
         {
@@ -104,6 +152,22 @@ class VideoAgentRepository(Protocol):
     async def create_workspace(self, user_id: str, workspace: VideoWorkspace) -> VideoWorkspace: ...
 
     async def get_workspace(self, user_id: str, workspace_id: str) -> VideoWorkspace | None: ...
+
+    async def load_conversation_state(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> tuple[VideoWorkspace, AgentPlan | None] | None: ...
+
+    async def apply_workspace_patch(
+        self,
+        user_id: str,
+        workspace_id: str,
+        patch: Mapping[str, JsonValue],
+        *,
+        expected_revision: int,
+        now: datetime,
+    ) -> VideoWorkspace: ...
 
     async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None: ...
 
@@ -216,6 +280,83 @@ class MemoryVideoAgentRepository:
     async def get_workspace(self, user_id: str, workspace_id: str) -> VideoWorkspace | None:
         record = self._workspace_by_owner.get((_owner(user_id), workspace_id))
         return None if record is None else _clone(record)
+
+    async def load_conversation_state(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> tuple[VideoWorkspace, AgentPlan | None] | None:
+        """按会话一次读取 Snapshot 所需的工作区和最新计划。"""
+
+        owner = _owner(user_id)
+        workspaces = [
+            workspace
+            for (workspace_owner, _), workspace in self._workspace_by_owner.items()
+            if workspace_owner == owner
+            and workspace.conversation_id == conversation_id
+        ]
+        if not workspaces:
+            return None
+        if len(workspaces) != 1:
+            raise AgentRuntimeRecordConflictError(
+                "VideoAgent 会话存在多个权威 workspace"
+            )
+        workspace = workspaces[0]
+        plans = [
+            plan
+            for (plan_owner, _), plan in self._plan_by_owner.items()
+            if plan_owner == owner
+            and plan.conversation_id == conversation_id
+            and plan.workspace_id == workspace.workspace_id
+        ]
+        if not plans:
+            return _clone(workspace), None
+        latest = max(
+            plans,
+            key=lambda item: (
+                _sortable_time(item.updated_at or item.created_at),
+                item.plan_id,
+            ),
+        )
+        steps = await self.list_plan_steps(owner, latest.plan_id)
+        return _clone(workspace), _clone(latest.model_copy(update={"steps": tuple(steps)}))
+
+    async def apply_workspace_patch(
+        self,
+        user_id: str,
+        workspace_id: str,
+        patch: Mapping[str, JsonValue],
+        *,
+        expected_revision: int,
+        now: datetime,
+    ) -> VideoWorkspace:
+        _assert_expected_revision(expected_revision)
+        normalized_patch = _workspace_patch(patch)
+        owner = _owner(user_id)
+        key = (owner, workspace_id)
+        async with self._transition_lock:
+            workspace = self._workspace_by_owner.get(key)
+            if workspace is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent workspace 不存在或不属于当前用户"
+                )
+            if _is_workspace_patch_replay(
+                workspace,
+                normalized_patch,
+                expected_revision=expected_revision,
+            ):
+                return _clone(workspace)
+            if workspace.revision != expected_revision:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent workspace revision 已变化"
+                )
+            updated = _updated_workspace(
+                workspace,
+                normalized_patch,
+                now=now,
+            )
+            self._workspace_by_owner[key] = _clone(updated)
+            return _clone(updated)
 
     async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None:
         owner = _owner(user_id)
@@ -506,6 +647,113 @@ class SQLVideoAgentRepository:
         async with self._session_factory() as session:
             row = (await session.scalars(statement)).one_or_none()
         return None if row is None else _workspace_from_row(row)
+
+    async def load_conversation_state(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> tuple[VideoWorkspace, AgentPlan | None] | None:
+        """在同一数据库会话中读取工作区、最新计划和有序步骤。"""
+
+        owner = _owner(user_id)
+        workspace_statement = (
+            select(PixelFlowVideoAgentWorkspaceRow)
+            .where(
+                PixelFlowVideoAgentWorkspaceRow.user_id == owner,
+                PixelFlowVideoAgentWorkspaceRow.conversation_id == conversation_id,
+            )
+            .order_by(PixelFlowVideoAgentWorkspaceRow.workspace_id)
+            .limit(2)
+        )
+        async with self._session_factory() as session:
+            workspace_rows = (await session.scalars(workspace_statement)).all()
+            if not workspace_rows:
+                return None
+            if len(workspace_rows) != 1:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent 会话存在多个权威 workspace"
+                )
+            workspace_row = workspace_rows[0]
+            plan_statement = (
+                select(PixelFlowVideoAgentPlanRow)
+                .where(
+                    PixelFlowVideoAgentPlanRow.user_id == owner,
+                    PixelFlowVideoAgentPlanRow.conversation_id == conversation_id,
+                    PixelFlowVideoAgentPlanRow.workspace_id
+                    == workspace_row.workspace_id,
+                )
+                .order_by(
+                    PixelFlowVideoAgentPlanRow.updated_at.desc(),
+                    PixelFlowVideoAgentPlanRow.created_at.desc(),
+                    PixelFlowVideoAgentPlanRow.plan_id.desc(),
+                )
+                .limit(1)
+            )
+            plan_row = (await session.scalars(plan_statement)).one_or_none()
+            if plan_row is None:
+                return _workspace_from_row(workspace_row), None
+            step_statement = (
+                select(PixelFlowVideoAgentPlanStepRow)
+                .where(
+                    PixelFlowVideoAgentPlanStepRow.user_id == owner,
+                    PixelFlowVideoAgentPlanStepRow.plan_id == plan_row.plan_id,
+                )
+                .order_by(PixelFlowVideoAgentPlanStepRow.sequence)
+            )
+            step_rows = (await session.scalars(step_statement)).all()
+        plan = _plan_from_row(plan_row).model_copy(
+            update={"steps": tuple(_step_from_row(row) for row in step_rows)}
+        )
+        return _workspace_from_row(workspace_row), plan
+
+    async def apply_workspace_patch(
+        self,
+        user_id: str,
+        workspace_id: str,
+        patch: Mapping[str, JsonValue],
+        *,
+        expected_revision: int,
+        now: datetime,
+    ) -> VideoWorkspace:
+        _assert_expected_revision(expected_revision)
+        normalized_patch = _workspace_patch(patch)
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                statement = (
+                    select(PixelFlowVideoAgentWorkspaceRow)
+                    .where(
+                        PixelFlowVideoAgentWorkspaceRow.user_id == owner,
+                        PixelFlowVideoAgentWorkspaceRow.workspace_id == workspace_id,
+                    )
+                    .with_for_update()
+                )
+                row = (await session.scalars(statement)).one_or_none()
+                if row is None:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent workspace 不存在或不属于当前用户"
+                    )
+                workspace = _workspace_from_row(row)
+                if _is_workspace_patch_replay(
+                    workspace,
+                    normalized_patch,
+                    expected_revision=expected_revision,
+                ):
+                    return workspace
+                if workspace.revision != expected_revision:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent workspace revision 已变化"
+                    )
+                updated = _updated_workspace(
+                    workspace,
+                    normalized_patch,
+                    now=now,
+                )
+                row.revision = updated.revision
+                row.payload_json = updated.payload
+                row.updated_at = updated.updated_at
+                await session.flush()
+                return _workspace_from_row(row)
 
     async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None:
         owner = _owner(user_id)

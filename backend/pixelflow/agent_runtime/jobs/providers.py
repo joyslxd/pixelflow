@@ -270,8 +270,11 @@ class ProviderJobAdapter:
     async def status(
         self,
         provider_job_id: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> ProviderJobSnapshot:
-        """只查询调用方指定的原 provider job ID。"""
+        """查询原provider job；仅显式scoped Service接收恢复作用域。"""
 
         normalized_job_id = _require_text(
             "provider_job_id",
@@ -281,8 +284,21 @@ class ProviderJobAdapter:
             normalized_job_id = _validate_provider_job_id(normalized_job_id)
         except ValueError:
             raise ProviderJobMappingError("provider_job_id_invalid") from None
+        scoped_status = getattr(self._service, "status_scoped", None)
+        if callable(scoped_status) and (user_id is None or conversation_id is None):
+            raise ProviderJobMappingError("provider_status_scope_required")
         try:
-            response = await self._service.status(normalized_job_id)
+            if callable(scoped_status):
+                response = await scoped_status(
+                    normalized_job_id,
+                    user_id=_require_text("user_id", user_id),
+                    conversation_id=_require_text(
+                        "conversation_id",
+                        conversation_id,
+                    ),
+                )
+            else:
+                response = await self._service.status(normalized_job_id)
         except Exception as exc:
             return _map_call_exception(
                 exc,
@@ -308,23 +324,12 @@ def _normalize_request(
 ) -> dict[str, JsonValue]:
     if not isinstance(request, Mapping):
         raise ProviderJobMappingError("provider_request_not_object")
-    _ensure_safe_result(request)
+    _ensure_safe_provider_request(request)
     try:
-        snapshot = ProviderJobSnapshot.model_validate(
-            {
-                "provider_job_id": None,
-                "outcome": ProviderJobOutcome.POLLING,
-                "result": copy.deepcopy(dict(request)),
-                "reason_code": "provider_polling",
-                "message": "供应商任务处理中。",
-            }
-        )
-    except (TypeError, ValidationError):
+        normalized = copy.deepcopy(dict(request))
+    except (TypeError, ValueError):
         raise ProviderJobMappingError("provider_request_invalid") from None
-    normalized_result = snapshot.model_dump(mode="python")["result"]
-    if not isinstance(normalized_result, dict):
-        raise ProviderJobMappingError("provider_request_not_object")
-    return normalized_result
+    return normalized
 
 
 def _map_call_exception(
@@ -577,3 +582,39 @@ def _ensure_safe_result(value: object) -> None:
         return
     if isinstance(value, float) and not math.isfinite(value):
         raise ProviderJobMappingError("provider_result_non_finite")
+
+
+def _ensure_safe_provider_request(value: object) -> None:
+    """校验只在start调用栈存在的请求，允许HTTPS签名素材URL。"""
+
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ProviderJobMappingError("provider_request_invalid")
+            normalized_key = re.sub(r"[^a-z0-9]+", "", key.lower())
+            if _SENSITIVE_KEY_PATTERN.search(key) or "token" in normalized_key:
+                raise ProviderJobMappingError("provider_request_sensitive")
+            _ensure_safe_provider_request(child)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _ensure_safe_provider_request(child)
+        return
+    if isinstance(value, str):
+        parsed = urlparse(value.strip())
+        if parsed.scheme in {"http", "https"}:
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ProviderJobMappingError("provider_request_unsafe_url")
+            if parsed.username is not None or parsed.password is not None:
+                raise ProviderJobMappingError("provider_request_unsafe_url")
+            return
+        if _SENSITIVE_VALUE_PATTERN.search(value):
+            raise ProviderJobMappingError("provider_request_sensitive")
+        return
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ProviderJobMappingError("provider_request_non_finite")
+        return
+    raise ProviderJobMappingError("provider_request_invalid")

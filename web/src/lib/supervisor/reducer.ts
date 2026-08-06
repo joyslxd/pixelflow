@@ -8,6 +8,21 @@ import {
   cloneSupervisorWorkspaceProjection,
   type SupervisorWorkspaceProjection,
 } from "./workspaceProjection.js";
+import type {
+  VideoAgentConfirmationState,
+  VideoAgentPlanState,
+} from "../../features/video-agent/state/contracts.js";
+import {
+  cloneVideoAgentConfirmationState,
+  cloneVideoAgentPlanState,
+  reduceVideoAgentEvent,
+} from "../../features/video-agent/state/reducer.js";
+import {
+  applyVideoWorkspaceSnapshot,
+  cloneVideoWorkspaceProjectionState,
+  createVideoWorkspaceProjectionState,
+  type VideoWorkspaceProjectionState,
+} from "../../features/video-agent/state/workspace.js";
 
 export const SUPERVISOR_CONNECTION_STATUS_VALUES = [
   "idle",
@@ -90,6 +105,9 @@ export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjecti
   compression: SupervisorCompressionState;
   inputQueue: SupervisorInputQueueItem[];
   resume: SupervisorResumePoint;
+  videoAgentWorkspace: VideoWorkspaceProjectionState;
+  videoAgentPlan: VideoAgentPlanState | null;
+  videoAgentConfirmation: VideoAgentConfirmationState | null;
 }
 
 export interface SupervisorRuntimeState extends SupervisorRuntimeProjection {
@@ -463,6 +481,35 @@ function applyAgentEvent(
       return applyCompressionTerminal(state, event, "failed");
     case "input.state_changed":
       return applyInputEvent(state, event);
+    case "agent.plan.created":
+    case "agent.step.started":
+    case "agent.step.progressed":
+    case "agent.step.completed":
+    case "agent.step.failed":
+    case "agent.confirmation.requested": {
+      const timeline = reduceVideoAgentEvent(
+        {
+          plans: state.videoAgentPlan
+            ? { [state.videoAgentPlan.planId]: state.videoAgentPlan }
+            : {},
+        },
+        event,
+      );
+      const eventPlanId = typeof event.payload.plan_id === "string"
+        ? event.payload.plan_id
+        : null;
+      return {
+        ...withEventResumePoint(state, event),
+        videoAgentPlan: eventPlanId ? timeline.plans[eventPlanId] ?? state.videoAgentPlan : state.videoAgentPlan,
+        videoAgentConfirmation: (
+          event.type === "agent.step.started"
+          || event.type === "agent.step.completed"
+          || event.type === "agent.step.failed"
+        ) && event.payload.step_id === state.videoAgentConfirmation?.stepId
+          ? null
+          : state.videoAgentConfirmation,
+      };
+    }
     case "message.upserted":
     case "workflow.progressed":
     case "interrupt.opened":
@@ -584,12 +631,34 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
   } catch {
     return null;
   }
+  let videoAgentWorkspace: VideoWorkspaceProjectionState;
+  let videoAgentPlan: VideoAgentPlanState | null;
+  let videoAgentConfirmation: VideoAgentConfirmationState | null;
+  try {
+    videoAgentWorkspace = projection.videoAgentWorkspace === undefined
+      ? createVideoWorkspaceProjectionState(projection.conversationId)
+      : cloneVideoWorkspaceProjectionState(
+        projection.videoAgentWorkspace,
+        projection.conversationId,
+      );
+    videoAgentPlan = projection.videoAgentPlan === undefined
+      ? null
+      : cloneVideoAgentPlanState(projection.videoAgentPlan);
+    videoAgentConfirmation = projection.videoAgentConfirmation === undefined
+      ? null
+      : cloneVideoAgentConfirmationState(projection.videoAgentConfirmation);
+  } catch {
+    return null;
+  }
   const cloned = {
     conversationId: projection.conversationId,
     run: { ...projection.run },
     compression: { ...projection.compression },
     inputQueue: projection.inputQueue.map((item) => ({ ...item })),
     resume: { ...projection.resume },
+    videoAgentWorkspace,
+    videoAgentPlan,
+    videoAgentConfirmation,
     ...workspace,
   };
   return isProjectionStateConsistent(cloned) ? cloned : null;
@@ -619,6 +688,9 @@ export function createSupervisorRuntimeState(conversationId: string): Supervisor
     messages: [],
     workflows: [],
     interrupt: null,
+    videoAgentWorkspace: createVideoWorkspaceProjectionState(conversationId),
+    videoAgentPlan: null,
+    videoAgentConfirmation: null,
     resume: {
       cursor: null,
       sequence: 0,
@@ -695,8 +767,21 @@ export function supervisorRuntimeReducer(
       if (projection.resume.sequence < state.resume.sequence) {
         return state;
       }
+      const incomingWorkspace = projection.videoAgentWorkspace.current;
+      const videoAgentWorkspace = incomingWorkspace
+        ? applyVideoWorkspaceSnapshot(state.videoAgentWorkspace, incomingWorkspace)
+        : state.videoAgentWorkspace.current
+          ? state.videoAgentWorkspace
+          : projection.videoAgentWorkspace;
       return {
         ...projection,
+        videoAgentWorkspace,
+        videoAgentPlan: incomingWorkspace === null && state.videoAgentWorkspace.current
+          ? state.videoAgentPlan
+          : projection.videoAgentPlan,
+        videoAgentConfirmation: incomingWorkspace === null && state.videoAgentWorkspace.current
+          ? state.videoAgentConfirmation
+          : projection.videoAgentConfirmation,
         connection: state.connection,
       };
     }

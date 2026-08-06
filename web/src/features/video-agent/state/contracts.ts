@@ -22,6 +22,17 @@ export interface VideoAgentPlanState {
   steps: Record<string, VideoAgentStepState>;
 }
 
+export interface VideoAgentConfirmationState {
+  confirmationId: string;
+  planId: string;
+  stepId: string;
+  title: string;
+  costSummary: string;
+  affectedSceneIds: string[];
+  submittable: boolean;
+  unavailableReason: string | null;
+}
+
 export interface VideoAgentTimelineState {
   plans: Record<string, VideoAgentPlanState>;
 }

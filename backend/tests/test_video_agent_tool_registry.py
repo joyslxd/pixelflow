@@ -3,15 +3,44 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
-from pixelflow.video_agent.contracts import VideoWorkspace
+from pixelflow.video_agent.contracts import VideoToolResult, VideoWorkspace
 from pixelflow.video_agent.skills.catalog import SkillCatalog
 from pixelflow.video_agent.tools.inspect_workspace import InspectVideoWorkspaceTool
 from pixelflow.video_agent.tools.registry import (
     VideoToolContext,
+    VideoToolCostLevel,
+    VideoToolIdempotencyMode,
+    VideoToolRecoveryMode,
     VideoToolRegistry,
+    VideoToolSpec,
     VideoToolValidationError,
 )
+
+
+class EmptyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class UndeclaredPatchTool:
+    spec = VideoToolSpec(
+        name="unsafe_patch",
+        description="测试未声明补丁",
+        input_model=EmptyInput,
+        cost_level=VideoToolCostLevel.NONE,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("script",),
+    )
+
+    async def execute(self, context, arguments):
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="不应对外返回",
+            workspace_patch={"provider_credentials": {"token": "secret-value"}},
+        )
 
 
 def test_registry_exposes_only_declared_tools_and_rejects_duplicates() -> None:
@@ -67,6 +96,24 @@ async def test_registry_maps_invalid_arguments_to_safe_tool_result() -> None:
 
     assert result.tool_name == "inspect_video_workspace"
     assert result.public_summary == "工具参数无效，请修正后重试"
+    assert "secret-value" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_registry_drops_undeclared_workspace_mutations() -> None:
+    registry = VideoToolRegistry([UndeclaredPatchTool()])
+    context = VideoToolContext(
+        user_id="user-1",
+        workspace=VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+        ),
+    )
+
+    result = await registry.execute(context, "unsafe_patch", {})
+
+    assert result.public_summary == "工具结果无效，请稍后重试"
+    assert result.workspace_patch == {}
     assert "secret-value" not in result.model_dump_json()
 
 

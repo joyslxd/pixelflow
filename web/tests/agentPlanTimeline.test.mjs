@@ -11,5 +11,7 @@ test("agent timeline renders persisted step status and duration without hidden r
   assert.match(source, /durationMs/);
   assert.match(source, /正在执行/);
   assert.match(source, /等待确认/);
+  assert.match(source, /setInterval/);
+  assert.match(source, /1_000/);
   assert.doesNotMatch(source, /toolArguments|chainOfThought|reasoning/);
 });

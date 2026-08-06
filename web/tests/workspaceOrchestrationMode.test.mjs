@@ -74,7 +74,6 @@ if (!adapterModuleUrl) {
 
 const {
   createConversationWriteSequencer,
-  inferInitialRuntimeIntent,
   resolveWorkspaceOrchestrationMode,
   resolveWorkspaceAgentRuntimeMode,
   resolveWorkspacePrimaryExecutionReady,
@@ -295,16 +294,12 @@ test("R1 assist 不得用空 Supervisor Workflow 覆盖 v2 任务看板", () => 
   );
 });
 
-test("R2 primary 先挂载统一会话层，并只对明确视频首轮提示申请接管", () => {
+test("R2 primary 先挂载统一会话层，业务归属等待服务端首个 Turn 冻结", () => {
   assert.deepEqual(resolveWorkspaceRuntimePolicy("frontend_v2", "conv-m13-r2", "primary"), {
     supervisorEnabled: true,
     legacyRunnerEnabled: true,
     legacyArtifactActionsEnabled: true,
   });
-  assert.equal(inferInitialRuntimeIntent("用这张参考图生成一条 30 秒商品视频"), "video");
-  assert.equal(inferInitialRuntimeIntent("请拆解分析这个视频"), "video_analysis");
-  assert.equal(inferInitialRuntimeIntent("做一张商品主图"), "image");
-  assert.equal(inferInitialRuntimeIntent("帮我处理一下"), null);
 });
 
 test("R1 assist 只在服务端 Turn 可执行后接力旧流程", () => {
@@ -544,7 +539,7 @@ test("全新 frontend_v2 页面在尚未创建会话时仍允许首条输入", (
   });
 });
 
-test("WorkspacePage 使用创建响应的权威归属并等待 Snapshot 后提交首个 Turn", () => {
+test("WorkspacePage 创建空壳后使用首个 Turn 返回的服务端权威归属", () => {
   assert.match(workspaceSource, /useSupervisorConversation/);
   assert.match(workspaceSource, /resolveWorkspaceOrchestrationMode\(created\)/);
   assert.match(workspaceSource, /agentRuntimeMode:\s*createdAgentRuntimeMode/);
@@ -555,6 +550,19 @@ test("WorkspacePage 使用创建响应的权威归属并等待 Snapshot 后提�
   assert.match(workspaceSource, /supervisorRuntime\.getContextVersion\(\)/);
   assert.doesNotMatch(workspaceSource, /expected_context_version:\s*1[,\n]/);
   assert.match(workspaceSource, /supervisorRuntime\.startTurn/);
+  const turnSource = extractFunctionBody(workspaceSource, "handleSupervisorTurn");
+  assert.match(turnSource, /started\.orchestrationMode/);
+  assert.match(turnSource, /setResolvedOrchestrationMode\(started\.orchestrationMode\)/);
+  assert.match(
+    turnSource,
+    /primaryExecutionReadyRef\.current\s*=\s*started\.orchestrationMode\s*===\s*"supervisor_v1"/,
+  );
+  assert.match(turnSource, /started\.routeIntent\s*===\s*"unknown"/);
+  assert.match(turnSource, /appendPersistedSupervisorNotice/);
+  assert.match(
+    workspaceSource,
+    /continueLegacy:\s*registered\.routeIntent\s*===\s*"unknown"[\s\S]{0,120}\?\s*false/,
+  );
   assert.match(
     workspaceSource,
     /resolveAssistHandoffAction\(\{[\s\S]*orchestrationMode:\s*orchestrationModeRef\.current/,

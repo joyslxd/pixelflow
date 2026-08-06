@@ -185,9 +185,17 @@ export const EVENT_TYPE_VALUES = [
   "message.upserted",
   "workflow.progressed",
   "interrupt.opened",
+  "interrupt.responded",
   "interrupt.closed",
   "external_job.state_changed",
   "external_job.quota_state_changed",
+  "agent.plan.created",
+  "agent.step.started",
+  "agent.step.progressed",
+  "agent.step.completed",
+  "agent.step.failed",
+  "agent.confirmation.requested",
+  "agent.route.decided",
   "error.raised",
 ] as const;
 

@@ -44,6 +44,7 @@ from .turn_registration import (
     TurnRegistrationContextConflictError,
     TurnRegistrationResult,
     TurnRegistrationUnavailableError,
+    TurnRouteAssignment,
     make_turn_registration_store,
     turn_registration_context_read_scope,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "TurnRegistrationContextConflictError",
     "TurnRegistrationResult",
     "TurnRegistrationUnavailableError",
+    "TurnRouteAssignment",
     "VideoRuntimeContextSnapshot",
     "VideoRuntimeContextSnapshotConflictError",
     "VideoRuntimeRepository",

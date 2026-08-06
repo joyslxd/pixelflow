@@ -99,4 +99,5 @@ class AgentEventType(StrEnum):
     AGENT_STEP_COMPLETED = "agent.step.completed"
     AGENT_STEP_FAILED = "agent.step.failed"
     AGENT_CONFIRMATION_REQUESTED = "agent.confirmation.requested"
+    AGENT_ROUTE_DECIDED = "agent.route.decided"
     ERROR_RAISED = "error.raised"

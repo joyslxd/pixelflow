@@ -28,6 +28,7 @@ from pixelflow.agent_runtime.contracts import (
     TurnStatus,
     WorkflowKind,
 )
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.agent_runtime.graph import (
     FakeWorkflowRegistry,
     make_agent_runtime_graph,
@@ -62,6 +63,14 @@ from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
     PixelFlowConversationMessageRecord,
 )
+from pixelflow.video_agent.contracts import (
+    AgentPlan,
+    AgentPlanStatus,
+    AgentPlanStep,
+    PlanStepStatus,
+    VideoWorkspace,
+)
+from pixelflow.video_agent.workspace.repository import MemoryVideoAgentRepository
 from tests._router_auth_helpers import make_authed_test_app
 
 NOW = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
@@ -113,6 +122,116 @@ def test_snapshot_interrupt_uses_frozen_projection_schema() -> None:
         "opened_at",
     }
     assert projection_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_projects_authoritative_video_workspace_plan_and_steps() -> None:
+    """刷新页面必须从同一 Snapshot 恢复工作区 revision、计划和有序步骤。"""
+
+    task_store = MemoryPixelFlowTaskStore()
+    runtime_repository = MemoryVideoRuntimeRepository(
+        task_store=task_store,
+        completion_clock=lambda: NOW,
+    )
+    video_agent_repository = MemoryVideoAgentRepository(
+        event_repository=runtime_repository,
+    )
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="assist",
+            enabled_intents=(),
+            new_conversation_rollout_percent=100,
+            context_compaction_enabled=True,
+        ),
+        repository=runtime_repository,
+        task_store=task_store,
+        video_agent_repository=video_agent_repository,
+        clock=lambda: NOW,
+    )
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.state.pixelflow_task_store = task_store
+    app.state.pixelflow_agent_runtime_service = service
+    app.include_router(pixelflow_conversations.router)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://task10-video-agent-snapshot.test",
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "视频工作区恢复"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_agent_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-snapshot",
+                conversation_id=conversation_id,
+                revision=4,
+                payload={"script": {"content": "权威脚本第四版"}},
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        await video_agent_repository.save_plan(
+            str(USER_ID),
+            AgentPlan(
+                plan_id="plan-snapshot",
+                workspace_id=workspace.workspace_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.RUNNING,
+                public_goal="修改第一条分镜",
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            [
+                AgentPlanStep(
+                    step_id="step-snapshot",
+                    plan_id="plan-snapshot",
+                    sequence=1,
+                    tool_name="generate_scenes",
+                    title="重新生成第一条分镜",
+                    status=PlanStepStatus.PENDING,
+                    confirmation_required=True,
+                    arguments={
+                        "scene_ids": ["scene-1"],
+                        "provider_secret": "不得进入公开Snapshot",
+                    },
+                )
+            ],
+        )
+        await video_agent_repository.request_step_confirmation(
+            str(USER_ID),
+            "plan-snapshot",
+            "step-snapshot",
+        )
+        await video_agent_repository.update_plan_status(
+            str(USER_ID),
+            "plan-snapshot",
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            now=NOW,
+        )
+        response = await client.get(
+            f"/agent/conversations/{conversation_id}/agent-snapshot",
+        )
+
+    assert response.status_code == 200
+    projection = response.json()["videoAgent"]
+    assert projection["workspace"]["revision"] == 4
+    assert projection["workspace"]["payload"]["script"]["content"] == "权威脚本第四版"
+    assert projection["plan"]["plan_id"] == "plan-snapshot"
+    assert "steps" not in projection["plan"]
+    assert [step["step_id"] for step in projection["steps"]] == ["step-snapshot"]
+    assert "arguments" not in projection["steps"][0]
+    assert "tool_name" not in projection["steps"][0]
+    assert "不得进入公开Snapshot" not in response.text
+    confirmation = projection["confirmation"]
+    assert confirmation["confirmation_id"].startswith("video_confirmation_")
+    assert confirmation["plan_id"] == "plan-snapshot"
+    assert confirmation["step_id"] == "step-snapshot"
+    assert confirmation["affected_scene_ids"] == ["scene-1"]
+    assert confirmation["submittable"] is False
+    assert "1个镜头" in confirmation["cost_summary"]
 
 
 def test_interrupt_response_request_uses_frozen_openapi_schema() -> None:
@@ -372,6 +491,28 @@ async def _seed_waiting_interrupt(
     return turn, interrupt
 
 
+async def _freeze_test_supervisor_owner(
+    task_store: MemoryPixelFlowTaskStore,
+    conversation_id: str,
+) -> None:
+    """为只验证历史 live 投影的用例建立已冻结服务端归属。"""
+
+    conversation = await task_store.get_conversation(
+        conversation_id,
+        user_id=str(USER_ID),
+    )
+    assert conversation is not None
+    updated = await task_store.update_conversation(
+        conversation_id,
+        user_id=str(USER_ID),
+        expected_revision=conversation.revision,
+        orchestration_mode="supervisor_v1",
+        orchestration_version=1,
+        _agent_runtime_patch={"primary_execution_ready": True},
+    )
+    assert updated is not None
+
+
 async def _wait_for_open_interrupt(
     repository: MemoryVideoRuntimeRepository,
     conversation_id: str,
@@ -430,6 +571,7 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
         task_store=task_store,
         turn_executor=executor,
         video_repository=repository,
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
         clock=lambda: NOW,
     )
@@ -443,7 +585,7 @@ async def test_supervisor_interrupt_response_resumes_original_turn_idempotently(
         ) as client:
             created = await client.post(
                 "/agent/conversations",
-                json={"title": "Task 10 live API", "initial_intent": "video"},
+                json={"title": "Task 10 live API"},
             )
             assert created.status_code == 200
             conversation_id = created.json()["conversation_id"]
@@ -619,6 +761,7 @@ async def test_interrupt_notify_failure_keeps_http_success_and_secret_transient(
         task_store=task_store,
         turn_executor=executor,  # type: ignore[arg-type]
         video_repository=repository,
+        conversation_router=ConversationRouteService(),
         primary_execution_intents=("video",),
         clock=lambda: NOW,
     )
@@ -633,7 +776,7 @@ async def test_interrupt_notify_failure_keeps_http_success_and_secret_transient(
     ) as client:
         start_conversation = await client.post(
             "/agent/conversations",
-            json={"title": "Turn 唤醒失败", "initial_intent": "video"},
+            json={"title": "Turn 唤醒失败"},
         )
         start_conversation_id = start_conversation.json()["conversation_id"]
         started = await client.post(
@@ -641,7 +784,7 @@ async def test_interrupt_notify_failure_keeps_http_success_and_secret_transient(
             headers={"Authorization": AUTHORIZATION},
             json={
                 "client_input_id": "44444444-4444-4444-8444-444444444444",
-                "content": "登记后由扫描恢复",
+                "content": "制作视频，登记后由扫描恢复",
                 "materials": [],
                 "reply_to_message_id": None,
                 "artifact_refs": [],
@@ -652,10 +795,11 @@ async def test_interrupt_notify_failure_keeps_http_success_and_secret_transient(
         await asyncio.sleep(0)
         created = await client.post(
             "/agent/conversations",
-            json={"title": "唤醒失败恢复", "initial_intent": "video"},
+            json={"title": "唤醒失败恢复"},
         )
         assert created.status_code == 200
         conversation_id = created.json()["conversation_id"]
+        await _freeze_test_supervisor_owner(task_store, conversation_id)
         turn, interrupt = await _seed_waiting_interrupt(
             repository,
             conversation_id=conversation_id,
@@ -789,7 +933,11 @@ async def test_snapshot_rejects_invalid_live_projection_with_fixed_code(
     ) as client:
         created = await client.post(
             "/agent/conversations",
-            json={"title": "损坏中断快照", "initial_intent": "video"},
+            json={"title": "损坏中断快照"},
+        )
+        await _freeze_test_supervisor_owner(
+            task_store,
+            created.json()["conversation_id"],
         )
         response = await client.get(
             "/agent/conversations/"

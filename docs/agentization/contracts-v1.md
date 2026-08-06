@@ -211,6 +211,8 @@ R1 修复后的统一合同如下，`K` 固定表示 `1024 tokens`：
 - `interrupt.opened`
 - `interrupt.closed`
 - `external_job.state_changed`
+- `external_job.quota_state_changed`
+- `agent.route.decided`
 - `error.raised`
 
 规定：
@@ -218,6 +220,7 @@ R1 修复后的统一合同如下，`K` 固定表示 `1024 tokens`：
 - 事件先持久化再发送，SSE 只做投递；断线后用 cursor 补发。
 - `message.upserted` 携带已经持久化的消息响应，artifact 继续放在现有 `payload.artifact`，避免消息和 artifact 两套事件乱序。
 - 前端按 `event_id + sequence` 幂等消费。发现 sequence gap 时重新取 snapshot，不自行猜状态。
+- `agent.route.decided`只携带公开`RouteDecision`和冻结后的`orchestration_mode`，不得包含Prompt、模型原始响应、推理过程或异常正文。
 - 压缩提示属于运行时状态，不写成聊天消息，也不向用户展示摘要正文、token 数或内部 prompt。
 
 建议文案：

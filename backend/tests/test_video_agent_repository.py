@@ -116,6 +116,102 @@ async def test_complete_step_persists_duration_and_owner_isolation(kind: Reposit
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
+async def test_workspace_patch_uses_revision_and_replays_same_snapshot(
+    kind: RepositoryKind,
+) -> None:
+    patch = {
+        "script": {
+            "source": "user_import",
+            "version": 1,
+            "content": "展示商品",
+        }
+    }
+    async with repository(kind) as (store, _):
+        created = await store.create_workspace("user-a", workspace())
+
+        updated = await store.apply_workspace_patch(
+            "user-a",
+            created.workspace_id,
+            patch,
+            expected_revision=created.revision,
+            now=T3,
+        )
+        replay = await store.apply_workspace_patch(
+            "user-a",
+            created.workspace_id,
+            patch,
+            expected_revision=created.revision,
+            now=T3,
+        )
+
+        assert updated.revision == 2
+        assert updated.payload["script"] == patch["script"]
+        assert replay == updated
+        with pytest.raises(AgentRuntimeRecordConflictError, match="revision"):
+            await store.apply_workspace_patch(
+                "user-a",
+                created.workspace_id,
+                {"script": {"source": "different"}},
+                expected_revision=created.revision,
+                now=T3,
+            )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_load_conversation_state_returns_latest_plan_with_ordered_steps(
+    kind: RepositoryKind,
+) -> None:
+    """Snapshot Repository 只返回当前用户、当前会话的权威工作区和最新计划。"""
+
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        first = plan()
+        await store.save_plan("user-a", first, [pending_step()])
+        second = AgentPlan(
+            plan_id="plan-2",
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            status=AgentPlanStatus.RUNNING,
+            public_goal="按新指令修改商品视频",
+            created_at=T3,
+            updated_at=T3,
+        )
+        await store.save_plan(
+            "user-a",
+            second,
+            [
+                AgentPlanStep(
+                    step_id="step-2b",
+                    plan_id="plan-2",
+                    sequence=2,
+                    tool_name="update_scene",
+                    title="更新分镜",
+                    status=PlanStepStatus.PENDING,
+                ),
+                AgentPlanStep(
+                    step_id="step-2a",
+                    plan_id="plan-2",
+                    sequence=1,
+                    tool_name="inspect_video_workspace",
+                    title="读取项目",
+                    status=PlanStepStatus.PENDING,
+                ),
+            ],
+        )
+
+        state = await store.load_conversation_state("user-a", "conversation-1")
+
+        assert state is not None
+        loaded_workspace, loaded_plan = state
+        assert loaded_workspace.workspace_id == "workspace-1"
+        assert loaded_plan is not None and loaded_plan.plan_id == "plan-2"
+        assert [step.step_id for step in loaded_plan.steps] == ["step-2a", "step-2b"]
+        assert await store.load_conversation_state("user-b", "conversation-1") is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
 async def test_terminal_step_completion_is_idempotent_for_same_result(kind: RepositoryKind) -> None:
     result = VideoToolResult(
         tool_name="inspect_video_workspace",

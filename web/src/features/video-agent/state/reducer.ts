@@ -1,4 +1,5 @@
 import type {
+  VideoAgentConfirmationState,
   VideoAgentPlanState,
   VideoAgentPlanStatus,
   VideoAgentPublicEvent,
@@ -23,6 +24,12 @@ function asArtifactRefs(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function asTextList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map(asText).filter((item): item is string => item !== null)
+    : [];
+}
+
 function asPlanStatus(value: unknown): VideoAgentPlanStatus | null {
   return ["planning", "running", "awaiting_confirmation", "completed", "failed", "cancelled"].includes(String(value))
     ? value as VideoAgentPlanStatus
@@ -37,6 +44,149 @@ function asStepStatus(value: unknown): VideoAgentStepStatus | null {
 
 export function createVideoAgentTimelineState(): VideoAgentTimelineState {
   return { plans: {} };
+}
+
+export function projectVideoAgentPlanSnapshot(
+  value: unknown,
+  rawSteps: unknown,
+): VideoAgentPlanState | null {
+  if (value === null) {
+    if (Array.isArray(rawSteps) && rawSteps.length === 0) return null;
+    throw new TypeError("VideoAgent计划快照不合法");
+  }
+  if (typeof value !== "object" || Array.isArray(value) || value === null || !Array.isArray(rawSteps)) {
+    throw new TypeError("VideoAgent计划快照不合法");
+  }
+  const planValue = value as Record<string, unknown>;
+  const planId = asText(planValue.plan_id);
+  const workspaceId = asText(planValue.workspace_id);
+  const status = asPlanStatus(planValue.status);
+  if (!planId || !workspaceId || !status) throw new TypeError("VideoAgent计划快照不合法");
+  const steps: Record<string, VideoAgentStepState> = {};
+  for (const rawStep of rawSteps) {
+    if (typeof rawStep !== "object" || rawStep === null || Array.isArray(rawStep)) {
+      throw new TypeError("VideoAgent步骤快照不合法");
+    }
+    const stepValue = rawStep as Record<string, unknown>;
+    const stepId = asText(stepValue.step_id);
+    const stepPlanId = asText(stepValue.plan_id);
+    const sequence = asPositiveInteger(stepValue.sequence);
+    const title = asText(stepValue.title);
+    const stepStatus = asStepStatus(stepValue.status);
+    if (!stepId || stepPlanId !== planId || !sequence || !title || !stepStatus || steps[stepId]) {
+      throw new TypeError("VideoAgent步骤快照不合法");
+    }
+    steps[stepId] = {
+      stepId,
+      sequence,
+      title,
+      status: stepStatus,
+      publicSummary: asText(stepValue.public_summary),
+      artifactRefs: asArtifactRefs(stepValue.artifact_refs),
+      startedAt: asText(stepValue.started_at),
+      completedAt: asText(stepValue.completed_at),
+      durationMs: asDuration(stepValue.duration_ms),
+    };
+  }
+  if (new Set(Object.values(steps).map((step) => step.sequence)).size !== Object.keys(steps).length) {
+    throw new TypeError("VideoAgent步骤sequence重复");
+  }
+  return {
+    planId,
+    workspaceId,
+    status,
+    publicGoal: asText(planValue.public_goal),
+    steps,
+  };
+}
+
+export function cloneVideoAgentPlanState(value: unknown): VideoAgentPlanState | null {
+  if (value === null) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("VideoAgent计划投影不合法");
+  }
+  const plan = value as Partial<VideoAgentPlanState>;
+  if (!plan.steps || typeof plan.steps !== "object" || Array.isArray(plan.steps)) {
+    throw new TypeError("VideoAgent计划投影不合法");
+  }
+  return projectVideoAgentPlanSnapshot(
+    {
+      plan_id: plan.planId,
+      workspace_id: plan.workspaceId,
+      status: plan.status,
+      public_goal: plan.publicGoal,
+    },
+    Object.values(plan.steps).map((step) => ({
+      step_id: step.stepId,
+      plan_id: plan.planId,
+      sequence: step.sequence,
+      title: step.title,
+      status: step.status,
+      public_summary: step.publicSummary,
+      artifact_refs: step.artifactRefs,
+      started_at: step.startedAt,
+      completed_at: step.completedAt,
+      duration_ms: step.durationMs,
+    })),
+  );
+}
+
+export function projectVideoAgentConfirmationSnapshot(
+  value: unknown,
+): VideoAgentConfirmationState | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("VideoAgent确认快照不合法");
+  }
+  const record = value as Record<string, unknown>;
+  const confirmationId = asText(record.confirmation_id);
+  const planId = asText(record.plan_id);
+  const stepId = asText(record.step_id);
+  const title = asText(record.title);
+  const costSummary = asText(record.cost_summary);
+  const affectedSceneIds = asTextList(record.affected_scene_ids);
+  if (
+    !confirmationId
+    || !planId
+    || !stepId
+    || !title
+    || !costSummary
+    || typeof record.submittable !== "boolean"
+  ) throw new TypeError("VideoAgent确认快照不合法");
+  const unavailableReason = asText(record.unavailable_reason);
+  if (!record.submittable && !unavailableReason) {
+    throw new TypeError("VideoAgent不可提交确认必须说明原因");
+  }
+  return {
+    confirmationId,
+    planId,
+    stepId,
+    title,
+    costSummary,
+    affectedSceneIds,
+    submittable: record.submittable,
+    unavailableReason,
+  };
+}
+
+export function cloneVideoAgentConfirmationState(
+  value: unknown,
+): VideoAgentConfirmationState | null {
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("VideoAgent确认投影不合法");
+  }
+  const confirmation = value as Partial<VideoAgentConfirmationState>;
+  return projectVideoAgentConfirmationSnapshot({
+    confirmation_id: confirmation.confirmationId,
+    plan_id: confirmation.planId,
+    step_id: confirmation.stepId,
+    title: confirmation.title,
+    cost_summary: confirmation.costSummary,
+    affected_scene_ids: confirmation.affectedSceneIds,
+    submittable: confirmation.submittable,
+    unavailable_reason: confirmation.unavailableReason,
+  });
 }
 
 export function reduceVideoAgentEvent(
@@ -56,6 +206,27 @@ export function reduceVideoAgentEvent(
       steps: state.plans[planId]?.steps ?? {},
     };
     return { plans: { ...state.plans, [planId]: plan } };
+  }
+
+  if (event.type === "agent.confirmation.requested") {
+    const planId = asText(event.payload.plan_id);
+    const stepId = asText(event.payload.step_id);
+    const plan = planId ? state.plans[planId] : undefined;
+    const previous = stepId && plan ? plan.steps[stepId] : undefined;
+    if (!planId || !stepId || !plan || !previous) return state;
+    return {
+      plans: {
+        ...state.plans,
+        [planId]: {
+          ...plan,
+          status: "awaiting_confirmation",
+          steps: {
+            ...plan.steps,
+            [stepId]: { ...previous, status: "awaiting_confirmation" },
+          },
+        },
+      },
+    };
   }
 
   if (!event.type.startsWith("agent.step.")) return state;
