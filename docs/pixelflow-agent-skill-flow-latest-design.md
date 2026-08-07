@@ -1,6 +1,6 @@
 # PixelFlow Agent/Skill 最新流程设计
 
-更新时间：2026-08-03
+更新时间：2026-08-05
 适用代码：当前 `pixelflow` 仓库最新前后端实现
 维护要求：以后只要 Agent 流程、Skill 边界、content-app/Borgrise 接口合同、前端确认/重试逻辑发生变化，本文件必须同步修改。
 
@@ -372,6 +372,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 - 每镜 9 张参考图预算在 Plan 初稿和 Plan 修订发布前执行双层控制：LLM 策划提示先要求每镜 `characters + scenes + props` 去重后不超过 9；后端再逐镜硬校验。候选超限时必须重新规划完整分镜，可拆镜或重排 4-15 秒整数时长、动作、对白和资产；重排前后三类具体资产名称并集必须完全一致，禁止通过数组截断、漏掉或删除全局资产凑数。重排仍超限或资产并集变化时 Plan 失败，前端不展示候选 Plan，场景包的 9 图校验只保留为纵深防线。
 - 如果 Plan LLM 的时间范围或镜头格式异常，后端只重建对应时间线和多秒段镜头描述，保留其具体标题、故事线、对白、角色、场景和道具；若具体语义本身不可恢复则 Plan 失败，不再用“目标用户”“真实使用场景”“产品”等泛化内容替换整份蓝图。
 - 场景包恢复历史 Plan 时对旧的全局镜头时间段做兼容换算，只把时间码平移为当前分镜的 `0-N秒`，不改写故事线、旁白、资产或其他权威字段；新 Plan 候选不走兼容分支。
+- Agent通过自然语言执行脚本、全局素材、场景包、单镜头、版本选择或交付参数修改时，服务端`VideoWorkspace` revision是唯一写模型：工具先以乐观锁提交权威补丁，再发布公开事件和成功消息。左侧对话Artifact、【视频资产包】、StoryboardPanel及其他右侧预览面板均以同一Snapshot/revision派生，不得各自保存可反向覆盖权威状态的业务副本。SSE只传递权威revision及安全Artifact引用；乱序旧事件必须丢弃，刷新、切换对话和断线重连必须得到与修改后完全一致的预览内容。
 - 主流程不因“文生视频/编辑视频/首帧图生视频”等入口类型而绕过场景包。
 - 正常生成视频都先生成多组视频场景片段，再逐段生成视频，最后合并。
 - 每段片段最少 4 秒，最多 15 秒。
@@ -937,13 +938,16 @@ flowchart TD
 3. 保存当前 conversation context 和 artifact。
 4. 用户充值后回到同一对话，仍可以点击当前阶段或上一步按钮继续。
 
-R2 视频 live Handler 的 status 402 候选在上述 v2 提示语义之外增加持久化恢复合同。Provider 已经返回
+R2 视频 Agent 的 402 恢复在上述 v2 提示语义之外增加持久化合同。Provider 已经返回
 `provider_job_id` 后，status 402 不允许重启原 Operation，也不允许再次调用 Provider start。Memory/SQL
 Repository 在同一临界区或事务中把 `quota_pause_revision` 从 `0` 单调递增，并原子提交对应的
 `external_job.quota_state_changed` pause Event；每个 revision 的 pause/resume Event ID 只由内部
 `job_id + revision + quota_state` 派生，恢复 Runtime 必须先投递 quota Event，再投递 completion，最后才允许
 继续轮询原 provider job。402 本身不是 completion，timeout、failed 和 404/expired 仍沿用终态及新 attempt
-合同。
+合同。Provider 尚未返回 `provider_job_id` 的 start 402 则保留 `CREATED` Operation，工作区写入
+`phase=start` 的稳定额度中断；用户恢复时只借用该 HTTP 请求的一次性 Authorization，重新执行原
+Operation 的同一 attempt 与幂等键。该分支不得创建新的 Operation、不得伪造 Provider job ID，且恢复
+完成后必须清除额度中断投影。
 
 用户恢复复用公开 interrupt response Controller 与既有 `retry_failed` 动作，安全 patch 只包含 `job_id` 和
 `quota_pause_revision`。Controller 接收的新 Authorization 只沿 Router → Service → Executor → Vault → Handler
@@ -1146,13 +1150,29 @@ corepack pnpm build
 
 ## 16. 当前实现边界
 
-- v2 前端主流程由 `WorkspacePage.tsx` 编排，后端提供分段接口，不是完全由后端 LangGraph 自动推进。
+- P0 抽取后 `WorkspacePage.tsx` 只保留 `VideoAgentWorkspace` 薄路由壳；旧 v2 前端编排暂存于 `features/legacy-workspace/LegacyWorkspace.tsx`，由 V2 迁移边界转发，后端仍提供分段接口。
 - 旧 `/agent/flows` LangGraph 任务流仍保留，主要用于任务 API、SSE、资产和旧流程兼容。
 - 直接视频生成接口 `/agent/flows/video/generate-direct/start` 存在，但业务主流程仍要求先走 plan.md 和视频场景包。
 - `ScenePackageSkill` 会先尝试 LLM，失败后用规则版兜底，保证流程可继续。
 - `content-app/Borgrise` 的真实接口参数应以同级 `content-app` Controller 和当前 `run_generation.py` 为准；发现 PixelFlow 需要但 content-app 不存在的接口，应先在 content-app 新增或向用户确认业务逻辑。
 
 ## 17. 已确认但尚未实现的完整 Agent 化改造
+
+2026-08-05 的统一 VideoAgent V2 P0 候选已在 `backend/pixelflow/video_agent/` 建立独立 Turn 入口、`VideoWorkspace`、`AgentPlan/AgentPlanStep` Repository、事务性公开步骤事件和前端 timeline reducer。Task 5 进一步增加受控工具注册中心：`SkillCatalog` 只通过 DeerFlow `SkillStorage` 读取已启用的 `SKILL.md` 元数据；`VideoToolRegistry` 只解析服务端显式注册工具，统一执行 Pydantic DTO 校验，并把用户可修正的参数错误收敛为固定安全结果；首个 `inspect_video_workspace` 只返回脚本、参考视频、素材、分镜和输出数量以及内部 `artifact:` 引用，不回显完整脚本、Provider 凭据或 URL。Task 6 核心通过 `deepseek-v4-pro.with_structured_output()` 生成最多八步的短计划，未知工具、非法 DTO 或超长计划最多携带固定反馈修复两次；工具参数和确认要求进入 V2 Step Repository，计费步骤先持久化 `awaiting_confirmation`，确认后才转为 `running` 并执行，重启恢复运行步骤时复用原 started 事件。
+
+Task 7 业务切片新增 `import_script`、`brainstorm_script` 和 `analyze_reference_video`。完整用户脚本直接写成 `ready` 版本且不进入旧 Plan 评审；创意生成只追加 `draft` 版本，优先复用 `creative.brief_generate`，模型不可用时通过 `creative.plan_markdown` 生成确定性可编辑草稿。`PixelFlowVideoDomainAdapter` 只调用稳定领域 Service 与 `VideoDecomposeSkill`，不导入旧 LangGraph node/router。参考视频首次解析通过 `M06ReferenceAnalysisOperationPort`、`OperationStartCoordinator`和`ContentAppTaskJobService`领取稳定Operation及content-app task ID；`VideoToolResult.pending_operation_job_ids`使执行器在外部job完成前保留`running`步骤，Service重建后恢复Worker只凭provider job ID查询，提交唯一完成事件后同一步重放写入白名单分镜，Provider start增量为0。HTTPS签名素材URL和用户Authorization只在start调用栈短暂存在，Repository只保存规范请求SHA-256、幂等键和job ID；status明确拒绝持久化用户Authorization，只从运行时密钥系统注入的`PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION`即时读取服务级Bearer。测试环境已验证该凭据可鉴权task status，不存在job固定映射为`expired`；配置缺失时Gateway仍fail-closed。Gateway最终接线还必须通过统一 PowerMem helper检索语义上下文、记录阶段摘要，不得在工具或Adapter内直接拼PowerMem HTTP。
+
+Task 0 已把`backend/pixelflow/agent_runtime/conversation_router.py`中的跨业务轻量路由接到权威首Turn边界。文件名明确表达它负责全部Conversation intent，而不是视频专用路由；`ConversationRouteService`覆盖视频生成、图片、PPT、视频分析和unknown。Conversation创建Controller严格拒绝`initial_intent`并只建立`routing_pending`空壳；明确且唯一的业务表达使用无副作用规则，多意图、隐含表达和未知请求才复用`recognize_intent_with_llm()`，模型异常、超时、未知、低于0.5置信度或超过共享`ContextBudgetPolicyProvider`预算时统一失败关闭为`unknown + requires_clarification`。`RouteRequest`只保留`artifact_ref/media_type/filename/mime_type`附件元数据，丢弃Authorization、签名URL和供应商字段。Memory/SQL Turn Registration Repository在同一提交中保存首条消息、Turn、`RouteDecision`、`orchestration_mode`和`agent.route.decided`公开事件；相同`client_input_id`只回读，不再次分类。前端已删除`inferInitialRuntimeIntent()`和创建API的`initial_intent`，并在首Turn响应后采用服务端`orchestration_mode`，避免误启动旧v2 runner。当前后端聚焦门禁已绿；完整前端门禁仍被工作区中另一个未提交的`WorkspacePage.tsx`大改阻塞，路由相关合同本身已经通过。
+
+Task 8镜头切片在`backend/pixelflow/video_agent/tools/scene.py`增加五个受控工具合同。`InspectSceneTool`只整理已有公开QC问题、内部Artifact证据、修复建议和关联素材；`PatchSceneTool`只接受故事线、Prompt、旁白、屏幕文案、转场、景别、运镜、4–15秒时长及内部素材引用，并把目标镜头标记为dirty；`ReplaceProjectAssetsTool`仅替换声明的输入素材字段，不递归改写历史版本、生成任务或既有产物；`ReviewGeneratedScenesTool`保留全部历史版本，选用目标版本后写`重新生成完成`和持久时间。`GenerateScenesTool`冻结为`BILLABLE + confirmation_required + OPERATION`，按`scene_ids + variant_count + attempt`调用`M06SceneGenerationOperationPort`；每个镜头版本拥有独立稳定Operation，pending job阻止步骤提前完成，完成事件恢复后只新增对应版本。未装配Port绝不退回直接供应商调用。`make_scene_video_job_service()`把六种生成模式精确映射到content-app DTO，start只消费当次用户Authorization，status使用服务级Bearer并支持重启恢复；成功结果投影内部Artifact、安全HTTPS视频URL和完成时间，同时追加到权威`VideoWorkspace.assets`。因此自然语言修改后的对话Artifact、视频资产包和右侧预览可以从同一revision恢复，不再各存一份视频结果。任务9已补齐合并与剪映Provider合同；Gateway是否注册完整四类集合仍受服务凭据、剪映配置和内部上传部署开关共同约束。
+
+当前 Task 8工具以及Task 9场景视频、QA质检、同步合并、剪映Provider Service与Gateway凭据链均已完成。Task 10已让Agent Runtime Snapshot按用户和会话聚合返回唯一`VideoWorkspace`、最新`AgentPlan`及有序steps；前端Supervisor Reducer把这份权威状态投影到执行时间线、视频资产包选择器和右侧证据面板，并按workspace revision拒绝旧事件或同版本冲突内容覆盖。`useVideoAgent`在同一工作区revision变化时保留仍存在的镜头选择，目标镜头删除或切换工作区后回退到当前第一镜；`SceneEvidencePanel`可切换多镜头并展示当前视频、历史版本、QC证据及单镜头自然语言编辑预填。完整旧Storyboard编辑器由`VideoAgentStoryboardSurface`功能边界承接，Legacy页面不再直接依赖Canvas Storyboard组件。Snapshot中的step改为白名单公开DTO，只保留标题、状态、确认标志、公开摘要、Artifact引用和时间，不向浏览器发送内部`tool_name`或`arguments`；唯一等待确认step再稳定派生confirmation ID、安全费用摘要和受影响镜头。Task 11已新增公开确认Controller，`AgentConfirmationCard`只提交confirmation/step ID与确认或取消决定；Memory/SQL取消在同一临界区跳过step并取消Plan。Gateway已安全构造10工具Registry、`VideoAgentExecutor`和动态Operation Resolver，参考解析、镜头生成、MP4合并是核心依赖，剪映降为可选能力。完成事件显式owner、V1先退役再启动唯一V2 Worker、首Turn异步Runner三项设计已经冻结但代码尚未完成，因此Executor仍不注入公开Service，Snapshot继续固定`submittable=false`。content-app内部幂等上传接口仍待上游部署并开启发布开关；Gateway激活、完成事件恢复、额度暂停恢复和移除`LegacyWorkspace`运行时兼容层也尚未完成，因此该候选不能作为生产切换依据。
+
+2026-08-06进一步裁定Task 11切换语义：M06通用完成回调显式增加`user_id + conversation_id`，V2完成Handler只能按该owner恢复原Plan；V1与V2 Recovery Worker不允许共存，必须先把V1历史Workflow冻结为只读并下架其执行代码，再启动唯一V2 Worker。首Turn的`VideoAgentEntrypoint.submit_turn()`只持久化Workspace和Plan，Controller返回后由扩展的`notify_registered_turn()`把一次性凭据交给独立VideoAgent Runner；Runner执行到人工确认或pending Operation即退出，不把Authorization写入Turn、Workspace或Plan。V2额度中断卡只提交稳定`quota_interrupt_id + resume/cancel`决定，后端复核owner、conversation、Plan、step、Operation和quota revision。start阶段402尚无provider job时，充值后复用同一Operation、attempt和幂等键重试start；status阶段402已有provider job时只恢复原job轮询，Provider start增量为0；取消则原子跳过当前step并取消Plan。V1 quota Handler不再复用，随V1执行链一起下架。
+
+同日实现进度：M06完成Dispatcher已经把`user_id + conversation_id`作为必填参数传给恢复Handler。历史V1视频恢复请求由`AgentRuntimeService.resume_workflow()`固定返回`video_workflow_retired`，公开内容仅包含workflow ID、创建时间和安全内部Artifact；旧creation contract、签名URL、状态正文和Provider信息均不返回，原记录及事件保持不变。Gateway生命周期已停止创建V1 live Graph、Supervisor Turn Executor和V1 Operation Recovery Worker；随后物理删除了旧Supervisor、Graph、live Handler、V1凭据与Operation Worker、V1状态编解码、Controller入口及相关测试。V2完成恢复改用独立`operation_namespace`，新视频会话归属为`video_agent_v2`；数据库历史表模型只保留审计数据，没有V1读取、恢复或执行入口。现有intake、planning、video分段Router继续直接依赖稳定领域Service。`LegacyWorkspace`仍是图片、PPT和分段v2交互的前端迁移壳，不属于已下线V1执行链，后续单独迁移。
+
+Task 9首个交付切片新增`compose_or_export_video`。工具在任何外部调用前强制校验`dirty_scene_ids`为空、QC不存在`dirty/failed/repairable/unresolved`状态、每个镜头拥有唯一顺序并已显式选用`approved`内部版本；传给交付Port的镜头按`scene_index`排序且只包含`scene_id/variant_id/artifact_ref`。Adapter只在内部根据这三个标识回读权威Workspace版本并解析Provider所需HTTPS URL，URL不进入工具DTO或交付输出快照。MP4与剪映工程包均声明`BILLABLE + confirmation_required + OPERATION`，运行中job通过`pending_operation_job_ids`保持原步骤运行，成功后工作区只保存内部Artifact引用。`ReviewGeneratedScenesTool`选用修复版本时会同时把对应QC标记为`resolved`。同步视频合并由`ContentAppMergeJobService`接入：单镜头直接复用，多个镜头只调用一次content-app同步接口；`OperationStartCoordinator`识别带provider ID的start终态后，由Memory/SQL Repository在一个事务中绑定provider ID、终态和唯一完成Outbox，不再创建虚假轮询计划。Task 11再把Authorization读取延迟到赢得start lease且确实需要首次Provider调用的瞬间；终态Operation重放不再依赖用户凭据。剪映由`JianyingDraftProviderJobService`接入第三方start/status；`OperationRecoveryRuntime`只把Repository中的`user_id/conversation_id`交给显式scoped Service。第三方成功ZIP经大小和非空校验后调用content-app`/api/internal/upload`：服务Bearer在Header，`target_user_id`在表单，`Idempotency-Key=hash(provider_job_id + user_id)`，因此崩溃重放仍归原用户且只生成一份资产。该上游能力由`pixelflow.content_app_internal_upload_enabled`显式声明，默认false；V2核心Registry把剪映视为可选能力，未部署时只有`jianying_package`失败关闭，不阻塞参考解析、镜头生成和MP4主链路；旧V1 live Runtime的全有或全无合同在退役前保持不变。
 
 当前团队已经确认“会话级 Supervisor + LangGraph 独立 Workflow Graph + 现有 v2 Service/Skill Adapter + 全局 Context Runtime”的单一目标架构。R1 已完成单槽集成和人工生产发布：生产为 `assist / enabled_intents=[] / 100% / context_compaction=true`，新对话使用统一 Turn、Snapshot、SSE、压缩队列和 Notice，但现有阶段工作流继续拥有业务推进权。M13.2/R2 已通过阶段单槽进入 Agent，dev profile 声明为 `primary / enabled_intents=[video] / 100% / true`；这个配置只代表允许接管的上限，不能单独证明业务执行链已安装。创建 Controller 接收保守的首轮 intent 提示后，`AgentRuntimeService` 还必须同时命中进程启动时注册的 `primary_execution_intents`，才允许把新对话冻结为 `supervisor_v1`。Task 13 隔离候选补齐了视频 live Graph Handler 的 Turn 消费、五类人工 interrupt、九动作分发、权威 Workflow/Artifact 投影和 Web 结构化 action 接线；Task 14 隔离候选进一步完成 Gateway 全有或全无装配、status 402 持久化暂停/恢复和 fake 公共全链路门禁，当前实现检查点为 `d32adf4`，状态为 `review_fix_local_verified:Task14 / awaiting_independent_slot_integration`。该候选尚未进入 Agent 长期分支，因此当前可部署 Agent 基线仍没有 live Handler，就绪集合为空，视频新对话安全保持 `frontend_v2`，但仍完整经过 R1 Turn、Snapshot/SSE、压缩和输入队列，再由既有 v2 视频 Service 推进。该提示不是 Supervisor 的权威业务分类，历史对话与运行中任务不迁移。
 
@@ -1174,11 +1194,13 @@ M06.1 在独立模块分支建立持久化 External Job 的首段领域合同：
 
 M06.2 继续为 `polling` operation 增加持久化轮询租约。Memory 与 SQL Repository 共享同一合同，SQL 在事务内锁定 operation 行，SQLite 额外使用 `BEGIN IMMEDIATE` 覆盖两个独立 Engine/worker 的竞争；领取同时匹配当前用户、对话和内部 job，仅允许 `provider_job_id` 已落库、`next_poll_at <= now` 且没有有效租约的任务。有效租约内同 worker 重领只回读原值，heartbeat 只能严格延长当前未过期租约；一次轮询结束后，持有者原子写入未来 `next_poll_at` 并清空 lease。租约在 `lease_expires_at == now` 的边界允许新 worker 接管，旧 worker 随即不能再 heartbeat 或排期。
 
-M06.3 在 Operation 与现有 v2 start/status Service 之间增加 `ProviderJobAdapter` 防腐层。start 显式透传本次 Authorization 与 operation 幂等键，但 Adapter 实例和稳定结果都不保存凭据；status 只查询调用方给出的原 provider job ID，并拒绝响应 ID 错配。现有 `ok/job_id/status/result/error/message` DTO 被统一为 `polling/succeeded/failed/paused_quota/timeout`，真实 `quota_paused` 别名也进入可恢复暂停；直接异常属性或 httpx response 中的 HTTP 402、额度标记和额度文案优先进入可恢复暂停，内置及 httpx 超时归一为 timeout。Adapter 递归剔除现有 DTO 中明确的 `raw/raw_response/provider_response/response_body` 字段，再对剩余 JSON 执行敏感键、凭据字符串和 URL 安全校验；稳定 Snapshot 固定五态与 reason/message 对应关系，业务结果递归冻结并在序列化前再次校验。未知状态、缺失或冲突 job ID、非法或疑似凭据形态的 job ID、其余敏感结果、带认证信息/查询串/fragment 的完整 HTTP(S) URL 及非法 JSON 一律 fail-closed，业务失败和未分类异常不回显供应商原文。M06.1–M06.3 增量仍只在模块分支，尚未进入 Agent 长期分支；Operation 终态落库、完成事件、workflow resume、终态 claim、crash window 和重启恢复仍由 M06.4–M06.5 实现。
+M06.3 在 Operation 与现有 v2 start/status Service 之间增加 `ProviderJobAdapter` 防腐层。start 显式透传本次 Authorization、规范供应商请求与operation幂等键，但 Adapter 实例和稳定结果都不保存凭据或原请求；status 只查询调用方给出的原 provider job ID，并拒绝响应 ID 错配。start请求禁止Authorization/API key等凭据字段、非HTTPS或带用户名密码URL，但允许只在调用栈短暂存在的HTTPS签名素材URL，Repository仍只保存其规范SHA-256。现有 `ok/job_id/status/result/error/message` DTO 被统一为 `polling/succeeded/failed/paused_quota/timeout`，真实 `quota_paused` 别名也进入可恢复暂停；直接异常属性或 httpx response 中的 HTTP 402、额度标记和额度文案优先进入可恢复暂停，内置及 httpx 超时归一为 timeout。Adapter 递归剔除现有 DTO 中明确的 `raw/raw_response/provider_response/response_body` 字段，再对剩余持久结果执行更严格的敏感键、凭据字符串和 URL 安全校验；稳定 Snapshot 固定五态与 reason/message 对应关系，业务结果递归冻结并在序列化前再次校验。未知状态、缺失或冲突 job ID、非法或疑似凭据形态的 job ID、其余敏感结果、带认证信息/查询串/fragment 的完整 HTTP(S)结果URL及非法 JSON 一律 fail-closed，业务失败和未分类异常不回显供应商原文。M06.1–M06.3 增量仍只在模块分支，尚未进入 Agent 长期分支；Operation 终态落库、完成事件、workflow resume、终态 claim、crash window 和重启恢复仍由 M06.4–M06.5 实现。
 
 M06.4 把 Provider 的 `succeeded/failed/timeout` 安全终态与 `external_job.state_changed` 完成事件作为一个事务提交：Memory Repository 同时持有 Operation/Event 写锁，SQL Repository 在同一个事务中锁定 Operation 与会话尾事件，任一冲突都不能留下“终态无事件”或“事件存在但 Operation 未终态”的半状态。事件 ID、cursor 和 run ID 只从内部 job ID 稳定派生；重复观察相同终态回读同一事件，不同终态、provider job ID 错配、无效轮询租约或事件身份碰撞均 fail-closed。Operation 与完成事件的返回快照、事件 payload 和嵌套结果全部深度只读，但仍能稳定序列化为普通 JSON。`OperationCompletionDispatcher` 按完成事件 ID 领取定向投递租约；通用 Outbox worker 若遇到队首完成事件必须停止，不能过滤该事件并越过 sequence 领取后续事件。Dispatcher 把原 workflow namespace、完成事件和 `idempotency_key=event_id` 交给 Workflow Graph Resume Port，并在 Graph 返回后按实际完成时间确认仍有效的投递租约。进程在 Provider 成功后、Graph checkpoint 前退出时由新 worker 继续原事件；Graph checkpoint 已落盘但 Outbox 尚未确认，或者 Graph 执行期间租约已经过期时，也只按同一 ID 重放并由 Workflow 去重，绝不重新调用供应商 start。`polling/paused_quota` 不进入该终态通道；M06.1–M06.4 增量仍只在模块分支，shutdown/restart 扫描、job 404/expired 和人工恢复留给 M06.5。
 
 M06.5 在模块分支补齐可关闭、可重启的 Operation Runtime。`OperationStartCoordinator` 先创建或回读稳定 Operation，再用数据库 start lease 保证并发请求只有胜者调用现有 Provider `start`；Authorization 与原请求只存在于该次 Client 调用，Repository 和 SQLite 只保存请求摘要、幂等键和 provider job ID。start 阶段 HTTP 402 释放尚未绑定 provider job 的租约并返回固定 `OperationStartQuotaPausedError`，用户充值后可显式重试同一 Operation；未知或不确定 start 结果保留租约，避免无幂等保护的自动重复启动。`OperationRecoveryRuntime` 按稳定顺序扫描到期轮询与未确认完成事件，每个候选通过用户、对话和数据库租约领取后只执行 `status(provider_job_id)`；关闭只取消本进程循环，未完成租约保留到过期，由重启进程继续原 job。单个 Provider、Repository 或 Graph 异常不能终止整批或后台循环；慢 status 返回后重新读取时钟，租约已过期的 worker 不能排期、暂停或提交终态。SQL 完成扫描在数据库中联结 Event 与 Operation，先过滤 job/status 一致的有效终态，再按 outbox ID 稳定排序并应用 `scan_limit`，既不被无效队首饿死，也不全量物化积压。
+
+Task 11 的V2执行链已经按上述合同接线：`VideoAgentEntrypoint`只保存Workspace/Plan，独立`VideoAgentRunner`负责非阻塞执行并清理单次Authorization；Gateway不再启动V1 Graph、旧Turn Executor或旧Recovery Worker，只在V2核心Provider完整就绪时启动唯一`OperationRecoveryRuntime`。每个异步工具在Workspace任务记录中持久化`plan_step_id`，完成与status 402额度事件必须同时匹配owner、conversation、Plan、step、Operation stage和job身份。成功事件只恢复原Plan；失败事件原子写step失败、Plan失败和安全SSE。Provider已有job的额度卡只提交`quota_interrupt_id + resume/cancel`：resume继续同一provider job且Provider start增量为0，cancel在Memory/SQL同一临界区跳过step、取消Plan并同步清除右侧Workspace额度状态。Provider尚无job的start 402仍需补稳定中断投影，并在充值后用当前HTTP一次性Authorization重跑同一Operation、attempt和幂等键。自然语言修改产生的Workspace revision继续作为对话状态、视频资产包和右侧预览面板的共同权威来源。
 
 status 阶段 HTTP 402 或 `quota_paused` 保留原 Operation/provider job ID 并清除自动轮询时间，只有显式人工动作可以重新安排原 job 查询，绝不再调用 `start`。Provider status HTTP 404 只依据状态码映射固定 `provider_job_expired` 安全快照，作为 `expired` 终态与唯一完成事件原子落库；人工恢复只能返回 `new_attempt_required`，不能把原终态改回 `created/polling`。M06 最终权威门禁固定覆盖 operation、lease、Provider Adapter、completion/recovery、Outbox、Repository/migration、Graph/Gateway 旧流程和 flag-off 边界、Pester 与 Ruff，已通过 Final 单槽集成进入 Agent 长期分支；当前自动化仍为 `automation_local_ready`，生产继续保持 R1 `assist`，M12.5/M13.2 的 Workflow 接线和 R2 发布仍须分别通过后续门禁与人工批准。
 

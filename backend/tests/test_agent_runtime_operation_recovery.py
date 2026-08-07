@@ -188,19 +188,47 @@ class _ScriptedExistingJobService:
         return result
 
 
+class _ScopedExistingJobService(_ScriptedExistingJobService):
+    """验证恢复Runtime只把Repository中的所有者作用域交给显式Service。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scoped_status_calls: list[tuple[str, str, str]] = []
+
+    async def status_scoped(
+        self,
+        provider_job_id: str,
+        *,
+        user_id: str,
+        conversation_id: str,
+    ) -> object:
+        self.scoped_status_calls.append(
+            (provider_job_id, user_id, conversation_id)
+        )
+        return {
+            "job_id": provider_job_id,
+            "status": "succeeded",
+            "result": {"artifact_ref": "artifact:scoped-status-result"},
+        }
+
+
 class _RecordingGraphResumer:
     """按事件 ID 记录 Workflow 恢复，不执行真实业务图。"""
 
     def __init__(self) -> None:
         self.calls: list[tuple[object, AgentEvent, str]] = []
+        self.owners: list[tuple[str, str]] = []
 
     async def resume_external_job(
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        self.owners.append((user_id, conversation_id))
         self.calls.append((namespace, completion_event, idempotency_key))
 
 
@@ -215,9 +243,12 @@ class _RecordingQuotaGraph:
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         quota_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        del user_id, conversation_id
         self.calls.append((namespace, quota_event, idempotency_key))
         if self._fail_first:
             self._fail_first = False
@@ -342,6 +373,98 @@ async def test_concurrent_start_calls_provider_once_and_never_persists_authoriza
         database_bytes = database_path.read_bytes()
         assert AUTHORIZATION.encode() not in database_bytes
         assert "生成商品主图".encode() not in database_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+async def test_synchronous_start_result_atomically_persists_terminal_event(
+    kind: RepositoryKind,
+    tmp_path: Path,
+) -> None:
+    service = _ScriptedExistingJobService(
+        start_response={
+            "job_id": "provider-merge-sync-1",
+            "status": "succeeded",
+            "result": {"video_url": "https://cdn.example.invalid/merged.mp4"},
+        }
+    )
+    request = build_operation_request(
+        workflow_id=WORKFLOW,
+        stage="image_generate",
+        stage_version=1,
+        attempt=1,
+        provider_request=PROVIDER_REQUEST,
+    )
+    async with _repositories(
+        kind,
+        tmp_path / f"{kind}-sync-start-terminal.db",
+    ) as (repository, _):
+        completed = await OperationStartCoordinator(
+            repository,
+            adapter=ProviderJobAdapter(service),
+            user_id=OWNER,
+            conversation_id=CONVERSATION,
+            clock=lambda: NOW,
+            job_id_factory=lambda: JOB_ID,
+        ).start(
+            request,
+            provider_request=PROVIDER_REQUEST,
+            authorization=AUTHORIZATION,
+            lease_owner="starter-sync-terminal",
+        )
+        pending = await repository.list_pending_operation_completions(
+            now=NOW,
+            limit=10,
+        )
+        events = await repository.list_events(OWNER, CONVERSATION)
+
+    assert completed.status is ExternalJobStatus.SUCCEEDED
+    assert completed.provider_job_id == "provider-merge-sync-1"
+    assert completed.next_poll_at is None
+    assert completed.lease_owner is None
+    assert len(pending) == 1
+    assert pending[0].operation == completed
+    assert events[-1].payload["result"]["video_url"].endswith("merged.mp4")
+    assert service.status_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_runtime_passes_repository_owner_to_scoped_status_service() -> None:
+    service = _ScopedExistingJobService()
+    repository = MemoryAgentRuntimeRepository()
+    request = build_operation_request(
+        workflow_id=WORKFLOW,
+        stage="image_generate",
+        stage_version=1,
+        attempt=1,
+        provider_request=PROVIDER_REQUEST,
+    )
+    await OperationStartCoordinator(
+        repository,
+        adapter=ProviderJobAdapter(service),
+        user_id=OWNER,
+        conversation_id=CONVERSATION,
+        clock=lambda: NOW,
+        job_id_factory=lambda: JOB_ID,
+        first_poll_delay=timedelta(seconds=2),
+    ).start(
+        request,
+        provider_request=PROVIDER_REQUEST,
+        authorization=AUTHORIZATION,
+        lease_owner="scoped-status-starter",
+    )
+    await OperationRecoveryRuntime(
+        repository,
+        resolver=_resolver(service),
+        resumer=_RecordingGraphResumer(),
+        worker_id="scoped-status-worker",
+        clock=lambda: NOW + timedelta(seconds=3),
+    ).run_once()
+
+    assert service.scoped_status_calls == [
+        (PROVIDER_JOB_ID, OWNER, CONVERSATION)
+    ]
+    assert service.status_calls == []
 
 
 @pytest.mark.asyncio
@@ -816,9 +939,12 @@ class _FailOnceGraphResumer(_RecordingGraphResumer):
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        self.owners.append((user_id, conversation_id))
         self.calls.append((namespace, completion_event, idempotency_key))
         if len(self.calls) == 1:
             raise RuntimeError("不得让单个 Graph 失败终止后台循环")

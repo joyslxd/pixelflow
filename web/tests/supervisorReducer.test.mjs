@@ -45,6 +45,10 @@ test("初始四维状态保持空闲且拒绝空对话标识", () => {
     messages: [],
     workflows: [],
     interrupt: null,
+    videoAgentWorkspace: { conversationId: "conv-1", current: null },
+    videoAgentPlan: null,
+    videoAgentConfirmation: null,
+    videoAgentQuota: null,
     resume: { cursor: null, sequence: 0 },
   });
   assert.throws(

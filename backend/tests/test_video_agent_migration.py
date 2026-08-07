@@ -6,7 +6,6 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_ROOT = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "persistence" / "migrations"
 
@@ -54,6 +53,11 @@ def test_video_agent_migration_is_additive_and_preserves_existing_workflow(tmp_p
             "pixelflow_video_agent_plans",
             "pixelflow_video_agent_plan_steps",
         }.issubset(inspector.get_table_names())
+        step_columns = {
+            column["name"]
+            for column in inspector.get_columns("pixelflow_video_agent_plan_steps")
+        }
+        assert {"arguments_json", "confirmation_required"}.issubset(step_columns)
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT current_stage FROM pixelflow_agent_workflows WHERE workflow_id = 'workflow-v1'")

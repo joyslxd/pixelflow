@@ -17,6 +17,7 @@ const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-")
 const typeTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-contract-types-"));
 const hookTestRoot = mkdtempSync(path.join(webRoot, ".pixelflow-hook-tests-"));
 const moduleDirectory = path.join(temporaryRoot, "modules");
+const videoAgentModuleDirectory = path.join(temporaryRoot, "video-agent");
 const apiDirectory = path.join(temporaryRoot, "api");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
 const agentRuntimeContractFixture = path.resolve(
@@ -63,8 +64,31 @@ function compileStandaloneModules(sourceFiles) {
     "ES2022",
     "--moduleResolution",
     "bundler",
+    "--rootDir",
+    "src",
     "--outDir",
     moduleDirectory,
+    "--skipLibCheck",
+    "--strict",
+  ]);
+}
+
+function compileVideoAgentModules() {
+  run(process.execPath, [
+    tscEntry,
+    "src/features/video-agent/state/contracts.ts",
+    "src/features/video-agent/state/reducer.ts",
+    "src/features/video-agent/state/workspace.ts",
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--rootDir",
+    "src/features/video-agent/state",
+    "--outDir",
+    videoAgentModuleDirectory,
     "--skipLibCheck",
     "--strict",
   ]);
@@ -191,6 +215,10 @@ function moduleUrl(directory, fileName) {
   return pathToFileURL(path.join(directory, fileName)).href;
 }
 
+function standaloneModuleUrl(fileName) {
+  return moduleUrl(moduleDirectory, path.join("lib", fileName));
+}
+
 try {
   if (!existsSync(tscEntry)) {
     throw new Error("未找到本地 TypeScript 编译器，请先执行 corepack pnpm install");
@@ -230,6 +258,7 @@ try {
     ]);
     compileApiModule();
     compileHookModule();
+    compileVideoAgentModules();
   }
 
   const testFiles = contractOnly
@@ -241,49 +270,48 @@ try {
 
   run(process.execPath, ["--test", ...testFiles], {
     env: {
-      ACTIVE_PLAN_SNAPSHOT_TEST_MODULE: moduleUrl(moduleDirectory, "activePlanSnapshot.js"),
-      AGENT_RUNTIME_CONTRACTS_TEST_MODULE: moduleUrl(
-        moduleDirectory,
-        contractOnly ? "contracts.js" : "supervisor/contracts.js",
-      ),
+      ACTIVE_PLAN_SNAPSHOT_TEST_MODULE: standaloneModuleUrl("activePlanSnapshot.js"),
+      AGENT_RUNTIME_CONTRACTS_TEST_MODULE: standaloneModuleUrl("supervisor/contracts.js"),
       AGENT_RUNTIME_CONTRACT_FIXTURE: agentRuntimeContractFixture,
       AGENT_RUNTIME_GENERATED_TYPE_TEST: generatedAgentRuntimeTypeTest,
       API_TEST_MODULE: moduleUrl(apiDirectory, "api.js"),
-      AUTH_STORAGE_TEST_MODULE: moduleUrl(moduleDirectory, "authStorage.js"),
-      CONVERSATION_ROUTING_TEST_MODULE: moduleUrl(moduleDirectory, "conversationRouting.js"),
-      IMAGE_REVIEW_TEST_MODULE: moduleUrl(moduleDirectory, "imageReview.js"),
-      JIANYING_DRAFT_TEST_MODULE: moduleUrl(moduleDirectory, "jianyingDraft.js"),
-      PLAN_JOB_RECOVERY_TEST_MODULE: moduleUrl(moduleDirectory, "planJobRecovery.js"),
-      PLAN_MESSAGE_RECOVERY_TEST_MODULE: moduleUrl(moduleDirectory, "planMessageRecovery.js"),
-      REVIEW_WINDOW_TEST_MODULE: moduleUrl(moduleDirectory, "reviewWindow.js"),
-      SCENE_ASSET_FAILURES_TEST_MODULE: path.join(moduleDirectory, "sceneAssetFailures.js"),
-      SCENE_MENTIONS_TEST_MODULE: moduleUrl(moduleDirectory, "sceneMentions.js"),
-      SCENE_PACKAGES_TEST_MODULE: moduleUrl(moduleDirectory, "scenePackages.js"),
-      SUPERVISOR_API_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/api.js"),
-      SUPERVISOR_ACTIONS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/actions.js"),
-      SUPERVISOR_EVENTS_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/events.js"),
+      AUTH_STORAGE_TEST_MODULE: standaloneModuleUrl("authStorage.js"),
+      CONVERSATION_ROUTING_TEST_MODULE: standaloneModuleUrl("conversationRouting.js"),
+      IMAGE_REVIEW_TEST_MODULE: standaloneModuleUrl("imageReview.js"),
+      JIANYING_DRAFT_TEST_MODULE: standaloneModuleUrl("jianyingDraft.js"),
+      PLAN_JOB_RECOVERY_TEST_MODULE: standaloneModuleUrl("planJobRecovery.js"),
+      PLAN_MESSAGE_RECOVERY_TEST_MODULE: standaloneModuleUrl("planMessageRecovery.js"),
+      REVIEW_WINDOW_TEST_MODULE: standaloneModuleUrl("reviewWindow.js"),
+      SCENE_ASSET_FAILURES_TEST_MODULE: path.join(moduleDirectory, "lib/sceneAssetFailures.js"),
+      SCENE_MENTIONS_TEST_MODULE: standaloneModuleUrl("sceneMentions.js"),
+      SCENE_PACKAGES_TEST_MODULE: standaloneModuleUrl("scenePackages.js"),
+      SUPERVISOR_API_TEST_MODULE: standaloneModuleUrl("supervisor/api.js"),
+      SUPERVISOR_ACTIONS_TEST_MODULE: standaloneModuleUrl("supervisor/actions.js"),
+      SUPERVISOR_EVENTS_TEST_MODULE: standaloneModuleUrl("supervisor/events.js"),
       SUPERVISOR_HOOK_TEST_MODULE: moduleUrl(hookTestRoot, "hooks/useSupervisorConversation.js"),
       SUPERVISOR_LEGACY_ADAPTER_TEST_MODULE: moduleUrl(
         moduleDirectory,
-        "supervisor/legacyAdapter.js",
+        "lib/supervisor/legacyAdapter.js",
       ),
       SUPERVISOR_LEGACY_ADAPTER_FIXTURE: supervisorLegacyAdapterFixture,
-      SUPERVISOR_REDUCER_TEST_MODULE: moduleUrl(moduleDirectory, "supervisor/reducer.js"),
+      SUPERVISOR_REDUCER_TEST_MODULE: standaloneModuleUrl("supervisor/reducer.js"),
       SUPERVISOR_RUNTIME_NOTICE_TEST_MODULE: moduleUrl(
         moduleDirectory,
-        "supervisor/runtimeNotice.js",
+        "lib/supervisor/runtimeNotice.js",
       ),
       SUPERVISOR_TURN_SUBMISSION_TEST_MODULE: moduleUrl(
         moduleDirectory,
-        "supervisor/turnSubmission.js",
+        "lib/supervisor/turnSubmission.js",
       ),
       SUPERVISOR_WORKSPACE_PROJECTION_TEST_MODULE: moduleUrl(
         moduleDirectory,
-        "supervisor/workspaceProjection.js",
+        "lib/supervisor/workspaceProjection.js",
       ),
-      TIME_TEST_MODULE: moduleUrl(moduleDirectory, "time.js"),
-      VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: moduleUrl(moduleDirectory, "videoRequirementConfig.js"),
-      WORKFLOW_TASK_BOARD_TEST_MODULE: moduleUrl(moduleDirectory, "workflowTaskBoard.js"),
+      TIME_TEST_MODULE: standaloneModuleUrl("time.js"),
+      VIDEO_AGENT_TIMELINE_REDUCER_TEST_MODULE: moduleUrl(videoAgentModuleDirectory, "reducer.js"),
+      VIDEO_AGENT_WORKSPACE_PROJECTION_TEST_MODULE: moduleUrl(videoAgentModuleDirectory, "workspace.js"),
+      VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: standaloneModuleUrl("videoRequirementConfig.js"),
+      WORKFLOW_TASK_BOARD_TEST_MODULE: standaloneModuleUrl("workflowTaskBoard.js"),
     },
   });
 } finally {

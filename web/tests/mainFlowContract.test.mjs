@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-const workspaceSource = fs.readFileSync(path.resolve("src/pages/WorkspacePage.tsx"), "utf8");
+const workspaceSource = fs.readFileSync(path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"), "utf8");
 const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
 const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPanel.tsx"), "utf8");
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");

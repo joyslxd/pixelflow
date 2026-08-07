@@ -6,7 +6,7 @@ const cardSource = readFileSync(new URL("../src/components/canvas/VideoResultCar
 const previewSource = readFileSync(new URL("../src/components/canvas/VideoPreviewPanel.tsx", import.meta.url), "utf8");
 const canvasSource = readFileSync(new URL("../src/components/canvas/CanvasPanel.tsx", import.meta.url), "utf8");
 const messageBubbleSource = readFileSync(new URL("../src/components/chat/MessageBubble.tsx", import.meta.url), "utf8");
-const workspaceSource = readFileSync(new URL("../src/pages/WorkspacePage.tsx", import.meta.url), "utf8");
+const workspaceSource = readFileSync(new URL("../src/features/legacy-workspace/LegacyWorkspace.tsx", import.meta.url), "utf8");
 
 test("video result cards preview full video and expose sound plus download controls", () => {
   assert.match(cardSource, /<video[\s\S]*muted=\{muted\}[\s\S]*playsInline[\s\S]*preload="auto"/);

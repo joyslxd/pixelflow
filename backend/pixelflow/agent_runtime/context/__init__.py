@@ -65,10 +65,6 @@ from .profiles import (
     parse_model_context_profiles,
     resolve_model_context_profile,
 )
-from .repository_source import (
-    RepositoryContextSnapshotSource,
-    RepositoryContextSourceRepository,
-)
 from .summaries import (
     StructuredSummaryRepository,
     SummaryEvidenceSnapshot,
@@ -137,8 +133,6 @@ __all__ = [
     "PayloadKind",
     "PIXELFLOW_STRUCTURED_SUMMARY_PROMPT",
     "RepositoryCompactionEventOutbox",
-    "RepositoryContextSnapshotSource",
-    "RepositoryContextSourceRepository",
     "StructuredSummaryRepository",
     "SummaryBuildRequest",
     "SummaryBuildResult",

@@ -964,6 +964,8 @@ class SQLPixelFlowTaskStore:
                         "current_task_id": "current_task_id",
                         "last_phase": "last_phase",
                         "context": "context_json",
+                        "orchestration_mode": "orchestration_mode",
+                        "orchestration_version": "orchestration_version",
                     }
                     for key, value in fields.items():
                         attr = mapping.get(key)
@@ -1299,7 +1301,14 @@ class MemoryPixelFlowTaskStore:
                 return None
             _check_conversation_revision(record.revision, expected_revision)
             changed = False
-            for key in ("title", "current_task_id", "last_phase", "context"):
+            for key in (
+                "title",
+                "current_task_id",
+                "last_phase",
+                "context",
+                "orchestration_mode",
+                "orchestration_version",
+            ):
                 if key in fields:
                     if key == "context":
                         value = _replace_context_preserving_server_fields(

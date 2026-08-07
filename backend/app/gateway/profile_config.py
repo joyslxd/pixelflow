@@ -136,6 +136,7 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("pixelflow", "jianying_draft_connect_timeout_seconds"): "PIXELFLOW_JIANYING_DRAFT_CONNECT_TIMEOUT_SECONDS",
     ("pixelflow", "jianying_draft_create_read_timeout_seconds"): "PIXELFLOW_JIANYING_DRAFT_CREATE_READ_TIMEOUT_SECONDS",
     ("pixelflow", "jianying_draft_query_read_timeout_seconds"): "PIXELFLOW_JIANYING_DRAFT_QUERY_READ_TIMEOUT_SECONDS",
+    ("pixelflow", "content_app_internal_upload_enabled"): "PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED",
     ("borgrise", "base_url"): "BORGRISE_BASE_URL",
     ("borgrise", "remote_verify_enabled"): "BORGRISE_REMOTE_VERIFY_ENABLED",
     ("borgrise", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",

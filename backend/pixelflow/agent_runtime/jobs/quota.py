@@ -18,7 +18,10 @@ from pydantic import (
 
 from ..contracts import AgentEvent, AgentEventType, ExternalJobStatus
 from ..contracts.base import ContractModel
-from ..graph import GraphExecutionNamespace, workflow_namespace
+from ..operation_namespace import (
+    OperationExecutionNamespace,
+    workflow_operation_namespace,
+)
 from ..persistence.repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
@@ -141,8 +144,10 @@ class WorkflowGraphQuotaStatePort(Protocol):
 
     async def resume_external_job_quota(
         self,
-        namespace: GraphExecutionNamespace,
+        namespace: OperationExecutionNamespace,
         *,
+        user_id: str,
+        conversation_id: str,
         quota_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
@@ -419,10 +424,12 @@ class OperationQuotaDispatcher:
             return None
         try:
             await self._quota_resumer.resume_external_job_quota(
-                workflow_namespace(
+                workflow_operation_namespace(
                     operation.conversation_id,
                     operation.workflow_id,
                 ),
+                user_id=normalized.user_id,
+                conversation_id=operation.conversation_id,
                 quota_event=_freeze_event(claim.event),
                 idempotency_key=claim.event.event_id,
             )

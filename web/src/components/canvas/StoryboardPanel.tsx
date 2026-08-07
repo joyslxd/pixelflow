@@ -16,7 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useMemo, useState } from "react";
 
-interface StoryboardPanelProps {
+export interface StoryboardPanelProps {
   msg: ChatMessage;
   onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void | Promise<void>;
   deferSceneUpdates?: boolean;

@@ -17,7 +17,7 @@ import type {
 } from "../src/lib/supervisor/contracts";
 
 const orchestration = {
-  orchestration_mode: "supervisor_v1",
+  orchestration_mode: "video_agent_v2",
   orchestration_version: 1,
 } satisfies ConversationOrchestration;
 

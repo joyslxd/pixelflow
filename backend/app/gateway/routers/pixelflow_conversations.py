@@ -12,30 +12,29 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
-from pixelflow.agent_runtime.contracts import (
-    InterruptResponseRequest,
-    TurnStartRequest,
-)
+from pixelflow.agent_runtime.contracts import TurnStartRequest
 from pixelflow.agent_runtime.service import (
     AgentRuntimeContextConflictError,
-    AgentRuntimeInterruptConflictError,
-    AgentRuntimeInterruptRequestValidationError,
     AgentRuntimeInterruptStateError,
-    AgentRuntimeLegacyInterruptOwnershipError,
     AgentRuntimeService,
     AgentRuntimeSnapshotResponse,
     AgentRuntimeUnavailableError,
+    AgentRuntimeVideoConfirmationConflictError,
+    AgentRuntimeVideoConfirmationUnavailableError,
+    AgentRuntimeVideoQuotaConflictError,
+    AgentRuntimeVideoQuotaUnavailableError,
     AgentTurnJobResponse,
     AgentTurnStartResponse,
-)
-from pixelflow.agent_workflows.video.live_capabilities import (
-    TransientTurnCredential,
+    VideoAgentConfirmationResponse,
+    VideoAgentConfirmationResponseRequest,
+    VideoAgentQuotaResponse,
+    VideoAgentQuotaResponseRequest,
 )
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
@@ -44,6 +43,7 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
+from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
 logger = logging.getLogger(__name__)
@@ -54,11 +54,12 @@ _MAX_CONVERSATION_MESSAGE_JOBS = 300
 
 
 class ConversationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = ""
     current_task_id: str | None = None
     last_phase: str = "idle"
     context: dict[str, Any] = Field(default_factory=dict)
-    initial_intent: Literal["image", "video", "ppt", "video_analysis"] | None = None
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -228,11 +229,6 @@ def _runtime_http_exception(exc: Exception) -> HTTPException:
                 "current_context_version": exc.current_context_version,
             },
         )
-    if isinstance(exc, AgentRuntimeInterruptConflictError):
-        return HTTPException(
-            status_code=409,
-            detail={"code": "agent_runtime_interrupt_conflict"},
-        )
     if isinstance(exc, AgentRuntimeInterruptStateError):
         return HTTPException(
             status_code=409,
@@ -243,55 +239,15 @@ def _runtime_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="Agent Runtime request failed")
 
 
-async def _preflight_agent_interrupt_response(
-    conversation_id: str,
-    interrupt_id: str,
+def _transient_video_agent_credential(
     request: Request,
-) -> None:
-    """在 FastAPI DTO 校验前只读确认所有权并生成固定安全错误。"""
-
-    try:
-        raw_body = await request.json()
-    except (UnicodeDecodeError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "agent_runtime_interrupt_response_invalid"},
-        ) from None
-    service = _agent_runtime_service(request)
-    try:
-        await service.preflight_interrupt_response(
-            user_id=await get_current_user(request),
-            conversation_id=conversation_id,
-            request=raw_body,
-        )
-    except AgentRuntimeLegacyInterruptOwnershipError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "agent_runtime_interrupt_owned_by_legacy_v2",
-                "interrupt_id": interrupt_id,
-            },
-        ) from exc
-    except AgentRuntimeInterruptRequestValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "agent_runtime_interrupt_response_invalid"},
-        ) from exc
-    except (
-        AgentRuntimeInterruptStateError,
-        AgentRuntimeUnavailableError,
-        LookupError,
-    ) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-def _transient_turn_credential(request: Request) -> TransientTurnCredential | None:
-    """只把当前 HTTP Authorization 封装为不可序列化的一次性凭据。"""
+) -> TransientVideoAgentCredential | None:
+    """把当前 Authorization 限制在本次 VideoAgent 确认执行调用链内。"""
 
     authorization = request.headers.get("Authorization")
     if authorization is None or not authorization.strip():
         return None
-    return TransientTurnCredential(authorization=authorization)
+    return TransientVideoAgentCredential(authorization=authorization)
 
 
 def _conversation_response(record: PixelFlowConversationRecord) -> ConversationResponse:
@@ -334,7 +290,6 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
     else:
         assignment = service.assignment_for_new_conversation(
             body.context,
-            initial_intent=body.initial_intent,
         )
         context = assignment.context
         orchestration_mode = assignment.orchestration_mode.value
@@ -381,7 +336,7 @@ async def start_agent_turn(
         raise _runtime_http_exception(exc) from exc
     service.notify_registered_turn(
         result.turn_id,
-        credential=_transient_turn_credential(request),
+        credential=_transient_video_agent_credential(request),
     )
     return result
 
@@ -407,6 +362,76 @@ async def get_agent_snapshot(
         AgentRuntimeUnavailableError,
         LookupError,
     ) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.post(
+    "/{conversation_id}/video-agent/confirmations/{confirmation_id}/responses",
+    response_model=VideoAgentConfirmationResponse,
+)
+async def respond_to_video_agent_confirmation(
+    conversation_id: str,
+    confirmation_id: str,
+    body: VideoAgentConfirmationResponseRequest,
+    request: Request,
+) -> VideoAgentConfirmationResponse:
+    """确认或取消当前会话唯一等待中的 VideoAgent 计费步骤。"""
+
+    try:
+        return await _agent_runtime_service(
+            request
+        ).respond_to_video_agent_confirmation(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            confirmation_id=confirmation_id,
+            request=body,
+            credential=_transient_video_agent_credential(request),
+        )
+    except AgentRuntimeVideoConfirmationUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "video_agent_confirmation_unavailable"},
+        ) from exc
+    except AgentRuntimeVideoConfirmationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "video_agent_confirmation_conflict"},
+        ) from exc
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.post(
+    "/{conversation_id}/video-agent/quota/{quota_interrupt_id}/responses",
+    response_model=VideoAgentQuotaResponse,
+)
+async def respond_to_video_agent_quota(
+    conversation_id: str,
+    quota_interrupt_id: str,
+    body: VideoAgentQuotaResponseRequest,
+    request: Request,
+) -> VideoAgentQuotaResponse:
+    """恢复原Provider job或原子取消额度中断对应的V2 Plan。"""
+
+    try:
+        return await _agent_runtime_service(request).respond_to_video_agent_quota(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            quota_interrupt_id=quota_interrupt_id,
+            request=body,
+            credential=_transient_video_agent_credential(request),
+        )
+    except AgentRuntimeVideoQuotaUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "video_agent_quota_unavailable"},
+        ) from exc
+    except AgentRuntimeVideoQuotaConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "video_agent_quota_conflict"},
+        ) from exc
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
         raise _runtime_http_exception(exc) from exc
 
 
@@ -495,61 +520,6 @@ async def get_agent_turn_job(
         raise _runtime_http_exception(exc) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="Turn run not found")
-    return result
-
-
-@router.post(
-    "/{conversation_id}/interrupts/{interrupt_id}/responses",
-    response_model=AgentTurnJobResponse,
-    dependencies=[Depends(_preflight_agent_interrupt_response)],
-)
-async def respond_to_agent_interrupt(
-    conversation_id: str,
-    interrupt_id: str,
-    body: InterruptResponseRequest,
-    request: Request,
-) -> AgentTurnJobResponse:
-    """live 对话在原 Turn 上登记响应；旧 v2 继续保持原所有权。"""
-
-    user_id = await get_current_user(request)
-    service = _agent_runtime_service(request)
-    try:
-        result = await service.respond_to_interrupt(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            interrupt_id=interrupt_id,
-            request=body,
-        )
-    except AgentRuntimeLegacyInterruptOwnershipError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "agent_runtime_interrupt_owned_by_legacy_v2",
-                "interrupt_id": interrupt_id,
-            },
-        ) from exc
-    except AgentRuntimeInterruptRequestValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "agent_runtime_interrupt_response_invalid"},
-        ) from exc
-    except AgentRuntimeInterruptConflictError as exc:
-        if exc.reason_code == "video_quota_resume_stale":
-            return JSONResponse(
-                status_code=409,
-                content={"reason_code": "video_quota_resume_stale"},
-            )
-        raise _runtime_http_exception(exc) from exc
-    except (
-        AgentRuntimeInterruptStateError,
-        AgentRuntimeUnavailableError,
-        LookupError,
-    ) as exc:
-        raise _runtime_http_exception(exc) from exc
-    service.notify_registered_interrupt(
-        interrupt_id,
-        credential=_transient_turn_credential(request),
-    )
     return result
 
 

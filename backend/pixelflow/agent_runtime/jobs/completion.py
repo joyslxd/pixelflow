@@ -12,7 +12,10 @@ from pydantic import ConfigDict, SerializationInfo, field_serializer
 
 from ..contracts import AgentEvent, ExternalJobStatus
 from ..contracts.base import ContractModel
-from ..graph import GraphExecutionNamespace, workflow_namespace
+from ..operation_namespace import (
+    OperationExecutionNamespace,
+    workflow_operation_namespace,
+)
 from ..persistence.repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
@@ -129,8 +132,10 @@ class WorkflowGraphResumePort(Protocol):
 
     async def resume_external_job(
         self,
-        namespace: GraphExecutionNamespace,
+        namespace: OperationExecutionNamespace,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
@@ -265,6 +270,75 @@ class OperationCompletionCoordinator:
                 last_error = exc
         raise OperationCompletionConflictError("Operation 终态或完成事件持久化冲突") from last_error
 
+    async def record_start_terminal(
+        self,
+        job_id: str,
+        snapshot: ProviderJobSnapshot,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> OperationCompletionRecord:
+        """把同步Provider的start结果原子绑定为终态与唯一完成事件。"""
+
+        operation_id = _require_job_id(job_id)
+        normalized_snapshot = ProviderJobSnapshot.model_validate(
+            snapshot.model_dump(mode="json")
+        )
+        terminal_status = _TERMINAL_STATUS_BY_OUTCOME.get(
+            normalized_snapshot.outcome
+        )
+        provider_job_id = normalized_snapshot.provider_job_id
+        if terminal_status is None or provider_job_id is None:
+            raise OperationCompletionConflictError(
+                "Provider start结果不是带任务标识的终态"
+            )
+        operation = await self._repository.get_operation(
+            self._user_id,
+            operation_id,
+        )
+        if operation is None or operation.conversation_id != self._conversation_id:
+            raise OperationCompletionConflictError("Operation 不存在或不属于当前会话")
+        snapshot_payload = normalized_snapshot.model_dump(mode="json")
+        event_record = OperationTerminalEventRecord(
+            event_id=build_operation_completion_event_id(operation_id),
+            cursor=_build_completion_cursor(operation_id),
+            run_id=_build_completion_run_id(operation_id),
+            occurred_at=now,
+            payload={
+                "job_id": operation.job_id,
+                "provider_job_id": provider_job_id,
+                "workflow_id": operation.workflow_id,
+                "stage": operation.stage,
+                "stage_version": operation.stage_version,
+                "attempt": operation.attempt,
+                "status": terminal_status.value,
+                "reason_code": snapshot_payload["reason_code"],
+                "message": snapshot_payload["message"],
+                "result": snapshot_payload["result"],
+            },
+        )
+        try:
+            completed_operation, completion_event = (
+                await self._repository.finalize_operation_start_terminal(
+                    self._user_id,
+                    self._conversation_id,
+                    operation_id,
+                    provider_job_id=provider_job_id,
+                    terminal_status=terminal_status,
+                    lease_owner=lease_owner,
+                    now=now,
+                    event=event_record,
+                )
+            )
+        except AgentRuntimeRecordConflictError as exc:
+            raise OperationCompletionConflictError(
+                "Operation同步终态或完成事件持久化冲突"
+            ) from exc
+        return OperationCompletionRecord(
+            operation=completed_operation,
+            event=completion_event,
+        )
+
 
 class OperationCompletionDispatcher:
     """领取唯一完成事件并把既有 Provider 结果恢复到原 Workflow。"""
@@ -319,7 +393,7 @@ class OperationCompletionDispatcher:
         )
         if operation is None or operation.conversation_id != self._conversation_id or claim.event.payload.get("workflow_id") != operation.workflow_id:
             raise OperationCompletionConflictError("完成事件与 Operation 身份不一致")
-        namespace = workflow_namespace(
+        namespace = workflow_operation_namespace(
             self._conversation_id,
             operation.workflow_id,
         )
@@ -327,6 +401,8 @@ class OperationCompletionDispatcher:
             completion_event = _freeze_event(claim.event)
             await self._resumer.resume_external_job(
                 namespace,
+                user_id=self._user_id,
+                conversation_id=self._conversation_id,
                 completion_event=completion_event,
                 idempotency_key=claim.event.event_id,
             )

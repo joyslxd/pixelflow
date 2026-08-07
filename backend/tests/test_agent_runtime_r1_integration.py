@@ -1557,7 +1557,11 @@ def test_r1_turn_start_is_idempotent_and_projects_snapshot_without_duplicate_mes
 
     assert first.status_code == retried.status_code == legacy_saved.status_code == snapshot.status_code == run_status.status_code == 200
     assert retried.json() == first.json()
-    assert run_status.json() == first.json()
+    assert run_status.json() == {
+        key: value
+        for key, value in first.json().items()
+        if key not in {"orchestration_mode", "route_decision"}
+    }
     assert first.json()["status"] == "accepted"
     assert first.json()["context_version"] == 1
     assert len(detail.json()["messages"]) == 1
@@ -2587,44 +2591,34 @@ def test_r1_assist_snapshot_keeps_non_user_history_messages() -> None:
 
 
 @pytest.mark.parametrize(
-    ("config", "initial_intent"),
+    "config",
     [
-        (_assist_config(), None),
-        (
-            AgentRuntimeConfig(
-                mode="primary",
-                enabled_intents=("video",),
-                new_conversation_rollout_percent=100,
-                context_compaction_enabled=True,
-            ),
-            "video",
+        _assist_config(),
+        AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("video",),
+            new_conversation_rollout_percent=100,
+            context_compaction_enabled=True,
         ),
-        (
-            AgentRuntimeConfig(
-                mode="primary",
-                enabled_intents=("image",),
-                new_conversation_rollout_percent=100,
-                context_compaction_enabled=True,
-            ),
-            "image",
+        AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("image",),
+            new_conversation_rollout_percent=100,
+            context_compaction_enabled=True,
         ),
     ],
     ids=["assist", "frontend-v2", "non-video"],
 )
 def test_r1_legacy_interrupt_response_precedes_new_body_validation(
     config: AgentRuntimeConfig,
-    initial_intent: str | None,
 ) -> None:
     """旧 owner 的空对象必须先返回 409，不受新响应 DTO 字段影响。"""
 
     app, _, _ = _r1_app(config=config)
     with TestClient(app) as client:
-        create_body = {"title": "R1 人工确认仍归旧流程"}
-        if initial_intent is not None:
-            create_body["initial_intent"] = initial_intent
         conversation_id = client.post(
             "/agent/conversations",
-            json=create_body,
+            json={"title": "R1 人工确认仍归旧流程"},
         ).json()["conversation_id"]
         response = client.post(
             f"/agent/conversations/{conversation_id}/interrupts/legacy-int/responses",

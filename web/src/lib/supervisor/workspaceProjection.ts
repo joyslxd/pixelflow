@@ -11,6 +11,16 @@ import {
   WORKFLOW_STATUS_VALUES,
 } from "./contracts.js";
 import type { SupervisorRuntimeProjection } from "./reducer.js";
+import {
+  projectVideoAgentConfirmationSnapshot,
+  projectVideoAgentPlanSnapshot,
+  projectVideoAgentQuotaSnapshot,
+} from "../../features/video-agent/state/reducer.js";
+import {
+  applyVideoWorkspaceSnapshot,
+  createVideoWorkspaceProjectionState,
+  projectVideoWorkspaceSnapshot,
+} from "../../features/video-agent/state/workspace.js";
 import type { WorkflowProgressSnapshot } from "../workflowTaskBoard.js";
 
 type SupervisorArtifactType = (typeof ARTIFACT_TYPE_VALUES)[number];
@@ -401,12 +411,65 @@ export function projectSupervisorSnapshot(
 ): SupervisorRuntimeProjection {
   if (!isRecord(value) || value.conversationId !== conversationId) return fail();
   const workspace = cloneSupervisorWorkspaceProjection(value, conversationId);
+  const videoAgentWorkspace = createVideoWorkspaceProjectionState(conversationId);
+  let projectedVideoAgentWorkspace = videoAgentWorkspace;
+  let videoAgentPlan = null;
+  let videoAgentConfirmation = null;
+  let videoAgentQuota = null;
+  if (value.videoAgent !== null && value.videoAgent !== undefined) {
+    if (!isRecord(value.videoAgent)) return fail();
+    projectedVideoAgentWorkspace = applyVideoWorkspaceSnapshot(
+      videoAgentWorkspace,
+      projectVideoWorkspaceSnapshot(value.videoAgent.workspace, conversationId),
+    );
+    videoAgentPlan = projectVideoAgentPlanSnapshot(
+      value.videoAgent.plan,
+      value.videoAgent.steps,
+    );
+    videoAgentConfirmation = projectVideoAgentConfirmationSnapshot(
+      value.videoAgent.confirmation,
+    );
+    videoAgentQuota = projectVideoAgentQuotaSnapshot(value.videoAgent.quota);
+    if (
+      videoAgentPlan
+      && videoAgentPlan.workspaceId !== projectedVideoAgentWorkspace.current?.workspaceId
+    ) return fail();
+    const waitingSteps = videoAgentPlan
+      ? Object.values(videoAgentPlan.steps).filter(
+        (step) => step.status === "awaiting_confirmation",
+      )
+      : [];
+    if (
+      waitingSteps.length > 1
+      || (waitingSteps.length === 1 && !videoAgentConfirmation)
+      || (
+        videoAgentConfirmation
+        && (
+          !videoAgentPlan
+          || videoAgentConfirmation.planId !== videoAgentPlan.planId
+          || waitingSteps[0]?.stepId !== videoAgentConfirmation.stepId
+        )
+      )
+    ) return fail();
+    if (
+      videoAgentQuota
+      && (
+        !videoAgentPlan
+        || videoAgentQuota.planId !== videoAgentPlan.planId
+        || videoAgentPlan.steps[videoAgentQuota.stepId]?.status !== "running"
+      )
+    ) return fail();
+  }
   return {
     conversationId,
     run: value.run as unknown as SupervisorRuntimeProjection["run"],
     compression: value.compression as unknown as SupervisorRuntimeProjection["compression"],
     inputQueue: value.inputQueue as unknown as SupervisorRuntimeProjection["inputQueue"],
     resume: value.resume as unknown as SupervisorRuntimeProjection["resume"],
+    videoAgentWorkspace: projectedVideoAgentWorkspace,
+    videoAgentPlan,
+    videoAgentConfirmation,
+    videoAgentQuota,
     ...workspace,
   };
 }

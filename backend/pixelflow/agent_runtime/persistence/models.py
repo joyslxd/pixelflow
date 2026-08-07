@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Index,
@@ -527,6 +528,8 @@ class PixelFlowVideoAgentPlanStepRow(Base):
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
     title: Mapped[str] = mapped_column(String(256), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    confirmation_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     public_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_refs_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     started_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)

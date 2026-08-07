@@ -8,7 +8,7 @@ const sidebarSource = fs.readFileSync(
   "utf8",
 );
 const workspaceSource = fs.readFileSync(
-  path.resolve("src/pages/WorkspacePage.tsx"),
+  path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"),
   "utf8",
 );
 

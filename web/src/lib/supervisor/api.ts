@@ -4,6 +4,8 @@ import type {
   JsonObject,
   JsonValue,
   TurnStartRequest,
+  VideoAgentConfirmationResponseRequest,
+  VideoAgentQuotaResponseRequest,
 } from "./contracts.js";
 
 const AGENT_API_PREFIX = "/agent";
@@ -36,6 +38,18 @@ export interface SupervisorApiTransport {
     conversationId: string,
     interruptId: string,
     request: InterruptResponseRequest,
+    options?: SupervisorRequestOptions,
+  ): Promise<TResponse>;
+  respondToVideoAgentConfirmation<TResponse extends JsonValue = JsonObject>(
+    conversationId: string,
+    confirmationId: string,
+    request: VideoAgentConfirmationResponseRequest,
+    options?: SupervisorRequestOptions,
+  ): Promise<TResponse>;
+  respondToVideoAgentQuota<TResponse extends JsonValue = JsonObject>(
+    conversationId: string,
+    quotaInterruptId: string,
+    request: VideoAgentQuotaResponseRequest,
     options?: SupervisorRequestOptions,
   ): Promise<TResponse>;
   getRunStatus<TResponse extends JsonValue = JsonObject>(
@@ -194,6 +208,28 @@ export function createSupervisorApiTransport(
     ),
     respondToInterrupt: (conversationId, interruptId, responseRequest, requestOptions = {}) => request(
       `/conversations/${encodeURIComponent(conversationId)}/interrupts/${encodeURIComponent(interruptId)}/responses`,
+      "POST",
+      responseRequest,
+      requestOptions,
+    ),
+    respondToVideoAgentConfirmation: (
+      conversationId,
+      confirmationId,
+      responseRequest,
+      requestOptions = {},
+    ) => request(
+      `/conversations/${encodeURIComponent(conversationId)}/video-agent/confirmations/${encodeURIComponent(confirmationId)}/responses`,
+      "POST",
+      responseRequest,
+      requestOptions,
+    ),
+    respondToVideoAgentQuota: (
+      conversationId,
+      quotaInterruptId,
+      responseRequest,
+      requestOptions = {},
+    ) => request(
+      `/conversations/${encodeURIComponent(conversationId)}/video-agent/quota/${encodeURIComponent(quotaInterruptId)}/responses`,
       "POST",
       responseRequest,
       requestOptions,

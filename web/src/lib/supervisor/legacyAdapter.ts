@@ -64,25 +64,6 @@ const INVALID_PENDING_OWNER = "历史对话 pending 状态归属不合法";
 const CONFLICTING_ARTIFACT = "历史对话 artifact 状态不一致";
 
 export type WorkspaceAgentRuntimeMode = "off" | "shadow" | "assist" | "primary";
-export type InitialRuntimeIntent = "image" | "video" | "ppt" | "video_analysis";
-
-/**
- * 从首轮文本提取保守的会话归属提示。
- *
- * 该提示只允许命中服务端 enabled_intents，不能替代 Supervisor 的权威分类；
- * 无法唯一判断时返回 null，让旧 v2 继续拥有业务推进权。
- */
-export function inferInitialRuntimeIntent(content: string): InitialRuntimeIntent | null {
-  const normalized = content.trim();
-  if (!normalized) return null;
-  if (/视频分析|分析.{0,8}视频|拆解.{0,8}视频/u.test(normalized)) return "video_analysis";
-  if (/(?:PPT|ppt|演示文稿|幻灯片)/u.test(normalized)) return "ppt";
-  // “图生视频”同时包含图片和视频，必须优先归入视频工作流。
-  if (/视频|短片|影片|图生视频|文生视频/u.test(normalized)) return "video";
-  if (/图片|图像|主图|海报/u.test(normalized)) return "image";
-  return null;
-}
-
 export interface ConversationWriteSequencer {
   run<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
 }
@@ -218,7 +199,7 @@ export function resolveWorkspaceOrchestrationMode(value: unknown): Orchestration
   const context = isRecord(conversation.context) ? conversation.context : {};
   try {
     const orchestration = resolveOrchestration(conversation);
-    if (orchestration.mode !== "supervisor_v1") return orchestration.mode;
+    if (orchestration.mode !== "video_agent_v2") return orchestration.mode;
     const conversationId = conversation.conversation_id;
     if (!isNonEmptyString(conversationId)) return "frontend_v2";
     const pending = resolvePending(context, conversationId);
@@ -317,7 +298,7 @@ export function resolveUnavailableSupervisorRecovery(
   input: UnavailableSupervisorRecoveryInput,
 ): UnavailableSupervisorRecoveryAction {
   if (
-    input.orchestrationMode !== "supervisor_v1"
+    input.orchestrationMode !== "video_agent_v2"
     || input.primaryExecutionReady === true
     || input.connectionStatus !== "connected"
     || (input.pendingCount <= 0 && !input.hasActiveInput)
@@ -344,13 +325,13 @@ export function resolveAssistHandoffAction(
   input: AssistHandoffPolicyInput,
 ): AssistHandoffAction {
   if (
-    input.orchestrationMode === "supervisor_v1" &&
+    input.orchestrationMode === "video_agent_v2" &&
     input.primaryExecutionReady !== true
   ) {
     return "unavailable";
   }
   if (input.registrationStatus === "pending") return "register";
-  if (input.orchestrationMode === "supervisor_v1") {
+  if (input.orchestrationMode === "video_agent_v2") {
     if (
       input.serverInputStatus === "failed" ||
       input.serverRunStatus === "failed"
@@ -393,7 +374,7 @@ export function resolveWorkspaceRuntimePolicy(
 ): WorkspaceRuntimePolicy {
   const hasConversation = conversationId.trim().length > 0;
   const supervisorEnabled = hasConversation && (
-    mode === "supervisor_v1"
+    mode === "video_agent_v2"
     || agentRuntimeMode === "assist"
     || agentRuntimeMode === "shadow"
     || agentRuntimeMode === "primary"
@@ -454,7 +435,7 @@ export function resolveWorkspaceInteractionPolicy(
   const runtimeBusy = !input.orchestrationResolved
     || (input.mode === "frontend_v2" ? input.legacyBusy : supervisorRuntimeBusy);
 
-  if (!input.orchestrationResolved || (input.mode === "supervisor_v1" && !hasConversation)) {
+  if (!input.orchestrationResolved || (input.mode === "video_agent_v2" && !hasConversation)) {
     return {
       composer: { disabled: true, canQueue: false },
       artifact: { actionsDisabled: true },
@@ -462,7 +443,7 @@ export function resolveWorkspaceInteractionPolicy(
     };
   }
 
-  if (input.mode === "supervisor_v1") {
+  if (input.mode === "video_agent_v2") {
     return {
       composer: {
         disabled: supervisorConnection === "fatal",
@@ -589,7 +570,7 @@ export function projectLegacyConversationSnapshot(value: unknown): LegacyConvers
 
   return {
     conversationId,
-    orchestrationMode: orchestration.mode === "supervisor_v1" && Object.values(pending).some(Boolean)
+    orchestrationMode: orchestration.mode === "video_agent_v2" && Object.values(pending).some(Boolean)
       ? "frontend_v2"
       : orchestration.mode,
     orchestrationVersion: orchestration.version,

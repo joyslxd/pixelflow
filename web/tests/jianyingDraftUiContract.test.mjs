@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-const workspaceSource = fs.readFileSync(path.resolve(testDirectory, "../src/pages/WorkspacePage.tsx"), "utf8");
+const workspaceSource = fs.readFileSync(path.resolve(testDirectory, "../src/features/legacy-workspace/LegacyWorkspace.tsx"), "utf8");
 const apiSource = fs.readFileSync(path.resolve(testDirectory, "../src/lib/api.ts"), "utf8");
 const jianyingDraftSource = fs.readFileSync(path.resolve(testDirectory, "../src/lib/jianyingDraft.ts"), "utf8");
 const chatPanelSource = fs.readFileSync(path.resolve(testDirectory, "../src/components/chat/ChatPanel.tsx"), "utf8");

@@ -240,6 +240,7 @@ class _CheckpointingGraphResumer:
 
     def __init__(self, *, fail_after_first_checkpoint: bool = False) -> None:
         self.calls: list[tuple[object, AgentEvent, str]] = []
+        self.owners: list[tuple[str, str]] = []
         self.checkpointed_event_ids: set[str] = set()
         self.applied_count = 0
         self._fail_after_first_checkpoint = fail_after_first_checkpoint
@@ -248,9 +249,12 @@ class _CheckpointingGraphResumer:
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        self.owners.append((user_id, conversation_id))
         self.calls.append((namespace, completion_event, idempotency_key))
         if idempotency_key not in self.checkpointed_event_ids:
             self.checkpointed_event_ids.add(idempotency_key)
@@ -802,6 +806,7 @@ async def test_crash_before_graph_resume_recovers_persisted_completion_only(
         assert resumed == completion.event
         assert replayed is None
         assert resumer.applied_count == 1
+        assert resumer.owners == [(OWNER, CONVERSATION)]
         namespace, event, idempotency_key = resumer.calls[0]
         assert namespace.thread_id == (f"pf:conversation:{CONVERSATION}:workflow:workflow-{JOB_ID}:v1")
         assert event == completion.event
@@ -960,10 +965,12 @@ async def test_completion_result_and_graph_input_are_deeply_read_only(
                 self,
                 namespace: object,
                 *,
+                user_id: str,
+                conversation_id: str,
                 completion_event: AgentEvent,
                 idempotency_key: str,
             ) -> None:
-                del namespace, idempotency_key
+                del namespace, user_id, conversation_id, idempotency_key
                 with pytest.raises(ValidationError):
                     completion_event.type = AgentEventType.ERROR_RAISED
                 with pytest.raises(TypeError):
@@ -1074,11 +1081,15 @@ async def test_graph_resume_cannot_ack_an_expired_delivery_lease(
                 self,
                 namespace: object,
                 *,
+                user_id: str,
+                conversation_id: str,
                 completion_event: AgentEvent,
                 idempotency_key: str,
             ) -> None:
                 await super().resume_external_job(
                     namespace,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
                     completion_event=completion_event,
                     idempotency_key=idempotency_key,
                 )

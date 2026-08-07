@@ -24,6 +24,7 @@ PixelFlow 是面向电商内容创作的图片、视频、视频分析、PPT制�
 | R1/R2 统一会话 Runtime | `backend/pixelflow/agent_runtime/service.py`、`runtime_compaction.py`、`replay.py`、`pixelflow_conversations.py` | Filter + 会话编排 Service + Inbox/Outbox Repository | dev 的 R2 候选让全部新对话先经 Turn、Snapshot/SSE、上下文压缩和队列；只有配置启用且 Gateway 已注册 live Graph Handler 的 intent 才能冻结为 `supervisor_v1`。Task 13 隔离候选已补齐视频 live handler 与前端结构化动作，但尚未执行 Task 14 的 Gateway 注册；当前可部署基线仍安全接力 v2。生产保持已发布的 R1 `assist / [] / 100%`，R2 未发布 |
 | R2 External Job Coordinator | `backend/pixelflow/agent_runtime/jobs/`、`agent_runtime/persistence/repositories.py` | 计费操作幂等/租约 Service + Provider 防腐 Client + Operation/Outbox Repository | M06 已完成稳定 operation、start/轮询租约、六态 Provider Adapter、事务性完成 Outbox、可关闭恢复 Runtime、402 人工恢复和 404/expired 新 attempt 语义，并通过 Final 单槽集成进入 Agent 长期分支；生产仍保持 R1 `assist`，后续 Workflow 接线与 R2 发布继续受独立门禁约束 |
 | R2 视频 Workflow Adapter | `backend/pixelflow/agent_workflows/video/`、`agent_runtime/replay.py` | 视频领域 Application Service + 权威 DTO + 回放编排 Service | M11 已完成并进入 Agent；M13.2 候选用标准 Turn/附件 DTO 串起 Supervisor Graph、视频 Planning Handler 和 M06 幂等 fake，冻结 Shadow 无副作用边界。真实付费 Provider 和生产 `primary(video)` 仍须独立批准 |
+| 统一 VideoAgent V2 | `backend/pixelflow/video_agent/`、`web/src/features/video-agent/` | 视频领域编排 Service + 受控 Client 注册中心 + 持久化工作台 Repository | P0 本地候选已具备独立 Turn 入口、工作区/计划/步骤持久化、事务性事件、Task 5 受控工具注册表和 Task 6 DeepSeek 结构化计划/确认/恢复核心；当前只注册安全只读的 `inspect_video_workspace`，真实业务工具、Gateway 旅程接线和 V2 工作台仍待后续任务完成，不能发布到生产 |
 | 旧 LangGraph 任务流 | `backend/app/gateway/routers/pixelflow_tasks.py`、`backend/pixelflow/graph.py`、`backend/pixelflow/nodes.py` | 固定状态机编排 Service | 仍保留任务 API、SSE、资产 API |
 | DeerFlow harness | `backend/packages/harness/deerflow/` | 平台基础设施 | run/thread、checkpointer、skills、sandbox、memory |
 | Web 前端 | `web/` | React 工作台 | 对话、表单、分镜编辑、产物确认 |
@@ -173,6 +174,8 @@ Agent 长期分支。
 
 前端任务看板规则：
 
+- Agent通过自然语言修改脚本、素材、视频场景包、单镜头、版本选择或交付参数时，必须先以乐观锁更新服务端权威`VideoWorkspace` revision，再发布成功消息和公开事件；左侧对话Artifact、【视频资产包】、`StoryboardPanel`及其他右侧预览面板只能从同一Snapshot/revision投影，禁止维护可互相覆盖的本地业务副本。乱序旧SSE事件必须丢弃；刷新、切换对话和SSE重连后必须恢复与修改后完全一致的内容。
+
 - 图片、视频、PPT 主流程在输入框后方、从左上圆角结束位置开始显示有最大宽度的任务看板；默认折叠，只展示当前步骤和状态，折叠态由前景输入框覆盖看板底边和下方圆角，展开时向上滑出完整链路、关闭时向下收回。`video_analysis`、未知意图和意图尚未识别时不展示。
 - 视频步骤固定为“需求收集 / 创意规划 / 创作规划 / 执行规划 / 素材生成 / 视频生成 / 导出交付”；PPT 为“需求收集 / 内容规划 / 大纲规划 / 页面生成 / PPT生成 / 导出交付”；图片为“需求收集 / 创意规划 / 执行规划 / 图片生成 / 导出交付”。直接图片编辑的“创意规划、执行规划”显示“已跳过”。
 - 看板使用 conversation context 的 `workflowProgress`、pending job 和结果 artifact 恢复；视频场景包 `stage=prepare_scene_packages` 对应“执行规划”，`stage=generate_scene_assets` 对应“素材生成”。
@@ -307,6 +310,8 @@ Agent 长期分支。
 路由在 `GET /agent/flows/video/jianying-draft/jobs/{job_id}` 首次读取到 `succeeded/failed/timeout/not_configured` 终态时，才通过 claim 调用 `record_power_mem_background()` 写 `category=experience`、`memory_type=experience`、`infer=False` 的安全摘要，`source_agent=jianying_draft_agent`；停止轮询不会自行写入。不得写入 Authorization、第三方密钥、完整下载 URL 查询参数、ZIP 内容或异常堆栈。第三方剪映接口不是 content-app 接口，但最终 ZIP 使用 `/api/upload`，因此相关调用变化仍要同步记录到 `CONTENT_APP_API_CALLS.md`。
 
 当前 `JianyingDraftService` 的 job registry、幂等索引和后台 task 都在单 Uvicorn worker 的进程内。未来部署到多 worker、多容器或多副本前，必须改为共享且持久化的 job store，否则不同进程无法共同保证 job 查询、幂等和终态去重。
+
+R2 live 剪映 Provider 使用`JianyingDraftProviderJobService`，不能直接包装现有进程内 Service。第三方task start/status只使用固定Provider token；恢复查询由`OperationRecoveryRuntime`从Repository提供真实`user_id/conversation_id`，不得从客户端请求体信任目标用户。第三方成功ZIP限制200MiB并校验非空后调用content-app`POST /api/internal/upload`：服务Bearer只放Header，`target_user_id`只放multipart表单，`Idempotency-Key`按`provider_job_id + user_id`稳定派生；content-app必须校验服务身份、目标用户和同键请求摘要，重复调用返回同一TOS资产。`pixelflow.content_app_internal_upload_enabled`默认false，内部接口未部署时`pixelflow_jianying_draft_job_service`不注册且四类live Provider整体失败关闭；禁止用测试管理员Bearer通过普通`/api/upload`静默代传。
 
 ## Borgrise/content-app 能力
 

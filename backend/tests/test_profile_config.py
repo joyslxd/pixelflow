@@ -29,6 +29,7 @@ _MAPPED_ENV_KEYS = {
     "GATEWAY_HOST",
     "GATEWAY_PORT",
     "PIXELFLOW_CAPTION_FONT",
+    "PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED",
     "PIXELFLOW_DRAFT_ROOT",
     "PIXELFLOW_EDIT_SKILL",
     "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
@@ -70,6 +71,12 @@ _REMOVED_MODEL_THIRD_PARTY_ENV_KEYS = {
 
 _REMOVED_BORGRISE_ENV_KEYS = {
     "BORGRISE_PROJECT_ID",
+    "BORGRISE_POLL_TIMEOUT",
+    "CONTENT_APP_API_BASE_URL",
+    "CONTENT_APP_REMOTE_VERIFY_ENABLED",
+    "CONTENT_APP_VERIFY_TIMEOUT_SECONDS",
+    "PIXELFLOW_DECOMPOSE_SKILL",
+    "PIXELFLOW_VIDEO_SKILL",
 }
 
 
@@ -113,6 +120,7 @@ pixelflow:
   render_root: /tmp/pixelflow-renders
   caption_font: /tmp/font.ttf
   jianying_draft_enabled: true
+  content_app_internal_upload_enabled: false
   jianying_draft_base_url: https://draft.example.test
   jianying_draft_token: test-draft-token
   jianying_draft_poll_interval_seconds: 1.5
@@ -192,6 +200,7 @@ def test_explicit_config_file_loads_yaml_into_environment(tmp_path: Path, monkey
     assert os.environ["PIXELFLOW_MEDIA_SKILL"] == "borgrise"
     assert os.environ["PIXELFLOW_EDIT_SKILL"] == "ffmpeg"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_ENABLED"] == "true"
+    assert os.environ["PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED"] == "false"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_BASE_URL"] == "https://draft.example.test"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_TOKEN"] == "test-draft-token"
     assert os.environ["PIXELFLOW_JIANYING_DRAFT_POLL_INTERVAL_SECONDS"] == "1.5"

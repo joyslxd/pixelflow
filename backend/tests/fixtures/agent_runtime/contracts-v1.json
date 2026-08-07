@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "orchestration": {
-    "orchestration_mode": "supervisor_v1",
+    "orchestration_mode": "video_agent_v2",
     "orchestration_version": 1
   },
   "action_decision": {

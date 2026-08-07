@@ -3,7 +3,7 @@
 import logging
 import os
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI
@@ -114,6 +114,130 @@ def _configure_jianying_draft_service(app: FastAPI) -> None:
     app.state.jianying_draft_poll_interval_seconds = runtime_config.poll_interval_seconds
 
 
+def _status_service_authorization_from_env() -> str:
+    """即时读取服务状态凭据，禁止把值缓存到Gateway对象或日志。"""
+
+    authorization = os.environ.get(
+        "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION",
+        "",
+    ).strip()
+    if (
+        not authorization.startswith("Bearer ")
+        or len(authorization) <= len("Bearer ")
+        or "\r" in authorization
+        or "\n" in authorization
+    ):
+        raise RuntimeError("content_app_status_authorization_unavailable")
+    return authorization
+
+
+def _configure_content_app_provider_services(
+    app: FastAPI,
+):
+    """仅在独立服务Authorization存在时装配可恢复content-app Client。"""
+
+    import httpx
+
+    from app.gateway.content_app_auth import get_content_app_auth_config
+    from pixelflow.agent_runtime.jobs import ProviderJobAdapter
+    from pixelflow.jianying_draft import load_jianying_draft_runtime_config
+    from pixelflow.jianying_draft.provider_jobs import (
+        JianyingDraftProviderJobService,
+    )
+    from pixelflow.skills.borgrise import (
+        make_merge_video_job_service,
+        make_quality_review_job_service,
+        make_reference_analysis_job_service,
+        make_scene_video_job_service,
+    )
+
+    try:
+        _status_service_authorization_from_env()
+    except RuntimeError:
+        app.state.pixelflow_reference_analysis_job_service = None
+        app.state.pixelflow_reference_analysis_provider_adapter = None
+        app.state.pixelflow_generate_scene_video_job_service = None
+        app.state.pixelflow_merge_video_job_service = None
+        app.state.pixelflow_quality_review_job_service = None
+        app.state.pixelflow_jianying_draft_job_service = None
+        app.state.pixelflow_reference_analysis_provider_reason = (
+            "content_app_status_authorization_unavailable"
+        )
+        return None
+
+    config = get_content_app_auth_config()
+    client = httpx.AsyncClient(
+        timeout=config.verify_timeout_seconds,
+        verify=not config.skip_ssl_verify,
+    )
+    service = make_reference_analysis_job_service(
+        client=client,
+        base_url=config.base_url,
+        status_headers_provider=lambda: {
+            "Authorization": _status_service_authorization_from_env(),
+        },
+        status_auth_mode="service_authorization",
+    )
+    app.state.pixelflow_reference_analysis_job_service = service
+    app.state.pixelflow_reference_analysis_provider_adapter = ProviderJobAdapter(
+        service
+    )
+    app.state.pixelflow_reference_analysis_provider_reason = None
+    app.state.pixelflow_generate_scene_video_job_service = (
+        make_scene_video_job_service(
+            client=client,
+            base_url=config.base_url,
+            status_headers_provider=lambda: {
+                "Authorization": _status_service_authorization_from_env(),
+            },
+            status_auth_mode="service_authorization",
+        )
+    )
+    app.state.pixelflow_merge_video_job_service = make_merge_video_job_service(
+        client=client,
+        base_url=config.base_url,
+        request_timeout_seconds=float(
+            os.environ.get("BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT", "3600")
+        ),
+    )
+    app.state.pixelflow_quality_review_job_service = (
+        make_quality_review_job_service(
+            client=client,
+            base_url=config.base_url,
+            status_headers_provider=lambda: {
+                "Authorization": _status_service_authorization_from_env(),
+            },
+            status_auth_mode="service_authorization",
+        )
+    )
+    jianying_config = load_jianying_draft_runtime_config()
+    app.state.pixelflow_jianying_draft_job_service = (
+        JianyingDraftProviderJobService(
+            client=client,
+            provider_base_url=jianying_config.base_url,
+            provider_token=jianying_config.token,
+            content_app_base_url=config.base_url,
+            service_authorization_provider=(
+                _status_service_authorization_from_env
+            ),
+            create_timeout_seconds=jianying_config.create_read_timeout_seconds,
+            query_timeout_seconds=jianying_config.query_read_timeout_seconds,
+        )
+        if (
+            jianying_config.enabled
+            and jianying_config.base_url
+            and jianying_config.token
+            and os.environ.get(
+                "PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED",
+                "false",
+            ).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        else None
+    )
+    return client
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI 应用生命周期处理器。"""
@@ -159,6 +283,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
         # Provider 关闭或配置缺失时仍注入安全不可用实现。
         _configure_jianying_draft_service(app)
+        content_app_provider_client = _configure_content_app_provider_services(app)
 
         pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:
@@ -176,16 +301,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
 
+        from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
+        from pixelflow.agent_runtime.conversation_router import ConversationRouteService
         from pixelflow.agent_runtime.persistence import (
             MemoryCompactionQueueRepository,
-            MemoryVideoRuntimeRepository,
-            SQLVideoRuntimeRepository,
+            SQLCompactionQueueRepository,
         )
         from pixelflow.agent_runtime.runtime_compaction import (
             build_agent_context_compactor,
         )
         from pixelflow.agent_runtime.service import AgentRuntimeService
         from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+        from pixelflow.video_agent.runner import VideoAgentRunner
         from pixelflow.video_agent.workspace import (
             MemoryVideoAgentRepository,
             SQLVideoAgentRepository,
@@ -193,26 +320,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         task_store = app.state.pixelflow_task_store
         if isinstance(task_store, SQLPixelFlowTaskStore):
-            agent_runtime_repository = SQLVideoRuntimeRepository(
+            agent_runtime_repository = SQLCompactionQueueRepository(
                 task_store.session_factory,
-                task_store=task_store,
             )
-            video_runtime_repository = agent_runtime_repository
             video_agent_repository = SQLVideoAgentRepository(
                 task_store.session_factory,
             )
         elif isinstance(task_store, MemoryPixelFlowTaskStore):
-            agent_runtime_repository = MemoryVideoRuntimeRepository(
-                task_store=task_store,
-            )
-            video_runtime_repository = agent_runtime_repository
+            agent_runtime_repository = MemoryCompactionQueueRepository()
             video_agent_repository = MemoryVideoAgentRepository(
                 event_repository=agent_runtime_repository,
             )
         else:
-            # MySQL 对话 Store 尚无同事务 VideoRuntimeRepository，保持 R1 压缩并固定关闭 live。
+            # MySQL 对话 Store 尚无同事务 Runtime Repository，保持 R1 压缩并固定关闭V2执行。
             agent_runtime_repository = MemoryCompactionQueueRepository()
-            video_runtime_repository = None
             video_agent_repository = None
         video_agent_entrypoint = (
             VideoAgentEntrypoint(
@@ -232,105 +353,131 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if agent_runtime_config.context_compaction_enabled
             else None
         )
-        from app.gateway.pixelflow_agent_live_capabilities import (
-            make_pixelflow_agent_live_capabilities,
+        from pixelflow.agent_runtime.jobs import (
+            ExistingJobService,
+            OperationRecoveryRuntime,
+            ProviderJobAdapter,
         )
-        from app.gateway.pixelflow_agent_live_providers import (
-            make_video_live_provider_adapters,
+        from pixelflow.video_agent.operation_resume import (
+            VideoAgentOperationResumer,
+            VideoAgentQuotaResumer,
         )
-        from app.gateway.pixelflow_agent_runtime import (
-            make_pixelflow_agent_live_runtime,
-        )
-        from deerflow.models.factory import create_chat_model
-        from pixelflow.agent_runtime.context import parse_model_context_profiles
-        from pixelflow.skills.base import get_image_skill
+        from pixelflow.video_agent.runtime import make_video_agent_runtime_assembly
 
         live_clock = _GatewayClock()
-        default_model_name = (
-            startup_config.models[0].name if startup_config.models else ""
-        )
-        live_capabilities = make_pixelflow_agent_live_capabilities(
-            model_factory=create_chat_model,
-            scene_asset_skill_factory=get_image_skill,
-            power_mem_service=app.state.pixelflow_power_mem_service,
-            clock=live_clock,
-            model_name=default_model_name,
-        )
-        live_providers = make_video_live_provider_adapters(
-            generate_scene_video=getattr(
-                app.state,
-                "pixelflow_generate_scene_video_job_service",
-                None,
-            ),
-            merge_video=getattr(
-                app.state,
-                "pixelflow_merge_video_job_service",
-                None,
-            ),
-            quality_review=getattr(
-                app.state,
-                "pixelflow_quality_review_job_service",
-                None,
-            ),
-            jianying_draft=getattr(
-                app.state,
-                "pixelflow_jianying_draft_job_service",
-                None,
-            ),
-        )
-        try:
-            live_model_profiles = parse_model_context_profiles(
-                startup_config.models,
+
+        def _optional_provider_adapter(
+            service: object,
+        ) -> ProviderJobAdapter | None:
+            """只包装符合M06合同的Service，构造期不触发Provider调用。"""
+
+            return (
+                ProviderJobAdapter(service)
+                if isinstance(service, ExistingJobService)
+                else None
             )
-        except Exception as error:  # noqa: BLE001 - live 档案异常固定降级，不中断 R1
-            logger.warning(
-                "PixelFlow Agent live 模型档案不可用：exception_type=%s",
-                type(error).__name__,
-            )
-            live_model_profiles = {}
-        agent_live_stack = AsyncExitStack()
-        try:
-            live_runtime = await agent_live_stack.enter_async_context(
-                make_pixelflow_agent_live_runtime(
-                    app,
-                    config=agent_runtime_config,
-                    repository=video_runtime_repository,
-                    task_store=task_store,
-                    checkpointer=app.state.checkpointer,
-                    capabilities=live_capabilities,
-                    providers=live_providers,
-                    model_name=default_model_name,
-                    model_profiles=live_model_profiles,
-                    memory_search=app.state.pixelflow_power_mem_service,
-                    clock=live_clock,
+
+        video_agent_runtime = make_video_agent_runtime_assembly(
+            operation_repository=(
+                agent_runtime_repository
+                if video_agent_repository is not None
+                else None
+            ),
+            video_repository=video_agent_repository,
+            reference_adapter=getattr(
+                app.state,
+                "pixelflow_reference_analysis_provider_adapter",
+                None,
+            ),
+            scene_adapter=_optional_provider_adapter(
+                getattr(
+                    app.state,
+                    "pixelflow_generate_scene_video_job_service",
+                    None,
                 )
+            ),
+            merge_adapter=_optional_provider_adapter(
+                getattr(
+                    app.state,
+                    "pixelflow_merge_video_job_service",
+                    None,
+                )
+            ),
+            jianying_adapter=_optional_provider_adapter(
+                getattr(
+                    app.state,
+                    "pixelflow_jianying_draft_job_service",
+                    None,
+                )
+            ),
+            lease_owner=f"gateway-video-agent:{os.getpid()}",
+            clock=live_clock.now,
+        )
+        app.state.pixelflow_video_agent_runtime = video_agent_runtime
+        video_agent_runner = (
+            VideoAgentRunner(
+                repository=video_agent_repository,
+                executor=video_agent_runtime.executor,
             )
-            app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
-                config=agent_runtime_config,
-                repository=agent_runtime_repository,
-                task_store=task_store,
-                context_compactor=context_compactor,
-                turn_executor=live_runtime.executor,
-                video_repository=video_runtime_repository,
-                video_agent_entrypoint=video_agent_entrypoint,
-                primary_execution_intents=(
-                    ("video",)
-                    if video_agent_entrypoint is not None
-                    and "video" in agent_runtime_config.enabled_intents
-                    else live_runtime.primary_execution_intents
+            if video_agent_repository is not None
+            and video_agent_runtime.executor is not None
+            else None
+        )
+        video_agent_operation_recovery = (
+            OperationRecoveryRuntime(
+                agent_runtime_repository,
+                resolver=video_agent_runtime.operation_resolver,
+                resumer=VideoAgentOperationResumer(
+                    repository=video_agent_repository,
+                    executor=video_agent_runtime.executor,
                 ),
+                quota_resumer=VideoAgentQuotaResumer(
+                    repository=video_agent_repository,
+                ),
+                worker_id=f"gateway-video-agent:{os.getpid()}:recovery",
+                clock=live_clock.now,
             )
-        except BaseException:
-            await agent_live_stack.aclose()
-            raise
+            if video_agent_repository is not None
+            and video_agent_runtime.executor is not None
+            and video_agent_runtime.operation_resolver is not None
+            else None
+        )
+        if video_agent_operation_recovery is not None:
+            await video_agent_operation_recovery.start()
+        app.state.pixelflow_video_agent_operation_recovery = (
+            video_agent_operation_recovery
+        )
+        app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
+            config=agent_runtime_config,
+            repository=agent_runtime_repository,
+            task_store=task_store,
+            context_compactor=context_compactor,
+            video_agent_repository=video_agent_repository,
+            video_agent_entrypoint=video_agent_entrypoint,
+            video_agent_executor=video_agent_runtime.executor,
+            video_agent_runner=video_agent_runner,
+            operation_repository=agent_runtime_repository,
+            video_agent_operation_recovery=video_agent_operation_recovery,
+            conversation_router=ConversationRouteService(
+                budget_policy_provider=ContextBudgetPolicyProvider(
+                    agent_runtime_config.context_budget,
+                ),
+            ),
+            # 只有完整V2核心与独立Runner同时就绪时才接管新视频对话。
+            primary_execution_intents=("video",) if video_agent_runner is not None else (),
+        )
         logger.info(
-            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s primary_execution_intents=%s live_status=%s",
+            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s primary_execution_intents=%s video_agent_ready=%s jianying_ready=%s",
             agent_runtime_config.mode,
             agent_runtime_config.new_conversation_rollout_percent,
             sorted(
                 app.state.pixelflow_agent_runtime_service.primary_execution_intents,
             ),
-            live_runtime.status_snapshot(),
+            video_agent_runtime.ready,
+            video_agent_runtime.optional_capabilities.get(
+                "jianying_package",
+                False,
+            ),
         )
 
         from pixelflow.tracing import configure_trace_sink
@@ -353,12 +500,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_agent_runtime_service is not None:
                 await pixelflow_agent_runtime_service.aclose()
                 logger.info("PixelFlow Agent Runtime closed")
-            await agent_live_stack.aclose()
-            logger.info("PixelFlow Agent live Runtime closed")
+            pixelflow_video_agent_operation_recovery = getattr(
+                app.state,
+                "pixelflow_video_agent_operation_recovery",
+                None,
+            )
+            if pixelflow_video_agent_operation_recovery is not None:
+                await pixelflow_video_agent_operation_recovery.aclose()
+                logger.info("PixelFlow VideoAgent Operation恢复Worker已关闭")
             pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
             if pixelflow_jianying_draft_service is not None:
                 await pixelflow_jianying_draft_service.aclose()
                 logger.info("PixelFlow Jianying draft service closed")
+            if content_app_provider_client is not None:
+                await content_app_provider_client.aclose()
+                logger.info("PixelFlow reference analysis Provider client closed")
             pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
             if pixelflow_mysql_engine is not None:
                 await pixelflow_mysql_engine.dispose()

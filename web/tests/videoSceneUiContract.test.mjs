@@ -8,7 +8,7 @@ const messageBubbleSource = readFileSync(
   "utf8",
 );
 const workspaceSource = readFileSync(
-  fileURLToPath(new URL("../src/pages/WorkspacePage.tsx", import.meta.url)),
+  fileURLToPath(new URL("../src/features/legacy-workspace/LegacyWorkspace.tsx", import.meta.url)),
   "utf8",
 );
 const storyboardPanelPath = fileURLToPath(new URL("../src/components/canvas/StoryboardPanel.tsx", import.meta.url));
@@ -31,7 +31,7 @@ test("video scene package chat card is a compact storyboard entry", () => {
 test("storyboard detail panel edits global assets and scene-varying fields", () => {
   assert.ok(existsSync(storyboardPanelPath), "StoryboardPanel must render scene package details in the right canvas");
   assert.match(workspaceSource, /selectedStoryboardMessageId/);
-  assert.match(workspaceSource, /StoryboardPanel/);
+  assert.match(workspaceSource, /VideoAgentStoryboardSurface/);
   assert.match(storyboardPanelSource, /出场角色/);
   assert.match(storyboardPanelSource, /场景/);
   assert.match(storyboardPanelSource, /道具/);

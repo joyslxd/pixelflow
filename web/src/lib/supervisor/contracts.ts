@@ -6,7 +6,7 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
-export const ORCHESTRATION_MODE_VALUES = ["frontend_v2", "supervisor_v1"] as const;
+export const ORCHESTRATION_MODE_VALUES = ["frontend_v2", "video_agent_v2"] as const;
 
 export type OrchestrationMode = (typeof ORCHESTRATION_MODE_VALUES)[number];
 
@@ -185,9 +185,17 @@ export const EVENT_TYPE_VALUES = [
   "message.upserted",
   "workflow.progressed",
   "interrupt.opened",
+  "interrupt.responded",
   "interrupt.closed",
   "external_job.state_changed",
   "external_job.quota_state_changed",
+  "agent.plan.created",
+  "agent.step.started",
+  "agent.step.progressed",
+  "agent.step.completed",
+  "agent.step.failed",
+  "agent.confirmation.requested",
+  "agent.route.decided",
   "error.raised",
 ] as const;
 
@@ -227,6 +235,15 @@ export type InterruptResponseRequest = Readonly<{
     artifact_refs: readonly string[];
     explicit_action: ExplicitActionSignal | null;
   }>;
+}>;
+
+export type VideoAgentQuotaResponseRequest = Readonly<{
+  decision: "resume" | "cancel";
+}>;
+
+export type VideoAgentConfirmationResponseRequest = Readonly<{
+  step_id: string;
+  decision: "confirm" | "cancel";
 }>;
 
 export type AgentInterruptProjection = Readonly<{

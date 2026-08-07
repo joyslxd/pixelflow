@@ -13,6 +13,8 @@ import type {
   InterruptResponseRequest,
   JsonValue,
   TurnStartRequest,
+  VideoAgentConfirmationResponseRequest,
+  VideoAgentQuotaResponseRequest,
 } from "../lib/supervisor/contracts.js";
 import {
   supervisorEventStream,
@@ -52,6 +54,14 @@ export interface SupervisorConversationController {
     interruptId: string,
     request: InterruptResponseRequest,
   ): Promise<JsonValue>;
+  respondToVideoAgentConfirmation(
+    confirmationId: string,
+    request: VideoAgentConfirmationResponseRequest,
+  ): Promise<JsonValue>;
+  respondToVideoAgentQuota(
+    quotaInterruptId: string,
+    request: VideoAgentQuotaResponseRequest,
+  ): Promise<JsonValue>;
   getRunStatus(runId: string): Promise<JsonValue>;
   dispose(): void;
 }
@@ -72,6 +82,14 @@ export interface UseSupervisorConversationResult {
   respondToInterrupt(
     interruptId: string,
     request: InterruptResponseRequest,
+  ): Promise<JsonValue>;
+  respondToVideoAgentConfirmation(
+    confirmationId: string,
+    request: VideoAgentConfirmationResponseRequest,
+  ): Promise<JsonValue>;
+  respondToVideoAgentQuota(
+    quotaInterruptId: string,
+    request: VideoAgentQuotaResponseRequest,
   ): Promise<JsonValue>;
   getRunStatus(runId: string): Promise<JsonValue>;
 }
@@ -280,6 +298,36 @@ export function createSupervisorConversationController(
     (signal) => api.respondToInterrupt(conversationId, interruptId, request, { signal }),
   );
 
+  const respondToVideoAgentConfirmation = (
+    confirmationId: string,
+    request: VideoAgentConfirmationResponseRequest,
+  ) => runScopedRequest(async (signal) => {
+    const session = generation;
+    const result = await api.respondToVideoAgentConfirmation(
+      conversationId,
+      confirmationId,
+      request,
+      { signal },
+    );
+    await loadSnapshot(session, signal);
+    return result;
+  });
+
+  const respondToVideoAgentQuota = (
+    quotaInterruptId: string,
+    request: VideoAgentQuotaResponseRequest,
+  ) => runScopedRequest(async (signal) => {
+    const session = generation;
+    const result = await api.respondToVideoAgentQuota(
+      conversationId,
+      quotaInterruptId,
+      request,
+      { signal },
+    );
+    await loadSnapshot(session, signal);
+    return result;
+  });
+
   const getRunStatus = (runId: string) => runScopedRequest(
     (signal) => api.getRunStatus(conversationId, runId, { signal }),
   );
@@ -307,6 +355,8 @@ export function createSupervisorConversationController(
     refreshSnapshot,
     startTurn,
     respondToInterrupt,
+    respondToVideoAgentConfirmation,
+    respondToVideoAgentQuota,
     getRunStatus,
     dispose,
   };
@@ -360,6 +410,20 @@ export function useSupervisorConversation(
     ),
     [controller],
   );
+  const respondToVideoAgentConfirmation = useCallback(
+    (
+      confirmationId: string,
+      request: VideoAgentConfirmationResponseRequest,
+    ) => controller.respondToVideoAgentConfirmation(confirmationId, request),
+    [controller],
+  );
+  const respondToVideoAgentQuota = useCallback(
+    (
+      quotaInterruptId: string,
+      request: VideoAgentQuotaResponseRequest,
+    ) => controller.respondToVideoAgentQuota(quotaInterruptId, request),
+    [controller],
+  );
   const getRunStatus = useCallback(
     (runId: string) => controller.getRunStatus(runId),
     [controller],
@@ -372,6 +436,8 @@ export function useSupervisorConversation(
     refreshSnapshot,
     startTurn,
     respondToInterrupt,
+    respondToVideoAgentConfirmation,
+    respondToVideoAgentQuota,
     getRunStatus,
-  }), [contextVersion, getContextVersion, getRunStatus, refreshSnapshot, respondToInterrupt, startTurn, state]);
+  }), [contextVersion, getContextVersion, getRunStatus, refreshSnapshot, respondToInterrupt, respondToVideoAgentConfirmation, respondToVideoAgentQuota, startTurn, state]);
 }

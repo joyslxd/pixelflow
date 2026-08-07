@@ -22,6 +22,28 @@ export interface VideoAgentPlanState {
   steps: Record<string, VideoAgentStepState>;
 }
 
+export interface VideoAgentConfirmationState {
+  confirmationId: string;
+  planId: string;
+  stepId: string;
+  title: string;
+  costSummary: string;
+  affectedSceneIds: string[];
+  submittable: boolean;
+  unavailableReason: string | null;
+}
+
+export interface VideoAgentQuotaState {
+  quotaInterruptId: string;
+  planId: string;
+  stepId: string;
+  quotaPauseRevision: number;
+  phase: "start" | "status";
+  reasonCode: "provider_quota_insufficient";
+  submittable: boolean;
+  unavailableReason: string | null;
+}
+
 export interface VideoAgentTimelineState {
   plans: Record<string, VideoAgentPlanState>;
 }

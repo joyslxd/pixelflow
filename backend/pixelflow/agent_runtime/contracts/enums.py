@@ -7,7 +7,7 @@ class OrchestrationMode(StrEnum):
     """对话创建后不可由普通 context PATCH 改写的编排归属。"""
 
     FRONTEND_V2 = "frontend_v2"
-    SUPERVISOR_V1 = "supervisor_v1"
+    VIDEO_AGENT_V2 = "video_agent_v2"
 
 
 class AgentAction(StrEnum):
@@ -99,4 +99,5 @@ class AgentEventType(StrEnum):
     AGENT_STEP_COMPLETED = "agent.step.completed"
     AGENT_STEP_FAILED = "agent.step.failed"
     AGENT_CONFIRMATION_REQUESTED = "agent.confirmation.requested"
+    AGENT_ROUTE_DECIDED = "agent.route.decided"
     ERROR_RAISED = "error.raised"

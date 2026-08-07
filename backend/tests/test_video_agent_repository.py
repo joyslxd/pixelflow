@@ -87,6 +87,134 @@ def pending_step() -> AgentPlanStep:
     )
 
 
+def confirmation_step() -> AgentPlanStep:
+    return AgentPlanStep(
+        step_id="step-confirmation",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成镜头",
+        status=PlanStepStatus.PENDING,
+        confirmation_required=True,
+    )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_confirmation_atomically_skips_step_and_plan(
+    kind: RepositoryKind,
+) -> None:
+    """取消确认后Memory与SQL都不能留下可再次提交的等待步骤。"""
+
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [confirmation_step()])
+        await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.RUNNING,
+            now=T0,
+        )
+        await store.request_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+        )
+        await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            now=T0,
+        )
+
+        cancelled = await store.cancel_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+            now=T3,
+        )
+        replayed = await store.cancel_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+            now=T3,
+        )
+
+        assert cancelled.status is AgentPlanStatus.CANCELLED
+        assert cancelled.steps[0].status is PlanStepStatus.SKIPPED
+        assert cancelled.steps[0].public_summary == "用户已取消执行"
+        assert cancelled.steps[0].duration_ms == 0
+        assert replayed == cancelled
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_quota_atomically_skips_step_plan_and_workspace_card(
+    kind: RepositoryKind,
+) -> None:
+    """额度取消必须同步更新Plan与右侧Workspace快照，并支持幂等重放。"""
+
+    quota_workspace = workspace().model_copy(
+        update={
+            "payload": {
+                "quota_interrupt": {
+                    "quota_interrupt_id": "quota-1",
+                    "plan_id": "plan-1",
+                    "step_id": "step-quota",
+                    "job_id": "job-1",
+                    "quota_pause_revision": 2,
+                }
+            }
+        }
+    )
+    running_plan = plan().model_copy(update={"status": AgentPlanStatus.RUNNING})
+    running_step = AgentPlanStep(
+        step_id="step-quota",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成镜头",
+        status=PlanStepStatus.RUNNING,
+        started_at=T0,
+    )
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", quota_workspace)
+        await store.save_plan("user-a", running_plan, [running_step])
+
+        cancelled = await store.cancel_quota_interrupted_plan(
+            "user-a",
+            "plan-1",
+            "step-quota",
+            quota_interrupt_id="quota-1",
+            job_id="job-1",
+            quota_pause_revision=2,
+            now=T3,
+        )
+        replayed = await store.cancel_quota_interrupted_plan(
+            "user-a",
+            "plan-1",
+            "step-quota",
+            quota_interrupt_id="quota-1",
+            job_id="job-1",
+            quota_pause_revision=2,
+            now=T3,
+        )
+        restored_workspace = await store.get_workspace(
+            "user-a",
+            "workspace-1",
+        )
+
+        assert cancelled.status is AgentPlanStatus.CANCELLED
+        assert cancelled.steps[0].status is PlanStepStatus.SKIPPED
+        assert replayed == cancelled
+        assert restored_workspace is not None
+        assert restored_workspace.payload["quota_interrupt"] is None
+        assert (
+            restored_workspace.payload["last_quota_resolution"]["state"]
+            == "cancelled"
+        )
+
+
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
 async def test_complete_step_persists_duration_and_owner_isolation(kind: RepositoryKind) -> None:
@@ -112,6 +240,102 @@ async def test_complete_step_persists_duration_and_owner_isolation(kind: Reposit
         assert completed.duration_ms == 3000
         assert completed.artifact_refs == ("artifact:workspace-1",)
         assert await store.get_workspace("user-b", "workspace-1") is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_workspace_patch_uses_revision_and_replays_same_snapshot(
+    kind: RepositoryKind,
+) -> None:
+    patch = {
+        "script": {
+            "source": "user_import",
+            "version": 1,
+            "content": "展示商品",
+        }
+    }
+    async with repository(kind) as (store, _):
+        created = await store.create_workspace("user-a", workspace())
+
+        updated = await store.apply_workspace_patch(
+            "user-a",
+            created.workspace_id,
+            patch,
+            expected_revision=created.revision,
+            now=T3,
+        )
+        replay = await store.apply_workspace_patch(
+            "user-a",
+            created.workspace_id,
+            patch,
+            expected_revision=created.revision,
+            now=T3,
+        )
+
+        assert updated.revision == 2
+        assert updated.payload["script"] == patch["script"]
+        assert replay == updated
+        with pytest.raises(AgentRuntimeRecordConflictError, match="revision"):
+            await store.apply_workspace_patch(
+                "user-a",
+                created.workspace_id,
+                {"script": {"source": "different"}},
+                expected_revision=created.revision,
+                now=T3,
+            )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_load_conversation_state_returns_latest_plan_with_ordered_steps(
+    kind: RepositoryKind,
+) -> None:
+    """Snapshot Repository 只返回当前用户、当前会话的权威工作区和最新计划。"""
+
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        first = plan()
+        await store.save_plan("user-a", first, [pending_step()])
+        second = AgentPlan(
+            plan_id="plan-2",
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            status=AgentPlanStatus.RUNNING,
+            public_goal="按新指令修改商品视频",
+            created_at=T3,
+            updated_at=T3,
+        )
+        await store.save_plan(
+            "user-a",
+            second,
+            [
+                AgentPlanStep(
+                    step_id="step-2b",
+                    plan_id="plan-2",
+                    sequence=2,
+                    tool_name="update_scene",
+                    title="更新分镜",
+                    status=PlanStepStatus.PENDING,
+                ),
+                AgentPlanStep(
+                    step_id="step-2a",
+                    plan_id="plan-2",
+                    sequence=1,
+                    tool_name="inspect_video_workspace",
+                    title="读取项目",
+                    status=PlanStepStatus.PENDING,
+                ),
+            ],
+        )
+
+        state = await store.load_conversation_state("user-a", "conversation-1")
+
+        assert state is not None
+        loaded_workspace, loaded_plan = state
+        assert loaded_workspace.workspace_id == "workspace-1"
+        assert loaded_plan is not None and loaded_plan.plan_id == "plan-2"
+        assert [step.step_id for step in loaded_plan.steps] == ["step-2a", "step-2b"]
+        assert await store.load_conversation_state("user-b", "conversation-1") is None
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
@@ -254,3 +478,68 @@ async def test_step_transition_event_is_idempotent(kind: RepositoryKind) -> None
         assert replay == first
         assert completed_replay == completed
         assert len(await event_repository.list_events("user-a", "conversation-1")) == 2
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_plan_read_and_status_update_use_authoritative_steps(kind: RepositoryKind) -> None:
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [pending_step()])
+
+        running = await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.RUNNING,
+            now=T0,
+        )
+        restored = await store.get_plan("user-a", "plan-1")
+
+        assert running.status is AgentPlanStatus.RUNNING
+        assert restored is not None
+        assert restored.status is AgentPlanStatus.RUNNING
+        assert restored.steps == (pending_step(),)
+        assert await store.get_plan("user-b", "plan-1") is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_confirmation_required_step_cannot_start_without_persisted_approval(
+    kind: RepositoryKind,
+) -> None:
+    step = AgentPlanStep(
+        step_id="step-confirm",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成分镜",
+        status=PlanStepStatus.PENDING,
+        arguments={"scene_ids": ["scene-3"], "variant_count": 3},
+        confirmation_required=True,
+    )
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [step])
+
+        with pytest.raises(AgentRuntimeRecordConflictError, match="确认"):
+            await store.start_step("user-a", "plan-1", "step-confirm", now=T0)
+
+        waiting = await store.request_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirm",
+        )
+        running = await store.confirm_step(
+            "user-a",
+            "plan-1",
+            "step-confirm",
+            now=T3,
+        )
+        restored = (await store.list_plan_steps("user-a", "plan-1"))[0]
+
+        assert waiting.status is PlanStepStatus.AWAITING_CONFIRMATION
+        assert waiting.started_at is None
+        assert running.status is PlanStepStatus.RUNNING
+        assert running.started_at == T3
+        assert restored.arguments == {"scene_ids": ["scene-3"], "variant_count": 3}
+        assert restored.confirmation_required is True
