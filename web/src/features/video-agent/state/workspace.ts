@@ -5,6 +5,15 @@ export interface VideoAgentWorkspaceAsset {
   sceneId: string | null;
 }
 
+export interface VideoAgentScriptEvidence {
+  artifactRef: string;
+  version: number;
+  status: string;
+  content: string;
+  reviewRequired: boolean;
+  source: string | null;
+}
+
 export interface VideoAgentSceneVariant {
   variantId: string;
   artifactRef: string;
@@ -33,6 +42,7 @@ export interface VideoAgentWorkspaceProjection {
   revision: number;
   scenes: VideoAgentSceneEvidence[];
   assets: VideoAgentWorkspaceAsset[];
+  script: VideoAgentScriptEvidence | null;
 }
 
 export interface VideoWorkspaceProjectionState {
@@ -166,6 +176,24 @@ function projectAsset(value: Record<string, unknown>): VideoAgentWorkspaceAsset 
   };
 }
 
+function projectScript(value: unknown): VideoAgentScriptEvidence | null {
+  if (!isRecord(value)) return null;
+  const content = optionalText(value.content);
+  const reference = artifactRef(value.artifact_ref);
+  const version = value.version;
+  if (!content || !reference || !Number.isSafeInteger(version) || (version as number) < 1) {
+    return null;
+  }
+  return {
+    artifactRef: reference,
+    version: version as number,
+    status: optionalText(value.status) ?? "draft",
+    content,
+    reviewRequired: value.review_required === true,
+    source: optionalText(value.source),
+  };
+}
+
 export function projectVideoWorkspaceSnapshot(
   value: unknown,
   expectedConversationId: string,
@@ -196,6 +224,7 @@ export function projectVideoWorkspaceSnapshot(
     assets: records(value.payload.assets)
       .map(projectAsset)
       .filter((item): item is VideoAgentWorkspaceAsset => item !== null),
+    script: projectScript(value.payload.script),
   };
 }
 
@@ -253,6 +282,14 @@ export function cloneVideoWorkspaceProjectionState(
             scene_id: asset.sceneId,
           } : asset)
           : [],
+        script: isRecord(current.script) ? {
+          artifact_ref: current.script.artifactRef,
+          version: current.script.version,
+          status: current.script.status,
+          content: current.script.content,
+          review_required: current.script.reviewRequired,
+          source: current.script.source,
+        } : null,
         qc: Array.isArray(current.scenes)
           ? Object.fromEntries(current.scenes.flatMap((scene) => (
             isRecord(scene) && typeof scene.sceneId === "string"

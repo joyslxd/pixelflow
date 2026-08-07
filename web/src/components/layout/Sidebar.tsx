@@ -71,7 +71,11 @@ export function Sidebar() {
     <aside className="hidden xl:flex w-[244px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="px-3 pt-5">
         <button
-          onClick={() => navigate("/")}
+          type="button"
+          onClick={() => {
+            window.dispatchEvent(new Event("pixelflow-new-conversation"));
+            navigate("/", { replace: true });
+          }}
           className="flex w-full items-center gap-2 rounded-xl border border-line bg-canvas px-3 py-2.5 text-[14px] font-medium text-ink transition-colors hover:border-accent/30 hover:text-accent"
         >
           <SquarePen size={16} />

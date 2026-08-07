@@ -335,14 +335,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # MySQL 对话 Store 尚无同事务 Runtime Repository，保持 R1 压缩并固定关闭V2执行。
             agent_runtime_repository = MemoryCompactionQueueRepository()
             video_agent_repository = None
-        video_agent_entrypoint = (
-            VideoAgentEntrypoint(
-                runtime_repository=agent_runtime_repository,
-                video_repository=video_agent_repository,
-            )
-            if video_agent_repository is not None
-            else None
-        )
+        video_agent_entrypoint = None
         context_compactor = (
             build_agent_context_compactor(
                 task_store=task_store,
@@ -414,6 +407,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             clock=live_clock.now,
         )
         app.state.pixelflow_video_agent_runtime = video_agent_runtime
+        if video_agent_repository is not None:
+            from pixelflow.video_agent.planner import (
+                DeepSeekVideoPlanningModel,
+                VideoAgentPlanner,
+            )
+            from pixelflow.video_agent.skills import SkillCatalog
+
+            planner = None
+            if video_agent_runtime.registry is not None:
+                planner = VideoAgentPlanner(
+                    model=DeepSeekVideoPlanningModel(app_config=startup_config),
+                    registry=video_agent_runtime.registry,
+                    skill_catalog=SkillCatalog(),
+                    clock=live_clock.now,
+                )
+            video_agent_entrypoint = VideoAgentEntrypoint(
+                runtime_repository=agent_runtime_repository,
+                video_repository=video_agent_repository,
+                planner=planner,
+                clock=live_clock.now,
+            )
         video_agent_runner = (
             VideoAgentRunner(
                 repository=video_agent_repository,

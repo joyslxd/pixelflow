@@ -143,6 +143,8 @@ test("confirmation card submits persisted identifiers without free-form workflow
   assert.match(evidence, /重新生成完成/);
   assert.match(evidence, /revision/);
   assert.match(legacyWorkspace, /AgentPlanTimeline/);
+  assert.match(legacyWorkspace, /agentActivity/);
+  assert.match(legacyWorkspace, /AgentScriptPreviewPanel/);
   assert.match(legacyWorkspace, /useVideoAgent/);
   assert.match(legacyWorkspace, /SceneEvidencePanel/);
   assert.match(legacyWorkspace, /AgentConfirmationCard/);

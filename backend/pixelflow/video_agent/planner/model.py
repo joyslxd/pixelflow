@@ -34,6 +34,7 @@ class VideoAgentPlanningContext(_PlanningContract):
     turn_id: str = Field(min_length=1, max_length=64)
     content: str = Field(min_length=1, max_length=20_000)
     artifact_refs: tuple[str, ...] = ()
+    materials: tuple[dict[str, JsonValue], ...] = ()
     workspace: VideoWorkspace
 
 
@@ -102,7 +103,13 @@ class DeepSeekVideoPlanningModel:
         user_payload = {
             "request": context.content,
             "artifact_refs": list(context.artifact_refs),
+            "materials": list(context.materials),
             "workspace_id": context.workspace.workspace_id,
+            "workspace_product_info": (
+                context.workspace.payload.get("product_info")
+                if isinstance(context.workspace.payload, dict)
+                else None
+            ),
             "tools": tools,
             "skills": skills,
             "repair_feedback": feedback,

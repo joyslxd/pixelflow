@@ -642,6 +642,7 @@ class AgentRuntimeService:
                 turn_id=registration.turn.turn_id,
                 content=body.content,
                 artifact_refs=tuple(body.artifact_refs),
+                materials=body.materials,
             )
             if registration.created and self._video_agent_runner is not None:
                 self._pending_video_agent_turns[registration.turn.turn_id] = (

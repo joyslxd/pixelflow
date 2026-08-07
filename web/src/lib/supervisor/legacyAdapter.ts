@@ -316,10 +316,10 @@ export function resolveUnavailableSupervisorRecovery(
 }
 
 /**
- * assist 只在服务端确认当前 Turn 可执行后接力旧流程。
+ * Runtime Turn 登记后的交接策略。
  *
- * queued/sending 以及尚未从 Snapshot 找到的 Turn 必须等待，刷新恢复时也不会
- * 重新提交旧流程；不需要旧流程的 Turn 则只确认交接完成。
+ * V2 不再把已登记输入接力到旧 frontend_v2 采集/intake；queued/sending 仍须等待，
+ * 失败可提示，其余只确认交接完成。
  */
 export function resolveAssistHandoffAction(
   input: AssistHandoffPolicyInput,
@@ -344,7 +344,7 @@ export function resolveAssistHandoffAction(
     ) {
       return "acknowledge";
     }
-    // 活跃 Turn 必须由真实 Graph 执行器推进，assist 接力层只等待权威终态。
+    // 活跃 Turn 必须由 VideoAgent 执行器推进，接力层只等待权威终态。
     return "wait";
   }
   if (
@@ -358,7 +358,8 @@ export function resolveAssistHandoffAction(
     return "wait";
   }
   if (input.serverInputStatus === "failed") return "failed";
-  return input.continueLegacy ? "continue_legacy" : "acknowledge";
+  // 保留 continueLegacy 字段兼容旧快照，但不再据此踢回旧采集链路。
+  return "acknowledge";
 }
 
 /**
@@ -435,7 +436,17 @@ export function resolveWorkspaceInteractionPolicy(
   const runtimeBusy = !input.orchestrationResolved
     || (input.mode === "frontend_v2" ? input.legacyBusy : supervisorRuntimeBusy);
 
-  if (!input.orchestrationResolved || (input.mode === "video_agent_v2" && !hasConversation)) {
+  if (!input.orchestrationResolved) {
+    return {
+      composer: { disabled: true, canQueue: false },
+      artifact: { actionsDisabled: true },
+      runtime: { busy: true, mode: input.mode },
+    };
+  }
+
+  // 空会话允许输入以触发 ensureConversation；只有已挂上 video_agent_v2 且会话 ID
+  // 丢失的短暂中间态才锁输入，避免“新建对话后无法打字”。
+  if (input.mode === "video_agent_v2" && !hasConversation && input.legacyBusy) {
     return {
       composer: { disabled: true, canQueue: false },
       artifact: { actionsDisabled: true },

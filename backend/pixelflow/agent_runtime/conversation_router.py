@@ -23,9 +23,21 @@ IntentClassifier = Callable[
 ]
 
 _VIDEO_ANALYSIS = re.compile(r"视频分析|拆解.{0,8}视频|分析.{0,8}(?:这个|该|参考)?视频", re.IGNORECASE)
-_VIDEO = re.compile(r"图生视频|文生视频|生成.{0,24}(?:视频|短片|影片)|制作.{0,24}(?:视频|短片|影片)", re.IGNORECASE)
+_VIDEO = re.compile(
+    r"图生视频|文生视频|"
+    r"(?:生成|制作|做|拍|出|创作|拍摄).{0,36}"
+    r"(?:视频|短片|影片|广告片|宣传片|品牌片|TVC|tvc|"
+    r"(?:\d+(?:\.\d+)?\s*(?:s|秒|S)\s*)?广告)|"
+    r"(?:视频|短片|影片).{0,12}(?:广告|成片)|"
+    r"(?:广告片|宣传片|品牌片|(?:\d+(?:\.\d+)?\s*(?:s|秒|S)\s*)广告)",
+    re.IGNORECASE,
+)
 _PPT = re.compile(r"PPT|演示文稿|幻灯片", re.IGNORECASE)
-_IMAGE = re.compile(r"商品主图|海报|图片编辑|图像编辑|生成.{0,8}(?:图片|图像)", re.IGNORECASE)
+_IMAGE = re.compile(
+    r"商品主图|海报|图片编辑|图像编辑|生成.{0,8}(?:图片|图像)|"
+    r"(?:做|制作|出).{0,8}(?:海报|主图)",
+    re.IGNORECASE,
+)
 
 
 class ConversationRouteService:
@@ -56,6 +68,9 @@ class ConversationRouteService:
             content=content,
             materials=tuple(_safe_material(item) for item in materials),
         )
+        rule_decision = _deterministic_decision(request.content)
+        if rule_decision is not None:
+            return rule_decision
         policy = self._budget_policy_provider.policy_for(
             "conversation_route",
         )
@@ -69,9 +84,6 @@ class ConversationRouteService:
         )
         if estimated_input_tokens > usable_input_tokens:
             return _unknown("request_too_large")
-        rule_decision = _deterministic_decision(request.content)
-        if rule_decision is not None:
-            return rule_decision
         try:
             result = await asyncio.wait_for(
                 self._llm_classifier(

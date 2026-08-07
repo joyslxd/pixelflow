@@ -84,6 +84,7 @@ import {
   AgentQuotaCard,
   type AgentQuotaSubmission,
 } from "@/features/video-agent/AgentQuotaCard";
+import { AgentScriptPreviewPanel } from "@/features/video-agent/AgentScriptPreviewPanel";
 import { SceneEvidencePanel } from "@/features/video-agent/SceneEvidencePanel";
 import { VideoAgentStoryboardSurface } from "@/features/video-agent/VideoAgentStoryboardSurface";
 import { useVideoAgent } from "@/features/video-agent/hooks/useVideoAgent";
@@ -2134,6 +2135,7 @@ export function WorkspacePage() {
   });
   const [videoAgentConfirmationSubmitting, setVideoAgentConfirmationSubmitting] = useState(false);
   const [videoAgentConfirmationError, setVideoAgentConfirmationError] = useState<string | null>(null);
+  const [selectedVideoAgentStepId, setSelectedVideoAgentStepId] = useState<string | null>(null);
   const visibleVideoAgentConfirmationId = supervisorRuntime.state.videoAgentConfirmation?.confirmationId ?? null;
   useEffect(() => {
     setVideoAgentConfirmationSubmitting(false);
@@ -2188,6 +2190,28 @@ export function WorkspacePage() {
   const videoAgentView = useVideoAgent(
     supervisorRuntime.state.videoAgentWorkspace,
   );
+  const videoAgentCompletedStepKey = useMemo(() => {
+    const plan = supervisorRuntime.state.videoAgentPlan;
+    if (!plan) return "";
+    return Object.values(plan.steps)
+      .filter((step) => step.status === "completed")
+      .map((step) => step.stepId)
+      .sort()
+      .join(",");
+  }, [supervisorRuntime.state.videoAgentPlan]);
+  useEffect(() => {
+    if (
+      orchestrationMode !== "video_agent_v2"
+      || !currentConversationId
+      || !videoAgentCompletedStepKey
+    ) return;
+    // 步骤完成事件不含 workspace 全文；刷新 Snapshot 才能露出脚本/分镜预览。
+    void supervisorRuntime.refreshSnapshot().catch(() => {});
+  }, [
+    currentConversationId,
+    orchestrationMode,
+    videoAgentCompletedStepKey,
+  ]);
   const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
     if (
       orchestrationMode !== "video_agent_v2"
@@ -7406,7 +7430,7 @@ export function WorkspacePage() {
       artifactRefs: [],
       interruptId: null,
       explicitAction: null,
-      continueLegacy: orchestrationModeRef.current === "frontend_v2",
+      continueLegacy: false,
       registrationStatus: "registered",
       runId: recoverableInput.turnId || undefined,
     };
@@ -7532,11 +7556,13 @@ export function WorkspacePage() {
       if (!conversationId) {
         resetWorkspace();
         restoringRef.current = false;
+        setBusy(false);
         return;
       }
       if (skipRouteRestoreConversationRef.current === conversationId) {
         skipRouteRestoreConversationRef.current = "";
         restoringRef.current = false;
+        setBusy(false);
         return;
       }
       setDialogOpen(false);
@@ -7563,12 +7589,18 @@ export function WorkspacePage() {
         await applyConversation(detail);
       } catch (err) {
         if (!cancelled) {
+          // 失效会话（常见于本地重启后）必须离开死链，否则输入区和新建都会像被锁住。
           resetWorkspace();
-          pushAssistant(`历史对话恢复失败:${err instanceof Error ? err.message : String(err)}`);
+          navigate("/", { replace: true });
+          const message = err instanceof Error ? err.message : String(err);
+          if (!/not found|404|Conversation not found/i.test(message)) {
+            pushAssistant(`历史对话恢复失败:${message}`);
+          }
         }
       } finally {
+        // 即使被路由切换取消，也要释放本轮恢复锁，避免新建对话后仍 busy。
+        restoringRef.current = false;
         if (!cancelled) {
-          restoringRef.current = false;
           setBusy(false);
           const deferredInputs = deferredOwnershipInputsRef.current.filter(
             (item) => item.routeConversationId === conversationId,
@@ -7579,18 +7611,38 @@ export function WorkspacePage() {
           for (const item of deferredInputs) {
             window.setTimeout(() => void handleSend(item.input), 0);
           }
+        } else {
+          setBusy(false);
         }
       }
     };
     void restoreConversation();
     return () => {
       cancelled = true;
+      restoringRef.current = false;
       if (conversationIdRef.current === conversationId) {
         setActiveConversationId("");
       }
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
-  }, [conversationId]);
+  }, [conversationId, navigate]);
+
+  useEffect(() => {
+    const startFreshConversation = () => {
+      skipRouteRestoreConversationRef.current = "";
+      deferredOwnershipInputsRef.current = [];
+      restoringRef.current = false;
+      setBusy(false);
+      resetWorkspace();
+      if (routeConversationIdRef.current) {
+        navigate("/", { replace: true });
+      }
+    };
+    window.addEventListener("pixelflow-new-conversation", startFreshConversation);
+    return () => {
+      window.removeEventListener("pixelflow-new-conversation", startFreshConversation);
+    };
+  }, [navigate]);
 
   useEffect(() => {
     if (restoringRef.current || !currentConversationId || orchestrationModeRef.current !== "frontend_v2") return;
@@ -7904,55 +7956,19 @@ export function WorkspacePage() {
           });
         return;
       }
+      // acknowledge / 历史 continue_legacy：V2 不再踢回旧采集，只清掉 pending。
       supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
-      if (handoffAction === "continue_legacy") {
-        supervisorLegacyHandoffClaimedRef.current.add(pendingTurn.clientInputId);
-      }
-      const continueRegisteredTurn = async () => {
-        let handoffPersisted = false;
-        if (handoffAction === "acknowledge") {
-          await persistPendingSupervisorTurns(
-            (current) => current.filter(
-              (item) => item.clientInputId !== pendingTurn.clientInputId,
-            ),
-            pendingTurn.conversationId,
-          );
-          handoffPersisted = true;
-          return;
-        }
-        try {
-          await handleSend(
-            {
-              content: pendingTurn.content,
-              materials: pendingTurn.materials,
-              reply_to_message_id: pendingTurn.replyToMessageId,
-              artifact_refs: pendingTurn.artifactRefs,
-            },
-            {
-              skipRuntimeRegistration: true,
-              clientInputId: pendingTurn.clientInputId,
-            },
-          );
-          await persistPendingSupervisorTurns(
-            (current) => current.filter(
-              (item) => item.clientInputId !== pendingTurn.clientInputId,
-            ),
-            pendingTurn.conversationId,
-          );
-          handoffPersisted = true;
-          await supervisorRuntime.refreshSnapshot().catch(() => {});
-        } finally {
-          if (handoffPersisted) {
-            supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
-          }
-        }
-      };
-      void continueRegisteredTurn().finally(() => {
-        supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
-        if (handoffAction === "acknowledge") {
+      void persistPendingSupervisorTurns(
+        (current) => current.filter(
+          (item) => item.clientInputId !== pendingTurn.clientInputId,
+        ),
+        pendingTurn.conversationId,
+      )
+        .then(() => supervisorRuntime.refreshSnapshot().catch(() => {}))
+        .finally(() => {
+          supervisorTurnInFlightRef.current.delete(pendingTurn.clientInputId);
           supervisorLegacyHandoffClaimedRef.current.delete(pendingTurn.clientInputId);
-        }
-      });
+        });
       return;
     }
     supervisorTurnInFlightRef.current.add(pendingTurn.clientInputId);
@@ -7961,9 +7977,7 @@ export function WorkspacePage() {
         if (!registered) return;
         const registeredTurn: PendingSupervisorTurn = {
           ...pendingTurn,
-          continueLegacy: registered.routeIntent === "unknown"
-            ? false
-            : pendingTurn.continueLegacy,
+          continueLegacy: false,
           registrationStatus: "registered",
           runId: registered.runId,
         };
@@ -8068,7 +8082,7 @@ export function WorkspacePage() {
             ? interruptId ?? restoredInterruptId
             : null,
           explicitAction: null,
-          continueLegacy: ownership.orchestrationMode === "frontend_v2",
+          continueLegacy: false,
           registrationStatus: "pending",
         };
         await persistPendingSupervisorTurns(
@@ -8080,6 +8094,14 @@ export function WorkspacePage() {
           activeConversation,
         );
         ensurePendingSupervisorTurnVisible(pendingTurn);
+        // 在 turns/start 返回前先给即时回执，避免用户感觉“发出去没反应”。
+        if (ownership.orchestrationMode === "video_agent_v2") {
+          void appendPersistedSupervisorNotice(
+            "已收到创作请求，正在生成执行方案…",
+            activeConversation,
+            `agent-ack:${activeConversation}:${message.id}:v1`,
+          );
+        }
         setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
         return;
@@ -10633,43 +10655,45 @@ export function WorkspacePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <AgentPlanTimeline plan={supervisorRuntime.state.videoAgentPlan} />
-      {supervisorRuntime.state.videoAgentConfirmation ? (
-        <div className="border-b border-slate-200 bg-white px-4 py-3">
-          <div className="mx-auto max-w-6xl">
-            <AgentConfirmationCard
-              confirmationId={supervisorRuntime.state.videoAgentConfirmation.confirmationId}
-              stepId={supervisorRuntime.state.videoAgentConfirmation.stepId}
-              title={supervisorRuntime.state.videoAgentConfirmation.title}
-              costSummary={supervisorRuntime.state.videoAgentConfirmation.costSummary}
-              affectedSceneIds={supervisorRuntime.state.videoAgentConfirmation.affectedSceneIds}
-              submitting={videoAgentConfirmationSubmitting}
-              actionAvailable={supervisorRuntime.state.videoAgentConfirmation.submittable}
-              unavailableReason={supervisorRuntime.state.videoAgentConfirmation.unavailableReason}
-              submissionError={videoAgentConfirmationError}
-              onSubmit={handleVideoAgentConfirmation}
-            />
-          </div>
-        </div>
-      ) : null}
-      {supervisorRuntime.state.videoAgentQuota ? (
-        <div className="border-b border-slate-200 bg-white px-4 py-3">
-          <div className="mx-auto max-w-6xl">
-            <AgentQuotaCard
-              quotaInterruptId={supervisorRuntime.state.videoAgentQuota.quotaInterruptId}
-              submitting={videoAgentQuotaSubmitting}
-              actionAvailable={supervisorRuntime.state.videoAgentQuota.submittable}
-              unavailableReason={supervisorRuntime.state.videoAgentQuota.unavailableReason}
-              submissionError={videoAgentQuotaError}
-              onSubmit={handleVideoAgentQuota}
-            />
-          </div>
-        </div>
-      ) : null}
       <div className="flex min-h-0 flex-1">
       <ChatPanel
         messages={messages}
         onSubmit={handleSend}
+        onNewConversation={() => {
+          window.dispatchEvent(new Event("pixelflow-new-conversation"));
+          navigate("/", { replace: true });
+        }}
+        agentActivity={(
+          <AgentPlanTimeline
+            plan={supervisorRuntime.state.videoAgentPlan}
+            selectedStepId={selectedVideoAgentStepId}
+            onSelectStep={setSelectedVideoAgentStepId}
+            confirmationSlot={supervisorRuntime.state.videoAgentConfirmation ? (
+              <AgentConfirmationCard
+                confirmationId={supervisorRuntime.state.videoAgentConfirmation.confirmationId}
+                stepId={supervisorRuntime.state.videoAgentConfirmation.stepId}
+                title={supervisorRuntime.state.videoAgentConfirmation.title}
+                costSummary={supervisorRuntime.state.videoAgentConfirmation.costSummary}
+                affectedSceneIds={supervisorRuntime.state.videoAgentConfirmation.affectedSceneIds}
+                submitting={videoAgentConfirmationSubmitting}
+                actionAvailable={supervisorRuntime.state.videoAgentConfirmation.submittable}
+                unavailableReason={supervisorRuntime.state.videoAgentConfirmation.unavailableReason}
+                submissionError={videoAgentConfirmationError}
+                onSubmit={handleVideoAgentConfirmation}
+              />
+            ) : null}
+            quotaSlot={supervisorRuntime.state.videoAgentQuota ? (
+              <AgentQuotaCard
+                quotaInterruptId={supervisorRuntime.state.videoAgentQuota.quotaInterruptId}
+                submitting={videoAgentQuotaSubmitting}
+                actionAvailable={supervisorRuntime.state.videoAgentQuota.submittable}
+                unavailableReason={supervisorRuntime.state.videoAgentQuota.unavailableReason}
+                submissionError={videoAgentQuotaError}
+                onSubmit={handleVideoAgentQuota}
+              />
+            ) : null}
+          />
+        )}
         referencedMaterials={referencedMaterials}
         onRemoveReferencedMaterial={handleRemoveReferencedMaterial}
         composerPrefillRequest={composerPrefillRequest}
@@ -10832,6 +10856,11 @@ export function WorkspacePage() {
               content: `请修改分镜 ${selected?.sceneIndex ?? sceneId}：`,
             });
           }}
+        />
+      ) : !canvasOpen && videoAgentView.workspace?.script ? (
+        <AgentScriptPreviewPanel
+          revision={videoAgentView.workspace.revision}
+          script={videoAgentView.workspace.script}
         />
       ) : null}
       {legacyArtifactActionsEnabled && dialogOpen && (

@@ -17,8 +17,25 @@ from pixelflow.video_agent.credentials import (
 from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
-from pixelflow.video_agent.tools import InspectVideoWorkspaceTool, VideoToolRegistry
+from pixelflow.video_agent.tools import (
+    BrainstormScriptTool,
+    InspectVideoWorkspaceTool,
+    VideoToolRegistry,
+)
 from pixelflow.video_agent.workspace import MemoryVideoAgentRepository
+
+
+class _StubVideoDomainAdapter:
+    async def brainstorm_script(self, **kwargs):
+        return (
+            "# 带货脚本\n"
+            "时长：15秒\n"
+            "画幅：9:16\n"
+            "结尾请下单购买\n"
+        )
+
+    async def analyze_reference_video(self, video_url: str):
+        raise AssertionError("unexpected reference analysis")
 
 
 @pytest.mark.asyncio
@@ -43,7 +60,12 @@ async def test_runner_executes_persisted_plan_and_discards_credential() -> None:
         repository=video_repository,
         executor=VideoAgentExecutor(
             repository=video_repository,
-            registry=VideoToolRegistry([InspectVideoWorkspaceTool()]),
+            registry=VideoToolRegistry(
+                [
+                    InspectVideoWorkspaceTool(),
+                    BrainstormScriptTool(adapter=_StubVideoDomainAdapter()),
+                ]
+            ),
             clock=lambda: now,
         ),
     )
@@ -62,7 +84,11 @@ async def test_runner_executes_persisted_plan_and_discards_credential() -> None:
     restored = await video_repository.get_plan("user-1", submission.plan.plan_id)
     assert restored is not None
     assert restored.status.value == "completed"
-    assert restored.steps[0].status.value == "completed"
+    assert [step.tool_name for step in restored.steps] == [
+        "inspect_video_workspace",
+        "brainstorm_script",
+    ]
+    assert all(step.status.value == "completed" for step in restored.steps)
     with pytest.raises(VideoAgentCredentialUnavailableError):
         credential.borrow_authorization()
 

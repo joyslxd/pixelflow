@@ -74,6 +74,60 @@ async def test_ambiguous_request_fails_closed_when_llm_is_unavailable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_colloquial_make_video_ad_uses_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content="帮我做一个护肤品广告视频",
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert decision.requires_clarification is False
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_generate_timed_ad_story_uses_video_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    story = (
+        "高级但不浮夸的餐厅里，一张泛黄的旧照片被放在桌面中央。" * 40
+        + "\n帮我根据以上故事情节生成 60s 广告"
+    )
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content=story,
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert decision.reason_code == "explicit_video_request"
+    assert decision.requires_clarification is False
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_long_story_with_video_keyword_bypasses_budget_gate() -> None:
+    """规则命中必须先于 token 预算，否则长剧本会被误判为未知意图。"""
+
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    router = ConversationRouteService(
+        llm_classifier=classifier,
+        budget_policy_provider=ContextBudgetPolicyProvider(
+            ContextBudgetConfig(
+                effective_context_k=3,
+                output_reserve_k=1,
+                safety_reserve_k=1,
+            )
+        ),
+    )
+
+    decision = await router.route(content=("十年前我们在小餐馆碰杯。" * 80) + "生成60s广告")
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
 async def test_router_uses_shared_context_budget_before_calling_llm() -> None:
     classifier = FakeClassifier(RuntimeError("不应调用"))
     router = ConversationRouteService(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -41,14 +42,97 @@ async def test_entrypoint_creates_recoverable_workspace_plan_and_public_event() 
     assert workspace == submission.workspace
     assert workspace.payload["latest_input"] == "我有一个护肤品脚本，帮我生成视频"
     assert workspace.payload["artifact_refs"] == ["artifact:product-1"]
-    assert submission.plan.public_goal == "处理视频创作请求"
-    assert [step.tool_name for step in steps] == ["inspect_video_workspace"]
+    assert submission.plan.public_goal.startswith("处理视频创作请求")
+    assert [step.tool_name for step in steps] == [
+        "inspect_video_workspace",
+        "brainstorm_script",
+    ]
+    assert steps[1].title == "生成带货脚本草稿"
     assert events[-1].type is AgentEventType.AGENT_PLAN_CREATED
     assert events[-1].payload["plan_id"] == submission.plan.plan_id
 
 
 @pytest.mark.asyncio
-async def test_entrypoint_replay_returns_existing_plan_without_duplicate_event() -> None:
+async def test_entrypoint_seeds_product_info_from_image_materials() -> None:
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    submission = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-materials",
+        turn_id="turn-materials",
+        content="生成带货视频",
+        artifact_refs=(),
+        materials=[
+            {
+                "name": "鞋子.jpg",
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "url": "https://example.com/shoes.jpg",
+            }
+        ],
+    )
+
+    workspace = await video_repository.get_workspace(
+        "user-1",
+        submission.workspace.workspace_id,
+    )
+    steps = await video_repository.list_plan_steps("user-1", submission.plan.plan_id)
+
+    assert workspace is not None
+    assert workspace.payload["product_info"]["name"] == "鞋子"
+    assert workspace.payload["product_info"]["images"][0]["url"] == (
+        "https://example.com/shoes.jpg"
+    )
+    assert [step.tool_name for step in steps] == [
+        "inspect_video_workspace",
+        "brainstorm_script",
+    ]
+    assert steps[1].arguments["product_info"]["name"] == "鞋子"
+
+
+@pytest.mark.asyncio
+async def test_entrypoint_does_not_await_llm_planner_on_hot_path() -> None:
+    """turns/start 必须立刻落确定性计划，不能被模型规划拖住。"""
+
+    class SlowPlanner:
+        async def plan_turn(self, context):  # noqa: ANN001, ARG002
+            await asyncio.sleep(30)
+            raise AssertionError("entrypoint 不应等待 LLM planner")
+
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=SlowPlanner(),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    started = datetime.now(UTC)
+    submission = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-fast",
+        turn_id="turn-fast",
+        content="帮我根据以上故事情节生成 60s 广告",
+        artifact_refs=(),
+    )
+    elapsed = (datetime.now(UTC) - started).total_seconds()
+
+    steps = await video_repository.list_plan_steps("user-1", submission.plan.plan_id)
+    assert elapsed < 2
+    assert [step.tool_name for step in steps] == [
+        "inspect_video_workspace",
+        "brainstorm_script",
+    ]
+    assert steps[1].title == "生成广告脚本草稿"
+    assert submission.plan.public_goal.startswith("处理视频创作请求")
+
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
     entrypoint = VideoAgentEntrypoint(
@@ -135,6 +219,8 @@ async def test_runtime_routes_primary_video_turn_to_v2_entrypoint_without_live_e
     assert workspace.payload == {
         "latest_input": "根据护肤品脚本生成视频",
         "artifact_refs": ["artifact:product-1"],
+        "materials": [],
+        "product_info": {},
     }
 
 

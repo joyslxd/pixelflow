@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Composer } from "@/components/composer/Composer";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@/lib/chat";
@@ -14,6 +14,7 @@ import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSubmit: (payload: AgentUserMessagePayload) => void;
+  onNewConversation?: () => void;
   referencedMaterials?: Array<Record<string, unknown>>;
   onRemoveReferencedMaterial?: (key: string) => void;
   composerPrefillRequest?: { id: string; content: string } | null;
@@ -56,6 +57,7 @@ interface ChatPanelProps {
   runtimeBusy?: boolean;
   runtimeNotice?: SupervisorRuntimeNoticeModel | null;
   workflowTaskBoard?: WorkflowTaskBoardModel | null;
+  agentActivity?: ReactNode;
 }
 
 function isProgressMessage(message: ChatMessage): boolean {
@@ -81,6 +83,7 @@ function hasRecoverableArtifactAction(message: ChatMessage): boolean {
 export function ChatPanel({
   messages,
   onSubmit,
+  onNewConversation,
   referencedMaterials,
   onRemoveReferencedMaterial,
   composerPrefillRequest,
@@ -123,6 +126,7 @@ export function ChatPanel({
   runtimeBusy = false,
   runtimeNotice = null,
   workflowTaskBoard,
+  agentActivity = null,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const latestVideoScenePackageMessageId = [...messages]
@@ -144,8 +148,17 @@ export function ChatPanel({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col border-r border-line" aria-busy={runtimeBusy || undefined}>
-      <div className="flex h-12 shrink-0 items-center px-5 text-[14px] font-semibold text-ink">
-        对话
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 px-5 text-[14px] font-semibold text-ink">
+        <span>对话</span>
+        {onNewConversation ? (
+          <button
+            type="button"
+            onClick={onNewConversation}
+            className="rounded-lg border border-line px-2.5 py-1 text-[12px] font-medium text-ink-soft transition-colors hover:border-accent/30 hover:text-accent"
+          >
+            新建对话
+          </button>
+        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-2">
@@ -208,6 +221,9 @@ export function ChatPanel({
             );
           })
         )}
+        {agentActivity ? (
+          <div className="w-full">{agentActivity}</div>
+        ) : null}
         <div ref={endRef} />
       </div>
 
