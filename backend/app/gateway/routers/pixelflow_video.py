@@ -12,11 +12,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
-from pixelflow.agent_workflows.video.live_capabilities import (
-    generate_application_scene_assets as run_generate_scene_assets,
-)
 from pixelflow.creative.contract import VideoCreationContract
 from pixelflow.generate.scene_asset_revision import revise_scene_package_asset
+from pixelflow.generate.scene_assets import (
+    generate_scene_assets as run_generate_scene_assets,
+)
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
 from pixelflow.memory import semantic_memory_text, with_semantic_memory
 from pixelflow.qc import VideoQCRequest, review_video_quality

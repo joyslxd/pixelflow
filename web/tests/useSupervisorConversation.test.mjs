@@ -77,9 +77,86 @@ function createApiFake(getSnapshot) {
     getSnapshot,
     startTurn: async () => ({ status: "accepted" }),
     respondToInterrupt: async () => ({ status: "accepted" }),
+    respondToVideoAgentConfirmation: async () => ({ plan_status: "completed" }),
+    respondToVideoAgentQuota: async () => ({ plan_status: "running" }),
     getRunStatus: async () => ({ status: "processing" }),
   };
 }
+
+test("VideoAgent 确认成功后立即刷新权威 Snapshot", async () => {
+  let snapshotCount = 0;
+  const confirmationCalls = [];
+  const api = createApiFake(async (conversationId) => {
+    snapshotCount += 1;
+    return projection(conversationId, snapshotCount, snapshotCount);
+  });
+  api.respondToVideoAgentConfirmation = async (
+    conversationId,
+    confirmationId,
+    request,
+  ) => {
+    confirmationCalls.push({ conversationId, confirmationId, request });
+    return { plan_status: "completed" };
+  };
+  const controller = createSupervisorConversationController({
+    conversationId: "conv-confirmation",
+    api,
+    eventStream: createEventStreamFake().client,
+  });
+
+  await controller.start();
+  const result = await controller.respondToVideoAgentConfirmation(
+    "confirmation-1",
+    { step_id: "step-1", decision: "confirm" },
+  );
+
+  assert.deepEqual(result, { plan_status: "completed" });
+  assert.deepEqual(confirmationCalls, [{
+    conversationId: "conv-confirmation",
+    confirmationId: "confirmation-1",
+    request: { step_id: "step-1", decision: "confirm" },
+  }]);
+  assert.equal(snapshotCount, 2);
+  assert.equal(controller.getContextVersion(), 2);
+  controller.dispose();
+});
+
+test("VideoAgent额度恢复成功后立即刷新权威Snapshot", async () => {
+  let snapshotCount = 0;
+  const quotaCalls = [];
+  const api = createApiFake(async (conversationId) => {
+    snapshotCount += 1;
+    return projection(conversationId, snapshotCount, snapshotCount);
+  });
+  api.respondToVideoAgentQuota = async (
+    conversationId,
+    quotaInterruptId,
+    request,
+  ) => {
+    quotaCalls.push({ conversationId, quotaInterruptId, request });
+    return { plan_status: "running" };
+  };
+  const controller = createSupervisorConversationController({
+    conversationId: "conv-quota",
+    api,
+    eventStream: createEventStreamFake().client,
+  });
+
+  await controller.start();
+  const result = await controller.respondToVideoAgentQuota(
+    "quota-1",
+    { decision: "resume" },
+  );
+
+  assert.deepEqual(result, { plan_status: "running" });
+  assert.deepEqual(quotaCalls, [{
+    conversationId: "conv-quota",
+    quotaInterruptId: "quota-1",
+    request: { decision: "resume" },
+  }]);
+  assert.equal(snapshotCount, 2);
+  controller.dispose();
+});
 
 function deferred() {
   let resolve;

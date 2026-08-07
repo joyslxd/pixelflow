@@ -17,6 +17,7 @@ from pixelflow.video_agent.adapters.reference_operation import (
     M06ReferenceAnalysisOperationPort,
 )
 from pixelflow.video_agent.contracts import VideoWorkspace
+from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 from pixelflow.video_agent.tools import VideoToolContext
 from pixelflow.video_agent.tools.reference import AnalyzeReferenceVideoTool
 
@@ -67,6 +68,25 @@ class ScriptedReferenceJobService:
         }
 
 
+class StartQuotaThenPollingReferenceService(ScriptedReferenceJobService):
+    def __init__(self) -> None:
+        super().__init__()
+        self._starts = 0
+
+    async def start(self, request, *, authorization: str, idempotency_key: str):
+        self.start_calls.append(
+            {
+                "request": dict(request),
+                "authorization": authorization,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        self._starts += 1
+        if self._starts == 1:
+            return {"status": "quota_paused"}
+        return {"job_id": "provider-reference-1", "status": "polling"}
+
+
 class RecordingGraphResumer:
     def __init__(self) -> None:
         self.event_ids: list[str] = []
@@ -75,18 +95,25 @@ class RecordingGraphResumer:
         self,
         namespace,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event,
         idempotency_key: str,
     ) -> None:
-        del namespace, completion_event
+        del namespace, user_id, conversation_id, completion_event
         self.event_ids.append(idempotency_key)
 
 
-def _context(payload: dict | None = None) -> VideoToolContext:
+def _context(
+    payload: dict | None = None,
+    *,
+    credential: TransientVideoAgentCredential | None = None,
+) -> VideoToolContext:
     return VideoToolContext(
         user_id="user-1",
         plan_id="plan-reference-1",
         step_id="step-reference-1",
+        credential=credential,
         workspace=VideoWorkspace(
             workspace_id="workspace-reference-1",
             conversation_id="conversation-reference-1",
@@ -109,18 +136,9 @@ async def test_reference_operation_recovers_same_job_without_repeating_start() -
     repository = MemoryAgentRuntimeRepository()
     service = ScriptedReferenceJobService()
     adapter = ProviderJobAdapter(service)
-    authorization_calls = 0
-
-    def authorization_provider(context: VideoToolContext) -> str:
-        nonlocal authorization_calls
-        assert context.user_id == "user-1"
-        authorization_calls += 1
-        return AUTHORIZATION
-
     port = M06ReferenceAnalysisOperationPort(
         repository=repository,
         adapter=adapter,
-        authorization_provider=authorization_provider,
         lease_owner="reference-start-worker",
         clock=lambda: NOW,
         job_id_factory=lambda: "operation-reference-1",
@@ -128,7 +146,9 @@ async def test_reference_operation_recovers_same_job_without_repeating_start() -
     tool = AnalyzeReferenceVideoTool(operation_port=port)
 
     started = await tool.execute(
-        _context(),
+        _context(
+            credential=TransientVideoAgentCredential(AUTHORIZATION),
+        ),
         {"reference_asset_ref": "artifact:reference-1"},
     )
 
@@ -164,7 +184,46 @@ async def test_reference_operation_recovers_same_job_without_repeating_start() -
     assert len(service.start_calls) == 1
     assert service.status_calls == ["provider-reference-1"]
     assert len(resumer.event_ids) == 1
-    assert authorization_calls == 2
+    assert service.start_calls[0]["authorization"] == AUTHORIZATION
     assert operation is not None
     assert AUTHORIZATION not in operation.model_dump_json()
     assert "sensitive" not in operation.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_start_quota_keeps_same_operation_for_current_credential_retry() -> None:
+    repository = MemoryAgentRuntimeRepository()
+    service = StartQuotaThenPollingReferenceService()
+    tool = AnalyzeReferenceVideoTool(
+        operation_port=M06ReferenceAnalysisOperationPort(
+            repository=repository,
+            adapter=ProviderJobAdapter(service),
+            lease_owner="reference-start-worker",
+            clock=lambda: NOW,
+            job_id_factory=lambda: "operation-reference-1",
+        )
+    )
+
+    paused = await tool.execute(
+        _context(credential=TransientVideoAgentCredential(AUTHORIZATION)),
+        {"reference_asset_ref": "artifact:reference-1"},
+    )
+    retry_payload = {**_context().workspace.payload, **paused.workspace_patch}
+    resumed = await tool.execute(
+        _context(
+            retry_payload,
+            credential=TransientVideoAgentCredential(AUTHORIZATION),
+        ),
+        {"reference_asset_ref": "artifact:reference-1"},
+    )
+    operation = await repository.get_operation("user-1", "operation-reference-1")
+
+    assert paused.pending_operation_job_ids == ("operation-reference-1",)
+    assert paused.workspace_patch["quota_interrupt"]["phase"] == "start"
+    assert resumed.pending_operation_job_ids == ("operation-reference-1",)
+    assert resumed.workspace_patch["quota_interrupt"] is None
+    assert operation is not None
+    assert operation.attempt == 1
+    assert operation.status.value == "polling"
+    assert len(service.start_calls) == 2
+    assert service.start_calls[0]["idempotency_key"] == service.start_calls[1]["idempotency_key"]

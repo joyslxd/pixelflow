@@ -226,7 +226,7 @@ test("TypeScript 镜像覆盖 fixture 中全部冻结 DTO 字段", () => {
 });
 
 test("镜像合同枚举与 contracts-v1.md 冻结值一致", () => {
-  assert.deepEqual(ORCHESTRATION_MODE_VALUES, ["frontend_v2", "supervisor_v1"]);
+  assert.deepEqual(ORCHESTRATION_MODE_VALUES, ["frontend_v2", "video_agent_v2"]);
   assert.deepEqual(ACTION_VALUES, [
     "answer_only",
     "continue_workflow",

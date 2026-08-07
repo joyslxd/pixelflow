@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, m
 
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
+from pixelflow.video_agent.quota import build_start_quota_interrupt_id
 
 from .registry import (
     VideoToolContext,
@@ -120,7 +121,7 @@ class SceneGenerationJob(VideoAgentContract):
     job_id: str = Field(min_length=1, max_length=128)
     scene_id: str = Field(min_length=1, max_length=128)
     variant_index: int = Field(ge=1, le=3)
-    status: Literal["polling", "succeeded"]
+    status: Literal["polling", "start_paused_quota", "succeeded"]
     variant_id: str | None = Field(default=None, max_length=128)
     artifact_ref: str | None = Field(default=None, pattern=_ARTIFACT_PATTERN, max_length=256)
     video_url: str | None = Field(default=None, max_length=4_096)
@@ -135,6 +136,16 @@ class SceneGenerationJob(VideoAgentContract):
             or self.completed_at is None
         ):
             raise ValueError("已完成生成任务必须包含版本、产物、视频和完成时间")
+        if self.status == "start_paused_quota" and any(
+            value is not None
+            for value in (
+                self.variant_id,
+                self.artifact_ref,
+                self.video_url,
+                self.completed_at,
+            )
+        ):
+            raise ValueError("start额度暂停任务不能包含终态产物")
         if self.video_url is not None:
             parsed = urlparse(self.video_url)
             if (
@@ -404,7 +415,13 @@ class GenerateScenesTool:
             next_scenes.append(
                 {
                     **scene,
-                    "generation_jobs": [job.model_dump(mode="json") for job in jobs],
+                    "generation_jobs": [
+                        {
+                            **job.model_dump(mode="json"),
+                            "plan_step_id": context.step_id,
+                        }
+                        for job in jobs
+                    ],
                     "variants": [*existing_variants, *generated_variants],
                     "edit_status": (
                         "等待版本审核" if generated_variants else "重新生成中"
@@ -418,6 +435,7 @@ class GenerateScenesTool:
                 "media_type": "video",
                 "url": job.video_url,
                 "source_job_id": job.job_id,
+                "plan_step_id": context.step_id,
                 "scene_id": job.scene_id,
                 "variant_id": job.variant_id,
             }
@@ -439,6 +457,28 @@ class GenerateScenesTool:
                 ]
             ),
         }
+        start_paused_jobs = [
+            job
+            for jobs in jobs_by_scene.values()
+            for job in jobs
+            if job.status == "start_paused_quota"
+        ]
+        if start_paused_jobs:
+            if len(start_paused_jobs) != 1:
+                raise VideoToolExecutionError("同一步骤只能等待一个start额度恢复")
+            paused = start_paused_jobs[0]
+            workspace_patch["quota_interrupt"] = {
+                "quota_interrupt_id": build_start_quota_interrupt_id(paused.job_id),
+                "plan_id": context.plan_id,
+                "step_id": context.step_id,
+                "job_id": paused.job_id,
+                "quota_pause_revision": 0,
+                "phase": "start",
+                "state": "paused",
+                "reason_code": "provider_quota_insufficient",
+            }
+        else:
+            workspace_patch["quota_interrupt"] = None
         if generated_assets:
             workspace_patch["assets"] = [
                 *[
@@ -462,7 +502,7 @@ class GenerateScenesTool:
                 job.job_id
                 for jobs in jobs_by_scene.values()
                 for job in jobs
-                if job.status == "polling"
+                if job.status in {"polling", "start_paused_quota"}
             ),
             requires_confirmation=True,
         )

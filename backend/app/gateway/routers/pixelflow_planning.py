@@ -17,18 +17,12 @@ from app.gateway.pixelflow_memory import (
     record_power_mem_background,
     search_power_mem,
 )
-from pixelflow.agent_workflows.video.live_capabilities import (
-    generate_application_plan as build_plan_markdown_with_llm,
-)
-from pixelflow.agent_workflows.video.live_capabilities import (
-    restore_application_plan as restore_plan_version,
-)
-from pixelflow.agent_workflows.video.live_capabilities import (
-    revise_application_plan as revise_plan_markdown_with_llm,
-)
 from pixelflow.creative.plan_markdown import (
     CreationIntent,
     build_plan_markdown,
+    build_plan_markdown_with_llm,
+    restore_plan_version,
+    revise_plan_markdown_with_llm,
 )
 from pixelflow.creative.revision_contract import build_manual_plan_revision_feedback
 from pixelflow.memory import build_memory_query, with_semantic_memory

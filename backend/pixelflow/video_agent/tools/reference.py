@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, m
 
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
+from pixelflow.video_agent.quota import build_start_quota_interrupt_id
 
 from .registry import (
     VideoToolContext,
@@ -43,14 +44,14 @@ class ReferenceAnalysisOperationJob(VideoAgentContract):
         max_length=256,
         pattern=r"^artifact:[A-Za-z0-9._:-]+$",
     )
-    status: Literal["polling", "succeeded"]
+    status: Literal["polling", "start_paused_quota", "succeeded"]
     storyboard: tuple[dict[str, JsonValue], ...] = ()
 
     @model_validator(mode="after")
     def validate_storyboard(self) -> ReferenceAnalysisOperationJob:
         if self.status == "succeeded" and not self.storyboard:
             raise ValueError("已完成参考视频Operation必须包含分镜")
-        if self.status == "polling" and self.storyboard:
+        if self.status in {"polling", "start_paused_quota"} and self.storyboard:
             raise ValueError("运行中的参考视频Operation不能提前返回分镜")
         return self
 
@@ -131,11 +132,12 @@ class AnalyzeReferenceVideoTool:
             raise VideoToolExecutionError("参考视频解析失败") from exc
         if analysis.artifact_ref != artifact_ref:
             raise VideoToolExecutionError("参考视频Operation结果身份不一致")
-        if analysis.status == "polling":
+        if analysis.status in {"polling", "start_paused_quota"}:
             reference_record: dict[str, JsonValue] = {
                 "artifact_ref": artifact_ref,
                 "job_id": analysis.job_id,
-                "status": "polling",
+                "plan_step_id": context.step_id,
+                "status": analysis.status,
                 "storyboard": [],
             }
             next_references = [
@@ -145,7 +147,25 @@ class AnalyzeReferenceVideoTool:
             return VideoToolResult(
                 tool_name=self.spec.name,
                 public_summary="参考视频解析任务已启动",
-                workspace_patch={"reference_videos": next_references},
+                workspace_patch={
+                    "reference_videos": next_references,
+                    **(
+                        {
+                            "quota_interrupt": {
+                                "quota_interrupt_id": build_start_quota_interrupt_id(analysis.job_id),
+                                "plan_id": context.plan_id,
+                                "step_id": context.step_id,
+                                "job_id": analysis.job_id,
+                                "quota_pause_revision": 0,
+                                "phase": "start",
+                                "state": "paused",
+                                "reason_code": "provider_quota_insufficient",
+                            }
+                        }
+                        if analysis.status == "start_paused_quota"
+                        else {"quota_interrupt": None}
+                    ),
+                },
                 artifact_refs=(artifact_ref,),
                 pending_operation_job_ids=(analysis.job_id,),
             )
@@ -161,6 +181,7 @@ class AnalyzeReferenceVideoTool:
         reference_record: dict[str, JsonValue] = {
             "artifact_ref": artifact_ref,
             "job_id": analysis.job_id,
+            "plan_step_id": context.step_id,
             "status": "done",
             "storyboard": storyboard,
         }

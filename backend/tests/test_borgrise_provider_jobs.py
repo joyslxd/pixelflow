@@ -41,10 +41,12 @@ class _RecordingGraphResumer:
         self,
         namespace,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event,
         idempotency_key: str,
     ) -> None:
-        del namespace, completion_event
+        del namespace, user_id, conversation_id, completion_event
         self.event_ids.append(idempotency_key)
 
 

@@ -33,6 +33,17 @@ export interface VideoAgentConfirmationState {
   unavailableReason: string | null;
 }
 
+export interface VideoAgentQuotaState {
+  quotaInterruptId: string;
+  planId: string;
+  stepId: string;
+  quotaPauseRevision: number;
+  phase: "start" | "status";
+  reasonCode: "provider_quota_insufficient";
+  submittable: boolean;
+  unavailableReason: string | null;
+}
+
 export interface VideoAgentTimelineState {
   plans: Record<string, VideoAgentPlanState>;
 }

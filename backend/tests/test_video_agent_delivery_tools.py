@@ -28,6 +28,8 @@ def _scene(
             {
                 "variant_id": variant_id,
                 "artifact_ref": f"artifact:{variant_id}",
+                "video_url": f"https://cdn.example.invalid/{variant_id}.mp4",
+                "source_job_id": f"job-{variant_id}",
                 "review_status": "approved" if approved else "pending",
                 "selected": approved,
             }

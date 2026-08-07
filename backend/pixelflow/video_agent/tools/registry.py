@@ -10,6 +10,7 @@ from typing import Protocol
 from pydantic import BaseModel, ValidationError
 
 from pixelflow.video_agent.contracts import VideoToolResult, VideoWorkspace
+from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 
 
 class VideoToolCostLevel(StrEnum):
@@ -62,6 +63,7 @@ class VideoToolContext:
     workspace: VideoWorkspace
     plan_id: str | None = None
     step_id: str | None = None
+    credential: TransientVideoAgentCredential | None = None
 
     def __post_init__(self) -> None:
         if not self.user_id.strip():

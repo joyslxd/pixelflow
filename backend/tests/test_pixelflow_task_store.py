@@ -204,7 +204,7 @@ async def test_memory_agent_runtime_response_write_commits_message_and_version_t
         PixelFlowConversationRecord(
             conversation_id="c-live-response",
             user_id="u1",
-            orchestration_mode="supervisor_v1",
+            orchestration_mode="video_agent_v2",
             context={
                 "__agent_runtime": {
                     "mode": "primary",
@@ -255,7 +255,7 @@ async def test_memory_agent_runtime_response_write_rolls_back_on_outer_failure()
         PixelFlowConversationRecord(
             conversation_id="c-live-rollback",
             user_id="u1",
-            orchestration_mode="supervisor_v1",
+            orchestration_mode="video_agent_v2",
             context={
                 "__agent_runtime": {
                     "mode": "primary",

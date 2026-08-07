@@ -160,10 +160,20 @@ class OperationStartCoordinator:
         request: OperationRequest,
         *,
         provider_request: Mapping[str, JsonValue],
-        authorization: str,
+        authorization: str | None = None,
+        authorization_provider: Callable[[], str] | None = None,
         lease_owner: str,
     ) -> OperationRecord:
         """只在持有 start lease 时透传本次请求与凭据，持久层仅保存摘要。"""
+
+        if (authorization is None) == (authorization_provider is None):
+            raise ValueError(
+                "authorization与authorization_provider必须且只能提供一个"
+            )
+        if authorization_provider is not None and not callable(
+            authorization_provider
+        ):
+            raise TypeError("authorization_provider必须可调用")
 
         normalized_request = OperationRequest.model_validate(request.model_dump(mode="python"))
         if hash_operation_request(provider_request) != normalized_request.request_hash:
@@ -198,11 +208,37 @@ class OperationStartCoordinator:
                 raise OperationConflictError("Operation start 竞争结果不可见")
             return winner
 
-        snapshot = await self._adapter.start(
-            provider_request,
-            authorization=authorization,
-            idempotency_key=normalized_request.idempotency_key,
-        )
+        try:
+            start_authorization = (
+                authorization
+                if authorization_provider is None
+                else authorization_provider()
+            )
+            if (
+                not isinstance(start_authorization, str)
+                or not start_authorization.strip()
+            ):
+                raise ValueError("Provider start缺少临时Authorization")
+        except Exception as exc:
+            await self._repository.release_operation_start(
+                self._user_id,
+                self._conversation_id,
+                operation.job_id,
+                lease_owner=worker,
+                now=self._clock(),
+            )
+            raise OperationConflictError(
+                "Provider start临时Authorization不可用"
+            ) from exc
+
+        try:
+            snapshot = await self._adapter.start(
+                provider_request,
+                authorization=start_authorization,
+                idempotency_key=normalized_request.idempotency_key,
+            )
+        finally:
+            start_authorization = ""
         if snapshot.provider_job_id is None:
             if snapshot.outcome is ProviderJobOutcome.PAUSED_QUOTA:
                 released = await self._repository.release_operation_start(
@@ -529,6 +565,42 @@ class OperationRecoveryRuntime:
                 operation=operation,
             )
         raise OperationConflictError("当前 Operation 不允许人工恢复")
+
+    async def authorize_quota_resume(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workflow_id: str,
+        job_id: str,
+        expected_revision: int,
+    ) -> OperationRecord:
+        """用当前V2用户动作恢复原Provider job，并立即投递同一resume事件。"""
+
+        if self._quota_resumer is None:
+            raise OperationConflictError("quota_resumer 未装配")
+        now = self._clock()
+        authorized = await OperationQuotaCoordinator(
+            self._repository,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        ).authorize_resume(
+            job_id,
+            workflow_id=workflow_id,
+            expected_revision=expected_revision,
+            delivery_lease_owner=self._quota_delivery_worker_id,
+            now=now,
+            delivery_lease_expires_at=now + self._lease_duration,
+        )
+        await self._dispatch_quota(
+            OwnedOperationQuotaEvent(
+                user_id=user_id,
+                operation=authorized.operation,
+                event=authorized.claim.event,
+            ),
+            now=self._clock(),
+        )
+        return authorized.operation
 
     async def start(self) -> None:
         """启动单个进程级扫描任务；重复调用不会创建第二个任务。"""

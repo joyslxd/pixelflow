@@ -35,6 +35,7 @@ from pixelflow.video_agent.contracts import (
 )
 from pixelflow.video_agent.executor.events import (
     build_step_completed_event,
+    build_step_failed_event,
     build_step_started_event,
 )
 
@@ -222,6 +223,27 @@ class VideoAgentRepository(Protocol):
         now: datetime,
     ) -> AgentPlanStep: ...
 
+    async def cancel_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        now: datetime,
+    ) -> AgentPlan: ...
+
+    async def cancel_quota_interrupted_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        quota_interrupt_id: str,
+        job_id: str,
+        quota_pause_revision: int,
+        now: datetime,
+    ) -> AgentPlan: ...
+
     async def start_step_with_event(
         self,
         user_id: str,
@@ -239,6 +261,18 @@ class VideoAgentRepository(Protocol):
         step_id: str,
         result: VideoToolResult,
         *,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]: ...
+
+    async def fail_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        reason_code: str,
+        public_summary: str,
         run_id: str,
         now: datetime,
     ) -> tuple[AgentPlanStep, AgentEvent]: ...
@@ -505,6 +539,165 @@ class MemoryVideoAgentRepository:
         self._steps_by_owner[key] = _clone(running)
         return _clone(running)
 
+    async def cancel_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        now: datetime,
+    ) -> AgentPlan:
+        """原子跳过待确认步骤并取消计划，避免留下可再次提交的确认单。"""
+
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            plan_key = (owner, plan_id)
+            step_key = (owner, plan_id, step_id)
+            plan = self._plan_by_owner.get(plan_key)
+            step = self._steps_by_owner.get(step_key)
+            if plan is None or step is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent plan或step不存在或不属于当前用户"
+                )
+            if plan.status is AgentPlanStatus.CANCELLED:
+                return _clone(plan)
+            if (
+                plan.status is not AgentPlanStatus.AWAITING_CONFIRMATION
+                or step.status is not PlanStepStatus.AWAITING_CONFIRMATION
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent step当前不能取消确认"
+                )
+            skipped = step.model_copy(
+                update={
+                    "status": PlanStepStatus.SKIPPED,
+                    "public_summary": "用户已取消执行",
+                    "started_at": now,
+                    "completed_at": now,
+                }
+            )
+            self._steps_by_owner[step_key] = _clone(skipped)
+            steps = await self.list_plan_steps(owner, plan_id)
+            cancelled = plan.model_copy(
+                update={
+                    "status": AgentPlanStatus.CANCELLED,
+                    "steps": tuple(steps),
+                    "updated_at": now,
+                }
+            )
+            self._plan_by_owner[plan_key] = _clone(cancelled)
+            return _clone(cancelled)
+
+    async def cancel_quota_interrupted_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        quota_interrupt_id: str,
+        job_id: str,
+        quota_pause_revision: int,
+        now: datetime,
+    ) -> AgentPlan:
+        """在同一内存临界区取消额度中断对应步骤、Plan和卡片。"""
+
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            plan_key = (owner, plan_id)
+            plan = self._plan_by_owner.get(plan_key)
+            if plan is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent plan 不存在或不属于当前用户"
+                )
+            workspace_key = (owner, plan.workspace_id)
+            workspace = self._workspace_by_owner.get(workspace_key)
+            step_key = (owner, plan_id, step_id)
+            step = self._steps_by_owner.get(step_key)
+            interrupt = (
+                workspace.payload.get("quota_interrupt")
+                if workspace is not None
+                else None
+            )
+            resolution = (
+                workspace.payload.get("last_quota_resolution")
+                if workspace is not None
+                else None
+            )
+            if (
+                plan.status is AgentPlanStatus.CANCELLED
+                and step is not None
+                and step.status is PlanStepStatus.SKIPPED
+                and interrupt is None
+                and isinstance(resolution, Mapping)
+                and resolution.get("event_id") == quota_interrupt_id
+                and resolution.get("job_id") == job_id
+                and resolution.get("quota_pause_revision")
+                == quota_pause_revision
+                and resolution.get("state") == "cancelled"
+            ):
+                steps = sorted(
+                    (
+                        item
+                        for (step_owner, stored_plan_id, _), item
+                        in self._steps_by_owner.items()
+                        if step_owner == owner and stored_plan_id == plan_id
+                    ),
+                    key=lambda item: item.sequence,
+                )
+                return _clone(plan).model_copy(update={"steps": tuple(steps)})
+            if (
+                workspace is None
+                or step is None
+                or step.status is not PlanStepStatus.RUNNING
+                or not isinstance(interrupt, Mapping)
+                or interrupt.get("quota_interrupt_id") != quota_interrupt_id
+                or interrupt.get("plan_id") != plan_id
+                or interrupt.get("step_id") != step_id
+                or interrupt.get("job_id") != job_id
+                or interrupt.get("quota_pause_revision")
+                != quota_pause_revision
+            ):
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent额度取消与当前权威状态不匹配"
+                )
+            _assert_plan_transition(plan.status, AgentPlanStatus.CANCELLED)
+            skipped = step.model_copy(
+                update={
+                    "status": PlanStepStatus.SKIPPED,
+                    "public_summary": "用户已取消额度中断任务",
+                    "completed_at": now,
+                }
+            )
+            cancelled = plan.model_copy(
+                update={"status": AgentPlanStatus.CANCELLED, "updated_at": now}
+            )
+            cleared = _updated_workspace(
+                workspace,
+                {
+                    "quota_interrupt": None,
+                    "last_quota_resolution": {
+                        "event_id": quota_interrupt_id,
+                        "job_id": job_id,
+                        "quota_pause_revision": quota_pause_revision,
+                        "state": "cancelled",
+                    },
+                },
+                now=now,
+            )
+            self._steps_by_owner[step_key] = _clone(skipped)
+            self._plan_by_owner[plan_key] = _clone(cancelled)
+            self._workspace_by_owner[workspace_key] = _clone(cleared)
+            steps = sorted(
+                (
+                    item
+                    for (step_owner, stored_plan_id, _), item
+                    in self._steps_by_owner.items()
+                    if step_owner == owner and stored_plan_id == plan_id
+                ),
+                key=lambda item: item.sequence,
+            )
+            return _clone(cancelled).model_copy(update={"steps": tuple(steps)})
+
     async def start_step_with_event(
         self,
         user_id: str,
@@ -566,6 +759,68 @@ class MemoryVideoAgentRepository:
                 raise
             return step, event
 
+    async def fail_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        reason_code: str,
+        public_summary: str,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        """把运行中步骤与安全失败事件放入同一内存临界区。"""
+
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            key = (owner, plan_id, step_id)
+            plan_key = (owner, plan_id)
+            before = self._steps_by_owner.get(key)
+            before_plan = self._plan_by_owner.get(plan_key)
+            if before is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent step 不存在或不属于当前用户"
+                )
+            if before_plan is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent plan 不存在或不属于当前用户"
+                )
+            if before.status is PlanStepStatus.FAILED:
+                failed = _clone(before)
+            elif before.status is PlanStepStatus.RUNNING:
+                failed = before.model_copy(
+                    update={
+                        "status": PlanStepStatus.FAILED,
+                        "public_summary": public_summary,
+                        "completed_at": now,
+                    }
+                )
+                self._steps_by_owner[key] = _clone(failed)
+            else:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent step 当前不能标记失败"
+                )
+            _assert_plan_transition(before_plan.status, AgentPlanStatus.FAILED)
+            failed_plan = before_plan.model_copy(
+                update={"status": AgentPlanStatus.FAILED, "updated_at": now}
+            )
+            self._plan_by_owner[plan_key] = _clone(failed_plan)
+            try:
+                event = await self._persist_memory_failure_event(
+                    owner,
+                    plan_id,
+                    failed,
+                    reason_code=reason_code,
+                    run_id=run_id,
+                    now=now,
+                )
+            except Exception:
+                self._steps_by_owner[key] = before
+                self._plan_by_owner[plan_key] = before_plan
+                raise
+            return failed, event
+
     async def list_plan_steps(self, user_id: str, plan_id: str) -> list[AgentPlanStep]:
         owner = _owner(user_id)
         steps = [
@@ -603,6 +858,40 @@ class MemoryVideoAgentRepository:
             conversation_id=plan.conversation_id,
             run_id=run_id,
             occurred_at=now,
+        )
+        return await self._event_repository.create_event(owner, event)
+
+    async def _persist_memory_failure_event(
+        self,
+        owner: str,
+        plan_id: str,
+        step: AgentPlanStep,
+        *,
+        reason_code: str,
+        run_id: str,
+        now: datetime,
+    ) -> AgentEvent:
+        if self._event_repository is None:
+            raise RuntimeError("VideoAgent step event repository 未配置")
+        plan = self._plan_by_owner.get((owner, plan_id))
+        if plan is None:
+            raise AgentRuntimeRecordConflictError(
+                "VideoAgent plan 不存在或不属于当前用户"
+            )
+        event_id = _step_event_id_from_parts(plan_id, step.step_id, phase="failed")
+        existing = await self._event_repository.get_event(owner, event_id)
+        if existing is not None:
+            return existing
+        events = await self._event_repository.list_events(owner, plan.conversation_id)
+        event = build_step_failed_event(
+            event_id=event_id,
+            cursor=f"cursor_{event_id[4:]}",
+            sequence=1 if not events else events[-1].sequence + 1,
+            conversation_id=plan.conversation_id,
+            run_id=run_id,
+            occurred_at=now,
+            step=step,
+            reason_code=reason_code,
         )
         return await self._event_repository.create_event(owner, event)
 
@@ -925,6 +1214,176 @@ class SQLVideoAgentRepository:
                 await session.flush()
                 return _step_from_row(row)
 
+    async def cancel_step_confirmation(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        now: datetime,
+    ) -> AgentPlan:
+        """在同一SQL事务中跳过确认步骤并取消计划。"""
+
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                plan_statement = (
+                    select(PixelFlowVideoAgentPlanRow)
+                    .where(
+                        PixelFlowVideoAgentPlanRow.user_id == owner,
+                        PixelFlowVideoAgentPlanRow.plan_id == plan_id,
+                    )
+                    .with_for_update()
+                )
+                plan_row = (await session.scalars(plan_statement)).one_or_none()
+                if plan_row is None:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent plan不存在或不属于当前用户"
+                    )
+                if AgentPlanStatus(plan_row.status) is AgentPlanStatus.CANCELLED:
+                    plan = _plan_from_row(plan_row)
+                else:
+                    step_row = await self._locked_step(
+                        session,
+                        owner,
+                        plan_id,
+                        step_id,
+                    )
+                    if (
+                        AgentPlanStatus(plan_row.status)
+                        is not AgentPlanStatus.AWAITING_CONFIRMATION
+                        or PlanStepStatus(step_row.status)
+                        is not PlanStepStatus.AWAITING_CONFIRMATION
+                    ):
+                        raise AgentRuntimeRecordConflictError(
+                            "VideoAgent step当前不能取消确认"
+                        )
+                    step_row.status = PlanStepStatus.SKIPPED.value
+                    step_row.public_summary = "用户已取消执行"
+                    step_row.started_at = now
+                    step_row.completed_at = now
+                    plan_row.status = AgentPlanStatus.CANCELLED.value
+                    plan_row.updated_at = now
+                    await session.flush()
+                    plan = _plan_from_row(plan_row)
+        steps = await self.list_plan_steps(owner, plan_id)
+        return plan.model_copy(update={"steps": tuple(steps)})
+
+    async def cancel_quota_interrupted_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        quota_interrupt_id: str,
+        job_id: str,
+        quota_pause_revision: int,
+        now: datetime,
+    ) -> AgentPlan:
+        """在同一SQL事务中取消额度中断对应步骤、Plan和卡片。"""
+
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                plan_row = (
+                    await session.scalars(
+                        select(PixelFlowVideoAgentPlanRow)
+                        .where(
+                            PixelFlowVideoAgentPlanRow.user_id == owner,
+                            PixelFlowVideoAgentPlanRow.plan_id == plan_id,
+                        )
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                if plan_row is None:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent plan不存在或不属于当前用户"
+                    )
+                workspace_row = (
+                    await session.scalars(
+                        select(PixelFlowVideoAgentWorkspaceRow)
+                        .where(
+                            PixelFlowVideoAgentWorkspaceRow.user_id == owner,
+                            PixelFlowVideoAgentWorkspaceRow.workspace_id
+                            == plan_row.workspace_id,
+                        )
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                step_row = await self._locked_step(
+                    session,
+                    owner,
+                    plan_id,
+                    step_id,
+                )
+                payload = (
+                    dict(workspace_row.payload_json)
+                    if workspace_row is not None
+                    else {}
+                )
+                interrupt = payload.get("quota_interrupt")
+                resolution = payload.get("last_quota_resolution")
+                if (
+                    AgentPlanStatus(plan_row.status)
+                    is AgentPlanStatus.CANCELLED
+                    and PlanStepStatus(step_row.status)
+                    is PlanStepStatus.SKIPPED
+                    and interrupt is None
+                    and isinstance(resolution, Mapping)
+                    and resolution.get("event_id") == quota_interrupt_id
+                    and resolution.get("job_id") == job_id
+                    and resolution.get("quota_pause_revision")
+                    == quota_pause_revision
+                    and resolution.get("state") == "cancelled"
+                ):
+                    plan = _plan_from_row(plan_row)
+                    replay = True
+                else:
+                    replay = False
+                if (
+                    not replay
+                    and (
+                        workspace_row is None
+                        or PlanStepStatus(step_row.status)
+                        is not PlanStepStatus.RUNNING
+                        or not isinstance(interrupt, Mapping)
+                        or interrupt.get("quota_interrupt_id")
+                        != quota_interrupt_id
+                        or interrupt.get("plan_id") != plan_id
+                        or interrupt.get("step_id") != step_id
+                        or interrupt.get("job_id") != job_id
+                        or interrupt.get("quota_pause_revision")
+                        != quota_pause_revision
+                    )
+                ):
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent额度取消与当前权威状态不匹配"
+                    )
+                if not replay:
+                    _assert_plan_transition(
+                        AgentPlanStatus(plan_row.status),
+                        AgentPlanStatus.CANCELLED,
+                    )
+                    step_row.status = PlanStepStatus.SKIPPED.value
+                    step_row.public_summary = "用户已取消额度中断任务"
+                    step_row.completed_at = now
+                    plan_row.status = AgentPlanStatus.CANCELLED.value
+                    plan_row.updated_at = now
+                    payload["quota_interrupt"] = None
+                    payload["last_quota_resolution"] = {
+                        "event_id": quota_interrupt_id,
+                        "job_id": job_id,
+                        "quota_pause_revision": quota_pause_revision,
+                        "state": "cancelled",
+                    }
+                    workspace_row.payload_json = payload
+                    workspace_row.revision += 1
+                    workspace_row.updated_at = now
+                    await session.flush()
+                    plan = _plan_from_row(plan_row)
+        steps = await self.list_plan_steps(owner, plan_id)
+        return plan.model_copy(update={"steps": tuple(steps)})
+
     async def start_step_with_event(
         self,
         user_id: str,
@@ -961,6 +1420,117 @@ class SQLVideoAgentRepository:
             now=now,
             result=result,
         )
+
+    async def fail_step_with_event(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+        *,
+        reason_code: str,
+        public_summary: str,
+        run_id: str,
+        now: datetime,
+    ) -> tuple[AgentPlanStep, AgentEvent]:
+        """在同一SQL事务中保存步骤失败状态与安全失败事件。"""
+
+        owner = _owner(user_id)
+        event_id = _step_event_id_from_parts(
+            plan_id,
+            step_id,
+            phase="failed",
+        )
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    row = await self._locked_step(
+                        session,
+                        owner,
+                        plan_id,
+                        step_id,
+                    )
+                    plan_row = await session.get(PixelFlowVideoAgentPlanRow, plan_id)
+                    if plan_row is None or plan_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError(
+                            "VideoAgent plan 不存在或不属于当前用户"
+                        )
+                    _assert_plan_transition(
+                        AgentPlanStatus(plan_row.status),
+                        AgentPlanStatus.FAILED,
+                    )
+                    existing_event = (
+                        await session.scalars(
+                            select(PixelFlowAgentEventRow).where(
+                                PixelFlowAgentEventRow.event_id == event_id,
+                            )
+                        )
+                    ).one_or_none()
+                    if row.status == PlanStepStatus.RUNNING.value:
+                        row.status = PlanStepStatus.FAILED.value
+                        row.public_summary = public_summary
+                        row.completed_at = now
+                        await session.flush()
+                    elif row.status != PlanStepStatus.FAILED.value:
+                        raise AgentRuntimeRecordConflictError(
+                            "VideoAgent step 当前不能标记失败"
+                        )
+                    plan_row.status = AgentPlanStatus.FAILED.value
+                    plan_row.updated_at = now
+                    step = _step_from_row(row)
+                    if existing_event is not None:
+                        if existing_event.user_id != owner:
+                            raise AgentRuntimeRecordConflictError(
+                                "VideoAgent event 已属于其他用户"
+                            )
+                        return step, _event_from_row(existing_event)
+                    last_event = (
+                        await session.scalars(
+                            select(PixelFlowAgentEventRow)
+                            .where(
+                                PixelFlowAgentEventRow.conversation_id
+                                == plan_row.conversation_id
+                            )
+                            .order_by(PixelFlowAgentEventRow.sequence.desc())
+                            .limit(1)
+                            .with_for_update()
+                        )
+                    ).first()
+                    if last_event is not None and last_event.user_id != owner:
+                        raise AgentRuntimeRecordConflictError(
+                            "AgentEvent conversation 已被其他所有者占用"
+                        )
+                    event = build_step_failed_event(
+                        event_id=event_id,
+                        cursor=f"cursor_{event_id[4:]}",
+                        sequence=1 if last_event is None else last_event.sequence + 1,
+                        conversation_id=plan_row.conversation_id,
+                        run_id=run_id,
+                        occurred_at=now,
+                        step=step,
+                        reason_code=reason_code,
+                    )
+                    session.add(
+                        PixelFlowAgentEventRow(
+                            schema_version=event.schema_version,
+                            event_id=event.event_id,
+                            sequence=event.sequence,
+                            cursor=event.cursor,
+                            conversation_id=event.conversation_id,
+                            user_id=owner,
+                            run_id=event.run_id,
+                            occurred_at=event.occurred_at,
+                            event_type=event.type.value,
+                            payload_json=event.payload,
+                            delivery_status="pending",
+                            delivery_attempts=0,
+                        )
+                    )
+                    await session.flush()
+                    return step, event
+        except IntegrityError:
+            raise AgentRuntimeRecordConflictError(
+                "VideoAgent step失败事件已存在或sequence冲突"
+            ) from None
 
     async def complete_step(
         self,
@@ -1139,10 +1709,16 @@ def _step_event_id_from_parts(
     plan_id: str,
     step_id: str,
     *,
-    completed: bool,
+    completed: bool | None = None,
+    phase: str | None = None,
 ) -> str:
-    phase = "completed" if completed else "started"
-    value = f"pixelflow-video-agent:step-event:{plan_id}:{step_id}:{phase}"
+    resolved_phase = phase or ("completed" if completed else "started")
+    if resolved_phase not in {"started", "completed", "failed"}:
+        raise ValueError("VideoAgent step事件阶段无效")
+    value = (
+        f"pixelflow-video-agent:step-event:{plan_id}:{step_id}:"
+        f"{resolved_phase}"
+    )
     return f"evt_{uuid5(NAMESPACE_URL, value).hex}"
 
 

@@ -129,7 +129,7 @@ async def test_runtime_routes_primary_video_turn_to_v2_entrypoint_without_live_e
         plan_event.payload["workspace_id"],
     )
     assert started.status == "accepted"
-    assert started.orchestration_mode.value == "supervisor_v1"
+    assert started.orchestration_mode.value == "video_agent_v2"
     assert started.route_decision is not None
     assert started.route_decision.intent.value == "video"
     assert workspace.payload == {

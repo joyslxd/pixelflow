@@ -44,7 +44,7 @@ class M06SceneGenerationOperationPort:
         *,
         repository: AgentRuntimeRepository,
         adapter: ProviderJobAdapter,
-        authorization_provider: Callable[[VideoToolContext], str],
+        authorization_provider: Callable[[VideoToolContext], str] | None = None,
         lease_owner: str,
         provider_request_builder: SceneProviderRequestBuilder | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -52,14 +52,18 @@ class M06SceneGenerationOperationPort:
     ) -> None:
         if not isinstance(adapter, ProviderJobAdapter):
             raise TypeError("adapter 必须是 ProviderJobAdapter")
-        if not callable(authorization_provider):
+        if authorization_provider is not None and not callable(
+            authorization_provider
+        ):
             raise TypeError("authorization_provider 必须可调用")
         normalized_owner = lease_owner.strip()
         if not normalized_owner or len(normalized_owner) > 128:
             raise ValueError("lease_owner 必须是1到128个字符")
         self._repository = repository
         self._adapter = adapter
-        self._authorization_provider = authorization_provider
+        self._authorization_provider = (
+            authorization_provider or _context_authorization
+        )
         self._lease_owner = normalized_owner
         self._provider_request_builder = (
             provider_request_builder or _default_provider_request
@@ -93,9 +97,6 @@ class M06SceneGenerationOperationPort:
             attempt=attempt,
             provider_request=provider_request,
         )
-        authorization = self._authorization_provider(context)
-        if not isinstance(authorization, str) or not authorization.strip():
-            raise VideoToolExecutionError("镜头生成Operation缺少临时授权")
         coordinator = OperationStartCoordinator(
             self._repository,
             adapter=self._adapter,
@@ -108,13 +109,20 @@ class M06SceneGenerationOperationPort:
             operation = await coordinator.start(
                 request,
                 provider_request=provider_request,
-                authorization=authorization,
+                authorization_provider=lambda: self._authorization_provider(
+                    context
+                ),
                 lease_owner=self._lease_owner,
             )
-        except (OperationConflictError, OperationStartQuotaPausedError) as exc:
+        except OperationStartQuotaPausedError as exc:
+            return SceneGenerationJob(
+                job_id=exc.operation.job_id,
+                scene_id=scene_id,
+                variant_index=variant_index,
+                status="start_paused_quota",
+            )
+        except OperationConflictError as exc:
             raise VideoToolExecutionError("镜头生成Operation启动失败") from exc
-        finally:
-            authorization = ""
 
         if operation.status in {ExternalJobStatus.CREATED, ExternalJobStatus.POLLING}:
             return SceneGenerationJob(
@@ -212,3 +220,14 @@ def _default_provider_request(
         if value is not None:
             request[key] = value
     return request
+
+
+def _context_authorization(context: VideoToolContext) -> str:
+    """从当前执行上下文借用凭据，不在Operation Adapter中缓存。"""
+
+    if context.credential is None:
+        raise VideoToolExecutionError("镜头生成Operation缺少临时授权")
+    try:
+        return context.credential.borrow_authorization()
+    except RuntimeError as exc:
+        raise VideoToolExecutionError("镜头生成Operation缺少临时授权") from exc

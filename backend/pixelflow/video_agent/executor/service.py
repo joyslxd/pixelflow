@@ -10,6 +10,7 @@ from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
 from pixelflow.video_agent.contracts import AgentPlan, AgentPlanStatus, PlanStepStatus
+from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 from pixelflow.video_agent.tools import VideoToolContext, VideoToolRegistry
 
 if TYPE_CHECKING:
@@ -28,7 +29,13 @@ class VideoAgentExecutor:
         self._registry = registry
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    async def run_plan(self, user_id: str, plan_id: str) -> AgentPlan:
+    async def run_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        *,
+        credential: TransientVideoAgentCredential | None = None,
+    ) -> AgentPlan:
         plan = await self._required_plan(user_id, plan_id)
         if plan.status in {
             AgentPlanStatus.COMPLETED,
@@ -46,13 +53,15 @@ class VideoAgentExecutor:
                 AgentPlanStatus.RUNNING,
                 now=self._clock(),
             )
-        return await self._continue(user_id, plan)
+        return await self._continue(user_id, plan, credential=credential)
 
     async def confirm_step(
         self,
         user_id: str,
         plan_id: str,
         step_id: str,
+        *,
+        credential: TransientVideoAgentCredential | None = None,
     ) -> AgentPlan:
         plan = await self._required_plan(user_id, plan_id)
         if plan.status is not AgentPlanStatus.AWAITING_CONFIRMATION:
@@ -76,12 +85,53 @@ class VideoAgentExecutor:
             AgentPlanStatus.RUNNING,
             now=self._clock(),
         )
-        return await self._continue(user_id, plan)
+        return await self._continue(user_id, plan, credential=credential)
 
-    async def resume_plan(self, user_id: str, plan_id: str) -> AgentPlan:
-        return await self.run_plan(user_id, plan_id)
+    async def cancel_step(
+        self,
+        user_id: str,
+        plan_id: str,
+        step_id: str,
+    ) -> AgentPlan:
+        """取消当前待确认计划，不把取消伪装成新的自然语言 Turn。"""
 
-    async def _continue(self, user_id: str, plan: AgentPlan) -> AgentPlan:
+        plan = await self._required_plan(user_id, plan_id)
+        if plan.status is AgentPlanStatus.CANCELLED:
+            return plan
+        waiting_steps = [
+            step
+            for step in plan.steps
+            if step.status is PlanStepStatus.AWAITING_CONFIRMATION
+        ]
+        if (
+            plan.status is not AgentPlanStatus.AWAITING_CONFIRMATION
+            or len(waiting_steps) != 1
+            or waiting_steps[0].step_id != step_id
+        ):
+            raise AgentRuntimeRecordConflictError("VideoAgent plan 当前确认步骤不匹配")
+        return await self._repository.cancel_step_confirmation(
+            user_id,
+            plan_id,
+            step_id,
+            now=self._clock(),
+        )
+
+    async def resume_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        *,
+        credential: TransientVideoAgentCredential | None = None,
+    ) -> AgentPlan:
+        return await self.run_plan(user_id, plan_id, credential=credential)
+
+    async def _continue(
+        self,
+        user_id: str,
+        plan: AgentPlan,
+        *,
+        credential: TransientVideoAgentCredential | None,
+    ) -> AgentPlan:
         workspace = await self._repository.get_workspace(user_id, plan.workspace_id)
         if workspace is None:
             raise AgentRuntimeRecordConflictError(
@@ -131,6 +181,7 @@ class VideoAgentExecutor:
                     workspace=workspace,
                     plan_id=plan.plan_id,
                     step_id=step.step_id,
+                    credential=credential,
                 ),
                 step.tool_name,
                 step.arguments,

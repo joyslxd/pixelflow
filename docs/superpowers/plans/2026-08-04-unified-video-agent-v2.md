@@ -76,11 +76,15 @@ web/src/
 - [x] 任务10权威Snapshot与前端投影切片：Agent Runtime Snapshot新增`videoAgent.workspace/plan/steps`聚合投影，Memory/SQL Repository按用户和会话读取唯一工作区、最新计划和有序步骤；前端统一Reducer按workspace revision拒绝旧版和同版本冲突覆盖，并把同一状态投影到`AgentPlanTimeline`、视频资产包选择器和右侧`SceneEvidencePanel`。`AgentConfirmationCard`只提交持久化confirmation/step ID与确认或取消决定，不接受自由流程指令。后端相关回归106项、前端完整419项、TypeScript、Ruff和开发构建通过（本地验证，2026-08-06）。
 - [x] 任务10多镜头证据与公开步骤DTO切片：新增`useVideoAgent`维护当前workspace内的镜头选择；revision更新时保留仍存在的选择，镜头删除或切换工作区时回退到当前第一镜。右侧`SceneEvidencePanel`支持多镜头切换、当前版本、历史版本、QC证据和“编辑此镜头”自然语言预填。Runtime Snapshot步骤改用白名单DTO，只公开标题、状态、确认标志、摘要、Artifact引用和时间，不再下发`tool_name`或原始`arguments`。前端完整420项及后端相关回归106项通过（本地验证，2026-08-06）。
 - [x] 任务10确认恢复卡与Storyboard功能边界：Snapshot从唯一等待确认step稳定派生confirmation ID，只投影费用摘要和受影响镜头；Gateway尚未装配Task 11公开确认Controller时固定`submittable=false`并返回安全原因，前端恢复`AgentConfirmationCard`但禁用按钮，绝不伪造普通Turn。新增`VideoAgentStoryboardSurface`承接完整旧分镜编辑器及其素材、@引用、保存、重试和生成动作，`LegacyWorkspace`不再直接导入Canvas Storyboard组件。最终后端相关回归111项、前端420项、TypeScript、Ruff和开发构建通过（本地验证，2026-08-06）。
+- [x] 任务11公开确认Controller与交付Adapter切片：新增按当前用户、当前对话、最新Plan、step和稳定confirmation ID五重校验的确认/取消API；确认继续原持久化step，取消在Memory/SQL同一临界区原子跳过待确认step并终止Plan，不伪造自然语言Turn，也不留下可再次提交的确认单。Authorization只进入不可复制、不可序列化、请求结束主动清理的执行期上下文；参考解析、镜头生成和新增`M06DeliveryOperationPort`均默认从该上下文借用凭据。MP4与剪映交付复用M06 Operation身份和完成事件，前端确认成功后立即刷新权威Snapshot。Gateway尚未注入完整受控工具Executor和Operation完成后的Plan恢复器时仍保持`submittable=false`，不会提前开放计费按钮。最终后端VideoAgent与公开Runtime API相关回归85项、前端完整421项、TypeScript、Ruff和开发构建通过（本地验证，2026-08-06）。
+- [x] 任务11核心Registry与Gateway构造切片：新增`make_video_agent_runtime_assembly()`，显式注册10个受控工具、完整`VideoAgentExecutor`和V2动态Operation stage Resolver；参考解析、镜头生成与MP4合并是核心就绪条件，剪映改为可选能力，未配置时只让`jianying_package`失败关闭，不阻塞MP4和其他VideoAgent工具。交付工具继续严格只向Port传`scene_id/variant_id/artifact_ref`，Adapter在内部从权威Workspace解析Provider URL，URL不进入工具DTO或交付输出快照。`OperationStartCoordinator`只在赢得start lease且确需首次调用Provider时才借用Authorization，终态Operation重放不再要求用户凭据。Gateway已构造并保存该Runtime装配结果，但在完成事件owner语义冻结前不注入公开确认Service。最终VideoAgent、公开API、Operation恢复、Gateway就绪与Provider相关回归142项通过（本地验证，2026-08-06）。
+- [x] 任务11 owner回调、V1只读归档与物理下线切片：M06 `WorkflowGraphResumePort`和`OperationCompletionDispatcher`已经显式传递`user_id + conversation_id`。`AgentRuntimeService.resume_workflow()`把历史视频Workflow固定收敛为`video_workflow_retired`，只返回workflow ID、创建时间和去重后的内部Artifact，不修改Workflow、不发布事件、不调用Provider，跨用户或非视频记录失败关闭。Gateway、Controller、持久化入口、Supervisor、Graph、live Handler、V1凭据与Operation Worker、V1状态编解码及其测试均已物理移除；V2完成恢复改用独立`operation_namespace`，新视频会话归属固定为`video_agent_v2`。数据库历史表模型只保留原始审计数据，不存在读取、恢复或执行入口。`agent_workflows/video`下仍保留由分段v2 Router使用的规划与场景包领域Service，不属于V1执行链。后端完整收集5170项、关键回归85项，前端全量359项与TypeScript检查通过（本地验证，2026-08-06）。
+- [x] 任务11 V2 Runner、唯一Recovery Worker与额度恢复切片：首Turn只持久化Workspace/Plan，再由独立`VideoAgentRunner`非阻塞执行并在结束时清理一次性Authorization。M06完成事件通过显式`plan_step_id`同时校验owner、conversation、Plan、step、Operation stage和workspace job绑定；成功只恢复原Plan，失败原子写步骤失败、Plan失败和安全事件。Gateway只在V2核心就绪时启动唯一`OperationRecoveryRuntime`，V1 Worker保持下架。Provider已有job的status 402额度卡只提交`quota_interrupt_id + resume/cancel`：resume恢复同一provider job且不增加start调用，cancel在Memory/SQL同一临界区同步跳过step、取消Plan并清除右侧Workspace中断。Provider尚未返回job ID的start 402同样会持久化`phase=start`稳定额度中断；恢复请求只在当前HTTP调用链借用一次性Authorization，重跑原Operation的同一attempt与幂等键，绝不创建第二个Provider任务。Snapshot/SSE、前端Transport、Reducer与额度卡已接线。后端start 402与公开Controller回归9项、前端TypeScript检查通过（本地验证，2026-08-06）。
 
 ### 进行中
 - [ ] 轻量化对话路由分发器提交收口：实现、客户端切换和完整前端门禁均已完成；仅待按中文规范检查并提交当前批次。
-- [ ] V2工作台页面接线：权威Snapshot、时间线、多镜头证据、确认恢复卡和完整Storyboard功能边界已经接线；Task 10 UI范围已完成。仍需在Task 11装配公开确认Controller/完整Executor，并移除`VideoAgentWorkspace`中的`LegacyWorkspace`运行时兼容渲染。
-- [ ] 规划执行真实旅程接线：规划器、执行器、确认闸门和任务7首批工具已经完成，仍需接入任务8–9业务工具，并在任务11完成Gateway唯一视频入口与恢复链路。
+- [ ] V2工作台页面接线：权威Snapshot、时间线、多镜头证据、确认恢复卡、额度恢复卡和完整Storyboard功能边界已经接线；Task 10 UI范围已完成。仍需把承载图片/PPT与分段v2交互的`LegacyWorkspace`迁入独立V2页面边界；它不是已下线的V1执行链。
+- [ ] 规划执行真实旅程接线：规划器、执行器、确认闸门、任务7–9工具、独立Runner、唯一Recovery Worker以及start/status 402恢复均已完成；仍需补齐三类真实旅程端到端计划生成和Golden Case。
 - [ ] 镜头面板迁移+单镜头局部重绘能力：完整迁移原有镜头面板至V2工作台，不丢失镜头、多版本查看逻辑；新增单镜头编辑入口，触发仅作用于该镜头的执行方案，生成完成后镜头卡片展示「重新生成完成」标识。
 
 # 任务0：轻量化对话路由分发器
@@ -568,14 +572,14 @@ git commit -m "feat: 新增V2智能体工作台页面"
 ## 涉及文件
 - 修改运行时：`backend/pixelflow/agent_runtime/{config.py,service.py,executor.py}`
 - 修改任务0跨业务路由：`backend/pixelflow/agent_runtime/conversation_router.py`
-- 删除目录：`backend/pixelflow/agent_workflows/video/`、V1调度器视频分支、全部V1相关测试
+- 删除目录：旧Supervisor/Graph/live Handler、V1调度器视频分支与全部V1相关测试；`backend/pixelflow/agent_workflows/video/`仅保留被分段v2 Router复用的规划与场景包领域Service
 - 新建测试：`backend/tests/{test_video_agent_entry.py,test_video_agent_e2e.py,test_video_agent_retirement.py}`
 
 ## 接口产出
 统一入口`VideoAgentEntrypoint.submit_turn`处理所有视频对话；
 存量V1任务查询返回`video_workflow_retired`，仅可读、不可执行/修改。
 
-- [ ] 步骤1：入口、归档、恢复测试用例
+- [x] 步骤1：入口、归档、恢复测试用例
 ```python
 def test_every_new_video_turn_uses_video_agent_entrypoint(app):
     assert app.conversation_router.resolve("video") is app.video_agent_entrypoint
@@ -590,12 +594,12 @@ async def test_reference_remix_resumes_after_generation_operation_restart(runtim
     restored = await runtime.resume_plan("u1", plan.plan_id)
     assert restored.steps[-1].status in {PlanStepStatus.RUNNING, PlanStepStatus.COMPLETED}
 ```
-- [ ] 步骤2：替换旧路由逻辑
-删除`SUPERVISOR_V1`、`VIDEO_AGENT_V2`、灰度开关、模式分支；所有视频请求统一进入`VideoAgentExecutor`；保留通用调度、事件队列、额度、权限校验。
-- [ ] 步骤3：存量V1归档只读逻辑
+- [x] 步骤2：替换旧路由逻辑
+删除`SUPERVISOR_V1`与旧live分支；新视频会话仅在V2入口、Runner和核心Provider就绪时冻结为`video_agent_v2`，保留通用Turn、事件队列、额度和权限校验。
+- [x] 步骤3：存量V1归档只读逻辑
 识别历史V1数据，返回只读归档信息；不迁移V1状态、不重启任务、不调用厂商接口；数据库原始记录保留用于审计，后续可通过数据清理任务删除。
-- [ ] 步骤4：删除全部V1代码
-移除V1视频工作流、调度器视频处理分支、接口、相关测试；统一通过V2适配层调用规划、生成、质检、合成能力。
+- [x] 步骤4：删除全部V1执行代码
+移除V1视频执行工作流、调度器视频处理分支、接口、相关测试；统一通过V2适配层调用规划、生成、质检、合成能力。保留的分段v2领域Service和数据库历史表只服务当前流程与审计，不恢复V1任务。
 - [ ] 步骤5：页面快照与SSE状态恢复
 对话快照返回当前项目、执行方案、待确认任务；页面先加载快照，再叠加实时事件；未完成任务复用调度，仅推送进度事件，不重复创建任务。
 - [ ] 步骤6：下线全量回归测试
@@ -720,12 +724,16 @@ web/src/
 - [x] **Task 10权威Snapshot与前端投影切片**：Runtime Snapshot聚合返回当前`VideoWorkspace`、最新`AgentPlan`和有序steps；前端Reducer按revision拒绝旧/冲突工作区覆盖，并接入`AgentPlanTimeline`与首镜头`SceneEvidencePanel`。确认卡使用持久化confirmation/step ID。后端相关回归106项、前端419项及构建门禁通过（本地验证，2026-08-06）。
 - [x] **Task 10多镜头证据与公开步骤DTO切片**：`useVideoAgent`维护跨revision有效镜头选择，右侧证据面板可切换多镜头并展示版本/QC，单镜头编辑入口预填精确自然语言目标。Snapshot步骤使用白名单公开DTO，不再下发工具名或原始参数。前端420项及后端相关回归106项通过（本地验证，2026-08-06）。
 - [x] **Task 10确认恢复卡与Storyboard功能边界**：Snapshot安全派生稳定confirmation ID、费用摘要与受影响镜头；Task 11 Controller未装配时`submittable=false`，前端展示但禁用确认按钮。完整旧Storyboard编辑器由`VideoAgentStoryboardSurface`承接，Legacy页面不再直接导入Canvas组件。最终后端相关回归111项、前端420项和构建门禁通过（本地验证，2026-08-06）。
+- [x] **Task 11公开确认Controller与交付Adapter切片**：确认/取消API按用户、对话、最新Plan、step和confirmation ID校验归属，确认恢复原持久化step；取消在Memory/SQL同一临界区原子跳过步骤并取消Plan，不触发计费工具。Authorization只存在于不可复制、不可序列化且请求结束主动清理的执行上下文。参考解析、镜头生成和MP4/剪映交付Operation统一从该上下文借用凭据，新增交付Adapter持久化稳定Operation与完成事件。前端提交后立即刷新权威Snapshot；Gateway完整Executor和Operation完成后的Plan恢复器未装配前继续保持按钮不可提交。最终后端VideoAgent与公开Runtime API相关回归85项、前端421项、TypeScript、Ruff和开发构建通过（本地验证，2026-08-06）。
+- [x] **Task 11核心Registry与Gateway构造切片**：新增10工具受控Registry、`VideoAgentExecutor`、动态Operation Resolver和Gateway安全构造；核心就绪只要求参考解析、镜头生成与MP4合并，剪映作为可选能力单独失败关闭。交付Port DTO继续只携带内部Artifact身份，Provider URL只在Adapter内部解析。Authorization延迟到start lease胜者首次调用Provider时读取，终态重放不要求用户凭据。完成事件owner、V1/V2 Recovery共存、V2额度恢复与首Turn异步唤醒合同仍待设计冻结，因此当前不激活Executor。最终VideoAgent、公开API、Operation恢复、Gateway就绪与Provider相关回归142项通过（本地验证，2026-08-06）。
+- [x] **Task 11 owner回调、V1只读归档与Gateway执行下架切片**：M06完成回调显式携带owner，历史V1视频恢复固定返回无副作用`video_workflow_retired`安全摘要。Gateway不再装配V1 Graph、Turn Executor或Operation Recovery Worker，V2 Runner未完成前保持`primary_execution_intents=[]`。旧分段Router已直接依赖稳定领域Service；V1源码与专属测试仍待物理删除。聚焦回归178项、owner与旧链过渡相邻回归312项通过（本地验证，2026-08-06）。
+- [x] **Task 11 V2 Runner、唯一Recovery与status 402额度恢复切片**：独立Runner消费已持久化Plan；Gateway仅启动V2唯一Recovery Worker。完成/额度事件用Workspace中的`plan_step_id`绑定原step，终态重放不需要Authorization。status 402的resume只恢复原provider job，cancel原子同步step、Plan与Workspace；Snapshot/SSE和前端额度卡接线完成。start 402稳定中断与携当前请求凭据重试仍待下一切片。后端VideoAgent、Operation与Gateway相关286项、前端TypeScript与422项全量测试通过（本地验证，2026-08-06）。
 
 ### In Progress
 
 - [ ] **轻量化对话路由提交收口**：实现、客户端切换和完整前端门禁均已完成，仅待中文规范检查与提交。
-- [ ] **V2 workbench UI**: Task 10 UI scope is complete with authoritative Snapshot, timeline, multi-scene evidence, recoverable confirmation card, and the full storyboard feature boundary. Task 11 must assemble the public confirmation Controller/executor and remove temporary `LegacyWorkspace` runtime rendering.
-- [ ] **Live planning journey wiring**: the planner, executor, confirmation gate, and initial Task 7 tools are complete; Tasks 8–9 still need business tools, and Task 11 must wire the sole Gateway video entry and recovery path.
+- [ ] **V2 workbench UI**: Snapshot、确认卡、额度卡和Storyboard边界已接线；仍需移除临时`LegacyWorkspace`运行时渲染。
+- [ ] **Live planning journey wiring**: Runner、唯一Recovery、owner完成桥和额度恢复均已完成；仍需完成三类真实旅程端到端规划与Golden Case。
 - [ ] **Scene package preservation and local regeneration**: migrate the existing video scene package into the V2 workbench without losing its scene/variant inspection flow; add a per-scene edit entry that creates a scoped regeneration plan and marks that scene `重新生成完成` after its replacement video is ready.
 
 ## Task 0: Implement the Thin Conversation Router
@@ -1271,6 +1279,15 @@ git commit -m "feat: add video agent workspace"
 
 ## Task 11: Make V2 the Only Video Entry and Retire V1
 
+当前进度（2026-08-06）：公开确认Controller、严格归属校验、确认/取消DTO、单次执行凭据、前端Snapshot刷新链路、任务9交付Operation Adapter、10工具Registry、Executor、独立Runner和Gateway装配均已完成。首Turn只落库Workspace/Plan，再由Runner执行；三类外部能力Adapter只在首次Provider start的数据库lease胜者边界借用Authorization，完成事件重放无需凭据。Gateway已下架V1执行链，并且只在V2核心完整就绪时启动唯一V2 Recovery Worker。完成事件与status 402额度事件均显式绑定owner、conversation、Plan、step和Operation；额度resume只恢复原job，cancel同步修改Plan与右侧Workspace。剪映为可选能力，不阻塞MP4核心链路。当前仍未完成的是start 402稳定中断与携凭据重试、V1源码/旧前端Reducer物理删除、编排模式命名清理、完整三类真实旅程与30-50套Golden Case。
+
+### Task 11设计裁定与待补项
+
+- [x] **M06完成事件的V2 owner合同**：扩展通用完成回调，显式携带`user_id + conversation_id`；V2 Handler必须用该owner读取原Plan，并同时复核完成事件、Operation、Plan和会话身份。不得通过跨用户枚举Plan反查owner（用户裁定：2026-08-06）。
+- [x] **V1/V2 Operation Recovery不共存**：不实现双Worker或共享分流；先完成历史V1只读归档并下架V1执行代码，再启动唯一V2 `OperationRecoveryRuntime`。切换过程必须保证任一时刻最多只有一个视频Operation恢复Worker运行，V1历史记录只能查询、不能恢复或重新调用Provider（用户裁定：2026-08-06）。
+- [x] **V2额度暂停与恢复合同**：V2使用独立额度中断卡，前端只提交稳定`quota_interrupt_id + decision(resume/cancel)`，不提交provider job ID或自由文本。服务端按owner、conversation、Plan、step、Operation、quota revision复核身份；当前HTTP Authorization只进入一次性执行上下文，不持久化。Provider start阶段返回402且尚无provider job ID时，充值后复用同一Operation、attempt和幂等键重试start；status阶段返回402且原provider job已存在时，只恢复该job轮询，Provider start增量必须为0。`resume`表示“已充值，继续”，`cancel`在Memory/SQL同一临界区跳过当前step并取消Plan。V1 quota Handler不复用，随V1一起下架（用户裁定：2026-08-06）。
+- [x] **首Turn规划与执行唤醒合同**：`VideoAgentEntrypoint.submit_turn()`只持久化Workspace和Plan；扩展`notify_registered_turn()`唤醒独立VideoAgent Runner，并把当前请求的一次性凭据交给该Runner。Runner逐步执行，遇到等待确认或pending Operation后退出；Authorization不得持久化到Turn、Workspace或Plan（用户裁定：2026-08-06）。
+
 **Files:**
 - Modify: `backend/pixelflow/agent_runtime/{config.py,service.py,executor.py}`
 - Modify the Task 0 router: `backend/pixelflow/agent_runtime/conversation_router.py`
@@ -1304,17 +1321,21 @@ async def test_reference_remix_resumes_after_generation_operation_restart(runtim
 
 Remove `SUPERVISOR_V1`, `VIDEO_AGENT_V2`, rollout flags, and mode-selection branches. `VideoAgentEntrypoint` resolves every video turn to `VideoAgentExecutor`; non-video routing remains outside this change. Preserve the existing generic runtime operation coordinator, event outbox, quota checks, and ownership checks.
 
-- [ ] **Step 3: Implement historical V1 read-only retirement**
+- [x] **Step 3: Implement historical V1 read-only retirement**
 
 Add a retirement lookup that recognizes existing V1 workflow rows and returns a stable public `video_workflow_retired` result containing only workflow ID, creation time, and historical artifact links. Do not migrate the V1 state payload into V2, restart any V1 job, or issue new provider calls. Existing database rows remain for audit and can be removed later by an explicit data-retention job.
+
+2026-08-06：`AgentRuntimeService.resume_workflow()`已实现该只读归档合同，并通过owner、类型、无状态修改、无事件、无Provider副作用和敏感旧字段过滤测试。Gateway已停止装配V1 Executor与Recovery Worker，但V1源码及其专属测试仍待步骤4物理删除。
 
 - [ ] **Step 4: Delete V1 implementation and tests**
 
 Remove `backend/pixelflow/agent_workflows/video/`, the V1 video Supervisor action/decision path, its HTTP handlers, and all tests that assert V1 video workflow stages. Remove the legacy Workspace feature and client Supervisor mode reducer. Update imports so reusable planning, scene generation, QC, composition, and Jianying services are reachable only through V2 adapters.
 
-- [ ] **Step 5: Implement V2 snapshot/SSE restoration**
+- [x] **Step 5: Implement V2 snapshot/SSE restoration**
 
 Expose current workspace, active plan, plan steps, open confirmation, and event cursor in the V2 conversation snapshot. Rehydrate frontend state from snapshot before applying live SSE events. Resume pending operations through the existing coordinator and write a new step-progress event instead of recreating the plan.
+
+2026-08-06：Snapshot已公开Workspace、Plan、白名单step、确认卡、额度卡与event cursor；前端先恢复Snapshot再消费SSE。唯一V2 Recovery Worker通过完成事件恢复原Plan，Operation和Plan均不重建；失败写`agent.step.failed`安全事件，额度pause/resume使用独立事件和卡片。
 
 - [ ] **Step 6: Run focused retirement and full verification**
 

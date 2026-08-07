@@ -15,6 +15,7 @@ interface AgentConfirmationCardProps {
   submitting?: boolean;
   actionAvailable?: boolean;
   unavailableReason?: string | null;
+  submissionError?: string | null;
   onSubmit?(submission: AgentConfirmationSubmission): void;
 }
 
@@ -27,6 +28,7 @@ export function AgentConfirmationCard({
   submitting = false,
   actionAvailable = true,
   unavailableReason = null,
+  submissionError = null,
   onSubmit,
 }: AgentConfirmationCardProps) {
   const submit = (decision: AgentConfirmationDecision) => {
@@ -67,6 +69,9 @@ export function AgentConfirmationCard({
       </div>
       {!actionAvailable && unavailableReason ? (
         <p className="mt-3 text-xs text-amber-800">{unavailableReason}</p>
+      ) : null}
+      {submissionError ? (
+        <p role="alert" className="mt-3 text-xs text-red-700">{submissionError}</p>
       ) : null}
     </section>
   );

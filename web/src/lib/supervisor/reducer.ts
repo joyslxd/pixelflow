@@ -11,10 +11,12 @@ import {
 import type {
   VideoAgentConfirmationState,
   VideoAgentPlanState,
+  VideoAgentQuotaState,
 } from "../../features/video-agent/state/contracts.js";
 import {
   cloneVideoAgentConfirmationState,
   cloneVideoAgentPlanState,
+  cloneVideoAgentQuotaState,
   reduceVideoAgentEvent,
 } from "../../features/video-agent/state/reducer.js";
 import {
@@ -108,6 +110,7 @@ export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjecti
   videoAgentWorkspace: VideoWorkspaceProjectionState;
   videoAgentPlan: VideoAgentPlanState | null;
   videoAgentConfirmation: VideoAgentConfirmationState | null;
+  videoAgentQuota: VideoAgentQuotaState | null;
 }
 
 export interface SupervisorRuntimeState extends SupervisorRuntimeProjection {
@@ -481,6 +484,51 @@ function applyAgentEvent(
       return applyCompressionTerminal(state, event, "failed");
     case "input.state_changed":
       return applyInputEvent(state, event);
+    case "external_job.quota_state_changed": {
+      const quotaState = event.payload.quota_state;
+      const planId = typeof event.payload.workflow_id === "string"
+        ? event.payload.workflow_id
+        : null;
+      const revision = typeof event.payload.quota_pause_revision === "number"
+        && Number.isSafeInteger(event.payload.quota_pause_revision)
+        && event.payload.quota_pause_revision > 0
+        ? event.payload.quota_pause_revision
+        : null;
+      const runningSteps = state.videoAgentPlan?.planId === planId
+        ? Object.values(state.videoAgentPlan.steps).filter(
+          (step) => step.status === "running",
+        )
+        : [];
+      const runningStep = runningSteps.length === 1 ? runningSteps[0] : undefined;
+      if (quotaState === "resumed") {
+        return {
+          ...withEventResumePoint(state, event),
+          videoAgentQuota: state.videoAgentQuota?.planId === planId
+            ? null
+            : state.videoAgentQuota,
+        };
+      }
+      if (
+        quotaState !== "paused"
+        || !planId
+        || !revision
+        || !runningStep
+        || event.payload.reason_code !== "provider_quota_insufficient"
+      ) return withEventResumePoint(state, event);
+      return {
+        ...withEventResumePoint(state, event),
+        videoAgentQuota: {
+          quotaInterruptId: event.event_id,
+          planId,
+          stepId: runningStep.stepId,
+          quotaPauseRevision: revision,
+          phase: "status",
+          reasonCode: "provider_quota_insufficient",
+          submittable: true,
+          unavailableReason: null,
+        },
+      };
+    }
     case "agent.plan.created":
     case "agent.step.started":
     case "agent.step.progressed":
@@ -634,6 +682,7 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
   let videoAgentWorkspace: VideoWorkspaceProjectionState;
   let videoAgentPlan: VideoAgentPlanState | null;
   let videoAgentConfirmation: VideoAgentConfirmationState | null;
+  let videoAgentQuota: VideoAgentQuotaState | null;
   try {
     videoAgentWorkspace = projection.videoAgentWorkspace === undefined
       ? createVideoWorkspaceProjectionState(projection.conversationId)
@@ -647,6 +696,9 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     videoAgentConfirmation = projection.videoAgentConfirmation === undefined
       ? null
       : cloneVideoAgentConfirmationState(projection.videoAgentConfirmation);
+    videoAgentQuota = projection.videoAgentQuota === undefined
+      ? null
+      : cloneVideoAgentQuotaState(projection.videoAgentQuota);
   } catch {
     return null;
   }
@@ -659,6 +711,7 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     videoAgentWorkspace,
     videoAgentPlan,
     videoAgentConfirmation,
+    videoAgentQuota,
     ...workspace,
   };
   return isProjectionStateConsistent(cloned) ? cloned : null;
@@ -691,6 +744,7 @@ export function createSupervisorRuntimeState(conversationId: string): Supervisor
     videoAgentWorkspace: createVideoWorkspaceProjectionState(conversationId),
     videoAgentPlan: null,
     videoAgentConfirmation: null,
+    videoAgentQuota: null,
     resume: {
       cursor: null,
       sequence: 0,
@@ -782,6 +836,9 @@ export function supervisorRuntimeReducer(
         videoAgentConfirmation: incomingWorkspace === null && state.videoAgentWorkspace.current
           ? state.videoAgentConfirmation
           : projection.videoAgentConfirmation,
+        videoAgentQuota: incomingWorkspace === null && state.videoAgentWorkspace.current
+          ? state.videoAgentQuota
+          : projection.videoAgentQuota,
         connection: state.connection,
       };
     }

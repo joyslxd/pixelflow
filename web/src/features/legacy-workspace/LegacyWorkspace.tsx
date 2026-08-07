@@ -76,7 +76,14 @@ import {
 } from "@/lib/conversationRouting";
 import { useSupervisorConversation } from "@/hooks/useSupervisorConversation";
 import { AgentPlanTimeline } from "@/features/video-agent/AgentPlanTimeline";
-import { AgentConfirmationCard } from "@/features/video-agent/AgentConfirmationCard";
+import {
+  AgentConfirmationCard,
+  type AgentConfirmationSubmission,
+} from "@/features/video-agent/AgentConfirmationCard";
+import {
+  AgentQuotaCard,
+  type AgentQuotaSubmission,
+} from "@/features/video-agent/AgentQuotaCard";
 import { SceneEvidencePanel } from "@/features/video-agent/SceneEvidencePanel";
 import { VideoAgentStoryboardSurface } from "@/features/video-agent/VideoAgentStoryboardSurface";
 import { useVideoAgent } from "@/features/video-agent/hooks/useVideoAgent";
@@ -388,7 +395,7 @@ const parseRegisteredSupervisorTurn = (
     typeof runId !== "string"
     || !runId
     || (status !== "accepted" && status !== "queued")
-    || (orchestrationMode !== "frontend_v2" && orchestrationMode !== "supervisor_v1")
+    || (orchestrationMode !== "frontend_v2" && orchestrationMode !== "video_agent_v2")
   ) {
     throw new TypeError("Agent Turn 返回格式不合法");
   }
@@ -2118,13 +2125,62 @@ export function WorkspacePage() {
       legacyArtifactActionsEnabled: false,
     };
   const primaryExecutionUnavailable = orchestrationResolved
-    && orchestrationMode === "supervisor_v1"
+    && orchestrationMode === "video_agent_v2"
     && !primaryExecutionReadyRef.current;
   // 新旧运行时共用同一个页面入口；R1 assist 只挂载会话基础设施，业务仍由旧 runner 推进。
   // 空会话使用稳定占位符，保证 Hook 顺序不变且不会向后端发起请求。
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
   });
+  const [videoAgentConfirmationSubmitting, setVideoAgentConfirmationSubmitting] = useState(false);
+  const [videoAgentConfirmationError, setVideoAgentConfirmationError] = useState<string | null>(null);
+  const visibleVideoAgentConfirmationId = supervisorRuntime.state.videoAgentConfirmation?.confirmationId ?? null;
+  useEffect(() => {
+    setVideoAgentConfirmationSubmitting(false);
+    setVideoAgentConfirmationError(null);
+  }, [currentConversationId, visibleVideoAgentConfirmationId]);
+  const handleVideoAgentConfirmation = (submission: AgentConfirmationSubmission) => {
+    if (
+      videoAgentConfirmationSubmitting
+      || submission.confirmationId !== visibleVideoAgentConfirmationId
+    ) return;
+    setVideoAgentConfirmationSubmitting(true);
+    setVideoAgentConfirmationError(null);
+    void supervisorRuntime.respondToVideoAgentConfirmation(
+      submission.confirmationId,
+      {
+        step_id: submission.stepId,
+        decision: submission.decision,
+      },
+    ).catch(() => {
+      setVideoAgentConfirmationError("确认请求未完成，请刷新后重试。");
+    }).finally(() => {
+      setVideoAgentConfirmationSubmitting(false);
+    });
+  };
+  const [videoAgentQuotaSubmitting, setVideoAgentQuotaSubmitting] = useState(false);
+  const [videoAgentQuotaError, setVideoAgentQuotaError] = useState<string | null>(null);
+  const visibleVideoAgentQuotaId = supervisorRuntime.state.videoAgentQuota?.quotaInterruptId ?? null;
+  useEffect(() => {
+    setVideoAgentQuotaSubmitting(false);
+    setVideoAgentQuotaError(null);
+  }, [currentConversationId, visibleVideoAgentQuotaId]);
+  const handleVideoAgentQuota = (submission: AgentQuotaSubmission) => {
+    if (
+      videoAgentQuotaSubmitting
+      || submission.quotaInterruptId !== visibleVideoAgentQuotaId
+    ) return;
+    setVideoAgentQuotaSubmitting(true);
+    setVideoAgentQuotaError(null);
+    void supervisorRuntime.respondToVideoAgentQuota(
+      submission.quotaInterruptId,
+      { decision: submission.decision },
+    ).catch(() => {
+      setVideoAgentQuotaError("额度恢复请求未完成，请刷新后重试。");
+    }).finally(() => {
+      setVideoAgentQuotaSubmitting(false);
+    });
+  };
   const restoredSupervisorUi = useMemo(
     () => restoreSupervisorVideoUi(supervisorRuntime.state.interrupt?.payload),
     [supervisorRuntime.state.interrupt?.payload],
@@ -2134,7 +2190,7 @@ export function WorkspacePage() {
   );
   const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
     if (
-      orchestrationMode !== "supervisor_v1"
+      orchestrationMode !== "video_agent_v2"
       || !restoredSupervisorUi
       || supervisorRuntime.state.conversationId !== currentConversationId
     ) return null;
@@ -2325,7 +2381,7 @@ export function WorkspacePage() {
     }));
     messagesRef.current = projectedMessages;
     setMessages(projectedMessages);
-    if (orchestrationModeRef.current === "supervisor_v1") {
+    if (orchestrationModeRef.current === "video_agent_v2") {
       const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
       workflowProgressConversationIdRef.current = currentConversationId;
       workflowProgressRef.current = nextProgress;
@@ -7287,10 +7343,10 @@ export function WorkspacePage() {
   // 类似从数据库恢复一条待执行的 Service Command，绝不重新注册或重复计费。
   useEffect(() => {
     if (
-      orchestrationModeRef.current === "supervisor_v1"
+      orchestrationModeRef.current === "video_agent_v2"
       && !primaryExecutionReadyRef.current
     ) return;
-    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+    const runtimeAttached = orchestrationModeRef.current === "video_agent_v2"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow"
       || agentRuntimeModeRef.current === "primary";
@@ -7655,7 +7711,7 @@ export function WorkspacePage() {
     contextVersion: number,
   ): Promise<RegisteredSupervisorTurn | null> => {
     const targetConversationId = pendingTurn.conversationId;
-    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+    const runtimeAttached = orchestrationModeRef.current === "video_agent_v2"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow"
       || agentRuntimeModeRef.current === "primary";
@@ -7671,13 +7727,13 @@ export function WorkspacePage() {
         materials: pendingTurn.materials as JsonObject[],
         replyToMessageId: pendingTurn.replyToMessageId,
         artifactRefs: pendingTurn.artifactRefs,
-        interruptId: orchestrationModeRef.current === "supervisor_v1"
+        interruptId: orchestrationModeRef.current === "video_agent_v2"
           ? pendingTurn.interruptId
           : null,
         explicitAction: pendingTurn.explicitAction,
       }, expectedContextVersion);
       if (submission.kind === "interrupt") {
-        if (orchestrationModeRef.current !== "supervisor_v1") return null;
+        if (orchestrationModeRef.current !== "video_agent_v2") return null;
         await supervisorRuntime.respondToInterrupt(submission.interruptId, submission.request);
         // interrupt 成功后先原子移除恢复上下文；若写回失败，保留相同
         // client_response_id 供幂等重试，不创建额外 Turn。
@@ -7695,7 +7751,7 @@ export function WorkspacePage() {
         await supervisorRuntime.startTurn(request),
       );
       setResolvedOrchestrationMode(started.orchestrationMode);
-      primaryExecutionReadyRef.current = started.orchestrationMode === "supervisor_v1";
+      primaryExecutionReadyRef.current = started.orchestrationMode === "video_agent_v2";
       if (started.routeIntent === "unknown") {
         await appendPersistedSupervisorNotice(
           "我还不能确定你要创建视频、图片、PPT，还是分析参考视频。请补充说明目标。",
@@ -7726,7 +7782,7 @@ export function WorkspacePage() {
     const targetConversationId = currentConversationId;
     const interruptId = supervisorRuntime.state.interrupt?.interruptId ?? null;
     if (
-      orchestrationModeRef.current !== "supervisor_v1"
+      orchestrationModeRef.current !== "video_agent_v2"
       || !targetConversationId
       || !interruptId
       || !content.trim()
@@ -7768,7 +7824,7 @@ export function WorkspacePage() {
         (serverItem) => serverItem.clientInputId === item.clientInputId,
       ))
       || candidateTurns[0];
-    const runtimeAttached = orchestrationModeRef.current === "supervisor_v1"
+    const runtimeAttached = orchestrationModeRef.current === "video_agent_v2"
       || agentRuntimeModeRef.current === "assist"
       || agentRuntimeModeRef.current === "shadow"
       || agentRuntimeModeRef.current === "primary";
@@ -7992,12 +8048,12 @@ export function WorkspacePage() {
     try {
       const ownership = await ensureConversation(text);
       activeConversation = ownership.conversationId;
-      const shouldRegisterRuntime = ownership.orchestrationMode === "supervisor_v1"
+      const shouldRegisterRuntime = ownership.orchestrationMode === "video_agent_v2"
         || ownership.agentRuntimeMode === "assist"
         || ownership.agentRuntimeMode === "shadow"
         || ownership.agentRuntimeMode === "primary";
       if (shouldRegisterRuntime && !runtimeOptions.skipRuntimeRegistration) {
-        const restoredInterruptId = ownership.orchestrationMode === "supervisor_v1"
+        const restoredInterruptId = ownership.orchestrationMode === "video_agent_v2"
           && supervisorRuntime.state.conversationId === activeConversation
           ? supervisorRuntime.state.interrupt?.interruptId ?? null
           : null;
@@ -8008,7 +8064,7 @@ export function WorkspacePage() {
           materials,
           replyToMessageId,
           artifactRefs,
-          interruptId: ownership.orchestrationMode === "supervisor_v1"
+          interruptId: ownership.orchestrationMode === "video_agent_v2"
             ? interruptId ?? restoredInterruptId
             : null,
           explicitAction: null,
@@ -10587,8 +10643,25 @@ export function WorkspacePage() {
               title={supervisorRuntime.state.videoAgentConfirmation.title}
               costSummary={supervisorRuntime.state.videoAgentConfirmation.costSummary}
               affectedSceneIds={supervisorRuntime.state.videoAgentConfirmation.affectedSceneIds}
+              submitting={videoAgentConfirmationSubmitting}
               actionAvailable={supervisorRuntime.state.videoAgentConfirmation.submittable}
               unavailableReason={supervisorRuntime.state.videoAgentConfirmation.unavailableReason}
+              submissionError={videoAgentConfirmationError}
+              onSubmit={handleVideoAgentConfirmation}
+            />
+          </div>
+        </div>
+      ) : null}
+      {supervisorRuntime.state.videoAgentQuota ? (
+        <div className="border-b border-slate-200 bg-white px-4 py-3">
+          <div className="mx-auto max-w-6xl">
+            <AgentQuotaCard
+              quotaInterruptId={supervisorRuntime.state.videoAgentQuota.quotaInterruptId}
+              submitting={videoAgentQuotaSubmitting}
+              actionAvailable={supervisorRuntime.state.videoAgentQuota.submittable}
+              unavailableReason={supervisorRuntime.state.videoAgentQuota.unavailableReason}
+              submissionError={videoAgentQuotaError}
+              onSubmit={handleVideoAgentQuota}
             />
           </div>
         </div>

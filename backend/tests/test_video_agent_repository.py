@@ -87,6 +87,134 @@ def pending_step() -> AgentPlanStep:
     )
 
 
+def confirmation_step() -> AgentPlanStep:
+    return AgentPlanStep(
+        step_id="step-confirmation",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成镜头",
+        status=PlanStepStatus.PENDING,
+        confirmation_required=True,
+    )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_confirmation_atomically_skips_step_and_plan(
+    kind: RepositoryKind,
+) -> None:
+    """取消确认后Memory与SQL都不能留下可再次提交的等待步骤。"""
+
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", plan(), [confirmation_step()])
+        await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.RUNNING,
+            now=T0,
+        )
+        await store.request_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+        )
+        await store.update_plan_status(
+            "user-a",
+            "plan-1",
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            now=T0,
+        )
+
+        cancelled = await store.cancel_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+            now=T3,
+        )
+        replayed = await store.cancel_step_confirmation(
+            "user-a",
+            "plan-1",
+            "step-confirmation",
+            now=T3,
+        )
+
+        assert cancelled.status is AgentPlanStatus.CANCELLED
+        assert cancelled.steps[0].status is PlanStepStatus.SKIPPED
+        assert cancelled.steps[0].public_summary == "用户已取消执行"
+        assert cancelled.steps[0].duration_ms == 0
+        assert replayed == cancelled
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_quota_atomically_skips_step_plan_and_workspace_card(
+    kind: RepositoryKind,
+) -> None:
+    """额度取消必须同步更新Plan与右侧Workspace快照，并支持幂等重放。"""
+
+    quota_workspace = workspace().model_copy(
+        update={
+            "payload": {
+                "quota_interrupt": {
+                    "quota_interrupt_id": "quota-1",
+                    "plan_id": "plan-1",
+                    "step_id": "step-quota",
+                    "job_id": "job-1",
+                    "quota_pause_revision": 2,
+                }
+            }
+        }
+    )
+    running_plan = plan().model_copy(update={"status": AgentPlanStatus.RUNNING})
+    running_step = AgentPlanStep(
+        step_id="step-quota",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成镜头",
+        status=PlanStepStatus.RUNNING,
+        started_at=T0,
+    )
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", quota_workspace)
+        await store.save_plan("user-a", running_plan, [running_step])
+
+        cancelled = await store.cancel_quota_interrupted_plan(
+            "user-a",
+            "plan-1",
+            "step-quota",
+            quota_interrupt_id="quota-1",
+            job_id="job-1",
+            quota_pause_revision=2,
+            now=T3,
+        )
+        replayed = await store.cancel_quota_interrupted_plan(
+            "user-a",
+            "plan-1",
+            "step-quota",
+            quota_interrupt_id="quota-1",
+            job_id="job-1",
+            quota_pause_revision=2,
+            now=T3,
+        )
+        restored_workspace = await store.get_workspace(
+            "user-a",
+            "workspace-1",
+        )
+
+        assert cancelled.status is AgentPlanStatus.CANCELLED
+        assert cancelled.steps[0].status is PlanStepStatus.SKIPPED
+        assert replayed == cancelled
+        assert restored_workspace is not None
+        assert restored_workspace.payload["quota_interrupt"] is None
+        assert (
+            restored_workspace.payload["last_quota_resolution"]["state"]
+            == "cancelled"
+        )
+
+
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
 async def test_complete_step_persists_duration_and_owner_isolation(kind: RepositoryKind) -> None:

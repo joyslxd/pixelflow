@@ -14,6 +14,7 @@ import type { SupervisorRuntimeProjection } from "./reducer.js";
 import {
   projectVideoAgentConfirmationSnapshot,
   projectVideoAgentPlanSnapshot,
+  projectVideoAgentQuotaSnapshot,
 } from "../../features/video-agent/state/reducer.js";
 import {
   applyVideoWorkspaceSnapshot,
@@ -414,6 +415,7 @@ export function projectSupervisorSnapshot(
   let projectedVideoAgentWorkspace = videoAgentWorkspace;
   let videoAgentPlan = null;
   let videoAgentConfirmation = null;
+  let videoAgentQuota = null;
   if (value.videoAgent !== null && value.videoAgent !== undefined) {
     if (!isRecord(value.videoAgent)) return fail();
     projectedVideoAgentWorkspace = applyVideoWorkspaceSnapshot(
@@ -427,6 +429,7 @@ export function projectSupervisorSnapshot(
     videoAgentConfirmation = projectVideoAgentConfirmationSnapshot(
       value.videoAgent.confirmation,
     );
+    videoAgentQuota = projectVideoAgentQuotaSnapshot(value.videoAgent.quota);
     if (
       videoAgentPlan
       && videoAgentPlan.workspaceId !== projectedVideoAgentWorkspace.current?.workspaceId
@@ -448,6 +451,14 @@ export function projectSupervisorSnapshot(
         )
       )
     ) return fail();
+    if (
+      videoAgentQuota
+      && (
+        !videoAgentPlan
+        || videoAgentQuota.planId !== videoAgentPlan.planId
+        || videoAgentPlan.steps[videoAgentQuota.stepId]?.status !== "running"
+      )
+    ) return fail();
   }
   return {
     conversationId,
@@ -458,6 +469,7 @@ export function projectSupervisorSnapshot(
     videoAgentWorkspace: projectedVideoAgentWorkspace,
     videoAgentPlan,
     videoAgentConfirmation,
+    videoAgentQuota,
     ...workspace,
   };
 }

@@ -126,7 +126,7 @@ def test_contract_enums_match_the_frozen_wire_values() -> None:
     )
     assert {item.value for item in OrchestrationMode} == {
         "frontend_v2",
-        "supervisor_v1",
+        "video_agent_v2",
     }
     assert {item.value for item in AgentAction} == {
         "answer_only",
@@ -206,7 +206,7 @@ def test_contracts_reject_unknown_fields_and_invalid_clarification() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         ConversationOrchestration.model_validate(
             {
-                "orchestration_mode": "supervisor_v1",
+                "orchestration_mode": "video_agent_v2",
                 "orchestration_version": 1,
                 "owner": "frontend",
             }

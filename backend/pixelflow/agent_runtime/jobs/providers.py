@@ -373,19 +373,22 @@ def _map_response(
     payload = _response_payload(response)
     if "ok" in payload and type(payload["ok"]) is not bool:
         raise ProviderJobMappingError("provider_ok_invalid")
-    provider_job_id = _response_job_id(
-        payload,
-        expected_job_id=expected_job_id,
-    )
     provider_status = _normalize_status(payload.get("status"))
 
     if _is_quota_response(payload, provider_status):
         return _snapshot(
-            provider_job_id=provider_job_id,
+            provider_job_id=_optional_response_job_id(
+                payload,
+                expected_job_id=expected_job_id,
+            ),
             outcome=ProviderJobOutcome.PAUSED_QUOTA,
             reason_code="provider_quota_insufficient",
             message="额度不足，当前任务已暂停，可在充值后继续。",
         )
+    provider_job_id = _response_job_id(
+        payload,
+        expected_job_id=expected_job_id,
+    )
     if provider_status in _TIMEOUT_STATUSES:
         return _snapshot(
             provider_job_id=provider_job_id,
@@ -457,6 +460,20 @@ def _response_job_id(
     if expected_job_id is not None and provider_job_id != expected_job_id:
         raise ProviderJobMappingError("provider_job_id_mismatch")
     return provider_job_id
+
+
+def _optional_response_job_id(
+    payload: Mapping[str, object],
+    *,
+    expected_job_id: str | None,
+) -> str | None:
+    """start 402可在供应商创建任务前发生，此时允许缺少provider job ID。"""
+
+    if payload.get("job_id") is None and payload.get("provider_job_id") is None:
+        if expected_job_id is not None:
+            raise ProviderJobMappingError("provider_job_id_missing")
+        return None
+    return _response_job_id(payload, expected_job_id=expected_job_id)
 
 
 def _normalize_status(value: object) -> str:

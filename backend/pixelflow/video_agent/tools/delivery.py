@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, m
 
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
+from pixelflow.video_agent.quota import build_start_quota_interrupt_id
 
 from .registry import (
     VideoToolContext,
@@ -35,19 +36,18 @@ class DeliveryOperationJob(VideoAgentContract):
 
     job_id: str = Field(min_length=1, max_length=64)
     output_type: DeliveryOutputType
-    status: Literal["polling", "succeeded"]
+    status: Literal["polling", "start_paused_quota", "succeeded"]
     artifact_ref: str | None = Field(
         default=None,
         pattern=r"^artifact:[A-Za-z0-9._:-]+$",
         max_length=256,
     )
-
     @model_validator(mode="after")
     def validate_artifact(self) -> DeliveryOperationJob:
         if self.status == "succeeded" and self.artifact_ref is None:
             raise ValueError("已完成交付Operation必须包含产物引用")
-        if self.status == "polling" and self.artifact_ref is not None:
-            raise ValueError("运行中的交付Operation不能提前包含产物引用")
+        if self.status in {"polling", "start_paused_quota"} and self.artifact_ref is not None:
+            raise ValueError("运行中的交付Operation不能提前包含产物")
         return self
 
 
@@ -108,6 +108,7 @@ class ComposeOrExportVideoTool:
         deliveries = _records(context.workspace.payload.get("deliveries"))
         delivery_record: dict[str, JsonValue] = {
             "job_id": job.job_id,
+            "plan_step_id": context.step_id,
             "output_type": job.output_type,
             "status": job.status,
             "artifact_ref": job.artifact_ref,
@@ -116,11 +117,29 @@ class ComposeOrExportVideoTool:
             item for item in deliveries if item.get("output_type") != job.output_type
         ]
         next_deliveries.append(delivery_record)
-        if job.status == "polling":
+        if job.status in {"polling", "start_paused_quota"}:
             return VideoToolResult(
                 tool_name=self.spec.name,
                 public_summary="视频交付任务已启动",
-                workspace_patch={"deliveries": next_deliveries},
+                workspace_patch={
+                    "deliveries": next_deliveries,
+                    **(
+                        {
+                            "quota_interrupt": {
+                                "quota_interrupt_id": build_start_quota_interrupt_id(job.job_id),
+                                "plan_id": context.plan_id,
+                                "step_id": context.step_id,
+                                "job_id": job.job_id,
+                                "quota_pause_revision": 0,
+                                "phase": "start",
+                                "state": "paused",
+                                "reason_code": "provider_quota_insufficient",
+                            }
+                        }
+                        if job.status == "start_paused_quota"
+                        else {"quota_interrupt": None}
+                    ),
+                },
                 pending_operation_job_ids=(job.job_id,),
                 requires_confirmation=True,
             )
@@ -133,6 +152,7 @@ class ComposeOrExportVideoTool:
                 "output_type": job.output_type,
                 "artifact_ref": job.artifact_ref,
                 "source_job_id": job.job_id,
+                "plan_step_id": context.step_id,
             }
         )
         return VideoToolResult(
@@ -203,12 +223,16 @@ def _validated_delivery_scenes(
         selected.append(
             {
                 "scene_id": scene_id,
-                "scene_index": scene_index,
+                "_scene_index": scene_index,
                 "variant_id": approved_variant_id,
                 "artifact_ref": str(artifact_ref),
             }
         )
-    return sorted(selected, key=lambda item: int(item["scene_index"]))
+    ordered = sorted(selected, key=lambda item: int(item["_scene_index"]))
+    return [
+        {key: value for key, value in item.items() if key != "_scene_index"}
+        for item in ordered
+    ]
 
 
 def _records(value: object) -> list[dict[str, JsonValue]]:

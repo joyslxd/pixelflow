@@ -47,7 +47,7 @@ function makeWindow() {
   };
 }
 
-test("四类 Supervisor 请求使用 /agent 路径、编码标识并透传请求体", async () => {
+test("六类 Supervisor 请求使用 /agent 路径、编码标识并透传请求体", async () => {
   const calls = [];
   const signal = new AbortController().signal;
   const transport = createSupervisorApiTransport({
@@ -69,19 +69,37 @@ test("四类 Supervisor 请求使用 /agent 路径、编码标识并透传请求
     client_response_id: "response-001",
     value: { action: "approve" },
   };
+  const confirmationResponse = {
+    step_id: "step/001",
+    decision: "confirm",
+  };
 
   await transport.getSnapshot("conv/001", { signal });
   await transport.startTurn("conv/001", turn, { signal });
   await transport.respondToInterrupt("conv/001", "interrupt/001", interruptResponse, { signal });
+  await transport.respondToVideoAgentConfirmation(
+    "conv/001",
+    "confirmation/001",
+    confirmationResponse,
+    { signal },
+  );
+  await transport.respondToVideoAgentQuota(
+    "conv/001",
+    "quota/001",
+    { decision: "resume" },
+    { signal },
+  );
   await transport.getRunStatus("conv/001", "run/001", { signal });
 
   assert.deepEqual(calls.map(call => call.url), [
     "/agent/conversations/conv%2F001/agent-snapshot",
     "/agent/conversations/conv%2F001/turns/start",
     "/agent/conversations/conv%2F001/interrupts/interrupt%2F001/responses",
+    "/agent/conversations/conv%2F001/video-agent/confirmations/confirmation%2F001/responses",
+    "/agent/conversations/conv%2F001/video-agent/quota/quota%2F001/responses",
     "/agent/conversations/conv%2F001/turns/jobs/run%2F001",
   ]);
-  assert.deepEqual(calls.map(call => call.init.method), ["GET", "POST", "POST", "GET"]);
+  assert.deepEqual(calls.map(call => call.init.method), ["GET", "POST", "POST", "POST", "POST", "GET"]);
   for (const call of calls) {
     assert.equal(call.init.headers.Authorization, "Bearer transport-token");
     assert.equal(call.init.signal, signal);
@@ -90,6 +108,8 @@ test("四类 Supervisor 请求使用 /agent 路径、编码标识并透传请求
   assert.equal(calls[1].init.headers["Content-Type"], "application/json");
   assert.deepEqual(JSON.parse(calls[1].init.body), turn);
   assert.deepEqual(JSON.parse(calls[2].init.body), interruptResponse);
+  assert.deepEqual(JSON.parse(calls[3].init.body), confirmationResponse);
+  assert.deepEqual(JSON.parse(calls[4].init.body), { decision: "resume" });
 });
 
 test("请求开始前已取消时不读取鉴权也不发送网络请求", async () => {

@@ -12,7 +12,10 @@ from pydantic import ConfigDict, SerializationInfo, field_serializer
 
 from ..contracts import AgentEvent, ExternalJobStatus
 from ..contracts.base import ContractModel
-from ..graph import GraphExecutionNamespace, workflow_namespace
+from ..operation_namespace import (
+    OperationExecutionNamespace,
+    workflow_operation_namespace,
+)
 from ..persistence.repositories import (
     AgentRuntimeRecordConflictError,
     AgentRuntimeRepository,
@@ -129,8 +132,10 @@ class WorkflowGraphResumePort(Protocol):
 
     async def resume_external_job(
         self,
-        namespace: GraphExecutionNamespace,
+        namespace: OperationExecutionNamespace,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
@@ -388,7 +393,7 @@ class OperationCompletionDispatcher:
         )
         if operation is None or operation.conversation_id != self._conversation_id or claim.event.payload.get("workflow_id") != operation.workflow_id:
             raise OperationCompletionConflictError("完成事件与 Operation 身份不一致")
-        namespace = workflow_namespace(
+        namespace = workflow_operation_namespace(
             self._conversation_id,
             operation.workflow_id,
         )
@@ -396,6 +401,8 @@ class OperationCompletionDispatcher:
             completion_event = _freeze_event(claim.event)
             await self._resumer.resume_external_job(
                 namespace,
+                user_id=self._user_id,
+                conversation_id=self._conversation_id,
                 completion_event=completion_event,
                 idempotency_key=claim.event.event_id,
             )

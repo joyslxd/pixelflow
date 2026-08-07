@@ -3,6 +3,7 @@ import type {
   VideoAgentPlanState,
   VideoAgentPlanStatus,
   VideoAgentPublicEvent,
+  VideoAgentQuotaState,
   VideoAgentStepState,
   VideoAgentStepStatus,
   VideoAgentTimelineState,
@@ -14,6 +15,10 @@ function asText(value: unknown): string | null {
 
 function asPositiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function asNonnegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function asDuration(value: unknown): number | null {
@@ -186,6 +191,64 @@ export function cloneVideoAgentConfirmationState(
     affected_scene_ids: confirmation.affectedSceneIds,
     submittable: confirmation.submittable,
     unavailable_reason: confirmation.unavailableReason,
+  });
+}
+
+export function projectVideoAgentQuotaSnapshot(
+  value: unknown,
+): VideoAgentQuotaState | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("VideoAgent额度快照不合法");
+  }
+  const record = value as Record<string, unknown>;
+  const quotaInterruptId = asText(record.quota_interrupt_id);
+  const planId = asText(record.plan_id);
+  const stepId = asText(record.step_id);
+  const quotaPauseRevision = asNonnegativeInteger(record.quota_pause_revision);
+  const phase = record.phase;
+  if (
+    !quotaInterruptId
+    || !planId
+    || !stepId
+    || quotaPauseRevision === null
+    || (phase !== "start" && phase !== "status")
+    || record.reason_code !== "provider_quota_insufficient"
+    || typeof record.submittable !== "boolean"
+  ) throw new TypeError("VideoAgent额度快照不合法");
+  const unavailableReason = asText(record.unavailable_reason);
+  if (!record.submittable && !unavailableReason) {
+    throw new TypeError("VideoAgent不可提交额度卡必须说明原因");
+  }
+  return {
+    quotaInterruptId,
+    planId,
+    stepId,
+    quotaPauseRevision,
+    phase,
+    reasonCode: "provider_quota_insufficient",
+    submittable: record.submittable,
+    unavailableReason,
+  };
+}
+
+export function cloneVideoAgentQuotaState(
+  value: unknown,
+): VideoAgentQuotaState | null {
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("VideoAgent额度投影不合法");
+  }
+  const quota = value as Partial<VideoAgentQuotaState>;
+  return projectVideoAgentQuotaSnapshot({
+    quota_interrupt_id: quota.quotaInterruptId,
+    plan_id: quota.planId,
+    step_id: quota.stepId,
+    quota_pause_revision: quota.quotaPauseRevision,
+    phase: quota.phase,
+    reason_code: quota.reasonCode,
+    submittable: quota.submittable,
+    unavailable_reason: quota.unavailableReason,
   });
 }
 

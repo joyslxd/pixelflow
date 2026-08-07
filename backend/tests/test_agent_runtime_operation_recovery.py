@@ -217,14 +217,18 @@ class _RecordingGraphResumer:
 
     def __init__(self) -> None:
         self.calls: list[tuple[object, AgentEvent, str]] = []
+        self.owners: list[tuple[str, str]] = []
 
     async def resume_external_job(
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        self.owners.append((user_id, conversation_id))
         self.calls.append((namespace, completion_event, idempotency_key))
 
 
@@ -239,9 +243,12 @@ class _RecordingQuotaGraph:
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         quota_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        del user_id, conversation_id
         self.calls.append((namespace, quota_event, idempotency_key))
         if self._fail_first:
             self._fail_first = False
@@ -932,9 +939,12 @@ class _FailOnceGraphResumer(_RecordingGraphResumer):
         self,
         namespace: object,
         *,
+        user_id: str,
+        conversation_id: str,
         completion_event: AgentEvent,
         idempotency_key: str,
     ) -> None:
+        self.owners.append((user_id, conversation_id))
         self.calls.append((namespace, completion_event, idempotency_key))
         if len(self.calls) == 1:
             raise RuntimeError("不得让单个 Graph 失败终止后台循环")
