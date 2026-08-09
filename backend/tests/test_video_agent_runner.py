@@ -18,28 +18,24 @@ from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
 from pixelflow.video_agent.tools import (
-    BrainstormScriptTool,
     InspectVideoWorkspaceTool,
+    RunScriptSkillStageTool,
     VideoToolRegistry,
 )
 from pixelflow.video_agent.workspace import MemoryVideoAgentRepository
 
 
-class _StubVideoDomainAdapter:
-    async def brainstorm_script(self, **kwargs):
-        return (
-            "# 带货脚本\n"
-            "时长：15秒\n"
-            "画幅：9:16\n"
-            "结尾请下单购买\n"
-        )
-
-    async def analyze_reference_video(self, video_url: str):
-        raise AssertionError("unexpected reference analysis")
-
-
 @pytest.mark.asyncio
-async def test_runner_executes_persisted_plan_and_discards_credential() -> None:
+async def test_runner_executes_persisted_plan_and_discards_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_generate(*, stage, user_story, prior):  # noqa: ANN001, ARG001
+        return f"# {stage}\n\n基于用户输入生成：{user_story[:40]}\n时长：15秒\n画幅：9:16\n结尾请下单购买\n"
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.tools.script_skill_pipeline._generate_stage_markdown",
+        fake_generate,
+    )
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository(
         event_repository=runtime_repository,
@@ -60,12 +56,7 @@ async def test_runner_executes_persisted_plan_and_discards_credential() -> None:
         repository=video_repository,
         executor=VideoAgentExecutor(
             repository=video_repository,
-            registry=VideoToolRegistry(
-                [
-                    InspectVideoWorkspaceTool(),
-                    BrainstormScriptTool(adapter=_StubVideoDomainAdapter()),
-                ]
-            ),
+            registry=VideoToolRegistry([RunScriptSkillStageTool()]),
             clock=lambda: now,
         ),
     )
@@ -84,11 +75,10 @@ async def test_runner_executes_persisted_plan_and_discards_credential() -> None:
     restored = await video_repository.get_plan("user-1", submission.plan.plan_id)
     assert restored is not None
     assert restored.status.value == "completed"
-    assert [step.tool_name for step in restored.steps] == [
-        "inspect_video_workspace",
-        "brainstorm_script",
-    ]
+    assert [step.tool_name for step in restored.steps] == ["run_script_skill_stage"] * 8
     assert all(step.status.value == "completed" for step in restored.steps)
+    events = await runtime_repository.list_events("user-1", "conversation-1")
+    assert any(event.type.value == "agent.step.progressed" for event in events)
     with pytest.raises(VideoAgentCredentialUnavailableError):
         credential.borrow_authorization()
 

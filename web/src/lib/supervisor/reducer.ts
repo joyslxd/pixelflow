@@ -109,6 +109,9 @@ export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjecti
   resume: SupervisorResumePoint;
   videoAgentWorkspace: VideoWorkspaceProjectionState;
   videoAgentPlan: VideoAgentPlanState | null;
+  /** Snapshot / 事件恢复出的会话内全部执行方案（服务端持久化）。 */
+  videoAgentPlans: Record<string, VideoAgentPlanState>;
+  videoAgentPlanOrder: string[];
   videoAgentConfirmation: VideoAgentConfirmationState | null;
   videoAgentQuota: VideoAgentQuotaState | null;
 }
@@ -494,10 +497,12 @@ function applyAgentEvent(
         && event.payload.quota_pause_revision > 0
         ? event.payload.quota_pause_revision
         : null;
-      const runningSteps = state.videoAgentPlan?.planId === planId
-        ? Object.values(state.videoAgentPlan.steps).filter(
-          (step) => step.status === "running",
-        )
+      const quotaPlan = planId
+        ? state.videoAgentPlans[planId]
+          ?? (state.videoAgentPlan?.planId === planId ? state.videoAgentPlan : null)
+        : null;
+      const runningSteps = quotaPlan
+        ? Object.values(quotaPlan.steps).filter((step) => step.status === "running")
         : [];
       const runningStep = runningSteps.length === 1 ? runningSteps[0] : undefined;
       if (quotaState === "resumed") {
@@ -537,18 +542,27 @@ function applyAgentEvent(
     case "agent.confirmation.requested": {
       const timeline = reduceVideoAgentEvent(
         {
-          plans: state.videoAgentPlan
-            ? { [state.videoAgentPlan.planId]: state.videoAgentPlan }
-            : {},
+          plans: { ...state.videoAgentPlans },
         },
         event,
       );
       const eventPlanId = typeof event.payload.plan_id === "string"
         ? event.payload.plan_id
         : null;
+      const nextOrder = event.type === "agent.plan.created" && eventPlanId
+        && !state.videoAgentPlanOrder.includes(eventPlanId)
+        ? [...state.videoAgentPlanOrder, eventPlanId]
+        : state.videoAgentPlanOrder;
+      const nextCurrent = event.type === "agent.plan.created" && eventPlanId
+        ? timeline.plans[eventPlanId] ?? state.videoAgentPlan
+        : state.videoAgentPlan?.planId
+          ? timeline.plans[state.videoAgentPlan.planId] ?? state.videoAgentPlan
+          : state.videoAgentPlan;
       return {
         ...withEventResumePoint(state, event),
-        videoAgentPlan: eventPlanId ? timeline.plans[eventPlanId] ?? state.videoAgentPlan : state.videoAgentPlan,
+        videoAgentPlans: timeline.plans,
+        videoAgentPlanOrder: nextOrder,
+        videoAgentPlan: nextCurrent,
         videoAgentConfirmation: (
           event.type === "agent.step.started"
           || event.type === "agent.step.completed"
@@ -683,6 +697,8 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
   let videoAgentPlan: VideoAgentPlanState | null;
   let videoAgentConfirmation: VideoAgentConfirmationState | null;
   let videoAgentQuota: VideoAgentQuotaState | null;
+  let videoAgentPlans: Record<string, VideoAgentPlanState>;
+  let videoAgentPlanOrder: string[];
   try {
     videoAgentWorkspace = projection.videoAgentWorkspace === undefined
       ? createVideoWorkspaceProjectionState(projection.conversationId)
@@ -699,6 +715,22 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     videoAgentQuota = projection.videoAgentQuota === undefined
       ? null
       : cloneVideoAgentQuotaState(projection.videoAgentQuota);
+    videoAgentPlans = {};
+    videoAgentPlanOrder = [];
+    if (projection.videoAgentPlans && typeof projection.videoAgentPlans === "object") {
+      for (const [planId, plan] of Object.entries(projection.videoAgentPlans)) {
+        const clonedPlan = cloneVideoAgentPlanState(plan);
+        if (clonedPlan) videoAgentPlans[planId] = clonedPlan;
+      }
+    }
+    if (Array.isArray(projection.videoAgentPlanOrder)) {
+      videoAgentPlanOrder = projection.videoAgentPlanOrder.filter(
+        (planId): planId is string => typeof planId === "string" && Boolean(videoAgentPlans[planId]),
+      );
+    }
+    for (const planId of Object.keys(videoAgentPlans)) {
+      if (!videoAgentPlanOrder.includes(planId)) videoAgentPlanOrder.push(planId);
+    }
   } catch {
     return null;
   }
@@ -710,6 +742,8 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     resume: { ...projection.resume },
     videoAgentWorkspace,
     videoAgentPlan,
+    videoAgentPlans,
+    videoAgentPlanOrder,
     videoAgentConfirmation,
     videoAgentQuota,
     ...workspace,
@@ -743,6 +777,8 @@ export function createSupervisorRuntimeState(conversationId: string): Supervisor
     interrupt: null,
     videoAgentWorkspace: createVideoWorkspaceProjectionState(conversationId),
     videoAgentPlan: null,
+    videoAgentPlans: {},
+    videoAgentPlanOrder: [],
     videoAgentConfirmation: null,
     videoAgentQuota: null,
     resume: {
@@ -827,18 +863,66 @@ export function supervisorRuntimeReducer(
         : state.videoAgentWorkspace.current
           ? state.videoAgentWorkspace
           : projection.videoAgentWorkspace;
+      const sameWorkspacePlan = state.videoAgentPlan
+        && incomingWorkspace
+        && state.videoAgentPlan.workspaceId === incomingWorkspace.workspaceId
+        ? state.videoAgentPlan
+        : null;
+      const preferRicherPlan = (
+        local: typeof state.videoAgentPlan,
+        incoming: typeof projection.videoAgentPlan,
+      ) => {
+        if (!local) return incoming;
+        if (!incoming) return local;
+        if (local.planId !== incoming.planId) return incoming;
+        const localSteps = Object.keys(local.steps).length;
+        const incomingSteps = Object.keys(incoming.steps).length;
+        return localSteps > incomingSteps ? local : incoming;
+      };
+      const resolvedPlan = preferRicherPlan(
+        sameWorkspacePlan,
+        projection.videoAgentPlan
+          ?? (incomingWorkspace === null && state.videoAgentWorkspace.current
+            ? state.videoAgentPlan
+            : null),
+      ) ?? sameWorkspacePlan;
+      const nextPlans = { ...state.videoAgentPlans };
+      // Snapshot 带回的历史 plans 是服务端权威；本地仅补齐步骤更丰富的同 id 版本。
+      for (const [planId, incomingPlan] of Object.entries(projection.videoAgentPlans || {})) {
+        nextPlans[planId] = preferRicherPlan(nextPlans[planId] ?? null, incomingPlan) ?? incomingPlan;
+      }
+      for (const plan of Object.values(state.videoAgentPlans)) {
+        const incomingSame = resolvedPlan?.planId === plan.planId ? resolvedPlan : null;
+        nextPlans[plan.planId] = preferRicherPlan(plan, incomingSame) ?? plan;
+      }
+      if (resolvedPlan) {
+        nextPlans[resolvedPlan.planId] = preferRicherPlan(
+          nextPlans[resolvedPlan.planId] ?? null,
+          resolvedPlan,
+        ) ?? resolvedPlan;
+      }
+      const nextOrder = [
+        ...(projection.videoAgentPlanOrder?.length
+          ? projection.videoAgentPlanOrder
+          : state.videoAgentPlanOrder),
+      ];
+      for (const planId of Object.keys(nextPlans)) {
+        if (!nextOrder.includes(planId)) nextOrder.push(planId);
+      }
       return {
         ...projection,
         videoAgentWorkspace,
-        videoAgentPlan: incomingWorkspace === null && state.videoAgentWorkspace.current
-          ? state.videoAgentPlan
-          : projection.videoAgentPlan,
-        videoAgentConfirmation: incomingWorkspace === null && state.videoAgentWorkspace.current
-          ? state.videoAgentConfirmation
-          : projection.videoAgentConfirmation,
-        videoAgentQuota: incomingWorkspace === null && state.videoAgentWorkspace.current
-          ? state.videoAgentQuota
-          : projection.videoAgentQuota,
+        videoAgentPlan: resolvedPlan,
+        videoAgentPlans: nextPlans,
+        videoAgentPlanOrder: nextOrder,
+        videoAgentConfirmation: projection.videoAgentConfirmation
+          ?? (incomingWorkspace === null && state.videoAgentWorkspace.current
+            ? state.videoAgentConfirmation
+            : null),
+        videoAgentQuota: projection.videoAgentQuota
+          ?? (incomingWorkspace === null && state.videoAgentWorkspace.current
+            ? state.videoAgentQuota
+            : null),
         connection: state.connection,
       };
     }

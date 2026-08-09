@@ -426,6 +426,129 @@ def test_video_router_starts_prepare_scene_package_job_and_polls_result(monkeypa
     assert status["result"]["sceneAssetFailures"] == []
 
 
+def test_video_router_prepare_scene_package_job_can_pause_for_image_model(monkeypatch):
+    import time
+
+    from app.gateway.routers import pixelflow_video
+
+    async def fake_prepare_video_scene_packages_with_llm(**_kwargs):
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": 30_000,
+            "global_assets": {
+                "characters": [{"asset_id": "character-presenter", "name": "讲解者", "three_view_prompt": "讲解者角色三视图"}],
+                "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
+            },
+            "scene_packages": [{"scene_id": "scene-1", "scene_index": 1, "duration_ms": 8000, "prompt": "第一幕"}],
+        }
+
+    def fail_if_image_skill_called():
+        raise AssertionError("generate_images=false 时不应启动参考图生成")
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", fail_if_image_skill_called)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/prepare-scene-packages/start",
+            json={
+                "form_values": {"product_info": "耳机"},
+                "plan_markdown": "耳机场景",
+                "selected_direction": {"title": "通勤"},
+                "target_duration_ms": 30_000,
+                "generate_images": False,
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        assert started["ok"] is True
+        assert started["job_id"]
+
+        status = None
+        for _ in range(20):
+            status_response = client.get(f"/agent/flows/video/prepare-scene-packages/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None
+    assert status["status"] == "completed"
+    assert status["stage"] == "awaiting_image_model"
+    assert status["result"]["ok"] is True
+    assert "生图模型" in (status["message"] or status["result"]["message"] or "")
+    packages = status["result"]["videoScenePackages"]
+    assert packages["global_assets"]["characters"][0].get("three_view_images") in (None, [], "")
+    assert status["result"]["sceneAssetFailures"] == []
+
+
+def test_video_router_prepare_scene_package_job_exposes_asset_progress(monkeypatch):
+    import asyncio
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import ImageGenerationResult
+
+    async def fake_prepare_video_scene_packages_with_llm(**_kwargs):
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": 30_000,
+            "global_assets": {
+                "characters": [{"asset_id": "character-presenter", "name": "讲解者", "three_view_prompt": "讲解者角色三视图"}],
+                "props": [{"asset_id": "prop-product", "name": "耳机", "image_prompt": "耳机道具图"}],
+            },
+            "scene_packages": [{"scene_id": "scene-1", "scene_index": 1, "duration_ms": 8000, "prompt": "第一幕"}],
+        }
+
+    class SlowImageSkill:
+        async def text_to_image(self, **_kwargs):
+            await asyncio.sleep(0.05)
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/asset.png"}], raw={})
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+    monkeypatch.setattr(pixelflow_video, "get_image_skill", lambda: SlowImageSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/agent/flows/video/prepare-scene-packages/start",
+            json={
+                "form_values": {"product_info": "耳机"},
+                "plan_markdown": "耳机场景",
+                "selected_direction": {"title": "通勤"},
+                "target_duration_ms": 30_000,
+            },
+        ).json()
+        seen_progress = False
+        status = None
+        for _ in range(80):
+            status = client.get(f"/agent/flows/video/prepare-scene-packages/jobs/{started['job_id']}").json()
+            if status.get("stage") == "generate_scene_assets" and status.get("result", {}).get("videoScenePackages"):
+                assert status["result"]["videoScenePackages"]["ok"] is True
+            if status.get("asset_progress") and status["asset_progress"].get("total", 0) > 0:
+                seen_progress = True
+                assert status["asset_progress"]["completed"] >= 1
+                assert "参考图进度" in status["message"]
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None and status["status"] == "completed"
+    assert seen_progress is True
+
+
 def test_video_router_starts_scene_asset_revision_job_and_polls_result(monkeypatch):
     import time
 

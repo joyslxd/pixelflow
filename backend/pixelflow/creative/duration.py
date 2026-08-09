@@ -9,7 +9,8 @@ MIN_VIDEO_DURATION_SEC = 4
 MAX_VIDEO_DURATION_SEC = 300
 MIN_SCENE_DURATION_SEC = 4
 MAX_SCENE_DURATION_SEC = 15
-PREFERRED_SCENE_DURATION_SEC = 10
+# Seedance 单镜上限 15s；切分时优先填满单镜，减少镜数（旧值 10 会把 60s 切成 6×10）。
+PREFERRED_SCENE_DURATION_SEC = 15
 
 
 def split_video_duration(total_seconds: int, preferred_seconds: int = PREFERRED_SCENE_DURATION_SEC) -> list[int]:

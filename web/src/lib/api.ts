@@ -395,6 +395,11 @@ export interface VideoCreationContract extends Record<string, unknown> {
   video_size: string;
   video_sound: string;
   image_model: string;
+  image_model_capabilities?: {
+    aspect_ratios: string[];
+    sizes: string[];
+  };
+  video_usage?: string;
   scene_image_ratio?: string | null;
   scene_image_size?: string | null;
 }
@@ -595,7 +600,7 @@ export interface PrepareScenePackagesJobStartResponse {
   ok: boolean;
   job_id: string;
   status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
-  stage: "prepare_scene_packages" | "generate_scene_assets" | "completed" | string;
+  stage: "prepare_scene_packages" | "generate_scene_assets" | "awaiting_image_model" | "completed" | string;
   message: string;
 }
 
@@ -603,8 +608,17 @@ export interface PrepareScenePackagesJobStatusResponse {
   ok: boolean;
   job_id: string;
   status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
-  stage: "prepare_scene_packages" | "generate_scene_assets" | "completed" | string;
+  stage: "prepare_scene_packages" | "generate_scene_assets" | "awaiting_image_model" | "completed" | string;
   result: PrepareScenePackagesJobResult | null;
+  asset_progress?: {
+    completed: number;
+    total: number;
+    asset_id?: string;
+    asset_name?: string;
+    asset_type?: string;
+    ok?: boolean;
+    quota_insufficient?: boolean;
+  } | null;
   error: string | null;
   message: string;
 }
@@ -625,6 +639,15 @@ export interface GenerateSceneAssetsJobStatusResponse {
   status: "queued" | "running" | "completed" | "failed" | "quota_paused" | string;
   stage: "generate_scene_assets" | "completed" | string;
   result: GenerateSceneAssetsResponse | null;
+  asset_progress?: {
+    completed: number;
+    total: number;
+    asset_id?: string;
+    asset_name?: string;
+    asset_type?: string;
+    ok?: boolean;
+    quota_insufficient?: boolean;
+  } | null;
   error: string | null;
   message: string;
 }
@@ -1441,15 +1464,21 @@ async function pollPrepareScenePackagesJob(
   };
 }
 
+export type GenerateSceneAssetsJobStatusCallback = (
+  status: GenerateSceneAssetsJobStatusResponse,
+) => void | Promise<void>;
+
 async function pollSceneAssetsJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
+  onStatus?: GenerateSceneAssetsJobStatusCallback,
 ): Promise<GenerateSceneAssetsResponse | null> {
   const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!shouldContinue()) return null;
     const status = await req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`);
     if (!shouldContinue()) return null;
+    await onStatus?.(status);
     if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
     if (status.status === "failed") {
       return {
@@ -1983,7 +2012,8 @@ export const api = {
     target_duration_ms?: number;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
-    asset_manifest: PlanAssetManifest;
+    asset_manifest?: PlanAssetManifest | null;
+    generate_images?: boolean;
   }) =>
     req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
       method: "POST",

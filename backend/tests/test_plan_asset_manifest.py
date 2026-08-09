@@ -6,6 +6,7 @@ import pytest
 
 from pixelflow.creative.asset_manifest import (
     empty_asset_manifest,
+    extract_script_setting_assets,
     fallback_asset_manifest,
     normalize_asset_manifest,
     render_asset_manifest_markdown,
@@ -197,3 +198,43 @@ def test_render_asset_manifest_markdown_marks_empty_groups() -> None:
     markdown = render_asset_manifest_markdown(empty_asset_manifest())
 
     assert markdown.count("- 无") == 3
+
+
+def test_extract_script_setting_assets_reads_all_cast_and_props() -> None:
+    markdown = """
+## 角色设定
+### 阿杰（男1）
+- 视觉形象：浅灰衬衫
+### 程岚（女1）
+- 视觉形象：深蓝Polo
+### 老周（男2）
+- 视觉形象：夹克
+### 小夏（女2）
+- 视觉形象：针织衫
+## 场景设定
+### 中餐厅
+暖光圆桌
+## 道具与产品设定
+### 蓝妹啤酒
+绿色瓶身
+### 旧相册
+泛黄照片
+"""
+    seed = extract_script_setting_assets(markdown)
+    assert [item["name"] for item in seed["characters"]] == ["阿杰", "程岚", "老周", "小夏"]
+    assert [item["name"] for item in seed["scenes"]] == ["中餐厅"]
+    assert [item["name"] for item in seed["props"]] == ["蓝妹啤酒", "旧相册"]
+    assert all("三视图" in item["three_view_prompt"] for item in seed["characters"])
+
+
+def test_extract_script_setting_assets_resolves_generic_core_product_heading() -> None:
+    markdown = """
+## 道具与产品设定
+### 核心产品
+名称：蓝妹啤酒
+绿色玻璃瓶，易拉环拉环清晰
+### 旧相册
+泛黄照片
+"""
+    seed = extract_script_setting_assets(markdown)
+    assert [item["name"] for item in seed["props"]] == ["蓝妹啤酒", "旧相册"]

@@ -170,6 +170,190 @@ def render_asset_manifest_markdown(asset_manifest: Mapping[str, Any]) -> str:
     return "\n".join(sections).strip()
 
 
+def extract_script_setting_assets(plan_markdown: str) -> AssetManifest:
+    """从脚本 Markdown 的角色/场景/道具设定章节解析资产种子（不依赖 LLM）。"""
+
+    text = str(plan_markdown or "").strip()
+    result = empty_asset_manifest()
+    if not text:
+        return result
+
+    character_section = _extract_markdown_section(
+        text,
+        r"角色设定|角色\s*[/／]\s*场景\s*[/／]\s*道具",
+    )
+    scene_section = _extract_markdown_section(text, r"场景设定")
+    prop_section = _extract_markdown_section(text, r"道具(?:与产品)?设定|道具设定")
+
+    for name, body in _iter_setting_entries(character_section):
+        description = body or (
+            f"角色“{name}”的固定人物设定；外貌、发型、服装与气质在所有分镜中保持一致。"
+        )
+        result["characters"].append(
+            {
+                "name": name,
+                "description": description,
+                "three_view_prompt": (
+                    f"角色“{name}”同一人物的正面、侧面、背面三视图，"
+                    f"{description}，三幅人物身份与造型严格一致，纯净背景，无文字水印、无产品道具。"
+                ),
+            }
+        )
+
+    for name, body in _iter_setting_entries(scene_section):
+        description = body or f"场景“{name}”的固定空间、光线与氛围设定。"
+        result["scenes"].append(
+            {
+                "name": name,
+                "description": description,
+                "image_prompt": (
+                    f"场景“{name}”环境参考图，{description}，清晰展示空间结构与光线氛围，"
+                    "无人、无文字水印。"
+                ),
+            }
+        )
+
+    for name, body in _iter_setting_entries(prop_section):
+        description = body or f"道具“{name}”的固定外观、材质与颜色设定。"
+        result["props"].append(
+            {
+                "name": name,
+                "description": description,
+                "image_prompt": (
+                    f"道具“{name}”产品参考图，{description}，完整展示外观材质颜色，"
+                    "纯净背景，无人物、无文字水印。"
+                ),
+            }
+        )
+    return result
+
+
+def _extract_markdown_section(text: str, heading_pattern: str) -> str:
+    match = re.search(
+        rf"#{{1,3}}\s*[0-9一二三四五六七八九十.、)）]*\s*(?:{heading_pattern})[^\n]*\n([\s\S]*?)"
+        rf"(?=#{{1,3}}\s*[0-9一二三四五六七八九十.、)）]*\s*(?:角色设定|场景设定|道具|大纲|完整镜头|合规|标题|规格)|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+_GENERIC_SETTING_NAMES = {
+    "角色设定",
+    "场景设定",
+    "道具",
+    "道具与产品设定",
+    "道具设定",
+    "视觉形象",
+    "身份",
+    "性格",
+    "金句",
+    "核心标签",
+    "名称",
+    "文字说明",
+    "核心产品",
+    "产品",
+    "商品",
+    "主商品",
+    "关键道具",
+    "产品道具",
+    "目标用户",
+    "用户",
+    "消费者",
+    "人物",
+    "角色",
+    "模特",
+    "真实使用场景",
+    "使用场景",
+    "真实场景",
+    "场景",
+    "环境",
+}
+
+
+def _concrete_name_from_setting_body(body: str) -> str:
+    """泛化标题（如「核心产品」）时，从正文抽可复用的具体实体名。"""
+
+    text = str(body or "").strip()
+    if not text:
+        return ""
+    labeled = re.search(
+        r"(?:名称|品牌|产品名|商品名|道具名)\s*[:：]\s*([^\n\s，,。；;]{2,40})",
+        text,
+    )
+    if labeled:
+        candidate = re.sub(r"[*_#`]", "", labeled.group(1)).strip()
+        candidate = re.split(r"[（(：:\-—|/]", candidate, maxsplit=1)[0].strip()
+        if candidate and _name_key(candidate) not in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
+            return candidate
+    first_line = re.split(r"[\n。；;]", text, maxsplit=1)[0].strip()
+    first_line = re.sub(r"^(?:外观|材质|颜色|描述|说明|名称|品牌)\s*[:：]\s*", "", first_line)
+    first_line = re.sub(r"[*_#`]", "", first_line).strip()
+    # 短专名优先，例如「蓝妹啤酒，绿色瓶身」
+    short = re.split(r"[，,、/\s|]", first_line, maxsplit=1)[0].strip()
+    if 2 <= len(short) <= 20 and _name_key(short) not in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
+        if not re.search(r"(卖点|强调|主张|要求|需要|目标)", short):
+            return short
+    return ""
+
+
+def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
+    if not section.strip():
+        return []
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def push(name: str, body: str) -> None:
+        cleaned = re.sub(r"[*_#`]", "", name).strip()
+        cleaned = re.split(r"[（(：:\-—|/]", cleaned, maxsplit=1)[0].strip()
+        if not cleaned or len(cleaned) > 40:
+            return
+        body_text = re.sub(r"\s+", " ", body).strip()[:400]
+        if _name_key(cleaned) in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
+            concrete = _concrete_name_from_setting_body(body_text)
+            if not concrete:
+                return
+            cleaned = concrete
+        key = _name_key(cleaned)
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append((cleaned, body_text))
+
+    # ### 阿杰 / #### 程岚（女1）
+    heading_blocks = re.split(r"(?=^#{2,4}\s+)", section, flags=re.MULTILINE)
+    found_heading = False
+    for block in heading_blocks:
+        heading = re.match(r"^#{2,4}\s+(.+)$", block.strip(), flags=re.MULTILINE)
+        if not heading:
+            continue
+        found_heading = True
+        title = heading.group(1).strip()
+        body = block[heading.end() :].strip()
+        push(title, body)
+
+    if found_heading and entries:
+        return entries
+
+    # - **阿杰**：... / - 阿杰：...
+    for match in re.finditer(
+        r"^[-*]\s+\*{0,2}([^:*\n]{1,40})\*{0,2}\s*[:：]\s*(.*)$",
+        section,
+        flags=re.MULTILINE,
+    ):
+        push(match.group(1), match.group(2))
+
+    # **阿杰**：段落
+    if not entries:
+        for match in re.finditer(
+            r"\*\*([^*]{1,40})\*\*\s*[:：]?\s*([^\n]*)",
+            section,
+        ):
+            push(match.group(1), match.group(2))
+
+    return entries
+
+
 def _collect_blueprint_asset_names(
     scene_blueprints: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[str]]:

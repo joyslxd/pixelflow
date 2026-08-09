@@ -76,6 +76,7 @@ const ARTIFACT_TYPE_VALUES = [
   "plan",
   "image_prepare",
   "image_edit_options",
+  "scene_asset_model_options",
   "image_result",
   "video_scene_packages",
   "video_quality_review",
@@ -414,6 +415,8 @@ export function projectSupervisorSnapshot(
   const videoAgentWorkspace = createVideoWorkspaceProjectionState(conversationId);
   let projectedVideoAgentWorkspace = videoAgentWorkspace;
   let videoAgentPlan = null;
+  let videoAgentPlans: Record<string, NonNullable<ReturnType<typeof projectVideoAgentPlanSnapshot>>> = {};
+  let videoAgentPlanOrder: string[] = [];
   let videoAgentConfirmation = null;
   let videoAgentQuota = null;
   if (value.videoAgent !== null && value.videoAgent !== undefined) {
@@ -426,6 +429,22 @@ export function projectSupervisorSnapshot(
       value.videoAgent.plan,
       value.videoAgent.steps,
     );
+    const history = Array.isArray(value.videoAgent.plans) ? value.videoAgent.plans : [];
+    for (const item of history) {
+      if (!isRecord(item)) return fail();
+      const historical = projectVideoAgentPlanSnapshot(item.plan, item.steps);
+      if (!historical) continue;
+      videoAgentPlans[historical.planId] = historical;
+      if (!videoAgentPlanOrder.includes(historical.planId)) {
+        videoAgentPlanOrder.push(historical.planId);
+      }
+    }
+    if (videoAgentPlan) {
+      videoAgentPlans[videoAgentPlan.planId] = videoAgentPlan;
+      if (!videoAgentPlanOrder.includes(videoAgentPlan.planId)) {
+        videoAgentPlanOrder.push(videoAgentPlan.planId);
+      }
+    }
     videoAgentConfirmation = projectVideoAgentConfirmationSnapshot(
       value.videoAgent.confirmation,
     );
@@ -468,6 +487,8 @@ export function projectSupervisorSnapshot(
     resume: value.resume as unknown as SupervisorRuntimeProjection["resume"],
     videoAgentWorkspace: projectedVideoAgentWorkspace,
     videoAgentPlan,
+    videoAgentPlans,
+    videoAgentPlanOrder,
     videoAgentConfirmation,
     videoAgentQuota,
     ...workspace,

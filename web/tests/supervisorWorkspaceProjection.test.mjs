@@ -193,6 +193,92 @@ test("Snapshot 原子恢复 VideoAgent workspace revision、计划和步骤", ()
   assert.equal(projection.videoAgentConfirmation.submittable, false);
 });
 
+test("Snapshot 恢复 VideoAgent 历史 plans 列表到 videoAgentPlans", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    videoAgent: {
+      workspace: {
+        workspace_id: "workspace-video-1",
+        conversation_id: "conv-1",
+        revision: 5,
+        payload: { scenes: [], assets: [] },
+      },
+      plan: {
+        plan_id: "plan-video-2",
+        workspace_id: "workspace-video-1",
+        status: "running",
+        public_goal: "最新执行方案",
+      },
+      steps: [{
+        step_id: "step-video-2",
+        plan_id: "plan-video-2",
+        sequence: 1,
+        title: "继续生成",
+        status: "running",
+        public_summary: null,
+        artifact_refs: [],
+        started_at: "2026-07-28T10:05:00Z",
+        completed_at: null,
+        duration_ms: null,
+      }],
+      plans: [
+        {
+          plan: {
+            plan_id: "plan-video-1",
+            workspace_id: "workspace-video-1",
+            status: "completed",
+            public_goal: "首轮执行方案",
+          },
+          steps: [{
+            step_id: "step-video-1",
+            plan_id: "plan-video-1",
+            sequence: 1,
+            title: "分析需求",
+            status: "completed",
+            public_summary: "已完成",
+            artifact_refs: [],
+            started_at: "2026-07-28T10:00:00Z",
+            completed_at: "2026-07-28T10:01:00Z",
+            duration_ms: 60000,
+          }],
+        },
+        {
+          plan: {
+            plan_id: "plan-video-2",
+            workspace_id: "workspace-video-1",
+            status: "running",
+            public_goal: "最新执行方案",
+          },
+          steps: [{
+            step_id: "step-video-2",
+            plan_id: "plan-video-2",
+            sequence: 1,
+            title: "继续生成",
+            status: "running",
+            public_summary: null,
+            artifact_refs: [],
+            started_at: "2026-07-28T10:05:00Z",
+            completed_at: null,
+            duration_ms: null,
+          }],
+        },
+      ],
+      confirmation: null,
+    },
+  }), "conv-1");
+
+  assert.deepEqual(projection.videoAgentPlanOrder, ["plan-video-1", "plan-video-2"]);
+  assert.equal(projection.videoAgentPlans["plan-video-1"].publicGoal, "首轮执行方案");
+  assert.equal(projection.videoAgentPlans["plan-video-1"].steps["step-video-1"].status, "completed");
+  assert.equal(projection.videoAgentPlan.planId, "plan-video-2");
+
+  const state = supervisorRuntimeReducer(createSupervisorRuntimeState("conv-1"), {
+    type: "snapshot.hydrated",
+    snapshot: projection,
+  });
+  assert.deepEqual(state.videoAgentPlanOrder, ["plan-video-1", "plan-video-2"]);
+  assert.equal(state.videoAgentPlans["plan-video-1"].status, "completed");
+});
+
 test("双视频 Workflow 按权威 run 和 artifact 身份选择当前卡片", () => {
   const first = message({
     message_id: "assistant-wf-1",

@@ -25,6 +25,7 @@ interface MessageBubbleProps {
   onRollbackPlan?: (msg: ChatMessage, version: number) => void;
   onGenerateImage?: (msg: ChatMessage) => void;
   onConfirmImageEditOptions?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
+  onConfirmSceneAssetModel?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
   onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
@@ -183,7 +184,10 @@ function imageModelType(config: ImageModelParamConfig): string {
 }
 
 function imageModelLabel(model: string): string {
-  return model === "gpt-image-2" ? "image-2" : model;
+  if (model === "gpt-image-2") return "image-2";
+  if (model === "seeddream-5.0") return "Seedream 5.0";
+  if (model === "seeddream-4.5") return "Seedream 4.5";
+  return model;
 }
 
 function imageModelParamConfig(config?: ImageModelParamConfig): Record<string, unknown> {
@@ -228,6 +232,7 @@ export function MessageBubble({
   onRollbackPlan,
   onGenerateImage,
   onConfirmImageEditOptions,
+  onConfirmSceneAssetModel,
   onAcceptImageResult,
   onReviseImageResult,
   onGenerateVideoFromScenePackages,
@@ -593,44 +598,52 @@ export function MessageBubble({
                   ))}
               </div>
             )}
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => onApprovePlan?.(msg)}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
-              >
-                <Check size={15} />
-                同意方案
-              </button>
-              {!hidePlanEdit ? (
+            {msg.artifact.scriptPlanConfirmed ? (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] text-emerald-800">
+                已确认脚本方案，正在/已生成视频资产包。
+              </div>
+            ) : (
+              <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => onEditPlan?.(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  onClick={() => onApprovePlan?.(msg)}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90"
                 >
-                  <Pencil size={15} />
-                  编辑
+                  <Check size={15} />
+                  同意方案
                 </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => onRevisePlan?.(msg)}
-                className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-              >
-                <Sparkles size={15} />
-                Agent 修改
-              </button>
-              {onRegeneratePlanDirections ? (
-                <button
-                  type="button"
-                  onClick={() => onRegeneratePlanDirections(msg)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
-                >
-                  <RefreshCw size={15} />
-                  新创意
-                </button>
-              ) : null}
-            </div>
+                {!hidePlanEdit && !msg.artifact.scriptPlanConfirmForAssets ? (
+                  <button
+                    type="button"
+                    onClick={() => onEditPlan?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  >
+                    <Pencil size={15} />
+                    编辑
+                  </button>
+                ) : null}
+                {!msg.artifact.scriptPlanConfirmForAssets ? (
+                  <button
+                    type="button"
+                    onClick={() => onRevisePlan?.(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  >
+                    <Sparkles size={15} />
+                    Agent 修改
+                  </button>
+                ) : null}
+                {onRegeneratePlanDirections && !msg.artifact.scriptPlanConfirmForAssets ? (
+                  <button
+                    type="button"
+                    onClick={() => onRegeneratePlanDirections(msg)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-line px-4 py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
+                  >
+                    <RefreshCw size={15} />
+                    新创意
+                  </button>
+                ) : null}
+              </div>
+            )}
           </div>
         ) : msg.artifact?.type === "image_edit_options" && msg.artifact.imageEditModelConfigs ? (
           <div className="mt-2 w-full max-w-[620px] space-y-3 rounded-2xl border border-line bg-surface p-3">
@@ -830,6 +843,81 @@ export function MessageBubble({
               </button>
             )}
           </div>
+        ) : msg.artifact?.type === "scene_asset_model_options" && msg.artifact.sceneAssetModelConfigs ? (
+          <div className="mt-2 w-full max-w-[560px] space-y-3 rounded-2xl border border-line bg-surface p-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+                <SlidersHorizontal size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-ink">{msg.artifact.title || "选择生图模型"}</span>
+                <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-soft">
+                  {msg.artifact.description || "场景包结构已就绪，请选择模型后再生成参考图。"}
+                </span>
+              </span>
+              {msg.artifact.sceneAssetModelConfirmed ? (
+                <span className="shrink-0 rounded-full bg-emerald/10 px-2 py-0.5 text-[11px] font-medium text-emerald">已确认</span>
+              ) : null}
+            </div>
+            {(() => {
+              const configs = msg.artifact.sceneAssetModelConfigs || [];
+              const modelNames = configs
+                .map((config) => imageModelType(config))
+                .filter(Boolean);
+              const choices = modelNames.length > 0
+                ? modelNames
+                : ["gpt-image-2", "seeddream-5.0"];
+              const preferred = choices.includes("gpt-image-2") ? "gpt-image-2" : choices[0];
+              const selected = selectedImageEditModel && choices.includes(selectedImageEditModel)
+                ? selectedImageEditModel
+                : preferred;
+              return (
+                <>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {choices.map((model) => {
+                      const active = selected === model;
+                      return (
+                        <button
+                          key={model}
+                          type="button"
+                          disabled={Boolean(msg.artifact?.sceneAssetModelConfirmed || actionsDisabled)}
+                          onClick={() => setSelectedImageEditModel(model)}
+                          className={cn(
+                            "rounded-xl border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                            active ? "border-accent bg-accent-soft text-accent" : "border-line bg-white text-ink hover:bg-canvas",
+                          )}
+                        >
+                          <span className="block text-[13px] font-semibold">{imageModelLabel(model)}</span>
+                          <span className="mt-1 block text-[11px] opacity-80">
+                            {model === "gpt-image-2" ? "默认 4K，适合精细资产" : "默认 2K，生成更快"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!msg.artifact.sceneAssetModelConfirmed ? (
+                    <button
+                      type="button"
+                      disabled={Boolean(actionsDisabled || !selected)}
+                      onClick={() => onConfirmSceneAssetModel?.(msg, {
+                        model: selected,
+                        ratio: "",
+                        size: "",
+                      })}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Sparkles size={15} />
+                      使用 {imageModelLabel(selected)} 生成参考图
+                    </button>
+                  ) : (
+                    <div className="rounded-xl bg-canvas px-3 py-2 text-[12px] text-ink-soft">
+                      已选择 {imageModelLabel(selected)}，参考图生成中…
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
         ) : msg.artifact?.type === "video_scene_packages" && msg.artifact.videoScenePackages ? (
           <div className="mt-2 w-full max-w-[560px] overflow-hidden rounded-2xl border border-line bg-surface">
             <div className="grid grid-cols-5 border-b border-line bg-canvas/60">
@@ -928,6 +1016,15 @@ export function MessageBubble({
                   >
                     <Sparkles size={15} />
                     {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
+                  </button>
+                ) : msg.artifact.sceneAssetsGenerating || msg.artifact.sceneAssetsAwaitingModel ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-line bg-canvas py-2.5 text-[13px] font-medium text-ink-soft"
+                  >
+                    <LoaderCircle size={15} className="animate-spin" />
+                    {msg.artifact.sceneAssetsAwaitingModel ? "待选择生图模型" : "参考图生成中"}
                   </button>
                 ) : (
                   <button

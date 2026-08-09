@@ -45,6 +45,11 @@ def test_split_video_duration_is_exact_for_all_supported_boundaries(total: int) 
     assert scene_time_ranges(durations)[-1][1] == total
 
 
+def test_split_video_duration_prefers_seedance_max_length_scenes() -> None:
+    assert split_video_duration(60) == [15, 15, 15, 15]
+    assert split_video_duration(30) == [15, 15]
+
+
 @pytest.mark.parametrize("invalid", [0, 3, 301, 5.5, True, "30"])
 def test_split_video_duration_rejects_invalid_values(invalid: object) -> None:
     with pytest.raises(ValueError, match="4.*300"):

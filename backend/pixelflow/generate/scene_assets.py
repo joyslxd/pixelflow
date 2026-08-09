@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from pixelflow.creative.scene_blueprint import asset_requirement_entity_quality_issues
 from pixelflow.generate.image_prepare import filter_image_materials
+
+SceneAssetProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 TEXT_TO_IMAGE_ENDPOINT = "/api/picture/text_to_image"
 REFERENCE_IMAGE_ENDPOINT = "/api/picture/multi_reference_image_generation"
@@ -16,6 +19,7 @@ MAX_REFERENCE_IMAGES = 9
 REFERENCE_IMAGE_QUALITY = "2K"
 PROP_REFERENCE_PROMPT_SUFFIX = "以参考图中的产品/商品外观为准，保持包装、颜色、材质和比例一致，干净背景，无文字水印。"
 SCENE_REFERENCE_PROMPT_SUFFIX = "如果图片是背景墙、天花板、地板等场景元素，以参考图中的场景风格和环境氛围为准，保持空间布局、色调和光影一致，干净画面，无文字水印。如果是产品图，生成的场景图必须包含该产品。"
+PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX = "根据道具使用场景，生成一张道具在多场景应用的 4 宫格图。"
 # 兼容旧命名
 MAX_PROP_REFERENCE_IMAGES = MAX_REFERENCE_IMAGES
 
@@ -115,6 +119,16 @@ def enhance_prop_reference_prompt(prompt: str) -> str:
     if PROP_REFERENCE_PROMPT_SUFFIX in cleaned:
         return cleaned
     return f"{cleaned}。{PROP_REFERENCE_PROMPT_SUFFIX}"
+
+
+def enhance_prop_multi_scene_grid_prompt(prompt: str) -> str:
+    """道具生图追加四宫格多场景应用要求（单张图，不改多图契约）。"""
+    cleaned = prompt.strip()
+    if not cleaned:
+        return PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX
+    if PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX in cleaned:
+        return cleaned
+    return f"{cleaned}。{PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX}"
 
 
 def _asset_generation_prompt(asset: dict[str, Any], *prompt_fields: str) -> str:
@@ -328,12 +342,28 @@ async def generate_scene_assets(
     scene_packages: list[dict[str, Any]],
     materials: list[dict[str, Any]] | None = None,
     image_ratio: str = "1:1",
-    image_size: str = "1080p",
+    image_size: str = "4K",
     model: str | None = None,
     quota_checker: Any,
     target_assets: list[dict[str, Any]] | None = None,
+    on_progress: SceneAssetProgressCallback | None = None,
 ) -> dict[str, Any]:
-    """生成场景参考图；props / scenes 在用户有上传图片时走参考生图。"""
+    """生成场景参考图；props / scenes 在用户有上传图片时走参考生图。
+
+    on_progress 在每张参考图尝试结束后触发，供异步 Job 回写轮询进度。
+    """
+    from pixelflow.skills.borgrise.run_generation import (
+        default_image_quality_for_model,
+        normalize_image_quality,
+    )
+
+    resolved_model = str(model or "gpt-image-2").strip() or "gpt-image-2"
+    quality = normalize_image_quality(image_size)
+    if resolved_model.casefold() == "gpt-image-2" and quality.casefold() == "1080p":
+        image_size = default_image_quality_for_model("gpt-image-2")
+    else:
+        image_size = quality or default_image_quality_for_model(resolved_model)
+    model = resolved_model
     enriched = [dict(scene) for scene in scene_packages if isinstance(scene, dict)]
     assets = dict(global_assets) if global_assets else {}
     _validate_scene_asset_entity_names(assets, enriched)
@@ -476,7 +506,7 @@ async def generate_scene_assets(
             prompt = _asset_generation_prompt(scene_image, "image_prompt")
             queue_asset(scene_image, "images", prompt, image_ratio, _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched))
         for prop_image in _list_of_dicts(assets.get("props")):
-            prompt = _asset_generation_prompt(prop_image, "image_prompt")
+            prompt = enhance_prop_multi_scene_grid_prompt(_asset_generation_prompt(prop_image, "image_prompt"))
             queue_asset(prop_image, "images", prompt, image_ratio, _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched))
     else:
         for scene in enriched:
@@ -501,7 +531,7 @@ async def generate_scene_assets(
                     _asset_context(scene_image, asset_type="scene_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
                 )
             for prop_image in _list_of_dicts(scene.get("prop_images")):
-                prompt = _asset_generation_prompt(prop_image, "image_prompt")
+                prompt = enhance_prop_multi_scene_grid_prompt(_asset_generation_prompt(prop_image, "image_prompt"))
                 queue_asset(
                     prop_image,
                     "images",
@@ -551,10 +581,43 @@ async def generate_scene_assets(
             if (target_key := _scene_asset_target_key(job[4])) is not None and target_key in requested_targets
         ]
 
+    total = len(asset_jobs)
+
+    async def emit_progress(
+        *,
+        completed: int,
+        context: dict[str, Any],
+        ok: bool,
+        quota_insufficient: bool = False,
+    ) -> None:
+        if on_progress is None:
+            return
+        payload = {
+            "completed": completed,
+            "total": total,
+            "asset_id": str(context.get("asset_id") or ""),
+            "asset_name": str(context.get("asset_name") or "未命名参考图"),
+            "asset_type": str(context.get("asset_type") or ""),
+            "ok": ok,
+            "quota_insufficient": quota_insufficient,
+            "global_assets": assets,
+            "scene_packages": enriched,
+            "failed_assets": list(failed_assets),
+        }
+        maybe_awaitable = on_progress(payload)
+        if maybe_awaitable is not None:
+            await maybe_awaitable
+
     for job_index, (target, field_name, prompt, ratio, context) in enumerate(asset_jobs):
         urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)
         if urls:
             target[field_name] = urls
+        await emit_progress(
+            completed=job_index + 1,
+            context=context,
+            ok=bool(urls),
+            quota_insufficient=quota_insufficient,
+        )
         if quota_insufficient:
             failed_target_keys = {
                 target_key

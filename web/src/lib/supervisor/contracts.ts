@@ -241,6 +241,12 @@ export type VideoAgentQuotaResponseRequest = Readonly<{
   decision: "resume" | "cancel";
 }>;
 
+export type VideoAgentScriptSaveRequest = Readonly<{
+  markdown: string;
+  expected_revision: number;
+  confirm_for_generation?: boolean;
+}>;
+
 export type VideoAgentConfirmationResponseRequest = Readonly<{
   step_id: string;
   decision: "confirm" | "cancel";

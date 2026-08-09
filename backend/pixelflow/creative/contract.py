@@ -158,7 +158,7 @@ def build_video_creation_contract(form_values: Mapping[str, Any]) -> VideoCreati
         "image_model_capabilities",
         {
             "aspect_ratios": ["1:1", "16:9", "9:16"],
-            "sizes": ["1080p", "2K", "4K"],
+            "sizes": ["4K", "2K", "1080p"],
         },
     )
     payload.setdefault("video_usage", "宣传片")

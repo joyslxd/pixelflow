@@ -69,6 +69,7 @@ export interface ChatMessage {
       | "plan"
       | "image_prepare"
       | "image_edit_options"
+      | "scene_asset_model_options"
       | "image_result"
       | "video_scene_packages"
       | "video_quality_review"
@@ -106,6 +107,13 @@ export interface ChatMessage {
     videoScenePackages?: PrepareScenePackagesResponse;
     originalVideoScenePackages?: PrepareScenePackagesResponse;
     sceneAssetFailures?: Array<Record<string, unknown>>;
+    /** 参考图仍在生成中：可查看结构，暂不可确认成片 */
+    sceneAssetsGenerating?: boolean;
+    /** 结构已就绪，等待选择生图模型 */
+    sceneAssetsAwaitingModel?: boolean;
+    /** 资产包生图模型选择卡 */
+    sceneAssetModelConfigs?: ImageModelParamConfig[];
+    sceneAssetModelConfirmed?: boolean;
     generatedSceneVideos?: GenerateSceneVideosResponse;
     mergedVideo?: MergeSceneVideosResponse;
     jianyingDraft?: JianyingDraftJobResponse;
@@ -127,6 +135,10 @@ export interface ChatMessage {
     deliveryDownloadedUrl?: string;
     pptStyle?: string;
     smartPptProjectId?: number | null;
+    /** Video Agent：脚本方案卡片，点「同意方案」=确认并生成资产包 */
+    scriptPlanConfirmForAssets?: boolean;
+    /** 已确认脚本方案，隐藏同意按钮 */
+    scriptPlanConfirmed?: boolean;
   };
 }
 

@@ -28,6 +28,7 @@ from ..contracts import (
     AgentEventType,
     OrchestrationMode,
     RouteDecision,
+    RouteIntent,
     TurnRecord,
     TurnStatus,
 )
@@ -92,6 +93,22 @@ def _stored_route_decision(context: dict | None) -> RouteDecision | None:
     runtime = (context or {}).get(AGENT_RUNTIME_CONTEXT_KEY)
     value = runtime.get("route_decision") if isinstance(runtime, dict) else None
     return RouteDecision.model_validate(value) if isinstance(value, dict) else None
+
+
+def _should_persist_route_assignment(
+    existing_route: RouteDecision | None,
+    route_assignment: TurnRouteAssignment | None,
+) -> bool:
+    """首次路由，或从 unknown/待澄清升级时，落库并允许切换编排模式。"""
+
+    if route_assignment is None:
+        return False
+    if existing_route is None:
+        return True
+    return (
+        existing_route.intent is RouteIntent.UNKNOWN
+        or existing_route.requires_clarification
+    )
 
 
 def _runtime_context_version(context: dict | None) -> int:
@@ -233,7 +250,10 @@ class MemoryTurnRegistrationStore:
             )
             next_version = current_version + 1
             existing_route = _stored_route_decision(conversation.context)
-            route_was_created = existing_route is None and route_assignment is not None
+            route_was_created = _should_persist_route_assignment(
+                existing_route,
+                route_assignment,
+            )
             runtime_patch: dict[str, object] = {"context_version": next_version}
             if route_was_created:
                 runtime_patch.update(
@@ -597,8 +617,9 @@ class SQLTurnRegistrationStore:
                 next_version = current_version + 1
                 runtime["context_version"] = next_version
                 existing_route = _stored_route_decision(runtime_context)
-                route_was_created = (
-                    existing_route is None and route_assignment is not None
+                route_was_created = _should_persist_route_assignment(
+                    existing_route,
+                    route_assignment,
                 )
                 if route_was_created:
                     runtime.update(

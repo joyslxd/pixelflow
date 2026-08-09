@@ -11,11 +11,18 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { VideoAgentPlanState, VideoAgentStepState } from "./state/contracts";
+import type { VideoAgentScriptStageEvidence } from "./state/workspace";
+import {
+  extractStageChangeHints,
+  shortStageLabel,
+  stageIdFromStep,
+} from "./scriptSkillStages";
 
 interface AgentPlanTimelineProps {
   plan: VideoAgentPlanState | null;
   now?: number;
   selectedStepId?: string | null;
+  scriptStages?: VideoAgentScriptStageEvidence[];
   onSelectStep?(stepId: string): void;
   confirmationSlot?: ReactNode;
   quotaSlot?: ReactNode;
@@ -63,10 +70,43 @@ function stepTone(status: VideoAgentStepState["status"]): string {
   return "border-slate-200 bg-white";
 }
 
+function stageEvidenceForStep(
+  step: VideoAgentStepState,
+  scriptStages: readonly VideoAgentScriptStageEvidence[],
+): VideoAgentScriptStageEvidence | null {
+  const stageId = stageIdFromStep(step);
+  if (!stageId) return null;
+  return scriptStages.find((stage) => stage.stageId === stageId) ?? null;
+}
+
+function stepChangeHints(
+  step: VideoAgentStepState,
+  stage: VideoAgentScriptStageEvidence | null,
+): string[] {
+  if (stage?.changeSummary) return [stage.changeSummary];
+  if (stage?.content) {
+    const hints = extractStageChangeHints(stage.content);
+    if (hints.length > 0) return hints;
+  }
+  if (step.publicSummary) {
+    const cleaned = step.publicSummary
+      .replace(/^已(?:完成|复用)\s*/u, "")
+      .trim();
+    if (cleaned) return [`本步产物：${cleaned}`];
+  }
+  return [];
+}
+
+function viewResultLabel(step: VideoAgentStepState, stage: VideoAgentScriptStageEvidence | null): string {
+  const label = shortStageLabel(stageIdFromStep(step), step.title);
+  return `查看本步新增：${label}`;
+}
+
 export function AgentPlanTimeline({
   plan,
   now,
   selectedStepId = null,
+  scriptStages = [],
   onSelectStep,
   confirmationSlot,
   quotaSlot,
@@ -82,7 +122,7 @@ export function AgentPlanTimeline({
   }, [hasRunningStep, now]);
   if (plan === null) return null;
   const steps = Object.values(plan.steps).sort((left, right) => left.sequence - right.sequence);
-  if (steps.length === 0) return null;
+  // 步骤尚未推到前端时也保留标题卡，避免「执行方案 · …」闪一下就消失。
   const displayNow = now ?? liveNow;
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const planStatusLabel = plan.status === "completed"
@@ -91,7 +131,9 @@ export function AgentPlanTimeline({
       ? "待确认"
       : plan.status === "failed"
         ? "失败"
-        : "进行中";
+        : steps.length === 0
+          ? "准备中"
+          : "进行中";
 
   return (
     <section
@@ -106,20 +148,34 @@ export function AgentPlanTimeline({
           {steps.length} 步 · {planStatusLabel}
         </span>
         <span className="text-[11px] text-slate-400">
-          已完成 {completedCount}/{steps.length}
+          已完成 {completedCount}/{steps.length || "?"}
         </span>
       </header>
 
+      {steps.length === 0 ? (
+        <p className="px-1 py-2 text-[12px] text-slate-500">正在生成执行步骤…</p>
+      ) : (
       <ol className="space-y-2">
         {steps.map((step) => {
           const duration = displayedDuration(step, displayNow);
           const selected = selectedStepId === step.stepId;
           const expanded = expandedIds[step.stepId]
             ?? (step.status === "running" || step.status === "awaiting_confirmation" || selected);
+          const hasProgressLog = step.progressLog.length > 0;
+          const stage = stageEvidenceForStep(step, scriptStages);
+          const changeHints = stepChangeHints(step, stage);
           const canExpand = Boolean(step.publicSummary)
+            || hasProgressLog
             || step.artifactRefs.length > 0
+            || changeHints.length > 0
+            || step.status === "running"
             || step.status === "completed"
             || step.status === "failed";
+          const liveStatus = step.status === "running"
+            ? (step.publicSummary || "正在执行该步骤…")
+            : null;
+          const canViewResult = Boolean(onSelectStep)
+            && (step.status === "completed" || Boolean(stage) || step.artifactRefs.length > 0);
           return (
             <li key={step.stepId}>
               <article
@@ -154,7 +210,15 @@ export function AgentPlanTimeline({
                         </span>
                       ) : null}
                     </div>
-                    {!expanded && step.publicSummary ? (
+                    {liveStatus ? (
+                      <p className="mt-1 text-[12px] leading-5 text-sky-700">
+                        {liveStatus}
+                      </p>
+                    ) : !expanded && changeHints.length > 0 ? (
+                      <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-slate-600">
+                        {changeHints[0]}
+                      </p>
+                    ) : !expanded && step.publicSummary ? (
                       <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-slate-600">
                         {step.publicSummary}
                       </p>
@@ -169,30 +233,63 @@ export function AgentPlanTimeline({
 
                 {expanded ? (
                   <div className="mt-2 space-y-2 border-t border-black/5 pt-2 pl-6">
-                    {step.publicSummary ? (
-                      <p className="text-[12px] leading-5 text-slate-700">{step.publicSummary}</p>
-                    ) : (
-                      <p className="text-[12px] text-slate-400">暂无结果摘要</p>
-                    )}
-                    {step.artifactRefs.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {step.artifactRefs.map((reference) => (
-                          <code
-                            key={reference}
-                            className="rounded bg-white/80 px-1.5 py-0.5 text-[11px] text-slate-600"
+                    {step.status === "running" && hasProgressLog ? (
+                      <ol className="space-y-1.5">
+                        {step.progressLog.map((item, index) => {
+                          const isLatest = index === step.progressLog.length - 1;
+                          return (
+                            <li
+                              key={`${step.stepId}-phase-${index}`}
+                              className={`flex items-start gap-2 text-[12px] leading-5 ${
+                                isLatest ? "text-sky-700" : "text-slate-500"
+                              }`}
+                            >
+                              {isLatest ? (
+                                <LoaderCircle className="mt-0.5 size-3.5 shrink-0 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+                              )}
+                              <span>{item}</span>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    ) : hasProgressLog ? (
+                      <ol className="space-y-1.5">
+                        {step.progressLog.map((item, index) => (
+                          <li
+                            key={`${step.stepId}-done-${index}`}
+                            className="flex items-start gap-2 text-[12px] leading-5 text-slate-600"
                           >
-                            {reference}
-                          </code>
+                            <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : null}
+                    {changeHints.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {changeHints.map((hint) => (
+                          <span
+                            key={`${step.stepId}-${hint}`}
+                            className="rounded-full border border-emerald-200 bg-emerald-50/80 px-2 py-0.5 text-[11px] text-emerald-800"
+                          >
+                            {hint}
+                          </span>
                         ))}
                       </div>
+                    ) : step.publicSummary ? (
+                      <p className="text-[12px] leading-5 text-slate-700">{step.publicSummary}</p>
+                    ) : !hasProgressLog ? (
+                      <p className="text-[12px] text-slate-400">暂无结果摘要</p>
                     ) : null}
-                    {onSelectStep && (step.status === "completed" || step.artifactRefs.length > 0) ? (
+                    {canViewResult ? (
                       <button
                         type="button"
                         className="text-[12px] font-medium text-sky-700 hover:underline"
-                        onClick={() => onSelectStep(step.stepId)}
+                        onClick={() => onSelectStep?.(step.stepId)}
                       >
-                        在右侧查看结果
+                        {viewResultLabel(step, stage)} →
                       </button>
                     ) : null}
                   </div>
@@ -209,6 +306,7 @@ export function AgentPlanTimeline({
           );
         })}
       </ol>
+      )}
     </section>
   );
 }

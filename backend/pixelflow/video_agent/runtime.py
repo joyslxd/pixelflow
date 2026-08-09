@@ -32,6 +32,7 @@ from pixelflow.video_agent.tools import (
     PatchSceneTool,
     ReplaceProjectAssetsTool,
     ReviewGeneratedScenesTool,
+    RunScriptSkillStageTool,
     VideoToolRegistry,
 )
 from pixelflow.video_agent.workspace import VideoAgentRepository
@@ -180,6 +181,7 @@ def make_video_agent_runtime_assembly(
             InspectVideoWorkspaceTool(),
             ImportScriptTool(),
             BrainstormScriptTool(),
+            RunScriptSkillStageTool(),
             AnalyzeReferenceVideoTool(operation_port=reference_port),
             InspectSceneTool(),
             PatchSceneTool(),

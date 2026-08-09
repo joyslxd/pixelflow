@@ -57,6 +57,72 @@ def test_enhance_prop_reference_prompt_appends_suffix_once():
     assert enhance_prop_reference_prompt(prompt) == prompt
 
 
+def test_enhance_prop_multi_scene_grid_prompt_appends_suffix_once():
+    from pixelflow.generate.scene_assets import (
+        PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX,
+        enhance_prop_multi_scene_grid_prompt,
+    )
+
+    prompt = enhance_prop_multi_scene_grid_prompt("耳机道具图")
+    assert prompt.startswith("耳机道具图")
+    assert PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX in prompt
+    assert enhance_prop_multi_scene_grid_prompt(prompt) == prompt
+
+
+def test_generate_scene_assets_appends_prop_grid_suffix_only_for_props():
+    from pixelflow.generate.scene_assets import PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX
+
+    captured: list[dict[str, Any]] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            captured.append(kwargs)
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/{len(captured)}.png"}])
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无参考图时不应调用参考生图")
+
+    asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [
+                    {
+                        "asset_id": "character-host",
+                        "name": "讲解者",
+                        "three_view_prompt": "讲解者三视图",
+                    }
+                ],
+                "scenes": [
+                    {
+                        "asset_id": "scene-desk",
+                        "name": "桌面",
+                        "image_prompt": "桌面场景图",
+                    }
+                ],
+                "props": [
+                    {
+                        "asset_id": "prop-product",
+                        "name": "耳机",
+                        "image_prompt": "耳机产品图",
+                    }
+                ],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert len(captured) == 3
+    character_prompt = str(captured[0].get("prompt") or "")
+    scene_prompt = str(captured[1].get("prompt") or "")
+    prop_prompt = str(captured[2].get("prompt") or "")
+    assert PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX not in character_prompt
+    assert PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX not in scene_prompt
+    assert PROP_MULTI_SCENE_GRID_PROMPT_SUFFIX in prop_prompt
+    assert captured[2].get("num_images") == 1
+
+
 def test_enhance_scene_reference_prompt_appends_suffix_once():
     prompt = enhance_scene_reference_prompt("桌面场景图")
     assert prompt.startswith("桌面场景图")
@@ -101,6 +167,59 @@ def test_generate_scene_assets_keeps_exactly_one_image_per_plan_asset():
     )
 
     assert result["global_assets"]["props"][0]["images"] == ["https://x/first.png"]
+
+
+def test_generate_scene_assets_emits_progress_after_each_asset():
+    events: list[dict[str, Any]] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/{len(events) + 1}.png"}])
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无参考图时不应调用参考生图")
+
+    async def on_progress(payload: dict[str, Any]) -> None:
+        events.append(
+            {
+                "completed": payload["completed"],
+                "total": payload["total"],
+                "asset_name": payload["asset_name"],
+                "ok": payload["ok"],
+            }
+        )
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [
+                    {
+                        "asset_id": "character-host",
+                        "name": "讲解者",
+                        "three_view_prompt": "讲解者三视图",
+                    }
+                ],
+                "props": [
+                    {
+                        "asset_id": "prop-product",
+                        "name": "耳机",
+                        "image_prompt": "耳机产品图",
+                    }
+                ],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            quota_checker=lambda _value: False,
+            on_progress=on_progress,
+        )
+    )
+
+    assert result["ok"] is True
+    assert [event["completed"] for event in events] == [1, 2]
+    assert events[0]["total"] == 2
+    assert events[0]["asset_name"] == "讲解者"
+    assert events[1]["asset_name"] == "耳机"
+    assert events[-1]["ok"] is True
 
 
 def test_generate_scene_assets_combines_plan_description_and_image_prompt():
@@ -275,6 +394,40 @@ def test_generate_scene_assets_uses_plan_image_contract_for_every_asset_call():
     assert all(call["ratio"] == "9:16" for call in calls)
     assert all(call["size"] == "4K" for call in calls)
     assert all(call["model"] == "gpt-image-2" for call in calls)
+
+
+def test_generate_scene_assets_coerces_gpt_image_1080p_to_4k():
+    """gpt-image-2 + 1080p 在 content-app 常无价格配置；对齐 Borg 默认升到 4K。"""
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs)
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/c.png"}], raw={})
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("本用例不应走参考图")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [{"asset_id": "character-a", "three_view_prompt": "人物三视图"}],
+                "scenes": [],
+                "props": [],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[],
+            image_ratio="9:16",
+            image_size="1080p",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert calls and calls[0]["size"] == "4K"
 
 
 def test_generate_scene_assets_only_retries_target_assets_and_preserves_completed_images():

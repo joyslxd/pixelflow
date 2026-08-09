@@ -25,7 +25,11 @@ from pixelflow.tasks import (
 )
 from pixelflow.video_agent.contracts import AgentPlanStatus, PlanStepStatus
 from pixelflow.video_agent.credentials import TransientVideoAgentCredential
-from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+from pixelflow.video_agent.entrypoint import (
+    VideoAgentEntrypoint,
+    merge_video_turn_content_with_history,
+    video_agent_plan_id,
+)
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
 from pixelflow.video_agent.workspace.repository import VideoAgentRepository
@@ -121,6 +125,14 @@ class AgentRuntimeVideoQuotaUnavailableError(RuntimeError):
     """VideoAgent额度恢复Worker或Repository尚未装配。"""
 
 
+class AgentRuntimeVideoScriptUnavailableError(RuntimeError):
+    """VideoAgent脚本保存入口尚未就绪。"""
+
+
+class AgentRuntimeVideoScriptConflictError(RuntimeError):
+    """VideoAgent脚本保存与当前工作区版本冲突。"""
+
+
 @dataclass(frozen=True)
 class AgentRuntimeConversationAssignment:
     """记录新对话一次性冻结的 Runtime 与业务编排归属。"""
@@ -196,6 +208,23 @@ class VideoAgentQuotaResponse(_RuntimeResponseModel):
     decision: Literal["resume", "cancel"]
     plan_status: AgentPlanStatus
     step_status: PlanStepStatus
+
+
+class VideoAgentScriptSaveRequest(_RuntimeResponseModel):
+    """右侧脚本预览发布用户编辑后的 Markdown。"""
+
+    markdown: str = Field(min_length=1, max_length=200_000)
+    expected_revision: int = Field(ge=1)
+    confirm_for_generation: bool = False
+
+
+class VideoAgentScriptSaveResponse(_RuntimeResponseModel):
+    """脚本保存后的公开摘要。"""
+
+    workspace_id: str
+    revision: int = Field(ge=1)
+    script_version: int = Field(ge=1)
+    artifact_ref: str
 
 
 class RetiredVideoWorkflowResponse(_RuntimeResponseModel):
@@ -292,12 +321,20 @@ class RuntimeVideoAgentQuotaProjection(_RuntimeResponseModel):
     unavailable_reason: str | None = None
 
 
+class RuntimeVideoAgentPlanBundle(_RuntimeResponseModel):
+    """单个历史执行方案及其步骤，供前端恢复多轮时间线。"""
+
+    plan: dict[str, Any]
+    steps: list[RuntimeVideoAgentStepProjection] = Field(default_factory=list)
+
+
 class RuntimeVideoAgentProjection(_RuntimeResponseModel):
     """右侧面板和执行时间线共享的 VideoAgent 权威投影。"""
 
     workspace: dict[str, Any]
     plan: dict[str, Any] | None = None
     steps: list[RuntimeVideoAgentStepProjection] = Field(default_factory=list)
+    plans: list[RuntimeVideoAgentPlanBundle] = Field(default_factory=list)
     confirmation: RuntimeVideoAgentConfirmationProjection | None = None
     quota: RuntimeVideoAgentQuotaProjection | None = None
 
@@ -437,6 +474,21 @@ def _video_agent_execution_ready(conversation: object) -> bool:
         and runtime.get("primary_execution_ready") is True
         and isinstance(runtime.get("enabled_intents"), list)
         and "video" in runtime["enabled_intents"]
+    )
+
+
+def _route_decision_needs_resolution(stored: object) -> bool:
+    """未知/待澄清路由不得粘住整段会话，后续输入必须允许重新判定。"""
+
+    if not isinstance(stored, dict):
+        return True
+    try:
+        decision = RouteDecision.model_validate(stored)
+    except (ValidationError, TypeError, ValueError):
+        return True
+    return (
+        decision.intent is RouteIntent.UNKNOWN
+        or decision.requires_clarification
     )
 
 
@@ -591,7 +643,7 @@ class AgentRuntimeService:
                     runtime.get("route_decision") if runtime else None
                 )
                 route_assignment: TurnRouteAssignment | None = None
-                if isinstance(stored_decision, dict):
+                if not _route_decision_needs_resolution(stored_decision):
                     route_decision = RouteDecision.model_validate(
                         stored_decision,
                     )
@@ -622,6 +674,12 @@ class AgentRuntimeService:
                     else route_assignment.primary_execution_ready
                 )
                 self._require_video_agent_entrypoint(video_agent_execution_ready)
+                if video_agent_execution_ready:
+                    # Plan 已结束后若 Turn 未收尾，会一直占着 ACCEPTED，导致下一条永远 QUEUED。
+                    await self._release_stale_completed_video_agent_turns(
+                        owner,
+                        conversation_id,
+                    )
                 registration = await self._register_turn(
                     user_id=owner,
                     conversation_id=conversation_id,
@@ -636,11 +694,34 @@ class AgentRuntimeService:
                 )
         response_turn = registration.turn
         if video_agent_execution_ready and self._video_agent_entrypoint is not None:
+            video_content = body.content
+            try:
+                history = await self.task_store.list_conversation_messages(
+                    conversation_id,
+                    user_id=owner,
+                    limit=80,
+                )
+                prior_user_contents = [
+                    message.content
+                    for message in history
+                    if message.role == "user"
+                    and message.content.strip()
+                    and message.message_id != registration.message.message_id
+                ]
+                video_content = merge_video_turn_content_with_history(
+                    body.content,
+                    prior_user_contents,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "合并 VideoAgent 上文失败，回退本轮原文：异常类型=%s",
+                    type(exc).__name__,
+                )
             submission = await self._video_agent_entrypoint.submit_turn(
                 user_id=owner,
                 conversation_id=conversation_id,
                 turn_id=registration.turn.turn_id,
-                content=body.content,
+                content=video_content,
                 artifact_refs=tuple(body.artifact_refs),
                 materials=body.materials,
             )
@@ -759,13 +840,175 @@ class AgentRuntimeService:
         video_scope = self._pending_video_agent_turns.pop(turn_id, None)
         if video_scope is not None and self._video_agent_runner is not None:
             self._schedule_executor_notification(
-                self._video_agent_runner.notify_turn(video_scope, credential),
+                self._run_video_agent_turn_and_release(video_scope, credential),
                 credential=credential,
                 kind="VideoAgent Turn",
             )
             return
         if credential is not None:
             credential.discard()
+
+    async def _run_video_agent_turn_and_release(
+        self,
+        scope: VideoAgentRunScope,
+        credential: TransientVideoAgentCredential | None,
+    ) -> None:
+        """执行 VideoAgent Plan，并在终态后释放 Agent Runtime Turn 占用。"""
+
+        try:
+            await self._release_stale_completed_video_agent_turns(
+                scope.user_id,
+                scope.conversation_id,
+            )
+            if self._video_agent_runner is not None:
+                await self._video_agent_runner.notify_turn(scope, credential)
+        finally:
+            # Runner 成功路径会 discard；失败或未进入 Runner 时这里兜底。
+            if credential is not None:
+                credential.discard()
+        await self._finalize_video_agent_turn(scope)
+
+    async def _release_stale_completed_video_agent_turns(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> None:
+        """收尾「Plan 已完成但 Turn 仍 ACCEPTED/PROCESSING」的僵尸占用。"""
+
+        if self._video_agent_repository is None:
+            return
+        owner = user_id.strip()
+        turns = await self.repository.list_turns(owner, conversation_id)
+        for turn in turns:
+            if turn.status not in {
+                TurnStatus.ACCEPTED,
+                TurnStatus.PROCESSING,
+            }:
+                continue
+            plan_id = video_agent_plan_id(conversation_id, turn.turn_id)
+            plan = await self._video_agent_repository.get_plan(owner, plan_id)
+            if plan is None or plan.status not in {
+                AgentPlanStatus.COMPLETED,
+                AgentPlanStatus.FAILED,
+            }:
+                continue
+            await self._complete_video_agent_runtime_turn(
+                user_id=owner,
+                conversation_id=conversation_id,
+                turn_id=turn.turn_id,
+                chain_next=False,
+            )
+
+    async def _finalize_video_agent_turn(self, scope: VideoAgentRunScope) -> None:
+        if self._video_agent_repository is None:
+            return
+        plan = await self._video_agent_repository.get_plan(
+            scope.user_id,
+            scope.plan_id,
+        )
+        if plan is None:
+            return
+        if plan.status is AgentPlanStatus.AWAITING_CONFIRMATION:
+            return
+        if plan.status is AgentPlanStatus.RUNNING:
+            return
+        if plan.status not in {
+            AgentPlanStatus.COMPLETED,
+            AgentPlanStatus.FAILED,
+        }:
+            return
+        await self._complete_video_agent_runtime_turn(
+            user_id=scope.user_id,
+            conversation_id=scope.conversation_id,
+            turn_id=scope.turn_id,
+            chain_next=True,
+        )
+
+    async def _complete_video_agent_runtime_turn(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        turn_id: str,
+        chain_next: bool,
+    ) -> None:
+        """完成当前 Runtime Turn，并可选领取/唤醒下一排队输入。"""
+
+        turn = await self.repository.get_turn(user_id, turn_id)
+        if turn is None or turn.conversation_id != conversation_id:
+            return
+        if turn.status is TurnStatus.COMPLETED:
+            return
+        if turn.status not in {
+            TurnStatus.ACCEPTED,
+            TurnStatus.PROCESSING,
+        }:
+            return
+        occurred_at = self._clock()
+        try:
+            _completed, next_turn = await self.repository.complete_turn_and_claim_next(
+                user_id,
+                conversation_id,
+                turn_id=turn_id,
+                now=occurred_at,
+            )
+        except AgentRuntimeRecordConflictError:
+            logger.warning(
+                "VideoAgent Turn 收尾冲突并保留队列：turn_id=%s",
+                turn_id,
+            )
+            return
+        await self._event_outbox.append(
+            user_id,
+            conversation_id=conversation_id,
+            run_id=turn_id,
+            event_type=AgentEventType.INPUT_STATE_CHANGED,
+            payload={
+                "client_input_id": str(turn.client_input_id),
+                "turn_id": turn_id,
+                "status": TurnStatus.COMPLETED.value,
+                "queue_position": None,
+            },
+            occurred_at=occurred_at,
+        )
+        if not chain_next or next_turn is None:
+            return
+        await self._append_processing_event(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            turn=next_turn,
+            occurred_at=occurred_at,
+        )
+        next_plan_id = video_agent_plan_id(conversation_id, next_turn.turn_id)
+        if self._video_agent_repository is not None:
+            next_plan = await self._video_agent_repository.get_plan(
+                user_id,
+                next_plan_id,
+            )
+            if next_plan is not None and next_plan.status in {
+                AgentPlanStatus.COMPLETED,
+                AgentPlanStatus.FAILED,
+            }:
+                await self._complete_video_agent_runtime_turn(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    turn_id=next_turn.turn_id,
+                    chain_next=True,
+                )
+                return
+        if self._video_agent_runner is None:
+            return
+        next_scope = VideoAgentRunScope(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            turn_id=next_turn.turn_id,
+            plan_id=next_plan_id,
+        )
+        self._schedule_executor_notification(
+            self._run_video_agent_turn_and_release(next_scope, None),
+            credential=None,
+            kind="VideoAgent Queued Turn",
+        )
 
     def _schedule_executor_notification(
         self,
@@ -1077,6 +1320,105 @@ class AgentRuntimeService:
             step_status=restored_step.status,
         )
 
+    async def save_video_agent_script(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        request: VideoAgentScriptSaveRequest,
+    ) -> VideoAgentScriptSaveResponse:
+        """把右侧预览中的用户编辑写入 VideoWorkspace.script，并追加版本。"""
+
+        owner = user_id.strip()
+        if self._video_agent_repository is None:
+            raise AgentRuntimeVideoScriptUnavailableError(
+                "VideoAgent脚本保存入口尚未安装"
+            )
+        conversation = await self.require_conversation(
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        state = await self._video_agent_repository.load_conversation_state(
+            owner,
+            conversation_id,
+        )
+        if state is None:
+            raise AgentRuntimeVideoScriptConflictError(
+                "当前会话没有可编辑的视频工作区"
+            )
+        workspace, _plan = state
+        if workspace.revision != request.expected_revision:
+            raise AgentRuntimeVideoScriptConflictError(
+                "脚本工作区版本已变化，请刷新后重试"
+            )
+        markdown = request.markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not markdown:
+            raise AgentRuntimeVideoScriptConflictError("脚本内容不能为空")
+        existing = workspace.payload.get("script")
+        existing_script = existing if isinstance(existing, dict) else {}
+        versions_raw = workspace.payload.get("script_versions")
+        versions = [
+            dict(item)
+            for item in (versions_raw if isinstance(versions_raw, list) else [])
+            if isinstance(item, dict)
+        ]
+        previous_version = existing_script.get("version")
+        next_version = (
+            previous_version + 1
+            if isinstance(previous_version, int) and previous_version >= 1
+            else max(
+                (
+                    item.get("version")
+                    for item in versions
+                    if isinstance(item.get("version"), int)
+                ),
+                default=0,
+            )
+            + 1
+        )
+        artifact_ref = existing_script.get("artifact_ref")
+        if not isinstance(artifact_ref, str) or not artifact_ref.startswith("artifact:"):
+            artifact_ref = f"artifact:video-script-edit-{workspace.workspace_id[:24]}"
+        script = {
+            **existing_script,
+            "artifact_ref": artifact_ref,
+            "source": "user_edit",
+            "version": next_version,
+            "status": "ready",
+            "review_required": False,
+            "content": markdown,
+            "missing_requirements": list(existing_script.get("missing_requirements") or [])
+            if isinstance(existing_script.get("missing_requirements"), list)
+            else [],
+        }
+        try:
+            patch: dict[str, object] = {
+                "script": script,
+                "script_versions": [*versions, script],
+            }
+            if request.confirm_for_generation:
+                patch["script_plan_confirmed"] = True
+                patch["script_plan_confirmed_version"] = next_version
+            updated = await self._video_agent_repository.apply_workspace_patch(
+                owner,
+                workspace.workspace_id,
+                patch,
+                expected_revision=workspace.revision,
+                now=self._clock(),
+            )
+        except AgentRuntimeRecordConflictError as exc:
+            raise AgentRuntimeVideoScriptConflictError(
+                "脚本工作区版本冲突，请刷新后重试"
+            ) from exc
+        return VideoAgentScriptSaveResponse(
+            workspace_id=updated.workspace_id,
+            revision=updated.revision,
+            script_version=next_version,
+            artifact_ref=artifact_ref,
+        )
+
     async def resume_workflow(
         self,
         *,
@@ -1249,6 +1591,38 @@ class AgentRuntimeService:
                     if plan is None
                     else plan.model_dump(mode="json", exclude={"steps"})
                 )
+                history_plans: list[RuntimeVideoAgentPlanBundle] = []
+                try:
+                    conversation_plans = await self._video_agent_repository.list_conversation_plans(
+                        owner,
+                        conversation_id,
+                    )
+                except (AgentRuntimeRecordConflictError, ValidationError, ValueError) as exc:
+                    raise AgentRuntimeInterruptStateError(
+                        "VideoAgent Snapshot 计划历史投影状态非法",
+                    ) from exc
+                for history_plan in conversation_plans:
+                    history_plans.append(
+                        RuntimeVideoAgentPlanBundle(
+                            plan=history_plan.model_dump(mode="json", exclude={"steps"}),
+                            steps=[
+                                RuntimeVideoAgentStepProjection(
+                                    step_id=step.step_id,
+                                    plan_id=step.plan_id,
+                                    sequence=step.sequence,
+                                    title=step.title,
+                                    status=step.status,
+                                    confirmation_required=step.confirmation_required,
+                                    public_summary=step.public_summary,
+                                    artifact_refs=list(step.artifact_refs),
+                                    started_at=step.started_at,
+                                    completed_at=step.completed_at,
+                                    duration_ms=step.duration_ms,
+                                )
+                                for step in history_plan.steps
+                            ],
+                        )
+                    )
                 confirmation: RuntimeVideoAgentConfirmationProjection | None = None
                 quota: RuntimeVideoAgentQuotaProjection | None = None
                 if plan is not None:
@@ -1375,6 +1749,7 @@ class AgentRuntimeService:
                             for step in plan.steps
                         ]
                     ),
+                    plans=history_plans,
                     confirmation=confirmation,
                     quota=quota,
                 )

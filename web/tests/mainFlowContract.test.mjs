@@ -928,8 +928,13 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 60_000/, "auto-confirm timeout must be 60 seconds");
   assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 60 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
-  assert.match(messageBubbleSource, /model === "gpt-image-2" \? "image-2"/, "MessageBubble must show image-2 as the gpt-image-2 display label");
+  assert.match(messageBubbleSource, /if \(model === "gpt-image-2"\) return "image-2"/, "MessageBubble must show image-2 as the gpt-image-2 display label");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
+  assert.match(messageBubbleSource, /scene_asset_model_options/, "MessageBubble must render scene asset model options card");
+  assert.match(messageBubbleSource, /onConfirmSceneAssetModel/, "MessageBubble must submit selected scene asset model");
+  assert.match(workspaceSource, /generate_images:\s*false/, "Video Agent asset package prepare must pause before image generation");
+  assert.match(workspaceSource, /handleConfirmSceneAssetModel/, "Workspace must confirm scene asset model before generate-scene-assets");
+  assert.match(workspaceSource, /startSceneAssetsJob/, "Confirmed model must start generate-scene-assets job");
   assert.match(messageBubbleSource, /max-h-\[420px\][\s\S]*object-contain/, "image result previews must preserve the generated image aspect ratio");
   assert.match(messageBubbleSource, /清晰度/, "image-edit options card must show quality choices");
   assert.match(messageBubbleSource, /尺寸/, "image-edit options card must show ratio choices");
@@ -1045,6 +1050,7 @@ test("交互策略分别控制输入框、产物动作和运行时忙碌态", ()
   assert.match(chatPanelSource, /latestActionableMessageId/, "ChatPanel must identify the latest actionable artifact");
   assert.match(chatPanelSource, /isLatestActionableQualityReview/, "ChatPanel must keep the latest QC result card actionable after analysis");
   assert.match(chatPanelSource, /hasRecoverableArtifactAction/, "ChatPanel must identify failed recoverable artifact cards");
+  assert.match(chatPanelSource, /scene_asset_model_options/, "unconfirmed scene asset model cards must stay actionable after later messages");
   assert.match(chatPanelSource, /actionsDisabled=\{Boolean\(artifactActionsDisabled\) \|\| \(!isLatestActionableQualityReview &&[\s\S]*!keepRecoverableActions/, "ChatPanel must disable actions while the artifact policy is locked or on older artifacts except the current QC result and recoverable failure cards");
   assert.match(messageBubbleSource, /actionsDisabled\?: boolean/, "MessageBubble must accept disabled action state");
   assert.match(messageBubbleSource, /onClickCapture=\{blockDisabledAction\}/, "MessageBubble must intercept disabled button clicks");

@@ -101,6 +101,8 @@ class PrepareScenePackagesRequest(BaseModel):
     creation_contract: VideoCreationContract | None = None
     scene_blueprints: list[dict[str, Any]] = Field(default_factory=list)
     asset_manifest: dict[str, Any] | None = None
+    # False：仅产出结构，停在 awaiting_image_model，等前端选模型后再 generate-scene-assets。
+    generate_images: bool = True
 
     @model_validator(mode="after")
     def require_final_plan_asset_manifest(self) -> PrepareScenePackagesRequest:
@@ -130,7 +132,7 @@ class GenerateSceneAssetsRequest(BaseModel):
     scene_packages: list[dict[str, Any]]
     materials: list[dict[str, Any]] = Field(default_factory=list)
     image_ratio: str = "1:1"
-    image_size: str = "1080p"
+    image_size: str = "4K"
     model: str | None = None
     creation_contract: VideoCreationContract | None = None
     target_assets: list[SceneAssetTarget] | None = Field(default=None, min_length=1, max_length=100)
@@ -154,6 +156,18 @@ class PrepareScenePackagesJobResult(BaseModel):
     message: str = ""
 
 
+class SceneAssetGenerationProgress(BaseModel):
+    """参考图逐张生成进度，供前端轮询展示。"""
+
+    completed: int = Field(ge=0, default=0)
+    total: int = Field(ge=0, default=0)
+    asset_id: str = ""
+    asset_name: str = ""
+    asset_type: str = ""
+    ok: bool = True
+    quota_insufficient: bool = False
+
+
 class PrepareScenePackagesJobStartResponse(BaseModel):
     ok: bool
     job_id: str
@@ -168,6 +182,7 @@ class PrepareScenePackagesJobStatusResponse(BaseModel):
     status: str
     stage: str = "prepare_scene_packages"
     result: PrepareScenePackagesJobResult | None = None
+    asset_progress: SceneAssetGenerationProgress | None = None
     error: str | None = None
     message: str = ""
 
@@ -186,6 +201,7 @@ class GenerateSceneAssetsJobStatusResponse(BaseModel):
     status: str
     stage: str = "generate_scene_assets"
     result: GenerateSceneAssetsResponse | None = None
+    asset_progress: SceneAssetGenerationProgress | None = None
     error: str | None = None
     message: str = ""
 
@@ -499,14 +515,16 @@ async def get_prepare_scene_packages_job(job_id: str) -> PrepareScenePackagesJob
     status = str(job.get("status") or "running")
     stage = str(job.get("stage") or "prepare_scene_packages")
     error = job.get("error")
+    asset_progress = _scene_asset_progress_from_job(job)
     return PrepareScenePackagesJobStatusResponse(
         ok=status not in {"failed"},
         job_id=job_id,
         status=status,
         stage=stage,
         result=result_payload,
+        asset_progress=asset_progress,
         error=str(error) if error else None,
-        message=_scene_package_job_message(status, stage, result_payload, error),
+        message=_scene_package_job_message(status, stage, result_payload, error, asset_progress),
     )
 
 
@@ -675,14 +693,16 @@ async def get_generate_scene_assets_job(job_id: str) -> GenerateSceneAssetsJobSt
     status = str(job.get("status") or "running")
     stage = str(job.get("stage") or "generate_scene_assets")
     error = job.get("error")
+    asset_progress = _scene_asset_progress_from_job(job)
     return GenerateSceneAssetsJobStatusResponse(
         ok=status not in {"failed"},
         job_id=job_id,
         status=status,
         stage=stage,
         result=result_payload,
+        asset_progress=asset_progress,
         error=str(error) if error else None,
-        message=_scene_asset_job_message(status, result_payload, error),
+        message=_scene_asset_job_message(status, result_payload, error, asset_progress),
     )
 
 
@@ -758,7 +778,11 @@ async def get_update_scene_package_asset_job(
     )
 
 
-async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> GenerateSceneAssetsResponse:
+async def _generate_scene_assets_response(
+    body: GenerateSceneAssetsRequest,
+    *,
+    on_progress: Any = None,
+) -> GenerateSceneAssetsResponse:
     if not body.scene_packages:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
 
@@ -769,10 +793,18 @@ async def _generate_scene_assets_response(body: GenerateSceneAssetsRequest) -> G
         scene_packages=[_clone_mapping(scene) for scene in body.scene_packages],
         materials=body.materials,
         image_ratio=_scene_image_ratio(contract) if contract is not None else body.image_ratio,
-        image_size=_scene_image_size(contract) if contract is not None else body.image_size,
+        image_size=(
+            _scene_image_size(contract)
+            if contract is not None
+            else _coerce_scene_image_size(
+                model=body.model or "gpt-image-2",
+                size=body.image_size,
+            )
+        ),
         model=contract.image_model if contract is not None else body.model,
         quota_checker=is_quota_insufficient,
         target_assets=[target.model_dump() for target in body.target_assets] if body.target_assets is not None else None,
+        on_progress=on_progress,
     )
     if result.get("quota_insufficient"):
         return GenerateSceneAssetsResponse(
@@ -1208,6 +1240,43 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
             )
             return
 
+        if not body.generate_images:
+            _SCENE_PACKAGE_JOBS[job_id] = {
+                "status": "completed",
+                "stage": "awaiting_image_model",
+                "result": PrepareScenePackagesJobResult(
+                    ok=True,
+                    videoScenePackages=video_scene_packages,
+                    sceneAssetFailures=[],
+                    message="场景包结构已就绪，请选择生图模型。",
+                ),
+                "asset_progress": None,
+                "error": None,
+            }
+            record_power_mem_background(
+                power_mem,
+                user_id=user_id,
+                content=concise_result_summary(
+                    "视频场景包 Agent 完成结构生成，等待生图模型确认",
+                    {
+                        "stage": "awaiting_image_model",
+                        "message": "场景包结构已就绪，请选择生图模型。",
+                        "ok": True,
+                    },
+                ),
+                category="experience",
+                source_agent="video_scene_package_agent",
+                metadata={
+                    "source": "video_prepare_scene_packages_job",
+                    "job_id": job_id,
+                    "scene_count": len(video_scene_packages.scene_packages),
+                },
+                memory_type="experience",
+                run_id=job_id,
+                infer=False,
+            )
+            return
+
         _SCENE_PACKAGE_JOBS[job_id] = {
             "status": "running",
             "stage": "generate_scene_assets",
@@ -1217,8 +1286,32 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
                 sceneAssetFailures=[],
                 message="视频场景包已生成，正在生成场景参考图。",
             ),
+            "asset_progress": None,
             "error": None,
         }
+
+        async def on_scene_asset_progress(progress: dict[str, Any]) -> None:
+            packages = PrepareScenePackagesResponse(
+                **{
+                    **video_scene_packages.model_dump(),
+                    "global_assets": progress.get("global_assets") or video_scene_packages.global_assets,
+                    "scene_packages": progress.get("scene_packages") or video_scene_packages.scene_packages,
+                    "message": "视频场景包已生成，正在生成场景参考图。",
+                }
+            )
+            _SCENE_PACKAGE_JOBS[job_id] = {
+                "status": "running",
+                "stage": "generate_scene_assets",
+                "result": PrepareScenePackagesJobResult(
+                    ok=True,
+                    videoScenePackages=packages,
+                    sceneAssetFailures=list(progress.get("failed_assets") or []),
+                    message=_asset_progress_message(progress),
+                ),
+                "asset_progress": _scene_asset_progress_payload(progress),
+                "error": None,
+            }
+
         scene_assets = await _generate_scene_assets_response(
             GenerateSceneAssetsRequest(
                 global_assets=video_scene_packages.global_assets,
@@ -1228,7 +1321,8 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
                 image_size=_scene_image_size(body.creation_contract),
                 model=body.creation_contract.image_model if body.creation_contract is not None else None,
                 creation_contract=body.creation_contract,
-            )
+            ),
+            on_progress=on_scene_asset_progress,
         )
         scene_packages_for_review = PrepareScenePackagesResponse(
             **{
@@ -1282,11 +1376,28 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
 
 async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, power_mem: Any = None, user_id: str | None = None) -> None:
     try:
-        result = await _generate_scene_assets_response(body)
+        async def on_scene_asset_progress(progress: dict[str, Any]) -> None:
+            _SCENE_ASSET_JOBS[job_id] = {
+                "status": "running",
+                "stage": "generate_scene_assets",
+                "result": GenerateSceneAssetsResponse(
+                    ok=True,
+                    endpoint="/api/picture/text_to_image",
+                    global_assets=progress.get("global_assets") or {},
+                    scene_packages=progress.get("scene_packages") or [],
+                    failed_assets=list(progress.get("failed_assets") or []),
+                    message=_asset_progress_message(progress),
+                ),
+                "asset_progress": _scene_asset_progress_payload(progress),
+                "error": None,
+            }
+
+        result = await _generate_scene_assets_response(body, on_progress=on_scene_asset_progress)
         _SCENE_ASSET_JOBS[job_id] = {
             "status": "quota_paused" if result.quota_insufficient else "completed",
             "stage": "completed",
             "result": result,
+            "asset_progress": _SCENE_ASSET_JOBS.get(job_id, {}).get("asset_progress"),
             "error": None,
         }
         record_power_mem_background(
@@ -1429,30 +1540,86 @@ def _trim_scene_asset_revision_jobs() -> None:
         _SCENE_ASSET_REVISION_JOBS.pop(job_id, None)
 
 
+def _scene_asset_progress_payload(progress: dict[str, Any]) -> SceneAssetGenerationProgress:
+    return SceneAssetGenerationProgress(
+        completed=max(0, int(progress.get("completed") or 0)),
+        total=max(0, int(progress.get("total") or 0)),
+        asset_id=str(progress.get("asset_id") or ""),
+        asset_name=str(progress.get("asset_name") or ""),
+        asset_type=str(progress.get("asset_type") or ""),
+        ok=bool(progress.get("ok", True)),
+        quota_insufficient=bool(progress.get("quota_insufficient")),
+    )
+
+
+def _scene_asset_progress_from_job(job: dict[str, Any]) -> SceneAssetGenerationProgress | None:
+    raw = job.get("asset_progress")
+    if isinstance(raw, SceneAssetGenerationProgress):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return SceneAssetGenerationProgress(**raw)
+        except Exception:  # noqa: BLE001 - 轮询端容错，坏进度不阻断主状态
+            return None
+    return None
+
+
+def _asset_progress_message(progress: dict[str, Any]) -> str:
+    completed = int(progress.get("completed") or 0)
+    total = int(progress.get("total") or 0)
+    asset_name = str(progress.get("asset_name") or "参考图").strip() or "参考图"
+    asset_type = str(progress.get("asset_type") or "").strip()
+    type_label = {
+        "character": "角色",
+        "scene_image": "场景",
+        "prop_image": "道具",
+    }.get(asset_type, "素材")
+    status = "已完成" if progress.get("ok", True) else "失败"
+    if total > 0:
+        return f"参考图进度 {completed}/{total}：{type_label}「{asset_name}」{status}"
+    return f"参考图进度：{type_label}「{asset_name}」{status}"
+
+
 def _scene_package_job_message(
     status: str,
     stage: str,
     result: PrepareScenePackagesJobResult | None,
     error: Any,
+    asset_progress: SceneAssetGenerationProgress | None = None,
 ) -> str:
     if status == "completed":
+        if stage == "awaiting_image_model":
+            return (
+                result.message
+                if result and result.message
+                else "场景包结构已就绪，请选择生图模型。"
+            )
         return result.message if result and result.message else "视频场景包和参考图已准备完成。"
     if status == "quota_paused":
         return quota_resume_message(result.message if result else None)
     if status == "failed":
         return str(error or "视频场景包生成失败。")
     if stage == "generate_scene_assets":
+        if asset_progress and asset_progress.total > 0:
+            return _asset_progress_message(asset_progress.model_dump())
         return "视频场景包已生成，正在生成场景参考图。"
     return "视频场景包生成中。"
 
 
-def _scene_asset_job_message(status: str, result: GenerateSceneAssetsResponse | None, error: Any) -> str:
+def _scene_asset_job_message(
+    status: str,
+    result: GenerateSceneAssetsResponse | None,
+    error: Any,
+    asset_progress: SceneAssetGenerationProgress | None = None,
+) -> str:
     if status == "completed":
         return result.message if result and result.message else "场景参考图生成完成。"
     if status == "quota_paused":
         return quota_resume_message(result.message if result else None)
     if status == "failed":
         return str(error or "场景参考图生成失败。")
+    if asset_progress and asset_progress.total > 0:
+        return _asset_progress_message(asset_progress.model_dump())
     return "场景参考图生成中。"
 
 
@@ -1832,10 +1999,28 @@ def _scene_image_ratio(contract: VideoCreationContract | None) -> str:
 
 def _scene_image_size(contract: VideoCreationContract | None) -> str:
     if contract is None:
-        return "1080p"
+        return "4K"
     if not contract.scene_image_size:
         raise ValueError("video creation contract is missing scene_image_size")
-    return contract.scene_image_size
+    return _coerce_scene_image_size(
+        model=str(contract.image_model or "gpt-image-2"),
+        size=contract.scene_image_size,
+    )
+
+
+def _coerce_scene_image_size(*, model: str, size: str) -> str:
+    """对齐 Borg 生图 Skill：gpt-image-2 默认 4K，避免 1080p 无价格配置。"""
+
+    from pixelflow.skills.borgrise.run_generation import (
+        default_image_quality_for_model,
+        normalize_image_quality,
+    )
+
+    quality = normalize_image_quality(size)
+    normalized_model = str(model or "").strip().lower()
+    if normalized_model == "gpt-image-2" and quality.casefold() == "1080p":
+        return default_image_quality_for_model("gpt-image-2")
+    return quality or default_image_quality_for_model(normalized_model or "gpt-image-2")
 
 
 def _asset_count(global_assets: dict[str, Any]) -> int:

@@ -233,6 +233,7 @@ try {
   } else {
     compileStandaloneModules([
       "src/lib/activePlanSnapshot.ts",
+      "src/lib/assetPackageProgressAnchor.ts",
       "src/lib/authStorage.ts",
       "src/lib/conversationRouting.ts",
       "src/lib/imageReview.ts",
@@ -241,8 +242,12 @@ try {
       "src/lib/planMessageRecovery.ts",
       "src/lib/reviewWindow.ts",
       "src/lib/sceneAssetFailures.ts",
+      "src/lib/sceneAssetModelSelection.ts",
       "src/lib/sceneMentions.ts",
+      "src/lib/scenePackageAssetUi.ts",
+      "src/lib/scenePackageJobResume.ts",
       "src/lib/scenePackages.ts",
+      "src/lib/shotDescriptionDisplay.ts",
       "src/lib/supervisor/api.ts",
       "src/lib/supervisor/actions.ts",
       "src/lib/supervisor/contracts.ts",
@@ -271,6 +276,7 @@ try {
   run(process.execPath, ["--test", ...testFiles], {
     env: {
       ACTIVE_PLAN_SNAPSHOT_TEST_MODULE: standaloneModuleUrl("activePlanSnapshot.js"),
+      ASSET_PACKAGE_PROGRESS_ANCHOR_TEST_MODULE: standaloneModuleUrl("assetPackageProgressAnchor.js"),
       AGENT_RUNTIME_CONTRACTS_TEST_MODULE: standaloneModuleUrl("supervisor/contracts.js"),
       AGENT_RUNTIME_CONTRACT_FIXTURE: agentRuntimeContractFixture,
       AGENT_RUNTIME_GENERATED_TYPE_TEST: generatedAgentRuntimeTypeTest,
@@ -283,8 +289,12 @@ try {
       PLAN_MESSAGE_RECOVERY_TEST_MODULE: standaloneModuleUrl("planMessageRecovery.js"),
       REVIEW_WINDOW_TEST_MODULE: standaloneModuleUrl("reviewWindow.js"),
       SCENE_ASSET_FAILURES_TEST_MODULE: path.join(moduleDirectory, "lib/sceneAssetFailures.js"),
+      SCENE_ASSET_MODEL_SELECTION_TEST_MODULE: standaloneModuleUrl("sceneAssetModelSelection.js"),
       SCENE_MENTIONS_TEST_MODULE: standaloneModuleUrl("sceneMentions.js"),
+      SCENE_PACKAGE_ASSET_UI_TEST_MODULE: standaloneModuleUrl("scenePackageAssetUi.js"),
+      SCENE_PACKAGE_JOB_RESUME_TEST_MODULE: standaloneModuleUrl("scenePackageJobResume.js"),
       SCENE_PACKAGES_TEST_MODULE: standaloneModuleUrl("scenePackages.js"),
+      SHOT_DESCRIPTION_DISPLAY_TEST_MODULE: standaloneModuleUrl("shotDescriptionDisplay.js"),
       SUPERVISOR_API_TEST_MODULE: standaloneModuleUrl("supervisor/api.js"),
       SUPERVISOR_ACTIONS_TEST_MODULE: standaloneModuleUrl("supervisor/actions.js"),
       SUPERVISOR_EVENTS_TEST_MODULE: standaloneModuleUrl("supervisor/events.js"),

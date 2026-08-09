@@ -41,7 +41,7 @@ class BrainstormScriptInput(BaseModel):
 
     product_info: dict[str, JsonValue] = Field(default_factory=dict)
     video_params: dict[str, JsonValue] = Field(default_factory=dict)
-    creative_direction: str = Field(default="", max_length=2_000)
+    creative_direction: str = Field(default="", max_length=100_000)
 
 
 def _validated[T: BaseModel](model: type[T], arguments: Mapping[str, object]) -> T:
@@ -182,6 +182,10 @@ class BrainstormScriptTool:
         if existing is not None:
             return _replay_result(self.spec.name, existing)
 
+        await context.emit_progress(
+            "正在整理商品信息与创意方向…",
+            phase="prepare_inputs",
+        )
         workspace_product = context.workspace.payload.get("product_info")
         workspace_params = context.workspace.payload.get("video_params")
         product_info = {
@@ -193,11 +197,25 @@ class BrainstormScriptTool:
             **request.video_params,
         }
         reference_analysis = context.workspace.payload.get("reference_analysis")
+        latest_input = context.workspace.payload.get("latest_input")
+        creative_direction = (
+            latest_input.strip()
+            if isinstance(latest_input, str) and latest_input.strip()
+            else request.creative_direction
+        )
+        await context.emit_progress(
+            "调用创意脚本 Skill（brief_generate）…",
+            phase="invoke_skill",
+        )
+        await context.emit_progress(
+            "已交给大模型生成脚本草稿，请稍候…",
+            phase="await_model",
+        )
         markdown = (
             await self._adapter.brainstorm_script(
                 product_info=product_info,
                 video_params=video_params,
-                creative_direction=request.creative_direction,
+                creative_direction=creative_direction,
                 reference_analysis=(
                     dict(reference_analysis)
                     if isinstance(reference_analysis, dict)
@@ -208,6 +226,10 @@ class BrainstormScriptTool:
         if not markdown:
             raise VideoToolValidationError("创意脚本结果为空")
 
+        await context.emit_progress(
+            "正在整理镜头、旁白与行动引导…",
+            phase="format_draft",
+        )
         versions = _script_versions(context.workspace.payload)
         version = _next_version(versions)
         artifact_ref = _artifact_ref(context.workspace.workspace_id, fingerprint)

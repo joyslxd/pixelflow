@@ -130,7 +130,9 @@ function inferIntentFromMessages(messages: WorkflowMessageSignal[]): WorkflowInt
 
 function currentStatusForPhase(phase: string, currentIndex: number, lastIndex: number): WorkflowTaskItemStatus {
   if (phase === "form_cancelled") return "cancelled";
-  if (/quota_paused|blocked/.test(phase)) return "paused";
+  if (/quota_paused|blocked|awaiting_image_model/.test(phase)) return "paused";
+  // 轮询瞬时失败后若已清 pending，不应把素材步永久钉死在「需处理」。
+  if (/scene_package_job_resume_failed|scene_asset_job_resume_failed/.test(phase)) return "waiting";
   if (/failed/.test(phase)) return "failed";
   if (currentIndex === lastIndex) return "waiting_download";
   if (/running|analyze|generation|merge/.test(phase)) return "processing";
@@ -143,7 +145,12 @@ function phaseIndexForVideo(phase: string, scenePackageStage: string): number | 
   if (/^plan_|plan_review/.test(phase)) return 2;
   if (/^scene_global_asset|^scene_asset/.test(phase)) return 4;
   if (/^scene_package/.test(phase)) {
-    return scenePackageStage === "generate_scene_assets" || scenePackageStage === "completed" || /ready|asset|quota/.test(phase) ? 4 : 3;
+    return scenePackageStage === "generate_scene_assets"
+      || scenePackageStage === "completed"
+      || scenePackageStage === "awaiting_image_model"
+      || /ready|asset|quota|awaiting/.test(phase)
+      ? 4
+      : 3;
   }
   if (/^video_(?:generated|regenerated|accepted)$/.test(phase)) return 6;
   if (/^video_/.test(phase)) return 5;
@@ -223,6 +230,55 @@ function artifactIndexAndStatus(intent: WorkflowIntent, messages: WorkflowMessag
   if (latestArtifact(messages, (artifact) => artifact.type === "plan" && artifact.intent === "image")) return { index: 2, status: "waiting" };
   if (latestArtifact(messages, (artifact) => artifact.type === "directions" && artifact.intent === "image")) return { index: 1, status: "waiting" };
   return null;
+}
+
+export function deriveWorkflowTaskBoardFromAgentPlan(input: {
+  planId?: string | null;
+  publicGoal?: string | null;
+  steps?: Record<string, {
+    stepId: string;
+    sequence: number;
+    title: string;
+    status: string;
+  }> | null;
+} | null | undefined): WorkflowTaskBoardModel | null {
+  if (!input?.planId || !input.steps || typeof input.steps !== "object") return null;
+  const ordered = Object.values(input.steps)
+    .filter((step) => step && typeof step.sequence === "number" && step.title)
+    .sort((left, right) => left.sequence - right.sequence);
+  if (ordered.length === 0) return null;
+
+  const mapStatus = (status: string): WorkflowTaskItemStatus => {
+    if (status === "completed") return "completed";
+    if (status === "running") return "processing";
+    if (status === "awaiting_confirmation") return "waiting";
+    if (status === "failed") return "failed";
+    if (status === "skipped") return "skipped";
+    return "pending";
+  };
+
+  const steps: WorkflowTaskItem[] = ordered.map((step) => ({
+    id: step.stepId,
+    label: step.title.replace(/\s*\/\w+\s*$/u, "").trim() || step.title,
+    status: mapStatus(step.status),
+  }));
+  const currentIndex = Math.max(
+    0,
+    steps.findIndex((step) => step.status === "processing" || step.status === "waiting" || step.status === "failed"),
+  );
+  const resolvedIndex = steps.some((step) => step.status === "processing" || step.status === "waiting" || step.status === "failed")
+    ? currentIndex
+    : steps.every((step) => step.status === "completed" || step.status === "skipped")
+      ? steps.length - 1
+      : steps.findIndex((step) => step.status === "pending");
+  const index = resolvedIndex >= 0 ? resolvedIndex : 0;
+  return {
+    workflowId: input.planId,
+    intent: "video",
+    flowKind: "standard",
+    steps,
+    currentStep: steps[index] || steps[0],
+  };
 }
 
 export function deriveWorkflowTaskBoard(input: WorkflowTaskBoardInput): WorkflowTaskBoardModel | null {

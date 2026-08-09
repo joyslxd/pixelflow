@@ -105,6 +105,66 @@ async def test_generate_timed_ad_story_uses_video_rule_without_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_one_minute_ad_uses_video_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content="帮我生成一分钟广告",
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_short_clarification_video_uses_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content="创建视频",
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_generate_commerce_video_clarification_uses_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content="生成带货视频",
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pasted_episode_script_routes_as_video_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    script = (
+        "# 剧本正文 /episode\n**时长**：60秒\n"
+        "### 镜头 01\n- **时间**：00:00-00:04\n- **景别**：特写\n"
+        "- **运镜**：俯拍\n- **画面**：旧照片\n- **旁白**：十年后\n"
+        "### 镜头 02\n- **时间**：00:04-00:10\n- **景别**：中景\n"
+        "- **运镜**：固定\n- **画面**：圆桌聚会蓝妹啤酒\n- **旁白**：无\n"
+        "### 镜头 03\n- **时间**：00:10-00:20\n- **景别**：特写\n"
+        "- **运镜**：推镜\n- **画面**：开瓶泡沫\n- **旁白**：如约\n"
+        "### 镜头 04\n- **时间**：00:20-00:30\n- **景别**：全景\n"
+        "- **运镜**：缓推\n- **画面**：碰杯 CTA\n- **行动引导**：购买\n"
+    )
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content=script,
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert decision.reason_code == "complete_script_payload"
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
 async def test_long_story_with_video_keyword_bypasses_budget_gate() -> None:
     """规则命中必须先于 token 预算，否则长剧本会被误判为未知意图。"""
 

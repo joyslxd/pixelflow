@@ -82,11 +82,19 @@ class PixelFlowVideoDomainAdapter:
             )
             return _render_brief_markdown(brief)
         except Exception as exc:  # noqa: BLE001
-            # 用途：模型不可用时复用确定性 Plan Service 生成可编辑草稿；影响：只降级本次草稿，不暴露异常内容。
+            # 用途：结构化 Brief 失败时改用故事感知 Markdown，避免模板乱序；影响：只降级本次草稿。
             logger.warning(
-                "VideoAgent 创意脚本模型调用失败，改用确定性草稿；error_type=%s",
+                "VideoAgent 创意脚本模型调用失败，改用故事感知草稿；error_type=%s error=%s",
                 type(exc).__name__,
+                str(exc)[:400],
             )
+            story_draft = await _story_aware_script_markdown(
+                product_info=product_info,
+                video_params=video_params,
+                creative_direction=creative_direction,
+            )
+            if story_draft:
+                return story_draft
             return _fallback_script_markdown(
                 product_info=product_info,
                 video_params=video_params,
@@ -148,16 +156,74 @@ def _fallback_script_markdown(
         form_values.setdefault("video_duration_sec", form_values["duration_sec"])
     if "ratio" in form_values:
         form_values.setdefault("video_ratio", form_values["ratio"])
+    # 长故事不要塞进 title，避免模板字段错乱；description 保留用户原文摘要。
+    story = creative_direction.strip()
+    summary = story if len(story) <= 500 else f"{story[:480]}…"
     result = build_plan_markdown(
         "video",
         form_values,
         {
-            "title": creative_direction or "推荐创意方向",
-            "description": creative_direction or "围绕商品卖点组织短视频脚本。",
+            "title": _product_name(product_info) or "视频创意脚本",
+            "description": summary or "围绕用户故事组织短视频脚本。",
         },
-        intake_context={"product_subject": _product_name(product_info)},
+        intake_context={
+            "product_subject": _product_name(product_info),
+            "user_story": summary,
+        },
     )
     return result.plan_markdown
+
+
+async def _story_aware_script_markdown(
+    *,
+    product_info: Mapping[str, JsonValue],
+    video_params: Mapping[str, JsonValue],
+    creative_direction: str,
+) -> str | None:
+    """结构化 Brief 失败时，直接让模型按用户故事输出 Markdown 脚本。"""
+
+    story = creative_direction.strip()
+    if not story:
+        return None
+    try:
+        from deerflow.models import create_chat_model
+
+        model = create_chat_model(thinking_enabled=False)
+        duration = video_params.get("duration_sec", 60)
+        ratio = video_params.get("ratio", "9:16")
+        product = _product_name(product_info)
+        message = await model.ainvoke(
+            [
+                (
+                    "system",
+                    "你是广告/短剧视频编剧。严格依据用户故事输出可拍摄 Markdown 脚本，"
+                    "不得改成无关带货模板，不得打乱故事顺序。",
+                ),
+                (
+                    "human",
+                    "请根据以下输入写完整脚本 Markdown，包含：时长、画幅、故事主线、"
+                    "镜头列表（时间/景别/运镜/画面/旁白/屏幕文案）、结尾 CTA。\n\n"
+                    f"商品：{product}\n时长：{duration}s\n画幅：{ratio}\n\n"
+                    f"用户故事：\n{story}",
+                ),
+            ]
+        )
+        content = getattr(message, "content", message)
+        if isinstance(content, list):
+            text = "".join(
+                str(part.get("text") if isinstance(part, dict) else part)
+                for part in content
+            )
+        else:
+            text = str(content)
+        markdown = text.strip()
+        return markdown or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "故事感知脚本降级也失败；error_type=%s",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _product_name(product_info: Mapping[str, JsonValue]) -> str:

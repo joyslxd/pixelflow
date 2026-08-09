@@ -43,7 +43,9 @@ export const FALLBACK_IMAGE_MODEL_CONFIG: GenerateModelParamConfig = {
   modelType: "gpt-image-2",
   modelCategoryType: "image_generate",
   paramConfig: {
-    sizeList: ["1080p", "2K", "4K"],
+    // 与 Borg Skill DEFAULT_IMAGE_QUALITY_BY_MODEL['gpt-image-2']=4K 对齐；
+    // content-app 对 gpt-image-2 + 1080p 常无价格配置。
+    sizeList: ["4K", "2K", "1080p"],
     aspectRatioList: ["1:1", "16:9", "9:16"],
   },
   isEnabled: true,
@@ -117,8 +119,27 @@ export function imageModelCapabilities(config: GenerateModelParamConfig): ImageM
       config.paramConfig?.aspectRatioList,
       FALLBACK_IMAGE_MODEL_CONFIG.paramConfig?.aspectRatioList || ["1:1", "16:9", "9:16"],
     ),
-    sizes: normalizedOptions(config.paramConfig?.sizeList, FALLBACK_IMAGE_MODEL_CONFIG.paramConfig?.sizeList || ["1080p", "2K", "4K"]),
+    sizes: normalizedOptions(
+      config.paramConfig?.sizeList,
+      FALLBACK_IMAGE_MODEL_CONFIG.paramConfig?.sizeList || ["4K", "2K", "1080p"],
+    ),
   };
+}
+
+/** 场景资产生图清晰度：优先 4K（gpt-image-2 Borg 默认），再 2K，最后才回落 1080p。 */
+export function preferredImageSize(sizes: string[], current = ""): string {
+  const selected = supportedOption(current, sizes);
+  if (selected && selected.toLowerCase() !== "1080p") return selected;
+  // 当前值是 1080p 时仍优先升级到模型支持的 4K/2K，避免计费配置缺失。
+  for (const preferred of ["4K", "2K", "1080p"]) {
+    const supported = supportedOption(preferred, sizes);
+    if (supported) return supported;
+  }
+  return sizes[0] || current.trim() || "4K";
+}
+
+export function preferredImageRatio(ratios: string[], current = "9:16"): string {
+  return supportedOption(current, ratios) || supportedOption("9:16", ratios) || ratios[0] || current || "9:16";
 }
 
 function enabledConfigs(configs: GenerateModelParamConfig[]): GenerateModelParamConfig[] {

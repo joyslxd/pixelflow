@@ -64,6 +64,7 @@ class VideoToolContext:
     plan_id: str | None = None
     step_id: str | None = None
     credential: TransientVideoAgentCredential | None = None
+    report_progress: object | None = None
 
     def __post_init__(self) -> None:
         if not self.user_id.strip():
@@ -74,6 +75,18 @@ class VideoToolContext:
             not self.plan_id.strip() or not self.step_id or not self.step_id.strip()
         ):
             raise ValueError("工具上下文的计划与步骤标识不能为空")
+
+    async def emit_progress(self, message: str, *, phase: str) -> None:
+        """向会话推送当前步骤的公开阶段文案；无回调时静默跳过。"""
+
+        reporter = self.report_progress
+        if reporter is None:
+            return
+        text = message.strip()
+        phase_key = phase.strip()
+        if not text or not phase_key:
+            return
+        await reporter(text, phase=phase_key)  # type: ignore[operator]
 
 
 class VideoTool(Protocol):

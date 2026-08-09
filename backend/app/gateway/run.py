@@ -31,6 +31,8 @@ def main() -> None:
         host=config.host,
         port=config.port,
         reload=args.reload,
+        # SSE / 长任务在热重载时会拖住优雅退出；超时后强制重启，避免整站请求 pending。
+        timeout_graceful_shutdown=5,
     )
 
 

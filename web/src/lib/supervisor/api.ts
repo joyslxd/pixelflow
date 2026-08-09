@@ -6,6 +6,7 @@ import type {
   TurnStartRequest,
   VideoAgentConfirmationResponseRequest,
   VideoAgentQuotaResponseRequest,
+  VideoAgentScriptSaveRequest,
 } from "./contracts.js";
 
 const AGENT_API_PREFIX = "/agent";
@@ -50,6 +51,11 @@ export interface SupervisorApiTransport {
     conversationId: string,
     quotaInterruptId: string,
     request: VideoAgentQuotaResponseRequest,
+    options?: SupervisorRequestOptions,
+  ): Promise<TResponse>;
+  saveVideoAgentScript<TResponse extends JsonValue = JsonObject>(
+    conversationId: string,
+    request: VideoAgentScriptSaveRequest,
     options?: SupervisorRequestOptions,
   ): Promise<TResponse>;
   getRunStatus<TResponse extends JsonValue = JsonObject>(
@@ -147,7 +153,7 @@ export function createSupervisorApiTransport(
 
   async function request<TResponse extends JsonValue>(
     path: string,
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT",
     body: InterruptResponseRequest | JsonObject | TurnStartRequest | undefined,
     requestOptions: SupervisorRequestOptions,
   ): Promise<TResponse> {
@@ -232,6 +238,16 @@ export function createSupervisorApiTransport(
       `/conversations/${encodeURIComponent(conversationId)}/video-agent/quota/${encodeURIComponent(quotaInterruptId)}/responses`,
       "POST",
       responseRequest,
+      requestOptions,
+    ),
+    saveVideoAgentScript: (
+      conversationId,
+      body,
+      requestOptions = {},
+    ) => request(
+      `/conversations/${encodeURIComponent(conversationId)}/video-agent/script`,
+      "PUT",
+      body,
       requestOptions,
     ),
     getRunStatus: (conversationId, runId, requestOptions = {}) => request(

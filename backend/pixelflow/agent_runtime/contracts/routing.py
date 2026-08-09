@@ -41,6 +41,7 @@ RouteReasonCode = Literal[
     "explicit_video_analysis",
     "explicit_ppt_request",
     "explicit_image_request",
+    "complete_script_payload",
     "llm_classified",
     "ambiguous_request",
     "classifier_unavailable",

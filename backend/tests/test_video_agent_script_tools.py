@@ -96,3 +96,40 @@ async def test_brainstorm_script_appends_versioned_draft_only() -> None:
     assert len(result.workspace_patch["script_versions"]) == 2
     assert result.requires_confirmation is False
     assert adapter.calls[0]["creative_direction"] == "通勤反差"
+
+
+@pytest.mark.asyncio
+async def test_brainstorm_script_emits_public_progress_phases() -> None:
+    phases: list[tuple[str, str]] = []
+
+    async def report_progress(message: str, *, phase: str) -> None:
+        phases.append((phase, message))
+
+    context = VideoToolContext(
+        user_id="user-1",
+        workspace=VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            payload={},
+        ),
+        plan_id="plan-1",
+        step_id="step-1",
+        report_progress=report_progress,
+    )
+    await BrainstormScriptTool(adapter=FakeVideoDomainAdapter()).execute(
+        context,
+        {
+            "product_info": {"product_name": "保温杯"},
+            "video_params": {"duration_sec": 15, "ratio": "9:16"},
+            "creative_direction": "通勤反差",
+        },
+    )
+
+    assert [phase for phase, _ in phases] == [
+        "prepare_inputs",
+        "invoke_skill",
+        "await_model",
+        "format_draft",
+    ]
+    assert "brief_generate" in phases[1][1]
+    assert "大模型" in phases[2][1]

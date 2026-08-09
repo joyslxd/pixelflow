@@ -14,6 +14,14 @@ export interface VideoAgentScriptEvidence {
   source: string | null;
 }
 
+export interface VideoAgentScriptStageEvidence {
+  stageId: string;
+  title: string;
+  content: string;
+  artifactRef: string | null;
+  changeSummary: string | null;
+}
+
 export interface VideoAgentSceneVariant {
   variantId: string;
   artifactRef: string;
@@ -43,6 +51,7 @@ export interface VideoAgentWorkspaceProjection {
   scenes: VideoAgentSceneEvidence[];
   assets: VideoAgentWorkspaceAsset[];
   script: VideoAgentScriptEvidence | null;
+  scriptStages: VideoAgentScriptStageEvidence[];
 }
 
 export interface VideoWorkspaceProjectionState {
@@ -194,6 +203,36 @@ function projectScript(value: unknown): VideoAgentScriptEvidence | null {
   };
 }
 
+const SCRIPT_PIPELINE_STAGE_ORDER = [
+  "start",
+  "plan",
+  "characters",
+  "outline",
+  "episode",
+  "review",
+  "compliance",
+  "export",
+] as const;
+
+function projectScriptStages(value: unknown): VideoAgentScriptStageEvidence[] {
+  if (!isRecord(value)) return [];
+  const stages: VideoAgentScriptStageEvidence[] = [];
+  for (const stageId of SCRIPT_PIPELINE_STAGE_ORDER) {
+    const raw = value[stageId];
+    if (!isRecord(raw)) continue;
+    const content = optionalText(raw.content);
+    if (!content) continue;
+    stages.push({
+      stageId,
+      title: optionalText(raw.title) ?? stageId,
+      content,
+      artifactRef: artifactRef(raw.artifact_ref),
+      changeSummary: optionalText(raw.change_summary),
+    });
+  }
+  return stages;
+}
+
 export function projectVideoWorkspaceSnapshot(
   value: unknown,
   expectedConversationId: string,
@@ -225,6 +264,7 @@ export function projectVideoWorkspaceSnapshot(
       .map(projectAsset)
       .filter((item): item is VideoAgentWorkspaceAsset => item !== null),
     script: projectScript(value.payload.script),
+    scriptStages: projectScriptStages(value.payload.script_pipeline),
   };
 }
 
@@ -290,6 +330,22 @@ export function cloneVideoWorkspaceProjectionState(
           review_required: current.script.reviewRequired,
           source: current.script.source,
         } : null,
+        script_pipeline: Array.isArray(current.scriptStages)
+          ? Object.fromEntries(
+            current.scriptStages
+              .filter(isRecord)
+              .map((stage) => [
+                stage.stageId,
+                {
+                  stage: stage.stageId,
+                  title: stage.title,
+                  content: stage.content,
+                  artifact_ref: stage.artifactRef,
+                  change_summary: stage.changeSummary,
+                },
+              ]),
+          )
+          : {},
         qc: Array.isArray(current.scenes)
           ? Object.fromEntries(current.scenes.flatMap((scene) => (
             isRecord(scene) && typeof scene.sceneId === "string"

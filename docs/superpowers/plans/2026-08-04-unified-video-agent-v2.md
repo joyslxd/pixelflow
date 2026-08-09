@@ -18,7 +18,7 @@ Python 3.12、FastAPI、Pydantic、SQLAlchemy/Alembic、LangGraph/LangChain、�
 3. 大模型仅能调用服务端注册工具，禁止直接调用厂商接口、数据库、FFmpeg、Shell脚本；
 4. `Plan.md`仅作为可选脚本附件，不再是视频生成强制前置文件；
 5. V2全新业务代码禁止写入 `backend/pixelflow/agent_workflows/video/`、`web/src/pages/WorkspacePage.tsx`；
-6. P0替换用户可见的V1入口与旧工作区页面；P0验收通过后，P1删除V1视频工作流、调度器视频处理分支及所有残留导入代码；P0收尾时`WorkspacePage.tsx`需精简至100-200行，仅保留V2路由布局外壳；
+6. P0替换用户可见的V1执行入口，但保留已经成熟的`LegacyWorkspace`作为V2视频工作台宿主；它不是V1视频执行链。`WorkspacePage.tsx`需精简至100-200行，仅保留V2路由布局外壳；`LegacyWorkspace`内部的业务真相必须逐步收敛到V2 Snapshot、受控命令和工具事件。P1再按自然边界抽取独立UI区域，不以目录迁移作为P0验收条件；
 7. 页面展示步骤耗时**仅以持久化存储的时间戳为准**，禁止对外暴露模型内部推理过程；
 8. 保留原有**视频镜头面板**作为工作区核心视图，承载镜头画面、素材、多版本、选中操作；V2可重构该面板实现逻辑，但不得删减、弱化原有查看交互；
 9 用户可在镜头面板直接编辑单个镜头，生成的执行方案仅限定作用于该镜头；镜头重绘完成后，对应镜头卡片必须展示可见的`重新生成完成`标识，附带新版本号与完成时间，同时保留历史版本用于对比、选用；
@@ -34,7 +34,7 @@ backend/pixelflow/video_agent/
   contracts/{plan.py,workspace.py,tools.py,__init__.py} 方案/工作区/工具数据契约
   workspace/{repository.py,evidence.py,__init__.py}     项目持久仓储、素材摘要
   skills/{catalog.py,__init__.py}                       创作能力清单
-  tools/{registry.py,inspect_workspace.py,script.py,reference.py,scene.py,delivery.py,__init__.py} 工具注册与实现
+  tools/{registry.py,inspect_workspace.py,script.py,script_skill_pipeline.py,reference.py,scene.py,delivery.py,__init__.py} 工具注册与实现
   adapters/{video_domain.py,__init__.py}                 底层视频能力适配层
   planner/{model.py,loop.py,__init__.py}                大模型规划器、工具循环调度
   executor/{service.py,__init__.py}                     方案执行、确认逻辑
@@ -50,9 +50,11 @@ backend/packages/harness/deerflow/persistence/migrations/versions/
   20260804_08_video_agent_runtime.py  V2数据库迁移脚本
 
 web/src/
-  features/video-agent/{VideoAgentWorkspace.tsx,AgentPlanTimeline.tsx,AgentConfirmationCard.tsx,SceneEvidencePanel.tsx} V2核心页面组件
+  features/video-agent/{VideoAgentWorkspace.tsx,AgentPlanTimeline.tsx,AgentConfirmationCard.tsx,AgentScriptPreviewPanel.tsx,AgentPipelineProgress.tsx,SceneEvidencePanel.tsx} V2核心页面组件
+  features/video-agent/{planHistory.ts,scriptSkillStages.ts} 方案历史、脚本阶段展示与自然语言动作识别
   features/video-agent/hooks/useVideoAgent.ts           智能体通用逻辑钩子
   features/video-agent/state/{contracts.ts,reducer.ts}  前端状态、事件规约
+  lib/shotDescriptionDisplay.ts                         分镜描述结构化展示
   pages/WorkspacePage.tsx                              顶层路由外壳
 ```
 
@@ -83,9 +85,29 @@ web/src/
 
 ### 进行中
 - [ ] 轻量化对话路由分发器提交收口：实现、客户端切换和完整前端门禁均已完成；仅待按中文规范检查并提交当前批次。
-- [ ] V2工作台页面接线：权威Snapshot、时间线、多镜头证据、确认恢复卡、额度恢复卡和完整Storyboard功能边界已经接线；Task 10 UI范围已完成。仍需把承载图片/PPT与分段v2交互的`LegacyWorkspace`迁入独立V2页面边界；它不是已下线的V1执行链。
+- [ ] V2工作台页面接线：权威Snapshot、时间线、多镜头证据、确认恢复卡、额度恢复卡和完整Storyboard功能边界已经接线。`LegacyWorkspace`继续作为V2工作台宿主，后续只收敛其状态来源与受控动作，不再把“抽成独立页面”作为P0阻塞项（设计调整日期：2026-08-09）。
 - [ ] 规划执行真实旅程接线：规划器、执行器、确认闸门、任务7–9工具、独立Runner、唯一Recovery Worker以及start/status 402恢复均已完成；仍需补齐三类真实旅程端到端计划生成和Golden Case。
 - [ ] 镜头面板迁移+单镜头局部重绘能力：完整迁移原有镜头面板至V2工作台，不丢失镜头、多版本查看逻辑；新增单镜头编辑入口，触发仅作用于该镜头的执行方案，生成完成后镜头卡片展示「重新生成完成」标识。
+
+### 2026-08-09 本地未提交增量：方案对齐与完成记录
+
+以下项目已经在本地工作区编码完成，但尚未提交，且需要在当前编辑批次结束后重新执行完整后端、前端、TypeScript与构建门禁。这里的`[x]`仅表示“代码已实现”，不表示已经完成提交或生产验收。
+
+- [x] **任务0补强：成稿与澄清路由恢复。** 直接粘贴结构化可拍脚本时以`complete_script_payload`进入视频Agent，不再先落入`unknown`而丢失上下文；简短“创建视频/图片/PPT”明确请求走规则路由；`unknown`或待澄清会话可在后续输入升级为确定意图；已结束但未收尾的VideoAgent Turn会释放，避免后续Turn永久排队。涉及`conversation_router.py`、`turn_registration.py`、`service.py`与Gateway路由测试。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务6/7补强：八阶段脚本 Skill 流水线。** 新增`/start → /plan → /characters → /outline → /episode → /review → /compliance → /export`受控工具；每一阶段只读取用户输入与上游公开产物，持续写入`script_pipeline`、版本化脚本和安全Artifact引用，并通过`agent.step.progressed`输出公开进度。成熟成稿可走“自检/合规/导出”短路径，多角色但缺少设定时回退到全流程补齐。新增`tools/script_skill_pipeline.py`及入口编排、仓储进度事件。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务7补强：脚本编辑、确认与连续对话。** 新增脚本保存API，使用`expected_revision`防止并发覆盖，保存后追加脚本版本；短的“继续生成视频”会携带上一次成稿进入同一视频上下文，但裸“生成视频”不会绕过脚本确认；需求发生明显变化时允许重新规划，澄清不会覆盖已有可用脚本。涉及`AgentRuntimeService`、`pixelflow_conversations.py`、`AgentScriptPreviewPanel.tsx`与脚本阶段前端规则。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务8补强：脚本设定完整进入视频资产包。** 从脚本Markdown解析角色、场景、道具/产品设定，强制补齐到`global_assets`，避免LLM把多人故事塌缩为单主角或漏掉产品道具；分镜时长优先按Seedance 15秒上限切分；道具参考图支持多视角/多场景网格提示词。涉及`creative/asset_manifest.py`、`generate/scene_packages.py`、`generate/scene_assets.py`及相邻测试。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务8补强：资产包分阶段生成与逐素材进度。** 场景包可先生成结构并停在`awaiting_image_model`，待用户选择生图模型后再生成参考图；参考图任务逐张回写完成数、总数、资产身份、失败/额度状态，前端可展示真实进度；GPT Image 2默认规格从不受支持的1080p收敛为4K。涉及`pixelflow_video.py`、`scene_assets.py`、`LegacyWorkspace.tsx`、`AgentPipelineProgress.tsx`。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务10补强：Legacy宿主中的V2过程可见性。** 在现有聊天和资产包体验中接入脚本阶段、资产包阶段、Agent步骤结果和耗时展示；步骤结果可跳转到相应脚本/资产区域；分镜描述可按时间、地点、角色、道具、动作、景别、运镜等字段结构化呈现，而非整段难读文本。涉及`AgentPlanTimeline.tsx`、`AgentPipelineProgress.tsx`、`shotDescriptionDisplay.ts`、`StoryboardPanel.tsx`、`MessageBubble.tsx`与`LegacyWorkspace.tsx`。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **任务10补强：多轮执行方案历史恢复。** Snapshot增加同一会话的有序Plan集合；前端以服务端集合为权威、`sessionStorage`仅作热缓存，合并时优先保留步骤更完整的同一Plan，避免多轮对话后旧方案卡片消失或被新Plan覆盖。涉及`workspace/repository.py`、`AgentRuntimeService`、`workspaceProjection.ts`、`planHistory.ts`与Snapshot测试。代码完成：2026-08-09；状态：未提交、待全量验收。
+- [x] **新增体验任务：资产包自然语言续作与局部重做。** 在脚本已确认、资产包待确认、资产包已就绪等阶段区分“继续生成成片”“重做资产包”“修改资产包”“确认生成”，不再因普通续作重复创建脚本方案；聊天消息先显示资产包卡片与真实生成进度，资产包修改保留原分镜、全局资产和版本选择能力。涉及`scriptSkillStages.ts`、`LegacyWorkspace.tsx`、`ChatPanel.tsx`与相关上下文用例。代码完成：2026-08-09；状态：未提交、待全量验收。
+
+### 2026-08-09 验收与提交收口
+
+- [ ] 解决当前TypeScript门禁：补齐本地`@uiw/react-md-editor`依赖、修正`PlanMarkdownResponse`测试构造、消除`LegacyWorkspace`和脚本预览的空值访问、移除时间线未使用参数。
+- [ ] 运行`cd backend && PYTHONPATH=. uv run pytest tests/test_video_agent_*.py tests/test_conversation_router.py tests/test_pixelflow_video_router.py -q`，覆盖路由、脚本流水线、资产包进度、镜头包与恢复。
+- [ ] 运行`cd web && npm test && npm run lint && npm run build-dev`，验证计划历史、过程展示、脚本编辑和资产包交互。
+- [ ] 运行`git diff --check`并修复所有格式问题；将“本地未提交增量”按路由/脚本/资产包/前端体验拆成可审阅提交，再把上述条目从“未提交、待全量验收”更新为提交哈希和验收结果。
 
 # 任务0：轻量化对话路由分发器
 ## 涉及文件
@@ -1256,7 +1278,7 @@ Completed on 2026-08-06: the isolated components, workspace revision projection,
 
 - [ ] **Step 4: Render V2 from the thin page shell**
 
-Keep only the V2 feature import and layout in `WorkspacePage.tsx`; no mode selection or legacy fallback remains:
+Keep only the V2 feature import and layout in `WorkspacePage.tsx`; no mode selection remains. During P0, `VideoAgentWorkspace` may compose the mature `LegacyWorkspace` host, provided its video business state is projected from the V2 Snapshot and all new video actions use V2 contracts:
 
 ```tsx
 return <VideoAgentWorkspace />;
@@ -1291,7 +1313,7 @@ git commit -m "feat: add video agent workspace"
 **Files:**
 - Modify: `backend/pixelflow/agent_runtime/{config.py,service.py,executor.py}`
 - Modify the Task 0 router: `backend/pixelflow/agent_runtime/conversation_router.py`
-- Delete: `backend/pixelflow/agent_workflows/video/`
+- Delete: V1 execution handlers under `backend/pixelflow/agent_workflows/video/`; retain only domain planning, scene-package and delivery services that are directly reused by V2 adapters until they have a V2-native home
 - Delete: the V1 video decision/action modules under `backend/pixelflow/agent_runtime/supervisor/`
 - Delete: V1 video workflow tests under `backend/tests/test_agent_video_workflow_*.py` and superseded Supervisor-routing tests
 - Create: `backend/tests/{test_video_agent_entry.py,test_video_agent_e2e.py,test_video_agent_retirement.py}`
@@ -1329,7 +1351,7 @@ Add a retirement lookup that recognizes existing V1 workflow rows and returns a 
 
 - [ ] **Step 4: Delete V1 implementation and tests**
 
-Remove `backend/pixelflow/agent_workflows/video/`, the V1 video Supervisor action/decision path, its HTTP handlers, and all tests that assert V1 video workflow stages. Remove the legacy Workspace feature and client Supervisor mode reducer. Update imports so reusable planning, scene generation, QC, composition, and Jianying services are reachable only through V2 adapters.
+Remove the V1 video Supervisor action/decision path, its HTTP handlers, and all tests that assert V1 video workflow stages. Keep the mature `LegacyWorkspace` as the P0 V2 workbench host; remove only its V1 Supervisor mode reducer and any state/action path that bypasses V2 Snapshot or V2 controlled commands. Under `agent_workflows/video/`, remove V1 execution handlers while retaining reusable planning, scene generation, QC, composition and Jianying domain services until their V2-native relocation is completed.
 
 - [x] **Step 5: Implement V2 snapshot/SSE restoration**
 

@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from pixelflow.creative.asset_manifest import normalize_asset_manifest
+from pixelflow.creative.asset_manifest import extract_script_setting_assets, normalize_asset_manifest
 from pixelflow.creative.duration import (
     MAX_SCENE_DURATION_SEC,
     MIN_SCENE_DURATION_SEC,
@@ -80,6 +80,7 @@ def prepare_video_scene_packages(
             form_values=form_values,
             selected_direction=selected_direction,
             stage_templates=stage_templates,
+            plan_markdown=plan_markdown,
         )
     if authoritative_blueprints and asset_manifest is None:
         global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
@@ -231,9 +232,22 @@ async def prepare_video_scene_packages_with_llm(
             model_factory or _default_model_factory,
         )
         stage_templates = _stage_templates(scene_count)
-        global_assets = _normalize_llm_global_assets(payload, form_values, selected_direction, stage_templates)
+        global_assets = _normalize_llm_global_assets(
+            payload,
+            form_values,
+            selected_direction,
+            stage_templates,
+            plan_markdown=plan_markdown,
+        )
         if authoritative_blueprints:
             global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
+        else:
+            global_assets = _ensure_script_setting_assets(
+                global_assets,
+                plan_markdown=plan_markdown,
+                form_values=form_values,
+                selected_direction=selected_direction,
+            )
         scenes = _normalize_llm_scene_packages(
             payload,
             durations,
@@ -321,6 +335,7 @@ def _scene_package_prompt(
         form_values=form_values,
         selected_direction=selected_direction,
         stage_templates=stage_templates,
+        plan_markdown=plan_markdown,
     )
     visual_style = _first_text(
         form_values.get("visual_style"),
@@ -328,6 +343,10 @@ def _scene_package_prompt(
     )
     video_ratio = _first_text(form_values.get("video_ratio"), "9:16")
     video_model = _first_text(form_values.get("video_model"), "seedance")
+    script_seed = extract_script_setting_assets(plan_markdown)
+    required_characters = [item["name"] for item in script_seed.get("characters", []) if item.get("name")]
+    required_scenes = [item["name"] for item in script_seed.get("scenes", []) if item.get("name")]
+    required_props = [item["name"] for item in script_seed.get("props", []) if item.get("name")]
     shot_contracts: list[str] = []
     for index, ((start_second, end_second), stage) in enumerate(zip(time_ranges, stage_templates, strict=True), start=1):
         reference_ids = _default_reference_asset_ids(default_assets, stage["asset_id"])
@@ -368,6 +387,11 @@ def _scene_package_prompt(
 10. 产品主体、商品、工具、包装、卖点物件一律放在 global_assets.props，不允许放进 global_assets.characters。
 11. 只返回 JSON，不要 Markdown，不要解释。
 12. 权威 Plan 分镜蓝图非空时，title、storyline、shot_description、narration、transition、顺序和时长均不得重写；只把 asset_requirements 落成 global_assets，并为镜头描述补充合法 @asset_id 和 mentions。
+13. 若 plan.md 含「角色设定 / 场景设定 / 道具设定」，必须把设定中的全部角色、场景、道具写入 global_assets，禁止只保留一个主角，禁止漏掉道具。
+14. 下列清单若非空，必须全部出现在 global_assets 对应数组中（可补充细节，不可删减）：
+   - 必提取角色：{json.dumps(required_characters, ensure_ascii=False)}
+   - 必提取场景：{json.dumps(required_scenes, ensure_ascii=False)}
+   - 必提取道具：{json.dumps(required_props, ensure_ascii=False)}
 
 输出格式：
 {{"global_assets":{{
@@ -406,7 +430,7 @@ def _scene_package_prompt(
 表单数据：{json.dumps(form_values, ensure_ascii=False)}
 创意方向：{json.dumps(selected_direction, ensure_ascii=False)}
 素材集合：{json.dumps(materials, ensure_ascii=False)}
-plan.md：{plan_markdown[:6000]}
+plan.md：{plan_markdown[:12000]}
 """
 
 
@@ -482,12 +506,19 @@ def _normalize_llm_global_assets(
     form_values: dict[str, Any],
     selected_direction: dict[str, Any],
     stage_templates: list[dict[str, str]],
+    *,
+    plan_markdown: str = "",
 ) -> dict[str, Any]:
-    defaults = _default_global_assets(form_values=form_values, selected_direction=selected_direction, stage_templates=stage_templates)
+    defaults = _default_global_assets(
+        form_values=form_values,
+        selected_direction=selected_direction,
+        stage_templates=stage_templates,
+        plan_markdown=plan_markdown,
+    )
     raw = payload.get("global_assets") if isinstance(payload, dict) and isinstance(payload.get("global_assets"), dict) else {}
     product_name = _first_text(form_values.get("product_info"), form_values.get("product_name"), selected_direction.get("product_name"), "产品")
     product_category = _first_text(form_values.get("product_category"), selected_direction.get("product_category"), "商品")
-    return {
+    global_assets = {
         "characters": _normalize_character_asset_list(
             raw.get("characters"),
             fallback=defaults["characters"],
@@ -508,6 +539,12 @@ def _normalize_llm_global_assets(
         ),
         "visual_style": _normalize_visual_style(raw.get("visual_style"), defaults["visual_style"]),
     }
+    return _ensure_script_setting_assets(
+        global_assets,
+        plan_markdown=plan_markdown,
+        form_values=form_values,
+        selected_direction=selected_direction,
+    )
 
 
 def _global_assets_from_plan_manifest(
@@ -769,7 +806,12 @@ def _normalize_character_asset_list(
             continue
         asset_id = _first_text(item.get("asset_id"), item.get("id"), f"character-{index}")
         name = _first_text(item.get("name"), item.get("label"), f"人物角色 {index}")
-        description = _first_text(item.get("description"), item.get("role"), item.get("persona"))
+        description = _first_text(
+            item.get("description"),
+            item.get("role"),
+            item.get("persona"),
+            f"{name}，造型与身份在全片保持一致",
+        )
         three_view_prompt = _ensure_three_view_prompt(
             _first_text(item.get("three_view_prompt"), item.get("image_prompt"), item.get("prompt")),
             name=name,
@@ -777,7 +819,7 @@ def _normalize_character_asset_list(
             product_name=product_name,
             product_category=product_category,
         )
-        if name and description and three_view_prompt:
+        if name and three_view_prompt:
             normalized.append(
                 {
                     **item,
@@ -788,6 +830,157 @@ def _normalize_character_asset_list(
                 }
             )
     return normalized or fallback
+
+
+def _ensure_script_setting_assets(
+    global_assets: dict[str, Any],
+    *,
+    plan_markdown: str,
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+) -> dict[str, Any]:
+    """把脚本设定集里解析出的角色/场景/道具强制补进 global_assets，避免 LLM 塌成单人。"""
+
+    seed = extract_script_setting_assets(plan_markdown)
+    if not any(seed.get(collection) for collection in ("characters", "scenes", "props")):
+        # 即使没有设定种子，也要丢掉泛化占位资产，避免生图边界直接校验失败。
+        cleaned = {**global_assets}
+        for collection in ("characters", "scenes", "props"):
+            items = cleaned.get(collection)
+            if not isinstance(items, list):
+                continue
+            cleaned[collection] = [
+                item
+                for item in items
+                if isinstance(item, dict) and not _is_generic_asset_name(collection, _first_text(item.get("name")))
+            ]
+        return cleaned
+
+    product_name = _concrete_product_name(
+        form_values=form_values,
+        selected_direction=selected_direction,
+        plan_markdown=plan_markdown,
+    ) or _strip_generic_product_prefix(
+        _first_text(form_values.get("product_info"), form_values.get("product_name"), selected_direction.get("product_name"))
+    )
+    product_category = _first_text(
+        form_values.get("product_category"),
+        selected_direction.get("product_category"),
+        "商品",
+    )
+    merged = {**global_assets}
+    used_ids = _global_image_asset_ids(global_assets)
+
+    def merge_collection(
+        collection: str,
+        *,
+        asset_type: str,
+        prompt_field: str,
+        seed_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        existing = global_assets.get(collection)
+        existing_items = [
+            item
+            for item in (existing if isinstance(existing, list) else [])
+            if isinstance(item, dict) and not _is_generic_asset_name(collection, _first_text(item.get("name")))
+        ]
+        by_name = {
+            _asset_name_key(item.get("name")): item
+            for item in existing_items
+            if _asset_name_key(item.get("name"))
+        }
+        concrete_seed = [
+            item
+            for item in seed_items
+            if isinstance(item, dict)
+            and _first_text(item.get("name"))
+            and not _is_generic_asset_name(collection, _first_text(item.get("name")))
+        ]
+        # 有脚本设定时优先按设定重建，避免默认「核心产品/目标用户」残留
+        prefer_seed_order = bool(concrete_seed) and (
+            collection == "characters"
+            or collection == "props"
+            or collection == "scenes"
+            or len(concrete_seed) > len(existing_items)
+        )
+        ordered_names = (
+            [item["name"] for item in concrete_seed]
+            if prefer_seed_order
+            else (
+                [str(item.get("name") or "").strip() for item in existing_items if str(item.get("name") or "").strip()]
+                + [
+                    item["name"]
+                    for item in concrete_seed
+                    if _asset_name_key(item.get("name")) not in by_name
+                ]
+            )
+        )
+        # 去重保序
+        seen_names: set[str] = set()
+        result: list[dict[str, Any]] = []
+        seed_by_name = {_asset_name_key(item.get("name")): item for item in concrete_seed}
+        for name in ordered_names:
+            key = _asset_name_key(name)
+            if not key or key in seen_names or _is_generic_asset_name(collection, name):
+                continue
+            seen_names.add(key)
+            existing_item = by_name.get(key)
+            seed_item = seed_by_name.get(key) or {"name": name}
+            if existing_item:
+                asset = {**seed_item, **existing_item, "name": _first_text(existing_item.get("name"), name)}
+            else:
+                asset = dict(seed_item)
+                asset["name"] = name
+            if collection == "characters":
+                description = _first_text(
+                    asset.get("description"),
+                    f"{name}，造型与身份在全片保持一致",
+                )
+                asset["description"] = description
+                asset["three_view_prompt"] = _ensure_three_view_prompt(
+                    _first_text(asset.get("three_view_prompt"), asset.get("image_prompt")),
+                    name=name,
+                    description=description,
+                    product_name=product_name,
+                    product_category=product_category,
+                )
+                asset.setdefault("three_view_images", [])
+            else:
+                description = _first_text(asset.get("description"), f"{name}，在全片保持一致")
+                prompt = _first_text(asset.get(prompt_field), asset.get("image_prompt"), f"{name}参考图，干净背景，细节清晰")
+                asset["description"] = description
+                asset[prompt_field] = prompt
+                asset.setdefault("images", [])
+            preferred_id = _first_text(asset.get("asset_id"), f"{asset_type}-{len(result) + 1}")
+            asset["asset_id"] = _unique_blueprint_asset_id(
+                preferred_id=preferred_id,
+                asset_type=asset_type,
+                name=name,
+                used_asset_ids=used_ids,
+            )
+            used_ids.add(asset["asset_id"])
+            result.append(asset)
+        return result or existing_items
+
+    merged["characters"] = merge_collection(
+        "characters",
+        asset_type="character",
+        prompt_field="three_view_prompt",
+        seed_items=list(seed.get("characters") or []),
+    )
+    merged["scenes"] = merge_collection(
+        "scenes",
+        asset_type="scene",
+        prompt_field="image_prompt",
+        seed_items=list(seed.get("scenes") or []),
+    )
+    merged["props"] = merge_collection(
+        "props",
+        asset_type="prop",
+        prompt_field="image_prompt",
+        seed_items=list(seed.get("props") or []),
+    )
+    return merged
 
 
 def _looks_like_non_person_asset(item: dict[str, Any], product_name: str) -> bool:
@@ -1179,15 +1372,72 @@ def _default_prop_image(form_values: dict[str, Any], selected_direction: dict[st
     }
 
 
+_GENERIC_ASSET_NAMES = {
+    "characters": {"目标用户", "用户", "消费者", "人物", "角色", "模特"},
+    "scenes": {"真实使用场景", "使用场景", "真实场景", "场景", "环境"},
+    "props": {"产品", "商品", "核心产品", "主商品", "关键道具", "产品道具", "道具"},
+}
+
+
+def _is_generic_asset_name(collection: str, name: str) -> bool:
+    normalized = re.sub(r"\s+", "", _first_text(name)).casefold()
+    return normalized in {item.casefold() for item in _GENERIC_ASSET_NAMES.get(collection, set())}
+
+
+def _strip_generic_product_prefix(value: str) -> str:
+    return re.sub(
+        r"^(?:核心产品|产品|商品|主商品|道具)\s*[:：\-—]\s*",
+        "",
+        _first_text(value),
+    ).strip()
+
+
+def _concrete_product_name(
+    *,
+    form_values: dict[str, Any],
+    selected_direction: dict[str, Any],
+    plan_markdown: str = "",
+) -> str:
+    """优先用脚本设定里的具体道具名，禁止回落到「核心产品」这类泛化占位。"""
+
+    seed = extract_script_setting_assets(plan_markdown)
+    for item in seed.get("props") or []:
+        if isinstance(item, dict):
+            name = _first_text(item.get("name"))
+            if name and not _is_generic_asset_name("props", name):
+                return name
+    candidates = [
+        form_values.get("product_info"),
+        form_values.get("product_name"),
+        selected_direction.get("product_name"),
+        selected_direction.get("title"),
+    ]
+    for candidate in candidates:
+        name = _strip_generic_product_prefix(_first_text(candidate))
+        if name and not _is_generic_asset_name("props", name) and name not in {"脚本成片产品", "未指定品类"}:
+            # 过长的整段脚本摘要不能当道具名
+            if len(name) <= 40 and "\n" not in name:
+                return name
+    return ""
+
+
 def _default_global_assets(
     *,
     form_values: dict[str, Any],
     selected_direction: dict[str, Any],
     stage_templates: list[dict[str, str]],
+    plan_markdown: str = "",
 ) -> dict[str, Any]:
-    product_name = _first_text(form_values.get("product_info"), form_values.get("product_name"), selected_direction.get("product_name"), "产品")
+    product_name = _concrete_product_name(
+        form_values=form_values,
+        selected_direction=selected_direction,
+        plan_markdown=plan_markdown,
+    ) or _strip_generic_product_prefix(
+        _first_text(form_values.get("product_info"), form_values.get("product_name"), selected_direction.get("product_name"))
+    )
+    display_product = product_name or "商品主体"
     product_category = _first_text(form_values.get("product_category"), selected_direction.get("product_category"), "商品")
-    target_audience = _first_text(form_values.get("target_audience"), selected_direction.get("target_audience"), "目标用户")
+    target_audience = _first_text(form_values.get("target_audience"), selected_direction.get("target_audience"), "目标受众")
     scene_assets: list[dict[str, Any]] = []
     seen_scene_ids: set[str] = set()
     for stage in stage_templates:
@@ -1195,7 +1445,7 @@ def _default_global_assets(
         if asset_id in seen_scene_ids:
             continue
         seen_scene_ids.add(asset_id)
-        description = stage["scene_description"].format(product_name=product_name)
+        description = stage["scene_description"].format(product_name=display_product)
         scene_assets.append(
             {
                 "asset_id": asset_id,
@@ -1205,37 +1455,9 @@ def _default_global_assets(
                 "images": [],
             }
         )
-    return {
-        "characters": [
-            {
-                "asset_id": "character-presenter",
-                "name": "主讲人",
-                "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-                "three_view_prompt": _ensure_three_view_prompt(
-                    "",
-                    name="主讲人",
-                    description=f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
-                    product_name=product_name,
-                    product_category=product_category,
-                ),
-                "three_view_images": [],
-            },
-            {
-                "asset_id": "character-user",
-                "name": "目标用户",
-                "description": f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
-                "three_view_prompt": _ensure_three_view_prompt(
-                    "",
-                    name="目标用户",
-                    description=f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
-                    product_name=product_name,
-                    product_category=product_category,
-                ),
-                "three_view_images": [],
-            },
-        ],
-        "scenes": scene_assets,
-        "props": [
+    prop_assets: list[dict[str, Any]] = []
+    if product_name and not _is_generic_asset_name("props", product_name):
+        prop_assets.append(
             {
                 "asset_id": "prop-product",
                 "name": product_name,
@@ -1243,7 +1465,43 @@ def _default_global_assets(
                 "image_prompt": f"{product_name}产品道具图，干净背景，细节清晰，颜色和外观稳定",
                 "images": [],
             }
+        )
+    # 无脚本设定时用可生图的具体身份名，禁止「主讲人/目标用户/核心产品」等泛化占位。
+    presenter_name = "出镜讲解者"
+    user_name = f"{target_audience}体验者" if target_audience and target_audience not in {"目标受众", "目标用户"} else "产品体验者"
+    if len(user_name) > 24:
+        user_name = "产品体验者"
+    defaults = {
+        "characters": [
+            {
+                "asset_id": "character-presenter",
+                "name": presenter_name,
+                "description": f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
+                "three_view_prompt": _ensure_three_view_prompt(
+                    "",
+                    name=presenter_name,
+                    description=f"适合{target_audience}信任的电商短视频讲解者，镜头表现自然可信",
+                    product_name=display_product,
+                    product_category=product_category,
+                ),
+                "three_view_images": [],
+            },
+            {
+                "asset_id": "character-user",
+                "name": user_name,
+                "description": f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
+                "three_view_prompt": _ensure_three_view_prompt(
+                    "",
+                    name=user_name,
+                    description=f"{target_audience}中的真实用户代表，用于表达使用前后的情绪变化",
+                    product_name=display_product,
+                    product_category=product_category,
+                ),
+                "three_view_images": [],
+            },
         ],
+        "scenes": scene_assets,
+        "props": prop_assets,
         "visual_style": {
             "asset_id": "style-main",
             "name": "真实摄影电商广告",
@@ -1251,6 +1509,12 @@ def _default_global_assets(
             "prompt": "真实摄影、电商广告质感、主体稳定、色彩自然、避免文字乱码和无关物体乱入",
         },
     }
+    return _ensure_script_setting_assets(
+        defaults,
+        plan_markdown=plan_markdown,
+        form_values=form_values,
+        selected_direction=selected_direction,
+    )
 
 
 def _exact_scene_durations_ms(target_duration_ms: Any) -> tuple[int, list[int]]:
@@ -1353,10 +1617,37 @@ def _default_shot_description(
 
 def _default_reference_asset_ids(global_assets: dict[str, Any], stage_asset_id: str) -> list[str]:
     known_ids = _global_image_asset_ids(global_assets)
-    character_id = _first_asset_id(global_assets, "characters", "character-presenter")
-    prop_id = _first_asset_id(global_assets, "props", "prop-product")
-    reference_ids = [character_id, stage_asset_id, prop_id]
-    return [asset_id for asset_id in reference_ids if asset_id in known_ids][:9]
+    reference_ids: list[str] = []
+
+    def push(asset_id: str) -> None:
+        if asset_id and asset_id in known_ids and asset_id not in reference_ids and len(reference_ids) < 9:
+            reference_ids.append(asset_id)
+
+    characters = global_assets.get("characters")
+    character_ids: list[str] = []
+    if isinstance(characters, list):
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            asset_id = _first_text(item.get("asset_id"), item.get("id"))
+            if asset_id:
+                character_ids.append(asset_id)
+    if character_ids:
+        push(character_ids[0])
+    push(stage_asset_id)
+    for asset_id in character_ids[1:4]:
+        push(asset_id)
+    props = global_assets.get("props")
+    if isinstance(props, list):
+        for item in props:
+            if not isinstance(item, dict):
+                continue
+            push(_first_text(item.get("asset_id"), item.get("id")))
+    if not reference_ids:
+        push(_first_asset_id(global_assets, "characters", "character-presenter"))
+        push(stage_asset_id)
+        push(_first_asset_id(global_assets, "props", "prop-product"))
+    return reference_ids[:9]
 
 
 def _first_asset_id(global_assets: dict[str, Any], collection: str, fallback: str) -> str:

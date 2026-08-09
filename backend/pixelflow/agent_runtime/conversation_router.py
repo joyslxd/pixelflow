@@ -25,17 +25,35 @@ IntentClassifier = Callable[
 _VIDEO_ANALYSIS = re.compile(r"视频分析|拆解.{0,8}视频|分析.{0,8}(?:这个|该|参考)?视频", re.IGNORECASE)
 _VIDEO = re.compile(
     r"图生视频|文生视频|"
-    r"(?:生成|制作|做|拍|出|创作|拍摄).{0,36}"
+    r"(?:生成|制作|做|拍|出|创作|拍摄|创建).{0,36}"
     r"(?:视频|短片|影片|广告片|宣传片|品牌片|TVC|tvc|"
-    r"(?:\d+(?:\.\d+)?\s*(?:s|秒|S)\s*)?广告)|"
+    r"(?:\d+(?:\.\d+)?\s*(?:s|秒|S|分钟|min)\s*)?广告)|"
     r"(?:视频|短片|影片).{0,12}(?:广告|成片)|"
-    r"(?:广告片|宣传片|品牌片|(?:\d+(?:\.\d+)?\s*(?:s|秒|S)\s*)广告)",
+    r"(?:广告片|宣传片|品牌片|(?:\d+(?:\.\d+)?\s*(?:s|秒|S|分钟|min)\s*)广告)|"
+    r"(?:一分钟|60\s*s|60\s*秒)\s*广告",
     re.IGNORECASE,
 )
 _PPT = re.compile(r"PPT|演示文稿|幻灯片", re.IGNORECASE)
 _IMAGE = re.compile(
     r"商品主图|海报|图片编辑|图像编辑|生成.{0,8}(?:图片|图像)|"
-    r"(?:做|制作|出).{0,8}(?:海报|主图)",
+    r"(?:做|制作|出|创建).{0,8}(?:海报|主图|图片|图像)",
+    re.IGNORECASE,
+)
+_CLARIFY_VIDEO = re.compile(
+    r"^(?:请)?(?:帮我)?(?:我要)?"
+    r"(?:创建|做|生成|制作)?"
+    r"(?:一个|一条|一支)?"
+    r"(?:带货)?"
+    r"(?:视频|广告视频|视频广告|带货视频)"
+    r"(?:吧)?$",
+    re.IGNORECASE,
+)
+_CLARIFY_IMAGE = re.compile(
+    r"^(?:请)?(?:帮我)?(?:我要)?(?:创建|做|生成|制作)?(?:一张|一个)?(?:图片|图像|海报)(?:吧)?$",
+    re.IGNORECASE,
+)
+_CLARIFY_PPT = re.compile(
+    r"^(?:请)?(?:帮我)?(?:我要)?(?:创建|做|生成|制作)?(?:一份|一个)?(?:PPT|演示文稿|幻灯片)(?:吧)?$",
     re.IGNORECASE,
 )
 
@@ -109,6 +127,19 @@ class ConversationRouteService:
 def _deterministic_decision(content: str) -> RouteDecision | None:
     if _VIDEO_ANALYSIS.search(content):
         return _explicit(RouteIntent.VIDEO_ANALYSIS, "explicit_video_analysis")
+    clarify = content.strip()
+    if len(clarify) <= 36:
+        if _CLARIFY_VIDEO.fullmatch(clarify):
+            return _explicit(RouteIntent.VIDEO, "explicit_video_request")
+        if _CLARIFY_PPT.fullmatch(clarify):
+            return _explicit(RouteIntent.PPT, "explicit_ppt_request")
+        if _CLARIFY_IMAGE.fullmatch(clarify):
+            return _explicit(RouteIntent.IMAGE, "explicit_image_request")
+    # 用户直接粘贴可拍成稿：按视频意图进入，避免先 unknown 再澄清丢上下文。
+    from pixelflow.video_agent.entrypoint import looks_like_complete_shooting_script
+
+    if looks_like_complete_shooting_script(content):
+        return _explicit(RouteIntent.VIDEO, "complete_script_payload")
     matches = [
         (RouteIntent.VIDEO, "explicit_video_request", bool(_VIDEO.search(content))),
         (RouteIntent.PPT, "explicit_ppt_request", bool(_PPT.search(content))),

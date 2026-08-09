@@ -337,6 +337,11 @@ async def test_load_conversation_state_returns_latest_plan_with_ordered_steps(
         assert [step.step_id for step in loaded_plan.steps] == ["step-2a", "step-2b"]
         assert await store.load_conversation_state("user-b", "conversation-1") is None
 
+        history = await store.list_conversation_plans("user-a", "conversation-1")
+        assert [item.plan_id for item in history] == ["plan-1", "plan-2"]
+        assert [step.step_id for step in history[1].steps] == ["step-2a", "step-2b"]
+        assert await store.list_conversation_plans("user-b", "conversation-1") == []
+
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio

@@ -13,8 +13,9 @@ import {
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
+import { parseShotDescriptionFields, shotDescriptionHasStructuredFields } from "@/lib/shotDescriptionDisplay";
 import { cn } from "@/lib/utils";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export interface StoryboardPanelProps {
   msg: ChatMessage;
@@ -117,6 +118,46 @@ function shotDescriptionText(shot: Record<string, unknown>): string {
   return legacyParts.filter(Boolean).join("");
 }
 
+function renderShotValueWithMentions(value: string) {
+  const parts = value.split(/(@[\w\-.\u4e00-\u9fff]+)/u);
+  return parts.map((part, index) => {
+    if (part.startsWith("@") && part.length > 1) {
+      return (
+        <span
+          key={`${part}-${index}`}
+          className="mx-0.5 inline-flex rounded-md bg-accent-soft px-1.5 py-0.5 text-[12px] font-medium text-accent"
+        >
+          {part}
+        </span>
+      );
+    }
+    return <span key={`text-${index}`}>{part}</span>;
+  });
+}
+
+function ShotDescriptionStructuredView({ text }: { text: string }) {
+  const fields = useMemo(() => parseShotDescriptionFields(text), [text]);
+  if (fields.length === 0) return null;
+  return (
+    <div className="overflow-hidden rounded-xl border border-line bg-white">
+      <table className="w-full border-collapse text-left text-[13px]">
+        <tbody>
+          {fields.map((field) => (
+            <tr key={`${field.label}-${field.value}`} className="border-b border-line last:border-b-0">
+              <th className="w-20 shrink-0 bg-canvas/70 px-3 py-2 align-top text-[12px] font-semibold text-ink-soft">
+                {field.label}
+              </th>
+              <td className="px-3 py-2 leading-relaxed text-ink">
+                {renderShotValueWithMentions(field.value)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function quotaInsufficient(value: unknown): boolean {
   if (!value) return false;
   if (typeof value === "object") {
@@ -162,6 +203,10 @@ export function StoryboardPanel({
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
   const [additionTarget, setAdditionTarget] = useState<AssetGroup | null>(null);
+  const [shotDescriptionEditorOpen, setShotDescriptionEditorOpen] = useState(false);
+  useEffect(() => {
+    setShotDescriptionEditorOpen(false);
+  }, [selectedSceneId]);
   const authoritativeSelectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const selectedScenePatch = authoritativeSelectedScene
     ? sceneDraftPatches[authoritativeSelectedScene.scene_id]
@@ -171,6 +216,7 @@ export function StoryboardPanel({
   const dirtySceneIds = new Set(msg.artifact?.videoScenePackageEditedSceneIds || []);
   const selectedReferenceIds = stringArray(selectedScene?.reference_asset_ids);
   const shot = shotRecord(selectedScene);
+  const shotText = shotDescriptionText(shot);
   const mentionCandidates = useMemo(() => buildMentionCandidates(assets), [assets]);
   const shotMentions = useMemo(
     () => normalizeShotMentions(shot, selectedReferenceIds, assets),
@@ -380,15 +426,47 @@ export function StoryboardPanel({
                   <textarea value={selectedScene.storyline || ""} onChange={(event) => updateScene({ storyline: event.currentTarget.value })} className={textareaClass()} />
                 </label>
                 <div className="grid gap-3 rounded-2xl border border-line bg-canvas p-3">
-                  <label className="grid gap-1.5 text-[12px] text-ink-soft">
-                    <span className="font-semibold text-ink">镜头描述 <span className="font-normal text-ink-soft">可以通过 @ 来添加参考</span></span>
-                    <SceneMentionEditor
-                      text={shotDescriptionText(shot)}
-                      shotDescription={{ ...shot, mentions: shotMentions }}
-                      candidates={mentionCandidates}
-                      onChange={updateShotDescription}
-                    />
-                  </label>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[12px] font-semibold text-ink">
+                      镜头描述 <span className="font-normal text-ink-soft">可通过 @ 添加参考</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShotDescriptionEditorOpen((open) => !open)}
+                      className="rounded-lg border border-line bg-white px-2.5 py-1 text-[11px] font-medium text-ink-soft hover:bg-canvas hover:text-ink"
+                    >
+                      {shotDescriptionEditorOpen ? "收起编辑" : "编辑原文"}
+                    </button>
+                  </div>
+                  {(() => {
+                    const structured = shotDescriptionHasStructuredFields(shotText);
+                    return (
+                      <>
+                        {structured ? (
+                          <ShotDescriptionStructuredView text={shotText} />
+                        ) : shotText ? (
+                          <p className="rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink">
+                            {renderShotValueWithMentions(shotText)}
+                          </p>
+                        ) : (
+                          <p className="rounded-xl border border-dashed border-line bg-white px-3 py-2 text-[12px] text-ink-soft">
+                            暂无镜头描述
+                          </p>
+                        )}
+                        {shotDescriptionEditorOpen || !structured ? (
+                          <label className="grid gap-1.5 text-[12px] text-ink-soft">
+                            <span className="font-medium text-ink">原文编辑</span>
+                            <SceneMentionEditor
+                              text={shotText}
+                              shotDescription={{ ...shot, mentions: shotMentions }}
+                              candidates={mentionCandidates}
+                              onChange={updateShotDescription}
+                            />
+                          </label>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </div>
                 <label className="grid gap-1.5 text-[12px] font-medium text-ink-soft">
                   旁白

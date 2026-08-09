@@ -33,6 +33,12 @@ from .scene import (
     SceneGenerationOperationPort,
 )
 from .script import BrainstormScriptTool, ImportScriptTool
+from .script_skill_pipeline import (
+    STAGE_ORDER,
+    STAGE_TITLES,
+    RunScriptSkillStageTool,
+    ScriptSkillStageInput,
+)
 
 __all__ = [
     "AnalyzeReferenceVideoTool",
@@ -52,8 +58,12 @@ __all__ = [
     "ReplaceProjectAssetsTool",
     "ReviewGeneratedSceneInput",
     "ReviewGeneratedScenesTool",
+    "RunScriptSkillStageTool",
+    "STAGE_ORDER",
+    "STAGE_TITLES",
     "SceneGenerationJob",
     "SceneGenerationOperationPort",
+    "ScriptSkillStageInput",
     "VideoTool",
     "VideoToolContext",
     "VideoToolCostLevel",

@@ -7,7 +7,11 @@ import math
 import re
 from typing import Any
 
-from pixelflow.creative.duration import MAX_SCENE_DURATION_SEC, MIN_SCENE_DURATION_SEC
+from pixelflow.creative.duration import (
+    MAX_SCENE_DURATION_SEC,
+    MIN_SCENE_DURATION_SEC,
+    PREFERRED_SCENE_DURATION_SEC,
+)
 
 MAX_SCENE_ASSET_REFERENCES = 9
 
@@ -560,7 +564,7 @@ def render_scene_blueprints_markdown(blueprints: list[dict[str, Any]]) -> str:
 def _fallback_scene_count(total_duration_sec: int) -> int:
     minimum_count = math.ceil(total_duration_sec / MAX_SCENE_DURATION_SEC)
     maximum_count = total_duration_sec // MIN_SCENE_DURATION_SEC
-    preferred_count = max(1, round(total_duration_sec / 10))
+    preferred_count = max(1, round(total_duration_sec / PREFERRED_SCENE_DURATION_SEC))
     return min(max(preferred_count, minimum_count), maximum_count)
 
 

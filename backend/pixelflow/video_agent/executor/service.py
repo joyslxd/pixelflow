@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -175,6 +176,22 @@ class VideoAgentExecutor:
                     run_id=plan.plan_id,
                     now=step.started_at or self._clock(),
                 )
+
+            current_step_id = step.step_id
+
+            async def report_progress(message: str, *, phase: str) -> None:
+                await self._repository.progress_step_with_event(
+                    user_id,
+                    plan.plan_id,
+                    current_step_id,
+                    public_summary=message,
+                    progress_phase=phase,
+                    run_id=plan.plan_id,
+                    now=self._clock(),
+                )
+                # 让出事件循环，避免长耗时工具卡住 SSE 推送阶段性 progressed。
+                await asyncio.sleep(0.05)
+
             result = await self._registry.execute(
                 VideoToolContext(
                     user_id=user_id,
@@ -182,6 +199,7 @@ class VideoAgentExecutor:
                     plan_id=plan.plan_id,
                     step_id=step.step_id,
                     credential=credential,
+                    report_progress=report_progress,
                 ),
                 step.tool_name,
                 step.arguments,

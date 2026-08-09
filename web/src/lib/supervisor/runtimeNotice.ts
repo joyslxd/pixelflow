@@ -98,10 +98,15 @@ export function resolveSupervisorRuntimeNotice(
   }
 
   if (queueBadge) {
+    const hasActiveOwner = input.inputQueue.some(
+      (item) => item.status === "accepted" || item.status === "processing" || item.status === "sending",
+    ) || input.runStatus === "running";
     return {
       kind: "queue",
       tone: "queued",
-      title: "输入已排队，系统会按顺序处理。",
+      title: hasActiveOwner
+        ? "上一条任务还在执行，新请求会在完成后自动开始。"
+        : "输入已排队，系统会按顺序处理。",
       detail: null,
       progressPercent: null,
       queueBadge,

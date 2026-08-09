@@ -8,6 +8,8 @@ export interface VideoAgentStepState {
   title: string;
   status: VideoAgentStepStatus;
   publicSummary: string | null;
+  progressLog: string[];
+  progressPhase: string | null;
   artifactRefs: string[];
   startedAt: string | null;
   completedAt: string | null;

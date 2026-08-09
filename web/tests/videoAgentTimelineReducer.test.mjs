@@ -68,3 +68,63 @@ test("confirmation requested event pauses the persisted plan step", () => {
   assert.equal(paused.plans["plan-1"].status, "awaiting_confirmation");
   assert.equal(paused.plans["plan-1"].steps["step-1"].status, "awaiting_confirmation");
 });
+
+test("progressed step event appends live phase log while keeping running status", () => {
+  const planned = reduceVideoAgentEvent(createVideoAgentTimelineState(), {
+    type: "agent.plan.created",
+    payload: {
+      plan_id: "plan-1",
+      workspace_id: "workspace-1",
+      status: "running",
+      public_goal: "生成广告",
+    },
+  });
+  const started = reduceVideoAgentEvent(planned, {
+    type: "agent.step.started",
+    payload: {
+      plan_id: "plan-1",
+      step_id: "step-2",
+      sequence: 2,
+      title: "生成广告脚本草稿",
+      status: "running",
+      started_at: "2026-08-04T00:00:00Z",
+    },
+  });
+  const progressed = reduceVideoAgentEvent(started, {
+    type: "agent.step.progressed",
+    payload: {
+      plan_id: "plan-1",
+      step_id: "step-2",
+      sequence: 2,
+      title: "生成广告脚本草稿",
+      status: "running",
+      public_summary: "调用创意脚本 Skill（brief_generate）…",
+      progress_phase: "invoke_skill",
+      started_at: "2026-08-04T00:00:00Z",
+    },
+  });
+  const waiting = reduceVideoAgentEvent(progressed, {
+    type: "agent.step.progressed",
+    payload: {
+      plan_id: "plan-1",
+      step_id: "step-2",
+      sequence: 2,
+      title: "生成广告脚本草稿",
+      status: "running",
+      public_summary: "已交给大模型生成脚本草稿，请稍候…",
+      progress_phase: "await_model",
+      started_at: "2026-08-04T00:00:00Z",
+    },
+  });
+
+  assert.equal(waiting.plans["plan-1"].steps["step-2"].status, "running");
+  assert.equal(
+    waiting.plans["plan-1"].steps["step-2"].publicSummary,
+    "已交给大模型生成脚本草稿，请稍候…",
+  );
+  assert.deepEqual(waiting.plans["plan-1"].steps["step-2"].progressLog, [
+    "调用创意脚本 Skill（brief_generate）…",
+    "已交给大模型生成脚本草稿，请稍候…",
+  ]);
+  assert.equal(waiting.plans["plan-1"].steps["step-2"].progressPhase, "await_model");
+});

@@ -29,12 +29,16 @@ from pixelflow.agent_runtime.service import (
     AgentRuntimeVideoConfirmationUnavailableError,
     AgentRuntimeVideoQuotaConflictError,
     AgentRuntimeVideoQuotaUnavailableError,
+    AgentRuntimeVideoScriptConflictError,
+    AgentRuntimeVideoScriptUnavailableError,
     AgentTurnJobResponse,
     AgentTurnStartResponse,
     VideoAgentConfirmationResponse,
     VideoAgentConfirmationResponseRequest,
     VideoAgentQuotaResponse,
     VideoAgentQuotaResponseRequest,
+    VideoAgentScriptSaveRequest,
+    VideoAgentScriptSaveResponse,
 )
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
@@ -396,6 +400,37 @@ async def respond_to_video_agent_confirmation(
         raise HTTPException(
             status_code=409,
             detail={"code": "video_agent_confirmation_conflict"},
+        ) from exc
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.put(
+    "/{conversation_id}/video-agent/script",
+    response_model=VideoAgentScriptSaveResponse,
+)
+async def save_video_agent_script(
+    conversation_id: str,
+    body: VideoAgentScriptSaveRequest,
+    request: Request,
+) -> VideoAgentScriptSaveResponse:
+    """保存右侧脚本预览中的用户编辑，并追加脚本版本。"""
+
+    try:
+        return await _agent_runtime_service(request).save_video_agent_script(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            request=body,
+        )
+    except AgentRuntimeVideoScriptUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "video_agent_script_unavailable"},
+        ) from exc
+    except AgentRuntimeVideoScriptConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "video_agent_script_conflict", "message": str(exc)},
         ) from exc
     except (AgentRuntimeUnavailableError, LookupError) as exc:
         raise _runtime_http_exception(exc) from exc

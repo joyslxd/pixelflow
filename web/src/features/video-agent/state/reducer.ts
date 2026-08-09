@@ -87,6 +87,13 @@ export function projectVideoAgentPlanSnapshot(
       title,
       status: stepStatus,
       publicSummary: asText(stepValue.public_summary),
+      progressLog: (() => {
+        const fromList = asTextList(stepValue.progress_log);
+        if (fromList.length > 0) return fromList;
+        const summary = asText(stepValue.public_summary);
+        return summary ? [summary] : [];
+      })(),
+      progressPhase: asText(stepValue.progress_phase),
       artifactRefs: asArtifactRefs(stepValue.artifact_refs),
       startedAt: asText(stepValue.started_at),
       completedAt: asText(stepValue.completed_at),
@@ -128,6 +135,8 @@ export function cloneVideoAgentPlanState(value: unknown): VideoAgentPlanState | 
       title: step.title,
       status: step.status,
       public_summary: step.publicSummary,
+      progress_log: step.progressLog,
+      progress_phase: step.progressPhase,
       artifact_refs: step.artifactRefs,
       started_at: step.startedAt,
       completed_at: step.completedAt,
@@ -303,13 +312,37 @@ export function reduceVideoAgentEvent(
 
   const resolvedPlanId = planId;
   const previous = plan.steps[stepId];
+  const nextSummary = asText(event.payload.public_summary) ?? previous?.publicSummary ?? null;
+  const nextPhase = asText(event.payload.progress_phase);
+  let progressLog = previous?.progressLog ?? [];
+  if (event.type === "agent.step.started") {
+    progressLog = [];
+  } else if (
+    event.type === "agent.step.progressed"
+    && nextSummary
+    && progressLog[progressLog.length - 1] !== nextSummary
+  ) {
+    progressLog = [...progressLog, nextSummary];
+  } else if (
+    event.type === "agent.step.completed"
+    && nextSummary
+    && progressLog.length === 0
+  ) {
+    progressLog = [nextSummary];
+  }
   const step: VideoAgentStepState = {
     ...previous,
     stepId,
     sequence,
     title,
     status,
-    publicSummary: asText(event.payload.public_summary) ?? previous?.publicSummary ?? null,
+    publicSummary: nextSummary,
+    progressLog,
+    progressPhase: event.type === "agent.step.progressed"
+      ? nextPhase
+      : event.type === "agent.step.started"
+        ? null
+        : previous?.progressPhase ?? nextPhase,
     artifactRefs: asArtifactRefs(event.payload.artifact_refs).length > 0
       ? asArtifactRefs(event.payload.artifact_refs)
       : previous?.artifactRefs ?? [],
