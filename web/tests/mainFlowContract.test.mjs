@@ -1007,10 +1007,21 @@ test("image edit options load content-app model configs and submit selected mode
     assert.match(workspaceSource, /handleConfirmSceneAssetModel/, "Workspace must confirm scene asset model before generate-scene-assets");
   assert.match(workspaceSource, /startSceneAssetsJob/, "Confirmed model must start generate-scene-assets job");
   assert.match(workspaceSource, /reference_brief/, "Confirmed model must pass reference brief into generate-scene-assets");
-  assert.match(workspaceSource, /resolveWorkflowResumeIntent/, "Workspace must route natural-language resume intents");
+  // V2.1：自然语言恢复禁止前端关键词编排；确认卡以外一律交给 turns/start。
+  assert.doesNotMatch(workspaceSource, /resolveWorkflowResumeIntent/, "Workspace must not route NL via FE resume intents");
+  assert.match(workspaceSource, /禁止前端关键词断点恢复/, "Workspace must document V2.1 no-FE-orchestration rule");
   assert.match(workspaceSource, /isAgreeScriptCreativeRequest/, "Workspace must accept natural-language creative confirmation");
+  assert.match(workspaceSource, /creativeConfirmNeedsClarification/, "Workspace must block agree when ratio/CTA still missing");
   assert.match(workspaceSource, /同意创意继续/, "Creative confirmation card must use agree label");
   assert.match(workspaceSource, /换个方向/, "Creative confirmation card must use revise label");
+  const stagesSource = fs.readFileSync(
+    path.resolve("src/features/video-agent/scriptSkillStages.ts"),
+    "utf8",
+  );
+  assert.match(stagesSource, /同意创作/, "Agree markers must include 同意创作");
+  assert.doesNotMatch(stagesSource, /export function resolveWorkflowResumeIntent/, "FE keyword resume router must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isConfirmScriptPlanRequest/, "FE keyword confirm-script detector must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isRetryFailedSceneAssetsRequest/, "FE keyword retry detector must be deleted");
   assert.match(workspaceSource, /applyAssetPackageStructureProgress/, "Asset package progress must surface prepare structure phases");
   assert.match(workspaceSource, /failAssetPackageProgressSteps/, "Resume 404 must fail frozen asset-package progress steps");
   assert.match(workspaceSource, /activePending\.job_id !== pendingScenePackageJob\.job_id/, "Stale scene-package resume must not clear the active job");
@@ -1378,44 +1389,27 @@ test("scene reference image retry only submits failed asset targets", () => {
   assert.match(apiSource, /target_assets\?: SceneAssetRetryTarget\[\]/, "scene asset API DTO must expose the target whitelist");
 });
 
-test("natural-language retry of failed reference images must not open a new Skill plan", () => {
+test("V2.1 natural-language follow-ups must not use FE keyword resume orchestration", () => {
   const stagesSource = fs.readFileSync(
     path.resolve("src/features/video-agent/scriptSkillStages.ts"),
     "utf8",
   );
-  assert.match(stagesSource, /export function isRetryFailedSceneAssetsRequest/, "must detect NL retry of failed scene assets");
-  assert.match(stagesSource, /export function isSingleSceneRevisionRequest/, "must detect NL single-scene revision");
-  assert.match(stagesSource, /if \(isSingleSceneRevisionRequest\(text\)\) return false/, "single-scene revision must not revise asset package");
-  assert.match(stagesSource, /"retry_failed_images"/, "resume intent must include retry_failed_images");
-  const resolveStart = stagesSource.indexOf("export function resolveWorkflowResumeIntent");
-  const resolveEnd = stagesSource.indexOf("export function isScriptCreativeConfirmationTitle", resolveStart);
-  assert.notEqual(resolveStart, -1, "resolveWorkflowResumeIntent must exist");
-  assert.notEqual(resolveEnd, -1, "creative confirmation helper must follow resolveWorkflowResumeIntent");
-  const resolveSource = stagesSource.slice(resolveStart, resolveEnd);
-  const retryIntentIndex = resolveSource.indexOf('isRetryFailedSceneAssetsRequest(content)) return "retry_failed_images"');
-  const startImagesIndex = resolveSource.indexOf('isStartImageGenerationRequest(content)) return "start_images"');
-  assert.notEqual(retryIntentIndex, -1, "retry_failed_images must be resolved from NL");
-  assert.notEqual(startImagesIndex, -1, "start_images must remain a resume intent");
-  assert.ok(retryIntentIndex < startImagesIndex, "failed-image retry must win over bare start_images (includes 生成参考图)");
-
-  const resumeStart = workspaceSource.indexOf("const resumeIntent = resolveWorkflowResumeIntent(text)");
-  const resumeEnd = workspaceSource.indexOf("if (\n          hasReadyScenePackage\n          && isConfirmGenerateVideoFromPackagesRequest(text)", resumeStart);
-  assert.notEqual(resumeStart, -1, "Workspace must resolve NL resume intents");
-  assert.notEqual(resumeEnd, -1, "confirm-generate-video branch must follow resume intents");
-  const resumeSource = workspaceSource.slice(resumeStart, resumeEnd);
-  assert.match(resumeSource, /resumeIntent === "retry_failed_images"/, "Workspace must handle retry_failed_images");
-  assert.match(resumeSource, /await handleRetrySceneAssets\(/, "NL failed-image retry must call handleRetrySceneAssets");
-  assert.match(resumeSource, /latestFailedScenePackageMessage/, "must locate the latest scene package with retryable failures");
-  const failedRetryIndex = resumeSource.indexOf('resumeIntent === "retry_failed_images"');
-  const alreadyDoneIndex = resumeSource.indexOf("参考图已经生成完成");
-  assert.notEqual(failedRetryIndex, -1, "retry_failed_images branch must exist");
-  assert.notEqual(alreadyDoneIndex, -1, "already-complete tip must remain for fully successful packages");
-  assert.ok(failedRetryIndex < alreadyDoneIndex, "failed retry must run before the already-complete early return");
+  // 关键词断点恢复整组已物理删除；NL 续跑只走 turns/start → 思考流 → Plan/Tool。
+  assert.doesNotMatch(stagesSource, /export function resolveWorkflowResumeIntent/, "resolveWorkflowResumeIntent must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isStartImageGenerationRequest/, "start-images keyword detector must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isRetryFailedSceneAssetsRequest/, "retry-failed keyword detector must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isSingleSceneRevisionRequest/, "single-scene keyword detector must be deleted");
+  assert.doesNotMatch(stagesSource, /export function isConfirmGenerateVideoFromPackagesRequest/, "confirm-generate keyword detector must be deleted");
+  assert.doesNotMatch(workspaceSource, /const resumeIntent = resolveWorkflowResumeIntent\(text\)/, "Workspace must not resolve FE resume intents");
+  assert.doesNotMatch(workspaceSource, /当前没有可自动恢复的断点/, "must not hard-block with no-breakpoint tip");
   assert.match(
-    resumeSource,
-    /latestFailedScenePackageMessage[\s\S]*handleRetrySceneAssets\(latestFailedScenePackageMessage\)/,
-    "start_images/generic_resume with remaining failures must also retry instead of opening a Skill plan",
+    workspaceSource,
+    /确认卡以外的自然语言一律交给 turns\/start/,
+    "V2 handleSend must fall through to VideoAgent thinking→plan",
   );
+  // 按钮级失败参考图重试仍保留（工作台显式动作），不靠 NL 关键词路由。
+  assert.match(workspaceSource, /const handleRetrySceneAssets = async/, "explicit retry button path must remain");
+  assert.match(workspaceSource, /onRetrySceneAssets/, "storyboard/message UI must still wire retry action");
 });
 
 test("video plan contract drives scene package assets videos and recoverable jobs", () => {

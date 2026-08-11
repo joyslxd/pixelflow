@@ -101,6 +101,18 @@ export interface SupervisorResumePoint {
   sequence: number;
 }
 
+export interface SupervisorAgentThinkingState {
+  turnId: string;
+  title: string;
+  subtitle: string;
+  /** reasoning channel：Thought 折叠区正文。 */
+  text: string;
+  /** answer channel：完成后写入对话框气泡。 */
+  answer: string;
+  startedAt: string | null;
+  status: "streaming" | "completed";
+}
+
 export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjection {
   conversationId: string;
   run: SupervisorRunState;
@@ -114,10 +126,13 @@ export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjecti
   videoAgentPlanOrder: string[];
   videoAgentConfirmation: VideoAgentConfirmationState | null;
   videoAgentQuota: VideoAgentQuotaState | null;
+  /** Snapshot 折叠出的思考流历史（服务端事件持久化）。 */
+  agentThinkingHistory: SupervisorAgentThinkingState[];
 }
 
 export interface SupervisorRuntimeState extends SupervisorRuntimeProjection {
   connection: SupervisorConnectionState;
+  agentThinking: SupervisorAgentThinkingState | null;
 }
 
 export type SupervisorRuntimeAction =
@@ -534,12 +549,78 @@ function applyAgentEvent(
         },
       };
     }
+    case "agent.thinking.started": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      if (!turnId) return withEventResumePoint(state, event);
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: {
+          turnId,
+          title: typeof event.payload.title === "string" && event.payload.title.trim()
+            ? event.payload.title
+            : "正在分析素材，提炼电商属性并构思方向…",
+          subtitle: typeof event.payload.subtitle === "string" && event.payload.subtitle.trim()
+            ? event.payload.subtitle
+            : "AI 编剧思考中…",
+          text: "",
+          answer: "",
+          startedAt: typeof event.payload.started_at === "string"
+            ? event.payload.started_at
+            : event.occurred_at,
+          status: "streaming",
+        },
+      };
+    }
+    case "agent.thinking.delta": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
+      if (!turnId || !delta || !state.agentThinking || state.agentThinking.turnId !== turnId) {
+        return withEventResumePoint(state, event);
+      }
+      const channel = typeof event.payload.channel === "string"
+        ? event.payload.channel
+        : "reasoning";
+      if (channel === "answer") {
+        return {
+          ...withEventResumePoint(state, event),
+          agentThinking: {
+            ...state.agentThinking,
+            answer: `${state.agentThinking.answer ?? ""}${delta}`,
+            status: "streaming",
+          },
+        };
+      }
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: {
+          ...state.agentThinking,
+          text: `${state.agentThinking.text}${delta}`,
+          status: "streaming",
+        },
+      };
+    }
+    case "agent.thinking.completed": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      if (!turnId || !state.agentThinking || state.agentThinking.turnId !== turnId) {
+        return withEventResumePoint(state, event);
+      }
+      const completed: SupervisorAgentThinkingState = {
+        ...state.agentThinking,
+        status: "completed",
+      };
+      const withoutSame = state.agentThinkingHistory.filter((item) => item.turnId !== turnId);
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: completed,
+        agentThinkingHistory: [...withoutSame, completed],
+      };
+    }
     case "agent.plan.created":
+    case "agent.plan.updated":
     case "agent.step.started":
     case "agent.step.progressed":
     case "agent.step.completed":
-    case "agent.step.failed":
-    case "agent.confirmation.requested": {
+    case "agent.step.failed": {
       const timeline = reduceVideoAgentEvent(
         {
           plans: { ...state.videoAgentPlans },
@@ -553,7 +634,8 @@ function applyAgentEvent(
         && !state.videoAgentPlanOrder.includes(eventPlanId)
         ? [...state.videoAgentPlanOrder, eventPlanId]
         : state.videoAgentPlanOrder;
-      const nextCurrent = event.type === "agent.plan.created" && eventPlanId
+      const nextCurrent = (event.type === "agent.plan.created" || event.type === "agent.plan.updated")
+        && eventPlanId
         ? timeline.plans[eventPlanId] ?? state.videoAgentPlan
         : state.videoAgentPlan?.planId
           ? timeline.plans[state.videoAgentPlan.planId] ?? state.videoAgentPlan
@@ -563,6 +645,7 @@ function applyAgentEvent(
         videoAgentPlans: timeline.plans,
         videoAgentPlanOrder: nextOrder,
         videoAgentPlan: nextCurrent,
+        // 思考流先于 Plan：plan/step 事件不强制收起 Thought（由 thinking 终态收起）。
         videoAgentConfirmation: (
           event.type === "agent.step.started"
           || event.type === "agent.step.completed"
@@ -570,6 +653,70 @@ function applyAgentEvent(
         ) && event.payload.step_id === state.videoAgentConfirmation?.stepId
           ? null
           : state.videoAgentConfirmation,
+      };
+    }
+    case "agent.confirmation.requested": {
+      const timeline = reduceVideoAgentEvent(
+        {
+          plans: { ...state.videoAgentPlans },
+        },
+        event,
+      );
+      const eventPlanId = typeof event.payload.plan_id === "string"
+        ? event.payload.plan_id
+        : null;
+      const nextCurrent = eventPlanId
+        ? timeline.plans[eventPlanId] ?? state.videoAgentPlan
+        : state.videoAgentPlan?.planId
+          ? timeline.plans[state.videoAgentPlan.planId] ?? state.videoAgentPlan
+          : state.videoAgentPlan;
+      const confirmId = typeof event.payload.confirmation_id === "string"
+        ? event.payload.confirmation_id
+        : "";
+      const confirmPlanId = typeof event.payload.plan_id === "string"
+        ? event.payload.plan_id
+        : "";
+      const confirmStepId = typeof event.payload.step_id === "string"
+        ? event.payload.step_id
+        : "";
+      const confirmTitle = typeof event.payload.title === "string"
+        ? event.payload.title
+        : "";
+      const confirmSummary = typeof event.payload.cost_summary === "string"
+        ? event.payload.cost_summary
+        : "";
+      const affected = Array.isArray(event.payload.affected_scene_ids)
+        ? event.payload.affected_scene_ids.filter(
+          (item): item is string => typeof item === "string" && item.trim().length > 0,
+        )
+        : [];
+      if (!confirmId || !confirmPlanId || !confirmStepId || !confirmTitle || !confirmSummary) {
+        return {
+          ...withEventResumePoint(state, event),
+          videoAgentPlans: timeline.plans,
+          videoAgentPlan: nextCurrent,
+          agentThinking: state.agentThinking
+            ? { ...state.agentThinking, status: "completed" as const }
+            : state.agentThinking,
+        };
+      }
+      return {
+        ...withEventResumePoint(state, event),
+        videoAgentPlans: timeline.plans,
+        videoAgentPlan: nextCurrent,
+        agentThinking: state.agentThinking
+          ? { ...state.agentThinking, status: "completed" as const }
+          : state.agentThinking,
+        videoAgentConfirmation: {
+          confirmationId: confirmId,
+          planId: confirmPlanId,
+          stepId: confirmStepId,
+          title: confirmTitle,
+          costSummary: confirmSummary,
+          affectedSceneIds: affected,
+          submittable: true,
+          unavailableReason: null,
+        },
       };
     }
     case "message.upserted":
@@ -764,6 +911,9 @@ function cloneProjection(value: unknown): SupervisorRuntimeProjection | null {
     videoAgentPlanOrder,
     videoAgentConfirmation,
     videoAgentQuota,
+    agentThinkingHistory: Array.isArray(projection.agentThinkingHistory)
+      ? projection.agentThinkingHistory.map((item) => ({ ...item }))
+      : [],
     ...workspace,
   };
   return isProjectionStateConsistent(cloned) ? cloned : null;
@@ -799,6 +949,8 @@ export function createSupervisorRuntimeState(conversationId: string): Supervisor
     videoAgentPlanOrder: [],
     videoAgentConfirmation: null,
     videoAgentQuota: null,
+    agentThinkingHistory: [],
+    agentThinking: null,
     resume: {
       cursor: null,
       sequence: 0,
@@ -927,6 +1079,27 @@ export function supervisorRuntimeReducer(
       for (const planId of Object.keys(nextPlans)) {
         if (!nextOrder.includes(planId)) nextOrder.push(planId);
       }
+      // Snapshot 折叠的思考历史是服务端权威；本地仅保留同 turn 更丰富的正文。
+      const historyByTurn = new Map<string, SupervisorAgentThinkingState>();
+      for (const item of state.agentThinkingHistory) {
+        historyByTurn.set(item.turnId, item);
+      }
+      for (const item of projection.agentThinkingHistory || []) {
+        const local = historyByTurn.get(item.turnId);
+        if (!local) {
+          historyByTurn.set(item.turnId, item);
+          continue;
+        }
+        const preferLocal = (local.text?.length || 0) > (item.text?.length || 0)
+          || (local.answer?.length || 0) > (item.answer?.length || 0);
+        historyByTurn.set(item.turnId, preferLocal ? { ...local, status: item.status } : item);
+      }
+      const nextThinkingHistory = [...historyByTurn.values()];
+      const liveFromSnapshot = nextThinkingHistory.find((item) => item.status === "streaming")
+        ?? null;
+      const nextLiveThinking = state.agentThinking?.status === "streaming"
+        ? state.agentThinking
+        : (liveFromSnapshot ?? state.agentThinking);
       return {
         ...projection,
         videoAgentWorkspace,
@@ -941,6 +1114,8 @@ export function supervisorRuntimeReducer(
           ?? (incomingWorkspace === null && state.videoAgentWorkspace.current
             ? state.videoAgentQuota
             : null),
+        agentThinkingHistory: nextThinkingHistory,
+        agentThinking: nextLiveThinking,
         connection: state.connection,
       };
     }

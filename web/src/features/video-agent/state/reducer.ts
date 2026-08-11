@@ -270,12 +270,77 @@ export function reduceVideoAgentEvent(
     const workspaceId = asText(event.payload.workspace_id);
     const status = asPlanStatus(event.payload.status);
     if (!planId || !workspaceId || !status) return state;
+    const previous = state.plans[planId];
+    const nextSteps: Record<string, VideoAgentStepState> = { ...(previous?.steps ?? {}) };
+    const rawSteps = Array.isArray(event.payload.steps) ? event.payload.steps : [];
+    for (const item of rawSteps) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const stepId = asText((item as Record<string, unknown>).step_id);
+      const sequence = asPositiveInteger((item as Record<string, unknown>).sequence);
+      const title = asText((item as Record<string, unknown>).title);
+      const stepStatus = asStepStatus((item as Record<string, unknown>).status) ?? "pending";
+      if (!stepId || !sequence || !title) continue;
+      const existing = nextSteps[stepId];
+      nextSteps[stepId] = {
+        stepId,
+        sequence,
+        title,
+        status: existing?.status && existing.status !== "pending" ? existing.status : stepStatus,
+        publicSummary: existing?.publicSummary ?? null,
+        progressLog: existing?.progressLog ?? [],
+        progressPhase: existing?.progressPhase ?? null,
+        artifactRefs: existing?.artifactRefs ?? [],
+        startedAt: existing?.startedAt ?? null,
+        completedAt: existing?.completedAt ?? null,
+        durationMs: existing?.durationMs ?? null,
+      };
+    }
     const plan: VideoAgentPlanState = {
       planId,
       workspaceId,
       status,
       publicGoal: asText(event.payload.public_goal),
-      steps: state.plans[planId]?.steps ?? {},
+      steps: nextSteps,
+    };
+    return { plans: { ...state.plans, [planId]: plan } };
+  }
+
+  if (event.type === "agent.plan.updated") {
+    const planId = asText(event.payload.plan_id);
+    const workspaceId = asText(event.payload.workspace_id);
+    const status = asPlanStatus(event.payload.status);
+    if (!planId || !workspaceId || !status) return state;
+    const previous = state.plans[planId];
+    const nextSteps: Record<string, VideoAgentStepState> = { ...(previous?.steps ?? {}) };
+    const rawSteps = Array.isArray(event.payload.steps) ? event.payload.steps : [];
+    for (const item of rawSteps) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const stepId = asText((item as Record<string, unknown>).step_id);
+      const sequence = asPositiveInteger((item as Record<string, unknown>).sequence);
+      const title = asText((item as Record<string, unknown>).title);
+      const stepStatus = asStepStatus((item as Record<string, unknown>).status) ?? "pending";
+      if (!stepId || !sequence || !title) continue;
+      const existing = nextSteps[stepId];
+      nextSteps[stepId] = {
+        stepId,
+        sequence,
+        title,
+        status: existing?.status && existing.status !== "pending" ? existing.status : stepStatus,
+        publicSummary: existing?.publicSummary ?? null,
+        progressLog: existing?.progressLog ?? [],
+        progressPhase: existing?.progressPhase ?? null,
+        artifactRefs: existing?.artifactRefs ?? [],
+        startedAt: existing?.startedAt ?? null,
+        completedAt: existing?.completedAt ?? null,
+        durationMs: existing?.durationMs ?? null,
+      };
+    }
+    const plan: VideoAgentPlanState = {
+      planId,
+      workspaceId,
+      status,
+      publicGoal: asText(event.payload.public_goal) ?? previous?.publicGoal ?? null,
+      steps: nextSteps,
     };
     return { plans: { ...state.plans, [planId]: plan } };
   }

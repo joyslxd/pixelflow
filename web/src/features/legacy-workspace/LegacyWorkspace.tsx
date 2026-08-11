@@ -119,6 +119,7 @@ import {
   AgentQuotaCard,
   type AgentQuotaSubmission,
 } from "@/features/video-agent/AgentQuotaCard";
+import { AgentThinkingStream, type AgentThinkingStreamModel } from "@/features/video-agent/AgentThinkingStream";
 import { AgentScriptPreviewPanel } from "@/features/video-agent/AgentScriptPreviewPanel";
 import { SceneEvidencePanel } from "@/features/video-agent/SceneEvidencePanel";
 import { VideoAgentStoryboardSurface } from "@/features/video-agent/VideoAgentStoryboardSurface";
@@ -130,7 +131,7 @@ import {
   saveVideoAgentPlanHistory,
   type VideoAgentPlanHistory,
 } from "@/features/video-agent/planHistory";
-import { stageIdFromStep, isContinueVideoGenerationRequest, isConfirmScriptPlanRequest, isRedesignTaskPlanRequest, isMajorRequirementChangeRequest, isRegenerateVideoAssetPackageRequest, isReviseVideoAssetPackageRequest, isConfirmGenerateVideoFromPackagesRequest, resolveGeneratableScriptMarkdown, buildAssetPackagePlanMarkdown, extractConcreteProductHint, workspaceHasGeneratableScript, workspaceHasExportReady, analyzeScriptCharacterReadiness, scriptNeedsFullCharacterPlan, resolveWorkflowResumeIntent, isScriptCreativeConfirmationTitle, isAgreeScriptCreativeRequest, isCancelScriptCreativeRequest } from "@/features/video-agent/scriptSkillStages";
+import { stageIdFromStep, resolveGeneratableScriptMarkdown, buildAssetPackagePlanMarkdown, extractConcreteProductHint, workspaceHasExportReady, analyzeScriptCharacterReadiness, scriptNeedsFullCharacterPlan, isScriptCreativeConfirmationTitle, isAgreeScriptCreativeRequest, isCancelScriptCreativeRequest, creativeConfirmNeedsClarification } from "@/features/video-agent/scriptSkillStages";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
@@ -1022,6 +1023,26 @@ function hasPassedRequirementCollection(
   }
   if (REQUIREMENT_COLLECTION_SUCCESSOR_CONTEXT_KEYS.some((key) => hasWorkflowValue(snapshot[key]))) return true;
   return lastPhasePassedRequirementCollection(lastPhase);
+}
+
+/** 思考流挂回用户消息后：优先用 thinking-answer 气泡前的用户消息。 */
+function resolveThinkingAfterMessageId(
+  turnId: string,
+  messages: ChatMessage[],
+): string {
+  const answerId = `thinking-answer:${turnId}`;
+  const answerIndex = messages.findIndex((message) => message.id === answerId);
+  if (answerIndex > 0) {
+    for (let index = answerIndex - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "user" && messages[index]?.id) {
+        return messages[index].id;
+      }
+    }
+  }
+  // 答案气泡尚未落库时：退化为最近一条用户消息（多轮刷新后仍靠 answer 锚点纠偏）。
+  return [...messages].reverse().find((message) => message.role === "user")?.id
+    || messages[0]?.id
+    || "";
 }
 
 function artifactMatchesDirectionContext(
@@ -2299,6 +2320,14 @@ export function WorkspacePage() {
   const [assetPackageAnchorMessageId, setAssetPackageAnchorMessageId] = useState("");
   const assetPackageAnchorMessageIdRef = useRef("");
   const [assetPackageProgressSteps, setAssetPackageProgressSteps] = useState<AgentPipelineProgressStep[]>([]);
+  const [optimisticAgentThinking, setOptimisticAgentThinking] = useState<AgentThinkingStreamModel | null>(null);
+  /** 本地仅作会话内即时归档缓存；刷新后以 Snapshot agentThinkingHistory 为准。 */
+  const [agentThinkingHistory, setAgentThinkingHistory] = useState<Array<AgentThinkingStreamModel & {
+    afterMessageId: string;
+  }>>([]);
+  /** 当前 Turn 思考打字机未追平时，延后展示本轮 Plan，避免「边想边出卡」。 */
+  const [holdActivePlanForThinking, setHoldActivePlanForThinking] = useState(false);
+  const thinkingAnswerNoticeInFlightRef = useRef<Set<string>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pendingCore, setPendingCore] = useState("");
   const [pendingIntent, setPendingIntent] = useState<CreationIntent>("video");
@@ -2362,6 +2391,83 @@ export function WorkspacePage() {
   const supervisorRuntime = useSupervisorConversation(currentConversationId || "workspace-pending", {
     enabled: runtimePolicy.supervisorEnabled,
   });
+  useEffect(() => {
+    if (supervisorRuntime.state.agentThinking && optimisticAgentThinking) {
+      setOptimisticAgentThinking(null);
+    }
+  }, [supervisorRuntime.state.agentThinking, optimisticAgentThinking]);
+  useEffect(() => {
+    // 换会话清空历史思考，避免串对话。
+    setAgentThinkingHistory([]);
+    setOptimisticAgentThinking(null);
+    setHoldActivePlanForThinking(false);
+    thinkingAnswerNoticeInFlightRef.current.clear();
+  }, [currentConversationId]);
+  useEffect(() => {
+    const live = supervisorRuntime.state.agentThinking ?? optimisticAgentThinking;
+    if (!live) {
+      setHoldActivePlanForThinking(false);
+    }
+  }, [supervisorRuntime.state.agentThinking, optimisticAgentThinking]);
+  useEffect(() => {
+    const thinking = supervisorRuntime.state.agentThinking;
+    if (!thinking || thinking.status !== "completed" || !thinking.text.trim()) return;
+    const afterMessageId = [...messagesRef.current].reverse().find((item) => item.role === "user")?.id
+      || messagesRef.current[0]?.id
+      || "";
+    if (!afterMessageId) return;
+    setAgentThinkingHistory((previous) => {
+      const index = previous.findIndex((item) => item.turnId === thinking.turnId);
+      const nextItem = { ...thinking, afterMessageId };
+      if (index >= 0) {
+        const copy = previous.slice();
+        copy[index] = nextItem;
+        return copy;
+      }
+      return [...previous, nextItem];
+    });
+  }, [supervisorRuntime.state.agentThinking]);
+  // Snapshot 恢复的思考历史：合并进本地归档，刷新后仍可回显 Thought。
+  useEffect(() => {
+    const restored = supervisorRuntime.state.agentThinkingHistory || [];
+    if (restored.length === 0) return;
+    setAgentThinkingHistory((previous) => {
+      const byTurn = new Map(previous.map((item) => [item.turnId, item]));
+      for (const item of restored) {
+        if (!item.turnId || !item.text?.trim()) continue;
+        const afterMessageId = resolveThinkingAfterMessageId(item.turnId, messagesRef.current)
+          || byTurn.get(item.turnId)?.afterMessageId
+          || "";
+        if (!afterMessageId) continue;
+        const local = byTurn.get(item.turnId);
+        const preferLocal = Boolean(
+          local
+          && (
+            (local.text?.length || 0) > (item.text?.length || 0)
+            || (local.answer?.length || 0) > (item.answer?.length || 0)
+          ),
+        );
+        byTurn.set(item.turnId, preferLocal && local
+          ? local
+          : {
+            turnId: item.turnId,
+            title: item.title,
+            subtitle: item.subtitle,
+            text: item.text,
+            answer: item.answer,
+            startedAt: item.startedAt,
+            status: item.status === "streaming" ? "streaming" : "completed",
+            afterMessageId,
+          });
+      }
+      return [...byTurn.values()];
+    });
+  }, [supervisorRuntime.state.agentThinkingHistory, messages.length, currentConversationId]);
+  useEffect(() => {
+    if (supervisorRuntime.state.videoAgentConfirmation) {
+      setOptimisticAgentThinking(null);
+    }
+  }, [supervisorRuntime.state.videoAgentConfirmation]);
   const [videoAgentConfirmationSubmitting, setVideoAgentConfirmationSubmitting] = useState(false);
   const [videoAgentConfirmationError, setVideoAgentConfirmationError] = useState<string | null>(null);
   const [selectedVideoAgentStepId, setSelectedVideoAgentStepId] = useState<string | null>(null);
@@ -2380,11 +2486,27 @@ export function WorkspacePage() {
       videoAgentConfirmationSubmitting
       || submission.confirmationId !== visibleVideoAgentConfirmationId
     ) return;
-    setVideoAgentConfirmationSubmitting(true);
-    setVideoAgentConfirmationError(null);
     const creativeGate = isScriptCreativeConfirmationTitle(
       supervisorRuntime.state.videoAgentConfirmation?.title,
     );
+    if (
+      creativeGate
+      && submission.decision === "confirm"
+      && creativeConfirmNeedsClarification(
+        supervisorRuntime.state.videoAgentConfirmation?.costSummary,
+      )
+    ) {
+      setVideoAgentConfirmationError(
+        "还缺画幅或结尾行动引导。请先在对话框回复，例如：画幅 9:16，结尾引导进直播间下单。",
+      );
+      pushAssistant(
+        "创意方向可以，但还需要你确认视频画幅（如 9:16 / 16:9 / 1:1）和结尾引导行动（如进直播间、小黄车下单）。请直接回复这两项后再点「同意创意继续」。",
+        conversationIdRef.current || currentConversationId || undefined,
+      );
+      return;
+    }
+    setVideoAgentConfirmationSubmitting(true);
+    setVideoAgentConfirmationError(null);
     void supervisorRuntime.respondToVideoAgentConfirmation(
       submission.confirmationId,
       {
@@ -8699,8 +8821,10 @@ export function WorkspacePage() {
 
   // 对话恢复是“先写 Ref、再提交 React 状态”。素材修订 job 额外在提交完成后接力一次，
   // 避免切换对话或刷新时，首个 setTimeout 早于可见对话状态而永久停止轮询。
+  // V2.1：仅 frontend_v2 历史会话续跑本地 pending Job；video_agent_v2 以 Operation/Snapshot 为准。
   useEffect(() => {
     if (!orchestrationResolved || !currentConversationId || !pageVisibleRef.current) return;
+    if (orchestrationModeRef.current !== "frontend_v2") return;
     const pendingScenePackageJob = pendingScenePackageJobRef.current;
     if (
       !pendingScenePackageJob?.job_id
@@ -9108,6 +9232,24 @@ export function WorkspacePage() {
     await supervisorRuntime.refreshSnapshot().catch(() => {});
   };
 
+  // 思考流 answer channel：完成后写入对话框气泡（与 Thought 折叠区分开）。
+  useEffect(() => {
+    const thinking = supervisorRuntime.state.agentThinking;
+    const conversationId = currentConversationId;
+    if (!thinking || thinking.status !== "completed" || !conversationId) return;
+    const answer = (thinking.answer || "").trim();
+    if (!answer) return;
+    const messageId = `thinking-answer:${thinking.turnId}`;
+    if (thinkingAnswerNoticeInFlightRef.current.has(messageId)) return;
+    if (messagesRef.current.some((message) => message.id === messageId)) return;
+    thinkingAnswerNoticeInFlightRef.current.add(messageId);
+    void appendPersistedSupervisorNotice(answer, conversationId, messageId)
+      .catch(() => undefined)
+      .finally(() => {
+        thinkingAnswerNoticeInFlightRef.current.delete(messageId);
+      });
+  }, [supervisorRuntime.state.agentThinking, currentConversationId]);
+
   const handleSupervisorTurn = async (
     pendingTurn: PendingSupervisorTurn,
     contextVersion: number,
@@ -9154,6 +9296,26 @@ export function WorkspacePage() {
       );
       setResolvedOrchestrationMode(started.orchestrationMode);
       primaryExecutionReadyRef.current = started.orchestrationMode === "video_agent_v2";
+      // run_id 与 VideoAgent turn_id 相同；对齐乐观思考卡，避免 SSE turn 对不上。
+      // text 保持空串：等 LLM 思考流 delta，不注入固定占位句。
+      if (started.orchestrationMode === "video_agent_v2" && started.runId) {
+        setOptimisticAgentThinking((current) => (
+          current
+            ? {
+              ...current,
+              turnId: started.runId,
+            }
+            : {
+              turnId: started.runId,
+              title: "正在分析素材，提炼电商属性并构思方向…",
+              subtitle: "AI 编剧思考中…",
+              text: "",
+              answer: "",
+              startedAt: new Date().toISOString(),
+              status: "streaming",
+            }
+        ));
+      }
       if (started.routeIntent === "unknown") {
         await appendPersistedSupervisorNotice(
           "我还不能确定你要创建视频、图片、PPT，还是分析参考视频。请补充说明目标。",
@@ -9425,6 +9587,19 @@ export function WorkspacePage() {
           && isScriptCreativeConfirmationTitle(creativeConfirmation.title)
         ) {
           if (isAgreeScriptCreativeRequest(text)) {
+            if (creativeConfirmNeedsClarification(creativeConfirmation.costSummary)) {
+              await appendMessageForConversation(
+                { ...message, conversationId: activeConversation },
+                activeConversation,
+              );
+              setReferencedMaterials([]);
+              if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+              pushAssistant(
+                "创意方向可以，但还需要你确认视频画幅（如 9:16 / 16:9 / 1:1）和结尾引导行动（如进直播间、小黄车下单）。请直接回复这两项后再点「同意创意继续」。",
+                activeConversation,
+              );
+              return;
+            }
             await appendMessageForConversation(
               { ...message, conversationId: activeConversation },
               activeConversation,
@@ -9487,432 +9662,10 @@ export function WorkspacePage() {
             "已按你的新想法重新从选题开始，确认创意后再继续后面的步骤…";
           creativeRevisePendingRef.current = true;
         }
-
-        const preferredScenePackageIndex = preferredVideoScenePackagesMessageIndex(
-          messagesRef.current.filter((item) => messageConversationId(item, activeConversation) === activeConversation),
-        );
-        const conversationScopedMessages = messagesRef.current.filter(
-          (item) => messageConversationId(item, activeConversation) === activeConversation,
-        );
-        const latestScenePackageMessage = preferredScenePackageIndex >= 0
-          ? conversationScopedMessages[preferredScenePackageIndex]
-          : [...messagesRef.current]
-            .reverse()
-            .find((item) => (
-              messageConversationId(item, activeConversation) === activeConversation
-              && item.artifact?.type === "video_scene_packages"
-              && item.artifact.videoScenePackages
-              && !item.artifact.sceneAssetProgressArchived
-            ));
-        const hasReadyScenePackage = Boolean(latestScenePackageMessage?.artifact?.videoScenePackages);
-        const hasGeneratedScenePackageImages = conversationScopedMessages.some((item) => (
-          item.artifact?.type === "video_scene_packages"
-          && scenePackageHasGeneratedImages(item.artifact.videoScenePackages)
-        ));
-        const latestFailedScenePackageMessage = [...conversationScopedMessages]
-          .reverse()
-          .find((item) => (
-            item.artifact?.type === "video_scene_packages"
-            && item.artifact.videoScenePackages
-            && !item.artifact.sceneAssetProgressArchived
-            && Boolean(item.artifact.sceneAssetFailures?.length)
-            && sceneAssetRetryTargets(item.artifact.sceneAssetFailures).length > 0
-          ));
-        const workspace = videoAgentView.workspace;
-        const scriptMarkdown = resolveGeneratableScriptMarkdown({
-          scriptContent: workspace?.script?.content,
-          stages: workspace?.scriptStages,
-        });
-        const canRebuildAssetPackage = workspaceHasGeneratableScript({
-          scriptContent: workspace?.script?.content,
-          stages: workspace?.scriptStages,
-        }) && Boolean(scriptMarkdown);
-
-        const resumeIntent = resolveWorkflowResumeIntent(text);
-        if (resumeIntent) {
-          await appendMessageForConversation(
-            { ...message, conversationId: activeConversation },
-            activeConversation,
-          );
-          setReferencedMaterials([]);
-          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-
-          const pendingJob = pendingScenePackageJobRef.current;
-          if (pendingJob?.conversation_id === activeConversation) {
-            pushAssistant("仍在生成中，已继续查询原任务，不会重复开跑。", activeConversation);
-            void resumePendingScenePackageJob(pendingJob).catch(() => {});
-            return;
-          }
-
-          const awaitingModelMessage = [...messagesRef.current]
-            .reverse()
-            .find((item) => (
-              messageConversationId(item, activeConversation) === activeConversation
-              && item.artifact?.type === "scene_asset_model_options"
-              && !item.artifact.sceneAssetModelConfirmed
-            ));
-          const awaitingModel = Boolean(
-            awaitingModelMessage
-            || latestScenePackageMessage?.artifact?.sceneAssetsAwaitingModel
-          );
-          const quotaInterrupt = supervisorRuntime.state.videoAgentQuota;
-          const scriptConfirmed = scriptPlanConfirmedRef.current
-            || workspace?.payload?.script_plan_confirmed === true
-            || Boolean((workspace as { scriptPlanConfirmed?: boolean } | null | undefined)?.scriptPlanConfirmed);
-
-          if (resumeIntent === "edit_script") {
-            setCanvasOpen(false);
-            const plan = supervisorRuntime.state.videoAgentPlan;
-            const exportStep = plan
-              ? Object.values(plan.steps).find((step) => stageIdFromStep(step) === "export")
-              : null;
-            if (exportStep) setSelectedVideoAgentStepId(exportStep.stepId);
-            pushAssistant("已打开脚本预览，可直接在右侧继续编辑；确认后再生成资产包。", activeConversation);
-            return;
-          }
-
-          // 「继续生成失败的参考图」：只重试失败项，绝不新开 Skill 执行方案。
-          if (resumeIntent === "retry_failed_images") {
-            const retryMsg = latestFailedScenePackageMessage
-              || (
-                latestScenePackageMessage?.artifact?.sceneAssetFailures?.length
-                  ? latestScenePackageMessage
-                  : undefined
-              );
-            if (retryMsg) {
-              await handleRetrySceneAssets(retryMsg);
-              return;
-            }
-            pushAssistant(
-              "当前没有可重试的失败参考图。可打开场景包结果卡查看，或点「重新生成参考图」。",
-              activeConversation,
-            );
-            return;
-          }
-
-          // 已有部分参考图且仍有失败项时，「开始生图/继续」也只补失败项，避免误提示「已完成」或开新计划。
-          if (
-            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
-            && latestFailedScenePackageMessage
-            && !pendingJob
-          ) {
-            await handleRetrySceneAssets(latestFailedScenePackageMessage);
-            return;
-          }
-
-          if (
-            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
-            && hasGeneratedScenePackageImages
-            && !pendingJob
-          ) {
-            pushAssistant(
-              "参考图已经生成完成，请打开带图的场景包结果卡继续确认或生成视频；若要重跑参考图，请在结果卡点「重新生成参考图」。",
-              activeConversation,
-            );
-            return;
-          }
-
-          if (
-            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
-            && awaitingModel
-          ) {
-            let prior: {
-              model?: string;
-              imageSize?: string;
-              imageRatio?: string;
-              referenceBrief?: string;
-              materials?: Array<Record<string, unknown>>;
-            } | null = null;
-            try {
-              const raw = sessionStorage.getItem(`pixelflow:last-scene-asset-model:${activeConversation}`);
-              prior = raw ? JSON.parse(raw) as typeof prior : null;
-            } catch {
-              prior = null;
-            }
-            if (prior?.model && awaitingModelMessage) {
-              await handleConfirmSceneAssetModel(awaitingModelMessage, {
-                model: String(prior.model),
-                ratio: String(prior.imageRatio || ""),
-                size: String(prior.imageSize || ""),
-                referenceMaterials: Array.isArray(prior.materials) ? prior.materials : [],
-                referenceBrief: String(prior.referenceBrief || ""),
-              });
-              return;
-            }
-            const packagesForModel =
-              awaitingModelMessage?.artifact?.videoScenePackages
-              || latestScenePackageMessage?.artifact?.videoScenePackages;
-            if (packagesForModel?.ok) {
-              const sourceArtifact = awaitingModelMessage?.artifact || latestScenePackageMessage?.artifact;
-              await pushSceneAssetModelOptionsCard(
-                {
-                  conversation_id: activeConversation,
-                  job_id: uid(),
-                  artifact: {
-                    type: "scene_asset_model_options",
-                    title: "选择生图模型",
-                    description: "",
-                    actionLabel: "确认",
-                    formValues: sourceArtifact?.formValues,
-                    intakeContext: sourceArtifact?.intakeContext,
-                    materials: sourceArtifact?.materials || [],
-                    selectedDirection: sourceArtifact?.selectedDirection,
-                    plan: sourceArtifact?.plan,
-                    videoScenePackages: packagesForModel,
-                    creationContract: packagesForModel.creation_contract || sourceArtifact?.creationContract,
-                  },
-                },
-                packagesForModel,
-                { messageId: sceneAssetModelOptionsMessageId(uid()) },
-              );
-              pushAssistant("请先在下方新的模型选择卡确认生图模型（也可上传参考图并说明用途），再说「开始生图」。", activeConversation);
-              return;
-            }
-            pushAssistant("请先在模型选择卡确认生图模型（也可上传参考图并说明用途），再说「开始生图」。", activeConversation);
-            return;
-          }
-
-          if (resumeIntent === "generic_resume" && quotaInterrupt?.quotaInterruptId) {
-            pushAssistant("检测到额度中断，请在额度卡点击「已充值，继续」后恢复。", activeConversation);
-            return;
-          }
-
-          if (
-            resumeIntent === "generic_resume"
-            && hasReadyScenePackage
-            && latestScenePackageMessage
-            && !latestScenePackageMessage.artifact?.sceneAssetsGenerating
-            && !latestScenePackageMessage.artifact?.sceneAssetsAwaitingModel
-          ) {
-            await handleGenerateVideoFromScenePackages(latestScenePackageMessage);
-            return;
-          }
-
-          if (
-            (resumeIntent === "generic_resume" || resumeIntent === "start_images")
-            && canRebuildAssetPackage
-            && scriptMarkdown
-            && !scriptConfirmed
-          ) {
-            await confirmScriptPlanAndGenerateAssetPackage(activeConversation, scriptMarkdown, message.id);
-            return;
-          }
-
-          if (resumeIntent === "generic_resume" && canRebuildAssetPackage && scriptMarkdown && scriptConfirmed) {
-            const materialsForJob = (workspace?.assets || [])
-              .filter((asset): asset is typeof asset & { url: string } => Boolean(asset.url))
-              .map((asset) => ({
-                asset_id: asset.artifactRef,
-                url: asset.url,
-                type: asset.mediaType,
-              }));
-            await startVideoAgentAssetPackageFromScript(
-              activeConversation,
-              scriptMarkdown,
-              materialsForJob,
-              "已从断点继续，正在生成视频资产包…",
-            );
-            return;
-          }
-
-          pushAssistant("当前没有可自动恢复的断点。可说明要「继续编辑脚本」「开始生图」或「生成成片」。", activeConversation);
-          return;
-        }
-
-        if (
-          hasReadyScenePackage
-          && isConfirmGenerateVideoFromPackagesRequest(text)
-          && latestScenePackageMessage
-        ) {
-          await appendMessageForConversation(
-            { ...message, conversationId: activeConversation },
-            activeConversation,
-          );
-          setReferencedMaterials([]);
-          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-          await handleGenerateVideoFromScenePackages(latestScenePackageMessage);
-          return;
-        }
-
-        if (
-          canRebuildAssetPackage
-          && (
-            isRegenerateVideoAssetPackageRequest(text)
-            || (hasReadyScenePackage && isReviseVideoAssetPackageRequest(text))
-            || (scriptPlanConfirmedRef.current && isRegenerateVideoAssetPackageRequest(text))
-          )
-        ) {
-          await appendMessageForConversation(
-            { ...message, conversationId: activeConversation },
-            activeConversation,
-          );
-          scriptPlanConfirmedRef.current = true;
-          const materialsForJob = (workspace?.assets || [])
-            .filter((asset): asset is typeof asset & { url: string } => Boolean(asset.url))
-            .map((asset) => ({
-              asset_id: asset.artifactRef,
-              url: asset.url,
-              type: asset.mediaType,
-            }));
-          const isPureRegenerate = isRegenerateVideoAssetPackageRequest(text)
-            && !/改成|换成|调整|补齐|增加|删掉|删除|去掉|修改/.test(text);
-          await startVideoAgentAssetPackageFromScript(
-            activeConversation,
-            scriptMarkdown,
-            materialsForJob,
-            isPureRegenerate
-              ? "已收到，正在重新生成视频资产包…"
-              : "已收到修改意见，正在重新生成视频资产包…",
-            {
-              revisionFeedback: isPureRegenerate ? undefined : text,
-            },
-          );
-          setReferencedMaterials([]);
-          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-          return;
-        }
+        // V2.1：确认卡以外的自然语言一律交给 turns/start → 思考流 → Plan/Tool。
+        // 禁止前端关键词断点恢复、本地 pending Job 续跑、直接开资产包/成片 Job。
       }
 
-      // 脚本已就绪时的成片意图：必须先确认脚本方案；角色不清则走全流程 Plan。
-      if (
-        ownership.orchestrationMode === "video_agent_v2"
-        && !runtimeOptions.skipRuntimeRegistration
-        && (
-          isContinueVideoGenerationRequest(text)
-          || isConfirmScriptPlanRequest(text)
-        )
-        && !isRegenerateVideoAssetPackageRequest(text)
-        && !isReviseVideoAssetPackageRequest(text)
-      ) {
-        const workspace = videoAgentView.workspace;
-        const scriptMarkdown = resolveGeneratableScriptMarkdown({
-          scriptContent: workspace?.script?.content,
-          stages: workspace?.scriptStages,
-        });
-        if (workspaceHasGeneratableScript({
-          scriptContent: workspace?.script?.content,
-          stages: workspace?.scriptStages,
-        }) && scriptMarkdown) {
-          if (scriptNeedsFullCharacterPlan({
-            scriptContent: scriptMarkdown,
-            stages: workspace?.scriptStages,
-          })) {
-            const readiness = analyzeScriptCharacterReadiness({
-              scriptContent: scriptMarkdown,
-              stages: workspace?.scriptStages,
-            });
-            const hints = readiness.missingHints.slice(0, 2).join("；") || "角色设定不完整";
-            characterSupplementNoticeRef.current =
-              `当前脚本的角色设定不够清晰（${hints}）。将按全流程生成执行方案，请先补充全部出镜角色（含视觉形象），确认脚本方案后再生成视频资产包。`;
-            // 不拦截：交给下方 turns/start 种子全流程 Plan，保留时间线可回溯。
-          } else if (
-            !isConfirmScriptPlanRequest(text)
-            && !scriptPlanConfirmedRef.current
-          ) {
-            if (!workspaceHasExportReady({
-              scriptContent: scriptMarkdown,
-              stages: workspace?.scriptStages,
-            })) {
-              await appendMessageForConversation(
-                { ...message, conversationId: activeConversation },
-                activeConversation,
-              );
-              pushAssistant(
-                "脚本尚未完成「导出脚本产物」。请先等导出完成，再确认脚本方案并生成视频资产包。",
-                activeConversation,
-              );
-              setReferencedMaterials([]);
-              if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-              return;
-            }
-            await appendMessageForConversation(
-              { ...message, conversationId: activeConversation },
-              activeConversation,
-            );
-            ensureDurableScriptPlanMessage(
-              activeConversation,
-              scriptMarkdown,
-              message.id,
-            );
-            pushAssistant(
-              "请先确认脚本执行方案后再生成视频资产包。可点击对话里的「同意方案」、右侧「确认脚本并生成资产包」，或回复「确认脚本」。",
-              activeConversation,
-            );
-            setReferencedMaterials([]);
-            if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-            return;
-          } else {
-            await appendMessageForConversation(
-              { ...message, conversationId: activeConversation },
-              activeConversation,
-            );
-            try {
-              await confirmScriptPlanAndGenerateAssetPackage(
-                activeConversation,
-                scriptMarkdown,
-              );
-            } catch (err) {
-              pushAssistant(
-                err instanceof Error ? err.message : `确认脚本方案失败：${String(err)}`,
-                activeConversation,
-              );
-            }
-            setReferencedMaterials([]);
-            if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-            return;
-          }
-        } else {
-          await appendMessageForConversation(
-            { ...message, conversationId: activeConversation },
-            activeConversation,
-          );
-          pushAssistant(
-            "当前还没有可生成视频的脚本。请先完成脚本生成，或在右侧保存脚本后再试。",
-            activeConversation,
-          );
-          setReferencedMaterials([]);
-          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-          return;
-        }
-      }
-      // 中途需求大变：先告知需重新设计任务规划，避免在旧 Plan 上硬跑。
-      if (
-        ownership.orchestrationMode === "video_agent_v2"
-        && !runtimeOptions.skipRuntimeRegistration
-      ) {
-        const workspace = videoAgentView.workspace;
-        const previousBrief = [
-          supervisorRuntime.state.videoAgentPlan?.publicGoal,
-          workspace?.script?.content,
-          workspace?.scriptStages?.find((stage) => stage.stageId === "start")?.content,
-        ].find((item) => typeof item === "string" && item.trim())?.trim() || "";
-        const hasActivePlan = Boolean(supervisorRuntime.state.videoAgentPlan?.planId)
-          || (workspace?.scriptStages?.length ?? 0) > 0
-          || Boolean(workspace?.script?.content);
-        if (
-          hasActivePlan
-          && !creativeRevisePendingRef.current
-          && isMajorRequirementChangeRequest(text, previousBrief)
-          && !isRedesignTaskPlanRequest(text)
-        ) {
-          await appendMessageForConversation(
-            { ...message, conversationId: activeConversation },
-            activeConversation,
-          );
-          pushAssistant(
-            "检测到当前输入与既有任务规划差异较大。若要按新需求继续，请回复「重新设计任务规划」；系统将废弃当前执行计划并重新规划后再执行。若只是微调脚本/资产包，请直接说明修改点。",
-            activeConversation,
-          );
-          setReferencedMaterials([]);
-          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
-          return;
-        }
-        if (hasActivePlan && isRedesignTaskPlanRequest(text)) {
-          characterSupplementNoticeRef.current =
-            "已确认按新需求重新设计任务规划，正在重新生成执行方案…";
-          scriptPlanConfirmedRef.current = false;
-        }
-      }
       const shouldRegisterRuntime = ownership.orchestrationMode === "video_agent_v2"
         || ownership.agentRuntimeMode === "assist"
         || ownership.agentRuntimeMode === "shadow"
@@ -9945,17 +9698,19 @@ export function WorkspacePage() {
           activeConversation,
         );
         ensurePendingSupervisorTurnVisible(pendingTurn);
-        // 在 turns/start 返回前先给即时回执，避免用户感觉“发出去没反应”。
+        // 在 turns/start 返回前先挂空思考壳，避免“发出去没反应”；正文只等 LLM 流式 delta。
         if (ownership.orchestrationMode === "video_agent_v2") {
-          const notice = characterSupplementNoticeRef.current
-            || "已收到创作请求，正在生成执行方案…";
           characterSupplementNoticeRef.current = "";
           creativeRevisePendingRef.current = false;
-          void appendPersistedSupervisorNotice(
-            notice,
-            activeConversation,
-            `agent-ack:${activeConversation}:${message.id}:v1`,
-          );
+          setOptimisticAgentThinking({
+            turnId: message.id,
+            title: "正在结合上下文识别脚本并核对生产字段…",
+            subtitle: "AI 编剧思考中…",
+            text: "",
+            answer: "",
+            startedAt: new Date().toISOString(),
+            status: "streaming",
+          });
         }
         setReferencedMaterials([]);
         if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
@@ -13052,6 +12807,50 @@ export function WorkspacePage() {
         }}
         agentActivityBlocks={[
           ...(() => {
+            const liveThinking = supervisorRuntime.state.agentThinking ?? optimisticAgentThinking;
+            const blocks: Array<{ afterMessageId: string; content: ReactElement }> = [];
+            // 历史思考保留：完成后默认折叠，结论条仍可见。
+            for (const archived of agentThinkingHistory) {
+              // 当前 Turn 由 liveThinking 负责打字机；归档只保留历史 Turn。
+              if (liveThinking?.turnId === archived.turnId) {
+                continue;
+              }
+              if (!archived.afterMessageId) continue;
+              blocks.push({
+                afterMessageId: archived.afterMessageId,
+                content: (
+                  <AgentThinkingStream
+                    key={archived.turnId}
+                    thinking={archived}
+                    defaultExpanded={false}
+                  />
+                ),
+              });
+            }
+            if (liveThinking) {
+              const afterMessageId = [...messages].reverse().find((item) => item.role === "user")?.id
+                || messages[0]?.id
+                || "";
+              if (afterMessageId) {
+                // 当前 Turn 优先展示 live（含完成后的打字机追平），避免立刻切归档导致整段砸出。
+                blocks.push({
+                  afterMessageId,
+                  content: (
+                    <AgentThinkingStream
+                      key={liveThinking.turnId}
+                      thinking={liveThinking}
+                      defaultExpanded={liveThinking.status === "streaming"}
+                      onRevealStateChange={({ catchingUp, status }) => {
+                        setHoldActivePlanForThinking(status === "streaming" || catchingUp);
+                      }}
+                    />
+                  ),
+                });
+              }
+            }
+            return blocks;
+          })(),
+          ...(() => {
             const planOrder = videoAgentPlanHistory.order.length > 0
               ? videoAgentPlanHistory.order
               : supervisorRuntime.state.videoAgentPlanOrder;
@@ -13075,6 +12874,8 @@ export function WorkspacePage() {
                 });
               if (!afterMessageId) return null;
               const isActivePlan = supervisorRuntime.state.videoAgentPlan?.planId === planId;
+              // 思考流打字机未结束前不展示本轮 Plan，保证「先想完 → 再出执行方案」。
+              if (isActivePlan && holdActivePlanForThinking) return null;
               return {
                 afterMessageId,
                 content: (
@@ -13242,6 +13043,17 @@ export function WorkspacePage() {
             const phaseByType = { segments: "segment_review", edit: "edit_review", qc: "qc_review" } as const;
             void loadResults(phaseByType[msg.artifact.type as "segments" | "edit" | "qc"]);
           }
+        }}
+        onOpenScriptPreview={() => {
+          // 关闭画布，露出右侧脚本预览草稿。
+          setCanvasOpen(false);
+          setSelectedPlanEditorMessageId("");
+          setSelectedStoryboardMessageId("");
+          const plan = supervisorRuntime.state.videoAgentPlan;
+          const exportStep = plan
+            ? Object.values(plan.steps).find((step) => stageIdFromStep(step) === "export")
+            : null;
+          if (exportStep) setSelectedVideoAgentStepId(exportStep.stepId);
         }}
       />
       {legacyArtifactActionsEnabled && canvasOpen && selectedPlanEditorMessage?.artifact?.plan ? (

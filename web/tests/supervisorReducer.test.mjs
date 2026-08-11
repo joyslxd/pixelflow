@@ -51,6 +51,8 @@ test("初始四维状态保持空闲且拒绝空对话标识", () => {
     videoAgentPlanOrder: [],
     videoAgentConfirmation: null,
     videoAgentQuota: null,
+    agentThinkingHistory: [],
+    agentThinking: null,
     resume: { cursor: null, sequence: 0 },
   });
   assert.throws(
@@ -589,6 +591,29 @@ test("input queue 固定 client_input_id 与 turn_id 一一绑定", () => {
   assert.equal(duplicateTurn.connection.status, "fatal");
   assert.equal(duplicateTurn.inputQueue.length, 1);
   assert.deepEqual(duplicateTurn.resume, { cursor: "cursor-1", sequence: 1 });
+});
+
+
+test("thinking completed 写入 agentThinkingHistory 供刷新回显", () => {
+  let state = createSupervisorRuntimeState("conv-1");
+  state = receive(state, event(1, "agent.thinking.started", {
+    turn_id: "turn-1",
+    title: "正在判断…",
+    subtitle: "AI 编剧思考中…",
+    started_at: "2026-08-11T13:00:00Z",
+  }));
+  state = receive(state, event(2, "agent.thinking.delta", {
+    turn_id: "turn-1",
+    delta: "先看脚本",
+    channel: "reasoning",
+  }));
+  state = receive(state, event(3, "agent.thinking.completed", {
+    turn_id: "turn-1",
+  }));
+  assert.equal(state.agentThinking?.status, "completed");
+  assert.equal(state.agentThinkingHistory.length, 1);
+  assert.equal(state.agentThinkingHistory[0].turnId, "turn-1");
+  assert.equal(state.agentThinkingHistory[0].text, "先看脚本");
 });
 
 test("conversation reset 原子清空上一对话四维状态", () => {

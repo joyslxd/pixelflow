@@ -243,6 +243,7 @@ def make_video_agent_runtime_assembly(
         executor=VideoAgentExecutor(
             repository=video_repository,
             registry=registry,
+            event_repository=operation_repository,
             clock=clock,
         ),
         operation_resolver=resolver,

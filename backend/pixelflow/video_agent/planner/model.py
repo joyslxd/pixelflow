@@ -44,6 +44,8 @@ class VideoAgentPlanningContext(_PlanningContract):
     workspace_digest: dict[str, JsonValue] = Field(default_factory=dict)
     operation_summaries: tuple[dict[str, JsonValue], ...] = ()
     blocking_confirmation: dict[str, JsonValue] | None = None
+    # 入场思考流裁决摘要：Planner 应优先尊重，避免再猜「是否成熟脚本」。
+    intake_thinking: dict[str, JsonValue] | None = None
 
 
 class VideoPlanningModel(Protocol):
@@ -150,6 +152,10 @@ class DeepSeekVideoPlanningModel:
             "用户修改第 N 镜/指定分镜时优先 patch_scene；"
             "确认生成或重生成已修改分镜时用 generate_scenes，"
             "且应只覆盖 dirty_scene_ids 或用户明确点名的镜头，禁止整包重做未改镜头。"
+            "若提供 intake_thinking：把其中的 intent、facts、missing_requirements 视为本轮上下文，"
+            "但必须由你根据 workspace、Operation 与注册工具独立选择计划标题和工具。"
+            "若 needs_user_reply=true 或 missing 非空，不要规划计费/破坏性工具。"
+            "不得把 Intake 的用户可见文案或任何旧步骤建议当作工具选择指令。"
         )
         user_payload = {
             "request": context.content,
@@ -159,6 +165,7 @@ class DeepSeekVideoPlanningModel:
             "workspace_digest": context.workspace_digest,
             "operation_summaries": list(context.operation_summaries),
             "blocking_confirmation": context.blocking_confirmation,
+            "intake_thinking": context.intake_thinking,
             "tools": tools,
             "skills": skills,
             "repair_feedback": feedback,

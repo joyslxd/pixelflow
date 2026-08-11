@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
@@ -14,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from deerflow.models import create_chat_model
 
 from pixelflow.video_agent.contracts import VideoToolResult
+from pixelflow.video_agent.production_fields import (
+    missing_creative_production_fields_async,
+    user_latest_input,
+)
 
 from .registry import (
     VideoToolContext,
@@ -67,6 +70,9 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
         "根据用户输入完成 /start：提炼题材、平台、时长、画幅、一句话卖点与创作目标。"
         "输出 Markdown，含：题材、目标平台、时长、画幅、核心梗、目标受众、转化目标。"
         "必须忠实用户故事，不得编造无关商品卖点。"
+        "若用户已给出时长，如实写出，不要改写；"
+        "若用户未明确画幅（如 9:16/16:9/1:1 或竖屏/横屏），画幅必须写「待用户确认」，禁止擅自填默认画幅；"
+        "若用户未明确结尾行动引导（下单/进直播间/私信等），转化目标必须写「待用户确认」，禁止编造 CTA。"
         "开头用 2～4 句写出「可确认的创意方向摘要」（故事钩子、情绪主线、为何有意思），"
         "方便用户判断是否同意后再继续写结构。"
     ),
@@ -185,7 +191,10 @@ async def _generate_stage_markdown(
     stage: ScriptSkillStage,
     user_story: str,
     prior: Mapping[str, Mapping[str, JsonValue]],
+    on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
+    from pixelflow.video_agent.thinking_stream import stream_chat_tokens
+
     prior_text = "\n\n".join(
         f"## 上游 {STAGE_TITLES[name]}\n{prior[name].get('content', '')}"
         for name in STAGE_ORDER
@@ -199,36 +208,35 @@ async def _generate_stage_markdown(
     if prior_text:
         human += f"\n【上游产物】\n{prior_text}\n"
     human += "\n只输出 Markdown，不要解释过程。"
-    model = create_chat_model(thinking_enabled=False)
-    # 用同步 invoke 丢进线程池，确保 wait_for 能在超时后解除阻塞；
-    # 纯 ainvoke 若底层同步占满事件循环，180s 超时形同虚设，前端会显示跑十几二十分钟。
     try:
-        message = await asyncio.wait_for(
-            asyncio.to_thread(
-                model.invoke,
-                [
-                    (
-                        "system",
-                        "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
-                        "禁止输出与用户输入无关的模板化带货文案。",
-                    ),
-                    ("human", human),
-                ],
-            ),
-            timeout=SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
+        model = create_chat_model(thinking_enabled=False, streaming=True)
+    except TypeError:
+        model = create_chat_model(thinking_enabled=False)
+    messages = [
+        (
+            "system",
+            "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
+            "禁止输出与用户输入无关的模板化带货文案。",
+        ),
+        ("human", human),
+    ]
+
+    async def on_content(delta: str) -> None:
+        if on_token is not None:
+            await on_token(delta)
+
+    try:
+        _reasoning, markdown = await stream_chat_tokens(
+            model=model,
+            messages=messages,
+            on_content=on_content,
+            timeout_sec=SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
         )
     except TimeoutError as exc:
         raise VideoToolValidationError(
             f"{STAGE_TITLES[stage]} 超时（{int(SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS)}秒），请稍后重试"
         ) from exc
-    content = getattr(message, "content", message)
-    if isinstance(content, list):
-        text = "".join(
-            str(part.get("text") if isinstance(part, dict) else part) for part in content
-        )
-    else:
-        text = str(content)
-    markdown = text.strip()
+    markdown = markdown.strip()
     if not markdown:
         raise VideoToolValidationError(f"{STAGE_TITLES[stage]} 结果为空")
     return markdown
@@ -307,6 +315,7 @@ class RunScriptSkillStageTool:
                 stage=stage,
                 user_story=user_story,
                 prior=prior,
+                on_token=context.emit_thinking_delta,
             )
         except VideoToolValidationError as exc:
             # 超时返回可完成摘要，让后续阶段可继续，而不是把执行卡永远挂住。
@@ -392,7 +401,11 @@ class ConfirmScriptCreativeInput(BaseModel):
 
 
 class ConfirmScriptCreativeTool:
-    """Path A：/start 完成后等人确认选题创意，再继续后续 Skill 阶段。"""
+    """Path A：/start 完成后等人确认选题创意，再继续后续 Skill 阶段。
+
+    Path B 导入脚本后若误排到本工具：允许用 workspace.script 作为可确认内容，
+    避免「缺少 start → 笼统工具参数无效」。
+    """
 
     spec = VideoToolSpec(
         name="confirm_script_creative",
@@ -422,8 +435,39 @@ class ConfirmScriptCreativeTool:
             ref = start.get("artifact_ref")
             if isinstance(ref, str):
                 artifact_ref = ref
+        # Path B：无 /start 时回退到已导入脚本正文。
         if not content:
-            raise VideoToolValidationError("缺少可确认的选题创意，请先完成 /start")
+            script = context.workspace.payload.get("script")
+            if isinstance(script, dict):
+                raw = script.get("content")
+                if isinstance(raw, str):
+                    content = raw.strip()
+                ref = script.get("artifact_ref")
+                if isinstance(ref, str) and ref.strip():
+                    artifact_ref = ref.strip()
+        if not content:
+            raise VideoToolValidationError(
+                "缺少可确认的选题创意或已导入脚本，请先完成创作或导入脚本。"
+            )
+
+        # 优先信任工作区已落库的缺项（补字段短链路会刷新）；短句「同意」不要再 LLM 误判。
+        script_obj = context.workspace.payload.get("script")
+        if isinstance(script_obj, dict) and "missing_requirements" in script_obj:
+            raw_missing = script_obj.get("missing_requirements")
+            gaps = (
+                [str(item).strip() for item in raw_missing if str(item).strip()]
+                if isinstance(raw_missing, list)
+                else []
+            )
+        else:
+            user_text = user_latest_input(context.workspace.payload)
+            gaps = await missing_creative_production_fields_async(content, user_text)
+        if gaps:
+            raise VideoToolValidationError(
+                "请先补充："
+                + "、".join(gaps)
+                + "。可直接回复例如：画幅 9:16，结尾引导进直播间下单。"
+            )
 
         summary_lines = [
             line.strip(" #-*")

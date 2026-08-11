@@ -76,16 +76,24 @@ def test_plan_and_tool_call_reject_unknown_fields() -> None:
 def test_video_agent_public_event_types_are_part_of_the_runtime_protocol() -> None:
     assert {
         AgentEventType.AGENT_PLAN_CREATED.value,
+        AgentEventType.AGENT_PLAN_UPDATED.value,
         AgentEventType.AGENT_STEP_STARTED.value,
         AgentEventType.AGENT_STEP_PROGRESSED.value,
         AgentEventType.AGENT_STEP_COMPLETED.value,
         AgentEventType.AGENT_STEP_FAILED.value,
+        AgentEventType.AGENT_THINKING_STARTED.value,
+        AgentEventType.AGENT_THINKING_DELTA.value,
+        AgentEventType.AGENT_THINKING_COMPLETED.value,
         AgentEventType.AGENT_CONFIRMATION_REQUESTED.value,
     } == {
         "agent.plan.created",
+        "agent.plan.updated",
         "agent.step.started",
         "agent.step.progressed",
         "agent.step.completed",
         "agent.step.failed",
+        "agent.thinking.started",
+        "agent.thinking.delta",
+        "agent.thinking.completed",
         "agent.confirmation.requested",
     }

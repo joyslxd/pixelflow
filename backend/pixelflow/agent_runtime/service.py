@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,7 +31,13 @@ from pixelflow.video_agent.entrypoint import (
     video_agent_plan_id,
 )
 from pixelflow.video_agent.executor import VideoAgentExecutor
+from pixelflow.video_agent.production_fields import (
+    creative_confirm_cost_summary,
+    user_latest_input,
+    workspace_missing_requirements,
+)
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
+from pixelflow.video_agent.thinking_stream import fold_thinking_history_from_events
 from pixelflow.video_agent.workspace.repository import VideoAgentRepository
 
 from .config import AgentRuntimeConfig
@@ -321,6 +327,18 @@ class RuntimeVideoAgentQuotaProjection(_RuntimeResponseModel):
     unavailable_reason: str | None = None
 
 
+class RuntimeVideoAgentThinkingProjection(_RuntimeResponseModel):
+    """可回显的思考流归档：由持久化 AgentEvent 折叠，刷新后不丢。"""
+
+    turn_id: str = Field(serialization_alias="turnId")
+    title: str = ""
+    subtitle: str = ""
+    text: str = ""
+    answer: str = ""
+    started_at: datetime | str | None = Field(default=None, serialization_alias="startedAt")
+    status: Literal["streaming", "completed"] = "completed"
+
+
 class RuntimeVideoAgentPlanBundle(_RuntimeResponseModel):
     """单个历史执行方案及其步骤，供前端恢复多轮时间线。"""
 
@@ -337,6 +355,10 @@ class RuntimeVideoAgentProjection(_RuntimeResponseModel):
     plans: list[RuntimeVideoAgentPlanBundle] = Field(default_factory=list)
     confirmation: RuntimeVideoAgentConfirmationProjection | None = None
     quota: RuntimeVideoAgentQuotaProjection | None = None
+    thinking_history: list[RuntimeVideoAgentThinkingProjection] = Field(
+        default_factory=list,
+        serialization_alias="thinkingHistory",
+    )
 
 
 class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
@@ -354,6 +376,10 @@ class AgentRuntimeSnapshotResponse(_RuntimeResponseModel):
     video_agent: RuntimeVideoAgentProjection | None = Field(
         default=None,
         serialization_alias="videoAgent",
+    )
+    thinking_history: list[RuntimeVideoAgentThinkingProjection] = Field(
+        default_factory=list,
+        serialization_alias="thinkingHistory",
     )
     resume: RuntimeResumeProjection
     context_version: int = Field(ge=0)
@@ -447,15 +473,21 @@ def _confirmation_cost_summary(
     workspace_payload: Mapping[str, object] | None = None,
 ) -> str:
     if tool_name == "confirm_script_creative":
-        guidance = (
-            "请确认选题与创意方向是否合适。"
-            "同意后继续写三幕结构与角色设定；"
-            "不满意可直接用自然语言说明想怎么改，我会重新从选题开始。"
-        )
         preview = _creative_preview_from_workspace(workspace_payload)
-        if preview:
-            return f"创意方向：{preview}\n\n{guidance}"
-        return guidance
+        missing = workspace_missing_requirements(workspace_payload)
+        duration_sec = None
+        if isinstance(workspace_payload, Mapping):
+            script = workspace_payload.get("script")
+            if isinstance(script, dict):
+                raw_duration = script.get("duration_sec")
+                if isinstance(raw_duration, int) and not isinstance(raw_duration, bool):
+                    duration_sec = raw_duration
+        return creative_confirm_cost_summary(
+            user_text=user_latest_input(workspace_payload),
+            preview=preview,
+            missing=missing,
+            duration_sec=duration_sec,
+        )
     if tool_name == "generate_scenes":
         target = f"{affected_count}个镜头" if affected_count else "所选镜头"
         return f"将生成{target}的新视频版本，执行后可能产生模型调用费用。"
@@ -587,6 +619,8 @@ class AgentRuntimeService:
             asyncio.Task[None],
         ] = {}
         self._executor_notification_tasks: set[asyncio.Task[None]] = set()
+        # turn_id → 延迟提交闭包：HTTP 先返回，再在 notify 里带凭据后台跑思考流+规划。
+        self._deferred_video_agent_submits: dict[str, Callable[..., Awaitable[None]]] = {}
         self._pending_video_agent_turns: dict[str, VideoAgentRunScope] = {}
         self._stale_plan_resume_inflight: set[str] = set()
 
@@ -754,24 +788,77 @@ class AgentRuntimeService:
                     "合并 VideoAgent 上文失败，回退本轮原文：异常类型=%s",
                     type(exc).__name__,
                 )
-            submission = await self._video_agent_entrypoint.submit_turn(
-                user_id=owner,
-                conversation_id=conversation_id,
-                turn_id=registration.turn.turn_id,
-                content=video_content,
-                artifact_refs=tuple(body.artifact_refs),
-                materials=body.materials,
-            )
-            if registration.created and self._video_agent_runner is not None:
-                self._pending_video_agent_turns[registration.turn.turn_id] = (
-                    VideoAgentRunScope(
+            # 不在 HTTP 里同步等思考流+Planner：先登记延迟任务，notify 后后台跑，
+            # 这样 agent-events SSE 能边想边推 delta，而不是整段结束后一次吐出。
+            entrypoint = self._video_agent_entrypoint
+            turn_key = registration.turn.turn_id
+            created = registration.created
+            message_id = registration.message.message_id
+            artifact_refs = tuple(body.artifact_refs)
+            materials = body.materials
+
+            async def _deferred_submit(
+                credential: TransientVideoAgentCredential | None = None,
+            ) -> None:
+                assert entrypoint is not None
+                try:
+                    submission = await entrypoint.submit_turn(
                         user_id=owner,
                         conversation_id=conversation_id,
-                        turn_id=registration.turn.turn_id,
-                        plan_id=submission.plan.plan_id,
+                        turn_id=turn_key,
+                        content=video_content,
+                        artifact_refs=artifact_refs,
+                        materials=materials,
                     )
-                )
-        if registration.created and self.config.context_compaction_enabled and self._context_compactor is not None:
+                    if (
+                        created
+                        and self.config.context_compaction_enabled
+                        and self._context_compactor is not None
+                    ):
+                        try:
+                            await self._context_compactor.maybe_compact(
+                                user_id=owner,
+                                conversation_id=conversation_id,
+                                run_id=turn_key,
+                                current_message_id=message_id,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Agent Runtime 自动压缩失败并保留已登记 Turn：异常类型=%s",
+                                type(exc).__name__,
+                            )
+                    if created and self._video_agent_runner is not None and submission.plan is not None:
+                        scope = VideoAgentRunScope(
+                            user_id=owner,
+                            conversation_id=conversation_id,
+                            turn_id=turn_key,
+                            plan_id=submission.plan.plan_id,
+                        )
+                        await self._run_video_agent_turn_and_release(scope, credential)
+                    else:
+                        # 无 Plan（例如缺字段追问）：仍要收尾 Turn，避免假排队。
+                        if credential is not None:
+                            credential.discard()
+                        await self._complete_video_agent_runtime_turn(
+                            user_id=owner,
+                            conversation_id=conversation_id,
+                            turn_id=turn_key,
+                            chain_next=True,
+                        )
+                except Exception:
+                    if credential is not None:
+                        credential.discard()
+                    logger.exception(
+                        "VideoAgent 延迟提交失败 turn_id=%s",
+                        turn_key,
+                    )
+
+            self._deferred_video_agent_submits[turn_key] = _deferred_submit
+        elif (
+            registration.created
+            and self.config.context_compaction_enabled
+            and self._context_compactor is not None
+        ):
             try:
                 await self._context_compactor.maybe_compact(
                     user_id=owner,
@@ -780,8 +867,6 @@ class AgentRuntimeService:
                     current_message_id=registration.message.message_id,
                 )
             except Exception as exc:
-                # M04 Runtime 已把异常写成 retry_required 与安全失败事件；
-                # Turn 入口仍返回已持久化状态，前端绝不能因 5xx 自动重发。
                 logger.warning(
                     "Agent Runtime 自动压缩失败并保留已登记 Turn：异常类型=%s",
                     type(exc).__name__,
@@ -874,6 +959,15 @@ class AgentRuntimeService:
     ) -> None:
         """非阻塞唤醒一次新登记 Turn；失败时保留扫描恢复语义。"""
 
+        deferred = self._deferred_video_agent_submits.pop(turn_id, None)
+        if deferred is not None:
+            self._schedule_executor_notification(
+                deferred(credential),
+                credential=credential,
+                kind="VideoAgent Submit",
+            )
+            return
+
         video_scope = self._pending_video_agent_turns.pop(turn_id, None)
         if video_scope is not None and self._video_agent_runner is not None:
             self._schedule_executor_notification(
@@ -884,6 +978,13 @@ class AgentRuntimeService:
             return
         if credential is not None:
             credential.discard()
+
+    async def drain_executor_notifications(self) -> None:
+        """测试辅助：等待当前已调度的后台唤醒任务结束。"""
+
+        while self._executor_notification_tasks:
+            pending = tuple(self._executor_notification_tasks)
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _run_video_agent_turn_and_release(
         self,
@@ -1666,6 +1767,10 @@ class AgentRuntimeService:
                 last_outcome = "completed"
 
         latest_event = events[-1] if events else None
+        folded_thinking = [
+            RuntimeVideoAgentThinkingProjection.model_validate(item)
+            for item in fold_thinking_history_from_events(events)
+        ]
         video_agent: RuntimeVideoAgentProjection | None = None
         if self._video_agent_repository is not None:
             try:
@@ -1878,6 +1983,7 @@ class AgentRuntimeService:
                     plans=history_plans,
                     confirmation=confirmation,
                     quota=quota,
+                    thinking_history=folded_thinking,
                 )
         return AgentRuntimeSnapshotResponse(
             conversation_id=conversation_id,
@@ -1897,6 +2003,7 @@ class AgentRuntimeService:
             messages=messages,
             workflows=[workflow.model_dump(mode="json") for workflow in workflows],
             video_agent=video_agent,
+            thinking_history=folded_thinking,
             resume=RuntimeResumeProjection(
                 cursor=None if latest_event is None else latest_event.cursor,
                 sequence=0 if latest_event is None else latest_event.sequence,
@@ -2108,6 +2215,7 @@ class AgentRuntimeService:
         if notification_tasks:
             await asyncio.gather(*notification_tasks, return_exceptions=True)
         self._pending_video_agent_turns.clear()
+        self._deferred_video_agent_submits.clear()
         tasks = tuple(self._compaction_recovery_tasks.values())
         self._compaction_recovery_tasks.clear()
         for task in tasks:

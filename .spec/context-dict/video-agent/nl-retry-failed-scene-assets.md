@@ -1,30 +1,27 @@
 ---
 topic: 自然语言续跑失败参考图，不重开 Skill 执行方案
 module: video-agent
-date: 2026-08-10
+date: 2026-08-11
 keywords:
   - 继续生成失败的参考图
-  - isRetryFailedSceneAssetsRequest
-  - retry_failed_images
   - handleRetrySceneAssets
+  - turns/start
   - 登录已过期
-  - resolveWorkflowResumeIntent
 ---
 ## 结论摘要
-场景参考图部分成功、部分失败（如 token/登录过期）后，用户说「继续生成失败的参考图」必须只调用 `handleRetrySceneAssets`（`target_assets`=失败项），禁止当成「开始生图」提示已完成，也禁止落入 VideoAgent 新开「执行方案 · 成稿自检与导出」。
+场景参考图部分失败后，「继续生成失败的参考图」等自然语言在 V2.1 **不再由前端关键词路由**；应交 VideoAgent 思考流选 Tool。工作台「重新生成参考图」按钮仍走 `handleRetrySceneAssets`（V2 发 Turn / `frontend_v2` 开 Job）。
 
 ## 关键文件
-- `web/src/features/video-agent/scriptSkillStages.ts`（`isRetryFailedSceneAssetsRequest`、`resolveWorkflowResumeIntent`）
-- `web/src/features/legacy-workspace/LegacyWorkspace.tsx`（`handleSend` resumeIntent 分支）
+- `web/src/features/legacy-workspace/LegacyWorkspace.tsx`（按钮 `handleRetrySceneAssets`；NL 走 turns/start）
+- `backend/pixelflow/video_agent/*`（思考流 / Planner 选 generate_scene_assets）
 - `web/tests/mainFlowContract.test.mjs`
 
 ## 核心逻辑
-1. 「继续生成失败的参考图」含「生成参考图」，旧逻辑先命中 `start_images`；若已有图则 early return「已经生成完成」，未拦住则落到 Skill turn。
-2. 新意图 `retry_failed_images` 优先于 `start_images`；`isStartImageGenerationRequest` 排除失败重试话术。
-3. Workspace：找最近带 `sceneAssetFailures` 的 `video_scene_packages` → `handleRetrySceneAssets`。
-4. `start_images` / `generic_resume` 若仍有可重试失败项，同样走失败重试，而不是「已完成」或重建资产包。
+1. 已删除 `isRetryFailedSceneAssetsRequest` / `resolveWorkflowResumeIntent` 前端编排
+2. 按钮路径：`onRetrySceneAssets` → `handleRetrySceneAssets` → V2 Turn 或 Job
+3. NL 路径：turns/start → thinking → Plan，禁止前端假「已完成」或新开无关 Skill 计划
 
 ## 注意事项
-- 按钮「重新生成参考图」路径本来就对；本修复补齐自然语言。
-- 无失败记录时应提示打开结果卡，不要假重试、也不要开新计划。
-- token 过期本身仍需用户重新登录后重试才会成功；路由正确只是不跑错流程。
+- 无失败记录时由 Agent/气泡说明，不要假重试
+- token 过期仍需用户重新登录后重试
+---

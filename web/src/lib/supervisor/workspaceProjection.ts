@@ -437,6 +437,33 @@ export function projectSupervisorSnapshot(
   let videoAgentPlanOrder: string[] = [];
   let videoAgentConfirmation = null;
   let videoAgentQuota = null;
+  let agentThinkingHistory: SupervisorRuntimeProjection["agentThinkingHistory"] = [];
+  const rawThinkingHistory = Array.isArray(value.thinkingHistory)
+    ? value.thinkingHistory
+    : (
+      isRecord(value.videoAgent) && Array.isArray(value.videoAgent.thinkingHistory)
+        ? value.videoAgent.thinkingHistory
+        : []
+    );
+  for (const item of rawThinkingHistory) {
+    if (!isRecord(item)) continue;
+    const turnId = typeof item.turnId === "string" ? item.turnId.trim() : "";
+    if (!turnId) continue;
+    const status = item.status === "streaming" ? "streaming" : "completed";
+    agentThinkingHistory.push({
+      turnId,
+      title: typeof item.title === "string" && item.title.trim()
+        ? item.title
+        : "正在分析素材，提炼电商属性并构思方向…",
+      subtitle: typeof item.subtitle === "string" && item.subtitle.trim()
+        ? item.subtitle
+        : "AI 编剧思考中…",
+      text: typeof item.text === "string" ? item.text : "",
+      answer: typeof item.answer === "string" ? item.answer : "",
+      startedAt: typeof item.startedAt === "string" ? item.startedAt : null,
+      status,
+    });
+  }
   if (value.videoAgent !== null && value.videoAgent !== undefined) {
     if (!isRecord(value.videoAgent)) return fail();
     projectedVideoAgentWorkspace = applyVideoWorkspaceSnapshot(
@@ -513,6 +540,7 @@ export function projectSupervisorSnapshot(
     videoAgentPlanOrder,
     videoAgentConfirmation,
     videoAgentQuota,
+    agentThinkingHistory,
     messages: workspace.messages,
     workflows,
     interrupt: workspace.interrupt,

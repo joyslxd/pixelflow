@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from pixelflow.video_agent.adapters import PixelFlowVideoDomainAdapter, VideoDomainAdapter
 from pixelflow.video_agent.contracts import VideoToolResult
+from pixelflow.video_agent.production_fields import analyze_production_fields_with_llm
 
 from .registry import (
     VideoToolContext,
@@ -86,17 +86,6 @@ def _artifact_ref(workspace_id: str, request_fingerprint: str) -> str:
     return f"artifact:video-script-{digest}"
 
 
-def _missing_requirements(markdown: str) -> list[str]:
-    missing: list[str] = []
-    if re.search(r"(?:时长|duration).{0,12}\d+\s*(?:秒|s)", markdown, re.IGNORECASE) is None:
-        missing.append("视频时长")
-    if re.search(r"(?:画幅|比例|ratio).{0,12}\d+\s*:\s*\d+", markdown, re.IGNORECASE) is None:
-        missing.append("视频画幅")
-    if not any(keyword in markdown for keyword in ("购买", "下单", "咨询", "行动", "CTA", "cta")):
-        missing.append("结尾行动引导")
-    return missing
-
-
 def _replay_result(tool_name: str, script: Mapping[str, object]) -> VideoToolResult:
     artifact_ref = str(script.get("artifact_ref") or "")
     refs = (artifact_ref,) if artifact_ref.startswith("artifact:") else ()
@@ -124,7 +113,28 @@ class ImportScriptTool:
         context: VideoToolContext,
         arguments: Mapping[str, object],
     ) -> VideoToolResult:
-        request = _validated(ImportScriptInput, arguments)
+        payload = dict(arguments)
+        # 思考流/Planner 常只给 tool_name；正文由服务端从 workspace / latest_input 注入。
+        if not str(payload.get("markdown") or "").strip():
+            script = context.workspace.payload.get("script")
+            markdown = ""
+            if isinstance(script, dict):
+                raw = script.get("content")
+                if isinstance(raw, str):
+                    markdown = raw.strip()
+            if not markdown:
+                latest = context.workspace.payload.get("latest_input")
+                if isinstance(latest, str):
+                    marker = "\n\n【本轮指令】"
+                    text = latest.strip()
+                    if marker in text:
+                        head, _, _ = text.partition(marker)
+                        markdown = head.strip() or text
+                    else:
+                        markdown = text
+            if markdown:
+                payload["markdown"] = markdown
+        request = _validated(ImportScriptInput, payload)
         fingerprint = _fingerprint(self.spec.name, request.model_dump(mode="json"))
         existing = _existing_script(context.workspace.payload, fingerprint)
         if existing is not None:
@@ -132,7 +142,9 @@ class ImportScriptTool:
 
         versions = _script_versions(context.workspace.payload)
         version = _next_version(versions)
-        missing = _missing_requirements(request.markdown)
+        analysis = await analyze_production_fields_with_llm(text=request.markdown)
+        missing = list(analysis.missing)
+        duration_sec = analysis.duration_sec
         artifact_ref = _artifact_ref(context.workspace.workspace_id, fingerprint)
         script: dict[str, JsonValue] = {
             "artifact_ref": artifact_ref,
@@ -144,7 +156,11 @@ class ImportScriptTool:
             "missing_requirements": missing,
             "request_fingerprint": fingerprint,
         }
+        if duration_sec is not None:
+            script["duration_sec"] = duration_sec
         summary = f"已导入脚本版本 {version}"
+        if duration_sec is not None:
+            summary += f"（已识别时长 {duration_sec} 秒）"
         if missing:
             summary += f"；仍缺少：{'、'.join(missing)}"
         return VideoToolResult(
@@ -233,6 +249,7 @@ class BrainstormScriptTool:
         versions = _script_versions(context.workspace.payload)
         version = _next_version(versions)
         artifact_ref = _artifact_ref(context.workspace.workspace_id, fingerprint)
+        analysis = await analyze_production_fields_with_llm(text=markdown)
         script: dict[str, JsonValue] = {
             "artifact_ref": artifact_ref,
             "source": "agent_brainstorm",
@@ -240,9 +257,11 @@ class BrainstormScriptTool:
             "status": "draft",
             "review_required": True,
             "content": markdown,
-            "missing_requirements": _missing_requirements(markdown),
+            "missing_requirements": list(analysis.missing),
             "request_fingerprint": fingerprint,
         }
+        if analysis.duration_sec is not None:
+            script["duration_sec"] = analysis.duration_sec
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"已生成创意脚本草稿版本 {version}",

@@ -10,12 +10,14 @@ from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
     MemoryAgentRuntimeRepository,
 )
+from pixelflow.video_agent.contracts import AgentPlan, AgentPlanStatus, AgentPlanStep, PlanStepStatus
 from pixelflow.video_agent.credentials import (
     TransientVideoAgentCredential,
     VideoAgentCredentialUnavailableError,
 )
-from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint, video_agent_plan_id
 from pixelflow.video_agent.executor import VideoAgentExecutor
+from pixelflow.video_agent.planner.model import VideoAgentPlanningContext
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
 from pixelflow.video_agent.tools import (
     ConfirmScriptCreativeTool,
@@ -26,11 +28,66 @@ from pixelflow.video_agent.tools import (
 from pixelflow.video_agent.workspace import MemoryVideoAgentRepository
 
 
+class _StubPathAPlanner:
+    async def plan_turn(self, context: VideoAgentPlanningContext) -> AgentPlan:
+        plan_id = video_agent_plan_id(context.conversation_id, context.turn_id)
+        now = datetime(2026, 8, 6, tzinfo=UTC)
+        stage_specs = (
+            ("start", "选题与创作目标 /start"),
+            ("confirm", "确认选题创意"),
+            ("plan", "三幕结构与爽点 /plan"),
+            ("characters", "角色/场景/道具设定 /characters"),
+            ("outline", "分镜大纲 /outline"),
+            ("episode", "生成剧本正文 /episode"),
+            ("review", "五维自检 /review"),
+            ("compliance", "合规检查 /compliance"),
+            ("export", "导出脚本产物 /export"),
+        )
+        steps: list[AgentPlanStep] = []
+        for index, (stage, title) in enumerate(stage_specs, start=1):
+            if stage == "confirm":
+                steps.append(
+                    AgentPlanStep(
+                        step_id=f"{plan_id}-step-{index}",
+                        plan_id=plan_id,
+                        sequence=index,
+                        tool_name="confirm_script_creative",
+                        title=title,
+                        status=PlanStepStatus.PENDING,
+                        arguments={},
+                        confirmation_required=True,
+                    )
+                )
+                continue
+            steps.append(
+                AgentPlanStep(
+                    step_id=f"{plan_id}-step-{index}",
+                    plan_id=plan_id,
+                    sequence=index,
+                    tool_name="run_script_skill_stage",
+                    title=title,
+                    status=PlanStepStatus.PENDING,
+                    arguments={"stage": stage, "creative_direction": ""},
+                    confirmation_required=False,
+                )
+            )
+        return AgentPlan(
+            plan_id=plan_id,
+            workspace_id=context.workspace.workspace_id,
+            conversation_id=context.conversation_id,
+            status=AgentPlanStatus.PLANNING,
+            public_goal="处理视频创作请求",
+            steps=tuple(steps),
+            created_at=now,
+            updated_at=now,
+        )
+
+
 @pytest.mark.asyncio
 async def test_runner_executes_persisted_plan_and_discards_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_generate(*, stage, user_story, prior):  # noqa: ANN001, ARG001
+    async def fake_generate(*, stage, user_story, prior, on_token=None):  # noqa: ANN001, ARG001
         return f"# {stage}\n\n基于用户输入生成：{user_story[:40]}\n时长：15秒\n画幅：9:16\n结尾请下单购买\n"
 
     monkeypatch.setattr(
@@ -45,6 +102,7 @@ async def test_runner_executes_persisted_plan_and_discards_credential(
     submission = await VideoAgentEntrypoint(
         runtime_repository=runtime_repository,
         video_repository=video_repository,
+        planner=_StubPathAPlanner(),
         clock=lambda: now,
     ).submit_turn(
         user_id="user-1",
@@ -81,11 +139,23 @@ async def test_runner_executes_persisted_plan_and_discards_credential(
     assert paused.steps[1].tool_name == "confirm_script_creative"
     assert paused.steps[1].status.value == "awaiting_confirmation"
 
+    workspace = await video_repository.get_workspace("user-1", paused.workspace_id)
+    assert workspace is not None
+    await video_repository.apply_workspace_patch(
+        "user-1",
+        paused.workspace_id,
+        {"latest_input": "生成商品视频，时长15秒，画幅9:16，结尾引导下单购买"},
+        expected_revision=workspace.revision,
+        now=now,
+    )
+
     await executor.confirm_step(
         "user-1",
         submission.plan.plan_id,
         paused.steps[1].step_id,
     )
+    # 确认 HTTP 只跑完确认步；后续 Skill 需 resume（与线上后台续跑一致）。
+    await executor.resume_plan("user-1", submission.plan.plan_id)
 
     restored = await video_repository.get_plan("user-1", submission.plan.plan_id)
     assert restored is not None

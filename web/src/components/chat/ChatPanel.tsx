@@ -19,6 +19,7 @@ interface ChatPanelProps {
   onRemoveReferencedMaterial?: (key: string) => void;
   composerPrefillRequest?: { id: string; content: string } | null;
   onOpenArtifact?: (msg: ChatMessage) => void;
+  onOpenScriptPreview?: () => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -95,6 +96,7 @@ export function ChatPanel({
   onRemoveReferencedMaterial,
   composerPrefillRequest,
   onOpenArtifact,
+  onOpenScriptPreview,
   onSelectDirection,
   onRegenerateDirections,
   onApprovePlan,
@@ -220,6 +222,7 @@ export function ChatPanel({
                   actionsDisabled={Boolean(artifactActionsDisabled) || (!isLatestActionableQualityReview && isSupersededArtifact && !keepScenePackageActions && !keepRecoverableActions)}
                   showProgressLoading={m.id === latestProgressMessageId}
                   onOpenArtifact={onOpenArtifact}
+                  onOpenScriptPreview={onOpenScriptPreview}
                   onSelectDirection={onSelectDirection}
                   onRegenerateDirections={onRegenerateDirections}
                   onApprovePlan={onApprovePlan}

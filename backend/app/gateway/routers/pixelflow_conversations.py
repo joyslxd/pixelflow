@@ -505,7 +505,8 @@ async def stream_agent_events(
                 yield f"data: {payload}\n\n"
             if await request.is_disconnected():
                 return
-            await asyncio.sleep(1)
+            # 轮询 80ms；约 15 秒无事件发一次心跳，避免代理掐断长连接。
+            await asyncio.sleep(0.08)
             try:
                 next_events = await service.events_after(
                     user_id=user_id,
@@ -519,7 +520,8 @@ async def stream_agent_events(
                 return
             pending = next_events
             idle_polls = 0 if pending else idle_polls + 1
-            if idle_polls >= 15:
+            # 约 15s / 0.08s ≈ 188
+            if idle_polls >= 188:
                 yield ": heartbeat\n\n"
                 idle_polls = 0
 

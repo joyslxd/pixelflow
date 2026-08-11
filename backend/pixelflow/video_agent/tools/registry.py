@@ -65,6 +65,7 @@ class VideoToolContext:
     step_id: str | None = None
     credential: TransientVideoAgentCredential | None = None
     report_progress: object | None = None
+    report_thinking: object | None = None
 
     def __post_init__(self) -> None:
         if not self.user_id.strip():
@@ -87,6 +88,17 @@ class VideoToolContext:
         if not text or not phase_key:
             return
         await reporter(text, phase=phase_key)  # type: ignore[operator]
+
+    async def emit_thinking_delta(self, text: str) -> None:
+        """向会话推送真 LLM 思考流增量；无回调时静默跳过。"""
+
+        reporter = self.report_thinking
+        if reporter is None:
+            return
+        piece = text.strip("\x00")
+        if not piece:
+            return
+        await reporter(piece)  # type: ignore[operator]
 
 
 class VideoTool(Protocol):
@@ -144,10 +156,16 @@ class VideoToolRegistry:
                 context,
                 validated.model_dump(mode="json"),
             )
-        except VideoToolValidationError:
+        except VideoToolValidationError as exc:
+            # 业务校验文案已面向用户（如缺画幅），不要吞成笼统「工具参数无效」。
+            detail = str(exc).strip()
             return VideoToolResult(
                 tool_name=tool.spec.name,
-                public_summary="工具参数无效，请修正后重试",
+                public_summary=(
+                    detail[:280]
+                    if detail
+                    else "工具参数无效，请修正后重试"
+                ),
             )
         except VideoToolExecutionError:
             return VideoToolResult(

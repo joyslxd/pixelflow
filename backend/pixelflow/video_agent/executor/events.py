@@ -22,6 +22,16 @@ def build_plan_created_event(
     occurred_at: datetime,
     plan: AgentPlan,
 ) -> AgentEvent:
+    steps_payload = [
+        {
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "title": step.title,
+            "status": step.status.value,
+            "confirmation_required": bool(step.confirmation_required),
+        }
+        for step in sorted(plan.steps, key=lambda item: item.sequence)
+    ]
     return AgentEvent(
         event_id=event_id,
         sequence=sequence,
@@ -35,6 +45,47 @@ def build_plan_created_event(
             "workspace_id": plan.workspace_id,
             "status": plan.status.value,
             "public_goal": plan.public_goal,
+            "steps": steps_payload,
+        },
+    )
+
+
+def build_plan_updated_event(
+    *,
+    event_id: str,
+    cursor: str,
+    sequence: int,
+    conversation_id: str,
+    run_id: str,
+    occurred_at: datetime,
+    plan: AgentPlan,
+) -> AgentEvent:
+    """Planner 落定后增量刷新目标与步骤清单（不含执行态细节）。"""
+
+    steps_payload = [
+        {
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "title": step.title,
+            "status": step.status.value,
+            "confirmation_required": bool(step.confirmation_required),
+        }
+        for step in sorted(plan.steps, key=lambda item: item.sequence)
+    ]
+    return AgentEvent(
+        event_id=event_id,
+        sequence=sequence,
+        cursor=cursor,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        occurred_at=occurred_at,
+        type=AgentEventType.AGENT_PLAN_UPDATED,
+        payload={
+            "plan_id": plan.plan_id,
+            "workspace_id": plan.workspace_id,
+            "status": plan.status.value,
+            "public_goal": plan.public_goal,
+            "steps": steps_payload,
         },
     )
 
@@ -145,6 +196,51 @@ def build_step_completed_event(
             "started_at": _iso(step.started_at),
             "completed_at": _iso(step.completed_at),
             "duration_ms": step.duration_ms,
+        },
+    )
+
+
+def build_confirmation_requested_event(
+    *,
+    event_id: str,
+    cursor: str,
+    sequence: int,
+    conversation_id: str,
+    run_id: str,
+    occurred_at: datetime,
+    step: AgentPlanStep,
+    cost_summary: str,
+    confirmation_id: str,
+    affected_scene_ids: list[str] | None = None,
+) -> AgentEvent:
+    """公开确认闸门；cost_summary 可含画幅/CTA 追问，不含内部推理。"""
+
+    if step.status is not PlanStepStatus.AWAITING_CONFIRMATION:
+        raise ValueError("confirmation event requires awaiting_confirmation step")
+    summary = cost_summary.strip()
+    if not summary:
+        raise ValueError("confirmation event requires cost_summary")
+    confirm_id = confirmation_id.strip()
+    if not confirm_id:
+        raise ValueError("confirmation event requires confirmation_id")
+    return AgentEvent(
+        event_id=event_id,
+        sequence=sequence,
+        cursor=cursor,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        occurred_at=occurred_at,
+        type=AgentEventType.AGENT_CONFIRMATION_REQUESTED,
+        payload={
+            "confirmation_id": confirm_id,
+            "plan_id": step.plan_id,
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "title": step.title,
+            "status": step.status.value,
+            "cost_summary": summary,
+            "affected_scene_ids": list(affected_scene_ids or []),
+            "tool_name": step.tool_name,
         },
     )
 

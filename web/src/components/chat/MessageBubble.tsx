@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Check, ChevronDown, Download, FileArchive, FileText, FileVideo, LoaderCircle, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles, Upload } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
 import { api, type CreativeDirectionResponse, type ImageEditModelSelection, type ImageModelParamConfig, type PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 import { draftButtonState, isJianyingDraftResultRetryable, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
+import { splitScriptVersionPreviewParts } from "@/features/video-agent/scriptSkillStages";
 
 interface MessageBubbleProps {
   msg: ChatMessage;
@@ -15,6 +16,7 @@ interface MessageBubbleProps {
   actionsDisabled?: boolean;
   showProgressLoading?: boolean;
   onOpenArtifact?: (msg: ChatMessage) => void;
+  onOpenScriptPreview?: () => void;
   onSelectDirection?: (msg: ChatMessage, direction: CreativeDirectionResponse) => void;
   onRegenerateDirections?: (msg: ChatMessage) => void;
   onApprovePlan?: (msg: ChatMessage) => void;
@@ -222,6 +224,7 @@ export function MessageBubble({
   actionsDisabled,
   showProgressLoading,
   onOpenArtifact,
+  onOpenScriptPreview,
   onSelectDirection,
   onRegenerateDirections,
   onApprovePlan,
@@ -470,6 +473,30 @@ export function MessageBubble({
     event.stopPropagation();
   };
 
+  const renderMessageContent = (content: string): ReactNode => {
+    if (isUser || !onOpenScriptPreview) return content;
+    const parts = splitScriptVersionPreviewParts(content);
+    if (parts.every((part) => part.kind === "text")) return content;
+    return parts.map((part, index) => {
+      if (part.kind === "text") {
+        return <span key={`t-${index}`}>{part.text}</span>;
+      }
+      return (
+        <button
+          key={`s-${index}`}
+          type="button"
+          className="inline p-0 align-baseline font-medium text-accent underline underline-offset-2 hover:opacity-80"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenScriptPreview();
+          }}
+        >
+          {part.text}
+        </button>
+      );
+    });
+  };
+
   return (
     <div className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}>
       <div
@@ -489,7 +516,7 @@ export function MessageBubble({
               : "border border-line bg-surface text-ink",
           )}
         >
-          {msg.content}
+          {renderMessageContent(msg.content)}
         </div>
         {messageMaterials.length > 0 && (
           <div className={cn("mt-2 flex max-w-[520px] flex-wrap gap-2", isUser ? "justify-end" : "justify-start")}>

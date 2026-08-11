@@ -171,14 +171,24 @@ deerflow:
 models:
   # 用途：命名默认聊天模型配置；非空字符串，修改后需重启；影响：默认模型查找键改变，回滚恢复 deepseek-v4-pro。
   - name: "deepseek-v4-pro"
-    # 用途：指定 LangChain 模型 Provider 类；导入路径字符串，修改后需重启；影响：模型 Client 实现改变，回滚恢复 ChatOpenAI 适配器。
-    use: "langchain_openai:ChatOpenAI"
+    # 用途：选择可解析 reasoning_content 的适配器；影响：思考流能拿到思维链；回滚勿改回标准 ChatOpenAI。
+    use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"
     # 用途：指定供应商模型名称；非空字符串，修改后需重启；影响：实际推理模型改变，回滚恢复已验证模型名。
     model: "deepseek-v4-pro-202606"
     # 用途：配置模型供应商 API Key；敏感字符串，修改后需重启；影响：错误值会使推理鉴权失败，回滚恢复服务器备份值；值由模型供应商管理员提供。
     api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"
     # 用途：配置模型 API Base；HTTPS URL，修改后需重启；影响：推理请求改投该兼容端点，回滚恢复发布前地址。
     base_url: "https://chaomengai.com/v1"
+    # 用途：声明支持思维链；布尔，修改后需重启；影响：thinking_enabled=True 时注入思考参数。
+    supports_thinking: true
+    # 用途：声明支持 reasoning_effort；布尔，修改后需重启。
+    supports_reasoning_effort: true
+    # 用途：开启思考时的构造参数；OpenAI 兼容网关必须用 extra_body.thinking。
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled  # 用途：打开深度思考；影响：响应含 reasoning_content。
+      reasoning_effort: high  # 用途：思考强度 low/high/max；影响：更细但更慢更贵。
     # 已验证模型上下文能力档案；Runtime 严格模式只接受本档案，不使用 128K 兼容兜底。
     context_profile:
       # 用途：声明模型物理上下文窗口；正整数，单位 tokens，默认按本档案 1000000。
@@ -202,10 +212,20 @@ models:
       # 影响：空值会被视为未验证并拒绝实际流程启动；不得填写 token、密钥或账号。
       source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"  # 用途：记录能力证据；影响：空值会拒绝启动。
   - name: "deepseek-v4-flash"
-    use: "langchain_openai:ChatOpenAI"
+    # 用途：Flash 使用同一 reasoning 补丁类；影响：流式保留 reasoning_content。
+    use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"
     model: "deepseek-v4-flash-202605"
     api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"
     base_url: "https://chaomengai.com/v1"
+    # 用途：声明 Flash 支持思维链；修改后需重启。
+    supports_thinking: true
+    # 用途：声明 Flash 支持 reasoning_effort；修改后需重启。
+    supports_reasoning_effort: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled  # 用途：打开深度思考；影响：响应含 reasoning_content。
+      reasoning_effort: high  # 用途：思考强度；影响：更细但更慢。
     context_profile:
       max_context_tokens: 1000000
       max_output_tokens: 32768

@@ -131,8 +131,8 @@ export function AgentPlanTimeline({
       ? "待确认"
       : plan.status === "failed"
         ? "失败"
-        : steps.length === 0
-          ? "准备中"
+        : plan.status === "planning" || steps.length === 0
+          ? "规划中"
           : "进行中";
 
   return (
@@ -153,7 +153,7 @@ export function AgentPlanTimeline({
       </header>
 
       {steps.length === 0 ? (
-        <p className="px-1 py-2 text-[12px] text-slate-500">正在生成执行步骤…</p>
+        <p className="px-1 py-2 text-[12px] text-slate-500">规划中，正在生成执行步骤…</p>
       ) : (
       <ol className="space-y-2">
         {steps.map((step) => {

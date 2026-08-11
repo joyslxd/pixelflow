@@ -10,18 +10,28 @@ from typing import TYPE_CHECKING
 
 from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
+    AgentRuntimeRepository,
 )
 from pixelflow.video_agent.contracts import (
     AgentPlan,
     AgentPlanStatus,
     AgentPlanStep,
     PlanStepStatus,
+    VideoWorkspace,
 )
 from pixelflow.video_agent.credentials import TransientVideoAgentCredential
+from pixelflow.video_agent.executor.events import build_confirmation_requested_event
+from pixelflow.video_agent.production_fields import (
+    analyze_production_fields_with_llm,
+    creative_confirm_cost_summary,
+    user_latest_input,
+)
+from pixelflow.video_agent.thinking_stream import ThinkingStreamPublisher
 from pixelflow.video_agent.tools import VideoToolContext, VideoToolRegistry
 from pixelflow.video_agent.tools.script_skill_pipeline import (
     SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
 )
+from uuid import NAMESPACE_URL, uuid5
 
 if TYPE_CHECKING:
     from pixelflow.video_agent.workspace import VideoAgentRepository
@@ -48,10 +58,12 @@ class VideoAgentExecutor:
         *,
         repository: VideoAgentRepository,
         registry: VideoToolRegistry,
+        event_repository: AgentRuntimeRepository | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._repository = repository
         self._registry = registry
+        self._event_repository = event_repository
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def run_plan(
@@ -196,6 +208,46 @@ class VideoAgentExecutor:
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent workspace 不存在或不属于当前用户"
             )
+        turn_id = str(workspace.payload.get("active_turn_id") or plan.plan_id).strip()
+        thinking: ThinkingStreamPublisher | None = None
+        if self._event_repository is not None and turn_id:
+            thinking = ThinkingStreamPublisher(
+                repository=self._event_repository,
+                user_id=user_id,
+                conversation_id=plan.conversation_id,
+                turn_id=turn_id,
+                clock=self._clock,
+            )
+        try:
+            return await self._continue_steps(
+                user_id=user_id,
+                plan=plan,
+                workspace=workspace,
+                thinking=thinking,
+                credential=credential,
+                stop_after_step_id=stop_after_step_id,
+            )
+        finally:
+            # 避免执行器思考流悬挂导致 Thought 计时拖到整段 Plan 结束、Turn 假占用。
+            if thinking is not None:
+                try:
+                    await thinking.complete()
+                except Exception:  # noqa: BLE001
+                    try:
+                        await thinking.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+    async def _continue_steps(
+        self,
+        *,
+        user_id: str,
+        plan: AgentPlan,
+        workspace: VideoWorkspace,
+        thinking: ThinkingStreamPublisher | None,
+        credential: TransientVideoAgentCredential | None,
+        stop_after_step_id: str | None = None,
+    ) -> AgentPlan:
         for step in plan.steps:
             if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.SKIPPED}:
                 continue
@@ -207,17 +259,24 @@ class VideoAgentExecutor:
                     now=self._clock(),
                 )
             if step.status is PlanStepStatus.PENDING and step.confirmation_required:
-                await self._repository.request_step_confirmation(
+                waiting = await self._repository.request_step_confirmation(
                     user_id,
                     plan.plan_id,
                     step.step_id,
                 )
-                return await self._repository.update_plan_status(
+                updated = await self._repository.update_plan_status(
                     user_id,
                     plan.plan_id,
                     AgentPlanStatus.AWAITING_CONFIRMATION,
                     now=self._clock(),
                 )
+                await self._emit_confirmation_requested(
+                    user_id=user_id,
+                    plan=updated,
+                    step=waiting,
+                    workspace_payload=workspace.payload,
+                )
+                return updated
             if step.status is PlanStepStatus.PENDING:
                 step, _ = await self._repository.start_step_with_event(
                     user_id,
@@ -268,6 +327,11 @@ class VideoAgentExecutor:
                 # 让出事件循环，避免长耗时工具卡住 SSE 推送阶段性 progressed。
                 await asyncio.sleep(0.05)
 
+            async def report_thinking(delta: str) -> None:
+                if thinking is None:
+                    return
+                await thinking.push_delta(delta, channel="content")
+
             result = await self._registry.execute(
                 VideoToolContext(
                     user_id=user_id,
@@ -276,6 +340,7 @@ class VideoAgentExecutor:
                     step_id=step.step_id,
                     credential=credential,
                     report_progress=report_progress,
+                    report_thinking=report_thinking,
                 ),
                 step.tool_name,
                 step.arguments,
@@ -328,6 +393,77 @@ class VideoAgentExecutor:
             AgentPlanStatus.COMPLETED,
             now=self._clock(),
         )
+
+    async def _emit_confirmation_requested(
+        self,
+        *,
+        user_id: str,
+        plan: AgentPlan,
+        step: AgentPlanStep,
+        workspace_payload: dict,
+    ) -> None:
+        """写出带 cost_summary 的确认事件，供前端即时投影追问文案。"""
+
+        if self._event_repository is None:
+            return
+        preview_lines = []
+        pipeline = workspace_payload.get("script_pipeline")
+        if isinstance(pipeline, dict):
+            start = pipeline.get("start")
+            if isinstance(start, dict) and isinstance(start.get("content"), str):
+                preview_lines = [
+                    line.strip(" #-*")
+                    for line in str(start["content"]).splitlines()
+                    if line.strip() and not line.strip().startswith("```")
+                ][:5]
+        preview = "；".join(preview_lines) if preview_lines else ""
+        if len(preview) > 420:
+            preview = preview[:420].strip()
+        if step.tool_name == "confirm_script_creative":
+            user_text = user_latest_input(workspace_payload)
+            analysis = await analyze_production_fields_with_llm(text=user_text)
+            cost_summary = creative_confirm_cost_summary(
+                user_text=user_text,
+                preview=preview,
+                missing=analysis.missing,
+                duration_sec=analysis.duration_sec,
+            )
+        else:
+            cost_summary = "该步骤会修改项目或调用计费能力，请确认后继续。"
+        now = self._clock()
+        events = await self._event_repository.list_events(
+            user_id,
+            plan.conversation_id,
+        )
+        sequence = 1 if not events else events[-1].sequence + 1
+        event_id = f"cnf_{plan.plan_id[-12:]}_{step.step_id[-12:]}_{sequence}"
+        if len(event_id) > 64:
+            event_id = event_id[:64]
+        event = build_confirmation_requested_event(
+            event_id=event_id,
+            cursor=f"c_{event_id}",
+            sequence=sequence,
+            conversation_id=plan.conversation_id,
+            run_id=str(workspace_payload.get("active_turn_id") or plan.plan_id)[:64],
+            occurred_at=now,
+            step=step,
+            cost_summary=cost_summary,
+            confirmation_id=(
+                "video_confirmation_"
+                + uuid5(
+                    NAMESPACE_URL,
+                    f"pixelflow-video-confirmation:{plan.plan_id}:{step.step_id}",
+                ).hex
+            ),
+        )
+        try:
+            await self._event_repository.create_event(user_id, event)
+        except AgentRuntimeRecordConflictError:
+            logger.warning(
+                "确认事件写入冲突 plan_id=%s step_id=%s",
+                plan.plan_id,
+                step.step_id,
+            )
 
     async def _required_plan(self, user_id: str, plan_id: str) -> AgentPlan:
         plan = await self._repository.get_plan(user_id, plan_id)

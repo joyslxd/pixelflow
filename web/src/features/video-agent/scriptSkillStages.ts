@@ -73,73 +73,6 @@ export function extractStageChangeHints(markdown: string, limit = 3): string[] {
   return hints;
 }
 
-/** 用户明确确认脚本方案后，才允许进入成片/资产包。 */
-export function isConfirmScriptPlanRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  const markers = [
-    "确认脚本",
-    "确认方案",
-    "确认plan",
-    "确认执行方案",
-    "确认脚本方案",
-    "确认脚本plan",
-    "确认并生成视频",
-    "确认并生成资产包",
-    "同意脚本",
-    "同意方案",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/** 用户明确要求按新需求重做任务规划。 */
-export function isRedesignTaskPlanRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  const markers = [
-    "重新设计任务规划",
-    "重新规划任务",
-    "重做任务规划",
-    "重新设计执行规划",
-    "重新规划",
-    "按新需求重做",
-    "需求变了重新规划",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/**
- * 中途需求大幅变更：已有脚本/计划时，用户又发来像新 brief 的长输入。
- * 短确认/改资产包/继续生成不算。
- */
-export function isMajorRequirementChangeRequest(
-  content: string,
-  previousBrief: string | null | undefined,
-): boolean {
-  const text = content.trim();
-  if (!text || text.length < 36) return false;
-  if (isConfirmScriptPlanRequest(text)) return false;
-  if (isContinueVideoGenerationRequest(text) && text.length < 80) return false;
-  if (isRegenerateVideoAssetPackageRequest(text)) return false;
-  if (isReviseVideoAssetPackageRequest(text)) return false;
-  if (isRedesignTaskPlanRequest(text)) return false;
-  if (isConfirmGenerateVideoFromPackagesRequest(text)) return false;
-  const looksLikeBrief = /(?:秒|分钟|9:16|16:9|短视频|广告|脚本|角色|朋友|品牌|产品|啤酒|宣传)/u.test(text)
-    && text.length >= 36;
-  if (!looksLikeBrief) return false;
-  const previous = (previousBrief || "").trim();
-  if (!previous) return false;
-  if (previous === text) return false;
-  // 同一 brief 的轻微补充不算大变更
-  if (previous.includes(text) || text.includes(previous.slice(0, Math.min(80, previous.length)))) {
-    return text.length > previous.length * 1.6;
-  }
-  const prevTokens = new Set(previous.replace(/\s+/gu, "").slice(0, 120).split(""));
-  const nextTokens = text.replace(/\s+/gu, "").slice(0, 120).split("");
-  const overlap = nextTokens.filter((ch) => prevTokens.has(ch)).length;
-  return overlap / Math.max(nextTokens.length, 1) < 0.55;
-}
-
 /** 从设定 Markdown 抽具体产品/道具名，避免 product_info 落成「核心产品」。 */
 export function extractConcreteProductHint(markdown: string): string {
   const text = markdown || "";
@@ -173,196 +106,17 @@ export function extractConcreteProductHint(markdown: string): string {
   return "";
 }
 
-/**
- * 脚本就绪后要求进入成片/资产包。
- * 刻意收窄：不含裸「生成视频」，避免「根据这个脚本生成视频」误跳过确认与脚本 Plan。
- */
-export function isContinueVideoGenerationRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  if (isConfirmScriptPlanRequest(text)) return true;
-  if (isRegenerateVideoAssetPackageRequest(text)) return true;
-  const markers = [
-    "继续生成视频",
-    "继续做视频",
-    "继续出片",
-    "继续生成资产包",
-    "继续准备资产包",
-    "生成资产包",
-    "准备资产包",
-    "视频资产包",
-    "生成场景包",
-    "准备场景包",
-    "继续生成场景包",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/** 明确要求重做视频资产包 / 场景包（可带修改意见）。 */
-export function isRegenerateVideoAssetPackageRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  const markers = [
-    "重新生成视频资产包",
-    "重新生成资产包",
-    "重新生成场景包",
-    "重做视频资产包",
-    "重做资产包",
-    "重做场景包",
-    "再生成一次资产包",
-    "再出一版资产包",
-    "再生成资产包",
-    "刷新资产包",
-    "重跑资产包",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/**
- * 单镜自然语言修订（修改第 N 镜），应交 patch_scene，不能当成重做资产包。
- */
-export function isSingleSceneRevisionRequest(content: string): boolean {
-  const text = content.trim();
-  if (!text || text.length > 240) return false;
-  return /(?:只|仅)?(?:修改|改|修复|重生成|重新生成)\s*第\s*\d+\s*(?:个)?(?:分镜|镜头|段|镜)/.test(text)
-    || /第\s*\d+\s*(?:个)?(?:分镜|镜头|段|镜).{0,24}(?:修改|改成|调整|重做|重生成)/.test(text);
-}
-
-/**
- * 资产包待确认阶段的自然语言修改：提到资产包/场景包/参考图，或对角色/道具/场景提出改动。
- * 长脚本正文不算修改指令。
- */
-export function isReviseVideoAssetPackageRequest(content: string): boolean {
-  const text = content.trim();
-  if (!text || text.length > 240) return false;
-  if (isSingleSceneRevisionRequest(text)) return false;
-  if (isRegenerateVideoAssetPackageRequest(text)) return true;
-  if (isConfirmScriptPlanRequest(text)) return false;
-  if (isConfirmGenerateVideoFromPackagesRequest(text)) return false;
-  const hasPackageTarget = /资产包|场景包|参考图|角色三视图|分镜素材|全局资产/.test(text);
-  const hasAssetTarget = /角色|道具|场景|三视图|分镜|人物|服装|发型|造型/.test(text);
-  const hasAction = /重新生成|重做|再生成|修改|改成|换成|调整|补齐|增加|删掉|删除|去掉|换掉|不要/.test(text);
-  return hasAction && (hasPackageTarget || hasAssetTarget);
-}
-
-/** 资产包已就绪后，确认生成成片（不是重做资产包）。 */
-export function isConfirmGenerateVideoFromPackagesRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  if (isRegenerateVideoAssetPackageRequest(text)) return false;
-  const markers = [
-    "确认并生成视频",
-    "确认生成视频",
-    "开始生成成片",
-    "生成成片",
-    "确认场景包并生成",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/** 明确要求回到脚本编辑，不启动资产包。 */
-export function isContinueEditingScriptRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  const markers = [
-    "继续编辑脚本",
-    "继续改脚本",
-    "编辑脚本",
-    "修改脚本",
-    "打开脚本",
-    "回到脚本",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/** 在模型选择闸门明确要求开始生图。 */
-export function isStartImageGenerationRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  if (isContinueEditingScriptRequest(text)) return false;
-  if (isRetryFailedSceneAssetsRequest(text)) return false;
-  const markers = [
-    "开始生图吧",
-    "开始生图",
-    "继续生图",
-    "生成参考图",
-    "开始生成参考图",
-  ];
-  return markers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/**
- * 明确要求只重试失败的参考图（不是重做整包 / 不是裸「开始生图」）。
- * 例：「继续生成失败的参考图」「重试失败参考图」。
- */
-export function isRetryFailedSceneAssetsRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text || text.length > 80) return false;
-  if (!/参考图|场景素材|分镜素材/.test(text)) return false;
-  const hasFailedFocus = /失败|报错|过期|token|登录|额度不足|没生成出来|未完成/.test(text);
-  const hasRetryAction = /继续生成|重新生成|重试|再生成|补齐|补生成|继续补/.test(text);
-  if (hasFailedFocus && hasRetryAction) return true;
-  const exactMarkers = [
-    "继续生成失败的参考图",
-    "重新生成失败的参考图",
-    "重试失败的参考图",
-    "重试失败参考图",
-    "补齐失败的参考图",
-    "继续生成失败参考图",
-  ];
-  return exactMarkers.some((marker) => text.includes(marker.toLowerCase()));
-}
-
-/**
- * 阶段感知的裸恢复话术（继续 / 从断点开始）。
- * 必须结合当前闸门解释，不能单独当成新 Turn。
- */
-export function isGenericWorkflowResumeRequest(content: string): boolean {
-  const text = content.trim().toLowerCase();
-  if (!text) return false;
-  if (text.length > 40) return false;
-  if (isConfirmScriptPlanRequest(text)) return false;
-  if (isContinueVideoGenerationRequest(text)) return false;
-  if (isContinueEditingScriptRequest(text)) return false;
-  if (isRetryFailedSceneAssetsRequest(text)) return false;
-  if (isStartImageGenerationRequest(text)) return false;
-  if (isConfirmGenerateVideoFromPackagesRequest(text)) return false;
-  if (isRegenerateVideoAssetPackageRequest(text)) return false;
-  if (isReviseVideoAssetPackageRequest(text)) return false;
-  if (isRedesignTaskPlanRequest(text)) return false;
-  const markers = [
-    "继续",
-    "接着做",
-    "接着来",
-    "从断掉的地方开始",
-    "从断点继续",
-    "从断掉的地方继续",
-    "断点恢复",
-    "resume",
-    "continue",
-  ];
-  return markers.some((marker) => text === marker.toLowerCase() || text.includes(marker.toLowerCase()));
-}
-
-export type WorkflowResumeIntent =
-  | "edit_script"
-  | "start_images"
-  | "retry_failed_images"
-  | "generic_resume"
-  | null;
-
-export function resolveWorkflowResumeIntent(content: string): WorkflowResumeIntent {
-  if (isContinueEditingScriptRequest(content)) return "edit_script";
-  if (isRetryFailedSceneAssetsRequest(content)) return "retry_failed_images";
-  if (isStartImageGenerationRequest(content)) return "start_images";
-  if (isGenericWorkflowResumeRequest(content)) return "generic_resume";
-  return null;
-}
-
 /** Path A：/start 后的选题创意确认闸门（以公开步骤标题识别）。 */
 export function isScriptCreativeConfirmationTitle(title: string | null | undefined): boolean {
   const text = (title || "").trim();
   return text.includes("确认选题创意");
+}
+
+/** 确认卡摘要仍缺画幅/结尾引导时，禁止直接「同意创意继续」。 */
+export function creativeConfirmNeedsClarification(
+  costSummary: string | null | undefined,
+): boolean {
+  return (costSummary || "").includes("还需要你确认");
 }
 
 /** 用户同意当前选题创意，继续后续 Skill 阶段。 */
@@ -386,9 +140,12 @@ export function isAgreeScriptCreativeRequest(content: string): boolean {
     "ok",
     "okay",
     "yes",
+    "同意创作",
+    "同意创意",
   ]);
   if (exact.has(text)) return true;
   const markers = [
+    "同意创作",
     "同意创意",
     "确认创意",
     "创意可以",
@@ -430,12 +187,14 @@ export function workspaceHasExportReady(input: ScriptReadinessInput): boolean {
   if (stages.some((stage) => stage.stageId === "export" && stage.content.trim())) {
     return true;
   }
-  // 无分阶段产物时，仅当终稿正文本身像导出件（含设定集 + 镜头）才放行
+  // 无分阶段产物时：终稿含设定集 + 镜头/时间码，即视为可确认（兼容 Path B 导入稿）。
   const script = input.scriptContent?.trim() ?? "";
-  if (!script) return false;
+  if (!script || script.length < 200) return false;
   const hasSettings = /角色设定|场景设定|道具/.test(script);
-  const hasShots = /镜头|分镜|00:\d{2}/.test(script);
-  return hasSettings && hasShots && script.length >= 200;
+  const hasShots = /镜头|分镜|00:\d{2}|\d+\s*[—\-–~～到至]\s*\d+\s*秒/.test(script);
+  if (hasSettings && hasShots) return true;
+  // Path B：成熟导入稿常无独立设定章，但有连续分镜时间码即可确认。
+  return hasShots && script.length >= 400;
 }
 
 /** 合并终稿与设定阶段，供角色完备性检查（预览里有设定但终稿未粘贴时也能识别）。 */
@@ -633,4 +392,66 @@ export function workspaceHasGeneratableScript(input: {
   stages?: ReadonlyArray<{ stageId: string; content: string }>;
 }): boolean {
   return resolveGeneratableScriptMarkdown(input).length > 0;
+}
+
+/** 单步「导入成熟脚本」计划：仍展示执行方案卡（V2 不再静默隐藏）。 */
+export function isSilentImportScriptPlan(_plan: {
+  publicGoal?: string | null;
+  steps: Record<string, { title: string; sequence?: number }>;
+}): boolean {
+  return false;
+}
+
+/** 补生产字段跟进：仍展示执行方案卡（V2 不再静默隐藏）。 */
+export function isSilentProductionFieldsPlan(_plan: {
+  publicGoal?: string | null;
+  steps: Record<string, { title: string; sequence?: number }>;
+}): boolean {
+  return false;
+}
+
+/** @deprecated 静默导入已取消；保留函数签名供旧测试过渡。 */
+export function buildSilentImportScriptNotice(
+  publicSummary: string | null | undefined,
+): string {
+  const summary = (publicSummary || "").trim();
+  const head = summary || "已导入脚本。";
+  const missingMatch = head.match(/仍缺少：(.+?)(?:。|$)/);
+  if (missingMatch) {
+    const items = missingMatch[1].trim().replace(/。$/, "");
+    return [
+      head.endsWith("。") ? head : `${head}`,
+      `请直接在对话框回复上述缺失项（${items}），我再继续。`,
+    ].join("\n");
+  }
+  return [
+    head.endsWith("。") ? head : `${head}。`,
+    "如需继续，直接告诉我下一步即可。",
+  ].join("\n");
+}
+
+/** 对话框里「已更新/已导入脚本版本 N」可点开右侧脚本预览。 */
+export const SCRIPT_VERSION_PREVIEW_LINK_RE = /已(?:更新|导入)脚本版本\s*\d+/g;
+
+export type ScriptVersionPreviewPart =
+  | { kind: "text"; text: string }
+  | { kind: "scriptVersion"; text: string };
+
+export function splitScriptVersionPreviewParts(content: string): ScriptVersionPreviewPart[] {
+  const text = content || "";
+  if (!text) return [];
+  const parts: ScriptVersionPreviewPart[] = [];
+  let last = 0;
+  for (const match of text.matchAll(SCRIPT_VERSION_PREVIEW_LINK_RE)) {
+    const index = match.index ?? 0;
+    if (index > last) {
+      parts.push({ kind: "text", text: text.slice(last, index) });
+    }
+    parts.push({ kind: "scriptVersion", text: match[0] });
+    last = index + match[0].length;
+  }
+  if (last < text.length) {
+    parts.push({ kind: "text", text: text.slice(last) });
+  }
+  return parts.length > 0 ? parts : [{ kind: "text", text }];
 }

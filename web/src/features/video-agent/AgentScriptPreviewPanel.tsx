@@ -332,16 +332,6 @@ export function AgentScriptPreviewPanel({
               ?? "等待脚本阶段产物"}
           </p>
         </div>
-        {onSave && script && !editing ? (
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[12px] font-medium text-slate-700 hover:bg-slate-50"
-            onClick={() => setEditing(true)}
-          >
-            <PencilLine className="size-3.5" />
-            编辑
-          </button>
-        ) : null}
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
@@ -427,26 +417,43 @@ export function AgentScriptPreviewPanel({
             </div>
           </div>
         </div>
-      ) : onConfirmScript && script && exportReady ? (
-        <div className="flex flex-col gap-2">
+      ) : script && (onSave || onConfirmScript) ? (
+        <div className="flex flex-col gap-2 border-t border-slate-100 pt-3">
           {error ? <p className="text-[12px] text-rose-600">{error}</p> : null}
-          <p className="text-[11px] leading-5 text-slate-500">
-            导出终稿已完成。请确认脚本方案（含角色/场景/道具）后再生成视频资产包。
-          </p>
-          <button
-            type="button"
-            className="inline-flex w-full items-center justify-center gap-1 rounded-lg bg-sky-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-45"
-            onClick={() => void handleConfirm()}
-            disabled={!canConfirm}
-          >
-            {confirming ? <LoaderCircle className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-            {confirming ? "确认中…" : "确认脚本并生成资产包"}
-          </button>
+          {exportReady ? (
+            <p className="text-[11px] leading-5 text-slate-500">
+              脚本草稿已就绪。可先编辑，确认后生成视频资产包。
+            </p>
+          ) : (
+            <p className="text-[11px] leading-5 text-slate-400">
+              可先编辑脚本草稿；完成导出或补齐设定/分镜后，即可确认并生成资产包。
+            </p>
+          )}
+          <div className="flex gap-2">
+            {onSave ? (
+              <button
+                type="button"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                onClick={() => setEditing(true)}
+                disabled={saving || confirming}
+              >
+                <PencilLine className="size-3.5" />
+                编辑
+              </button>
+            ) : null}
+            {onConfirmScript ? (
+              <button
+                type="button"
+                className="inline-flex flex-[1.4] items-center justify-center gap-1 rounded-lg bg-sky-600 px-3 py-2 text-[12px] font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-45"
+                onClick={() => void handleConfirm()}
+                disabled={!canConfirm}
+              >
+                {confirming ? <LoaderCircle className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+                {confirming ? "确认中…" : "确认"}
+              </button>
+            ) : null}
+          </div>
         </div>
-      ) : onConfirmScript && script && !exportReady ? (
-        <p className="text-[11px] leading-5 text-slate-400">
-          完成「导出脚本产物」后，将在此显示确认并生成资产包。
-        </p>
       ) : null}
     </aside>
   );
