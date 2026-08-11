@@ -32,10 +32,20 @@ from .scene import (
     SceneGenerationJob,
     SceneGenerationOperationPort,
 )
+from .scene_packages import (
+    GenerateSceneAssetsInput,
+    GenerateSceneAssetsTool,
+    PrepareScenePackagesInput,
+    PrepareScenePackagesTool,
+    SceneAssetOperationPort,
+    ScenePackageOperationJob,
+    ScenePackageOperationPort,
+)
 from .script import BrainstormScriptTool, ImportScriptTool
 from .script_skill_pipeline import (
     STAGE_ORDER,
     STAGE_TITLES,
+    ConfirmScriptCreativeTool,
     RunScriptSkillStageTool,
     ScriptSkillStageInput,
 )
@@ -45,8 +55,11 @@ __all__ = [
     "BrainstormScriptTool",
     "ComposeOrExportVideoInput",
     "ComposeOrExportVideoTool",
+    "ConfirmScriptCreativeTool",
     "DeliveryOperationJob",
     "DeliveryOperationPort",
+    "GenerateSceneAssetsInput",
+    "GenerateSceneAssetsTool",
     "ImportScriptTool",
     "InspectVideoWorkspaceTool",
     "GenerateScenesInput",
@@ -54,6 +67,8 @@ __all__ = [
     "InspectSceneTool",
     "PatchSceneInput",
     "PatchSceneTool",
+    "PrepareScenePackagesInput",
+    "PrepareScenePackagesTool",
     "ReplaceProjectAssetsInput",
     "ReplaceProjectAssetsTool",
     "ReviewGeneratedSceneInput",
@@ -61,8 +76,11 @@ __all__ = [
     "RunScriptSkillStageTool",
     "STAGE_ORDER",
     "STAGE_TITLES",
+    "SceneAssetOperationPort",
     "SceneGenerationJob",
     "SceneGenerationOperationPort",
+    "ScenePackageOperationJob",
+    "ScenePackageOperationPort",
     "ScriptSkillStageInput",
     "VideoTool",
     "VideoToolContext",

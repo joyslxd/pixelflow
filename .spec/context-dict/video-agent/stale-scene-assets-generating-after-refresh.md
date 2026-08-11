@@ -26,3 +26,4 @@ keywords:
 - 用户需刷新一次吃到修复；然后在模型卡重新确认即可真正重跑生图
 - 后端内存 job 若已丢，只能重新发起，无法续旧 job id
 - 未确认的 `scene_asset_model_options` 必须保留可点（`hasRecoverableArtifactAction`），否则会被后续场景包消息 supersede 成灰按钮
+- 2026-08-10：resume 404 清 pending 后若不清 `sceneAssetsGenerating`，分镜卡会假锁「参考图生成中」；现 resume fail 与 restore reconcile 都会写回消息 payload。历史会话可刷新生效，或手动把 generating→false / awaitingModel→true

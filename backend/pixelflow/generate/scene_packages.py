@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -27,7 +28,7 @@ from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_
 DEFAULT_TARGET_DURATION_MS = 30_000
 MIN_SCENE_DURATION_MS = MIN_SCENE_DURATION_SEC * 1000
 MAX_SCENE_DURATION_MS = MAX_SCENE_DURATION_SEC * 1000
-SCENE_PACKAGE_LLM_MODEL_NAME = "deepseek-v4-pro"
+SCENE_PACKAGE_LLM_MODEL_NAME = "deepseek-v4-flash"
 ModelFactory = Callable[..., Any]
 
 
@@ -191,10 +192,20 @@ async def prepare_video_scene_packages_with_llm(
     *,
     model_name: str = SCENE_PACKAGE_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     """用 LLM 生成视频场景包，失败时降级到规则版场景包。"""
+
+    async def emit(phase: str, message: str) -> None:
+        if on_progress is None:
+            return
+        maybe = on_progress(phase, message)
+        if asyncio.iscoroutine(maybe) or asyncio.isfuture(maybe):
+            await maybe
+
     selected_direction = selected_direction or {}
     materials = materials or []
+    await emit("resolve_inputs", "正在解析镜头时长与蓝图…")
     duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
         target_duration_ms,
         scene_blueprints,
@@ -203,6 +214,7 @@ async def prepare_video_scene_packages_with_llm(
         validate_asset_requirement_quality(authoritative_blueprints)
     scene_count = len(durations)
     if authoritative_blueprints and asset_manifest is not None:
+        await emit("fast_path_manifest", "已有 Plan 蓝图与资产清单，跳过结构模型…")
         result = prepare_video_scene_packages(
             form_values=form_values,
             plan_markdown=plan_markdown,
@@ -215,22 +227,30 @@ async def prepare_video_scene_packages_with_llm(
         result["message"] = "已严格按最终 Plan 生成视频场景包和全局资产，不再进行二次资产分析。"
         result["llm_used"] = False
         result["model_name"] = model_name
+        await emit("completed", result["message"])
         return result
     try:
-        payload = await asyncio.to_thread(
-            _invoke_scene_package_model,
-            _scene_package_prompt(
-                form_values=form_values,
-                plan_markdown=plan_markdown,
-                selected_direction=selected_direction,
-                materials=materials,
-                target_duration_ms=duration_ms,
-                durations=durations,
-                scene_blueprints=authoritative_blueprints,
-            ),
+        await emit("build_prompt", "正在组装场景包结构提示词…")
+        prompt = _scene_package_prompt(
+            form_values=form_values,
+            plan_markdown=plan_markdown,
+            selected_direction=selected_direction,
+            materials=materials,
+            target_duration_ms=duration_ms,
+            durations=durations,
+            scene_blueprints=authoritative_blueprints,
+        )
+        await emit(
+            "invoke_llm",
+            f"正在调用结构模型 {model_name}，通常约几十秒到 2 分钟…",
+        )
+        payload = await _invoke_scene_package_model_with_heartbeat(
+            prompt,
             model_name,
             model_factory or _default_model_factory,
+            emit,
         )
+        await emit("parse_normalize", "正在整理全局资产与分镜结构…")
         stage_templates = _stage_templates(scene_count)
         global_assets = _normalize_llm_global_assets(
             payload,
@@ -259,7 +279,7 @@ async def prepare_video_scene_packages_with_llm(
         )
         if len(scenes) != scene_count:
             raise ValueError(f"LLM scene package count mismatch: expected {scene_count}, got {len(scenes)}")
-        return {
+        result = {
             "ok": True,
             "message": "LLM 已生成视频场景包，请前端展示给用户逐场景编辑确认。",
             "requires_confirmation": True,
@@ -270,7 +290,10 @@ async def prepare_video_scene_packages_with_llm(
             "llm_used": True,
             "model_name": model_name,
         }
+        await emit("completed", result["message"])
+        return result
     except Exception as exc:  # noqa: BLE001 - LLM boundary must keep the flow usable
+        await emit("fallback", f"结构模型失败，正在使用规则兜底：{exc}")
         fallback = prepare_video_scene_packages(
             form_values=form_values,
             plan_markdown=plan_markdown,
@@ -291,6 +314,42 @@ def _default_model_factory(model_name: str, *, attach_tracing: bool = False) -> 
     from deerflow.models.factory import create_chat_model
 
     return create_chat_model(model_name, attach_tracing=attach_tracing)
+
+
+async def _invoke_scene_package_model_with_heartbeat(
+    prompt: str,
+    model_name: str,
+    model_factory: ModelFactory,
+    emit: Any,
+    *,
+    heartbeat_sec: float = 30.0,
+) -> Any:
+    """结构模型调用期间独立心跳回写进度（按墙钟累计，避免卡在首个 30 秒文案）。"""
+    started = time.monotonic()
+    stop = asyncio.Event()
+
+    async def heartbeat_loop() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=heartbeat_sec)
+                return
+            except asyncio.TimeoutError:
+                elapsed = max(0, int(time.monotonic() - started))
+                minutes, seconds = divmod(elapsed, 60)
+                await emit(
+                    "invoke_llm",
+                    f"结构模型 {model_name} 仍在生成中（已等待 {minutes} 分 {seconds:02d} 秒）…",
+                )
+
+    beat = asyncio.create_task(heartbeat_loop())
+    try:
+        return await asyncio.to_thread(_invoke_scene_package_model, prompt, model_name, model_factory)
+    finally:
+        stop.set()
+        try:
+            await beat
+        except Exception:  # noqa: BLE001 - 心跳收尾失败不影响主结果
+            pass
 
 
 def _invoke_scene_package_model(prompt: str, model_name: str, model_factory: ModelFactory) -> Any:
@@ -1373,7 +1432,18 @@ def _default_prop_image(form_values: dict[str, Any], selected_direction: dict[st
 
 
 _GENERIC_ASSET_NAMES = {
-    "characters": {"目标用户", "用户", "消费者", "人物", "角色", "模特"},
+    "characters": {
+        "目标用户",
+        "用户",
+        "消费者",
+        "人物",
+        "角色",
+        "模特",
+        "角色关系",
+        "角色关系图",
+        "主要角色档案",
+        "角色档案",
+    },
     "scenes": {"真实使用场景", "使用场景", "真实场景", "场景", "环境"},
     "props": {"产品", "商品", "核心产品", "主商品", "关键道具", "产品道具", "道具"},
 }

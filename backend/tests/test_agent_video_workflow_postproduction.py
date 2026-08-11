@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
+
 import test_agent_video_workflow_generation as generation_tests
 from test_agent_video_workflow_generation import _AtomicFakeOperationPort, _reviewed_scene_package_state
 
@@ -22,6 +23,9 @@ from pixelflow.agent_workflows.video import (
 from pixelflow.agent_workflows.video import postproduction as postproduction_module
 from pixelflow.skills.base import GenerationResult, VideoQualityReviewResult
 
+
+
+pytestmark = pytest.mark.v1_workflow_legacy
 
 def _generated_state():
     package = _reviewed_scene_package_state()

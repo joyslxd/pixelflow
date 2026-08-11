@@ -205,6 +205,18 @@ models:
       # 修改后需重启；不改变数值但用于审计，回滚恢复本次说明。
       # 影响：空值会被视为未验证并拒绝实际流程启动；不得填写 token、密钥或账号。
       source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"  # 用途：记录能力证据；影响：空值会拒绝启动。
+  # 场景包结构生成用 Flash；比 Pro 更快，供 prepare-scene-packages 结构阶段。
+  - name: "deepseek-v4-flash"
+    use: "langchain_openai:ChatOpenAI"
+    model: "deepseek-v4-flash-202605"
+    api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"
+    base_url: "https://chaomengai.com/v1"
+    context_profile:
+      max_context_tokens: 1000000
+      max_output_tokens: 32768
+      tokenizer_strategy: "conservative_estimate"
+      verified_at: "2026-08-10T00:00:00+08:00"
+      source: "AIRouter DeepSeek V4 Flash 场景包结构加速"
 
 # sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
 sandbox:

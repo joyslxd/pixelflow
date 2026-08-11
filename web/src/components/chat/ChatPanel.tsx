@@ -74,6 +74,7 @@ function hasRecoverableArtifactAction(message: ChatMessage): boolean {
   if (!artifact) return false;
   // 刷新后解除假 confirmed 的模型卡，即使后面已有场景包消息，仍需可再次确认生图。
   if (artifact.type === "scene_asset_model_options" && !artifact.sceneAssetModelConfirmed) return true;
+  if (artifact.type === "video_scene_packages" && artifact.sceneAssetProgressArchived) return false;
   if (artifact.type === "video_scene_packages" && (artifact.sceneAssetsAwaitingModel || artifact.sceneAssetsGenerating)) return true;
   if (artifact.imageResult && !artifact.imageResult.ok) return true;
   if (artifact.videoAnalysis && !artifact.videoAnalysis.ok) return true;

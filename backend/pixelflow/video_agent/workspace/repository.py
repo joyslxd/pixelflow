@@ -91,6 +91,43 @@ def _assert_expected_revision(expected_revision: int) -> None:
         )
 
 
+_SCRIPT_SKILL_TOOL_NAME = "run_script_skill_stage"
+_SCRIPT_SKILL_PLAN_TOOLS = frozenset(
+    {
+        _SCRIPT_SKILL_TOOL_NAME,
+        "confirm_script_creative",
+    }
+)
+_ACTIVE_SCRIPT_PLAN_STATUSES = frozenset(
+    {
+        AgentPlanStatus.PLANNING,
+        AgentPlanStatus.RUNNING,
+        AgentPlanStatus.AWAITING_CONFIRMATION,
+    }
+)
+_OPEN_SCRIPT_STEP_STATUSES = frozenset(
+    {
+        PlanStepStatus.PENDING,
+        PlanStepStatus.RUNNING,
+        PlanStepStatus.AWAITING_CONFIRMATION,
+    }
+)
+_SCRIPT_SKILL_SUPERSEDED_SUMMARY = "用户已确认脚本并开始生成资产包，本步已跳过"
+
+
+def _is_active_script_skill_plan(plan: AgentPlan) -> bool:
+    """脚本 Skill 计划仍在推进时，确认成片后可整单取消。"""
+
+    if plan.status not in _ACTIVE_SCRIPT_PLAN_STATUSES:
+        return False
+    if not plan.steps:
+        return plan.public_goal == "成稿自检与导出"
+    # Path A 在 /start 后插入 confirm_script_creative，仍视为脚本 Skill 计划。
+    return all(step.tool_name in _SCRIPT_SKILL_PLAN_TOOLS for step in plan.steps) and any(
+        step.tool_name == _SCRIPT_SKILL_TOOL_NAME for step in plan.steps
+    )
+
+
 def _updated_workspace(
     workspace: VideoWorkspace,
     patch: Mapping[str, JsonValue],
@@ -252,6 +289,14 @@ class VideoAgentRepository(Protocol):
         quota_pause_revision: int,
         now: datetime,
     ) -> AgentPlan: ...
+
+    async def cancel_active_script_skill_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> list[AgentPlan]: ...
 
     async def start_step_with_event(
         self,
@@ -517,7 +562,12 @@ class MemoryVideoAgentRepository:
         if step is None:
             raise AgentRuntimeRecordConflictError("VideoAgent step 不存在或不属于当前用户")
         if step.status is PlanStepStatus.RUNNING:
-            return _clone(step)
+            # 陈旧重跑会传入新的 now；普通 resume 传入原 started_at，保持耗时连续。
+            if step.started_at == now:
+                return _clone(step)
+            started = step.model_copy(update={"started_at": now})
+            self._steps_by_owner[key] = _clone(started)
+            return _clone(started)
         if step.status is not PlanStepStatus.PENDING:
             raise AgentRuntimeRecordConflictError("VideoAgent step 不能开始")
         if step.confirmation_required:
@@ -756,6 +806,49 @@ class MemoryVideoAgentRepository:
                 key=lambda item: item.sequence,
             )
             return _clone(cancelled).model_copy(update={"steps": tuple(steps)})
+
+    async def cancel_active_script_skill_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> list[AgentPlan]:
+        """确认脚本成片后取消仍在跑的脚本 Skill 计划，避免假忙碌。"""
+
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            conversation = conversation_id.strip()
+            plans = await self.list_conversation_plans(owner, conversation)
+            cancelled_plans: list[AgentPlan] = []
+            for plan in plans:
+                if not _is_active_script_skill_plan(plan):
+                    continue
+                _assert_plan_transition(plan.status, AgentPlanStatus.CANCELLED)
+                for step in plan.steps:
+                    if step.status not in _OPEN_SCRIPT_STEP_STATUSES:
+                        continue
+                    key = (owner, plan.plan_id, step.step_id)
+                    skipped = step.model_copy(
+                        update={
+                            "status": PlanStepStatus.SKIPPED,
+                            "public_summary": _SCRIPT_SKILL_SUPERSEDED_SUMMARY,
+                            "started_at": step.started_at or now,
+                            "completed_at": now,
+                        }
+                    )
+                    self._steps_by_owner[key] = _clone(skipped)
+                steps = await self.list_plan_steps(owner, plan.plan_id)
+                cancelled = plan.model_copy(
+                    update={
+                        "status": AgentPlanStatus.CANCELLED,
+                        "steps": tuple(steps),
+                        "updated_at": now,
+                    }
+                )
+                self._plan_by_owner[(owner, plan.plan_id)] = _clone(cancelled)
+                cancelled_plans.append(_clone(cancelled))
+            return cancelled_plans
 
     async def start_step_with_event(
         self,
@@ -1362,7 +1455,11 @@ class SQLVideoAgentRepository:
                 row = await self._locked_step(session, owner, plan_id, step_id)
                 step = _step_from_row(row)
                 if step.status is PlanStepStatus.RUNNING:
-                    return step
+                    if step.started_at == now:
+                        return step
+                    row.started_at = now
+                    await session.flush()
+                    return _step_from_row(row)
                 if step.status is not PlanStepStatus.PENDING:
                     raise AgentRuntimeRecordConflictError("VideoAgent step 不能开始")
                 if step.confirmation_required:
@@ -1589,6 +1686,72 @@ class SQLVideoAgentRepository:
                     plan = _plan_from_row(plan_row)
         steps = await self.list_plan_steps(owner, plan_id)
         return plan.model_copy(update={"steps": tuple(steps)})
+
+    async def cancel_active_script_skill_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+    ) -> list[AgentPlan]:
+        """确认脚本成片后取消仍在跑的脚本 Skill 计划，避免假忙碌。"""
+
+        owner = _owner(user_id)
+        conversation = conversation_id.strip()
+        plans = await self.list_conversation_plans(owner, conversation)
+        cancelled_plans: list[AgentPlan] = []
+        for plan in plans:
+            if not _is_active_script_skill_plan(plan):
+                continue
+            async with self._session_factory() as session:
+                async with session.begin():
+                    plan_row = (
+                        await session.scalars(
+                            select(PixelFlowVideoAgentPlanRow)
+                            .where(
+                                PixelFlowVideoAgentPlanRow.user_id == owner,
+                                PixelFlowVideoAgentPlanRow.plan_id == plan.plan_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if plan_row is None:
+                        continue
+                    current_status = AgentPlanStatus(plan_row.status)
+                    if current_status is AgentPlanStatus.CANCELLED:
+                        continue
+                    if current_status not in _ACTIVE_SCRIPT_PLAN_STATUSES:
+                        continue
+                    _assert_plan_transition(current_status, AgentPlanStatus.CANCELLED)
+                    step_rows = (
+                        await session.scalars(
+                            select(PixelFlowVideoAgentPlanStepRow)
+                            .where(
+                                PixelFlowVideoAgentPlanStepRow.user_id == owner,
+                                PixelFlowVideoAgentPlanStepRow.plan_id == plan.plan_id,
+                            )
+                            .order_by(PixelFlowVideoAgentPlanStepRow.sequence)
+                            .with_for_update()
+                        )
+                    ).all()
+                    for step_row in step_rows:
+                        status = PlanStepStatus(step_row.status)
+                        if status not in _OPEN_SCRIPT_STEP_STATUSES:
+                            continue
+                        step_row.status = PlanStepStatus.SKIPPED.value
+                        step_row.public_summary = _SCRIPT_SKILL_SUPERSEDED_SUMMARY
+                        if step_row.started_at is None:
+                            step_row.started_at = now
+                        step_row.completed_at = now
+                    plan_row.status = AgentPlanStatus.CANCELLED.value
+                    plan_row.updated_at = now
+                    await session.flush()
+                    cancelled_plans.append(_plan_from_row(plan_row))
+        result: list[AgentPlan] = []
+        for plan in cancelled_plans:
+            steps = await self.list_plan_steps(owner, plan.plan_id)
+            result.append(plan.model_copy(update={"steps": tuple(steps)}))
+        return result
 
     async def start_step_with_event(
         self,
@@ -1932,6 +2095,10 @@ class SQLVideoAgentRepository:
                     else:
                         if row.status == PlanStepStatus.RUNNING.value:
                             step = _step_from_row(row)
+                            if step.started_at != now:
+                                row.started_at = now
+                                await session.flush()
+                                step = _step_from_row(row)
                         elif row.status == PlanStepStatus.PENDING.value:
                             row.status = PlanStepStatus.RUNNING.value
                             row.started_at = now

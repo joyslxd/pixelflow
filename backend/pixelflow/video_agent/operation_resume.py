@@ -264,6 +264,10 @@ def _stage_matches_tool(stage: str, tool_name: str) -> bool:
         return tool_name == "analyze_reference_video"
     if stage.startswith("generate_scene:"):
         return tool_name == "generate_scenes"
+    if stage.startswith("prepare_scene_packages:"):
+        return tool_name == "prepare_scene_packages"
+    if stage.startswith("generate_scene_assets:"):
+        return tool_name == "generate_scene_assets"
     if stage in {"deliver:mp4", "deliver:jianying_package"}:
         return tool_name == "compose_or_export_video"
     return False

@@ -34,6 +34,8 @@ import {
   type PptContentJsonResult,
   type PptSummaryResult,
   type GenerateSceneAssetsResponse,
+  type GenerateSceneVideosJobStatusResponse,
+  type GenerateSceneVideosResponse,
   type PrepareScenePackagesJobResult,
   type PrepareScenePackagesJobStatusResponse,
   type PrepareScenePackagesResponse,
@@ -56,13 +58,19 @@ import {
   remapMessageAnchorId,
   resolveAssetPackageProgressAnchorId,
 } from "@/lib/assetPackageProgressAnchor";
+import { resolveVideoAgentPlanAnchorId } from "@/lib/videoAgentPlanAnchor";
 import {
   classifyScenePackageJobResume,
   scenePackageJobResumeDelayMs,
 } from "@/lib/scenePackageJobResume";
 import {
+  hasMediaResultMessage,
   isSceneAssetGenerationMaterialized,
+  mediaResultClientMessageId,
+  markConfirmedSceneAssetModelOptions,
+  preferredVideoScenePackagesMessageIndex,
   reconcileStaleSceneAssetUiFlags,
+  resolveVideoScenePackagesForRestore,
   scenePackageHasGeneratedImages,
 } from "@/lib/scenePackageAssetUi";
 import {
@@ -97,8 +105,10 @@ import { AgentPlanTimeline } from "@/features/video-agent/AgentPlanTimeline";
 import {
   AgentPipelineProgress,
   applyAssetPackageAssetProgress,
+  applyAssetPackageStructureProgress,
   applyAssetPackageJobStage,
   createAssetPackageProgressSteps,
+  failAssetPackageProgressSteps,
   type AgentPipelineProgressStep,
 } from "@/features/video-agent/AgentPipelineProgress";
 import {
@@ -120,7 +130,7 @@ import {
   saveVideoAgentPlanHistory,
   type VideoAgentPlanHistory,
 } from "@/features/video-agent/planHistory";
-import { stageIdFromStep, isContinueVideoGenerationRequest, isConfirmScriptPlanRequest, isRedesignTaskPlanRequest, isMajorRequirementChangeRequest, isRegenerateVideoAssetPackageRequest, isReviseVideoAssetPackageRequest, isConfirmGenerateVideoFromPackagesRequest, resolveGeneratableScriptMarkdown, buildAssetPackagePlanMarkdown, extractConcreteProductHint, workspaceHasGeneratableScript, workspaceHasExportReady, analyzeScriptCharacterReadiness, scriptNeedsFullCharacterPlan } from "@/features/video-agent/scriptSkillStages";
+import { stageIdFromStep, isContinueVideoGenerationRequest, isConfirmScriptPlanRequest, isRedesignTaskPlanRequest, isMajorRequirementChangeRequest, isRegenerateVideoAssetPackageRequest, isReviseVideoAssetPackageRequest, isConfirmGenerateVideoFromPackagesRequest, resolveGeneratableScriptMarkdown, buildAssetPackagePlanMarkdown, extractConcreteProductHint, workspaceHasGeneratableScript, workspaceHasExportReady, analyzeScriptCharacterReadiness, scriptNeedsFullCharacterPlan, resolveWorkflowResumeIntent, isScriptCreativeConfirmationTitle, isAgreeScriptCreativeRequest, isCancelScriptCreativeRequest } from "@/features/video-agent/scriptSkillStages";
 import { buildImageRevisionPreparePayload, canAcceptImageResult, imageResultSummary } from "@/lib/imageReview";
 import { isReviewExpired, reviewExpiresAt, timeoutReviewMessage } from "@/lib/reviewWindow";
 import {
@@ -194,7 +204,6 @@ import { buildSupervisorSubmission } from "@/lib/supervisor/turnSubmission";
 import { supervisorApi } from "@/lib/supervisor/api";
 import {
   mergeSupervisorMessagesWithPending,
-  projectSupervisorWorkflowProgress,
   selectSupervisorArtifactMessage,
 } from "@/lib/supervisor/workspaceProjection";
 
@@ -1105,6 +1114,7 @@ interface ImageGenerationJobRequest {
   prompt: string;
   negative_prompt?: string;
   params: Record<string, unknown>;
+  conversation_id?: string;
 }
 
 interface ImageAssetEditJobRequest {
@@ -1118,6 +1128,7 @@ interface ImageAssetEditJobRequest {
   ratio?: string;
   size?: string;
   model?: string | null;
+  conversation_id?: string;
 }
 
 type ImageAssetFusionJobRequest = ImageAssetEditJobRequest;
@@ -1160,6 +1171,13 @@ interface SceneAssetsJobRequest {
   model?: string | null;
   creation_contract?: VideoCreationContract;
   target_assets?: SceneAssetRetryTarget[];
+  reference_brief?: string;
+  asset_reference_bindings?: Array<{
+    asset_id?: string;
+    asset_type?: string;
+    reference_urls?: string[];
+  }>;
+  conversation_id?: string;
 }
 
 interface PendingScenePackageJob {
@@ -1183,12 +1201,15 @@ interface SceneVideosJobRequest {
   model?: string | null;
   sound?: string;
   creation_contract?: VideoCreationContract;
+  conversation_id?: string;
 }
 
 interface MergeSceneVideosJobRequest {
   scene_videos: SceneVideoPayload[];
   duration?: number;
   size?: string;
+  model?: string | null;
+  conversation_id?: string;
 }
 
 interface PendingVideoJob {
@@ -1727,6 +1748,30 @@ function sceneVideoForPackageScene(
   );
 }
 
+function mergePartialGeneratedSceneVideos(
+  previous: GenerateSceneVideosResponse | undefined,
+  partial: GenerateSceneVideosResponse,
+  affectedSceneIds?: string[],
+): GenerateSceneVideosResponse {
+  if (!previous?.scene_videos.length || !affectedSceneIds?.length) {
+    return {
+      ...partial,
+      scene_videos: [...(partial.scene_videos || [])].sort((a, b) => Number(a.scene_index) - Number(b.scene_index)),
+    };
+  }
+  const affected = new Set(affectedSceneIds);
+  const kept = previous.scene_videos.filter((scene) => !affected.has(scene.scene_id));
+  const nextVideos = [...kept, ...(partial.scene_videos || [])].sort(
+    (a, b) => Number(a.scene_index) - Number(b.scene_index),
+  );
+  const keptFailed = (previous.failed_scenes || []).filter((scene) => !affected.has(String(scene.scene_id || "")));
+  return {
+    ...partial,
+    scene_videos: nextVideos,
+    failed_scenes: [...keptFailed, ...(partial.failed_scenes || [])],
+  };
+}
+
 function canReuseUneditedSceneVideos(
   videoScenePackages: PrepareScenePackagesResponse,
   generatedSceneVideos: NonNullable<ChatMessage["artifact"]>["generatedSceneVideos"] | undefined,
@@ -1918,6 +1963,15 @@ function hasMaterializedScenePackageJob(messages: ChatMessage[], job: PendingSce
   if (job.kind === "scene_asset_generation") {
     // 结构 early card / generating spinner 不算完成；必须有参考图。
     if (isSceneAssetGenerationMaterialized(messages, job.kind)) return true;
+    if (hasMediaResultMessage(messages, "scene_assets", job.job_id)) {
+      const mediaResult = messages.find((message) => message.id === mediaResultClientMessageId("scene_assets", job.job_id));
+      if (
+        mediaResult?.artifact?.type === "video_scene_packages"
+        && scenePackageHasGeneratedImages(mediaResult.artifact.videoScenePackages)
+      ) {
+        return true;
+      }
+    }
     return messages.some(
       (message) =>
         message.id === expectedMessageId
@@ -2060,10 +2114,8 @@ function restoreLatestVideoScenePackagesFromContext(
         creation_contract: context.creation_contract as VideoCreationContract | null | undefined,
       } satisfies PrepareScenePackagesResponse)
     : null;
-  const latestIndex = [...messages]
-    .reverse()
-    .findIndex((message) => message.artifact?.type === "video_scene_packages" && Boolean(message.artifact.videoScenePackages));
-  if (latestIndex < 0) {
+  const messageIndex = preferredVideoScenePackagesMessageIndex(messages);
+  if (messageIndex < 0) {
     if (!restoredVideoScenePackages) return messages;
     return [
       ...messages,
@@ -2084,23 +2136,25 @@ function restoreLatestVideoScenePackagesFromContext(
           generatedSceneVideos,
           mergedVideo,
           videoScenePackageEditedSceneIds: editedSceneIds || [],
+          sceneAssetsGenerating: false,
+          sceneAssetsAwaitingModel: false,
         },
       },
     ];
   }
-  const messageIndex = messages.length - 1 - latestIndex;
   return messages.map((message, index) => {
     const videoScenePackages = message.artifact?.videoScenePackages;
     if (index !== messageIndex || !message.artifact || !videoScenePackages) return message;
+    const nextPackages = resolveVideoScenePackagesForRestore(videoScenePackages, restoredVideoScenePackages) || videoScenePackages;
+    const preferredHasImages = scenePackageHasGeneratedImages(nextPackages);
     return {
       ...message,
       artifact: {
         ...message.artifact,
-        videoScenePackages: {
-          ...videoScenePackages,
-          global_assets: videoScenePackages.global_assets,
-          scene_packages: videoScenePackages.scene_packages,
-        },
+        videoScenePackages: nextPackages,
+        originalVideoScenePackages: message.artifact.originalVideoScenePackages || nextPackages,
+        sceneAssetsGenerating: preferredHasImages ? false : Boolean(message.artifact.sceneAssetsGenerating),
+        sceneAssetsAwaitingModel: preferredHasImages ? false : Boolean(message.artifact.sceneAssetsAwaitingModel),
         generatedSceneVideos:
           latestVideoResultArtifact?.generatedSceneVideos ||
           message.artifact.generatedSceneVideos ||
@@ -2328,13 +2382,23 @@ export function WorkspacePage() {
     ) return;
     setVideoAgentConfirmationSubmitting(true);
     setVideoAgentConfirmationError(null);
+    const creativeGate = isScriptCreativeConfirmationTitle(
+      supervisorRuntime.state.videoAgentConfirmation?.title,
+    );
     void supervisorRuntime.respondToVideoAgentConfirmation(
       submission.confirmationId,
       {
         step_id: submission.stepId,
         decision: submission.decision,
       },
-    ).catch(() => {
+    ).then(() => {
+      if (creativeGate && submission.decision === "cancel") {
+        pushAssistant(
+          "已取消当前创意方向。请直接用自然语言说明想怎么改（例如加冲突、换情绪、换时空跨度），我会重新从选题开始。",
+          conversationIdRef.current || currentConversationId || undefined,
+        );
+      }
+    }).catch(() => {
       setVideoAgentConfirmationError("确认请求未完成，请刷新后重试。");
     }).finally(() => {
       setVideoAgentConfirmationSubmitting(false);
@@ -2483,20 +2547,25 @@ export function WorkspacePage() {
       const next = { ...previous };
       order.forEach((planId, planIndex) => {
         const existing = next[planId];
-        if (existing && userMessages.some((message) => message.id === existing)) return;
-        // 锚点失效/新建：按 plan 序号对齐用户消息；最新 plan 优先锚到刚发出的用户消息。
         const isLatestPlan = planIndex === order.length - 1;
         const preferredId = lastPlanAnchorUserMessageIdRef.current;
-        const preferred = preferredId
-          ? userMessages.find((message) => message.id === preferredId)
-          : undefined;
-        const byIndex = userMessages[Math.min(planIndex, userMessages.length - 1)];
-        next[planId] = (
-          (!existing && isLatestPlan && preferred)
-          || byIndex
-          || preferred
-          || userMessages[userMessages.length - 1]
-        ).id;
+        const byIndexUser = userMessages[Math.min(planIndex, userMessages.length - 1)];
+        const preferredUserId = (
+          (!existing && isLatestPlan && preferredId)
+          || (existing && userMessages.some((message) => message.id === existing) ? existing : "")
+          || byIndexUser?.id
+          || preferredId
+          || userMessages[userMessages.length - 1]?.id
+          || ""
+        );
+        // 优先锚到用户消息后的「已收到创作请求…」回执，避免方案卡插在回执前面。
+        const resolved = resolveVideoAgentPlanAnchorId({
+          preferredUserMessageId: preferredUserId,
+          messages,
+        });
+        if (!resolved) return;
+        if (existing === resolved) return;
+        next[planId] = resolved;
         changed = true;
       });
       return changed ? next : previous;
@@ -2532,9 +2601,10 @@ export function WorkspacePage() {
     return () => window.clearTimeout(timer);
   }, [currentConversationId, videoAgentPlanAnchors]);
   const activeSupervisorVideoTarget = useMemo<SupervisorVideoTarget | null>(() => {
+    // V2.1 批次 D：关闭 V2 的 Workflow 影子 UI；进度与动作只走 VideoAgent Plan/Turn。
+    if (orchestrationMode === "video_agent_v2") return null;
     if (
-      orchestrationMode !== "video_agent_v2"
-      || !restoredSupervisorUi
+      !restoredSupervisorUi
       || supervisorRuntime.state.conversationId !== currentConversationId
     ) return null;
     const workflow = supervisorRuntime.state.workflows.find(
@@ -2637,6 +2707,7 @@ export function WorkspacePage() {
   const lastPlanAnchorUserMessageIdRef = useRef("");
   const scriptPlanConfirmedRef = useRef(false);
   const characterSupplementNoticeRef = useRef("");
+  const creativeRevisePendingRef = useRef(false);
   const durableScriptPlanMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPlanMessagePersistenceIdsRef = useRef(new Set<string>());
   const conversationIdRef = useRef<string>("");
@@ -2735,12 +2806,7 @@ export function WorkspacePage() {
       : projectedMessages;
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
-    if (orchestrationModeRef.current === "video_agent_v2") {
-      const nextProgress = projectSupervisorWorkflowProgress(supervisorRuntime.state.workflows);
-      workflowProgressConversationIdRef.current = currentConversationId;
-      workflowProgressRef.current = nextProgress;
-      setWorkflowProgress(nextProgress);
-    }
+    // V2.1 批次 D：不再用 workflows 影子进度驱动 V2 任务板。
   }, [
     currentConversationId,
     orchestrationMode,
@@ -2749,7 +2815,6 @@ export function WorkspacePage() {
     supervisorRuntime.state.connection.status,
     supervisorRuntime.state.conversationId,
     supervisorRuntime.state.messages,
-    supervisorRuntime.state.workflows,
   ]);
 
   useEffect(() => {
@@ -3015,6 +3080,40 @@ export function WorkspacePage() {
       conversationId: conversation,
       time: formatMessageTime(saved.created_at),
     };
+  };
+
+  /**
+   * 同 client_message_id 的进度/结果卡必须 PATCH 更新。
+   * append 对已存在 message_id 会原样返回旧记录，导致参考图进度刷新后丢失。
+   */
+  const upsertPersistedChatMessage = async (
+    message: ChatMessage,
+    targetConversationId: string,
+  ): Promise<void> => {
+    if (!targetConversationId) {
+      appendOptimisticMessageForConversation(message, targetConversationId);
+      return;
+    }
+    const optimisticMessage = appendOptimisticMessageForConversation(message, targetConversationId);
+    const payload = {
+      artifact: optimisticMessage.artifact,
+      materials: optimisticMessage.materials || [],
+      client_message_id: optimisticMessage.id,
+    } as unknown as Record<string, unknown>;
+    try {
+      await api.updateConversationMessage(targetConversationId, optimisticMessage.id, {
+        content: optimisticMessage.content,
+        payload,
+      });
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : 0;
+      if (status !== 404) return;
+      try {
+        await persistChatMessage(targetConversationId, optimisticMessage);
+      } catch {
+        // keep optimistic local copy
+      }
+    }
   };
 
   const replaceOptimisticMessage = (
@@ -3598,6 +3697,47 @@ export function WorkspacePage() {
 
   const handleUpdateVideoScenePackage = (msg: ChatMessage, sceneId: string, patch: ScenePackagePatch) => {
     updateVideoScenePackagesInMessage(msg.id, (scenePackages) => updateScenePackageField(scenePackages, sceneId, patch), sceneId);
+    // V2.1 批次 C：工作台编辑提交 Turn，由 patch_scene 写 Workspace dirty。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      const targetConversationId = messageConversationId(msg, conversationIdRef.current);
+      if (!targetConversationId) return;
+      const parts: string[] = [`修改分镜 ${sceneId}`];
+      if (typeof patch.storyline === "string" && patch.storyline.trim()) {
+        parts.push(`故事线：${patch.storyline.trim()}`);
+      }
+      if (typeof patch.prompt === "string" && patch.prompt.trim()) {
+        parts.push(`提示词：${patch.prompt.trim()}`);
+      }
+      if (typeof patch.narration === "string") {
+        parts.push(`旁白：${patch.narration}`);
+      }
+      if (typeof patch.transition === "string" && patch.transition.trim()) {
+        parts.push(`转场：${patch.transition.trim()}`);
+      }
+      if (patch.duration_ms != null && String(patch.duration_ms).trim()) {
+        parts.push(`时长毫秒：${String(patch.duration_ms).trim()}`);
+      }
+      const shotText = patch.shot_description && typeof patch.shot_description === "object"
+        && typeof patch.shot_description.text === "string"
+        ? patch.shot_description.text.trim()
+        : "";
+      if (shotText) parts.push(`镜头描述：${shotText}`);
+      void handleSupervisorTurn(
+        {
+          conversationId: targetConversationId,
+          clientInputId: uid(),
+          content: parts.join("。"),
+          materials: [],
+          replyToMessageId: null,
+          artifactRefs: [],
+          interruptId: null,
+          explicitAction: null,
+          continueLegacy: false,
+          registrationStatus: "pending",
+        },
+        supervisorRuntime.getContextVersion() ?? 0,
+      );
+    }
   };
 
   const handleReferenceGlobalAsset = (asset: SceneGlobalAssetReference) => {
@@ -3930,6 +4070,7 @@ export function WorkspacePage() {
         ratio: request.selection?.ratio,
         size: request.selection?.size,
         model: request.selection?.model,
+        conversation_id: targetConversationId,
       };
       const started = shouldFuseAsset ? await api.startImageAssetFusionJob(jobRequest) : await api.startImageAssetEditJob(jobRequest);
       const pendingImageJob: PendingImageJob = {
@@ -4104,6 +4245,7 @@ export function WorkspacePage() {
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
+        conversation_id: targetConversationId,
       };
       const selectedDirection = {
         direction_id: "image_edit",
@@ -5637,34 +5779,43 @@ export function WorkspacePage() {
         : awaitingModel
           ? "场景包结构已就绪。请选择生图模型后再生成参考图。"
           : "视频场景包和参考图已准备好，请确认后生成视频。");
-    pushArtifact(tip, {
-      type: "video_scene_packages",
-      title: "视频场景包",
-      description: options.generating
-        ? `${videoScenePackages.scene_packages.length} 个场景片段，参考图生成中，可先查看结构。`
-        : awaitingModel
-          ? `${videoScenePackages.scene_packages.length} 个场景片段，结构已就绪，待选择生图模型。`
-          : `${videoScenePackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
-      actionLabel: options.generating || awaitingModel ? "查看" : "确认",
-      videoScenePackages,
-      originalVideoScenePackages: videoScenePackages,
-      sceneAssetFailures: options.sceneAssetFailures || [],
-      sceneAssetsGenerating: options.generating,
-      sceneAssetsAwaitingModel: awaitingModel,
-      intent: "video",
-      formValues: artifact.formValues,
-      intakeContext: artifact.intakeContext,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-    }, targetConversationId, scenePackageJobMessageId(pendingScenePackageJob));
+    const message: ChatMessage = {
+      id: scenePackageJobMessageId(pendingScenePackageJob),
+      conversationId: targetConversationId || undefined,
+      role: "assistant",
+      content: tip,
+      time: "",
+      artifact: {
+        type: "video_scene_packages",
+        title: "视频场景包",
+        description: options.generating
+          ? `${videoScenePackages.scene_packages.length} 个场景片段，参考图生成中，可先查看结构。`
+          : awaitingModel
+            ? `${videoScenePackages.scene_packages.length} 个场景片段，结构已就绪，待选择生图模型。`
+            : `${videoScenePackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
+        actionLabel: options.generating || awaitingModel ? "查看" : "确认",
+        videoScenePackages,
+        originalVideoScenePackages: videoScenePackages,
+        sceneAssetFailures: options.sceneAssetFailures || [],
+        sceneAssetsGenerating: options.generating,
+        sceneAssetsAwaitingModel: awaitingModel,
+        intent: "video",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+      },
+    };
+    void upsertPersistedChatMessage(message, targetConversationId);
   };
 
   const sceneAssetModelOptionsMessageId = (jobId: string) => `scene-asset-model-options:${jobId}`;
 
   const pushSceneAssetModelOptionsCard = async (
-    pendingScenePackageJob: PendingScenePackageJob,
+    pendingScenePackageJob: Pick<PendingScenePackageJob, "conversation_id" | "job_id" | "artifact">,
     videoScenePackages: PrepareScenePackagesResponse,
+    options?: { messageId?: string },
   ) => {
     const targetConversationId = pendingScenePackageJob.conversation_id;
     const artifact = pendingScenePackageJob.artifact;
@@ -5694,6 +5845,7 @@ export function WorkspacePage() {
           },
           isEnabled: true,
         } as ImageModelParamConfig));
+    const messageId = options?.messageId || sceneAssetModelOptionsMessageId(pendingScenePackageJob.job_id);
     pushArtifact("场景包结构已就绪，请选择生图模型后再生成参考图。", {
       type: "scene_asset_model_options",
       title: "选择生图模型",
@@ -5710,7 +5862,7 @@ export function WorkspacePage() {
       sceneAssetModelConfigs: modelConfigs,
       sceneAssetModelConfirmed: false,
       creationContract: videoScenePackages.creation_contract || artifact.plan?.creation_contract,
-    }, targetConversationId, sceneAssetModelOptionsMessageId(pendingScenePackageJob.job_id));
+    }, targetConversationId, messageId);
   };
 
   const handleConfirmSceneAssetModel = async (
@@ -5768,50 +5920,101 @@ export function WorkspacePage() {
             sceneAssetModelConfirmed: true,
             videoScenePackages: nextPackages,
             creationContract: creationContract as unknown as Record<string, unknown>,
+            sceneAssetReferenceMaterials: selection.referenceMaterials || [],
+            sceneAssetReferenceBrief: selection.referenceBrief || "",
           },
         };
       });
       messagesRef.current = nextItems;
       return nextItems;
     });
-    upsertEarlyScenePackageCard(
-      {
-        job_id: msg.id.replace(/^scene-asset-model-options:/, "") || "scene-assets",
-        conversation_id: targetConversationId,
-        source_message_id: msg.id,
-        kind: "scene_asset_generation",
-        started_at: new Date().toISOString(),
-        request: {} as SceneAssetsJobRequest,
-        artifact: {
-          ...artifact,
-          videoScenePackages: nextPackages,
-          type: "video_scene_packages",
-          title: "视频场景包",
-          description: "",
-          actionLabel: "查看",
-        },
-      },
-      nextPackages,
-      {
-        generating: true,
-        tip: `已选择生图模型，正在生成场景参考图（${sceneAssetModelLabel(model)}）…`,
-      },
+    const confirmedMessage = messagesRef.current.find(
+      (item) => item.id === msg.id && messageConversationId(item, targetConversationId) === targetConversationId,
     );
+    if (confirmedMessage?.artifact) {
+      void api.updateConversationMessage(targetConversationId, msg.id, {
+        content: confirmedMessage.content,
+        payload: {
+          artifact: confirmedMessage.artifact,
+          materials: confirmedMessage.materials || confirmedMessage.artifact.materials || [],
+          client_message_id: msg.id,
+        } as unknown as Record<string, unknown>,
+      }).catch(() => {});
+    }
     setAssetPackageProgressSteps((current) => applyAssetPackageJobStage(
       current.length > 0 ? current : createAssetPackageProgressSteps(),
       "generate_scene_assets",
     ));
     pushAssistant(`已选择 ${sceneAssetModelLabel(model)}，开始生成场景参考图…`, targetConversationId);
+    // V2.1 批次 B：模型确认后提交 Turn，由 generate_scene_assets Tool 执行。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      try {
+        sessionStorage.setItem(
+          `pixelflow:last-scene-asset-model:${targetConversationId}`,
+          JSON.stringify({
+            model,
+            imageSize,
+            imageRatio,
+            referenceBrief: selection.referenceBrief || "",
+            materials: selection.referenceMaterials || [],
+          }),
+        );
+      } catch {
+        // ignore
+      }
+      const brief = String(selection.referenceBrief || "").trim();
+      await handleSupervisorTurn(
+        {
+          conversationId: targetConversationId,
+          clientInputId: uid(),
+          content: (
+            `确认生图模型 ${model}，比例 ${imageRatio}，清晰度 ${imageSize}，开始生成参考图`
+            + (brief ? `。用途：${brief}` : "")
+          ),
+          materials: [
+            ...(Array.isArray(artifact.materials) ? artifact.materials : []),
+            ...(selection.referenceMaterials || []),
+          ],
+          replyToMessageId: null,
+          artifactRefs: [],
+          interruptId: null,
+          explicitAction: null,
+          continueLegacy: false,
+          registrationStatus: "pending",
+        },
+        supervisorRuntime.getContextVersion() ?? 0,
+      );
+      return;
+    }
     try {
       const request: SceneAssetsJobRequest = {
         global_assets: nextPackages.global_assets,
         scene_packages: nextPackages.scene_packages,
-        materials: artifact.materials || [],
+        materials: [
+          ...(Array.isArray(artifact.materials) ? artifact.materials : []),
+          ...(selection.referenceMaterials || []),
+        ],
         image_ratio: imageRatio,
         image_size: imageSize,
         model,
         creation_contract: creationContract,
+        reference_brief: selection.referenceBrief || "",
+        conversation_id: targetConversationId,
       };
+      try {
+        sessionStorage.setItem(
+          `pixelflow:last-scene-asset-model:${targetConversationId}`,
+          JSON.stringify({
+            model,
+            imageSize,
+            imageRatio,
+            referenceBrief: selection.referenceBrief || "",
+            materials: request.materials,
+          }),
+        );
+      } catch {
+        // ignore storage failures
+      }
       const started = await api.startSceneAssetsJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
         job_id: started.job_id,
@@ -5833,6 +6036,11 @@ export function WorkspacePage() {
           creationContract: creationContract as unknown as Record<string, unknown>,
         },
       };
+      // 进度卡用真实 job_id，避免改写历史模型卡或旧 prepare 卡。
+      upsertEarlyScenePackageCard(pendingScenePackageJob, nextPackages, {
+        generating: true,
+        tip: `已选择生图模型，正在生成场景参考图（${sceneAssetModelLabel(model)}）…`,
+      });
       await persistPendingScenePackageJob(pendingScenePackageJob, targetConversationId, "scene_asset_generation_running", {
         intent: "video",
         scene_package_stage: "generate_scene_assets",
@@ -5860,7 +6068,7 @@ export function WorkspacePage() {
     const assetName = (progress.asset_name || "参考图").trim() || "参考图";
     const statusText = progress.ok === false ? "失败" : "已完成";
     const content = `参考图 ${progress.completed}/${progress.total}：${typeLabel}「${assetName}」${statusText}`;
-    void appendMessageForConversation(
+    void upsertPersistedChatMessage(
       {
         id: `scene-package-asset-tip:${pendingScenePackageJob.job_id}`,
         conversationId: pendingScenePackageJob.conversation_id,
@@ -5869,6 +6077,81 @@ export function WorkspacePage() {
         time: "",
       },
       pendingScenePackageJob.conversation_id,
+    );
+  };
+
+  const sceneVideoProgressMessageId = (jobId: string) => mediaResultClientMessageId("scene_videos", jobId);
+
+  const pushSceneVideoProgressTip = (
+    pendingVideoJob: PendingVideoJob,
+    progress: NonNullable<GenerateSceneVideosJobStatusResponse["video_progress"]>,
+  ) => {
+    if (!progress.total || progress.completed <= 0) return;
+    const sceneLabel = progress.scene_index
+      ? `第 ${progress.scene_index} 镜`
+      : (progress.scene_id || "分镜");
+    const statusText = progress.ok === false ? "失败" : "已完成，可预览";
+    const content = `分镜视频 ${progress.completed}/${progress.total}：${sceneLabel}${statusText}`;
+    void appendMessageForConversation(
+      {
+        id: `scene-video-progress-tip:${pendingVideoJob.job_id}`,
+        conversationId: pendingVideoJob.conversation_id,
+        role: "assistant",
+        content,
+        time: "",
+      },
+      pendingVideoJob.conversation_id,
+    );
+  };
+
+  const upsertEarlySceneVideoCard = (
+    pendingVideoJob: PendingVideoJob,
+    partial: GenerateSceneVideosResponse,
+    options?: { tip?: string },
+  ) => {
+    const targetConversationId = pendingVideoJob.conversation_id;
+    const artifact = pendingVideoJob.artifact;
+    const videoScenePackages = artifact.videoScenePackages;
+    if (!videoScenePackages) return;
+    const merged = mergePartialGeneratedSceneVideos(
+      artifact.generatedSceneVideos,
+      partial,
+      pendingVideoJob.affected_scene_ids,
+    );
+    const requestScenes = "scenes" in pendingVideoJob.request ? pendingVideoJob.request.scenes : [];
+    const total = requestScenes.length || videoScenePackages.scene_packages.length;
+    const completed = merged.scene_videos.length;
+    const tip = options?.tip
+      || (completed > 0
+        ? `分镜视频生成中（已完成 ${completed}/${total}），可先预览已生成片段。`
+        : "场景包已确认，正在生成场景视频…完成后可在卡片中预览每段。");
+    void upsertPersistedChatMessage(
+      {
+        id: sceneVideoProgressMessageId(pendingVideoJob.job_id),
+        conversationId: targetConversationId || undefined,
+        role: "assistant",
+        content: tip,
+        time: "",
+        artifact: {
+          type: "video_result",
+          title: "分镜视频",
+          description: completed > 0
+            ? `已生成 ${completed} 段分镜视频，其余仍在生成中。`
+            : `${videoScenePackages.scene_packages.length} 个分镜，视频生成中。`,
+          actionLabel: "查看",
+          videoScenePackages,
+          originalVideoScenePackages: artifact.originalVideoScenePackages || videoScenePackages,
+          generatedSceneVideos: merged,
+          sceneVideosGenerating: true,
+          intent: "video",
+          formValues: artifact.formValues,
+          intakeContext: artifact.intakeContext,
+          materials: artifact.materials || [],
+          selectedDirection: artifact.selectedDirection,
+          plan: artifact.plan,
+        },
+      },
+      targetConversationId,
     );
   };
 
@@ -5928,28 +6211,37 @@ export function WorkspacePage() {
     const imageReviewStartedAt = Date.now();
     const imageReviewRequestedAt = new Date(imageReviewStartedAt).toISOString();
     const imageReviewExpiresAt = reviewExpiresAt(imageReviewStartedAt, AUTO_CONFIRM_TIMEOUT_MS);
-    const imageResultMessage = pushArtifact(imageResult.ok ? imageResultSuccessContentForJob(pendingImageJob) : imageResultFailureContentForJob(pendingImageJob), {
-      type: "image_result",
-      title: imageResultTitleForJob(pendingImageJob),
-      description: imageQuotaInsufficient
-        ? quotaMessage(imageResult.message || (pendingImageJob.kind === "image_regeneration" ? "图片重新生成额度不足。" : "图片生成额度不足。"))
-        : imageResultSummary(imageResult),
-      actionLabel: "查看",
-      imageResult,
-      imagePrepare,
-      imageEditRequest: artifact.imageEditRequest,
-      imageEditConfirmedSelection: artifact.imageEditConfirmedSelection,
-      imageRevisionFeedback: pendingImageJob.revision_feedback || artifact.imageRevisionFeedback,
-      intent: "image",
-      formValues: artifact.formValues,
-      intakeContext: artifact.intakeContext,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-      reviewRequestedAt: imageResult.ok ? imageReviewRequestedAt : undefined,
-      reviewExpiresAt: canAcceptImageResult(imageResult) ? imageReviewExpiresAt : undefined,
-    }, targetConversationId);
-    if (canAcceptImageResult(imageResult)) {
+    const imageResultMessageId = mediaResultClientMessageId(
+      pendingImageJob.kind === "direct_image_edit" ? "image_generate" : "image_generate",
+      pendingImageJob.job_id,
+    );
+    let imageResultMessage: ChatMessage | undefined;
+    if (hasMediaResultMessage(messagesRef.current, "image_generate", pendingImageJob.job_id)) {
+      imageResultMessage = messagesRef.current.find((message) => message.id === imageResultMessageId);
+    } else {
+      imageResultMessage = pushArtifact(imageResult.ok ? imageResultSuccessContentForJob(pendingImageJob) : imageResultFailureContentForJob(pendingImageJob), {
+        type: "image_result",
+        title: imageResultTitleForJob(pendingImageJob),
+        description: imageQuotaInsufficient
+          ? quotaMessage(imageResult.message || (pendingImageJob.kind === "image_regeneration" ? "图片重新生成额度不足。" : "图片生成额度不足。"))
+          : imageResultSummary(imageResult),
+        actionLabel: "查看",
+        imageResult,
+        imagePrepare,
+        imageEditRequest: artifact.imageEditRequest,
+        imageEditConfirmedSelection: artifact.imageEditConfirmedSelection,
+        imageRevisionFeedback: pendingImageJob.revision_feedback || artifact.imageRevisionFeedback,
+        intent: "image",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+        reviewRequestedAt: imageResult.ok ? imageReviewRequestedAt : undefined,
+        reviewExpiresAt: canAcceptImageResult(imageResult) ? imageReviewExpiresAt : undefined,
+      }, targetConversationId, imageResult.ok ? imageResultMessageId : uid());
+    }
+    if (imageResultMessage && canAcceptImageResult(imageResult)) {
       window.setTimeout(() => {
         if (shouldAutoAcceptImageResult(imageResultMessage, targetConversationId)) {
           void handleAcceptImageResult(imageResultMessage, true);
@@ -6308,25 +6600,70 @@ export function WorkspacePage() {
       current.length > 0 ? current : createAssetPackageProgressSteps(),
       retryCompleted ? "completed" : "generate_scene_assets",
     ));
-    pushArtifact(retryCompleted ? successContent : failureContent, {
-      type: "video_scene_packages",
-      title: "视频场景包",
-      description: quotaPaused
-        ? quotaMessage(sceneAssets.message || "场景参考图生成额度不足。")
-        : `${nextPackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
-      actionLabel: quotaPaused ? "继续" : "确认",
-      videoScenePackages: nextPackages,
-      originalVideoScenePackages: artifact.originalVideoScenePackages || videoScenePackages,
-      sceneAssetFailures,
-      sceneAssetsGenerating: false,
-      sceneAssetsAwaitingModel: false,
-      intent: "video",
-      formValues: artifact.formValues,
-      intakeContext: artifact.intakeContext,
-      materials: artifact.materials || [],
-      selectedDirection: artifact.selectedDirection,
-      plan: artifact.plan,
-    }, targetConversationId, scenePackageJobMessageId(pendingScenePackageJob));
+
+    // 进度卡归档：结果已写入独立 media-result 卡，避免对话里留下「待生成」假进度。
+    const earlyMessageId = scenePackageJobMessageId(pendingScenePackageJob);
+    const resultMessageId = mediaResultClientMessageId("scene_assets", pendingScenePackageJob.job_id);
+    const archivedEarlyContent = "本批参考图进度已结束，请查看下方「参考图生成完成」结果卡。";
+    setMessages((items) => {
+      const nextItems = items.map((message) => {
+        if (messageConversationId(message, targetConversationId) !== targetConversationId) return message;
+        if (!message.artifact || message.artifact.type !== "video_scene_packages") return message;
+        const isCurrentEarly = message.id === earlyMessageId;
+        const isStaleEmptyProgress =
+          !message.artifact.sceneAssetProgressArchived
+          && Boolean(message.artifact.sceneAssetsGenerating || message.artifact.sceneAssetsAwaitingModel)
+          && !scenePackageHasGeneratedImages(message.artifact.videoScenePackages);
+        if (!isCurrentEarly && !isStaleEmptyProgress) return message;
+        return {
+          ...message,
+          content: isCurrentEarly ? archivedEarlyContent : message.content,
+          artifact: {
+            ...message.artifact,
+            sceneAssetsGenerating: false,
+            sceneAssetsAwaitingModel: false,
+            sceneAssetProgressArchived: true,
+          },
+        };
+      });
+      messagesRef.current = nextItems;
+      return nextItems;
+    });
+    const earlyMessage = messagesRef.current.find(
+      (message) => message.id === earlyMessageId && messageConversationId(message, targetConversationId) === targetConversationId,
+    );
+    if (earlyMessage?.artifact) {
+      void api.updateConversationMessage(targetConversationId, earlyMessageId, {
+        content: earlyMessage.content,
+        payload: {
+          artifact: earlyMessage.artifact,
+          materials: earlyMessage.materials || earlyMessage.artifact.materials || [],
+          client_message_id: earlyMessageId,
+        } as unknown as Record<string, unknown>,
+      }).catch(() => {});
+    }
+
+    if (!hasMediaResultMessage(messagesRef.current, "scene_assets", pendingScenePackageJob.job_id)) {
+      pushArtifact(retryCompleted ? successContent : failureContent, {
+        type: "video_scene_packages",
+        title: "视频场景包",
+        description: quotaPaused
+          ? quotaMessage(sceneAssets.message || "场景参考图生成额度不足。")
+          : `${nextPackages.scene_packages.length} 个场景片段，生成视频前必须确认。`,
+        actionLabel: quotaPaused ? "继续" : "确认",
+        videoScenePackages: nextPackages,
+        originalVideoScenePackages: artifact.originalVideoScenePackages || videoScenePackages,
+        sceneAssetFailures,
+        sceneAssetsGenerating: false,
+        sceneAssetsAwaitingModel: false,
+        intent: "video",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+      }, targetConversationId, resultMessageId);
+    }
 
     await clearPendingScenePackageJob(
       targetConversationId,
@@ -6339,6 +6676,7 @@ export function WorkspacePage() {
     videoScenePackages: PrepareScenePackagesResponse,
     sceneIds?: Set<string>,
     editedSceneIds: Set<string> = sceneIds || new Set<string>(),
+    conversationId?: string,
   ): SceneVideosJobRequest => {
     const creationContract = videoScenePackages.creation_contract || {
       video_duration_sec: videoScenePackages.target_duration_ms / 1000,
@@ -6361,12 +6699,14 @@ export function WorkspacePage() {
       model: creationContract.video_model,
       sound: creationContract.video_sound,
       creation_contract: creationContract,
+      conversation_id: conversationId,
     };
   };
 
   const mergeRequestFromSceneVideos = (
     sceneVideos: NonNullable<ChatArtifact["generatedSceneVideos"]>["scene_videos"],
     targetDurationMs?: number,
+    conversationId?: string,
   ): MergeSceneVideosJobRequest => ({
     scene_videos: sceneVideos.map((scene) => ({
       scene_id: scene.scene_id,
@@ -6375,6 +6715,7 @@ export function WorkspacePage() {
     })),
     duration: Math.max(1, Math.ceil((targetDurationMs || 1000) / 1000)),
     size: "1080p",
+    conversation_id: conversationId,
   });
 
   const handleCompletedVideoMergeJob = async (
@@ -6394,40 +6735,44 @@ export function WorkspacePage() {
     const isRegeneration = pendingVideoJob.merge_purpose === "regeneration";
     const mergeQuotaInsufficient = isQuotaInsufficientPayload(mergedVideo);
     const videoReviewRequestedAt = new Date().toISOString();
-    pushArtifact(
-      mergedVideo.ok
-        ? isRegeneration
-          ? "视频已按修改意见重新生成，请查看新版本。"
-          : "视频生成完成，请查看合并视频和场景视频。"
-        : isRegeneration
-          ? "视频重新合并失败，请查看错误信息。"
-          : "视频合并失败，请查看错误信息。",
-      {
-        type: "video_result",
-        title: isRegeneration ? "视频修改结果" : "视频生成结果",
-        description: mergedVideo.ok
+    const mergeResultMessageId = mediaResultClientMessageId("merge_video", pendingVideoJob.job_id);
+    if (!hasMediaResultMessage(messagesRef.current, "merge_video", pendingVideoJob.job_id) || !mergedVideo.ok) {
+      pushArtifact(
+        mergedVideo.ok
           ? isRegeneration
-            ? "已复用未受影响场景，并合并新版本视频。"
-            : "合并视频和每个场景视频已返回。"
-          : mergeQuotaInsufficient
-            ? quotaMessage(mergedVideo.message || "视频合并额度不足。")
-            : mergedVideo.message,
-        actionLabel: "查看",
-        videoScenePackages,
-        originalVideoScenePackages,
-        generatedSceneVideos,
-        mergedVideo,
-        videoScenePackageEditedSceneIds: [],
-        intent: "video",
-        formValues: artifact.formValues,
-        intakeContext: artifact.intakeContext,
-        materials: artifact.materials || [],
-        selectedDirection: artifact.selectedDirection,
-        plan: artifact.plan,
-        reviewRequestedAt: mergedVideo.ok ? videoReviewRequestedAt : undefined,
-      },
-      targetConversationId,
-    );
+            ? "视频已按修改意见重新生成，请查看新版本。"
+            : "视频生成完成，请查看合并视频和场景视频。"
+          : isRegeneration
+            ? "视频重新合并失败，请查看错误信息。"
+            : "视频合并失败，请查看错误信息。",
+        {
+          type: "video_result",
+          title: isRegeneration ? "视频修改结果" : "视频生成结果",
+          description: mergedVideo.ok
+            ? isRegeneration
+              ? "已复用未受影响场景，并合并新版本视频。"
+              : "合并视频和每个场景视频已返回。"
+            : mergeQuotaInsufficient
+              ? quotaMessage(mergedVideo.message || "视频合并额度不足。")
+              : mergedVideo.message,
+          actionLabel: "查看",
+          videoScenePackages,
+          originalVideoScenePackages,
+          generatedSceneVideos,
+          mergedVideo,
+          videoScenePackageEditedSceneIds: [],
+          intent: "video",
+          formValues: artifact.formValues,
+          intakeContext: artifact.intakeContext,
+          materials: artifact.materials || [],
+          selectedDirection: artifact.selectedDirection,
+          plan: artifact.plan,
+          reviewRequestedAt: mergedVideo.ok ? videoReviewRequestedAt : undefined,
+        },
+        targetConversationId,
+        mergedVideo.ok ? mergeResultMessageId : uid(),
+      );
+    }
     if (mergedVideo.ok) {
       updateOriginalScenePackageMessageWithVideoResult(
         pendingVideoJob.source_message_id,
@@ -6495,7 +6840,11 @@ export function WorkspacePage() {
     mergePurpose?: "generation" | "regeneration";
     affectedSceneIds?: string[];
   }) => {
-    const request = mergeRequestFromSceneVideos(generatedSceneVideos.scene_videos, videoScenePackages.target_duration_ms);
+    const request = mergeRequestFromSceneVideos(
+      generatedSceneVideos.scene_videos,
+      videoScenePackages.target_duration_ms,
+      targetConversationId,
+    );
     const started = await api.startMergeSceneVideosJob(request);
     const pendingVideoJob: PendingVideoJob = {
       job_id: started.job_id,
@@ -6546,13 +6895,14 @@ export function WorkspacePage() {
         videoScenePackages,
         originalVideoScenePackages,
         generatedSceneVideos,
+        sceneVideosGenerating: false,
         intent: "video",
         formValues: artifact.formValues,
         intakeContext: artifact.intakeContext,
         materials: artifact.materials || [],
         selectedDirection: artifact.selectedDirection,
         plan: artifact.plan,
-      }, targetConversationId);
+      }, targetConversationId, mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id));
       await clearPendingVideoJob(targetConversationId, videoQuotaInsufficient ? "video_generation_quota_paused" : "video_generation_failed", {
         global_assets: videoScenePackages.global_assets,
         intake_context: artifact.intakeContext,
@@ -6564,7 +6914,29 @@ export function WorkspacePage() {
       return;
     }
 
-    pushAssistant("场景视频已生成，正在按场景顺序合并完整视频…", targetConversationId);
+    // 分镜视频成功即落历史卡（不等待 merge）；服务端已写则 upsert 清掉 generating。
+    const sceneVideosResultMessageId = mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id);
+    const existingSceneVideosCard = messagesRef.current.find((message) => message.id === sceneVideosResultMessageId);
+    if (!existingSceneVideosCard || existingSceneVideosCard.artifact?.sceneVideosGenerating) {
+      pushArtifact("分镜视频本批已生成，可在历史中查看；正在按场景顺序合并完整视频…", {
+        type: "video_result",
+        title: "分镜视频",
+        description: "本批分镜视频已生成，可在历史中查看。",
+        actionLabel: "查看",
+        videoScenePackages,
+        originalVideoScenePackages,
+        generatedSceneVideos,
+        sceneVideosGenerating: false,
+        intent: "video",
+        formValues: artifact.formValues,
+        intakeContext: artifact.intakeContext,
+        materials: artifact.materials || [],
+        selectedDirection: artifact.selectedDirection,
+        plan: artifact.plan,
+      }, targetConversationId, sceneVideosResultMessageId);
+    } else {
+      pushAssistant("场景视频已生成，正在按场景顺序合并完整视频…", targetConversationId);
+    }
     await startAndResumeVideoMergeJob({
       targetConversationId,
       sourceMessageId: pendingVideoJob.source_message_id,
@@ -6603,13 +6975,14 @@ export function WorkspacePage() {
         videoScenePackageEditedSceneIds: artifact.videoScenePackageEditedSceneIds || pendingVideoJob.affected_scene_ids || [],
         generatedSceneVideos: regenerated,
         mergedVideo: artifact.mergedVideo,
+        sceneVideosGenerating: false,
         intent: "video",
         formValues: artifact.formValues,
         intakeContext: artifact.intakeContext,
         materials: artifact.materials || [],
         selectedDirection: artifact.selectedDirection,
         plan: artifact.plan,
-      }, targetConversationId);
+      }, targetConversationId, mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id));
       await clearPendingVideoJob(targetConversationId, isQuotaInsufficientPayload(regenerated) ? "video_regeneration_quota_paused" : "video_regeneration_failed", {
         video_revision_feedback: artifact.videoRevisionFeedback,
         video_revision_use_quality_review: pendingVideoJob.use_quality_review,
@@ -6634,6 +7007,22 @@ export function WorkspacePage() {
       scene_videos: nextSceneVideos,
       message: "已按修改意见更新受影响场景。",
     };
+    pushArtifact("受影响分镜已更新，正在合并新版本视频…", {
+      type: "video_result",
+      title: "分镜视频",
+      description: "受影响分镜已更新，可在历史中查看。",
+      actionLabel: "查看",
+      videoScenePackages: displayVideoScenePackages,
+      originalVideoScenePackages,
+      generatedSceneVideos,
+      sceneVideosGenerating: false,
+      intent: "video",
+      formValues: artifact.formValues,
+      intakeContext: artifact.intakeContext,
+      materials: artifact.materials || [],
+      selectedDirection: artifact.selectedDirection,
+      plan: artifact.plan,
+    }, targetConversationId, mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id));
     await startAndResumeVideoMergeJob({
       targetConversationId,
       sourceMessageId: pendingVideoJob.source_message_id,
@@ -6683,13 +7072,14 @@ export function WorkspacePage() {
         actionLabel: "查看",
         videoScenePackages: artifact.videoScenePackages,
         generatedSceneVideos,
+        sceneVideosGenerating: false,
         intent: "video",
         formValues: artifact.formValues,
         intakeContext: artifact.intakeContext,
         materials: artifact.materials || [],
         selectedDirection: artifact.selectedDirection,
         plan: artifact.plan,
-      }, targetConversationId);
+      }, targetConversationId, mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id));
       await clearPendingVideoJob(targetConversationId, videoQuotaInsufficient ? "video_generation_quota_paused" : "video_generation_failed", {
         affected_scene_ids: pendingVideoJob.affected_scene_ids || [],
         global_assets: artifact.videoScenePackages.global_assets,
@@ -6702,7 +7092,22 @@ export function WorkspacePage() {
       return;
     }
 
-    pushAssistant("失败分镜已补齐，正在按场景顺序合并完整视频…", targetConversationId);
+    pushArtifact("失败分镜已补齐，可在历史中查看；正在按场景顺序合并完整视频…", {
+      type: "video_result",
+      title: "分镜视频",
+      description: "失败分镜已补齐，可在历史中查看。",
+      actionLabel: "查看",
+      videoScenePackages: artifact.videoScenePackages,
+      originalVideoScenePackages: artifact.originalVideoScenePackages,
+      generatedSceneVideos,
+      sceneVideosGenerating: false,
+      intent: "video",
+      formValues: artifact.formValues,
+      intakeContext: artifact.intakeContext,
+      materials: artifact.materials || [],
+      selectedDirection: artifact.selectedDirection,
+      plan: artifact.plan,
+    }, targetConversationId, mediaResultClientMessageId("scene_videos", pendingVideoJob.job_id));
     await startAndResumeVideoMergeJob({
       targetConversationId,
       sourceMessageId: pendingVideoJob.source_message_id,
@@ -6728,6 +7133,26 @@ export function WorkspacePage() {
       return true;
     };
     setBusyForConversation(pendingVideoJob.conversation_id, true);
+    let lastVideoProgressCompleted = -1;
+    let earlySceneVideoCardShown = false;
+    const syncSceneVideoProgress = (status: GenerateSceneVideosJobStatusResponse) => {
+      if (pendingVideoJob.kind === "video_merge") return;
+      const generating = status.status === "running";
+      const progress = status.video_progress;
+      const progressTick = Boolean(
+        progress
+        && progress.total > 0
+        && progress.completed > lastVideoProgressCompleted,
+      );
+      if (generating && status.result && (!earlySceneVideoCardShown || progressTick)) {
+        upsertEarlySceneVideoCard(pendingVideoJob, status.result);
+        earlySceneVideoCardShown = true;
+      }
+      if (progress && progress.total > 0 && progress.completed > lastVideoProgressCompleted) {
+        lastVideoProgressCompleted = progress.completed;
+        pushSceneVideoProgressTip(pendingVideoJob, progress);
+      }
+    };
     try {
       if (stopIfHidden()) return;
       if (pendingVideoJob.kind === "video_merge") {
@@ -6741,12 +7166,26 @@ export function WorkspacePage() {
         await handleCompletedVideoMergeJob(pendingVideoJob, mergedVideo, processedKey);
         return;
       }
+      if (pendingVideoJob.kind === "scene_generation" || pendingVideoJob.kind === "scene_regeneration" || pendingVideoJob.kind === "scene_failed_retry") {
+        upsertEarlySceneVideoCard(pendingVideoJob, {
+          ok: true,
+          endpoint: "/api/video/reference-mode-video",
+          scene_videos: [],
+          failed_scenes: [],
+          message: "场景视频生成中…",
+        });
+        earlySceneVideoCardShown = true;
+      }
       const status = await api.getSceneVideosJob(pendingVideoJob.job_id);
       if (stopIfHidden()) return;
+      syncSceneVideoProgress(status);
       const generatedSceneVideos =
         status.status === "completed" && status.result
           ? status.result
-          : await api.pollSceneVideoJob(pendingVideoJob.job_id, shouldContinuePolling);
+          : await api.pollSceneVideoJob(pendingVideoJob.job_id, shouldContinuePolling, (tick) => {
+            if (stopIfHidden()) return;
+            syncSceneVideoProgress(tick);
+          });
       if (!generatedSceneVideos || stopIfHidden()) return;
       if (pendingVideoJob.kind === "scene_regeneration") {
         await handleCompletedSceneRegenerationJob(pendingVideoJob, generatedSceneVideos, processedKey);
@@ -7030,6 +7469,9 @@ export function WorkspacePage() {
             ? "completed"
             : status.stage;
           let next = applyAssetPackageJobStage(base, stage);
+          if (status.stage === "prepare_scene_packages" && status.structure_progress) {
+            next = applyAssetPackageStructureProgress(next, status.structure_progress);
+          }
           if (status.stage === "generate_scene_assets" && status.asset_progress) {
             next = applyAssetPackageAssetProgress(next, status.asset_progress);
           }
@@ -7219,6 +7661,11 @@ export function WorkspacePage() {
     } catch (err) {
       releaseArtifactAction(processedKey);
       const message = err instanceof Error ? err.message : String(err);
+      // 旧 job 的迟到 resume 失败时，不得清掉当前活跃 pending，也别吓用户。
+      const activePending = pendingScenePackageJobRef.current;
+      if (activePending && activePending.job_id !== pendingScenePackageJob.job_id) {
+        return;
+      }
       const action = classifyScenePackageJobResume(err);
       if (action === "retain_pending") {
         const nextAttempt = (pendingScenePackageJob.restart_count || 0) + 1;
@@ -7239,15 +7686,43 @@ export function WorkspacePage() {
         }, scenePackageJobResumeDelayMs(nextAttempt));
         return;
       }
+      setAssetPackageProgressSteps((current) => failAssetPackageProgressSteps(
+        current,
+        action === "clear_not_found"
+          ? "任务不存在或已过期（常见于网关热重载）。请从最新 plan / 场景包卡片手动重试"
+          : `任务查询失败：${message}`,
+      ));
       pushAssistant(
         action === "clear_not_found"
-          ? "之前的场景包、参考图或素材修订任务不存在或已过期。为避免重复生成，我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
+          ? "之前的场景包、参考图或素材修订任务不存在或已过期（开发环境常见于网关热重载清空内存 Job）。执行规划已中断；为避免重复生成我没有自动重启，请从最新 plan 或场景包卡片手动重试。"
           : `继续查询场景包生成任务失败:${message}`,
         pendingScenePackageJob.conversation_id,
       );
-      await clearPendingScenePackageJob(pendingScenePackageJob.conversation_id, "scene_package_job_resume_failed", {
-        scene_package_job_resume_error: message,
-      }).catch(() => {});
+      // pending 清掉后必须同步摘掉卡片上的「参考图生成中」，否则分镜确认会假死锁住。
+      const clearedMessages = reconcileStaleSceneAssetUiFlags(messagesRef.current, { hasActiveAssetJob: false });
+      if (clearedMessages !== messagesRef.current) {
+        messagesRef.current = clearedMessages;
+        setMessages(clearedMessages);
+        for (const item of clearedMessages) {
+          if (messageConversationId(item, pendingScenePackageJob.conversation_id) !== pendingScenePackageJob.conversation_id) continue;
+          if (item.artifact?.type !== "video_scene_packages" && item.artifact?.type !== "scene_asset_model_options") continue;
+          void api.updateConversationMessage(pendingScenePackageJob.conversation_id, item.id, {
+            content: item.content,
+            payload: {
+              artifact: item.artifact,
+              materials: item.materials || item.artifact?.materials || [],
+              client_message_id: item.id,
+            } as unknown as Record<string, unknown>,
+          }).catch(() => {});
+        }
+      }
+      await clearPendingScenePackageJob(
+        pendingScenePackageJob.conversation_id,
+        action === "clear_not_found" ? "scene_package_awaiting_image_model" : "scene_package_job_resume_failed",
+        {
+          scene_package_job_resume_error: message,
+        },
+      ).catch(() => {});
     } finally {
       if (pausedForHiddenConversation) releaseArtifactAction(processedKey);
       activeScenePackageJobPollsRef.current.delete(pollKey);
@@ -7935,15 +8410,33 @@ export function WorkspacePage() {
       && !hasMaterializedScenePackageJob(normalizedMessages, pendingScenePackageJob)
       ? pendingScenePackageJob
       : null;
-    const reconciledMessages = reconcileStaleSceneAssetUiFlags(normalizedMessages, {
-      hasActiveAssetJob: Boolean(
-        resumableScenePackageJob
-        && (
-          resumableScenePackageJob.kind === "scene_asset_generation"
-          || resumableScenePackageJob.kind === "scene_package_generation"
+    const reconciledMessages = markConfirmedSceneAssetModelOptions(
+      reconcileStaleSceneAssetUiFlags(normalizedMessages, {
+        hasActiveAssetJob: Boolean(
+          resumableScenePackageJob
+          && (
+            resumableScenePackageJob.kind === "scene_asset_generation"
+            || resumableScenePackageJob.kind === "scene_package_generation"
+          ),
         ),
-      ),
-    });
+      }),
+    );
+    // 内存 reconcile 后写回消息，避免刷新前仍从 DB 读到假「参考图生成中」。
+    if (reconciledMessages !== normalizedMessages) {
+      for (const item of reconciledMessages) {
+        const before = normalizedMessages.find((message) => message.id === item.id);
+        if (!before || before.artifact === item.artifact) continue;
+        if (item.artifact?.type !== "video_scene_packages" && item.artifact?.type !== "scene_asset_model_options") continue;
+        void api.updateConversationMessage(detail.conversation.conversation_id, item.id, {
+          content: item.content,
+          payload: {
+            artifact: item.artifact,
+            materials: item.materials || item.artifact?.materials || [],
+            client_message_id: item.id,
+          } as unknown as Record<string, unknown>,
+        }).catch(() => {});
+      }
+    }
     const pendingPlanJobMaterialized = Boolean(
       pendingPlanJob
       && hasMaterializedPlanJob(reconciledMessages, detail.conversation.conversation_id, pendingPlanJob),
@@ -8687,12 +9180,13 @@ export function WorkspacePage() {
     explicitAction: ExplicitActionSignal,
     options: SubmitSupervisorActionOptions,
   ): Promise<void> {
+    // V2.1 批次 D：V2 禁止再写入 workflow action；frontend_v2 本就不走此入口。
+    if (orchestrationModeRef.current === "video_agent_v2") return;
     const clientInputId = crypto.randomUUID();
     const targetConversationId = currentConversationId;
     const interruptId = supervisorRuntime.state.interrupt?.interruptId ?? null;
     if (
-      orchestrationModeRef.current !== "video_agent_v2"
-      || !targetConversationId
+      !targetConversationId
       || !interruptId
       || !content.trim()
     ) return;
@@ -8925,14 +9419,105 @@ export function WorkspacePage() {
         ownership.orchestrationMode === "video_agent_v2"
         && !runtimeOptions.skipRuntimeRegistration
       ) {
-        const latestScenePackageMessage = [...messagesRef.current]
+        const creativeConfirmation = supervisorRuntime.state.videoAgentConfirmation;
+        if (
+          creativeConfirmation
+          && isScriptCreativeConfirmationTitle(creativeConfirmation.title)
+        ) {
+          if (isAgreeScriptCreativeRequest(text)) {
+            await appendMessageForConversation(
+              { ...message, conversationId: activeConversation },
+              activeConversation,
+            );
+            setReferencedMaterials([]);
+            if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+            try {
+              await supervisorRuntime.respondToVideoAgentConfirmation(
+                creativeConfirmation.confirmationId,
+                {
+                  step_id: creativeConfirmation.stepId,
+                  decision: "confirm",
+                },
+              );
+              pushAssistant("已确认选题创意，继续完善结构与角色设定…", activeConversation);
+            } catch {
+              pushAssistant("创意确认未完成，请点确认卡「同意创意继续」，或刷新后重试。", activeConversation);
+            }
+            return;
+          }
+
+          if (isCancelScriptCreativeRequest(text)) {
+            await appendMessageForConversation(
+              { ...message, conversationId: activeConversation },
+              activeConversation,
+            );
+            setReferencedMaterials([]);
+            if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+            try {
+              await supervisorRuntime.respondToVideoAgentConfirmation(
+                creativeConfirmation.confirmationId,
+                {
+                  step_id: creativeConfirmation.stepId,
+                  decision: "cancel",
+                },
+              );
+            } catch {
+              // 取消失败时仍提示用户换方向，避免卡死。
+            }
+            pushAssistant(
+              "已取消当前创意方向。请直接用自然语言说明想怎么改，我会重新从选题开始。",
+              activeConversation,
+            );
+            return;
+          }
+
+          // 其他自然语言 = 改创意：先取消闸门，再走新 Turn 重跑 /start。
+          try {
+            await supervisorRuntime.respondToVideoAgentConfirmation(
+              creativeConfirmation.confirmationId,
+              {
+                step_id: creativeConfirmation.stepId,
+                decision: "cancel",
+              },
+            );
+          } catch {
+            // 继续开新 Turn，避免旧确认卡挡住改创意。
+          }
+          characterSupplementNoticeRef.current =
+            "已按你的新想法重新从选题开始，确认创意后再继续后面的步骤…";
+          creativeRevisePendingRef.current = true;
+        }
+
+        const preferredScenePackageIndex = preferredVideoScenePackagesMessageIndex(
+          messagesRef.current.filter((item) => messageConversationId(item, activeConversation) === activeConversation),
+        );
+        const conversationScopedMessages = messagesRef.current.filter(
+          (item) => messageConversationId(item, activeConversation) === activeConversation,
+        );
+        const latestScenePackageMessage = preferredScenePackageIndex >= 0
+          ? conversationScopedMessages[preferredScenePackageIndex]
+          : [...messagesRef.current]
+            .reverse()
+            .find((item) => (
+              messageConversationId(item, activeConversation) === activeConversation
+              && item.artifact?.type === "video_scene_packages"
+              && item.artifact.videoScenePackages
+              && !item.artifact.sceneAssetProgressArchived
+            ));
+        const hasReadyScenePackage = Boolean(latestScenePackageMessage?.artifact?.videoScenePackages);
+        const hasGeneratedScenePackageImages = conversationScopedMessages.some((item) => (
+          item.artifact?.type === "video_scene_packages"
+          && scenePackageHasGeneratedImages(item.artifact.videoScenePackages)
+        ));
+        const latestFailedScenePackageMessage = [...conversationScopedMessages]
           .reverse()
           .find((item) => (
-            messageConversationId(item, activeConversation) === activeConversation
-            && item.artifact?.type === "video_scene_packages"
+            item.artifact?.type === "video_scene_packages"
             && item.artifact.videoScenePackages
+            && !item.artifact.sceneAssetProgressArchived
+            && Boolean(item.artifact.sceneAssetFailures?.length)
+            && sceneAssetRetryTargets(item.artifact.sceneAssetFailures).length > 0
           ));
-        const hasReadyScenePackage = Boolean(latestScenePackageMessage?.artifact?.videoScenePackages);
         const workspace = videoAgentView.workspace;
         const scriptMarkdown = resolveGeneratableScriptMarkdown({
           scriptContent: workspace?.script?.content,
@@ -8942,6 +9527,197 @@ export function WorkspacePage() {
           scriptContent: workspace?.script?.content,
           stages: workspace?.scriptStages,
         }) && Boolean(scriptMarkdown);
+
+        const resumeIntent = resolveWorkflowResumeIntent(text);
+        if (resumeIntent) {
+          await appendMessageForConversation(
+            { ...message, conversationId: activeConversation },
+            activeConversation,
+          );
+          setReferencedMaterials([]);
+          if (!conversationId) navigate(`/c/${activeConversation}`, { replace: true });
+
+          const pendingJob = pendingScenePackageJobRef.current;
+          if (pendingJob?.conversation_id === activeConversation) {
+            pushAssistant("仍在生成中，已继续查询原任务，不会重复开跑。", activeConversation);
+            void resumePendingScenePackageJob(pendingJob).catch(() => {});
+            return;
+          }
+
+          const awaitingModelMessage = [...messagesRef.current]
+            .reverse()
+            .find((item) => (
+              messageConversationId(item, activeConversation) === activeConversation
+              && item.artifact?.type === "scene_asset_model_options"
+              && !item.artifact.sceneAssetModelConfirmed
+            ));
+          const awaitingModel = Boolean(
+            awaitingModelMessage
+            || latestScenePackageMessage?.artifact?.sceneAssetsAwaitingModel
+          );
+          const quotaInterrupt = supervisorRuntime.state.videoAgentQuota;
+          const scriptConfirmed = scriptPlanConfirmedRef.current
+            || workspace?.payload?.script_plan_confirmed === true
+            || Boolean((workspace as { scriptPlanConfirmed?: boolean } | null | undefined)?.scriptPlanConfirmed);
+
+          if (resumeIntent === "edit_script") {
+            setCanvasOpen(false);
+            const plan = supervisorRuntime.state.videoAgentPlan;
+            const exportStep = plan
+              ? Object.values(plan.steps).find((step) => stageIdFromStep(step) === "export")
+              : null;
+            if (exportStep) setSelectedVideoAgentStepId(exportStep.stepId);
+            pushAssistant("已打开脚本预览，可直接在右侧继续编辑；确认后再生成资产包。", activeConversation);
+            return;
+          }
+
+          // 「继续生成失败的参考图」：只重试失败项，绝不新开 Skill 执行方案。
+          if (resumeIntent === "retry_failed_images") {
+            const retryMsg = latestFailedScenePackageMessage
+              || (
+                latestScenePackageMessage?.artifact?.sceneAssetFailures?.length
+                  ? latestScenePackageMessage
+                  : undefined
+              );
+            if (retryMsg) {
+              await handleRetrySceneAssets(retryMsg);
+              return;
+            }
+            pushAssistant(
+              "当前没有可重试的失败参考图。可打开场景包结果卡查看，或点「重新生成参考图」。",
+              activeConversation,
+            );
+            return;
+          }
+
+          // 已有部分参考图且仍有失败项时，「开始生图/继续」也只补失败项，避免误提示「已完成」或开新计划。
+          if (
+            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
+            && latestFailedScenePackageMessage
+            && !pendingJob
+          ) {
+            await handleRetrySceneAssets(latestFailedScenePackageMessage);
+            return;
+          }
+
+          if (
+            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
+            && hasGeneratedScenePackageImages
+            && !pendingJob
+          ) {
+            pushAssistant(
+              "参考图已经生成完成，请打开带图的场景包结果卡继续确认或生成视频；若要重跑参考图，请在结果卡点「重新生成参考图」。",
+              activeConversation,
+            );
+            return;
+          }
+
+          if (
+            (resumeIntent === "start_images" || resumeIntent === "generic_resume")
+            && awaitingModel
+          ) {
+            let prior: {
+              model?: string;
+              imageSize?: string;
+              imageRatio?: string;
+              referenceBrief?: string;
+              materials?: Array<Record<string, unknown>>;
+            } | null = null;
+            try {
+              const raw = sessionStorage.getItem(`pixelflow:last-scene-asset-model:${activeConversation}`);
+              prior = raw ? JSON.parse(raw) as typeof prior : null;
+            } catch {
+              prior = null;
+            }
+            if (prior?.model && awaitingModelMessage) {
+              await handleConfirmSceneAssetModel(awaitingModelMessage, {
+                model: String(prior.model),
+                ratio: String(prior.imageRatio || ""),
+                size: String(prior.imageSize || ""),
+                referenceMaterials: Array.isArray(prior.materials) ? prior.materials : [],
+                referenceBrief: String(prior.referenceBrief || ""),
+              });
+              return;
+            }
+            const packagesForModel =
+              awaitingModelMessage?.artifact?.videoScenePackages
+              || latestScenePackageMessage?.artifact?.videoScenePackages;
+            if (packagesForModel?.ok) {
+              const sourceArtifact = awaitingModelMessage?.artifact || latestScenePackageMessage?.artifact;
+              await pushSceneAssetModelOptionsCard(
+                {
+                  conversation_id: activeConversation,
+                  job_id: uid(),
+                  artifact: {
+                    type: "scene_asset_model_options",
+                    title: "选择生图模型",
+                    description: "",
+                    actionLabel: "确认",
+                    formValues: sourceArtifact?.formValues,
+                    intakeContext: sourceArtifact?.intakeContext,
+                    materials: sourceArtifact?.materials || [],
+                    selectedDirection: sourceArtifact?.selectedDirection,
+                    plan: sourceArtifact?.plan,
+                    videoScenePackages: packagesForModel,
+                    creationContract: packagesForModel.creation_contract || sourceArtifact?.creationContract,
+                  },
+                },
+                packagesForModel,
+                { messageId: sceneAssetModelOptionsMessageId(uid()) },
+              );
+              pushAssistant("请先在下方新的模型选择卡确认生图模型（也可上传参考图并说明用途），再说「开始生图」。", activeConversation);
+              return;
+            }
+            pushAssistant("请先在模型选择卡确认生图模型（也可上传参考图并说明用途），再说「开始生图」。", activeConversation);
+            return;
+          }
+
+          if (resumeIntent === "generic_resume" && quotaInterrupt?.quotaInterruptId) {
+            pushAssistant("检测到额度中断，请在额度卡点击「已充值，继续」后恢复。", activeConversation);
+            return;
+          }
+
+          if (
+            resumeIntent === "generic_resume"
+            && hasReadyScenePackage
+            && latestScenePackageMessage
+            && !latestScenePackageMessage.artifact?.sceneAssetsGenerating
+            && !latestScenePackageMessage.artifact?.sceneAssetsAwaitingModel
+          ) {
+            await handleGenerateVideoFromScenePackages(latestScenePackageMessage);
+            return;
+          }
+
+          if (
+            (resumeIntent === "generic_resume" || resumeIntent === "start_images")
+            && canRebuildAssetPackage
+            && scriptMarkdown
+            && !scriptConfirmed
+          ) {
+            await confirmScriptPlanAndGenerateAssetPackage(activeConversation, scriptMarkdown, message.id);
+            return;
+          }
+
+          if (resumeIntent === "generic_resume" && canRebuildAssetPackage && scriptMarkdown && scriptConfirmed) {
+            const materialsForJob = (workspace?.assets || [])
+              .filter((asset): asset is typeof asset & { url: string } => Boolean(asset.url))
+              .map((asset) => ({
+                asset_id: asset.artifactRef,
+                url: asset.url,
+                type: asset.mediaType,
+              }));
+            await startVideoAgentAssetPackageFromScript(
+              activeConversation,
+              scriptMarkdown,
+              materialsForJob,
+              "已从断点继续，正在生成视频资产包…",
+            );
+            return;
+          }
+
+          pushAssistant("当前没有可自动恢复的断点。可说明要「继续编辑脚本」「开始生图」或「生成成片」。", activeConversation);
+          return;
+        }
 
         if (
           hasReadyScenePackage
@@ -9115,6 +9891,7 @@ export function WorkspacePage() {
           || Boolean(workspace?.script?.content);
         if (
           hasActivePlan
+          && !creativeRevisePendingRef.current
           && isMajorRequirementChangeRequest(text, previousBrief)
           && !isRedesignTaskPlanRequest(text)
         ) {
@@ -9173,6 +9950,7 @@ export function WorkspacePage() {
           const notice = characterSupplementNoticeRef.current
             || "已收到创作请求，正在生成执行方案…";
           characterSupplementNoticeRef.current = "";
+          creativeRevisePendingRef.current = false;
           void appendPersistedSupervisorNotice(
             notice,
             activeConversation,
@@ -9368,6 +10146,7 @@ export function WorkspacePage() {
           prompt: imagePrepare.prompt,
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
+          conversation_id: targetConversationId,
         };
         const started = await api.startImageGenerationJob(request);
         const pendingImageJob: PendingImageJob = {
@@ -10245,6 +11024,7 @@ export function WorkspacePage() {
           prompt: imagePrepare.prompt,
           negative_prompt: imagePrepare.negative_prompt,
           params: imagePrepare.params,
+          conversation_id: targetConversationId,
         };
         const started = await api.startImageGenerationJob(request);
         const pendingImageJob: PendingImageJob = {
@@ -10490,6 +11270,26 @@ export function WorkspacePage() {
           url: asset.url,
           type: asset.mediaType,
         }));
+      // V2.1 批次 B：控制面提交 Turn，由 prepare_scene_packages Tool 执行，不再直接开 Job。
+      if (orchestrationModeRef.current === "video_agent_v2") {
+        pushAssistant("已确认脚本方案，已交给 VideoAgent 生成资产包…", targetConversationId);
+        await handleSupervisorTurn(
+          {
+            conversationId: targetConversationId,
+            clientInputId: uid(),
+            content: "确认脚本并生成资产包",
+            materials,
+            replyToMessageId: null,
+            artifactRefs: [],
+            interruptId: null,
+            explicitAction: null,
+            continueLegacy: false,
+            registrationStatus: "pending",
+          },
+          supervisorRuntime.getContextVersion() ?? 0,
+        );
+        return;
+      }
       await startVideoAgentAssetPackageFromScript(
         targetConversationId,
         markdown,
@@ -10510,6 +11310,30 @@ export function WorkspacePage() {
     options: { revisionFeedback?: string } = {},
   ) => {
     if (!targetConversationId || !planMarkdown.trim()) return;
+    // V2.1 批次 B：自然语言/按钮重做也走 Turn，禁止直接 startPrepareScenePackagesJob。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      const revisionFeedback = options.revisionFeedback?.trim() || "";
+      const content = revisionFeedback
+        ? `请按修改意见重新生成视频资产包：${revisionFeedback}`
+        : "确认脚本并生成资产包";
+      pushAssistant(notice, targetConversationId);
+      await handleSupervisorTurn(
+        {
+          conversationId: targetConversationId,
+          clientInputId: uid(),
+          content,
+          materials,
+          replyToMessageId: null,
+          artifactRefs: [],
+          interruptId: null,
+          explicitAction: null,
+          continueLegacy: false,
+          registrationStatus: "pending",
+        },
+        supervisorRuntime.getContextVersion() ?? 0,
+      );
+      return;
+    }
     const existing = pendingScenePackageJobRef.current;
     if (existing?.conversation_id === targetConversationId) {
       pushAssistant("视频资产包仍在生成中，请稍候…", targetConversationId);
@@ -10766,6 +11590,32 @@ export function WorkspacePage() {
       return;
     }
     pushAssistant(`正在重新生成 ${targetAssets.length} 个失败的场景参考图…`, targetConversationId);
+    // V2.1 批次 B：失败参考图重试走 Turn，由 generate_scene_assets Tool 执行。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      try {
+        await handleSupervisorTurn(
+          {
+            conversationId: targetConversationId,
+            clientInputId: uid(),
+            content: `继续生成失败的参考图（共 ${targetAssets.length} 个）`,
+            materials: artifact.materials || [],
+            replyToMessageId: null,
+            artifactRefs: [],
+            interruptId: null,
+            explicitAction: null,
+            continueLegacy: false,
+            registrationStatus: "pending",
+          },
+          supervisorRuntime.getContextVersion() ?? 0,
+        );
+      } catch (err) {
+        releaseArtifactAction(processedKey);
+        pushAssistant(`场景参考图继续生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      } finally {
+        setBusyForConversation(targetConversationId, false);
+      }
+      return;
+    }
     try {
       // 旧合同可能仍是 gpt-image-2+1080p；重试前按实时能力升到 4K/2K。
       let creationContract = videoScenePackages.creation_contract || undefined;
@@ -10802,6 +11652,7 @@ export function WorkspacePage() {
         model: imageModel,
         creation_contract: creationContract,
         target_assets: targetAssets,
+        conversation_id: targetConversationId,
       };
       const started = await api.startSceneAssetsJob(request);
       const pendingScenePackageJob: PendingScenePackageJob = {
@@ -11053,6 +11904,7 @@ export function WorkspacePage() {
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
+        conversation_id: targetConversationId,
       };
       const started = await api.startImageGenerationJob(request);
       const pendingImageJob: PendingImageJob = {
@@ -11116,6 +11968,7 @@ export function WorkspacePage() {
         prompt: imagePrepare.prompt,
         negative_prompt: imagePrepare.negative_prompt,
         params: imagePrepare.params,
+        conversation_id: targetConversationId,
       };
       const started = await api.startImageGenerationJob(request);
       const pendingImageJob: PendingImageJob = {
@@ -11419,12 +12272,43 @@ export function WorkspacePage() {
           : "场景包已确认，正在生成场景视频…",
       targetConversationId,
     );
+    // V2.1 批次 C：分镜视频生成/脏镜重生成走 Turn → generate_scenes，禁止直接开 Job。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      try {
+        const content = isDirtySceneRegeneration
+          ? `重新生成已修改的分镜视频（${Array.from(dirtySceneIds).join("、")}）`
+          : isFailedSceneRetry
+            ? `继续生成失败的分镜视频（${Array.from(retrySceneIds).join("、")}）`
+            : "确认并生成分镜视频";
+        await handleSupervisorTurn(
+          {
+            conversationId: targetConversationId,
+            clientInputId: uid(),
+            content,
+            materials: [],
+            replyToMessageId: null,
+            artifactRefs: [],
+            interruptId: null,
+            explicitAction: null,
+            continueLegacy: false,
+            registrationStatus: "pending",
+          },
+          supervisorRuntime.getContextVersion() ?? 0,
+        );
+      } catch (err) {
+        releaseArtifactAction(processedKey);
+        pushAssistant(`分镜视频生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      } finally {
+        setBusyForConversation(targetConversationId, false);
+      }
+      return;
+    }
     try {
       const request = isDirtySceneRegeneration
-        ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds)
+        ? sceneVideoRequestFromPackages(videoScenePackages, dirtySceneIds, dirtySceneIds, targetConversationId)
         : isFailedSceneRetry
-          ? sceneVideoRequestFromPackages(videoScenePackages, retrySceneIds)
-          : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds);
+          ? sceneVideoRequestFromPackages(videoScenePackages, retrySceneIds, retrySceneIds, targetConversationId)
+          : sceneVideoRequestFromPackages(videoScenePackages, undefined, dirtySceneIds, targetConversationId);
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = isDirtySceneRegeneration
         ? {
@@ -11613,6 +12497,35 @@ export function WorkspacePage() {
     }
     const affectedSceneLabel = formatSceneIndexesForMessage(artifact.videoScenePackages.scene_packages, affectedSceneIds);
     pushAssistant(`正在重生成 ${affectedSceneLabel}，并复用未受影响分镜…`, targetConversationId);
+    // V2.1 批次 C：QC/修改意见重生成走 Turn，由 patch_scene + generate_scenes 执行。
+    if (orchestrationModeRef.current === "video_agent_v2") {
+      try {
+        await handleSupervisorTurn(
+          {
+            conversationId: targetConversationId,
+            clientInputId: uid(),
+            content: (
+              `按修改意见重生成分镜 ${Array.from(affectedSceneIds).join("、")}：`
+              + `${artifact.videoRevisionFeedback || ""}`
+            ).trim(),
+            materials: [],
+            replyToMessageId: null,
+            artifactRefs: [],
+            interruptId: null,
+            explicitAction: null,
+            continueLegacy: false,
+            registrationStatus: "pending",
+          },
+          supervisorRuntime.getContextVersion() ?? 0,
+        );
+      } catch (err) {
+        releaseArtifactAction(processedKey);
+        pushAssistant(`分镜重生成失败:${err instanceof Error ? err.message : String(err)}`, targetConversationId);
+      } finally {
+        setBusyForConversation(targetConversationId, false);
+      }
+      return;
+    }
     try {
       const nextVideoScenePackages = {
         ...artifact.videoScenePackages,
@@ -11631,7 +12544,7 @@ export function WorkspacePage() {
         originalVideoScenePackages,
         videoScenePackageEditedSceneIds: Array.from(affectedSceneIds),
       };
-      const request = sceneVideoRequestFromPackages(nextVideoScenePackages, affectedSceneIds);
+      const request = sceneVideoRequestFromPackages(nextVideoScenePackages, affectedSceneIds, affectedSceneIds, targetConversationId);
       const started = await api.startSceneVideosJob(request);
       const pendingVideoJob: PendingVideoJob = {
         job_id: started.job_id,
@@ -11779,15 +12692,23 @@ export function WorkspacePage() {
   const agentPlanTaskBoard = deriveWorkflowTaskBoardFromAgentPlan(
     supervisorRuntime.state.videoAgentPlan,
   );
-  // Video Agent 有自主 Plan 时优先展示 Plan 步骤；否则回退固定阶段板。
-  const workflowTaskBoard = (
-    runtimePolicy.legacyRunnerEnabled || runtimePolicy.supervisorEnabled
-  ) && (agentPlanTaskBoard || derivedWorkflowTaskBoard)
-    ? {
-        ...(agentPlanTaskBoard || derivedWorkflowTaskBoard)!,
-        workflowId: `${currentConversationId}:${(agentPlanTaskBoard || derivedWorkflowTaskBoard)!.workflowId}`,
-      }
-    : null;
+  // Video Agent 有自主 Plan 时只展示 Plan；V2 不再回退 Workflow 影子阶段板。
+  const workflowTaskBoard = orchestrationMode === "video_agent_v2"
+    ? (agentPlanTaskBoard
+      ? {
+          ...agentPlanTaskBoard,
+          workflowId: `${currentConversationId}:${agentPlanTaskBoard.workflowId}`,
+        }
+      : null)
+    : (
+      (runtimePolicy.legacyRunnerEnabled || runtimePolicy.supervisorEnabled)
+      && (agentPlanTaskBoard || derivedWorkflowTaskBoard)
+        ? {
+            ...(agentPlanTaskBoard || derivedWorkflowTaskBoard)!,
+            workflowId: `${currentConversationId}:${(agentPlanTaskBoard || derivedWorkflowTaskBoard)!.workflowId}`,
+          }
+        : null
+    );
   const legacyArtifactActionsEnabled = runtimePolicy.legacyArtifactActionsEnabled;
 
   const jianyingDraftVersionForMessage = (msg: ChatMessage): string => {
@@ -12146,8 +13067,12 @@ export function WorkspacePage() {
                 && messages.some((message) => message.id === anchoredId)
               )
                 ? anchoredId
-                // 锚点失效时挂到首条用户消息，避免执行方案卡变成 orphan 沉到对话底部“消失”。
-                : (messages.find((message) => message.role === "user")?.id || "");
+                : resolveVideoAgentPlanAnchorId({
+                  preferredUserMessageId: (
+                    messages.find((message) => message.role === "user")?.id || ""
+                  ),
+                  messages,
+                });
               if (!afterMessageId) return null;
               const isActivePlan = supervisorRuntime.state.videoAgentPlan?.planId === planId;
               return {
@@ -12165,6 +13090,16 @@ export function WorkspacePage() {
                         title={supervisorRuntime.state.videoAgentConfirmation.title}
                         costSummary={supervisorRuntime.state.videoAgentConfirmation.costSummary}
                         affectedSceneIds={supervisorRuntime.state.videoAgentConfirmation.affectedSceneIds}
+                        confirmLabel={
+                          isScriptCreativeConfirmationTitle(supervisorRuntime.state.videoAgentConfirmation.title)
+                            ? "同意创意继续"
+                            : "确认执行"
+                        }
+                        cancelLabel={
+                          isScriptCreativeConfirmationTitle(supervisorRuntime.state.videoAgentConfirmation.title)
+                            ? "换个方向"
+                            : "取消"
+                        }
                         submitting={videoAgentConfirmationSubmitting}
                         actionAvailable={supervisorRuntime.state.videoAgentConfirmation.submittable}
                         unavailableReason={supervisorRuntime.state.videoAgentConfirmation.unavailableReason}
@@ -12240,15 +13175,13 @@ export function WorkspacePage() {
         onConfirmSceneAssetModel={handleConfirmSceneAssetModel}
         onAcceptImageResult={legacyArtifactActionsEnabled ? handleAcceptImageResult : undefined}
         onReviseImageResult={legacyArtifactActionsEnabled ? handleReviseImageResult : undefined}
-        onGenerateVideoFromScenePackages={(legacyArtifactActionsEnabled ? handleGenerateVideoFromScenePackages : undefined)
-          ?? supervisorVideoArtifact?.onGenerateVideoFromScenePackages}
+        onGenerateVideoFromScenePackages={handleGenerateVideoFromScenePackages}
         onAcceptVideoResult={(legacyArtifactActionsEnabled ? handleAcceptVideoResult : undefined)
           ?? supervisorVideoArtifact?.onAcceptVideoResult}
         onReviseVideoResult={(legacyArtifactActionsEnabled ? handleReviseVideoResult : undefined)
           ?? supervisorVideoArtifact?.onReviseVideoResult}
         onOpenVideoResult={handleOpenVideoResult}
-        onRegenerateVideoWithRevision={(legacyArtifactActionsEnabled ? handleRegenerateVideoWithRevision : undefined)
-          ?? supervisorVideoArtifact?.onRegenerateVideoWithRevision}
+        onRegenerateVideoWithRevision={handleRegenerateVideoWithRevision}
         onRetryImageResult={legacyArtifactActionsEnabled ? handleRetryImageResult : undefined}
         onRetrySceneAssets={(msg: ChatMessage) => {
           // prepare-scene-packages / Video Agent 资产包走 Python job；v2 下不能落到空的 continue_workflow。
@@ -12327,10 +13260,14 @@ export function WorkspacePage() {
       ) : canvasOpen && selectedStoryboardMessage?.artifact?.videoScenePackages ? (
         <VideoAgentStoryboardSurface
           msg={selectedStoryboardMessage}
-          deferSceneUpdates={Boolean(supervisorVideoArtifact)}
-          onUpdateVideoScenePackage={legacyArtifactActionsEnabled
-            ? (sceneId, patch) => handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch)
-            : supervisorVideoArtifact?.onUpdateVideoScenePackage}
+          deferSceneUpdates={orchestrationMode !== "video_agent_v2" && Boolean(supervisorVideoArtifact)}
+          onUpdateVideoScenePackage={(sceneId, patch) => {
+            if (orchestrationMode === "video_agent_v2" || legacyArtifactActionsEnabled) {
+              handleUpdateVideoScenePackage(selectedStoryboardMessage, sceneId, patch);
+              return;
+            }
+            void supervisorVideoArtifact?.onUpdateVideoScenePackage?.(sceneId, patch);
+          }}
           onReferenceGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleReferenceGlobalAsset
             : undefined}
           onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleDeleteGlobalAsset
@@ -12340,13 +13277,9 @@ export function WorkspacePage() {
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
             : supervisorVideoArtifact?.onAddGlobalAsset}
-          onGenerateVideo={legacyArtifactActionsEnabled
-            ? () => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)
-            : () => supervisorVideoArtifact?.onGenerateVideoFromScenePackages(selectedStoryboardMessage)}
-          onRetrySceneAssets={legacyArtifactActionsEnabled
-            ? () => handleRetrySceneAssets(selectedStoryboardMessage)
-            : () => supervisorVideoArtifact?.onRetrySceneAssets(selectedStoryboardMessage)}
-          onSave={legacyArtifactActionsEnabled
+          onGenerateVideo={() => handleGenerateVideoFromScenePackages(selectedStoryboardMessage)}
+          onRetrySceneAssets={() => handleRetrySceneAssets(selectedStoryboardMessage)}
+          onSave={orchestrationMode === "video_agent_v2" || legacyArtifactActionsEnabled
             ? () => handleSaveVideoScenePackage(selectedStoryboardMessage)
             : supervisorVideoArtifact?.onSaveStoryboard}
           onClose={() => {

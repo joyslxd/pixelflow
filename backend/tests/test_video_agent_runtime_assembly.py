@@ -72,17 +72,23 @@ def test_core_runtime_assembly_registers_all_tools_without_jianying() -> None:
         "analyze_reference_video",
         "brainstorm_script",
         "compose_or_export_video",
+        "confirm_script_creative",
+        "generate_scene_assets",
         "generate_scenes",
         "import_script",
         "inspect_scene",
         "inspect_video_workspace",
         "patch_scene",
+        "prepare_scene_packages",
         "replace_project_assets",
         "review_generated_scenes",
+        "run_script_skill_stage",
     )
     assert assembly.operation_resolver is not None
     assert assembly.operation_resolver.resolve("analyze_reference:0123456789abcdef") is reference
     assert assembly.operation_resolver.resolve("generate_scene:0123456789ab:v3") is scene
+    assert assembly.operation_resolver.resolve("prepare_scene_packages:0123456789abcdef") is not None
+    assert assembly.operation_resolver.resolve("generate_scene_assets:0123456789abcdef") is not None
     assert assembly.operation_resolver.resolve("deliver:mp4") is merge
     with pytest.raises(OperationConflictError):
         assembly.operation_resolver.resolve("deliver:jianying_package")

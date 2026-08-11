@@ -19,6 +19,9 @@ from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.creative.plan_markdown import build_plan_markdown
 from pixelflow.intake.forms import draft_creative_directions, validate_form
 
+
+pytestmark = pytest.mark.v1_workflow_legacy
+
 VIDEO_FORM = {
     "product_info": "AuroraFit 智能健康戒指",
     "product_category": "数码3C",

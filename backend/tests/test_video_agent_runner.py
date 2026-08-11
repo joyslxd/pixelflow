@@ -18,6 +18,7 @@ from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
 from pixelflow.video_agent.tools import (
+    ConfirmScriptCreativeTool,
     InspectVideoWorkspaceTool,
     RunScriptSkillStageTool,
     VideoToolRegistry,
@@ -52,30 +53,54 @@ async def test_runner_executes_persisted_plan_and_discards_credential(
         content="生成商品视频",
         artifact_refs=("artifact:product-1",),
     )
+    executor = VideoAgentExecutor(
+        repository=video_repository,
+        registry=VideoToolRegistry(
+            [RunScriptSkillStageTool(), ConfirmScriptCreativeTool()]
+        ),
+        clock=lambda: now,
+    )
     runner = VideoAgentRunner(
         repository=video_repository,
-        executor=VideoAgentExecutor(
-            repository=video_repository,
-            registry=VideoToolRegistry([RunScriptSkillStageTool()]),
-            clock=lambda: now,
-        ),
+        executor=executor,
     )
     credential = TransientVideoAgentCredential("Bearer transient-test")
+    scope = VideoAgentRunScope(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+        plan_id=submission.plan.plan_id,
+    )
 
-    await runner.notify_turn(
-        VideoAgentRunScope(
-            user_id="user-1",
-            conversation_id="conversation-1",
-            turn_id="turn-1",
-            plan_id=submission.plan.plan_id,
-        ),
-        credential,
+    await runner.notify_turn(scope, credential)
+
+    paused = await video_repository.get_plan("user-1", submission.plan.plan_id)
+    assert paused is not None
+    assert paused.status.value == "awaiting_confirmation"
+    assert paused.steps[0].status.value == "completed"
+    assert paused.steps[1].tool_name == "confirm_script_creative"
+    assert paused.steps[1].status.value == "awaiting_confirmation"
+
+    await executor.confirm_step(
+        "user-1",
+        submission.plan.plan_id,
+        paused.steps[1].step_id,
     )
 
     restored = await video_repository.get_plan("user-1", submission.plan.plan_id)
     assert restored is not None
     assert restored.status.value == "completed"
-    assert [step.tool_name for step in restored.steps] == ["run_script_skill_stage"] * 8
+    assert [step.tool_name for step in restored.steps] == [
+        "run_script_skill_stage",
+        "confirm_script_creative",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+        "run_script_skill_stage",
+    ]
     assert all(step.status.value == "completed" for step in restored.steps)
     events = await runtime_repository.list_events("user-1", "conversation-1")
     assert any(event.type.value == "agent.step.progressed" for event in events)

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
-import { Check, ChevronDown, Download, FileArchive, FileText, FileVideo, LoaderCircle, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Download, FileArchive, FileText, FileVideo, LoaderCircle, Pencil, Presentation, RefreshCw, SlidersHorizontal, Sparkles, Upload } from "lucide-react";
 import { VideoResultCard } from "@/components/canvas/VideoResultCard";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
 import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
-import type { CreativeDirectionResponse, ImageEditModelSelection, ImageModelParamConfig, PptPageImage } from "@/lib/api";
+import { api, type CreativeDirectionResponse, type ImageEditModelSelection, type ImageModelParamConfig, type PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 import { draftButtonState, isJianyingDraftResultRetryable, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 
@@ -281,8 +281,8 @@ export function MessageBubble({
   const sceneAssetFailed = Boolean(msg.artifact?.sceneAssetFailures?.length);
   const imageGenerationFailed = Boolean(msg.artifact?.imageResult && !canAcceptImageResult(msg.artifact.imageResult));
   const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
-  const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages);
-  const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length);
+  const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages && !msg.artifact.sceneVideosGenerating);
+  const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length && !msg.artifact.sceneVideosGenerating);
   const imageAccepted = Boolean(msg.artifact?.imageAccepted);
   const sceneGlobalAssetEditReview = Boolean(msg.artifact?.sceneGlobalAssetEditReview);
   const videoAccepted = Boolean(msg.artifact?.videoAccepted);
@@ -320,6 +320,14 @@ export function MessageBubble({
   const [selectedImageEditSize, setSelectedImageEditSize] = useState("");
   const [imageEditModelMenuOpen, setImageEditModelMenuOpen] = useState(false);
   const [imageEditModelMenuFocusIndex, setImageEditModelMenuFocusIndex] = useState(0);
+  const [sceneAssetReferenceMaterials, setSceneAssetReferenceMaterials] = useState<Array<Record<string, unknown>>>(
+    () => records(msg.artifact?.sceneAssetReferenceMaterials),
+  );
+  const [sceneAssetReferenceBrief, setSceneAssetReferenceBrief] = useState(
+    () => stringValue(msg.artifact?.sceneAssetReferenceBrief),
+  );
+  const [sceneAssetReferenceUploading, setSceneAssetReferenceUploading] = useState(false);
+  const sceneAssetReferenceInputRef = useRef<HTMLInputElement | null>(null);
   const imageEditModelMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -456,6 +464,8 @@ export function MessageBubble({
     if (!actionsDisabled) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (!target?.closest("button")) return;
+    // 参考图生成中仍允许打开分镜预览
+    if (target.closest('[data-allow-when-disabled="true"]')) return;
     event.preventDefault();
     event.stopPropagation();
   };
@@ -896,6 +906,100 @@ export function MessageBubble({
                     })}
                   </div>
                   {!msg.artifact.sceneAssetModelConfirmed ? (
+                    <div className="space-y-2 rounded-xl border border-dashed border-line bg-canvas/60 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[12px] font-medium text-ink">参考图（可选）</span>
+                        <button
+                          type="button"
+                          disabled={Boolean(actionsDisabled || sceneAssetReferenceUploading)}
+                          onClick={() => sceneAssetReferenceInputRef.current?.click()}
+                          className="inline-flex items-center gap-1 rounded-lg border border-line bg-white px-2.5 py-1 text-[11px] text-ink hover:bg-canvas disabled:opacity-50"
+                        >
+                          <Upload size={12} />
+                          {sceneAssetReferenceUploading ? "上传中…" : "上传图片"}
+                        </button>
+                        <input
+                          ref={sceneAssetReferenceInputRef}
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          className="hidden"
+                          onChange={(event) => {
+                            const files = Array.from(event.target.files || []);
+                            event.target.value = "";
+                            if (!files.length) return;
+                            void (async () => {
+                              setSceneAssetReferenceUploading(true);
+                              try {
+                                const uploaded: Array<Record<string, unknown>> = [];
+                                for (const file of files) {
+                                  if (!file.type.toLowerCase().startsWith("image/")) continue;
+                                  const result = await api.uploadAttachment(file);
+                                  if (result.type !== "image" || !result.url) continue;
+                                  uploaded.push({
+                                    url: result.url,
+                                    path: result.path || result.url,
+                                    name: result.name || result.filename,
+                                    mediaType: "image",
+                                    mimeType: result.mimeType,
+                                  });
+                                }
+                                if (uploaded.length) {
+                                  setSceneAssetReferenceMaterials((current) => [...current, ...uploaded]);
+                                }
+                              } finally {
+                                setSceneAssetReferenceUploading(false);
+                              }
+                            })();
+                          }}
+                        />
+                      </div>
+                      {sceneAssetReferenceMaterials.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                          {sceneAssetReferenceMaterials.map((material, index) => {
+                            const url = stringValue(material.url) || stringValue(material.artifact_url) || stringValue(material.image_url);
+                            if (!url) return null;
+                            return (
+                              <div key={`${url}-${index}`} className="relative h-14 w-14 overflow-hidden rounded-lg border border-line bg-white">
+                                <img src={url} alt={`参考图${index + 1}`} className="h-full w-full object-cover" />
+                                <span className="absolute bottom-0 left-0 right-0 bg-black/55 px-1 text-[9px] text-white">图{index + 1}</span>
+                                <button
+                                  type="button"
+                                  className="absolute right-0 top-0 bg-black/55 px-1 text-[10px] text-white"
+                                  onClick={() => setSceneAssetReferenceMaterials((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-ink-soft">可上传任务/道具/场景参考图；不上传则按文案生图。</p>
+                      )}
+                      <textarea
+                        value={sceneAssetReferenceBrief}
+                        disabled={Boolean(actionsDisabled)}
+                        onChange={(event) => setSceneAssetReferenceBrief(event.target.value)}
+                        placeholder="说明用途，例如：图1用于女主定妆；图2用于客厅场景；图3用于产品特写"
+                        className="min-h-[72px] w-full rounded-lg border border-line bg-white px-2.5 py-2 text-[12px] text-ink outline-none focus:border-accent"
+                      />
+                      {(() => {
+                        const assetHints = [
+                          ...globalAssetRecords(msg.artifact?.videoScenePackages?.global_assets, "characters").map((item) => `角色「${assetTitle(item, "未命名")}」`),
+                          ...globalAssetRecords(msg.artifact?.videoScenePackages?.global_assets, "scenes").map((item) => `场景「${assetTitle(item, "未命名")}」`),
+                          ...globalAssetRecords(msg.artifact?.videoScenePackages?.global_assets, "props").map((item) => `道具「${assetTitle(item, "未命名")}」`),
+                        ].slice(0, 8);
+                        if (!assetHints.length) return null;
+                        return (
+                          <p className="text-[11px] leading-relaxed text-ink-soft">
+                            可绑定资产：{assetHints.join("、")}
+                          </p>
+                        );
+                      })()}
+                    </div>
+                  ) : null}
+                  {!msg.artifact.sceneAssetModelConfirmed ? (
                     <button
                       type="button"
                       disabled={Boolean(actionsDisabled || !selected)}
@@ -903,6 +1007,8 @@ export function MessageBubble({
                         model: selected,
                         ratio: "",
                         size: "",
+                        referenceMaterials: sceneAssetReferenceMaterials,
+                        referenceBrief: sceneAssetReferenceBrief.trim(),
                       })}
                       className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
@@ -920,7 +1026,19 @@ export function MessageBubble({
           </div>
         ) : msg.artifact?.type === "video_scene_packages" && msg.artifact.videoScenePackages ? (
           <div className="mt-2 w-full max-w-[560px] overflow-hidden rounded-2xl border border-line bg-surface">
-            <div className="grid grid-cols-5 border-b border-line bg-canvas/60">
+            {msg.artifact.sceneAssetProgressArchived ? (
+              <div className="px-4 py-3 text-[13px] leading-relaxed text-ink-soft">
+                本批「生成中」进度卡已归档。请向上查看带参考图的结果卡继续确认或生成视频。
+              </div>
+            ) : (
+            <>
+            <button
+              type="button"
+              data-allow-when-disabled="true"
+              onClick={() => onOpenArtifact?.(msg)}
+              className="grid w-full grid-cols-5 border-b border-line bg-canvas/60 text-left"
+              title="查看分镜"
+            >
               {previewAssets(msg).length > 0 ? (
                 previewAssets(msg).map((asset) => (
                   <div key={asset.id} className="border-r border-line last:border-r-0">
@@ -934,7 +1052,7 @@ export function MessageBubble({
                   </div>
                 ))
               )}
-            </div>
+            </button>
             <div className="flex items-start gap-3">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
                 <FileVideo size={18} />
@@ -996,11 +1114,12 @@ export function MessageBubble({
                 ) : null}
               </div>
             ) : null}
-            {isLatestVideoScenePackage ? (
+            {(isLatestVideoScenePackage || msg.artifact.sceneAssetsGenerating || msg.artifact.sceneAssetsAwaitingModel) ? (
               <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
                 {msg.artifact.videoScenePackages ? (
                   <button
                     type="button"
+                    data-allow-when-disabled="true"
                     onClick={() => onOpenArtifact?.(msg)}
                     className="flex items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas"
                   >
@@ -1038,6 +1157,8 @@ export function MessageBubble({
                 )}
               </div>
             ) : null}
+            </>
+            )}
           </div>
         ) : msg.artifact?.type === "ppt_outline" && msg.artifact.pptSummary ? (
           <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
@@ -1465,9 +1586,21 @@ export function MessageBubble({
               </span>
               <span className={cn(
                 "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
-                msg.artifact.mergedVideo?.ok ? "bg-emerald/10 text-emerald" : "bg-amber/10 text-amber",
+                msg.artifact.sceneVideosGenerating
+                  ? "bg-amber/10 text-amber"
+                  : msg.artifact.mergedVideo?.ok
+                    ? "bg-emerald/10 text-emerald"
+                    : msg.artifact.generatedSceneVideos?.ok && !msg.artifact.mergedVideo
+                      ? "bg-emerald/10 text-emerald"
+                      : "bg-amber/10 text-amber",
               )}>
-                {msg.artifact.mergedVideo?.ok ? "已合并" : "失败"}
+                {msg.artifact.sceneVideosGenerating
+                  ? "生成中"
+                  : msg.artifact.mergedVideo?.ok
+                    ? "已合并"
+                    : msg.artifact.generatedSceneVideos?.ok && !msg.artifact.mergedVideo
+                      ? "分镜就绪"
+                      : "失败"}
               </span>
             </div>
             {msg.artifact.mergedVideo?.error && (
@@ -1488,7 +1621,9 @@ export function MessageBubble({
             )}
             {sceneVideoResults.length > 0 ? (
               <section className="space-y-2">
-                <div className="text-[13px] font-semibold text-ink">分镜视频生成结果</div>
+                <div className="text-[13px] font-semibold text-ink">
+                  {msg.artifact.sceneVideosGenerating ? "分镜视频预览（生成中）" : "分镜视频生成结果"}
+                </div>
                 <div className="grid gap-3 sm:grid-cols-3">
                   {sceneVideoResults.map((result) => (
                     <VideoResultCard
@@ -1499,6 +1634,10 @@ export function MessageBubble({
                   ))}
                 </div>
               </section>
+            ) : msg.artifact.sceneVideosGenerating ? (
+              <div className="rounded-xl border border-dashed border-line bg-canvas/50 px-3 py-4 text-center text-[12px] text-ink-soft">
+                分镜视频生成中，完成后可在此预览每段…
+              </div>
             ) : null}
             {msg.artifact.generatedSceneVideos?.failed_scenes.length ? (
               <div className="space-y-2 rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">

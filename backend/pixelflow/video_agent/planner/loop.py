@@ -76,8 +76,8 @@ class VideoAgentPlanner:
         )
 
     def _validate_proposal(self, proposal: VideoPlanProposal) -> str:
-        if not 1 <= len(proposal.steps) <= 8:
-            return "规划最多只能包含八个步骤"
+        if not 1 <= len(proposal.steps) <= 3:
+            return "规划最多只能包含三个步骤"
         for step in proposal.steps:
             tool = self._registry.resolve(step.tool_name)
             if tool is None:

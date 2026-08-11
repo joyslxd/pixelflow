@@ -114,7 +114,7 @@ flowchart TD
 | 策划 Agent | `pixelflow_planning.py`、`creative/plan_markdown.py`、`creative/plan_llm.py`、`creative/scene_blueprint.py`、`creative/seedance_plan.py` | 表单、创意方向、行业画像、素材、intake_context、创作合同 | plan.md、权威 `scene_blueprints`、模板路径、版本历史、最终生产合同、一致性问题 | 视频先生成总分总结构、镜头调度、精确时长和资产清单；稳定 `asset_id` 后调用 Seedance Skill 专门写作全部分镜，严格校验后再发布 |
 | 人工审核 Agent | `WorkspacePage.tsx` | plan.md、图片结果、视频结果、用户反馈 | 同意、修改模式、回退版本、重试指令 | “当前创意内修改”只生成下一版 Plan；只有明确选择“重新生成新创意”才返回 3 个创意方向；历史版本可回退 |
 | 图片生成 Agent | `pixelflow_image.py`、`generate/image_prepare.py` | plan.md、表单、素材、修改意见、数量 | 图片生成参数、图片结果 | 根据语义选择四类图片接口 |
-| 视频生成 Agent | `agent_workflows/video/planning.py`、`agent_workflows/video/scene_packages.py`、`agent_workflows/video/video_generation.py`、`agent_workflows/video/postproduction.py`、`agent_workflows/video/delivery.py`、`pixelflow_video.py` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan、场景包、分镜视频、合并/QC、剪映历史与下载投影的权威快照 | M11.1–M11.5 已形成完整候选 Application Service 链；尚未注册 Supervisor handler，生产仍走原 v2 |
+| 视频生成 Agent | **权威：** `video_agent/*`（Planner + Tools + Adapters）；兼容 Job：`pixelflow_video.py`；**已隔离（批次 E）：** `agent_workflows/video/*` | 当前版本 plan.md、`scene_blueprints`、最终生产合同、素材、场景编辑结果 | Plan、场景包、分镜视频、合并/QC、剪映历史与下载投影 | V2.1 主路径走 VideoAgent；`agent_workflows/video` 无生产 import，仅 legacy 测试对照；`frontend_v2` 仍可用 Job HTTP |
 | 视频分析 Agent | `pixelflow_video.py` | 文本和素材中的视频链接 | 单视频或多视频 storyboard | 先抽取媒体链接，再判断单个/批量 |
 | 剪映草稿 Agent | `pixelflow_jianying_draft.py`、`jianying_draft/service.py`、`jianying_draft/http_skill.py` | 来源对话、当前版本全部成功的有序分镜视频、`storyboard_version_id` | 草稿异步 job、第三方任务编号、TOS ZIP 下载地址或公开失败结果 | Router 类比 Spring Controller；Service 管理输入校验、幂等、状态机和 30 分钟超时；HTTP Skill 创建/轮询第三方任务、下载校验第三方 ZIP 并通过 content-app 原样上传 |
 | PPT制作 Agent | `pixelflow_ppt.py`、`intake/forms.py`、`skills/borgrise/run_generation.py` | PPT主题、风格、Word/Excel/PDF 附件、行业画像 | PPT大纲、页面JSON、页面图片、PPT文件 | 每一步是 content-app 异步任务，Python 后端 job 轮询 |
@@ -122,6 +122,8 @@ flowchart TD
 | 语义记忆 Service | `pixelflow/memory/service.py`、`app/gateway/pixelflow_memory.py` | 用户 ID、业务查询、阶段摘要 | PowerMem 记忆检索和写入 | 所有新增 Agent/流程都必须复用这一层，不直接拼 PowerMem HTTP |
 
 ### 4.1 M11.1 视频前置规划 Workflow Adapter 候选
+
+> **V2.1 批次 E（2026-08-11）：** 下列 `agent_workflows/video/*` 描述为历史候选 Application Service 链，**已从生产路径隔离**（无 Gateway / video_agent import）。权威编排见 `video_agent/*`。保留本节供对照；勿当作现行入口。
 
 `backend/pixelflow/agent_workflows/video/planning.py` 新增确定性的
 `VideoPlanningWorkflowService`，类比 Java 的视频领域 Application Service。它不调用

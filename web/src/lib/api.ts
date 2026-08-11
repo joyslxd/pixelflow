@@ -524,6 +524,8 @@ export interface ImageEditModelSelection {
   model: string;
   ratio: string;
   size: string;
+  referenceMaterials?: Array<Record<string, unknown>>;
+  referenceBrief?: string;
 }
 
 export interface UploadedAttachment extends Record<string, unknown> {
@@ -618,6 +620,10 @@ export interface PrepareScenePackagesJobStatusResponse {
     asset_type?: string;
     ok?: boolean;
     quota_insufficient?: boolean;
+  } | null;
+  structure_progress?: {
+    phase?: string;
+    message?: string;
   } | null;
   error: string | null;
   message: string;
@@ -724,6 +730,14 @@ export interface GenerateSceneVideosJobStatusResponse {
   job_id: string;
   status: "queued" | "running" | "completed" | "failed" | string;
   result: GenerateSceneVideosResponse | null;
+  video_progress?: {
+    completed: number;
+    total: number;
+    scene_id?: string;
+    scene_index?: number;
+    ok?: boolean;
+    quota_insufficient?: boolean;
+  } | null;
   error: string | null;
   message: string;
 }
@@ -1201,20 +1215,25 @@ async function pollPlanJob(
 async function pollSceneVideoJob(
   jobId: string,
   shouldContinue: () => boolean = () => true,
+  onProgress?: (status: GenerateSceneVideosJobStatusResponse) => void,
 ): Promise<GenerateSceneVideosResponse | null> {
   const deadline = Date.now() + SCENE_VIDEO_JOB_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!shouldContinue()) return null;
     const status = await req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`);
     if (!shouldContinue()) return null;
+    onProgress?.(status);
     if (status.status === "completed" && status.result) return status.result;
     if (status.status === "failed") {
       return {
         ok: false,
         endpoint: "/api/video/reference-mode-video",
-        scene_videos: [],
-        failed_scenes: [{ error: status.error || status.message || "场景视频生成失败" }],
+        scene_videos: status.result?.scene_videos || [],
+        failed_scenes: status.result?.failed_scenes?.length
+          ? status.result.failed_scenes
+          : [{ error: status.error || status.message || "场景视频生成失败" }],
         message: status.error || status.message || "场景视频生成失败",
+        quota_insufficient: status.result?.quota_insufficient,
       };
     }
     await delay(SCENE_VIDEO_JOB_POLL_INTERVAL_MS);
@@ -1924,6 +1943,7 @@ export const api = {
     prompt: string;
     negative_prompt?: string;
     params: Record<string, unknown>;
+    conversation_id?: string;
   }) => req<ImageGenerateJobStartResponse>(`${FLOW_BASE}/image/generate/start`, { method: "POST", body: JSON.stringify(body) }),
 
   getImageGenerationJob: (jobId: string) =>
@@ -1955,6 +1975,7 @@ export const api = {
     ratio?: string;
     size?: string;
     model?: string | null;
+    conversation_id?: string;
   }) => req<ImageAssetEditJobStartResponse>(`${FLOW_BASE}/image/edit-asset/start`, { method: "POST", body: JSON.stringify(body) }),
 
   getImageAssetEditJob: (jobId: string) =>
@@ -1986,6 +2007,7 @@ export const api = {
     ratio?: string;
     size?: string;
     model?: string | null;
+    conversation_id?: string;
   }) => req<ImageAssetFusionJobStartResponse>(`${FLOW_BASE}/image/fuse-asset/start`, { method: "POST", body: JSON.stringify(body) }),
 
   getImageAssetFusionJob: (jobId: string) =>
@@ -2045,6 +2067,13 @@ export const api = {
     model?: string | null;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     target_assets?: SceneAssetRetryTarget[];
+    reference_brief?: string | null;
+    asset_reference_bindings?: Array<{
+      asset_id?: string;
+      asset_type?: string;
+      reference_urls?: string[];
+    }>;
+    conversation_id?: string;
   }) =>
     req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
       method: "POST",
@@ -2076,6 +2105,7 @@ export const api = {
     model?: string | null;
     sound?: string;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
+    conversation_id?: string;
   }) =>
     req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
       method: "POST",
@@ -2150,6 +2180,7 @@ export const api = {
     duration?: number;
     size?: string;
     model?: string | null;
+    conversation_id?: string;
   }) =>
     req<MergeSceneVideosJobStartResponse>(`${FLOW_BASE}/video/merge/start`, {
       method: "POST",

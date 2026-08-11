@@ -2699,3 +2699,59 @@ def test_r1_runtime_endpoints_keep_owner_isolation_and_context_conflict_contract
 
     assert hidden_snapshot.status_code == 404
     assert hidden_turn.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_video_agent_v2_snapshot_omits_workflow_shadow_state() -> None:
+    """批次 D：video_agent_v2 Snapshot 不返回 workflows，即使库里仍有 Workflow 记录。"""
+
+    from app.gateway.routers import pixelflow_conversations
+
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=_assist_config(),
+        repository=repository,
+        task_store=task_store,
+        clock=lambda: NOW,
+    )
+    conversation = await task_store.create_conversation(
+        pixelflow_conversations.PixelFlowConversationRecord(
+            conversation_id="r1-v2-no-workflow-shadow",
+            user_id=str(USER_ID),
+            orchestration_mode="video_agent_v2",
+            orchestration_version=1,
+            context={
+                AGENT_RUNTIME_CONTEXT_KEY: {
+                    "mode": "primary",
+                    "primary_execution_ready": True,
+                    "enabled_intents": ["video"],
+                    "context_version": 0,
+                }
+            },
+        ),
+    )
+    await repository.create_workflow(
+        str(USER_ID),
+        WorkflowRecord(
+            workflow_id="wf-shadow-should-hide",
+            conversation_id=conversation.conversation_id,
+            kind=WorkflowKind.VIDEO,
+            status=WorkflowStatus.RUNNING,
+            current_stage="generate_scenes",
+            stage_version=1,
+            creation_contract_snapshot={},
+            latest_artifact_refs=[],
+            context_version=1,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+    )
+
+    projection = await service.snapshot(
+        user_id=str(USER_ID),
+        conversation_id=conversation.conversation_id,
+    )
+    assert projection.workflows == []
+    stored = await repository.list_workflows(str(USER_ID), conversation.conversation_id)
+    assert [item.workflow_id for item in stored] == ["wf-shadow-should-hide"]

@@ -489,6 +489,74 @@ def test_video_router_prepare_scene_package_job_can_pause_for_image_model(monkey
     assert status["result"]["sceneAssetFailures"] == []
 
 
+def test_video_router_prepare_scene_package_job_exposes_structure_progress(monkeypatch):
+    import asyncio
+    import time
+
+    from app.gateway.routers import pixelflow_video
+
+    async def fake_prepare_video_scene_packages_with_llm(**kwargs):
+        on_progress = kwargs.get("on_progress")
+        if on_progress is not None:
+            maybe = on_progress("invoke_llm", "正在调用结构模型 LLM，通常约几十秒到 2 分钟…")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+            await asyncio.sleep(0.05)
+            maybe = on_progress("parse_normalize", "正在整理全局资产与分镜结构…")
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        return {
+            "ok": True,
+            "message": "场景包已生成。",
+            "requires_confirmation": True,
+            "review_timeout_sec": None,
+            "target_duration_ms": 30_000,
+            "global_assets": {"characters": [], "scenes": [], "props": []},
+            "scene_packages": [{"scene_id": "scene-1", "scene_index": 1, "duration_ms": 8000, "prompt": "第一幕"}],
+        }
+
+    monkeypatch.setattr(pixelflow_video, "prepare_video_scene_packages_with_llm", fake_prepare_video_scene_packages_with_llm)
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        start_response = client.post(
+            "/agent/flows/video/prepare-scene-packages/start",
+            json={
+                "form_values": {"product_info": "耳机"},
+                "plan_markdown": "耳机场景",
+                "selected_direction": {"title": "通勤"},
+                "target_duration_ms": 30_000,
+                "generate_images": False,
+            },
+        )
+        assert start_response.status_code == 200
+        started = start_response.json()
+        status = None
+        for _ in range(80):
+            status_response = client.get(f"/agent/flows/video/prepare-scene-packages/jobs/{started['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            if status.get("structure_progress") and status["structure_progress"].get("phase") == "invoke_llm":
+                assert "结构模型" in (status["structure_progress"].get("message") or "")
+                assert "结构模型" in (status.get("message") or "")
+                break
+            if status["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        assert status is not None
+        # 最终仍应完成到 awaiting_image_model
+        for _ in range(80):
+            status_response = client.get(f"/agent/flows/video/prepare-scene-packages/jobs/{started['job_id']}")
+            status = status_response.json()
+            if status["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        assert status["status"] == "completed"
+        assert status["stage"] == "awaiting_image_model"
+
+
 def test_video_router_prepare_scene_package_job_exposes_asset_progress(monkeypatch):
     import asyncio
     import time
@@ -2255,6 +2323,74 @@ def test_video_router_starts_scene_video_job_and_polls_result(monkeypatch):
     assert status["status"] == "completed"
     assert status["result"]["ok"] is True
     assert status["result"]["scene_videos"][0]["video_url"] == "https://x/第一幕展示白色耳机.mp4"
+
+
+def test_video_router_scene_video_job_exposes_video_progress(monkeypatch):
+    import asyncio
+    import time
+
+    from app.gateway.routers import pixelflow_video
+    from pixelflow.skills import GenerationResult
+
+    class SlowVideoSkill:
+        async def reference_mode_video(self, **kwargs):
+            await asyncio.sleep(0.05)
+            return GenerationResult(
+                ok=True,
+                task_id=f"{kwargs['prompt']}-task",
+                url=f"https://x/{kwargs['prompt']}.mp4",
+                raw={"endpoint": "/api/video/reference-mode-video"},
+            )
+
+    monkeypatch.setattr(pixelflow_video, "get_video_skill", lambda: SlowVideoSkill())
+
+    app = make_authed_test_app(user_factory=_stable_user)
+    app.include_router(pixelflow_video.router)
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/agent/flows/video/generate-scenes/start",
+            json={
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "duration_ms": 8000,
+                        "prompt": "第一幕",
+                        "image_urls": ["https://x/role.png"],
+                    },
+                    {
+                        "scene_id": "scene-2",
+                        "scene_index": 2,
+                        "duration_ms": 8000,
+                        "prompt": "第二幕",
+                        "image_urls": ["https://x/role.png"],
+                    },
+                ],
+                "ratio": "9:16",
+                "size": "720p",
+                "sound": "on",
+            },
+        ).json()
+        seen_progress = False
+        status = None
+        for _ in range(80):
+            status = client.get(f"/agent/flows/video/generate-scenes/jobs/{started['job_id']}").json()
+            progress = status.get("video_progress") or {}
+            if progress.get("total", 0) > 0:
+                assert progress["total"] == 2
+            if progress.get("completed", 0) >= 1 and status.get("result", {}).get("scene_videos"):
+                seen_progress = True
+                if status["status"] == "running":
+                    assert "分镜视频" in (status.get("message") or "")
+                assert len(status["result"]["scene_videos"]) >= 1
+            if status["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+    assert status is not None and status["status"] == "completed"
+    assert seen_progress is True
+    assert len(status["result"]["scene_videos"]) == 2
 
 
 def test_video_router_merges_scene_videos_in_scene_order(monkeypatch):

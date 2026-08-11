@@ -1,4 +1,7 @@
-"""视频场景包与全局资产图的确定性 Workflow Service。"""
+"""视频场景包与全局资产图的确定性 Workflow Service。
+
+DEPRECATED (V2.1 批次 E): 未被 Gateway / video_agent 生产路径引用；见包级说明。
+"""
 
 from __future__ import annotations
 

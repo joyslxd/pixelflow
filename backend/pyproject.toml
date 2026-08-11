@@ -31,9 +31,13 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# 默认跳过已隔离的 V1 video workflow 单元测试（批次 E）；需要时显式：
+#   uv run pytest -m v1_workflow_legacy
+addopts = ["-m", "not v1_workflow_legacy"]
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
+    "v1_workflow_legacy: quarantined agent_workflows/video unit tests (Batch E)",
 ]
 
 [tool.uv]

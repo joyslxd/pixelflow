@@ -1,4 +1,10 @@
-"""视频生成 Workflow 的阶段 Service 与权威业务快照。"""
+"""视频生成 Workflow 的阶段 Service 与权威业务快照。
+
+DEPRECATED (V2.1 批次 E): 本包未再被 Gateway / video_agent 生产路径导入。
+权威编排已迁至 ``pixelflow.video_agent``（Planner + Registry Tools + Adapters）。
+保留源码与 ``tests/test_agent_video_workflow_*.py``（marker: ``v1_workflow_legacy``）
+供历史对照；生产观测稳定后再物理删除。勿在新代码中 import。
+"""
 
 from __future__ import annotations
 

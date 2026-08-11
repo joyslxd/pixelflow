@@ -219,12 +219,23 @@ export function isRegenerateVideoAssetPackageRequest(content: string): boolean {
 }
 
 /**
+ * 单镜自然语言修订（修改第 N 镜），应交 patch_scene，不能当成重做资产包。
+ */
+export function isSingleSceneRevisionRequest(content: string): boolean {
+  const text = content.trim();
+  if (!text || text.length > 240) return false;
+  return /(?:只|仅)?(?:修改|改|修复|重生成|重新生成)\s*第\s*\d+\s*(?:个)?(?:分镜|镜头|段|镜)/.test(text)
+    || /第\s*\d+\s*(?:个)?(?:分镜|镜头|段|镜).{0,24}(?:修改|改成|调整|重做|重生成)/.test(text);
+}
+
+/**
  * 资产包待确认阶段的自然语言修改：提到资产包/场景包/参考图，或对角色/道具/场景提出改动。
  * 长脚本正文不算修改指令。
  */
 export function isReviseVideoAssetPackageRequest(content: string): boolean {
   const text = content.trim();
   if (!text || text.length > 240) return false;
+  if (isSingleSceneRevisionRequest(text)) return false;
   if (isRegenerateVideoAssetPackageRequest(text)) return true;
   if (isConfirmScriptPlanRequest(text)) return false;
   if (isConfirmGenerateVideoFromPackagesRequest(text)) return false;
@@ -247,6 +258,156 @@ export function isConfirmGenerateVideoFromPackagesRequest(content: string): bool
     "确认场景包并生成",
   ];
   return markers.some((marker) => text.includes(marker.toLowerCase()));
+}
+
+/** 明确要求回到脚本编辑，不启动资产包。 */
+export function isContinueEditingScriptRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text) return false;
+  const markers = [
+    "继续编辑脚本",
+    "继续改脚本",
+    "编辑脚本",
+    "修改脚本",
+    "打开脚本",
+    "回到脚本",
+  ];
+  return markers.some((marker) => text.includes(marker.toLowerCase()));
+}
+
+/** 在模型选择闸门明确要求开始生图。 */
+export function isStartImageGenerationRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text) return false;
+  if (isContinueEditingScriptRequest(text)) return false;
+  if (isRetryFailedSceneAssetsRequest(text)) return false;
+  const markers = [
+    "开始生图吧",
+    "开始生图",
+    "继续生图",
+    "生成参考图",
+    "开始生成参考图",
+  ];
+  return markers.some((marker) => text.includes(marker.toLowerCase()));
+}
+
+/**
+ * 明确要求只重试失败的参考图（不是重做整包 / 不是裸「开始生图」）。
+ * 例：「继续生成失败的参考图」「重试失败参考图」。
+ */
+export function isRetryFailedSceneAssetsRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text || text.length > 80) return false;
+  if (!/参考图|场景素材|分镜素材/.test(text)) return false;
+  const hasFailedFocus = /失败|报错|过期|token|登录|额度不足|没生成出来|未完成/.test(text);
+  const hasRetryAction = /继续生成|重新生成|重试|再生成|补齐|补生成|继续补/.test(text);
+  if (hasFailedFocus && hasRetryAction) return true;
+  const exactMarkers = [
+    "继续生成失败的参考图",
+    "重新生成失败的参考图",
+    "重试失败的参考图",
+    "重试失败参考图",
+    "补齐失败的参考图",
+    "继续生成失败参考图",
+  ];
+  return exactMarkers.some((marker) => text.includes(marker.toLowerCase()));
+}
+
+/**
+ * 阶段感知的裸恢复话术（继续 / 从断点开始）。
+ * 必须结合当前闸门解释，不能单独当成新 Turn。
+ */
+export function isGenericWorkflowResumeRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text) return false;
+  if (text.length > 40) return false;
+  if (isConfirmScriptPlanRequest(text)) return false;
+  if (isContinueVideoGenerationRequest(text)) return false;
+  if (isContinueEditingScriptRequest(text)) return false;
+  if (isRetryFailedSceneAssetsRequest(text)) return false;
+  if (isStartImageGenerationRequest(text)) return false;
+  if (isConfirmGenerateVideoFromPackagesRequest(text)) return false;
+  if (isRegenerateVideoAssetPackageRequest(text)) return false;
+  if (isReviseVideoAssetPackageRequest(text)) return false;
+  if (isRedesignTaskPlanRequest(text)) return false;
+  const markers = [
+    "继续",
+    "接着做",
+    "接着来",
+    "从断掉的地方开始",
+    "从断点继续",
+    "从断掉的地方继续",
+    "断点恢复",
+    "resume",
+    "continue",
+  ];
+  return markers.some((marker) => text === marker.toLowerCase() || text.includes(marker.toLowerCase()));
+}
+
+export type WorkflowResumeIntent =
+  | "edit_script"
+  | "start_images"
+  | "retry_failed_images"
+  | "generic_resume"
+  | null;
+
+export function resolveWorkflowResumeIntent(content: string): WorkflowResumeIntent {
+  if (isContinueEditingScriptRequest(content)) return "edit_script";
+  if (isRetryFailedSceneAssetsRequest(content)) return "retry_failed_images";
+  if (isStartImageGenerationRequest(content)) return "start_images";
+  if (isGenericWorkflowResumeRequest(content)) return "generic_resume";
+  return null;
+}
+
+/** Path A：/start 后的选题创意确认闸门（以公开步骤标题识别）。 */
+export function isScriptCreativeConfirmationTitle(title: string | null | undefined): boolean {
+  const text = (title || "").trim();
+  return text.includes("确认选题创意");
+}
+
+/** 用户同意当前选题创意，继续后续 Skill 阶段。 */
+export function isAgreeScriptCreativeRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text || text.length > 48) return false;
+  if (isCancelScriptCreativeRequest(text)) return false;
+  const exact = new Set([
+    "同意",
+    "可以",
+    "确认",
+    "没问题",
+    "就这个",
+    "就按这个",
+    "继续",
+    "接着做",
+    "接着来",
+    "好",
+    "好的",
+    "行",
+    "ok",
+    "okay",
+    "yes",
+  ]);
+  if (exact.has(text)) return true;
+  const markers = [
+    "同意创意",
+    "确认创意",
+    "创意可以",
+    "同意这个",
+    "就这个创意",
+    "可以继续",
+    "好的继续",
+    "按这个来",
+    "就按这个方向",
+  ];
+  return markers.some((marker) => text.includes(marker.toLowerCase()));
+}
+
+/** 仅取消当前创意闸门，不立刻开新 Turn（等待用户补充方向）。 */
+export function isCancelScriptCreativeRequest(content: string): boolean {
+  const text = content.trim().toLowerCase();
+  if (!text || text.length > 24) return false;
+  const markers = ["换个方向", "取消", "不要这个", "不行", "重来", "重新想"];
+  return markers.some((marker) => text === marker.toLowerCase());
 }
 
 export interface ScriptCharacterReadiness {
@@ -310,7 +471,7 @@ function countCharacterProfiles(section: string): number {
   const collect = (value: string | undefined) => {
     const name = (value || "").replace(/[*_#`]/gu, "").trim();
     if (!name || name.length > 24) return;
-    if (/^(角色设定|场景设定|道具|视觉形象|身份|性格|金句|核心标签)/u.test(name)) return;
+        if (/^(角色设定|场景设定|道具|视觉形象|身份|性格|金句|核心标签|角色关系|角色档案)/u.test(name)) return;
     names.add(name);
   };
 

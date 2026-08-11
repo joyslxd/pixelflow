@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from pixelflow.generate.scene_assets import (
+    build_reference_binding_index,
     collect_prop_reference_image_urls,
     collect_uploaded_reference_image_urls,
     enhance_global_asset_edit_prompt,
@@ -13,6 +14,7 @@ from pixelflow.generate.scene_assets import (
     enhance_scene_reference_prompt,
     generate_scene_assets,
     global_asset_edit_ratio,
+    resolve_reference_urls_for_asset,
     resolve_scene_asset_endpoint,
 )
 from pixelflow.skills import ImageGenerationResult
@@ -40,6 +42,77 @@ def test_collect_uploaded_reference_image_urls_excludes_scene_global_asset():
         ]
     )
     assert urls == ["https://x/fila1.jpg", "https://x/fila2.jpg"]
+
+
+def test_build_reference_binding_index_matches_asset_name_and_type_fallback():
+    index = build_reference_binding_index(
+        materials=[
+            {"url": "https://x/girl.png", "mediaType": "image"},
+            {"url": "https://x/living.png", "mediaType": "image"},
+            {"url": "https://x/shoe.png", "mediaType": "image"},
+            {"url": "https://x/extra.png", "mediaType": "image"},
+        ],
+        scene_packages=[],
+        global_assets={
+            "characters": [{"asset_id": "character-girl", "name": "女主"}],
+            "scenes": [{"asset_id": "scene-living", "name": "客厅"}],
+            "props": [{"asset_id": "prop-shoe", "name": "跑鞋"}],
+        },
+        reference_brief="图1用于女主定妆；图2用于客厅场景；图3是道具；图4随便参考",
+    )
+    assert resolve_reference_urls_for_asset(
+        index,
+        asset_id="character-girl",
+        asset_type="character",
+        asset_name="女主",
+    ) == ["https://x/girl.png"]
+    assert resolve_reference_urls_for_asset(
+        index,
+        asset_id="scene-living",
+        asset_type="scene_image",
+        asset_name="客厅",
+    ) == ["https://x/living.png"]
+    assert resolve_reference_urls_for_asset(
+        index,
+        asset_id="prop-shoe",
+        asset_type="prop_image",
+        asset_name="跑鞋",
+    ) == ["https://x/shoe.png"]
+    assert index["global_urls"] == ["https://x/extra.png"]
+
+
+def test_generate_scene_assets_uses_brief_binding_for_character_reference():
+    captured: dict[str, list[str]] = {}
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            raise AssertionError("角色应走参考图")
+
+        async def reference_image(self, **kwargs):
+            asset_prompt = str(kwargs.get("prompt") or "")
+            captured[asset_prompt] = list(kwargs.get("reference_images") or [])
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/out.png"}], raw={})
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [{"asset_id": "character-girl", "name": "女主", "three_view_prompt": "女主三视图"}],
+                "scenes": [],
+                "props": [],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[{"url": "https://x/girl.png", "mediaType": "image"}],
+            reference_brief="图1用于女主",
+            image_ratio="9:16",
+            image_size="4K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert any(urls == ["https://x/girl.png"] for urls in captured.values())
 
 
 def test_global_asset_edit_ratio_and_prompt():
@@ -390,7 +463,7 @@ def test_generate_scene_assets_uses_plan_image_contract_for_every_asset_call():
 
     assert result["ok"] is True
     assert len(calls) == 3
-    assert {call["method"] for call in calls} == {"text_to_image", "reference_image"}
+    assert {call["method"] for call in calls} == {"reference_image"}
     assert all(call["ratio"] == "9:16" for call in calls)
     assert all(call["size"] == "4K" for call in calls)
     assert all(call["model"] == "gpt-image-2" for call in calls)
@@ -557,9 +630,6 @@ def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_ma
 
     class FakeImageSkill:
         async def text_to_image(self, **kwargs):
-            calls.append(f"text:{kwargs['prompt']}")
-            if "角色三视图" in kwargs["prompt"]:
-                return ImageGenerationResult(ok=True, images=[{"url": "https://x/role.png"}], raw={})
             raise AssertionError(f"unexpected text_to_image prompt: {kwargs['prompt']}")
 
         async def reference_image(self, **kwargs):
@@ -568,6 +638,12 @@ def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_ma
             assert kwargs["model"] == "gpt-image-2"
             assert kwargs["ratio"] == "9:16"
             assert kwargs["size"] == "4K"
+            if "角色三视图" in kwargs["prompt"] or "人物" in kwargs["prompt"]:
+                return ImageGenerationResult(
+                    ok=True,
+                    images=[{"url": "https://x/role.png"}],
+                    raw={"endpoint": "/api/picture/multi_reference_image_generation"},
+                )
             if "场景图" in kwargs["prompt"]:
                 assert "场景风格" in kwargs["prompt"]
                 return ImageGenerationResult(
@@ -600,11 +676,11 @@ def test_generate_scene_assets_uses_reference_image_for_props_and_scenes_when_ma
     )
 
     assert result["ok"] is True
-    assert result["endpoint"] == "/api/picture/mixed"
+    assert result["endpoint"] == "/api/picture/multi_reference_image_generation"
+    assert result["global_assets"]["characters"][0]["three_view_images"] == ["https://x/role.png"]
     assert result["global_assets"]["scenes"][0]["images"] == ["https://x/scene.png"]
     assert result["global_assets"]["props"][0]["images"] == ["https://x/prop.png"]
-    assert sum(1 for call in calls if call.startswith("ref:")) == 2
-    assert any(call.startswith("text:") for call in calls)
+    assert sum(1 for call in calls if call.startswith("ref:")) == 3
 
 
 def test_generate_scene_assets_falls_back_scene_to_text_to_image_when_reference_fails():

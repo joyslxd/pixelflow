@@ -573,9 +573,27 @@ function applyAgentEvent(
       };
     }
     case "message.upserted":
-    case "workflow.progressed":
     case "interrupt.opened":
     case "interrupt.closed": {
+      try {
+        const workspace = applySupervisorWorkspaceEvent({
+          messages: state.messages,
+          workflows: state.workflows,
+          interrupt: state.interrupt,
+        }, event);
+        return {
+          ...withEventResumePoint(state, event),
+          ...workspace,
+        };
+      } catch {
+        return withInvalidEvent(state);
+      }
+    }
+    case "workflow.progressed": {
+      // V2.1 批次 D：VideoAgent 会话忽略 Workflow 影子进度事件。
+      if (state.videoAgentWorkspace.current || state.videoAgentPlan) {
+        return withEventResumePoint(state, event);
+      }
       try {
         const workspace = applySupervisorWorkspaceEvent({
           messages: state.messages,

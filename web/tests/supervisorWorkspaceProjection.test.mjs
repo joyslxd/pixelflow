@@ -193,6 +193,56 @@ test("Snapshot 原子恢复 VideoAgent workspace revision、计划和步骤", ()
   assert.equal(projection.videoAgentConfirmation.submittable, false);
 });
 
+test("V2.1 batch D Snapshot 有 VideoAgent 时清空 Workflow 影子状态", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    videoAgent: {
+      workspace: {
+        workspace_id: "workspace-video-1",
+        conversation_id: "conv-1",
+        revision: 1,
+        payload: { scenes: [], assets: [] },
+      },
+      plan: null,
+      steps: [],
+      confirmation: null,
+    },
+  }), "conv-1");
+  assert.deepEqual(projection.workflows, []);
+  assert.equal(projection.videoAgentWorkspace.current.workspaceId, "workspace-video-1");
+});
+
+test("V2.1 batch D VideoAgent 会话忽略 workflow.progressed 事件", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    workflows: [],
+    resume: { cursor: "cursor-1", sequence: 1 },
+    videoAgent: {
+      workspace: {
+        workspace_id: "workspace-video-1",
+        conversation_id: "conv-1",
+        revision: 1,
+        payload: { scenes: [], assets: [] },
+      },
+      plan: null,
+      steps: [],
+      confirmation: null,
+    },
+  }), "conv-1");
+  let state = supervisorRuntimeReducer(createSupervisorRuntimeState("conv-1"), {
+    type: "snapshot.hydrated",
+    snapshot: projection,
+  });
+  state = supervisorRuntimeReducer(state, {
+    type: "event.received",
+    event: event(2, "workflow.progressed", workflow({
+      current_stage: "generate_scene_videos",
+      stage_version: 4,
+      updated_at: "2026-07-28T10:05:00Z",
+    })),
+  });
+  assert.deepEqual(state.workflows, []);
+  assert.deepEqual(state.resume, { cursor: "cursor-2", sequence: 2 });
+});
+
 test("Snapshot 恢复 VideoAgent 历史 plans 列表到 videoAgentPlans", () => {
   const projection = projectSupervisorSnapshot(snapshot({
     videoAgent: {
@@ -365,6 +415,38 @@ test("助手卡片拒绝 run、workflow 与 artifact 身份不一致", () => {
     }), "conv-1"),
     /Supervisor 工作区投影状态不合法/,
   );
+});
+
+test("VideoAgent 脚本确认卡无 workflow 身份时仍可恢复 Snapshot", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    messages: [message(), {
+      message_id: "script-plan-1",
+      conversation_id: "conv-1",
+      user_id: "user-1",
+      role: "assistant",
+      content: "脚本方案已就绪。",
+      payload: {
+        client_message_id: "client-script-plan-1",
+        materials: [],
+        artifact: {
+          type: "plan",
+          title: "脚本方案待确认",
+          description: "确认后将生成视频资产包",
+          actionLabel: "查看",
+          scriptPlanConfirmForAssets: true,
+          scriptPlanConfirmed: false,
+        },
+      },
+      created_at: "2026-08-10T01:52:59Z",
+    }],
+    workflows: [],
+    interrupt: null,
+  }), "conv-1");
+  assert.equal(projection.messages.length, 2);
+  const card = projection.messages[1];
+  assert.equal(card.artifact?.title, "脚本方案待确认");
+  assert.equal(card.runId, undefined);
+  assert.equal(card.workflowId, undefined);
 });
 
 test("Snapshot 投影保留尚未入库的当前会话 pending 用户消息", () => {

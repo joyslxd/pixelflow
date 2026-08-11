@@ -58,6 +58,8 @@ class SceneMutablePatch(BaseModel):
     shot_type: str | None = Field(default=None, max_length=256)
     camera_movement: str | None = Field(default=None, max_length=512)
     duration_sec: float | None = Field(default=None, gt=0, le=15)
+    duration_ms: int | None = Field(default=None, ge=1_000, le=15_000)
+    title: str | None = Field(default=None, max_length=256)
     asset_refs: tuple[str, ...] | None = Field(default=None, max_length=12)
 
     @model_validator(mode="after")
@@ -99,8 +101,8 @@ class ReplaceProjectAssetsInput(BaseModel):
 class GenerateScenesInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scene_ids: tuple[str, ...] = Field(min_length=1, max_length=20)
-    variant_count: int = Field(default=3, ge=1, le=3)
+    scene_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    variant_count: int = Field(default=1, ge=1, le=3)
     attempt: int = Field(default=1, ge=1, le=10)
 
     @model_validator(mode="after")
@@ -229,13 +231,13 @@ class InspectSceneTool:
 class PatchSceneTool:
     spec = VideoToolSpec(
         name="patch_scene",
-        description="只修改指定镜头允许变更的创作字段",
+        description="只修改指定镜头允许变更的创作字段，并写入 dirty_scene_ids",
         input_model=PatchSceneInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("scenes", "dirty_scene_ids", "qc"),
+        workspace_mutations=("scenes", "scene_packages", "dirty_scene_ids", "qc"),
     )
 
     async def execute(
@@ -244,18 +246,25 @@ class PatchSceneTool:
         arguments: Mapping[str, object],
     ) -> VideoToolResult:
         request = _validate(PatchSceneInput, arguments, "镜头补丁参数无效")
-        scenes = _scene_records(context.workspace.payload.get("scenes"))
+        payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        scenes = _workspace_scenes(payload)
         target = _find_scene(scenes, request.scene_id)
         patch = request.patch.model_dump(mode="json", exclude_unset=True)
+        if "duration_ms" in patch and "duration_sec" not in patch:
+            patch["duration_sec"] = float(patch["duration_ms"]) / 1000.0
+        if "duration_sec" in patch and "duration_ms" not in patch:
+            patch["duration_ms"] = int(round(float(patch["duration_sec"]) * 1000))
+        if "narration" in patch and "narration_text" not in patch:
+            patch["narration_text"] = patch["narration"]
         updated = {**target, **patch, "edit_status": "待重新生成"}
         next_scenes = [
             updated if scene.get("scene_id") == request.scene_id else scene
             for scene in scenes
         ]
         dirty = _ordered_unique(
-            [*_text_list(context.workspace.payload.get("dirty_scene_ids")), request.scene_id]
+            [*_text_list(payload.get("dirty_scene_ids")), request.scene_id]
         )
-        qc = _qc_records(context.workspace.payload.get("qc"))
+        qc = _qc_records(payload.get("qc"))
         previous_qc = qc.get(request.scene_id, {})
         qc[request.scene_id] = {
             **previous_qc,
@@ -268,11 +277,11 @@ class PatchSceneTool:
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"镜头 {request.scene_id} 已更新并标记为待重新生成",
-            workspace_patch={
-                "scenes": next_scenes,
-                "dirty_scene_ids": dirty,
-                "qc": qc,
-            },
+            workspace_patch=_scenes_workspace_patch(
+                next_scenes,
+                dirty_scene_ids=dirty,
+                qc=qc,
+            ),
         )
 
 
@@ -285,7 +294,7 @@ class ReplaceProjectAssetsTool:
         confirmation_required=True,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("scenes", "dirty_scene_ids", "asset_replacements"),
+        workspace_mutations=("scenes", "scene_packages", "dirty_scene_ids", "asset_replacements"),
     )
 
     async def execute(
@@ -311,7 +320,9 @@ class ReplaceProjectAssetsTool:
         missing_targets = sorted(set(replacements.values()).difference(available_refs))
         if missing_targets:
             raise VideoToolValidationError("替换目标素材不存在")
-        scenes = _scene_records(context.workspace.payload.get("scenes"))
+        scenes = _workspace_scenes(
+            context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        )
         affected: list[str] = []
         next_scenes: list[dict[str, JsonValue]] = []
         for scene in scenes:
@@ -337,8 +348,7 @@ class ReplaceProjectAssetsTool:
             tool_name=self.spec.name,
             public_summary=f"已替换素材引用，影响 {len(affected)} 个镜头",
             workspace_patch={
-                "scenes": next_scenes,
-                "dirty_scene_ids": dirty,
+                **_scenes_workspace_patch(next_scenes, dirty_scene_ids=dirty),
                 "asset_replacements": audit,
             },
             artifact_refs=tuple(replacements.values()),
@@ -349,21 +359,23 @@ class ReplaceProjectAssetsTool:
 class GenerateScenesTool:
     spec = VideoToolSpec(
         name="generate_scenes",
-        description="按镜头和版本数量启动可恢复的定向生成任务",
+        description="仅生成指定脏镜头或明确 scene_ids；未传 scene_ids 时使用 workspace dirty_scene_ids",
         input_model=GenerateScenesInput,
         cost_level=VideoToolCostLevel.BILLABLE,
         confirmation_required=True,
         idempotency_mode=VideoToolIdempotencyMode.OPERATION,
         recovery_mode=VideoToolRecoveryMode.OPERATION,
-        workspace_mutations=("scenes", "dirty_scene_ids", "assets"),
+        workspace_mutations=("scenes", "scene_packages", "dirty_scene_ids", "assets"),
     )
 
     def __init__(
         self,
         *,
         operation_port: SceneGenerationOperationPort | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._operation_port = operation_port
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def execute(
         self,
@@ -371,12 +383,16 @@ class GenerateScenesTool:
         arguments: Mapping[str, object],
     ) -> VideoToolResult:
         request = _validate(GenerateScenesInput, arguments, "镜头生成参数无效")
-        scenes = _scene_records(context.workspace.payload.get("scenes"))
-        selected = [_find_scene(scenes, scene_id) for scene_id in request.scene_ids]
+        payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        scenes = _workspace_scenes(payload)
+        scene_ids = list(request.scene_ids) or _text_list(payload.get("dirty_scene_ids"))
+        if not scene_ids:
+            raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
+        selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
         if self._operation_port is None:
             raise VideoToolExecutionError("镜头生成Operation尚未装配")
         jobs_by_scene: dict[str, list[SceneGenerationJob]] = {
-            scene_id: [] for scene_id in request.scene_ids
+            scene_id: [] for scene_id in scene_ids
         }
         for scene in selected:
             scene_id = str(scene["scene_id"])
@@ -391,6 +407,7 @@ class GenerateScenesTool:
                     raise VideoToolExecutionError("镜头生成Operation结果身份不一致")
                 jobs_by_scene[scene_id].append(job)
         next_scenes: list[dict[str, JsonValue]] = []
+        completed_dirty: list[str] = []
         for scene in scenes:
             scene_id = str(scene.get("scene_id") or "")
             jobs = jobs_by_scene.get(scene_id)
@@ -412,23 +429,53 @@ class GenerateScenesTool:
                 for job in jobs
                 if job.status == "succeeded"
             ]
-            next_scenes.append(
-                {
-                    **scene,
-                    "generation_jobs": [
-                        {
-                            **job.model_dump(mode="json"),
-                            "plan_step_id": context.step_id,
-                        }
-                        for job in jobs
-                    ],
-                    "variants": [*existing_variants, *generated_variants],
-                    "edit_status": (
-                        "等待版本审核" if generated_variants else "重新生成中"
-                    ),
-                }
+            # 单版本成功路径：直接标记重新生成完成并清脏，未修改镜头保持原样。
+            auto_complete = (
+                request.variant_count == 1
+                and len(generated_variants) == 1
+                and all(job.status == "succeeded" for job in jobs)
             )
-        assets = _record_list(context.workspace.payload.get("assets"))
+            if auto_complete:
+                chosen = {
+                    **generated_variants[0],
+                    "selected": True,
+                    "review_status": "approved",
+                }
+                completed_dirty.append(scene_id)
+                next_scenes.append(
+                    {
+                        **scene,
+                        "generation_jobs": [
+                            {
+                                **job.model_dump(mode="json"),
+                                "plan_step_id": context.step_id,
+                            }
+                            for job in jobs
+                        ],
+                        "variants": [*existing_variants, chosen],
+                        "approved_variant_id": chosen["variant_id"],
+                        "edit_status": "重新生成完成",
+                        "regenerated_at": self._clock().isoformat(),
+                    }
+                )
+            else:
+                next_scenes.append(
+                    {
+                        **scene,
+                        "generation_jobs": [
+                            {
+                                **job.model_dump(mode="json"),
+                                "plan_step_id": context.step_id,
+                            }
+                            for job in jobs
+                        ],
+                        "variants": [*existing_variants, *generated_variants],
+                        "edit_status": (
+                            "等待版本审核" if generated_variants else "重新生成中"
+                        ),
+                    }
+                )
+        assets = _record_list(payload.get("assets"))
         generated_assets = [
             {
                 "artifact_ref": job.artifact_ref,
@@ -448,15 +495,17 @@ class GenerateScenesTool:
             for item in generated_assets
             if item.get("artifact_ref")
         }
-        workspace_patch: dict[str, JsonValue] = {
-            "scenes": next_scenes,
-            "dirty_scene_ids": _ordered_unique(
-                [
-                    *_text_list(context.workspace.payload.get("dirty_scene_ids")),
-                    *request.scene_ids,
-                ]
-            ),
-        }
+        remaining_dirty = [
+            scene_id
+            for scene_id in _ordered_unique(
+                [*_text_list(payload.get("dirty_scene_ids")), *scene_ids]
+            )
+            if scene_id not in completed_dirty
+        ]
+        workspace_patch = _scenes_workspace_patch(
+            next_scenes,
+            dirty_scene_ids=remaining_dirty,
+        )
         start_paused_jobs = [
             job
             for jobs in jobs_by_scene.values()
@@ -517,7 +566,7 @@ class ReviewGeneratedScenesTool:
         confirmation_required=False,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("scenes", "dirty_scene_ids", "qc"),
+        workspace_mutations=("scenes", "scene_packages", "dirty_scene_ids", "qc"),
     )
 
     def __init__(
@@ -537,7 +586,8 @@ class ReviewGeneratedScenesTool:
             arguments,
             "镜头版本审核参数无效",
         )
-        scenes = _scene_records(context.workspace.payload.get("scenes"))
+        payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        scenes = _workspace_scenes(payload)
         target = _find_scene(scenes, request.scene_id)
         variants = _record_list(target.get("variants"))
         if not any(item.get("variant_id") == request.variant_id for item in variants):
@@ -569,8 +619,8 @@ class ReviewGeneratedScenesTool:
                     }
                 )
         updated: dict[str, JsonValue] = {**target, "variants": next_variants}
-        dirty = _text_list(context.workspace.payload.get("dirty_scene_ids"))
-        qc = _qc_records(context.workspace.payload.get("qc"))
+        dirty = _text_list(payload.get("dirty_scene_ids"))
+        qc = _qc_records(payload.get("qc"))
         if request.decision == "approve":
             updated.update(
                 {
@@ -600,11 +650,11 @@ class ReviewGeneratedScenesTool:
                 if request.decision == "approve"
                 else f"镜头 {request.scene_id} 已废弃版本 {request.variant_id}"
             ),
-            workspace_patch={
-                "scenes": next_scenes,
-                "dirty_scene_ids": dirty,
-                "qc": qc,
-            },
+            workspace_patch=_scenes_workspace_patch(
+                next_scenes,
+                dirty_scene_ids=dirty,
+                qc=qc,
+            ),
         )
 
 
@@ -613,6 +663,29 @@ def _validate(model: type[BaseModel], arguments: Mapping[str, object], message: 
         return model.model_validate(dict(arguments))
     except ValidationError as exc:
         raise VideoToolValidationError(message) from exc
+
+
+def _workspace_scenes(payload: Mapping[str, object]) -> list[dict[str, JsonValue]]:
+    scenes = _scene_records(payload.get("scenes"))
+    if scenes:
+        return scenes
+    return _scene_records(payload.get("scene_packages"))
+
+
+def _scenes_workspace_patch(
+    scenes: list[dict[str, JsonValue]],
+    *,
+    dirty_scene_ids: list[str],
+    qc: dict[str, dict[str, JsonValue]] | None = None,
+) -> dict[str, JsonValue]:
+    patch: dict[str, JsonValue] = {
+        "scenes": scenes,
+        "scene_packages": scenes,
+        "dirty_scene_ids": dirty_scene_ids,
+    }
+    if qc is not None:
+        patch["qc"] = qc
+    return patch
 
 
 def _scene_records(value: object) -> list[dict[str, JsonValue]]:
@@ -646,7 +719,7 @@ def _required_scene(
     payload: Mapping[str, object],
     scene_id: str,
 ) -> dict[str, JsonValue]:
-    return _find_scene(_scene_records(payload.get("scenes")), scene_id)
+    return _find_scene(_workspace_scenes(payload), scene_id)
 
 
 def _qc_records(value: object) -> dict[str, dict[str, JsonValue]]:

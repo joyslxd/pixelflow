@@ -356,6 +356,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             VideoAgentQuotaResumer,
         )
         from pixelflow.video_agent.runtime import make_video_agent_runtime_assembly
+        from pixelflow.video_agent.adapters.domain_jobs import (
+            make_generate_scene_assets_runner,
+        )
+        from pixelflow.skills import get_image_skill
+        from pixelflow.skills.base import is_quota_insufficient
 
         live_clock = _GatewayClock()
 
@@ -403,12 +408,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     None,
                 )
             ),
+            scene_assets_runner=make_generate_scene_assets_runner(
+                image_skill_factory=get_image_skill,
+                quota_checker=is_quota_insufficient,
+            ),
             lease_owner=f"gateway-video-agent:{os.getpid()}",
             clock=live_clock.now,
         )
         app.state.pixelflow_video_agent_runtime = video_agent_runtime
         if video_agent_repository is not None:
             from pixelflow.video_agent.planner import (
+                DeepSeekEntryPathModel,
                 DeepSeekVideoPlanningModel,
                 VideoAgentPlanner,
             )
@@ -426,6 +436,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 runtime_repository=agent_runtime_repository,
                 video_repository=video_agent_repository,
                 planner=planner,
+                entry_path_model=DeepSeekEntryPathModel(app_config=startup_config),
                 clock=live_clock.now,
             )
         video_agent_runner = (

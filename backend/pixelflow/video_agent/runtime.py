@@ -14,22 +14,32 @@ from pixelflow.agent_runtime.ports import OperationConflictError
 from pixelflow.video_agent.adapters.delivery_operation import (
     M06DeliveryOperationPort,
 )
+from pixelflow.video_agent.adapters.domain_jobs import (
+    GenerateSceneAssetsJobService,
+    PrepareScenePackageJobService,
+)
 from pixelflow.video_agent.adapters.reference_operation import (
     M06ReferenceAnalysisOperationPort,
 )
 from pixelflow.video_agent.adapters.scene_operation import (
     M06SceneGenerationOperationPort,
 )
+from pixelflow.video_agent.adapters.scene_package_operation import (
+    M06ScenePackageOperationPort,
+)
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.tools import (
     AnalyzeReferenceVideoTool,
     BrainstormScriptTool,
     ComposeOrExportVideoTool,
+    ConfirmScriptCreativeTool,
+    GenerateSceneAssetsTool,
     GenerateScenesTool,
     ImportScriptTool,
     InspectSceneTool,
     InspectVideoWorkspaceTool,
     PatchSceneTool,
+    PrepareScenePackagesTool,
     ReplaceProjectAssetsTool,
     ReviewGeneratedScenesTool,
     RunScriptSkillStageTool,
@@ -40,6 +50,8 @@ from pixelflow.video_agent.workspace import VideoAgentRepository
 VIDEO_AGENT_RUNTIME_NOT_READY = "video_agent_runtime_not_ready"
 _REFERENCE_STAGE = re.compile(r"^analyze_reference:[0-9a-f]{16}$")
 _SCENE_STAGE = re.compile(r"^generate_scene:[0-9a-f]{12}:v[1-9][0-9]*$")
+_PREPARE_STAGE = re.compile(r"^prepare_scene_packages:[0-9a-f]{16}$")
+_ASSETS_STAGE = re.compile(r"^generate_scene_assets:[0-9a-f]{16}$")
 
 
 class VideoAgentOperationAdapterResolver:
@@ -51,12 +63,16 @@ class VideoAgentOperationAdapterResolver:
         reference_adapter: ProviderJobAdapter,
         scene_adapter: ProviderJobAdapter,
         merge_adapter: ProviderJobAdapter,
+        prepare_adapter: ProviderJobAdapter,
+        assets_adapter: ProviderJobAdapter,
         jianying_adapter: ProviderJobAdapter | None = None,
     ) -> None:
         for name, adapter in {
             "reference_adapter": reference_adapter,
             "scene_adapter": scene_adapter,
             "merge_adapter": merge_adapter,
+            "prepare_adapter": prepare_adapter,
+            "assets_adapter": assets_adapter,
         }.items():
             if not isinstance(adapter, ProviderJobAdapter):
                 raise TypeError(f"{name}必须是ProviderJobAdapter")
@@ -69,6 +85,8 @@ class VideoAgentOperationAdapterResolver:
             "reference": reference_adapter,
             "scene": scene_adapter,
             "mp4": merge_adapter,
+            "prepare": prepare_adapter,
+            "assets": assets_adapter,
         }
         if jianying_adapter is not None:
             self._adapters["jianying"] = jianying_adapter
@@ -84,6 +102,10 @@ class VideoAgentOperationAdapterResolver:
             return self._adapters["reference"]
         if _SCENE_STAGE.fullmatch(stage):
             return self._adapters["scene"]
+        if _PREPARE_STAGE.fullmatch(stage):
+            return self._adapters["prepare"]
+        if _ASSETS_STAGE.fullmatch(stage):
+            return self._adapters["assets"]
         if stage == "deliver:mp4":
             return self._adapters["mp4"]
         if stage == "deliver:jianying_package" and "jianying" in self._adapters:
@@ -121,10 +143,16 @@ def make_video_agent_runtime_assembly(
     scene_adapter: ProviderJobAdapter | None,
     merge_adapter: ProviderJobAdapter | None,
     jianying_adapter: ProviderJobAdapter | None = None,
+    prepare_adapter: ProviderJobAdapter | None = None,
+    assets_adapter: ProviderJobAdapter | None = None,
+    scene_assets_runner: Callable[..., object] | None = None,
     lease_owner: str,
     clock: Callable[[], datetime] | None = None,
 ) -> VideoAgentRuntimeAssembly:
-    """只有参考解析、镜头生成和MP4合并齐备时构造核心Runtime。"""
+    """只有参考解析、镜头生成和MP4合并齐备时构造核心Runtime。
+
+    场景包/参考图 Adapter 默认使用进程内领域 Job；可由调用方覆盖。
+    """
 
     optional_capabilities = MappingProxyType(
         {"jianying_package": jianying_adapter is not None}
@@ -151,10 +179,19 @@ def make_video_agent_runtime_assembly(
             optional_capabilities=optional_capabilities,
             reason_code=VIDEO_AGENT_RUNTIME_NOT_READY,
         )
+
+    resolved_prepare = prepare_adapter or ProviderJobAdapter(
+        PrepareScenePackageJobService(use_llm=True)
+    )
+    resolved_assets = assets_adapter or ProviderJobAdapter(
+        GenerateSceneAssetsJobService(runner=scene_assets_runner)
+    )
     resolver = VideoAgentOperationAdapterResolver(
         reference_adapter=reference_adapter,
         scene_adapter=scene_adapter,
         merge_adapter=merge_adapter,
+        prepare_adapter=resolved_prepare,
+        assets_adapter=resolved_assets,
         jianying_adapter=jianying_adapter,
     )
     reference_port = M06ReferenceAnalysisOperationPort(
@@ -176,13 +213,23 @@ def make_video_agent_runtime_assembly(
         lease_owner=f"{lease_owner}:delivery",
         clock=clock,
     )
+    package_port = M06ScenePackageOperationPort(
+        repository=operation_repository,
+        prepare_adapter=resolved_prepare,
+        assets_adapter=resolved_assets,
+        lease_owner=f"{lease_owner}:scene-packages",
+        clock=clock,
+    )
     registry = VideoToolRegistry(
         [
             InspectVideoWorkspaceTool(),
             ImportScriptTool(),
             BrainstormScriptTool(),
             RunScriptSkillStageTool(),
+            ConfirmScriptCreativeTool(),
             AnalyzeReferenceVideoTool(operation_port=reference_port),
+            PrepareScenePackagesTool(operation_port=package_port),
+            GenerateSceneAssetsTool(operation_port=package_port),
             InspectSceneTool(),
             PatchSceneTool(),
             ReplaceProjectAssetsTool(),

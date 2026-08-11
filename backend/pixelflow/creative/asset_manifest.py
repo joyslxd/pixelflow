@@ -268,7 +268,35 @@ _GENERIC_SETTING_NAMES = {
     "真实场景",
     "场景",
     "环境",
+    # Skill /characters 常见容器标题，不是可出镜角色名
+    "角色关系",
+    "角色关系图",
+    "主要角色档案",
+    "角色档案",
+    "角色弧线",
+    "感情线弧线",
+    "关键互动场景预设",
+    "四层反派体系",
 }
+
+# 容器标题：不可当作资产名；应继续解析其下的列表/子标题人名
+_CONTAINER_SETTING_HEADINGS = {
+    "角色关系",
+    "角色关系图",
+    "主要角色档案",
+    "角色档案",
+    "角色弧线",
+    "感情线弧线",
+    "关键互动场景预设",
+    "四层反派体系",
+}
+
+
+def _is_container_setting_heading(name: str) -> bool:
+    key = _name_key(name)
+    return key in {_name_key(item) for item in _CONTAINER_SETTING_HEADINGS} or key.startswith(
+        _name_key("角色关系")
+    )
 
 
 def _concrete_name_from_setting_body(body: str) -> str:
@@ -297,6 +325,34 @@ def _concrete_name_from_setting_body(body: str) -> str:
     return ""
 
 
+def _names_from_cast_list_prose(body: str) -> list[tuple[str, str]]:
+    """从「安然、Yann、联名方代表三人同框」这类关系散文抽人名。"""
+
+    text = str(body or "").strip()
+    if not text:
+        return []
+    # 优先匹配「A、B、C三人/之间/同框」
+    match = re.search(
+        r"^([^\n。；;]{2,80}?)(?:三人|三位|两人|两位|四人|四位|之间|同框|共同)",
+        text,
+    )
+    chunk = match.group(1) if match else ""
+    if not chunk:
+        return []
+    names: list[tuple[str, str]] = []
+    for raw in re.split(r"[、，,/／|]", chunk):
+        cleaned = re.sub(r"[*_#`]", "", raw).strip()
+        cleaned = re.split(r"[（(：:\-—]", cleaned, maxsplit=1)[0].strip()
+        if not cleaned or len(cleaned) > 20:
+            continue
+        if _name_key(cleaned) in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
+            continue
+        if re.search(r"(关系|档案|弧线|设定|场景|道具)", cleaned):
+            continue
+        names.append((cleaned, text[:400]))
+    return names
+
+
 def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
     if not section.strip():
         return []
@@ -307,6 +363,8 @@ def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
         cleaned = re.sub(r"[*_#`]", "", name).strip()
         cleaned = re.split(r"[（(：:\-—|/]", cleaned, maxsplit=1)[0].strip()
         if not cleaned or len(cleaned) > 40:
+            return
+        if _is_container_setting_heading(cleaned):
             return
         body_text = re.sub(r"\s+", " ", body).strip()[:400]
         if _name_key(cleaned) in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
@@ -320,6 +378,25 @@ def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
         seen.add(key)
         entries.append((cleaned, body_text))
 
+    def push_list_entries(text: str) -> None:
+        list_hits = 0
+        for match in re.finditer(
+            r"^[-*]\s+\*{0,2}([^:*\n]{1,40})\*{0,2}\s*[:：]\s*(.*)$",
+            text,
+            flags=re.MULTILINE,
+        ):
+            before = len(entries)
+            push(match.group(1), match.group(2))
+            if len(entries) > before:
+                list_hits += 1
+        # 仅当列表未命中时，再扫「**安然**：」行，避免把正文强调误当角色
+        if list_hits == 0:
+            for match in re.finditer(
+                r"\*\*([^*]{1,40})\*\*\s*[:：]\s*([^\n]*)",
+                text,
+            ):
+                push(match.group(1), match.group(2))
+
     # ### 阿杰 / #### 程岚（女1）
     heading_blocks = re.split(r"(?=^#{2,4}\s+)", section, flags=re.MULTILINE)
     found_heading = False
@@ -330,20 +407,24 @@ def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
         found_heading = True
         title = heading.group(1).strip()
         body = block[heading.end() :].strip()
-        push(title, body)
+        title_name = re.sub(r"[*_#`]", "", title).strip()
+        title_name = re.split(r"[（(：:\-—|/]", title_name, maxsplit=1)[0].strip()
+        if _is_container_setting_heading(title_name):
+            before = len(entries)
+            push_list_entries(body)
+            if len(entries) == before:
+                for name, prose in _names_from_cast_list_prose(body):
+                    push(name, prose)
+        else:
+            push(title, body)
 
     if found_heading and entries:
         return entries
 
     # - **阿杰**：... / - 阿杰：...
-    for match in re.finditer(
-        r"^[-*]\s+\*{0,2}([^:*\n]{1,40})\*{0,2}\s*[:：]\s*(.*)$",
-        section,
-        flags=re.MULTILINE,
-    ):
-        push(match.group(1), match.group(2))
+    push_list_entries(section)
 
-    # **阿杰**：段落
+    # **阿杰**：段落（整段仍无条目时）
     if not entries:
         for match in re.finditer(
             r"\*\*([^*]{1,40})\*\*\s*[:：]?\s*([^\n]*)",

@@ -190,13 +190,31 @@ function projectMessage(value: unknown, conversationId: string): SupervisorChatM
   const runId = value.run_id ?? value.runId;
   const workflowId = payload.workflow_id ?? value.workflowId;
   const artifactRef = payload.artifact_ref ?? value.artifactRef;
-  if (artifact && value.role === "assistant" && (
-    !isNonEmptyString(runId)
-    || !isNonEmptyString(workflowId)
-    || runId !== workflowId
-    || !isNonEmptyString(artifactRef)
-    || !/^artifact:\S+$/u.test(artifactRef)
-  )) return fail();
+  const hasWorkflowIdentity = isNonEmptyString(runId)
+    && isNonEmptyString(workflowId)
+    && runId === workflowId
+    && isNonEmptyString(artifactRef)
+    && /^artifact:\S+$/u.test(artifactRef);
+  if (artifact && value.role === "assistant" && !hasWorkflowIdentity) {
+    // VideoAgent「脚本方案待确认」等本地卡片完全没有 workflow 身份：保留卡片，勿让 Snapshot fatal。
+    // 若只给了残缺/冲突身份，仍视为投影非法。
+    if (
+      runId === undefined
+      && workflowId === undefined
+      && artifactRef === undefined
+    ) {
+      return {
+        id: messageId,
+        conversationId,
+        role: value.role,
+        content: value.content,
+        time,
+        ...(materials.length > 0 ? { materials } : {}),
+        artifact,
+      };
+    }
+    return fail();
+  }
   if (!artifact && (
     (runId !== undefined && !isNonEmptyString(runId))
     || (workflowId !== undefined && !isNonEmptyString(workflowId))
@@ -479,6 +497,10 @@ export function projectSupervisorSnapshot(
       )
     ) return fail();
   }
+  // V2.1 批次 D：有 VideoAgent 投影时不吸收 Workflow 影子状态。
+  const workflows = value.videoAgent !== null && value.videoAgent !== undefined
+    ? []
+    : workspace.workflows;
   return {
     conversationId,
     run: value.run as unknown as SupervisorRuntimeProjection["run"],
@@ -491,7 +513,9 @@ export function projectSupervisorSnapshot(
     videoAgentPlanOrder,
     videoAgentConfirmation,
     videoAgentQuota,
-    ...workspace,
+    messages: workspace.messages,
+    workflows,
+    interrupt: workspace.interrupt,
   };
 }
 

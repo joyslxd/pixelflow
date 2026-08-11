@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -24,6 +25,9 @@ from .registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 单阶段大模型生成超时；避免合规等步骤无限挂起导致执行卡假忙碌。
+SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS = 180.0
 
 ScriptSkillStage = Literal[
     "start",
@@ -63,6 +67,8 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
         "根据用户输入完成 /start：提炼题材、平台、时长、画幅、一句话卖点与创作目标。"
         "输出 Markdown，含：题材、目标平台、时长、画幅、核心梗、目标受众、转化目标。"
         "必须忠实用户故事，不得编造无关商品卖点。"
+        "开头用 2～4 句写出「可确认的创意方向摘要」（故事钩子、情绪主线、为何有意思），"
+        "方便用户判断是否同意后再继续写结构。"
     ),
     "plan": (
         "根据用户输入与上游 /start 结果完成 /plan：写出三幕结构、付费/情绪卡点、爽点矩阵。"
@@ -194,16 +200,27 @@ async def _generate_stage_markdown(
         human += f"\n【上游产物】\n{prior_text}\n"
     human += "\n只输出 Markdown，不要解释过程。"
     model = create_chat_model(thinking_enabled=False)
-    message = await model.ainvoke(
-        [
-            (
-                "system",
-                "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
-                "禁止输出与用户输入无关的模板化带货文案。",
+    # 用同步 invoke 丢进线程池，确保 wait_for 能在超时后解除阻塞；
+    # 纯 ainvoke 若底层同步占满事件循环，180s 超时形同虚设，前端会显示跑十几二十分钟。
+    try:
+        message = await asyncio.wait_for(
+            asyncio.to_thread(
+                model.invoke,
+                [
+                    (
+                        "system",
+                        "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
+                        "禁止输出与用户输入无关的模板化带货文案。",
+                    ),
+                    ("human", human),
+                ],
             ),
-            ("human", human),
-        ]
-    )
+            timeout=SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise VideoToolValidationError(
+            f"{STAGE_TITLES[stage]} 超时（{int(SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS)}秒），请稍后重试"
+        ) from exc
     content = getattr(message, "content", message)
     if isinstance(content, list):
         text = "".join(
@@ -291,7 +308,13 @@ class RunScriptSkillStageTool:
                 user_story=user_story,
                 prior=prior,
             )
-        except VideoToolValidationError:
+        except VideoToolValidationError as exc:
+            # 超时返回可完成摘要，让后续阶段可继续，而不是把执行卡永远挂住。
+            if "超时" in str(exc):
+                return VideoToolResult(
+                    tool_name=self.spec.name,
+                    public_summary=str(exc),
+                )
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -361,4 +384,67 @@ class RunScriptSkillStageTool:
             public_summary=change_summary,
             workspace_patch=workspace_patch,
             artifact_refs=artifact_refs,
+        )
+
+
+class ConfirmScriptCreativeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ConfirmScriptCreativeTool:
+    """Path A：/start 完成后等人确认选题创意，再继续后续 Skill 阶段。"""
+
+    spec = VideoToolSpec(
+        name="confirm_script_creative",
+        description="确认选题与创意方向后继续脚本创作",
+        input_model=ConfirmScriptCreativeInput,
+        cost_level=VideoToolCostLevel.NONE,
+        confirmation_required=True,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("script_pipeline",),
+    )
+
+    async def execute(
+        self,
+        context: VideoToolContext,
+        arguments: Mapping[str, object],
+    ) -> VideoToolResult:
+        del arguments
+        prior = _pipeline(context.workspace.payload)
+        start = prior.get("start")
+        content = ""
+        artifact_ref = ""
+        if isinstance(start, dict):
+            raw = start.get("content")
+            if isinstance(raw, str):
+                content = raw.strip()
+            ref = start.get("artifact_ref")
+            if isinstance(ref, str):
+                artifact_ref = ref
+        if not content:
+            raise VideoToolValidationError("缺少可确认的选题创意，请先完成 /start")
+
+        summary_lines = [
+            line.strip(" #-*")
+            for line in content.splitlines()
+            if line.strip() and not line.strip().startswith("```")
+        ][:6]
+        preview = "；".join(summary_lines)[:280] if summary_lines else content[:280]
+        next_pipeline = {
+            **prior,
+            "creative_confirmed": {
+                "stage": "creative_confirmed",
+                "title": "确认选题创意",
+                "content": content,
+                "artifact_ref": artifact_ref,
+                "change_summary": "用户已确认选题创意，继续创作结构",
+                "confirmed": True,
+            },
+        }
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary=f"已确认选题创意：{preview}",
+            workspace_patch={"script_pipeline": next_pipeline},
+            artifact_refs=(artifact_ref,) if artifact_ref else (),
         )

@@ -1,5 +1,10 @@
 # 统一视频智能体架构设计方案
 
+> **已被取代（2026-08-10）**：本文件记录 V2 初始迁移设计。后续实现以
+> [`2026-08-10-video-agent-v2.1-control-plane-design.md`](2026-08-10-video-agent-v2.1-control-plane-design.md)
+> 为唯一权威设计，尤其以其中的「Agent 控制面收敛」替代本文件关于固定入口路径、
+> 前端资产包编排和 V2/Workflow 并存的结论。
+
 ## 文档状态
 
 本设计基线已通过审批，对应分支：`feature/agent_0.8.5_boguan_joyce`
@@ -84,7 +89,48 @@ PixelFlow 已具备完整视频基础能力：脚本与分镜规划、参考视�
 5. 持久化每一步输出结果，工具返回数据发生变化时自动修正剩余执行方案；
 6. 涉及计费、批量任务、破坏性操作前，必须向用户发起确认。
 
+### 入口路径规划：档位方案（2026-08-10）
 
+跨业务路由（图/视频/PPT）仍由 Supervisor 薄路由负责；**进入 VideoAgent 之后**如何展开本轮 `AgentPlan`，按改造量分为两档。当前实现与验收以**方案 1**为准；方案 2 保留为后续对照测试与升级候选。
+
+#### 方案 1（当前选用）：LLM 只选入口路径，规则展开 steps
+
+- **做什么**：规则优先判定 `create | polish | continue | inspect`；仅在规则落 `inspect` 且工作区/输入显示仍可能是视频创作跟进时，调用一次短 structured LLM，输出上述四选一。
+- **不做什么**：模型不直接点名 `/start` `/plan` 等 Skill 步骤，也不自由拼工具序列。
+- **展开**：仍由 `_deterministic_plan` 按路径种子固定 steps（Path A 含创意确认闸门；B=`review→compliance→export`；C/inspect=`inspect_video_workspace`）。
+- **护栏**：LLM 提案经服务端消毒——`continue` 必须脚本就绪且已确认；`polish` 须像成稿；失败/超时 fail-closed 回退规则结果（多为 `inspect`）。
+- **热路径**：明确规则命中（含「视频/成稿/继续生成」等）**不调** LLM，保证 `turns/start` 延迟。
+- **改造量**：小（约 0.5–1.5 人日量级）；适合先验证「改创意/补镜头不再误 inspect」。
+
+#### 方案 2（对照候选）：LLM 产出完整短 Plan
+
+- **做什么**：每轮把 workspace 证据包 + 工具白名单交给已有 `VideoAgentPlanner`，模型直接产出 ≤8/9 步的 `tool_name` 序列。
+- **护栏**：仅允许注册工具；计费步强制 `confirmation_required`；非法提案最多修复两次。
+- **代价**：规划延迟进入热路径或需异步规划；动态步序要补黄金用例与前端展示；比方案 1 更易「乱点工具」。
+- **改造量**：中（约 1–2 周，含测试收敛）。
+- **状态**：文档保留、可另开对照实验；**当前不接入 `submit_turn` 热路径**。
+
+#### 方案对比
+
+| 维度 | 方案 1（选用） | 方案 2（候选） |
+| --- | --- | --- |
+| LLM 输出 | 入口路径枚举 | 完整 steps / 工具序列 |
+| 与现网兼容 | 高，复用确定性种子 | 中，需替换种子逻辑 |
+| 延迟与成本 | 多数 Turn 0 次调用；歧义时 1 次短调用 | 几乎每轮 1 次规划调用 |
+| 表达力 | 只能在 A/B/C/inspect 间选 | 可跳步、混用场景工具 |
+| 主要风险 | 路径选错但仍在受控种子内 | 幻觉工具序、确认闸门绕开需强校验 |
+| 适用 | 模糊跟进、改创意、补镜头 | 参考改编、局部修镜等开放编排 |
+
+**决策（2026-08-10）**：先落地并测试 **方案 1**；方案 2 待方案 1 验收稳定后再评估是否升级。
+
+### 现在实际怎么走（2026-08-10 更新）
+
+| 层 | 有没有上下文 | 干什么 |
+| --- | --- | --- |
+| Supervisor 路由 | 明确 intent（如 video）会**粘住**，不每轮重跑 LLM；只有 unknown 才重路由 | 跨业务：图/视频/PPT |
+| 进 VideoAgent 前 | 会读最近用户消息做**有限合并**（成稿/长 brief + 短指令/改创意跟进） | 拼 `latest_input` |
+| VideoAgent 入口（方案 1） | 规则判 A/B/C/inspect；歧义时 LLM 只选路径 | **确定性种子 Plan**，不是动态选 Skill |
+| Skill 执行 | 读 `latest_input` + `script_pipeline` 上游产物 | 按 Plan 顺序跑 stage |
 
 #### 参考：参考视频改编完整执行方案示例
 
@@ -205,7 +251,7 @@ backend/pixelflow/video_agent/
 采用 **对话流内嵌执行叙事**（类似 Codex / Cursor Agent 的交互），**不**把时间线做成独立中栏看板：
 
 1. **主栏 = 对话流**：用户消息、助手结论（`message.upserted`）、执行方案卡片、逐步工具/步骤块、确认卡，按时间顺序混排在同一滚动列表中；
-2. **步骤块就地展开**：`agent.step.*` 渲染为对话流里的紧凑步骤条目（标题 + 状态 + 摘要 + 耗时），点击可展开可见输入与关联素材；进行中步骤显示已运行时长；
+2. **步骤块就地展开**：`agent.step.`* 渲染为对话流里的紧凑步骤条目（标题 + 状态 + 摘要 + 耗时），点击可展开可见输入与关联素材；进行中步骤显示已运行时长；
 3. **确认卡内联**：`agent.confirmation.requested` 直接插在对应步骤之后，用户在对话流内确认/拒绝，不另开中栏；
 4. **右侧（或可折叠侧栏）= 证据面板**：`SceneEvidencePanel` 展示当前选中步骤/镜头的素材预览，服务「看图」而非「看流程」；窄屏可改为底部抽屉；
 5. **禁止**：单独占满一列的步骤看板、与对话脱节的第二套进度条、展示模型推理链或原始 tool JSON。
@@ -545,7 +591,7 @@ The frontend shows an execution narrative, not model chain-of-thought. Each time
 Use a **chat-inline execution narrative** (Codex / Cursor Agent style). Do **not** put the timeline in a separate middle-column board:
 
 1. **Primary column = conversation stream**: user messages, assistant conclusions (`message.upserted`), plan cards, step blocks, and confirmation cards interleave in one scrollable list.
-2. **Steps expand in place**: `agent.step.*` renders as compact in-stream step rows (title, status, summary, duration); click to expand visible inputs and linked artifacts; running steps show elapsed time.
+2. **Steps expand in place**: `agent.step.`* renders as compact in-stream step rows (title, status, summary, duration); click to expand visible inputs and linked artifacts; running steps show elapsed time.
 3. **Confirmations are inline**: `agent.confirmation.requested` appears immediately after the relevant step; the user confirms or declines in the stream.
 4. **Right rail (or collapsible drawer) = evidence**: `SceneEvidencePanel` previews the selected step/scene artifacts. On narrow viewports use a bottom drawer. This pane is for "seeing media", not for "watching progress".
 5. **Forbidden**: a full-column step kanban disconnected from chat, a second progress UI that duplicates the stream, or any display of model chain-of-thought / raw tool JSON.

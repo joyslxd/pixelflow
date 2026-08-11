@@ -238,3 +238,46 @@ def test_extract_script_setting_assets_resolves_generic_core_product_heading() -
 """
     seed = extract_script_setting_assets(markdown)
     assert [item["name"] for item in seed["props"]] == ["蓝妹啤酒", "旧相册"]
+
+
+def test_extract_script_setting_assets_skips_character_relationship_heading() -> None:
+    """Skill 常把「角色关系」写成容器标题；不能当唯一出场角色。"""
+
+    nested = """
+## 角色设定
+### 角色关系
+- **安然**：女主，短发，主讲
+- **Yann**：闺蜜，协助演示
+- **联名方代表**：品牌方背书
+## 场景设定
+### 海岛酒店房间
+暖光
+## 道具与产品设定
+### 联名面霜
+玻璃瓶
+"""
+    seed = extract_script_setting_assets(nested)
+    assert [item["name"] for item in seed["characters"]] == ["安然", "Yann", "联名方代表"]
+    assert "角色关系" not in [item["name"] for item in seed["characters"]]
+
+    prose = """
+## 角色设定
+### 角色关系
+安然、Yann、联名方代表三人同框；安然是主讲，Yann 是闺蜜，联名方代表负责背书。
+"""
+    prose_seed = extract_script_setting_assets(prose)
+    assert [item["name"] for item in prose_seed["characters"]] == ["安然", "Yann", "联名方代表"]
+
+    dossiers = """
+## 角色设定
+### 角色关系
+三人互为合作关系。
+### 安然（女1）
+短发主讲
+### Yann（女2）
+闺蜜
+### 联名方代表（男1）
+品牌方
+"""
+    dossier_seed = extract_script_setting_assets(dossiers)
+    assert [item["name"] for item in dossier_seed["characters"]] == ["安然", "Yann", "联名方代表"]

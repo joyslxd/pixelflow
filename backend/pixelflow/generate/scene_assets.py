@@ -1,7 +1,8 @@
-"""视频场景参考图生成：props / scenes 支持用户上传图参考生图，其余资产仍走文生图。"""
+"""视频场景参考图生成：角色/场景/道具支持用户上传图参考生图。"""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -105,11 +106,200 @@ def enhance_scene_reference_prompt(prompt: str) -> str:
 def _enhance_reference_prompt(prompt: str, asset_type: str) -> str:
     if asset_type == "scene_image":
         return enhance_scene_reference_prompt(prompt)
-    return enhance_prop_reference_prompt(prompt)
+    if asset_type == "prop_image":
+        return enhance_prop_reference_prompt(prompt)
+    cleaned = prompt.strip()
+    if not cleaned:
+        return "以参考图中的人物外貌与服装为准（如果有参考图的话），保持五官、发型、体态和服饰一致，干净背景，无文字水印。"
+    if "参考图" in cleaned:
+        return cleaned
+    return f"{cleaned}。以参考图中的人物外貌与服装为准（如果有参考图的话），保持五官、发型、体态和服饰一致。"
 
 
 def _uses_reference_image(asset_type: str, reference_urls: list[str]) -> bool:
-    return asset_type in {"prop_image", "scene_image"} and bool(reference_urls)
+    return asset_type in {"character", "prop_image", "scene_image"} and bool(reference_urls)
+
+
+_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "character": ("角色", "人物", "演员", "女主", "男主", "character"),
+    "scene_image": ("场景", "背景", "环境", "scene"),
+    "prop_image": ("道具", "商品", "产品", "任务", "物件", "prop", "product"),
+}
+
+
+def _asset_catalog(global_assets: dict[str, Any] | None) -> list[dict[str, str]]:
+    assets = global_assets if isinstance(global_assets, dict) else {}
+    catalog: list[dict[str, str]] = []
+    for collection, asset_type in (
+        ("characters", "character"),
+        ("scenes", "scene_image"),
+        ("props", "prop_image"),
+    ):
+        for item in _list_of_dicts(assets.get(collection)):
+            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not asset_id and not name:
+                continue
+            catalog.append(
+                {
+                    "asset_id": asset_id,
+                    "asset_name": name,
+                    "asset_type": asset_type,
+                }
+            )
+    return catalog
+
+
+def _infer_types_from_text(text: str) -> set[str]:
+    lowered = text.casefold()
+    matched: set[str] = set()
+    for asset_type, aliases in _TYPE_ALIASES.items():
+        if any(alias.casefold() in lowered for alias in aliases):
+            matched.add(asset_type)
+    return matched
+
+
+def _split_reference_brief_segments(brief: str, url_count: int) -> list[str]:
+    cleaned = brief.strip()
+    if not cleaned:
+        return [""] * url_count
+    numbered = re.findall(
+        r"(?:图|图片|参考图|第)?\s*(\d+)\s*[:：\.、\)\]】]?\s*([^\n；;]+)",
+        cleaned,
+    )
+    by_index: dict[int, str] = {}
+    for raw_index, segment in numbered:
+        try:
+            index = int(raw_index)
+        except ValueError:
+            continue
+        if 1 <= index <= url_count:
+            by_index[index] = segment.strip()
+    if by_index:
+        return [by_index.get(index + 1, "") for index in range(url_count)]
+    parts = [part.strip() for part in re.split(r"[\n；;]+", cleaned) if part.strip()]
+    if len(parts) >= url_count:
+        return parts[:url_count]
+    if len(parts) == 1:
+        return [parts[0]] * url_count
+    while len(parts) < url_count:
+        parts.append(parts[-1] if parts else "")
+    return parts[:url_count]
+
+
+def build_reference_binding_index(
+    *,
+    materials: list[dict[str, Any]] | None,
+    scene_packages: list[dict[str, Any]] | None,
+    global_assets: dict[str, Any] | None = None,
+    reference_brief: str | None = None,
+    asset_reference_bindings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """把上传参考图解析为 per-asset / per-type / 全局索引。"""
+
+    all_urls = collect_prop_reference_image_urls(materials, scene_packages)
+    by_asset_id: dict[str, list[str]] = {}
+    by_type: dict[str, list[str]] = {
+        "character": [],
+        "scene_image": [],
+        "prop_image": [],
+    }
+    global_urls: list[str] = []
+    catalog = _asset_catalog(global_assets)
+
+    def append_unique(bucket: list[str], url: str) -> None:
+        if url and url not in bucket:
+            bucket.append(url)
+
+    for binding in asset_reference_bindings or []:
+        if not isinstance(binding, dict):
+            continue
+        urls = [
+            str(item).strip()
+            for item in (binding.get("reference_urls") or [])
+            if str(item or "").strip()
+        ]
+        urls = [url for url in urls if _is_reference_image_url(url)]
+        asset_id = str(binding.get("asset_id") or "").strip()
+        asset_type = str(binding.get("asset_type") or "").strip()
+        if asset_id:
+            for url in urls:
+                append_unique(by_asset_id.setdefault(asset_id, []), url)
+        if asset_type in by_type:
+            for url in urls:
+                append_unique(by_type[asset_type], url)
+        if not asset_id and asset_type not in by_type:
+            for url in urls:
+                append_unique(global_urls, url)
+
+    brief = str(reference_brief or "").strip()
+    segments = _split_reference_brief_segments(brief, len(all_urls)) if all_urls else []
+    for index, url in enumerate(all_urls):
+        segment = segments[index] if index < len(segments) else ""
+        # 仅用该图对应分段做资产名匹配，避免整段 brief 把所有图绑到同一个资产。
+        name_haystack = segment.strip() or (brief if len(all_urls) == 1 else "")
+        matched_asset = False
+        if name_haystack:
+            for item in catalog:
+                name = item["asset_name"]
+                asset_id = item["asset_id"]
+                if name and name in name_haystack:
+                    append_unique(by_asset_id.setdefault(asset_id or name, []), url)
+                    append_unique(by_type[item["asset_type"]], url)
+                    matched_asset = True
+                elif asset_id and asset_id in name_haystack:
+                    append_unique(by_asset_id.setdefault(asset_id, []), url)
+                    append_unique(by_type[item["asset_type"]], url)
+                    matched_asset = True
+        if matched_asset:
+            continue
+        types = _infer_types_from_text(segment) or (
+            _infer_types_from_text(brief) if len(all_urls) == 1 else set()
+        )
+        if types:
+            for asset_type in types:
+                append_unique(by_type[asset_type], url)
+            continue
+        append_unique(global_urls, url)
+
+    if not brief and not asset_reference_bindings:
+        global_urls = list(all_urls)
+
+    return {
+        "by_asset_id": by_asset_id,
+        "by_type": by_type,
+        "global_urls": global_urls,
+        "all_urls": all_urls,
+    }
+
+
+def resolve_reference_urls_for_asset(
+    index: dict[str, Any],
+    *,
+    asset_id: str,
+    asset_type: str,
+    asset_name: str = "",
+    limit: int = 9,
+) -> list[str]:
+    by_asset_id = index.get("by_asset_id") if isinstance(index.get("by_asset_id"), dict) else {}
+    by_type = index.get("by_type") if isinstance(index.get("by_type"), dict) else {}
+    global_urls = index.get("global_urls") if isinstance(index.get("global_urls"), list) else []
+    all_urls = index.get("all_urls") if isinstance(index.get("all_urls"), list) else []
+    candidates: list[str] = []
+    for key in (asset_id, asset_name):
+        if key and key in by_asset_id:
+            for url in by_asset_id[key]:
+                if url not in candidates:
+                    candidates.append(url)
+    if not candidates and asset_type in by_type:
+        for url in by_type[asset_type]:
+            if url not in candidates:
+                candidates.append(url)
+    if not candidates:
+        for url in global_urls or all_urls:
+            if url not in candidates:
+                candidates.append(url)
+    return candidates[: max(1, limit)]
 
 
 def enhance_prop_reference_prompt(prompt: str) -> str:
@@ -347,8 +537,10 @@ async def generate_scene_assets(
     quota_checker: Any,
     target_assets: list[dict[str, Any]] | None = None,
     on_progress: SceneAssetProgressCallback | None = None,
+    reference_brief: str | None = None,
+    asset_reference_bindings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """生成场景参考图；props / scenes 在用户有上传图片时走参考生图。
+    """生成场景参考图；有上传参考图时按绑定/类型走参考生图。
 
     on_progress 在每张参考图尝试结束后触发，供异步 Job 回写轮询进度。
     """
@@ -369,7 +561,13 @@ async def generate_scene_assets(
     _validate_scene_asset_entity_names(assets, enriched)
     failed_assets: list[dict[str, Any]] = []
     generation_modes: set[str] = set()
-    reference_urls = collect_prop_reference_image_urls(materials, enriched)
+    reference_index = build_reference_binding_index(
+        materials=materials,
+        scene_packages=enriched,
+        global_assets=assets,
+        reference_brief=reference_brief,
+        asset_reference_bindings=asset_reference_bindings,
+    )
 
     async def generate_asset(
         prompt: str,
@@ -377,6 +575,13 @@ async def generate_scene_assets(
         context: dict[str, Any],
     ) -> tuple[list[str], bool, str]:
         asset_type = str(context.get("asset_type") or "")
+        reference_urls = resolve_reference_urls_for_asset(
+            reference_index,
+            asset_id=str(context.get("asset_id") or ""),
+            asset_type=asset_type,
+            asset_name=str(context.get("asset_name") or ""),
+            limit=MAX_REFERENCE_IMAGES,
+        )
         use_reference = _uses_reference_image(asset_type, reference_urls)
         generation_mode = "reference_image" if use_reference else "text_to_image"
         attempts: list[dict[str, Any]] = []

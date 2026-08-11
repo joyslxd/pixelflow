@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from typing import Any, Literal
@@ -13,10 +14,22 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.gateway.pixelflow_memory import concise_result_summary, current_user_id, power_mem_service, record_power_mem_background, search_power_mem
 from pixelflow.creative.contract import VideoCreationContract
+from pixelflow.generate.media_history import (
+    build_merge_video_artifact,
+    build_scene_assets_artifact,
+    build_scene_videos_artifact,
+    merge_video_should_persist,
+    persist_media_result_message,
+    persist_scene_assets_progress,
+    resolve_conversation_id,
+    scene_assets_should_persist,
+    scene_videos_should_persist,
+)
 from pixelflow.generate.scene_asset_revision import revise_scene_package_asset
 from pixelflow.generate.scene_assets import (
     generate_scene_assets as run_generate_scene_assets,
 )
+from pixelflow.tasks.store import PixelFlowTaskStore
 from pixelflow.generate.scene_packages import prepare_video_scene_packages_with_llm
 from pixelflow.memory import semantic_memory_text, with_semantic_memory
 from pixelflow.qc import VideoQCRequest, review_video_quality
@@ -50,6 +63,120 @@ _MAX_SCENE_ASSET_REVISION_JOBS = 100
 _MAX_REFERENCE_IMAGE_COUNT = 9
 _SCENE_VIDEO_MAX_CONCURRENCY = 100
 _SCENE_VIDEO_MAX_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
+
+
+def _task_store_from_request(request: Request) -> PixelFlowTaskStore | None:
+    store = getattr(request.app.state, "pixelflow_task_store", None)
+    return store if store is not None else None
+
+
+def _job_conversation_id(body: Any, request: Request) -> str | None:
+    body_id = getattr(body, "conversation_id", None)
+    return resolve_conversation_id(
+        body_conversation_id=str(body_id) if body_id else None,
+        header_conversation_id=request.headers.get("X-Conversation-Id"),
+    )
+
+
+def _model_dump(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+async def _persist_scene_assets_history(
+    *,
+    store: PixelFlowTaskStore | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    job_id: str,
+    result: GenerateSceneAssetsResponse,
+) -> None:
+    payload = _model_dump(result)
+    if not scene_assets_should_persist(payload):
+        return
+    await persist_media_result_message(
+        store,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        job_id=job_id,
+        kind="scene_assets",
+        content="参考图生成完成（本批），已写入对话历史，可随时回看。",
+        artifact=build_scene_assets_artifact(payload, job_id=job_id),
+        last_phase="scene_package_ready" if result.ok and not result.quota_insufficient else "scene_asset_failed",
+        context_patch={
+            "global_assets": payload.get("global_assets") or {},
+            "scene_packages": payload.get("scene_packages") or [],
+            "scene_asset_failures": payload.get("failed_assets") or [],
+            "creation_contract": payload.get("creation_contract"),
+        },
+    )
+
+
+async def _persist_scene_videos_history(
+    *,
+    store: PixelFlowTaskStore | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    job_id: str,
+    result: GenerateSceneVideosResponse,
+) -> None:
+    payload = _model_dump(result)
+    if not scene_videos_should_persist(payload):
+        return
+    await persist_media_result_message(
+        store,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        job_id=job_id,
+        kind="scene_videos",
+        content="分镜视频本批已生成，已写入对话历史。",
+        artifact=build_scene_videos_artifact(payload, job_id=job_id),
+        last_phase="scene_videos_ready" if result.ok else "scene_videos_partial",
+        context_patch={
+            "generated_scene_videos": payload.get("scene_videos") or [],
+            "failed_scenes": payload.get("failed_scenes") or [],
+        },
+    )
+
+
+async def _persist_merge_video_history(
+    *,
+    store: PixelFlowTaskStore | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    job_id: str,
+    result: MergeSceneVideosResponse,
+) -> None:
+    payload = _model_dump(result)
+    if not merge_video_should_persist(payload):
+        return
+    await persist_media_result_message(
+        store,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        job_id=job_id,
+        kind="merge_video",
+        content="合成视频已生成，已写入对话历史。",
+        artifact=build_merge_video_artifact(payload, job_id=job_id),
+        last_phase="video_merged" if result.ok else "video_merge_failed",
+        context_patch={
+            "merged_video": {
+                "ok": result.ok,
+                "merged_video_url": result.merged_video_url,
+                "task_id": result.task_id,
+                "message": result.message,
+            },
+            "generated_scene_videos": [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in (result.scene_videos or [])
+            ],
+        },
+    )
 
 DirectVideoMode = Literal[
     "text_to_video",
@@ -89,6 +216,7 @@ class GenerateSceneVideosRequest(BaseModel):
     model: str | None = None
     sound: str = "on"
     creation_contract: VideoCreationContract | None = None
+    conversation_id: str | None = None
 
 
 class PrepareScenePackagesRequest(BaseModel):
@@ -127,6 +255,12 @@ class SceneAssetTarget(BaseModel):
     asset_type: Literal["character", "scene_image", "prop_image"]
 
 
+class SceneAssetReferenceBinding(BaseModel):
+    asset_id: str = ""
+    asset_type: Literal["character", "scene_image", "prop_image"] | str = ""
+    reference_urls: list[str] = Field(default_factory=list)
+
+
 class GenerateSceneAssetsRequest(BaseModel):
     global_assets: dict[str, Any] = Field(default_factory=dict)
     scene_packages: list[dict[str, Any]]
@@ -136,6 +270,9 @@ class GenerateSceneAssetsRequest(BaseModel):
     model: str | None = None
     creation_contract: VideoCreationContract | None = None
     target_assets: list[SceneAssetTarget] | None = Field(default=None, min_length=1, max_length=100)
+    reference_brief: str | None = None
+    asset_reference_bindings: list[SceneAssetReferenceBinding] = Field(default_factory=list)
+    conversation_id: str | None = None
 
 
 class GenerateSceneAssetsResponse(BaseModel):
@@ -168,6 +305,24 @@ class SceneAssetGenerationProgress(BaseModel):
     quota_insufficient: bool = False
 
 
+class SceneVideoGenerationProgress(BaseModel):
+    """分镜视频逐镜生成进度，供前端轮询展示与预览。"""
+
+    completed: int = Field(ge=0, default=0)
+    total: int = Field(ge=0, default=0)
+    scene_id: str = ""
+    scene_index: int = 0
+    ok: bool = True
+    quota_insufficient: bool = False
+
+
+class ScenePackageStructureProgress(BaseModel):
+    """场景包结构阶段子进度，供执行规划卡展示。"""
+
+    phase: str = ""
+    message: str = ""
+
+
 class PrepareScenePackagesJobStartResponse(BaseModel):
     ok: bool
     job_id: str
@@ -183,6 +338,7 @@ class PrepareScenePackagesJobStatusResponse(BaseModel):
     stage: str = "prepare_scene_packages"
     result: PrepareScenePackagesJobResult | None = None
     asset_progress: SceneAssetGenerationProgress | None = None
+    structure_progress: ScenePackageStructureProgress | None = None
     error: str | None = None
     message: str = ""
 
@@ -288,6 +444,7 @@ class GenerateSceneVideosJobStatusResponse(BaseModel):
     job_id: str
     status: str
     result: GenerateSceneVideosResponse | None = None
+    video_progress: SceneVideoGenerationProgress | None = None
     error: str | None = None
     message: str = ""
 
@@ -297,6 +454,7 @@ class MergeSceneVideosRequest(BaseModel):
     duration: int = 30
     size: str = "1080p"
     model: str | None = None
+    conversation_id: str | None = None
 
 
 class MergeSceneVideosResponse(BaseModel):
@@ -516,6 +674,7 @@ async def get_prepare_scene_packages_job(job_id: str) -> PrepareScenePackagesJob
     stage = str(job.get("stage") or "prepare_scene_packages")
     error = job.get("error")
     asset_progress = _scene_asset_progress_from_job(job)
+    structure_progress = _scene_structure_progress_from_job(job)
     return PrepareScenePackagesJobStatusResponse(
         ok=status not in {"failed"},
         job_id=job_id,
@@ -523,12 +682,24 @@ async def get_prepare_scene_packages_job(job_id: str) -> PrepareScenePackagesJob
         stage=stage,
         result=result_payload,
         asset_progress=asset_progress,
+        structure_progress=structure_progress,
         error=str(error) if error else None,
-        message=_scene_package_job_message(status, stage, result_payload, error, asset_progress),
+        message=_scene_package_job_message(
+            status,
+            stage,
+            result_payload,
+            error,
+            asset_progress,
+            structure_progress,
+        ),
     )
 
 
-async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) -> PrepareScenePackagesResponse:
+async def _prepare_scene_packages_response(
+    body: PrepareScenePackagesRequest,
+    *,
+    on_structure_progress: Any | None = None,
+) -> PrepareScenePackagesResponse:
     contract = body.creation_contract
     form_values = dict(body.form_values)
     target_duration_ms = body.target_duration_ms
@@ -556,6 +727,7 @@ async def _prepare_scene_packages_response(body: PrepareScenePackagesRequest) ->
         target_duration_ms=target_duration_ms,
         scene_blueprints=body.scene_blueprints,
         asset_manifest=body.asset_manifest,
+        on_progress=on_structure_progress,
     )
     result["creation_contract"] = contract.model_dump() if contract is not None else None
     return PrepareScenePackagesResponse(**result)
@@ -662,13 +834,25 @@ async def start_generate_scene_assets(body: GenerateSceneAssetsRequest, request:
         raise HTTPException(status_code=400, detail="scene_packages不能为空")
     _trim_scene_asset_jobs()
     job_id = uuid.uuid4().hex
+    conversation_id = _job_conversation_id(body, request)
     _SCENE_ASSET_JOBS[job_id] = {
         "status": "running",
         "stage": "generate_scene_assets",
         "result": None,
         "error": None,
+        "conversation_id": conversation_id,
+        "user_id": await current_user_id(request),
     }
-    asyncio.create_task(_run_scene_asset_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    asyncio.create_task(
+        _run_scene_asset_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            await current_user_id(request),
+            conversation_id=conversation_id,
+            store=_task_store_from_request(request),
+        )
+    )
     return GenerateSceneAssetsJobStartResponse(
         ok=True,
         job_id=job_id,
@@ -805,6 +989,10 @@ async def _generate_scene_assets_response(
         quota_checker=is_quota_insufficient,
         target_assets=[target.model_dump() for target in body.target_assets] if body.target_assets is not None else None,
         on_progress=on_progress,
+        reference_brief=body.reference_brief,
+        asset_reference_bindings=[
+            binding.model_dump() for binding in body.asset_reference_bindings
+        ],
     )
     if result.get("quota_insufficient"):
         return GenerateSceneAssetsResponse(
@@ -969,7 +1157,11 @@ async def get_generate_direct_video_job(job_id: str) -> GenerateDirectVideoJobSt
     )
 
 
-async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> GenerateSceneVideosResponse:
+async def _generate_scene_videos_response(
+    body: GenerateSceneVideosRequest,
+    *,
+    on_progress: Any | None = None,
+) -> GenerateSceneVideosResponse:
     if not body.scenes:
         raise HTTPException(status_code=400, detail="scenes不能为空")
 
@@ -981,6 +1173,33 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
     video_sound = contract.video_sound if contract is not None else body.sound
     supported_generation_types = _video_generation_types(contract)
     semaphore = asyncio.Semaphore(max(1, min(_SCENE_VIDEO_MAX_CONCURRENCY, len(body.scenes))))
+    progress_lock = asyncio.Lock()
+    completed_videos: list[GeneratedSceneVideo] = []
+    failed_items: list[dict[str, Any]] = []
+    finished_count = 0
+    total_scenes = len(body.scenes)
+
+    async def emit_progress(
+        scene: SceneGenerationItem,
+        *,
+        ok: bool,
+        quota_insufficient: bool = False,
+    ) -> None:
+        if on_progress is None:
+            return
+        progress = {
+            "completed": finished_count,
+            "total": total_scenes,
+            "scene_id": scene.scene_id,
+            "scene_index": scene.scene_index,
+            "ok": ok,
+            "quota_insufficient": quota_insufficient,
+            "scene_videos": [item.model_dump() for item in sorted(completed_videos, key=lambda item: item.scene_index)],
+            "failed_scenes": list(failed_items),
+        }
+        maybe = on_progress(progress)
+        if asyncio.iscoroutine(maybe) or asyncio.isfuture(maybe):
+            await maybe
 
     async def run_scene_once(
         scene: SceneGenerationItem,
@@ -1048,6 +1267,7 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
         )
 
     async def run_scene(scene: SceneGenerationItem) -> GeneratedSceneVideo | dict[str, Any]:
+        nonlocal finished_count
         async with semaphore:
             last_failure: dict[str, Any] | None = None
             mode_override: DirectVideoMode | None = None
@@ -1055,13 +1275,18 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                 try:
                     item = await run_scene_once(scene, attempt, mode_override)
                 except SceneVideoCapabilityError as exc:
-                    return {
+                    item = {
                         "scene_id": scene.scene_id,
                         "scene_index": scene.scene_index,
                         "error": str(exc),
                         "attempts": attempt,
                         "capability_mismatch": True,
                     }
+                    async with progress_lock:
+                        finished_count += 1
+                        failed_items.append(item)
+                        await emit_progress(scene, ok=False)
+                    return item
                 except Exception as exc:  # noqa: BLE001 - per-scene vendor failures must not abort sibling scenes.
                     last_failure = {
                         "scene_id": scene.scene_id,
@@ -1071,9 +1296,17 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                     }
                     continue
                 if isinstance(item, GeneratedSceneVideo):
+                    async with progress_lock:
+                        finished_count += 1
+                        completed_videos.append(item)
+                        await emit_progress(scene, ok=True)
                     return item
                 last_failure = item
                 if is_quota_insufficient(item):
+                    async with progress_lock:
+                        finished_count += 1
+                        failed_items.append(item)
+                        await emit_progress(scene, ok=False, quota_insufficient=True)
                     return item
                 if _is_unsupported_task_type_failure(item):
                     # 旧合同没有实时能力快照时保留 legacy 首次选择；供应商明确拒绝 task_type 后，
@@ -1081,15 +1314,28 @@ async def _generate_scene_videos_response(body: GenerateSceneVideosRequest) -> G
                     if scene.generation_mode is None and mode_override is None and item.get("mode") == "reference_mode_video" and (supported_generation_types is None or _video_mode_is_supported("text_to_video", supported_generation_types)):
                         mode_override = "text_to_video"
                         continue
+                    async with progress_lock:
+                        finished_count += 1
+                        failed_items.append(item)
+                        await emit_progress(scene, ok=False)
                     return item
                 if _is_non_retryable_scene_failure(item):
+                    async with progress_lock:
+                        finished_count += 1
+                        failed_items.append(item)
+                        await emit_progress(scene, ok=False)
                     return item
-            return last_failure or {
+            final_failure = last_failure or {
                 "scene_id": scene.scene_id,
                 "scene_index": scene.scene_index,
                 "error": "场景视频生成失败",
                 "attempts": _SCENE_VIDEO_MAX_ATTEMPTS,
             }
+            async with progress_lock:
+                finished_count += 1
+                failed_items.append(final_failure)
+                await emit_progress(scene, ok=False, quota_insufficient=is_quota_insufficient(final_failure))
+            return final_failure
 
     results = await asyncio.gather(*(run_scene(scene) for scene in sorted(body.scenes, key=lambda item: item.scene_index)))
     scene_videos = sorted((item for item in results if isinstance(item, GeneratedSceneVideo)), key=lambda item: item.scene_index)
@@ -1137,8 +1383,37 @@ async def start_generate_scene_videos(body: GenerateSceneVideosRequest, request:
         raise HTTPException(status_code=400, detail="scenes不能为空")
     _trim_scene_video_jobs()
     job_id = uuid.uuid4().hex
-    _SCENE_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_scene_video_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    conversation_id = _job_conversation_id(body, request)
+    user_id = await current_user_id(request)
+    _SCENE_VIDEO_JOBS[job_id] = {
+        "status": "running",
+        "result": GenerateSceneVideosResponse(
+            ok=True,
+            scene_videos=[],
+            failed_scenes=[],
+            message=f"场景视频生成中（0/{len(body.scenes)}）…",
+        ),
+        "video_progress": SceneVideoGenerationProgress(
+            completed=0,
+            total=len(body.scenes),
+            scene_id="",
+            scene_index=0,
+            ok=True,
+        ),
+        "error": None,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }
+    asyncio.create_task(
+        _run_scene_video_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            user_id,
+            conversation_id=conversation_id,
+            store=_task_store_from_request(request),
+        )
+    )
     return GenerateSceneVideosJobStartResponse(ok=True, job_id=job_id, status="running", message="场景视频生成任务已启动。")
 
 
@@ -1156,20 +1431,81 @@ async def get_generate_scene_video_job(job_id: str) -> GenerateSceneVideosJobSta
         result_payload = None
     status = str(job.get("status") or "running")
     error = job.get("error")
+    video_progress = _scene_video_progress_from_job(job)
     return GenerateSceneVideosJobStatusResponse(
         ok=status != "failed",
         job_id=job_id,
         status=status,
         result=result_payload,
+        video_progress=video_progress,
         error=str(error) if error else None,
-        message="场景视频生成完成。" if status == "completed" else ("场景视频生成失败。" if status == "failed" else "场景视频生成中。"),
+        message=_scene_video_job_message(status, result_payload, error, video_progress),
     )
 
 
-async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_scene_video_job(
+    job_id: str,
+    body: GenerateSceneVideosRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
-        result = await _generate_scene_videos_response(body)
-        _SCENE_VIDEO_JOBS[job_id] = {"status": "completed", "result": result, "error": None}
+        async def on_scene_video_progress(progress: dict[str, Any]) -> None:
+            scene_videos_raw = progress.get("scene_videos") or []
+            failed_scenes = list(progress.get("failed_scenes") or [])
+            try:
+                scene_videos = [GeneratedSceneVideo(**item) if isinstance(item, dict) else item for item in scene_videos_raw]
+            except Exception:  # noqa: BLE001 - 进度 payload 容错，坏片段不阻断轮询
+                scene_videos = []
+            partial = GenerateSceneVideosResponse(
+                ok=not failed_scenes,
+                endpoint="/api/video/mixed" if len({getattr(item, "endpoint", "") for item in scene_videos}) > 1 else (
+                    scene_videos[0].endpoint if scene_videos else "/api/video/reference-mode-video"
+                ),
+                scene_videos=scene_videos,
+                failed_scenes=failed_scenes,
+                quota_insufficient=bool(progress.get("quota_insufficient")),
+                message=_video_progress_message(progress),
+            )
+            current = dict(_SCENE_VIDEO_JOBS.get(job_id) or {})
+            current.update(
+                {
+                    "status": "running",
+                    "result": partial,
+                    "video_progress": _scene_video_progress_payload(progress),
+                    "error": None,
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                }
+            )
+            _SCENE_VIDEO_JOBS[job_id] = current
+
+        result = await _generate_scene_videos_response(body, on_progress=on_scene_video_progress)
+        _SCENE_VIDEO_JOBS[job_id] = {
+            "status": "completed",
+            "result": result,
+            "video_progress": SceneVideoGenerationProgress(
+                completed=len(body.scenes),
+                total=len(body.scenes),
+                scene_id="",
+                scene_index=0,
+                ok=result.ok,
+                quota_insufficient=result.quota_insufficient,
+            ),
+            "error": None,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
+        await _persist_scene_videos_history(
+            store=store,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            result=result,
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -1182,7 +1518,13 @@ async def _run_scene_video_job(job_id: str, body: GenerateSceneVideosRequest, po
             infer=False,
         )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
-        _SCENE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _SCENE_VIDEO_JOBS[job_id] = {
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
         _record_video_job_failure(power_mem, user_id, job_id, "scene_video_generation_agent", "video_generate_scenes_job", exc)
 
 
@@ -1212,9 +1554,29 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
             "status": "running",
             "stage": "prepare_scene_packages",
             "result": None,
+            "structure_progress": {
+                "phase": "resolve_inputs",
+                "message": "正在解析镜头时长与蓝图…",
+            },
             "error": None,
         }
-        video_scene_packages = await _prepare_scene_packages_response(body)
+
+        async def on_structure_progress(phase: str, message: str) -> None:
+            current = dict(_SCENE_PACKAGE_JOBS.get(job_id) or {})
+            current.update(
+                {
+                    "status": "running",
+                    "stage": "prepare_scene_packages",
+                    "structure_progress": {"phase": phase, "message": message},
+                    "error": None,
+                }
+            )
+            _SCENE_PACKAGE_JOBS[job_id] = current
+
+        video_scene_packages = await _prepare_scene_packages_response(
+            body,
+            on_structure_progress=on_structure_progress,
+        )
         if not video_scene_packages.ok:
             _SCENE_PACKAGE_JOBS[job_id] = {
                 "status": "completed",
@@ -1374,23 +1736,48 @@ async def _run_prepare_scene_package_job(job_id: str, body: PrepareScenePackages
         _record_video_job_failure(power_mem, user_id, job_id, "video_scene_package_agent", "video_prepare_scene_packages_job", exc)
 
 
-async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_scene_asset_job(
+    job_id: str,
+    body: GenerateSceneAssetsRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
         async def on_scene_asset_progress(progress: dict[str, Any]) -> None:
+            partial = GenerateSceneAssetsResponse(
+                ok=True,
+                endpoint="/api/picture/text_to_image",
+                global_assets=progress.get("global_assets") or {},
+                scene_packages=progress.get("scene_packages") or [],
+                failed_assets=list(progress.get("failed_assets") or []),
+                message=_asset_progress_message(progress),
+            )
             _SCENE_ASSET_JOBS[job_id] = {
                 "status": "running",
                 "stage": "generate_scene_assets",
-                "result": GenerateSceneAssetsResponse(
-                    ok=True,
-                    endpoint="/api/picture/text_to_image",
-                    global_assets=progress.get("global_assets") or {},
-                    scene_packages=progress.get("scene_packages") or [],
-                    failed_assets=list(progress.get("failed_assets") or []),
-                    message=_asset_progress_message(progress),
-                ),
+                "result": partial,
                 "asset_progress": _scene_asset_progress_payload(progress),
                 "error": None,
+                "conversation_id": conversation_id,
+                "user_id": user_id,
             }
+            try:
+                await persist_scene_assets_progress(
+                    store,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    job_id=job_id,
+                    global_assets=partial.global_assets,
+                    scene_packages=partial.scene_packages,
+                    failed_assets=partial.failed_assets,
+                    progress=progress,
+                    creation_contract=body.creation_contract.model_dump() if body.creation_contract is not None else None,
+                )
+            except Exception:  # noqa: BLE001 - 进度落库失败不阻断生成
+                logger.exception("persist scene asset progress failed job_id=%s", job_id)
 
         result = await _generate_scene_assets_response(body, on_progress=on_scene_asset_progress)
         _SCENE_ASSET_JOBS[job_id] = {
@@ -1399,7 +1786,16 @@ async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, po
             "result": result,
             "asset_progress": _SCENE_ASSET_JOBS.get(job_id, {}).get("asset_progress"),
             "error": None,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
+        await _persist_scene_assets_history(
+            store=store,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            result=result,
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -1417,6 +1813,8 @@ async def _run_scene_asset_job(job_id: str, body: GenerateSceneAssetsRequest, po
             "stage": str(_SCENE_ASSET_JOBS.get(job_id, {}).get("stage") or "generate_scene_assets"),
             "result": None,
             "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
         _record_video_job_failure(power_mem, user_id, job_id, "video_scene_asset_agent", "video_generate_scene_assets_job", exc)
 
@@ -1552,6 +1950,17 @@ def _scene_asset_progress_payload(progress: dict[str, Any]) -> SceneAssetGenerat
     )
 
 
+def _scene_video_progress_payload(progress: dict[str, Any]) -> SceneVideoGenerationProgress:
+    return SceneVideoGenerationProgress(
+        completed=max(0, int(progress.get("completed") or 0)),
+        total=max(0, int(progress.get("total") or 0)),
+        scene_id=str(progress.get("scene_id") or ""),
+        scene_index=int(progress.get("scene_index") or 0),
+        ok=bool(progress.get("ok", True)),
+        quota_insufficient=bool(progress.get("quota_insufficient")),
+    )
+
+
 def _scene_asset_progress_from_job(job: dict[str, Any]) -> SceneAssetGenerationProgress | None:
     raw = job.get("asset_progress")
     if isinstance(raw, SceneAssetGenerationProgress):
@@ -1559,6 +1968,30 @@ def _scene_asset_progress_from_job(job: dict[str, Any]) -> SceneAssetGenerationP
     if isinstance(raw, dict):
         try:
             return SceneAssetGenerationProgress(**raw)
+        except Exception:  # noqa: BLE001 - 轮询端容错，坏进度不阻断主状态
+            return None
+    return None
+
+
+def _scene_video_progress_from_job(job: dict[str, Any]) -> SceneVideoGenerationProgress | None:
+    raw = job.get("video_progress")
+    if isinstance(raw, SceneVideoGenerationProgress):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return SceneVideoGenerationProgress(**raw)
+        except Exception:  # noqa: BLE001 - 轮询端容错，坏进度不阻断主状态
+            return None
+    return None
+
+
+def _scene_structure_progress_from_job(job: dict[str, Any]) -> ScenePackageStructureProgress | None:
+    raw = job.get("structure_progress")
+    if isinstance(raw, ScenePackageStructureProgress):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return ScenePackageStructureProgress(**raw)
         except Exception:  # noqa: BLE001 - 轮询端容错，坏进度不阻断主状态
             return None
     return None
@@ -1580,12 +2013,44 @@ def _asset_progress_message(progress: dict[str, Any]) -> str:
     return f"参考图进度：{type_label}「{asset_name}」{status}"
 
 
+def _video_progress_message(progress: dict[str, Any]) -> str:
+    completed = int(progress.get("completed") or 0)
+    total = int(progress.get("total") or 0)
+    scene_index = int(progress.get("scene_index") or 0)
+    scene_id = str(progress.get("scene_id") or "").strip()
+    status = "已完成" if progress.get("ok", True) else "失败"
+    label = f"第 {scene_index} 镜" if scene_index > 0 else (scene_id or "分镜")
+    if total > 0 and completed == 0 and not scene_id and scene_index <= 0:
+        return f"分镜视频生成中（0/{total}）…"
+    if total > 0:
+        return f"分镜视频进度 {completed}/{total}：{label}{status}"
+    return f"分镜视频进度：{label}{status}"
+
+
+def _scene_video_job_message(
+    status: str,
+    result: GenerateSceneVideosResponse | None,
+    error: Any,
+    video_progress: SceneVideoGenerationProgress | None = None,
+) -> str:
+    if status == "completed":
+        return result.message if result and result.message else "场景视频生成完成。"
+    if status == "failed":
+        return str(error) if error else "场景视频生成失败。"
+    if video_progress and video_progress.total > 0:
+        return _video_progress_message(video_progress.model_dump())
+    if result and result.message:
+        return result.message
+    return "场景视频生成中。"
+
+
 def _scene_package_job_message(
     status: str,
     stage: str,
     result: PrepareScenePackagesJobResult | None,
     error: Any,
     asset_progress: SceneAssetGenerationProgress | None = None,
+    structure_progress: ScenePackageStructureProgress | None = None,
 ) -> str:
     if status == "completed":
         if stage == "awaiting_image_model":
@@ -1603,6 +2068,8 @@ def _scene_package_job_message(
         if asset_progress and asset_progress.total > 0:
             return _asset_progress_message(asset_progress.model_dump())
         return "视频场景包已生成，正在生成场景参考图。"
+    if structure_progress and structure_progress.message.strip():
+        return structure_progress.message.strip()
     return "视频场景包生成中。"
 
 
@@ -2102,8 +2569,25 @@ async def start_merge_scene_videos(body: MergeSceneVideosRequest, request: Reque
         raise HTTPException(status_code=400, detail="至少需要1个场景视频才能合并")
     _trim_merge_video_jobs()
     job_id = uuid.uuid4().hex
-    _MERGE_VIDEO_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_merge_video_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    conversation_id = _job_conversation_id(body, request)
+    user_id = await current_user_id(request)
+    _MERGE_VIDEO_JOBS[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }
+    asyncio.create_task(
+        _run_merge_video_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            user_id,
+            conversation_id=conversation_id,
+            store=_task_store_from_request(request),
+        )
+    )
     return MergeSceneVideosJobStartResponse(ok=True, job_id=job_id, status="running", message="视频合并任务已启动。")
 
 
@@ -2171,7 +2655,15 @@ async def _merge_scene_videos_response(body: MergeSceneVideosRequest) -> MergeSc
     return response
 
 
-async def _run_merge_video_job(job_id: str, body: MergeSceneVideosRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_merge_video_job(
+    job_id: str,
+    body: MergeSceneVideosRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
         result = await _merge_scene_videos_response(body)
         status = _merge_video_job_status(result)
@@ -2180,7 +2672,17 @@ async def _run_merge_video_job(job_id: str, body: MergeSceneVideosRequest, power
             "status": status,
             "result": result,
             "error": error,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
+        if status in {"completed", "quota_paused"}:
+            await _persist_merge_video_history(
+                store=store,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                job_id=job_id,
+                result=result,
+            )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -2200,7 +2702,13 @@ async def _run_merge_video_job(job_id: str, body: MergeSceneVideosRequest, power
             infer=False,
         )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
-        _MERGE_VIDEO_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _MERGE_VIDEO_JOBS[job_id] = {
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
         _record_video_job_failure(power_mem, user_id, job_id, "video_merge_agent", "video_merge_job", exc)
 
 

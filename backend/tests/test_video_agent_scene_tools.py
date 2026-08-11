@@ -261,3 +261,34 @@ async def test_review_generated_scene_preserves_history_and_marks_regeneration()
     assert target["edit_status"] == "重新生成完成"
     assert target["regenerated_at"] == NOW.isoformat()
     assert reviewed.workspace_patch["dirty_scene_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_scene_mirrors_scene_packages_and_marks_dirty() -> None:
+    result = await PatchSceneTool().execute(
+        _context(),
+        {
+            "scene_id": "scene-3",
+            "patch": {"storyline": "只改第三镜故事线", "duration_ms": 5000},
+        },
+    )
+    assert result.workspace_patch["scenes"][1]["storyline"] == "只改第三镜故事线"
+    assert result.workspace_patch["scenes"][1]["duration_sec"] == 5.0
+    assert result.workspace_patch["scene_packages"] == result.workspace_patch["scenes"]
+    assert result.workspace_patch["dirty_scene_ids"] == ["scene-3"]
+    assert result.workspace_patch["scenes"][0]["prompt"] == "保持不变的开场"
+
+
+@pytest.mark.asyncio
+async def test_generate_scenes_uses_dirty_ids_when_scene_ids_omitted() -> None:
+    operation_port = FakeSceneGenerationOperationPort()
+    tool = GenerateScenesTool(operation_port=operation_port, clock=lambda: NOW)
+    result = await tool.execute(_context(), {"variant_count": 1})
+    assert operation_port.calls == [("scene-3", 1)]
+    target = result.workspace_patch["scenes"][1]
+    untouched = result.workspace_patch["scenes"][0]
+    assert untouched.get("generation_jobs") is None
+    assert target["edit_status"] == "重新生成完成"
+    assert target["approved_variant_id"] == "scene-3-v2"
+    assert result.workspace_patch["dirty_scene_ids"] == []
+    assert result.workspace_patch["scene_packages"] == result.workspace_patch["scenes"]

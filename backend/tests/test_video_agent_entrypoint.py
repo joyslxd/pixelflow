@@ -17,17 +17,117 @@ from pixelflow.tasks import (
     PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
 )
+from pixelflow.video_agent.contracts import AgentPlan, AgentPlanStatus, AgentPlanStep, PlanStepStatus
 from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
+from pixelflow.video_agent.planner.model import (
+    VideoAgentPlanningContext,
+    VideoPlanProposal,
+    VideoPlanStepProposal,
+)
 from pixelflow.video_agent.workspace.repository import MemoryVideoAgentRepository
+
+
+class StubPlanner:
+    """按队列返回固定短计划，记录 plan_turn 调用。"""
+
+    def __init__(self, proposals: list[VideoPlanProposal] | None = None) -> None:
+        self.calls: list[VideoAgentPlanningContext] = []
+        self._proposals = list(proposals or [])
+
+    def enqueue(self, proposal: VideoPlanProposal) -> None:
+        self._proposals.append(proposal)
+
+    async def plan_turn(self, context: VideoAgentPlanningContext) -> AgentPlan:
+        self.calls.append(context)
+        proposal = self._proposals.pop(0) if self._proposals else VideoPlanProposal(
+            public_goal="读取项目资料",
+            steps=(
+                VideoPlanStepProposal(
+                    tool_name="inspect_video_workspace",
+                    title="读取项目资料",
+                    arguments={},
+                ),
+            ),
+        )
+        now = datetime(2026, 8, 5, tzinfo=UTC)
+        from pixelflow.video_agent.entrypoint import video_agent_plan_id
+
+        plan_id = video_agent_plan_id(context.conversation_id, context.turn_id)
+        steps = tuple(
+            AgentPlanStep(
+                step_id=f"{plan_id}-step-{index}",
+                plan_id=plan_id,
+                sequence=index,
+                tool_name=step.tool_name,
+                title=step.title,
+                status=PlanStepStatus.PENDING,
+                arguments=dict(step.arguments),
+                confirmation_required=step.tool_name == "confirm_script_creative",
+            )
+            for index, step in enumerate(proposal.steps, start=1)
+        )
+        return AgentPlan(
+            plan_id=plan_id,
+            workspace_id=context.workspace.workspace_id,
+            conversation_id=context.conversation_id,
+            status=AgentPlanStatus.PLANNING,
+            public_goal=proposal.public_goal,
+            steps=steps,
+            created_at=now,
+            updated_at=now,
+        )
+
+
+def _creative_short_plan() -> VideoPlanProposal:
+    return VideoPlanProposal(
+        public_goal="处理视频创作请求",
+        steps=(
+            VideoPlanStepProposal(
+                tool_name="run_script_skill_stage",
+                title="选题与创作目标 /start",
+                arguments={"stage": "start", "creative_direction": ""},
+            ),
+            VideoPlanStepProposal(
+                tool_name="confirm_script_creative",
+                title="确认选题创意",
+                arguments={},
+            ),
+        ),
+    )
+
+
+def _polish_short_plan() -> VideoPlanProposal:
+    return VideoPlanProposal(
+        public_goal="成稿自检与导出",
+        steps=(
+            VideoPlanStepProposal(
+                tool_name="run_script_skill_stage",
+                title="五维自检 /review",
+                arguments={"stage": "review", "creative_direction": ""},
+            ),
+            VideoPlanStepProposal(
+                tool_name="run_script_skill_stage",
+                title="合规检查 /compliance",
+                arguments={"stage": "compliance", "creative_direction": ""},
+            ),
+            VideoPlanStepProposal(
+                tool_name="run_script_skill_stage",
+                title="导出脚本产物 /export",
+                arguments={"stage": "export", "creative_direction": ""},
+            ),
+        ),
+    )
 
 
 @pytest.mark.asyncio
 async def test_entrypoint_creates_recoverable_workspace_plan_and_public_event() -> None:
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_creative_short_plan()])
     entrypoint = VideoAgentEntrypoint(
         runtime_repository=runtime_repository,
         video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
     )
 
@@ -46,19 +146,15 @@ async def test_entrypoint_creates_recoverable_workspace_plan_and_public_event() 
     assert workspace == submission.workspace
     assert workspace.payload["latest_input"] == "我有一个护肤品脚本，帮我生成视频"
     assert workspace.payload["artifact_refs"] == ["artifact:product-1"]
-    assert submission.plan.public_goal.startswith("处理视频创作请求")
-    assert [step.tool_name for step in steps] == ["run_script_skill_stage"] * 8
-    assert [step.arguments["stage"] for step in steps] == [
-        "start",
-        "plan",
-        "characters",
-        "outline",
-        "episode",
-        "review",
-        "compliance",
-        "export",
+    assert len(planner.calls) == 1
+    assert planner.calls[0].workspace_digest.get("workspace_id") == workspace.workspace_id
+    assert [step.tool_name for step in steps] == [
+        "run_script_skill_stage",
+        "confirm_script_creative",
     ]
-    assert steps[0].title == "选题与创作目标 /start"
+    assert steps[0].arguments.get("stage") == "start"
+    assert steps[1].confirmation_required is True
+    assert len(steps) <= 3
     assert events[-1].type is AgentEventType.AGENT_PLAN_CREATED
     assert events[-1].payload["plan_id"] == submission.plan.plan_id
 
@@ -67,9 +163,11 @@ async def test_entrypoint_creates_recoverable_workspace_plan_and_public_event() 
 async def test_entrypoint_seeds_product_info_from_image_materials() -> None:
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_creative_short_plan()])
     entrypoint = VideoAgentEntrypoint(
         runtime_repository=runtime_repository,
         video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
     )
 
@@ -100,13 +198,18 @@ async def test_entrypoint_seeds_product_info_from_image_materials() -> None:
     assert workspace.payload["product_info"]["images"][0]["url"] == (
         "https://example.com/shoes.jpg"
     )
-    assert [step.tool_name for step in steps] == ["run_script_skill_stage"] * 8
+    assert [step.tool_name for step in steps] == [
+        "run_script_skill_stage",
+        "confirm_script_creative",
+    ]
     assert steps[0].arguments == {"stage": "start", "creative_direction": ""}
+    assert steps[1].tool_name == "confirm_script_creative"
+    assert steps[1].confirmation_required is True
 
 
 @pytest.mark.asyncio
 async def test_continue_generation_after_script_ready_does_not_reseed_skill_plan() -> None:
-    """脚本就绪后「继续生成视频」不得再开 8 步脚本 Plan，也不得覆盖 latest_input。"""
+    """脚本就绪后「继续生成视频」不得再开长脚本 Plan，也不得覆盖 latest_input。"""
 
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
@@ -151,6 +254,7 @@ async def test_continue_generation_after_script_ready_does_not_reseed_skill_plan
 
     assert second.plan.public_goal == "准备视频资产包"
     assert [step.tool_name for step in second.plan.steps] == ["inspect_video_workspace"]
+    assert len(second.plan.steps) == 1
     assert second.workspace.payload["latest_input"] == "帮我生成一分钟广告"
     assert second.workspace.payload["pending_generation_request"] == "继续生成视频"
     assert second.workspace.payload["script_entry_path"] == "continue"
@@ -177,15 +281,103 @@ def test_merge_short_followup_reuses_prior_episode_script() -> None:
     assert merge_video_turn_content_with_history(prior, []) == prior.strip()
 
 
+def test_merge_creative_followup_reuses_fuzzy_video_brief() -> None:
+    from pixelflow.video_agent.entrypoint import merge_video_turn_content_with_history
+
+    prior = (
+        "我想拍一个蓝妹视频，就是讲友谊天长地久那种，"
+        "很多年以前朋友们聚餐喝蓝妹，多年以后还是喝蓝妹，但是故事要有意思点"
+    )
+    followup = (
+        "小伍手里的拍立得吐出相纸，相纸上正是四人碰杯的瞬间，和桌上蓝妹。"
+        "--这个镜头里面要加上戏剧化的转折，例如那个时候是 5 个人，现在变 4 个人了"
+    )
+    merged = merge_video_turn_content_with_history(followup, [prior])
+    assert prior in merged
+    assert "【本轮指令】" in merged
+    assert "拍立得" in merged
+
+
 @pytest.mark.asyncio
-async def test_path_b_polish_seeds_review_compliance_export_and_user_episode() -> None:
-    """路径 B：明确成稿意图 → 只种子 review/compliance/export，并注入用户 episode。"""
+async def test_creative_followup_after_start_reseeds_path_a_instead_of_inspect() -> None:
+    """取消创意确认后补镜头/加转折，应合并上文并由 Planner 给出短创作计划。"""
 
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_creative_short_plan(), _creative_short_plan()])
     entrypoint = VideoAgentEntrypoint(
         runtime_repository=runtime_repository,
         video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    first = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-creative-revise",
+        turn_id="turn-1",
+        content=(
+            "我想拍一个蓝妹视频，就是讲友谊天长地久那种，"
+            "很多年以前朋友们聚餐喝蓝妹，多年以后还是喝蓝妹，但是故事要有意思点"
+        ),
+        artifact_refs=(),
+    )
+    workspace = first.workspace.model_copy(
+        update={
+            "revision": first.workspace.revision,
+            "payload": {
+                **first.workspace.payload,
+                "script_pipeline": {
+                    "start": {
+                        "stage": "start",
+                        "title": "选题与创作目标 /start",
+                        "content": "可确认的创意方向摘要：蓝妹友谊穿越时空。",
+                    }
+                },
+            },
+        }
+    )
+    await video_repository.apply_workspace_patch(
+        "user-1",
+        workspace.workspace_id,
+        {"script_pipeline": workspace.payload["script_pipeline"]},
+        expected_revision=first.workspace.revision,
+        now=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+
+    second = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-creative-revise",
+        turn_id="turn-2",
+        content=(
+            "小伍手里的拍立得吐出相纸，相纸上正是四人碰杯的瞬间，和桌上蓝妹。"
+            "--这个镜头里面要加上戏剧化的转折，例如那个时候是 5 个人，现在变 4 个人了"
+        ),
+        artifact_refs=(),
+    )
+    steps = await video_repository.list_plan_steps("user-1", second.plan.plan_id)
+
+    assert second.workspace.payload["script_entry_path"] == "create"
+    assert "蓝妹视频" in second.workspace.payload["latest_input"]
+    assert "【本轮指令】" in second.workspace.payload["latest_input"]
+    assert "拍立得" in second.workspace.payload["latest_input"]
+    assert steps[0].tool_name == "run_script_skill_stage"
+    assert steps[0].arguments["stage"] == "start"
+    assert steps[1].tool_name == "confirm_script_creative"
+    assert len(steps) <= 3
+    assert len(planner.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_path_b_polish_seeds_review_compliance_export_and_user_episode() -> None:
+    """路径 B：成稿意图写入 episode 种子；Planner 给出短润色计划。"""
+
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_polish_short_plan()])
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
     )
     script = (
@@ -214,6 +406,7 @@ async def test_path_b_polish_seeds_review_compliance_export_and_user_episode() -
         "compliance",
         "export",
     ]
+    assert len(steps) <= 3
     assert episode["source"] == "user_complete_script"
     assert "这是完整脚本" in episode["content"]
 
@@ -363,13 +556,13 @@ async def test_continue_without_confirmation_does_not_enter_asset_path() -> None
 
 
 @pytest.mark.asyncio
-async def test_entrypoint_does_not_await_llm_planner_on_hot_path() -> None:
-    """turns/start 必须立刻落确定性计划，不能被模型规划拖住。"""
+async def test_entrypoint_awaits_planner_with_timeout_and_falls_back_to_inspect() -> None:
+    """V2.1：热路径调用 Planner；超时后仅 inspect，不得展开完整流水线。"""
 
     class SlowPlanner:
         async def plan_turn(self, context):  # noqa: ANN001, ARG002
-            await asyncio.sleep(30)
-            raise AssertionError("entrypoint 不应等待 LLM planner")
+            await asyncio.Event().wait()
+            raise AssertionError("超时后不应继续执行")
 
     runtime_repository = MemoryAgentRuntimeRepository()
     video_repository = MemoryVideoAgentRepository()
@@ -378,6 +571,7 @@ async def test_entrypoint_does_not_await_llm_planner_on_hot_path() -> None:
         video_repository=video_repository,
         planner=SlowPlanner(),  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
+        planning_timeout_sec=0.2,
     )
 
     started = datetime.now(UTC)
@@ -392,9 +586,28 @@ async def test_entrypoint_does_not_await_llm_planner_on_hot_path() -> None:
 
     steps = await video_repository.list_plan_steps("user-1", submission.plan.plan_id)
     assert elapsed < 2
-    assert [step.tool_name for step in steps] == ["run_script_skill_stage"] * 8
-    assert steps[4].title == "生成剧本正文 /episode"
-    assert submission.plan.public_goal.startswith("处理视频创作请求")
+    assert [step.tool_name for step in steps] == ["inspect_video_workspace"]
+    assert submission.plan.public_goal == "规划超时，先读取项目资料"
+
+
+@pytest.mark.asyncio
+async def test_entrypoint_without_planner_falls_back_to_inspect() -> None:
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    submission = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-no-planner",
+        turn_id="turn-1",
+        content="帮我拍一支广告",
+        artifact_refs=(),
+    )
+    assert [step.tool_name for step in submission.plan.steps] == ["inspect_video_workspace"]
+    assert submission.workspace.payload.get("script_entry_path") == "create"
 
 
 @pytest.mark.asyncio
@@ -493,11 +706,12 @@ async def test_runtime_routes_primary_video_turn_to_v2_entrypoint_without_live_e
 
 @pytest.mark.asyncio
 async def test_start_turn_merges_prior_episode_when_followup_is_short_video_request() -> None:
-    """澄清短句「生成带货视频」必须带回上文成稿，不能只种子空创意 8 步。"""
+    """澄清短句「生成带货视频」必须带回上文成稿，并由 Planner 给出短润色计划。"""
 
     task_store = MemoryPixelFlowTaskStore()
     runtime_repository = MemoryCompactionQueueRepository()
     video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_polish_short_plan()])
     service = AgentRuntimeService(
         config=AgentRuntimeConfig(
             mode="primary",
@@ -509,6 +723,7 @@ async def test_start_turn_merges_prior_episode_when_followup_is_short_video_requ
         video_agent_entrypoint=VideoAgentEntrypoint(
             runtime_repository=runtime_repository,
             video_repository=video_repository,
+            planner=planner,  # type: ignore[arg-type]
             clock=lambda: datetime(2026, 8, 8, tzinfo=UTC),
         ),
         conversation_router=ConversationRouteService(),
@@ -585,6 +800,7 @@ async def test_start_turn_merges_prior_episode_when_followup_is_short_video_requ
         "compliance",
         "export",
     ]
+    assert len(planner.calls) == 1
 
 
 @pytest.mark.asyncio

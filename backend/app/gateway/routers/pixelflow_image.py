@@ -17,6 +17,12 @@ from pixelflow.generate.image_prepare import (
     prepare_image_generation,
     validate_final_image_contract,
 )
+from pixelflow.generate.media_history import (
+    build_image_result_artifact,
+    image_result_should_persist,
+    persist_media_result_message,
+    resolve_conversation_id,
+)
 from pixelflow.generate.scene_assets import (
     REFERENCE_IMAGE_QUALITY,
     collect_uploaded_reference_image_urls,
@@ -26,6 +32,7 @@ from pixelflow.generate.scene_assets import (
 from pixelflow.memory import with_semantic_memory
 from pixelflow.skills import get_image_skill
 from pixelflow.skills.base import is_quota_insufficient, quota_resume_message
+from pixelflow.tasks.store import PixelFlowTaskStore
 
 router = APIRouter(prefix="/agent/flows/image", tags=["pixelflow-flows"])
 
@@ -35,6 +42,53 @@ _IMAGE_ASSET_EDIT_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_IMAGE_ASSET_EDIT_JOBS = 100
 _IMAGE_ASSET_FUSION_JOBS: dict[str, dict[str, Any]] = {}
 _MAX_IMAGE_ASSET_FUSION_JOBS = 100
+
+
+def _task_store_from_request(request: Request) -> PixelFlowTaskStore | None:
+    store = getattr(request.app.state, "pixelflow_task_store", None)
+    return store if store is not None else None
+
+
+def _job_conversation_id(body: Any, request: Request) -> str | None:
+    body_id = getattr(body, "conversation_id", None)
+    return resolve_conversation_id(
+        body_conversation_id=str(body_id) if body_id else None,
+        header_conversation_id=request.headers.get("X-Conversation-Id"),
+    )
+
+
+def _model_dump(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+async def _persist_image_history(
+    *,
+    store: PixelFlowTaskStore | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    job_id: str,
+    kind: str,
+    result: Any,
+    last_phase: str,
+) -> None:
+    payload = _model_dump(result)
+    if not image_result_should_persist(payload):
+        return
+    await persist_media_result_message(
+        store,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        job_id=job_id,
+        kind=kind,
+        content="图片结果已写入对话历史，可随时回看。",
+        artifact=build_image_result_artifact(payload, job_id=job_id, kind=kind),
+        last_phase=last_phase,
+        context_patch={"image_result": payload},
+    )
 
 
 class ImagePrepareRequest(BaseModel):
@@ -64,6 +118,7 @@ class ImageGenerateRequest(BaseModel):
     prompt: str = ""
     negative_prompt: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str | None = None
 
 
 class ImageGenerateResponse(BaseModel):
@@ -105,6 +160,7 @@ class ImageAssetEditRequest(BaseModel):
     ratio: str = "1:1"
     size: str = REFERENCE_IMAGE_QUALITY
     model: str | None = IMAGE_EDIT_MODEL
+    conversation_id: str | None = None
 
 
 class ImageAssetEditResponse(BaseModel):
@@ -147,6 +203,7 @@ class ImageAssetFusionRequest(BaseModel):
     ratio: str = "1:1"
     size: str = REFERENCE_IMAGE_QUALITY
     model: str | None = IMAGE_EDIT_MODEL
+    conversation_id: str | None = None
 
 
 class ImageAssetFusionResponse(BaseModel):
@@ -245,8 +302,26 @@ async def generate_image(body: ImageGenerateRequest, request: Request) -> ImageG
 async def start_generate_image(body: ImageGenerateRequest, request: Request) -> ImageGenerateJobStartResponse:
     _trim_image_generation_jobs()
     job_id = uuid.uuid4().hex
-    _IMAGE_GENERATION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_image_generation_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    conversation_id = _job_conversation_id(body, request)
+    user_id = await current_user_id(request)
+    store = _task_store_from_request(request)
+    _IMAGE_GENERATION_JOBS[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }
+    asyncio.create_task(
+        _run_image_generation_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            user_id,
+            conversation_id=conversation_id,
+            store=store,
+        )
+    )
     return ImageGenerateJobStartResponse(ok=True, job_id=job_id, status="running", message="图片生成任务已启动。")
 
 
@@ -340,8 +415,26 @@ async def edit_image_asset(body: ImageAssetEditRequest, request: Request) -> Ima
 async def start_edit_image_asset(body: ImageAssetEditRequest, request: Request) -> ImageAssetEditJobStartResponse:
     _trim_image_asset_edit_jobs()
     job_id = uuid.uuid4().hex
-    _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_image_asset_edit_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    conversation_id = _job_conversation_id(body, request)
+    user_id = await current_user_id(request)
+    store = _task_store_from_request(request)
+    _IMAGE_ASSET_EDIT_JOBS[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }
+    asyncio.create_task(
+        _run_image_asset_edit_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            user_id,
+            conversation_id=conversation_id,
+            store=store,
+        )
+    )
     return ImageAssetEditJobStartResponse(ok=True, job_id=job_id, status="running", message="素材图片编辑任务已启动。")
 
 
@@ -389,8 +482,26 @@ async def fuse_image_asset(body: ImageAssetFusionRequest, request: Request) -> I
 async def start_fuse_image_asset(body: ImageAssetFusionRequest, request: Request) -> ImageAssetFusionJobStartResponse:
     _trim_image_asset_fusion_jobs()
     job_id = uuid.uuid4().hex
-    _IMAGE_ASSET_FUSION_JOBS[job_id] = {"status": "running", "result": None, "error": None}
-    asyncio.create_task(_run_image_asset_fusion_job(job_id, body, power_mem_service(request), await current_user_id(request)))
+    conversation_id = _job_conversation_id(body, request)
+    user_id = await current_user_id(request)
+    store = _task_store_from_request(request)
+    _IMAGE_ASSET_FUSION_JOBS[job_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+    }
+    asyncio.create_task(
+        _run_image_asset_fusion_job(
+            job_id,
+            body,
+            power_mem_service(request),
+            user_id,
+            conversation_id=conversation_id,
+            store=store,
+        )
+    )
     return ImageAssetFusionJobStartResponse(ok=True, job_id=job_id, status="running", message="素材图片融合任务已启动。")
 
 
@@ -597,14 +708,33 @@ async def _fuse_image_asset_response(body: ImageAssetFusionRequest) -> ImageAsse
     )
 
 
-async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_image_generation_job(
+    job_id: str,
+    body: ImageGenerateRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
         result = await _generate_image_response(body)
         _IMAGE_GENERATION_JOBS[job_id] = {
             "status": "quota_paused" if result.quota_insufficient else "completed",
             "result": result,
             "error": None,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
+        await _persist_image_history(
+            store=store,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            kind="image_generate",
+            result=result,
+            last_phase="image_ready",
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -617,7 +747,13 @@ async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest, pow
             infer=False,
         )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
-        _IMAGE_GENERATION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _IMAGE_GENERATION_JOBS[job_id] = {
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -631,14 +767,33 @@ async def _run_image_generation_job(job_id: str, body: ImageGenerateRequest, pow
         )
 
 
-async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_image_asset_edit_job(
+    job_id: str,
+    body: ImageAssetEditRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
         result = await _edit_image_asset_response(body)
         _IMAGE_ASSET_EDIT_JOBS[job_id] = {
             "status": "quota_paused" if result.quota_insufficient else "completed",
             "result": result,
             "error": None,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
+        await _persist_image_history(
+            store=store,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            kind="image_asset_edit",
+            result=result,
+            last_phase="image_ready",
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -651,7 +806,13 @@ async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest, po
             infer=False,
         )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
-        _IMAGE_ASSET_EDIT_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _IMAGE_ASSET_EDIT_JOBS[job_id] = {
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -665,14 +826,33 @@ async def _run_image_asset_edit_job(job_id: str, body: ImageAssetEditRequest, po
         )
 
 
-async def _run_image_asset_fusion_job(job_id: str, body: ImageAssetFusionRequest, power_mem: Any = None, user_id: str | None = None) -> None:
+async def _run_image_asset_fusion_job(
+    job_id: str,
+    body: ImageAssetFusionRequest,
+    power_mem: Any = None,
+    user_id: str | None = None,
+    *,
+    conversation_id: str | None = None,
+    store: PixelFlowTaskStore | None = None,
+) -> None:
     try:
         result = await _fuse_image_asset_response(body)
         _IMAGE_ASSET_FUSION_JOBS[job_id] = {
             "status": "quota_paused" if result.quota_insufficient else "completed",
             "result": result,
             "error": None,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
         }
+        await _persist_image_history(
+            store=store,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            job_id=job_id,
+            kind="image_asset_fusion",
+            result=result,
+            last_phase="image_ready",
+        )
         record_power_mem_background(
             power_mem,
             user_id=user_id,
@@ -685,7 +865,13 @@ async def _run_image_asset_fusion_job(job_id: str, body: ImageAssetFusionRequest
             infer=False,
         )
     except Exception as exc:  # noqa: BLE001 - background boundary must persist failure for polling clients
-        _IMAGE_ASSET_FUSION_JOBS[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+        _IMAGE_ASSET_FUSION_JOBS[job_id] = {
+            "status": "failed",
+            "result": None,
+            "error": str(exc),
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        }
         record_power_mem_background(
             power_mem,
             user_id=user_id,

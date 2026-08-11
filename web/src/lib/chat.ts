@@ -111,10 +111,16 @@ export interface ChatMessage {
     sceneAssetsGenerating?: boolean;
     /** 结构已就绪，等待选择生图模型 */
     sceneAssetsAwaitingModel?: boolean;
+    /** 本批 early 进度卡已归档（结果见 media-result 卡），勿再显示「待生成」 */
+    sceneAssetProgressArchived?: boolean;
     /** 资产包生图模型选择卡 */
     sceneAssetModelConfigs?: ImageModelParamConfig[];
     sceneAssetModelConfirmed?: boolean;
+    sceneAssetReferenceMaterials?: Array<Record<string, unknown>>;
+    sceneAssetReferenceBrief?: string;
     generatedSceneVideos?: GenerateSceneVideosResponse;
+    /** 分镜视频仍在生成中：可预览已完成片段 */
+    sceneVideosGenerating?: boolean;
     mergedVideo?: MergeSceneVideosResponse;
     jianyingDraft?: JianyingDraftJobResponse;
     pendingJianyingDraftJob?: PendingJianyingDraftJobPayload;

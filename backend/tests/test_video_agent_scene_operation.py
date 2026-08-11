@@ -151,7 +151,9 @@ async def test_scene_operation_recovers_variant_without_repeating_start() -> Non
     assert replayed.workspace_patch["assets"][-1]["artifact_ref"] == (
         "artifact:scene-3-v2"
     )
-    assert target["edit_status"] == "等待版本审核"
+    assert target["edit_status"] == "重新生成完成"
+    assert target["approved_variant_id"] == "scene-3-v2"
+    assert replayed.workspace_patch["dirty_scene_ids"] == []
     assert len(service.start_calls) == 1
     assert service.status_calls == ["provider-scene-1"]
     assert len(resumer.event_ids) == 1

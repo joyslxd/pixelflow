@@ -1,0 +1,20 @@
+---
+description: 每次新会话自动加载项目上下文
+alwaysApply: true
+---
+
+## 项目上下文加载
+
+定位当前文件所在 git 根目录，读取（存在才读）：
+
+- `CLAUDE.md`
+- `.spec/ai-coding-context/index.md`
+- `.spec/ai-coding-context/ai-coding-context.md`
+
+调查代码前先检索：
+
+```bash
+rg "<关键词>" .spec/context-dict/ -l
+```
+
+设计/实现阶段再按需读 `overview.md`、`conventions.md`。

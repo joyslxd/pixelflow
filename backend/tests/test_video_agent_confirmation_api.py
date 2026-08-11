@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import pickle
 from datetime import UTC, datetime, timedelta
@@ -229,6 +230,187 @@ async def test_confirmation_controller_resumes_original_plan_and_discards_creden
     assert tool.credential is not None
     with pytest.raises(VideoAgentCredentialUnavailableError):
         tool.credential.borrow_authorization()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_schedules_background_continue_for_followup_steps() -> None:
+    """创意确认后 HTTP 立即返回；后续步由后台 resume 推进。"""
+
+    class ConfirmThenFollowTool:
+        spec = VideoToolSpec(
+            name="confirm_script_creative",
+            description="确认创意",
+            input_model=EmptyInput,
+            cost_level=VideoToolCostLevel.NONE,
+            confirmation_required=True,
+            idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+            recovery_mode=VideoToolRecoveryMode.REPLAY,
+            workspace_mutations=("script_pipeline",),
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, context: VideoToolContext, arguments):
+            del context, arguments
+            self.calls += 1
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="创意已确认",
+            )
+
+    class FollowupTool:
+        spec = VideoToolSpec(
+            name="inspect_video_workspace",
+            description="后续阶段",
+            input_model=EmptyInput,
+            cost_level=VideoToolCostLevel.NONE,
+            confirmation_required=False,
+            idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+            recovery_mode=VideoToolRecoveryMode.REPLAY,
+            workspace_mutations=(),
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.gate = asyncio.Event()
+
+        async def execute(self, context: VideoToolContext, arguments):
+            del context, arguments
+            await self.gate.wait()
+            self.calls += 1
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="后续完成",
+            )
+    confirm_tool = ConfirmThenFollowTool()
+    followup_tool = FollowupTool()
+    task_store = MemoryPixelFlowTaskStore()
+    runtime_repository = MemoryCompactionQueueRepository()
+    video_repository = MemoryVideoAgentRepository(
+        event_repository=runtime_repository,
+    )
+    ticks = iter(NOW + timedelta(seconds=value) for value in range(1, 40))
+    executor = VideoAgentExecutor(
+        repository=video_repository,
+        registry=VideoToolRegistry([confirm_tool, followup_tool]),
+        clock=lambda: next(ticks),
+    )
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="assist",
+            enabled_intents=(),
+            new_conversation_rollout_percent=100,
+            context_compaction_enabled=True,
+        ),
+        repository=runtime_repository,
+        task_store=task_store,
+        video_agent_repository=video_repository,
+        video_agent_executor=executor,
+        clock=lambda: NOW,
+    )
+    app = make_authed_test_app(
+        user_factory=lambda: _user(USER_ID, "task11-followup@example.com")
+    )
+    app.state.pixelflow_task_store = task_store
+    app.state.pixelflow_agent_runtime_service = service
+    app.include_router(pixelflow_conversations.router)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://task11-followup.test"
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "确认后续续跑"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-confirm-followup",
+                conversation_id=conversation_id,
+                payload={},
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        steps = [
+            AgentPlanStep(
+                step_id="step-confirm",
+                plan_id="plan-confirm-followup",
+                sequence=1,
+                tool_name=confirm_tool.spec.name,
+                title="确认选题创意",
+                status=PlanStepStatus.PENDING,
+                arguments={},
+                confirmation_required=True,
+            ),
+            AgentPlanStep(
+                step_id="step-followup",
+                plan_id="plan-confirm-followup",
+                sequence=2,
+                tool_name=followup_tool.spec.name,
+                title="写三幕结构",
+                status=PlanStepStatus.PENDING,
+                arguments={},
+                confirmation_required=False,
+            ),
+        ]
+        await video_repository.save_plan(
+            str(USER_ID),
+            AgentPlan(
+                plan_id="plan-confirm-followup",
+                workspace_id=workspace.workspace_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.RUNNING,
+                public_goal="创意确认后继续",
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            steps,
+        )
+        await video_repository.request_step_confirmation(
+            str(USER_ID),
+            "plan-confirm-followup",
+            "step-confirm",
+        )
+        await video_repository.update_plan_status(
+            str(USER_ID),
+            "plan-confirm-followup",
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            now=NOW,
+        )
+        snapshot = await client.get(
+            f"/agent/conversations/{conversation_id}/agent-snapshot"
+        )
+        confirmation_id = snapshot.json()["videoAgent"]["confirmation"][
+            "confirmation_id"
+        ]
+
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/confirmations/"
+            f"{confirmation_id}/responses",
+            headers={"Authorization": AUTHORIZATION},
+            json={"step_id": "step-confirm", "decision": "confirm"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["step_status"] == "completed"
+    assert body["plan_status"] == "running"
+    assert confirm_tool.calls == 1
+    assert followup_tool.calls == 0
+
+    followup_tool.gate.set()
+    pending = list(service._executor_notification_tasks)
+    if pending:
+        await asyncio.gather(*pending)
+
+    plan = await video_repository.get_plan(str(USER_ID), "plan-confirm-followup")
+    assert plan is not None
+    assert plan.status is AgentPlanStatus.COMPLETED
+    assert followup_tool.calls == 1
 
 
 @pytest.mark.asyncio

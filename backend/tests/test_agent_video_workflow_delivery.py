@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
+
 import test_agent_video_workflow_postproduction as postproduction_tests
 from test_agent_video_workflow_generation import _AtomicFakeOperationPort, _reviewed_scene_package_state
 
@@ -29,6 +30,9 @@ from pixelflow.jianying_draft.models import (
 )
 from pixelflow.jianying_draft.skill import JianyingDraftCapability
 
+
+
+pytestmark = pytest.mark.v1_workflow_legacy
 
 class _FakeJianyingDraftSkill:
     def __init__(

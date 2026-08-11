@@ -548,3 +548,106 @@ async def test_confirmation_required_step_cannot_start_without_persisted_approva
         assert running.started_at == T3
         assert restored.arguments == {"scene_ids": ["scene-3"], "variant_count": 3}
         assert restored.confirmation_required is True
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_active_script_skill_plans_skips_running_and_pending(
+    kind: RepositoryKind,
+) -> None:
+    """确认成片后应取消仍在跑的脚本 Skill 计划，跳过未完成步骤。"""
+
+    polish = plan().model_copy(
+        update={
+            "status": AgentPlanStatus.RUNNING,
+            "public_goal": "成稿自检与导出",
+        }
+    )
+    steps = [
+        AgentPlanStep(
+            step_id="step-review",
+            plan_id="plan-1",
+            sequence=1,
+            tool_name="run_script_skill_stage",
+            title="五维自检 /review",
+            status=PlanStepStatus.COMPLETED,
+            arguments={"stage": "review"},
+            started_at=T0,
+            completed_at=T0,
+        ),
+        AgentPlanStep(
+            step_id="step-compliance",
+            plan_id="plan-1",
+            sequence=2,
+            tool_name="run_script_skill_stage",
+            title="合规检查 /compliance",
+            status=PlanStepStatus.RUNNING,
+            arguments={"stage": "compliance"},
+            started_at=T0,
+        ),
+        AgentPlanStep(
+            step_id="step-export",
+            plan_id="plan-1",
+            sequence=3,
+            tool_name="run_script_skill_stage",
+            title="导出脚本产物 /export",
+            status=PlanStepStatus.PENDING,
+            arguments={"stage": "export"},
+        ),
+    ]
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", polish, steps)
+
+        cancelled = await store.cancel_active_script_skill_plans(
+            "user-a",
+            "conversation-1",
+            now=T3,
+        )
+        replayed = await store.cancel_active_script_skill_plans(
+            "user-a",
+            "conversation-1",
+            now=T3,
+        )
+        restored = await store.get_plan("user-a", "plan-1")
+
+    assert len(cancelled) == 1
+    assert cancelled[0].status is AgentPlanStatus.CANCELLED
+    assert restored is not None
+    assert restored.status is AgentPlanStatus.CANCELLED
+    assert restored.steps[0].status is PlanStepStatus.COMPLETED
+    assert restored.steps[1].status is PlanStepStatus.SKIPPED
+    assert restored.steps[1].public_summary == "用户已确认脚本并开始生成资产包，本步已跳过"
+    assert restored.steps[2].status is PlanStepStatus.SKIPPED
+    assert replayed == []
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_cancel_active_script_skill_plans_ignores_non_script_plans(
+    kind: RepositoryKind,
+) -> None:
+    running = plan().model_copy(update={"status": AgentPlanStatus.RUNNING})
+    step = AgentPlanStep(
+        step_id="step-scene",
+        plan_id="plan-1",
+        sequence=1,
+        tool_name="generate_scenes",
+        title="生成镜头",
+        status=PlanStepStatus.RUNNING,
+        started_at=T0,
+    )
+    async with repository(kind) as (store, _):
+        await store.create_workspace("user-a", workspace())
+        await store.save_plan("user-a", running, [step])
+        cancelled = await store.cancel_active_script_skill_plans(
+            "user-a",
+            "conversation-1",
+            now=T3,
+        )
+        restored = await store.get_plan("user-a", "plan-1")
+
+    assert cancelled == []
+    assert restored is not None
+    assert restored.status is AgentPlanStatus.RUNNING
+    assert restored.steps[0].status is PlanStepStatus.RUNNING

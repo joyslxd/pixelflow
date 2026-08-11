@@ -12,6 +12,8 @@ interface AgentConfirmationCardProps {
   title: string;
   costSummary: string;
   affectedSceneIds: string[];
+  confirmLabel?: string;
+  cancelLabel?: string;
   submitting?: boolean;
   actionAvailable?: boolean;
   unavailableReason?: string | null;
@@ -25,6 +27,8 @@ export function AgentConfirmationCard({
   title,
   costSummary,
   affectedSceneIds,
+  confirmLabel = "确认执行",
+  cancelLabel = "取消",
   submitting = false,
   actionAvailable = true,
   unavailableReason = null,
@@ -39,7 +43,7 @@ export function AgentConfirmationCard({
   return (
     <section aria-label="执行确认" className="rounded-xl border border-amber-200 bg-amber-50 p-4">
       <h2 className="text-base font-semibold text-amber-950">{title}</h2>
-      <p className="mt-1 text-sm text-amber-900">{costSummary}</p>
+      <p className="mt-1 whitespace-pre-line text-sm text-amber-900">{costSummary}</p>
       {affectedSceneIds.length > 0 ? (
         <div className="mt-3 flex flex-wrap gap-2" aria-label="受影响镜头">
           {affectedSceneIds.map((sceneId) => (
@@ -56,7 +60,7 @@ export function AgentConfirmationCard({
           onClick={() => submit("cancel")}
           className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-amber-900 disabled:opacity-50"
         >
-          取消
+          {cancelLabel}
         </button>
         <button
           type="button"
@@ -64,7 +68,7 @@ export function AgentConfirmationCard({
           onClick={() => submit("confirm")}
           className="rounded-lg bg-amber-700 px-3 py-2 text-sm text-white disabled:opacity-50"
         >
-          确认执行
+          {confirmLabel}
         </button>
       </div>
       {!actionAvailable && unavailableReason ? (

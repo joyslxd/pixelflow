@@ -108,7 +108,7 @@ test("Supervisor 场景包和分镜操作提交结构化 modify continue regener
 });
 
 test("Supervisor 分镜编辑只在显式保存时提交一次当前草稿", () => {
-  assert.match(workspaceSource, /deferSceneUpdates=\{Boolean\(supervisorVideoArtifact\)\}/);
+  assert.match(workspaceSource, /deferSceneUpdates=\{orchestrationMode !== "video_agent_v2" && Boolean\(supervisorVideoArtifact\)\}/);
   assert.match(storyboardPanelSource, /sceneDraftPatches/);
   assert.match(storyboardPanelSource, /saveStoryboardDraft/);
   assert.match(storyboardPanelSource, /await onUpdateVideoScenePackage/);

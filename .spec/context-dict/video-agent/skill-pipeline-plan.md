@@ -26,7 +26,7 @@ keywords:
 
 ## 注意事项
 - 八阶段会串行调用模型，耗时显著；后续可对广告场景压缩阶段或加确认闸门。
-- Skill 原文要求“每步确认”，当前 P0 自动连跑；若产品要确认，给 stage 开 `confirmation_required`。
+- Skill 原文要求“每步确认”，当前 P0 自动连跑；Path A 仅在 `/start` 后开「确认选题创意」闸门（`confirm_script_creative`），详见 `path-a-creative-confirm-gate.md`。
 - 旧会话仍可能是两步 brainstorm Plan，需新建对话验证。
 - 旧终稿不会自动补场景/道具，需新对话重跑流水线。
 - 开发热重载时若 SSE（agent-events）未关闭，uvicorn 会卡在 Waiting for connections to close，导致 conversations/capability 全部 pending；`run.py` 已设 `timeout_graceful_shutdown=5`。

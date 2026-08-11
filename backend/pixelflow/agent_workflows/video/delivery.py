@@ -1,4 +1,7 @@
-"""剪映草稿、历史入口和最终视频下载投影的 Workflow Service。"""
+"""剪映草稿、历史入口和最终视频下载投影的 Workflow Service。
+
+DEPRECATED (V2.1 批次 E): 未被 Gateway / video_agent 生产路径引用；见包级说明。
+"""
 
 from __future__ import annotations
 

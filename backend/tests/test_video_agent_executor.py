@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -200,6 +201,81 @@ async def test_executor_stops_before_billable_tool_until_confirmation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirm_step_returns_before_followup_steps() -> None:
+    """确认 HTTP 只完成确认步；后续步留给 resume，避免被长 LLM 拖死。"""
+
+    confirm_tool = BillableTool()
+    followup = InspectVideoWorkspaceTool()
+    event_repository = MemoryAgentRuntimeRepository()
+    repository = MemoryVideoAgentRepository(event_repository=event_repository)
+    workspace = await repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            payload={"artifact_refs": ["artifact:workspace-1"]},
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    steps = [
+        AgentPlanStep(
+            step_id="step-confirm",
+            plan_id="plan-1",
+            sequence=1,
+            tool_name=confirm_tool.spec.name,
+            title="确认创意",
+            status=PlanStepStatus.PENDING,
+            arguments={},
+            confirmation_required=True,
+        ),
+        AgentPlanStep(
+            step_id="step-followup",
+            plan_id="plan-1",
+            sequence=2,
+            tool_name=followup.spec.name,
+            title="后续阶段",
+            status=PlanStepStatus.PENDING,
+            arguments={},
+            confirmation_required=False,
+        ),
+    ]
+    await repository.save_plan(
+        "user-1",
+        AgentPlan(
+            plan_id="plan-1",
+            workspace_id=workspace.workspace_id,
+            conversation_id=workspace.conversation_id,
+            status=AgentPlanStatus.PLANNING,
+            public_goal="确认后继续",
+            steps=tuple(steps),
+            created_at=T0,
+            updated_at=T0,
+        ),
+        steps,
+    )
+    ticks = iter(T0 + timedelta(seconds=value) for value in range(1, 40))
+    executor = VideoAgentExecutor(
+        repository=repository,
+        registry=VideoToolRegistry([confirm_tool, followup]),
+        clock=lambda: next(ticks),
+    )
+
+    waiting = await executor.run_plan("user-1", "plan-1")
+    assert waiting.status is AgentPlanStatus.AWAITING_CONFIRMATION
+
+    after_confirm = await executor.confirm_step("user-1", "plan-1", "step-confirm")
+    assert after_confirm.status is AgentPlanStatus.RUNNING
+    assert after_confirm.steps[0].status is PlanStepStatus.COMPLETED
+    assert after_confirm.steps[1].status is PlanStepStatus.PENDING
+    assert confirm_tool.calls == 1
+
+    completed = await executor.resume_plan("user-1", "plan-1")
+    assert completed.status is AgentPlanStatus.COMPLETED
+    assert completed.steps[1].status is PlanStepStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_executor_resumes_persisted_running_step_without_restarting_it() -> None:
     executor, repository, event_repository = await make_executor(
         InspectVideoWorkspaceTool(),
@@ -216,6 +292,43 @@ async def test_executor_resumes_persisted_running_step_without_restarting_it() -
 
     assert completed.status is AgentPlanStatus.COMPLETED
     assert len(await event_repository.list_events("user-1", "conversation-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_running_resume_resets_started_at_for_duration() -> None:
+    """陈旧 RUNNING 重跑后耗时不应包含僵尸等待。"""
+
+    from pixelflow.video_agent.tools.script_skill_pipeline import (
+        SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
+    )
+
+    executor, repository, _ = await make_executor(
+        InspectVideoWorkspaceTool(),
+        confirmation_required=False,
+    )
+    old_start = T0
+    await repository.update_plan_status(
+        "user-1", "plan-1", AgentPlanStatus.RUNNING, now=old_start
+    )
+    await repository.start_step_with_event(
+        "user-1", "plan-1", "step-1", run_id="plan-1", now=old_start
+    )
+
+    resume_at = old_start + timedelta(
+        seconds=SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS + 60
+    )
+    ticks = [resume_at + timedelta(seconds=i) for i in range(12)]
+    clock_values = iter(ticks)
+    executor._clock = lambda: next(clock_values, ticks[-1])
+
+    completed = await executor.resume_plan("user-1", "plan-1")
+
+    assert completed.status is AgentPlanStatus.COMPLETED
+    step = completed.steps[0]
+    assert step.started_at is not None and step.started_at >= resume_at
+    assert step.started_at != old_start
+    assert step.duration_ms is not None
+    assert step.duration_ms < 60_000
 
 
 @pytest.mark.asyncio
@@ -259,3 +372,73 @@ async def test_executor_keeps_step_running_until_operation_result_is_replayed() 
     assert completed.status is AgentPlanStatus.COMPLETED
     assert completed.steps[0].status is PlanStepStatus.COMPLETED
     assert tool.calls == 2
+
+
+class SlowThenSucceedTool:
+    spec = VideoToolSpec(
+        name="run_script_skill_stage",
+        description="模拟可被确认成片取消的脚本阶段",
+        input_model=EmptyInput,
+        cost_level=VideoToolCostLevel.EXTERNAL_READ,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("script_pipeline",),
+    )
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def execute(self, context: VideoToolContext, arguments):  # noqa: ANN001, ARG002
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="阶段完成",
+        )
+
+
+@pytest.mark.asyncio
+async def test_executor_returns_cancelled_plan_without_completing_superseded_step() -> None:
+    tool = SlowThenSucceedTool()
+    executor, repository, _ = await make_executor(tool, confirmation_required=False)
+    plan = await repository.get_plan("user-1", "plan-1")
+    assert plan is not None
+    # 把工具名改成脚本 Skill，便于 cancel_active_script_skill_plans 识别。
+    steps = await repository.list_plan_steps("user-1", "plan-1")
+    skill_step = steps[0].model_copy(
+        update={
+            "tool_name": "run_script_skill_stage",
+            "title": "合规检查 /compliance",
+            "arguments": {"stage": "compliance"},
+        }
+    )
+    await repository.save_plan(
+        "user-1",
+        plan.model_copy(
+            update={
+                "status": AgentPlanStatus.PLANNING,
+                "public_goal": "成稿自检与导出",
+                "steps": (skill_step,),
+            }
+        ),
+        [skill_step],
+    )
+
+    run_task = asyncio.create_task(executor.run_plan("user-1", "plan-1"))
+    await asyncio.wait_for(tool.started.wait(), timeout=2)
+    cancelled = await repository.cancel_active_script_skill_plans(
+        "user-1",
+        "conversation-1",
+        now=T0 + timedelta(seconds=5),
+    )
+    tool.release.set()
+    result = await asyncio.wait_for(run_task, timeout=2)
+
+    assert len(cancelled) == 1
+    assert result.status is AgentPlanStatus.CANCELLED
+    assert result.steps[0].status is PlanStepStatus.SKIPPED
+    assert tool.calls == 1

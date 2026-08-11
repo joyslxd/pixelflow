@@ -301,3 +301,50 @@ export function applyAssetPackageAssetProgress(
     return stampStepTransition(previousById.get(step.id), next, nowIso);
   });
 }
+
+export function applyAssetPackageStructureProgress(
+  steps: AgentPipelineProgressStep[],
+  progress: { phase?: string; message?: string } | null | undefined,
+  nowIso = new Date().toISOString(),
+): AgentPipelineProgressStep[] {
+  const message = String(progress?.message || "").trim();
+  if (!message) return steps;
+  const phase = String(progress?.phase || "").trim();
+  const detail = phase
+    ? `prepare-scene-packages · ${message}`
+    : message;
+  const previousById = new Map(steps.map((step) => [step.id, step]));
+  return steps.map((step) => {
+    if (step.id !== "packages" || step.status === "completed" || step.status === "failed") {
+      return step;
+    }
+    const next: AgentPipelineProgressStep = {
+      ...step,
+      status: "running",
+      detail,
+    };
+    return stampStepTransition(previousById.get(step.id), next, nowIso);
+  });
+}
+
+/** Job 404 / resume 失败时收掉「假运行中」进度，避免已用时继续涨、心跳文案冻结。 */
+export function failAssetPackageProgressSteps(
+  steps: AgentPipelineProgressStep[],
+  detail = "任务已中断或过期，请从最新 plan / 场景包卡片手动重试",
+  nowIso = new Date().toISOString(),
+): AgentPipelineProgressStep[] {
+  if (!steps.length) return steps;
+  const previousById = new Map(steps.map((step) => [step.id, step]));
+  return steps.map((step) => {
+    if (step.status === "completed" || step.status === "failed") return step;
+    if (step.status !== "running" && step.id !== "packages" && step.id !== "assets") {
+      return step;
+    }
+    const next: AgentPipelineProgressStep = {
+      ...step,
+      status: "failed",
+      detail,
+    };
+    return stampStepTransition(previousById.get(step.id), next, nowIso);
+  });
+}

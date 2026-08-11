@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,8 +22,27 @@ from pixelflow.video_agent.contracts import (
     VideoWorkspace,
 )
 from pixelflow.video_agent.executor.events import build_plan_created_event
-from pixelflow.video_agent.planner import VideoAgentPlanner
+from pixelflow.video_agent.planner import (
+    VideoAgentPlanner,
+    VideoAgentPlanningContext,
+    VideoAgentPlanningError,
+)
+from pixelflow.video_agent.planner.entry_path import (
+    EntryPathModel,
+    select_entry_path_with_llm,
+)
+from pixelflow.video_agent.planner.workspace_digest import (
+    blocking_confirmation_from_plan,
+    build_workspace_digest,
+    summarize_operations,
+)
 from pixelflow.video_agent.workspace.repository import VideoAgentRepository
+
+logger = logging.getLogger(__name__)
+
+# V2.1：Planner 主路径超时后降级为 inspect，避免 turns/start 无限挂起。
+# DeepSeek 结构化规划单次常需 5–12s，且最多 3 次修复重试，10s 极易误降级。
+_DEFAULT_PLANNING_TIMEOUT_SEC = 45.0
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -81,13 +102,6 @@ def _product_info_from_materials(
 # A 全创作 / B 成稿润色 / C 直接成片 / inspect 资料探查
 ScriptEntryPath = Literal["create", "polish", "continue", "inspect"]
 
-# 成稿润色：review → compliance → export（跳过选题到正文）
-POLISH_STAGE_ORDER: tuple[Literal["review", "compliance", "export"], ...] = (
-    "review",
-    "compliance",
-    "export",
-)
-
 
 def _should_seed_script_draft(
     content: str,
@@ -108,6 +122,88 @@ def _should_seed_script_draft(
         "tvc",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _looks_like_creative_followup(content: str) -> bool:
+    """改创意 / 补镜头 / 加转折：本身未必含「视频」，但应继续 Path A。"""
+
+    text = content.strip()
+    if not text:
+        return False
+    if _is_continue_video_generation(text) or _is_confirm_script_plan(text):
+        return False
+    if looks_like_complete_shooting_script(text):
+        return False
+    lowered = text.casefold()
+    markers = (
+        "改成",
+        "换成",
+        "加上",
+        "加个",
+        "增加",
+        "补上",
+        "补一个",
+        "转折",
+        "戏剧",
+        "镜头",
+        "变成",
+        "不要",
+        "删掉",
+        "调整",
+        "重写",
+        "重新",
+        "更有意思",
+        "冲突",
+        "反转",
+        "拍立得",
+        "相纸",
+        "碰杯",
+        "蓝妹",
+        "多年以前",
+        "多年以后",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    narrative = ("故事", "朋友", "人物", "场景", "旁白", "画面", "以前", "现在")
+    return len(text) >= 40 and any(token in text for token in narrative)
+
+
+def _pipeline_stage_content(workspace: VideoWorkspace, stage: str) -> str:
+    pipeline = workspace.payload.get("script_pipeline")
+    if not isinstance(pipeline, Mapping):
+        return ""
+    item = pipeline.get(stage)
+    if not isinstance(item, Mapping):
+        return ""
+    content = item.get("content")
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _workspace_creative_brief(workspace: VideoWorkspace) -> str:
+    """会话里已有的选题/故事 brief，供改创意跟进合并。
+
+    优先用户 latest_input（原始主题），其次 /start 产物。
+    """
+
+    latest = workspace.payload.get("latest_input")
+    if isinstance(latest, str) and latest.strip():
+        brief = latest.strip()
+        if _should_seed_script_draft(brief, ()) or len(brief) >= 40:
+            return brief
+    start = _pipeline_stage_content(workspace, "start")
+    if start:
+        return start
+    return ""
+
+
+def _merge_creative_revision_with_brief(current: str, brief: str) -> str:
+    text = current.strip()
+    prior = brief.strip()
+    if not text or not prior:
+        return text
+    if text == prior or prior in text or "【本轮指令】" in text:
+        return text
+    return f"{prior}\n\n【本轮指令】{text}"
 
 
 def _is_confirm_script_plan(content: str) -> bool:
@@ -197,7 +293,7 @@ def _character_profile_count(text: str) -> int:
         name = re.sub(r"[*_#`]", "", raw).strip()
         if not name or len(name) > 24:
             return
-        if re.match(r"^(角色设定|场景设定|道具|视觉形象|身份|性格|金句|核心标签)", name):
+        if re.match(r"^(角色设定|场景设定|道具|视觉形象|身份|性格|金句|核心标签|角色关系|角色档案)", name):
             return
         names.add(name.split("（")[0].split("(")[0].strip())
 
@@ -466,18 +562,25 @@ def merge_video_turn_content_with_history(
     current: str,
     prior_user_contents: Sequence[str],
 ) -> str:
-    """短指令进 VideoAgent 时，把最近一条成稿/长 brief 拼回 latest_input。
+    """短指令 / 改创意跟进进 VideoAgent 时，把最近一条成稿或创作 brief 拼回 latest_input。
 
-    典型坏路径：用户先贴完整 /episode，路由 unknown 澄清后只发「生成带货视频」，
-    若不合并则 8 步 Skill 只看见短句。
+    典型坏路径：
+    1) 用户先贴完整 /episode，路由 unknown 澄清后只发「生成带货视频」；
+    2) 用户先发蓝妹主题，取消创意确认后再发「镜头要加转折」——短跟进不含「视频」关键词。
     """
 
     text = current.strip()
     if not text:
         return text
+    if "【本轮指令】" in text:
+        return text
     if looks_like_complete_shooting_script(text) or len(text) >= 400:
         return text
-    if not is_short_video_followup_instruction(text) and len(text) >= 80:
+    if (
+        not is_short_video_followup_instruction(text)
+        and not _looks_like_creative_followup(text)
+        and len(text) >= 80
+    ):
         return text
 
     best: str | None = None
@@ -491,6 +594,9 @@ def merge_video_turn_content_with_history(
             ranked = score * 1000 + min(len(candidate), 5000)
         elif len(candidate) >= 400:
             ranked = 500 + min(len(candidate), 5000)
+        elif _should_seed_script_draft(candidate, ()) and len(candidate) >= 24:
+            # 模糊主题 brief（含「视频」等）也要能拼回改创意跟进。
+            ranked = 100 + min(len(candidate), 5000)
         else:
             continue
         if ranked >= best_score:
@@ -551,6 +657,9 @@ def _resolve_script_entry_path(
         return "polish"
     if _should_seed_script_draft(content, materials):
         return "create"
+    # 会话已有选题/故事：改创意、补镜头类跟进继续 Path A，避免落成 inspect。
+    if _workspace_creative_brief(workspace) and _looks_like_creative_followup(content):
+        return "create"
     return "inspect"
 
 
@@ -564,6 +673,26 @@ def _user_episode_pipeline_item(content: str) -> dict[str, Any]:
         "change_summary": "载入用户完整脚本作为待审成稿",
         "source": "user_complete_script",
     }
+
+
+def _looks_like_confirmation_response(content: str) -> bool:
+    """用户是否在回应待确认闸门（同意/取消/修改），而非开新编排。"""
+
+    text = content.strip().casefold()
+    if not text or len(text) > 80:
+        return False
+    markers = (
+        "同意",
+        "确认",
+        "取消",
+        "拒绝",
+        "不同意",
+        "换个方向",
+        "重新选题",
+        "已充值",
+        "继续",
+    )
+    return any(marker.casefold() in text for marker in markers)
 
 
 def _public_goal(content: str, *, entry_path: ScriptEntryPath = "create") -> str:
@@ -588,10 +717,10 @@ class VideoAgentSubmission:
 
 
 class VideoAgentEntrypoint:
-    """把一个已登记的用户 Turn 转换为可恢复的 VideoAgent 首计划。
+    """把一个已登记的用户 Turn 转换为可恢复的 VideoAgent 短计划。
 
-    HTTP `turns/start` 路径只落确定性短计划并推送 `agent.plan.created`，
-    不在请求内等待大模型规划，避免前端长时间无回执。
+    V2.1：主路径调用 `VideoAgentPlanner.plan_turn()`（最多 3 步）；
+    Planner 缺失/超时/失败时仅降级为单步 `inspect_video_workspace`。
     """
 
     def __init__(
@@ -600,13 +729,17 @@ class VideoAgentEntrypoint:
         runtime_repository: AgentRuntimeRepository,
         video_repository: VideoAgentRepository,
         planner: VideoAgentPlanner | None = None,
+        entry_path_model: EntryPathModel | None = None,
         clock: Callable[[], datetime] | None = None,
+        planning_timeout_sec: float = _DEFAULT_PLANNING_TIMEOUT_SEC,
     ) -> None:
         self._runtime_repository = runtime_repository
         self._video_repository = video_repository
-        # planner 保留装配位，供后续 Runner 异步扩写；不在 submit_turn 热路径调用。
         self._planner = planner
+        # entry_path 仅用于 workspace 诊断/润色种子，不再展开完整步骤表。
+        self._entry_path_model = entry_path_model
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._planning_timeout_sec = max(0.1, float(planning_timeout_sec))
 
     async def submit_turn(
         self,
@@ -653,6 +786,13 @@ class VideoAgentEntrypoint:
                 updated_at=occurred_at,
             ),
         )
+        # 改创意跟进：先用工作区已有 brief 拼回，再写入 latest_input，避免只剩镜头补丁。
+        prior_brief = _workspace_creative_brief(workspace)
+        if prior_brief and (
+            _looks_like_creative_followup(text)
+            or not _should_seed_script_draft(text, safe_materials)
+        ):
+            text = _merge_creative_revision_with_brief(text, prior_brief)
         continue_generation = (
             _workspace_has_generatable_script(workspace)
             and _is_continue_video_generation(text)
@@ -692,11 +832,21 @@ class VideoAgentEntrypoint:
             _workspace_has_generatable_script(workspace)
             and _is_continue_video_generation(text)
         )
+        # 入口路径只写 workspace 诊断/润色种子，不再决定步骤表。
         entry_path = _resolve_script_entry_path(
             content=text,
             materials=safe_materials,
             workspace=workspace,
             continue_generation=continue_generation,
+        )
+        entry_path = await select_entry_path_with_llm(
+            content=text,
+            materials=safe_materials,
+            workspace=workspace,
+            rule_path=entry_path,
+            model=self._entry_path_model,
+            is_complete_script=_is_complete_script_polish,
+            has_generatable_script=_workspace_has_generatable_script,
         )
         if entry_path == "create":
             script_md = _workspace_script_markdown(workspace)
@@ -723,7 +873,7 @@ class VideoAgentEntrypoint:
                     now=occurred_at,
                 )
         if entry_path == "polish":
-            # 路径 B：把用户成稿注入为虚拟 episode，供 review/compliance/export 使用。
+            # 路径 B：把用户成稿注入为虚拟 episode，供后续 Tool 读取。
             existing_pipeline = workspace.payload.get("script_pipeline")
             pipeline: dict[str, Any] = (
                 dict(existing_pipeline) if isinstance(existing_pipeline, dict) else {}
@@ -749,9 +899,13 @@ class VideoAgentEntrypoint:
                     expected_revision=workspace.revision,
                     now=occurred_at,
                 )
-        plan = self._deterministic_plan(
+
+        plan = await self._plan_turn_or_fallback(
+            owner=owner,
             conversation_id=conversation_id,
+            turn_id=turn_id,
             content=text,
+            artifact_refs=artifact_refs,
             materials=safe_materials,
             workspace=workspace,
             plan_id=plan_id,
@@ -784,6 +938,141 @@ class VideoAgentEntrypoint:
             )
         return VideoAgentSubmission(workspace=workspace, plan=plan)
 
+    async def _plan_turn_or_fallback(
+        self,
+        *,
+        owner: str,
+        conversation_id: str,
+        turn_id: str,
+        content: str,
+        artifact_refs: tuple[str, ...],
+        materials: list[dict[str, Any]],
+        workspace: VideoWorkspace,
+        plan_id: str,
+        occurred_at: datetime,
+        entry_path: ScriptEntryPath,
+    ) -> AgentPlan:
+        state = await self._video_repository.load_conversation_state(owner, conversation_id)
+        latest_plan = state[1] if state is not None else None
+        blocking = blocking_confirmation_from_plan(latest_plan)
+        if blocking is not None and not _looks_like_confirmation_response(content):
+            return self._inspect_fallback_plan(
+                conversation_id=conversation_id,
+                content=content,
+                workspace=workspace,
+                plan_id=plan_id,
+                occurred_at=occurred_at,
+                public_goal="当前有待确认步骤，请先确认或取消后再继续",
+            )
+
+        operation_summaries: list[dict[str, Any]] = []
+        try:
+            operations = await self._runtime_repository.list_operations(owner, conversation_id)
+            operation_summaries = summarize_operations(operations)
+        except Exception:  # noqa: BLE001 — Operation 读取失败不得阻断规划
+            logger.exception("VideoAgent list_operations failed; planning without ops")
+
+        if self._planner is None:
+            return self._inspect_fallback_plan(
+                conversation_id=conversation_id,
+                content=content,
+                workspace=workspace,
+                plan_id=plan_id,
+                occurred_at=occurred_at,
+                public_goal=_public_goal(content, entry_path=entry_path),
+            )
+
+        context = VideoAgentPlanningContext(
+            user_id=owner,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            content=content,
+            artifact_refs=artifact_refs,
+            materials=tuple(materials),
+            workspace=workspace,
+            workspace_digest=build_workspace_digest(workspace),
+            operation_summaries=tuple(operation_summaries),
+            blocking_confirmation=blocking,
+        )
+        try:
+            plan = await asyncio.wait_for(
+                self._planner.plan_turn(context),
+                timeout=self._planning_timeout_sec,
+            )
+        except TimeoutError:
+            logger.warning(
+                "VideoAgent planner timed out after %.1fs; falling back to inspect",
+                self._planning_timeout_sec,
+            )
+            return self._inspect_fallback_plan(
+                conversation_id=conversation_id,
+                content=content,
+                workspace=workspace,
+                plan_id=plan_id,
+                occurred_at=occurred_at,
+                public_goal="规划超时，先读取项目资料",
+            )
+        except VideoAgentPlanningError as exc:
+            logger.warning("VideoAgent planner rejected proposal: %s", exc)
+            return self._inspect_fallback_plan(
+                conversation_id=conversation_id,
+                content=content,
+                workspace=workspace,
+                plan_id=plan_id,
+                occurred_at=occurred_at,
+                public_goal="规划失败，先读取项目资料",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("VideoAgent planner failed; falling back to inspect")
+            return self._inspect_fallback_plan(
+                conversation_id=conversation_id,
+                content=content,
+                workspace=workspace,
+                plan_id=plan_id,
+                occurred_at=occurred_at,
+                public_goal="规划异常，先读取项目资料",
+            )
+
+        # 保证 plan_id 与 Turn 派生一致（幂等回放依赖）。
+        if plan.plan_id != plan_id:
+            remapped_steps = tuple(
+                step.model_copy(update={"plan_id": plan_id}) for step in plan.steps
+            )
+            plan = plan.model_copy(update={"plan_id": plan_id, "steps": remapped_steps})
+        return plan
+
+    def _inspect_fallback_plan(
+        self,
+        *,
+        conversation_id: str,
+        content: str,
+        workspace: VideoWorkspace,
+        plan_id: str,
+        occurred_at: datetime,
+        public_goal: str | None = None,
+    ) -> AgentPlan:
+        """Planner 故障时的最小降级：单步 inspect，禁止展开完整流水线。"""
+
+        return AgentPlan(
+            plan_id=plan_id,
+            workspace_id=workspace.workspace_id,
+            conversation_id=conversation_id,
+            status=AgentPlanStatus.PLANNING,
+            public_goal=public_goal or _public_goal(content, entry_path="inspect"),
+            steps=(
+                AgentPlanStep(
+                    step_id=_stable_id("video_step", plan_id, "1"),
+                    plan_id=plan_id,
+                    sequence=1,
+                    tool_name="inspect_video_workspace",
+                    title="读取项目资料",
+                    status=PlanStepStatus.PENDING,
+                ),
+            ),
+            created_at=occurred_at,
+            updated_at=occurred_at,
+        )
+
     def _deterministic_plan(
         self,
         *,
@@ -796,109 +1085,17 @@ class VideoAgentEntrypoint:
         entry_path: ScriptEntryPath | None = None,
         continue_generation: bool = False,
     ) -> AgentPlan:
-        from pixelflow.video_agent.tools.script_skill_pipeline import (
-            STAGE_ORDER,
-            STAGE_TITLES,
-        )
+        """DEPRECATED stub：兼容旧调用点，一律降级为 inspect。
 
-        resolved = entry_path or _resolve_script_entry_path(
-            content=content,
-            materials=materials,
-            workspace=workspace,
-            continue_generation=continue_generation,
-        )
+        V2.1 主路径已走 ``VideoAgentPlanner.plan_turn``；勿新增对此方法的依赖。
+        生产观测稳定后可随批次 E 硬删一并移除。
+        """
 
-        if resolved == "continue":
-            # 路径 C：脚本已就绪，只确认工作区，交由前端/资产包链路推进。
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal=_public_goal(content, entry_path="continue"),
-                steps=(
-                    AgentPlanStep(
-                        step_id=_stable_id("video_step", plan_id, "asset_ready"),
-                        plan_id=plan_id,
-                        sequence=1,
-                        tool_name="inspect_video_workspace",
-                        title="确认脚本就绪，准备视频资产包",
-                        status=PlanStepStatus.PENDING,
-                    ),
-                ),
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-
-        if resolved == "polish":
-            # 路径 B：用户成稿 → 自检 → 合规 → 导出。
-            stages = POLISH_STAGE_ORDER
-            steps = tuple(
-                AgentPlanStep(
-                    step_id=_stable_id("video_step", plan_id, f"polish-{stage}"),
-                    plan_id=plan_id,
-                    sequence=index,
-                    tool_name="run_script_skill_stage",
-                    title=STAGE_TITLES[stage],
-                    status=PlanStepStatus.PENDING,
-                    arguments={"stage": stage, "creative_direction": ""},
-                )
-                for index, stage in enumerate(stages, start=1)
-            )
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal=_public_goal(content, entry_path="polish"),
-                steps=steps,
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-
-        if resolved == "create":
-            # 路径 A：完整故事在 workspace.latest_input；步骤参数只带 stage，避免截断。
-            goal_source = str(workspace.payload.get("latest_input") or "").strip() or content
-            steps = tuple(
-                AgentPlanStep(
-                    step_id=_stable_id("video_step", plan_id, str(index)),
-                    plan_id=plan_id,
-                    sequence=index,
-                    tool_name="run_script_skill_stage",
-                    title=STAGE_TITLES[stage],
-                    status=PlanStepStatus.PENDING,
-                    arguments={"stage": stage, "creative_direction": ""},
-                )
-                for index, stage in enumerate(STAGE_ORDER, start=1)
-            )
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal=_public_goal(goal_source, entry_path="create"),
-                steps=steps,
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-
-        steps = [
-            AgentPlanStep(
-                step_id=_stable_id("video_step", plan_id, "1"),
-                plan_id=plan_id,
-                sequence=1,
-                tool_name="inspect_video_workspace",
-                title="读取项目资料",
-                status=PlanStepStatus.PENDING,
-            )
-        ]
-        return AgentPlan(
-            plan_id=plan_id,
-            workspace_id=workspace.workspace_id,
+        del materials, entry_path, continue_generation
+        return self._inspect_fallback_plan(
             conversation_id=conversation_id,
-            status=AgentPlanStatus.PLANNING,
-            public_goal=_public_goal(content, entry_path="inspect"),
-            steps=tuple(steps),
-            created_at=occurred_at,
-            updated_at=occurred_at,
+            content=content,
+            workspace=workspace,
+            plan_id=plan_id,
+            occurred_at=occurred_at,
         )

@@ -1,4 +1,7 @@
-"""视频采集、方向和 Plan 审核阶段的确定性 Workflow Service。"""
+"""视频采集、方向和 Plan 审核阶段的确定性 Workflow Service。
+
+DEPRECATED (V2.1 批次 E): 未被 Gateway / video_agent 生产路径引用；见包级说明。
+"""
 
 from __future__ import annotations
 

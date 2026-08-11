@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -419,7 +419,43 @@ def _safe_internal_artifact_refs(values: Iterable[object]) -> list[str]:
     return result
 
 
-def _confirmation_cost_summary(tool_name: str, affected_count: int) -> str:
+def _creative_preview_from_workspace(payload: Mapping[str, object] | None) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    pipeline = payload.get("script_pipeline")
+    if not isinstance(pipeline, Mapping):
+        return ""
+    start = pipeline.get("start")
+    if not isinstance(start, Mapping):
+        return ""
+    content = start.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return ""
+    lines = [
+        line.strip(" #-*")
+        for line in content.splitlines()
+        if line.strip() and not line.strip().startswith("```")
+    ][:5]
+    preview = "；".join(lines) if lines else content.strip()
+    return preview[:420].strip()
+
+
+def _confirmation_cost_summary(
+    tool_name: str,
+    affected_count: int,
+    *,
+    workspace_payload: Mapping[str, object] | None = None,
+) -> str:
+    if tool_name == "confirm_script_creative":
+        guidance = (
+            "请确认选题与创意方向是否合适。"
+            "同意后继续写三幕结构与角色设定；"
+            "不满意可直接用自然语言说明想怎么改，我会重新从选题开始。"
+        )
+        preview = _creative_preview_from_workspace(workspace_payload)
+        if preview:
+            return f"创意方向：{preview}\n\n{guidance}"
+        return guidance
     if tool_name == "generate_scenes":
         target = f"{affected_count}个镜头" if affected_count else "所选镜头"
         return f"将生成{target}的新视频版本，执行后可能产生模型调用费用。"
@@ -552,6 +588,7 @@ class AgentRuntimeService:
         ] = {}
         self._executor_notification_tasks: set[asyncio.Task[None]] = set()
         self._pending_video_agent_turns: dict[str, VideoAgentRunScope] = {}
+        self._stale_plan_resume_inflight: set[str] = set()
 
     def assignment_for_new_conversation(
         self,
@@ -890,6 +927,7 @@ class AgentRuntimeService:
             if plan is None or plan.status not in {
                 AgentPlanStatus.COMPLETED,
                 AgentPlanStatus.FAILED,
+                AgentPlanStatus.CANCELLED,
             }:
                 continue
             await self._complete_video_agent_runtime_turn(
@@ -915,6 +953,7 @@ class AgentRuntimeService:
         if plan.status not in {
             AgentPlanStatus.COMPLETED,
             AgentPlanStatus.FAILED,
+            AgentPlanStatus.CANCELLED,
         }:
             return
         await self._complete_video_agent_runtime_turn(
@@ -1010,6 +1049,33 @@ class AgentRuntimeService:
             kind="VideoAgent Queued Turn",
         )
 
+    def _maybe_schedule_stale_video_plan_resume(
+        self,
+        user_id: str,
+        plan_id: str,
+    ) -> None:
+        if self._video_agent_executor is None:
+            return
+        key = f"{user_id}:{plan_id}"
+        if key in self._stale_plan_resume_inflight:
+            return
+        self._stale_plan_resume_inflight.add(key)
+
+        async def _resume() -> None:
+            try:
+                await self._video_agent_executor.maybe_resume_stale_running_plan(
+                    user_id,
+                    plan_id,
+                )
+            finally:
+                self._stale_plan_resume_inflight.discard(key)
+
+        self._schedule_executor_notification(
+            _resume(),
+            credential=None,
+            kind="VideoAgent Stale Plan Resume",
+        )
+
     def _schedule_executor_notification(
         self,
         notification,
@@ -1100,6 +1166,33 @@ class AgentRuntimeService:
                             step.step_id,
                             credential=credential,
                         )
+                        # 确认步已完成且仍有后续：后台续跑，避免 HTTP 被 /plan|/characters 拖死。
+                        confirmed = next(
+                            (
+                                item
+                                for item in result.steps
+                                if item.step_id == step.step_id
+                            ),
+                            None,
+                        )
+                        if (
+                            result.status is AgentPlanStatus.RUNNING
+                            and confirmed is not None
+                            and confirmed.status is PlanStepStatus.COMPLETED
+                            and any(
+                                item.status is PlanStepStatus.PENDING
+                                for item in result.steps
+                            )
+                        ):
+                            self._schedule_executor_notification(
+                                self._video_agent_executor.resume_plan(
+                                    owner,
+                                    result.plan_id,
+                                    credential=None,
+                                ),
+                                credential=None,
+                                kind="VideoAgent Post-Confirm Continue",
+                            )
                     elif (
                         plan.status
                         in {AgentPlanStatus.RUNNING, AgentPlanStatus.COMPLETED}
@@ -1412,6 +1505,13 @@ class AgentRuntimeService:
             raise AgentRuntimeVideoScriptConflictError(
                 "脚本工作区版本冲突，请刷新后重试"
             ) from exc
+        if request.confirm_for_generation:
+            # 成片确认后收口仍在跑的脚本润色/创作计划，避免执行卡假忙碌。
+            await self._video_agent_repository.cancel_active_script_skill_plans(
+                owner,
+                conversation_id,
+                now=self._clock(),
+            )
         return VideoAgentScriptSaveResponse(
             workspace_id=updated.workspace_id,
             revision=updated.revision,
@@ -1483,6 +1583,9 @@ class AgentRuntimeService:
             owner,
             conversation_id,
         )
+        # V2.1 批次 D：video_agent_v2 只暴露 VideoAgent 事实，不投影 Workflow 影子进度。
+        if getattr(conversation, "orchestration_mode", None) == "video_agent_v2":
+            workflows = []
         messages_by_id = {
             message.message_id: deepcopy(message.to_dict())
             for message in stored_messages
@@ -1593,6 +1696,19 @@ class AgentRuntimeService:
                 )
                 history_plans: list[RuntimeVideoAgentPlanBundle] = []
                 try:
+                    if workspace.payload.get("script_plan_confirmed") is True:
+                        # 已确认成片的会话：刷新时收口卡住的脚本 Skill 执行卡。
+                        await self._video_agent_repository.cancel_active_script_skill_plans(
+                            owner,
+                            conversation_id,
+                            now=self._clock(),
+                        )
+                        refreshed = await self._video_agent_repository.load_conversation_state(
+                            owner,
+                            conversation_id,
+                        )
+                        if refreshed is not None:
+                            workspace, plan = refreshed
                     conversation_plans = await self._video_agent_repository.list_conversation_plans(
                         owner,
                         conversation_id,
@@ -1641,6 +1757,15 @@ class AgentRuntimeService:
                         raise AgentRuntimeInterruptStateError(
                             "VideoAgent 确认投影状态非法",
                         )
+                    # 热重载后脚本 Skill 可能卡在 RUNNING；Snapshot 时拉起一次恢复。
+                    if (
+                        plan.status is AgentPlanStatus.RUNNING
+                        and self._video_agent_executor is not None
+                    ):
+                        self._maybe_schedule_stale_video_plan_resume(
+                            owner,
+                            plan.plan_id,
+                        )
                     if waiting_steps:
                         waiting_step = waiting_steps[0]
                         affected_scene_ids = _safe_affected_scene_ids(
@@ -1658,6 +1783,7 @@ class AgentRuntimeService:
                             cost_summary=_confirmation_cost_summary(
                                 waiting_step.tool_name,
                                 len(affected_scene_ids),
+                                workspace_payload=workspace.payload,
                             ),
                             affected_scene_ids=affected_scene_ids,
                             submittable=self._video_agent_executor is not None,
