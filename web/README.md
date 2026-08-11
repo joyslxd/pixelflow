@@ -27,7 +27,7 @@ Vite 配置会从当前 `web/` 目录读取环境文件：
 
 支持的变量：
 
-- `VITE_API_TARGET`：开发服务器把 `/agent` 代理到的目标。
+- `VITE_API_TARGET`：开发服务器把 `/agent2` 代理到的目标。
 - `VITE_CONTENT_APP_TARGET`：开发服务器把所有 `/api/...` 请求代理到的 content-app 目标。
 
 当前 development 默认走测试 content-app。如果要联调本机 PixelFlow 后端：
@@ -55,7 +55,7 @@ src/
   lib/                  api / authStorage / types / chat 类型 / utils
 ```
 
-> WorkspacePage 已接 `/agent/flows`
+> WorkspacePage 已接 `/agent2/flows`
 > (创建 / SSE 事件 / 可解释执行时间线 / brief 确认·修订 / 结果·资产)。
 
 ## 本地 Authorization 调试
@@ -68,4 +68,4 @@ PixelFlow 前端所有后端请求都通过 `src/lib/api.ts` 统一调用。这�
 http://localhost:5273/agentfrontend/#/auth-token
 ```
 
-粘贴 content-app 登录 token 后点击“保存并验证”。页面会把 token 保存到 `localStorage.Authorization`，并调用 `/agent/auth/me` 验证当前用户。验证通过后，回到工作台即可正常调用 `/agent/flows`、SSE 和资产接口。
+粘贴 content-app 登录 token 后点击“保存并验证”。页面会把 token 保存到 `localStorage.Authorization`，并调用 `/agent2/auth/me` 验证当前用户。验证通过后，回到工作台即可正常调用 `/agent2/flows`、SSE 和资产接口。

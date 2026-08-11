@@ -4,7 +4,7 @@ import {
   type AgentEventEnvelope,
 } from "./contracts.js";
 
-const AGENT_API_PREFIX = "/agent";
+const AGENT_API_PREFIX = "/agent2";
 const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 const DEFAULT_RECONNECT_DELAY_MS = 1000;
