@@ -713,6 +713,36 @@ interface PendingPlanSaveMessageContinuation {
 
 type PendingMessageJobContinuation = PendingHandleSendMessageContinuation | PendingPlanSaveMessageContinuation;
 
+function createVideoAgentPlanResponse({
+  planMarkdown,
+  creationContract = {},
+  sceneBlueprints = [],
+  assetManifest,
+}: {
+  planMarkdown: string;
+  creationContract?: Record<string, unknown>;
+  sceneBlueprints?: PlanMarkdownResponse["scene_blueprints"];
+  assetManifest?: PlanMarkdownResponse["asset_manifest"];
+}): PlanMarkdownResponse {
+  return {
+    output_type: "video",
+    plan_markdown: planMarkdown,
+    template_path: "",
+    consistency_issues: [],
+    review_timeout_sec: null,
+    plan_version: 1,
+    plan_history: [],
+    creation_contract: creationContract,
+    scene_durations_sec: [],
+    scene_blueprints: sceneBlueprints,
+    asset_manifest: assetManifest ?? { characters: [], scenes: [], props: [] },
+    llm_used: false,
+    model_name: "",
+    error: null,
+    restored_from_version: null,
+  };
+}
+
 interface PendingMessageJob {
   job_id: string;
   conversation_id: string;
@@ -10365,17 +10395,7 @@ export function WorkspacePage() {
       durableScriptPlanMessageIdsRef.current.add(fingerprint);
       return;
     }
-    const plan: PlanMarkdownResponse = {
-      output_type: "video",
-      plan_markdown: planMarkdown,
-      template_path: "",
-      consistency_issues: [],
-      review_timeout_sec: null,
-      plan_version: 1,
-      plan_history: [],
-      creation_contract: {},
-      scene_blueprints: [],
-    };
+    const plan = createVideoAgentPlanResponse({ planMarkdown });
     void appendMessageForConversation(
       {
         id: uid(),
@@ -10544,17 +10564,10 @@ export function WorkspacePage() {
       tags: ["script"],
       data: {},
     };
-    const plan: PlanMarkdownResponse = {
-      output_type: "video",
-      plan_markdown: fullPlanMarkdown,
-      template_path: "",
-      consistency_issues: [],
-      review_timeout_sec: null,
-      plan_version: 1,
-      plan_history: [],
-      creation_contract: creationContract as unknown as Record<string, unknown>,
-      scene_blueprints: [],
-    };
+    const plan = createVideoAgentPlanResponse({
+      planMarkdown: fullPlanMarkdown,
+      creationContract: creationContract as unknown as Record<string, unknown>,
+    });
     const artifact: ChatArtifact = {
       type: "plan",
       title: "已确认脚本",
@@ -12118,6 +12131,7 @@ export function WorkspacePage() {
   const supervisorVideoArtifact = activeSupervisorVideoTarget
     ? renderSupervisorVideoArtifact(activeSupervisorVideoTarget)
     : null;
+  const videoAgentWorkspace = videoAgentView.workspace;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -12388,14 +12402,14 @@ export function WorkspacePage() {
             });
           }}
         />
-      ) : !canvasOpen && (
-        videoAgentView.workspace?.script
-        || (videoAgentView.workspace?.scriptStages?.length ?? 0) > 0
+      ) : !canvasOpen && videoAgentWorkspace && (
+        videoAgentWorkspace.script
+        || videoAgentWorkspace.scriptStages.length > 0
       ) ? (
         <AgentScriptPreviewPanel
-          revision={videoAgentView.workspace.revision}
-          script={videoAgentView.workspace.script}
-          stages={videoAgentView.workspace.scriptStages}
+          revision={videoAgentWorkspace.revision}
+          script={videoAgentWorkspace.script}
+          stages={videoAgentWorkspace.scriptStages}
           focusStageId={(() => {
             const plan = supervisorRuntime.state.videoAgentPlan;
             const stepId = selectedVideoAgentStepId;
@@ -12406,10 +12420,10 @@ export function WorkspacePage() {
           saving={savingVideoAgentScript}
           confirming={confirmingVideoAgentScript}
           exportReady={workspaceHasExportReady({
-            scriptContent: videoAgentView.workspace.script?.content,
-            stages: videoAgentView.workspace.scriptStages,
+            scriptContent: videoAgentWorkspace.script?.content,
+            stages: videoAgentWorkspace.scriptStages,
           })}
-          onSave={videoAgentView.workspace.script ? async (markdown) => {
+          onSave={videoAgentWorkspace.script ? async (markdown) => {
             const conversationId = currentConversationId;
             const workspace = videoAgentView.workspace;
             if (!conversationId || !workspace?.script) {
@@ -12435,7 +12449,7 @@ export function WorkspacePage() {
               setSavingVideoAgentScript(false);
             }
           } : undefined}
-          onConfirmScript={videoAgentView.workspace.script ? async (markdown) => {
+          onConfirmScript={videoAgentWorkspace.script ? async (markdown) => {
             const conversationId = currentConversationId;
             if (!conversationId) {
               throw new Error("当前会话没有可确认的脚本工作区");
